@@ -204,6 +204,24 @@ def build_expansion_mask(batch_size, block_size, total_cache_len, prompt_offset)
 # ---------------------------------------------------------------------------
 
 
+def _patch_torch_empty():
+    """Workaround for torch_spyre spyre_empty() not accepting size= kwarg.
+
+    Upstream fix: https://github.com/torch-spyre/torch-spyre/issues/1729
+    """
+    _orig = torch.empty
+
+    def _patched(*args, size=None, **kwargs):
+        if size is not None:
+            return _orig(size, **kwargs)
+        return _orig(*args, **kwargs)
+
+    if getattr(torch.empty, "_hf_adapters_patched", False):
+        return
+    torch.empty = _patched
+    torch.empty._hf_adapters_patched = True
+
+
 def load_model_common(model_path, prepare_fn, dtype=torch.float16):
     """Load an HF model, apply Spyre adaptations, move to device.
 
@@ -214,6 +232,7 @@ def load_model_common(model_path, prepare_fn, dtype=torch.float16):
     """
     from transformers import AutoModelForCausalLM
 
+    _patch_torch_empty()
     print(f"Loading model from {model_path} ...")
     model = AutoModelForCausalLM.from_pretrained(
         model_path, dtype=dtype, device_map="cpu",

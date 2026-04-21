@@ -137,19 +137,22 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     )
     vocab_size = model.config.vocab_size
 
+    # Match model dtype for KV caches and masks
+    param_dtype = next(model.parameters()).dtype
+
     # Empty KV caches
     key_caches = [
-        torch.empty(batch_size, num_kv_heads, 0, head_dim, dtype=torch.float16)
+        torch.empty(batch_size, num_kv_heads, 0, head_dim, dtype=param_dtype)
         for _ in range(num_layers)
     ]
     value_caches = [
-        torch.empty(batch_size, num_kv_heads, 0, head_dim, dtype=torch.float16)
+        torch.empty(batch_size, num_kv_heads, 0, head_dim, dtype=param_dtype)
         for _ in range(num_layers)
     ]
 
     # --- Prefill ---
     position_ids = torch.arange(seq_len).unsqueeze(0)
-    causal_mask = torch.zeros((1, 1, seq_len, seq_len), dtype=torch.float16)
+    causal_mask = torch.zeros((1, 1, seq_len, seq_len), dtype=param_dtype)
     for i in range(seq_len):
         causal_mask[:, :, i, i + 1:] = -torch.inf
 
@@ -171,7 +174,7 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
         next_ids = torch.tensor([[token]])
         next_pos = torch.tensor([[seq_len + step - 1]])
         total_len = cache_len + 1
-        decode_mask = torch.zeros((1, 1, 1, total_len), dtype=torch.float16)
+        decode_mask = torch.zeros((1, 1, 1, total_len), dtype=param_dtype)
 
         with torch.no_grad():
             logits = run_forward_fn(
@@ -192,7 +195,8 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
 # Test driver
 # ---------------------------------------------------------------------------
 
-def run_model_test(model_name, model_path, adapter_filename, num_decode=4):
+def run_model_test(model_name, model_path, adapter_filename, num_decode=4,
+                   dtype="float16"):
     """Load model, run HF ref vs adapter, return comparison list."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -200,13 +204,15 @@ def run_model_test(model_name, model_path, adapter_filename, num_decode=4):
     run_forward_fn = adapter_mod._run_forward
     prepare_fn = adapter_mod.prepare_for_spyre
 
+    torch_dtype = torch.float32 if dtype == "float32" else torch.float16
+
     print(f"\n{'='*70}")
-    print(f"  {model_name}: loading {model_path}")
+    print(f"  {model_name}: loading {model_path} ({dtype})")
     print(f"{'='*70}")
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForCausalLM.from_pretrained(
-        model_path, torch_dtype=torch.float16, device_map="cpu",
+        model_path, torch_dtype=torch_dtype, device_map="cpu",
     )
     model.eval()
     model.requires_grad_(False)
@@ -308,9 +314,10 @@ MODELS = {
         "adapter": "hf_granite.py",
     },
     "granite4": {
-        "name": "Granite 4.0 Tiny",
-        "path": "ibm-granite/granite-4.0-tiny-preview",
+        "name": "Granite 4.0 1B",
+        "path": "ibm-granite/granite-4.0-1b-base",
         "adapter": "hf_granitemoehybrid.py",
+        "dtype": "float32",  # fp16 overflows on CPU due to multipliers
     },
     "smollm3": {
         "name": "SmolLM3 3B",
@@ -332,6 +339,7 @@ if __name__ == "__main__":
         try:
             comps, _ = run_model_test(
                 m["name"], m["path"], m["adapter"], num_decode=4,
+                dtype=m.get("dtype", "float16"),
             )
             ok = print_results_table(m["name"], comps)
             all_results[key] = {"comparisons": comps, "all_match": ok}
