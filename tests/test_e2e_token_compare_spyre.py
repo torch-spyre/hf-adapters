@@ -49,6 +49,11 @@ MODEL_REGISTRY = {
         "path": "ibm-granite/granite-3.3-2b-instruct",
         "adapter": "hf_adapters.hf_granite",
     },
+    "llama": {
+        "name": "TinyLlama 1.1B",
+        "path": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        "adapter": "hf_adapters.hf_llama",
+    },
 }
 
 

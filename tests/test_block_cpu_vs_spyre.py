@@ -126,6 +126,22 @@ def _make_smollm3_config():
     return cfg
 
 
+def _make_llama_config():
+    from transformers import AutoConfig
+    try:
+        cfg = AutoConfig.from_pretrained("meta-llama/Llama-3.2-3B")
+    except Exception:
+        from transformers import LlamaConfig
+        cfg = LlamaConfig(
+            hidden_size=3072, num_attention_heads=24, num_key_value_heads=8,
+            intermediate_size=8192, num_hidden_layers=3, vocab_size=128256,
+            rms_norm_eps=1e-5, max_position_embeddings=4096,
+        )
+    cfg.num_hidden_layers = 3
+    cfg._attn_implementation = "eager"
+    return cfg
+
+
 MODEL_REGISTRY = {
     "qwen3": {
         "name": "Qwen3 0.6B",
@@ -146,6 +162,11 @@ MODEL_REGISTRY = {
         "name": "SmolLM3",
         "config_fn": _make_smollm3_config,
         "adapter": "hf_adapters.hf_smollm3",
+    },
+    "llama": {
+        "name": "Llama 3.2 3B",
+        "config_fn": _make_llama_config,
+        "adapter": "hf_adapters.hf_llama",
     },
 }
 

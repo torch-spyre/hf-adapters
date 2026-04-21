@@ -12,6 +12,8 @@ which models are supported on Spyre hardware.
 | Granite 3.3 2B | granite | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | Granite 4.0 1B | granitemoehybrid | 128 | 64 | Yes | Yes | Yes | Yes |
 | SmolLM3 3B | smollm3 | 128 | 64 | Yes | Yes | Yes | Yes |
+| Llama 3.2 3B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
+| TinyLlama 1.1B | llama | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | Phi-4 mini | phi3 | 96 | 48 | **No** | Untested | **No** (sub-stick) | — |
 
 **CPU Accurate** = adapter produces identical greedy tokens to stock
@@ -39,6 +41,10 @@ model = load_model("ibm-granite/granite-4.0-1b-base")
 # SmolLM3
 from hf_adapters.hf_smollm3 import load_model, generate
 model = load_model("HuggingFaceTB/SmolLM3-3B-Base")
+
+# Llama (covers Llama 1/2/3, Code Llama, Yi, TinyLlama)
+from hf_adapters.hf_llama import load_model, generate
+model = load_model("meta-llama/Llama-3.2-3B")
 
 # Phi-4 mini (blocked on Spyre — sub-stick head_dim)
 from hf_adapters.hf_phi3 import load_model, generate

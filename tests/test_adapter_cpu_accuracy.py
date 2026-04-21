@@ -329,6 +329,11 @@ MODELS = {
         "path": "HuggingFaceTB/SmolLM3-3B-Base",
         "adapter": "hf_smollm3.py",
     },
+    "llama": {
+        "name": "TinyLlama 1.1B",
+        "path": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        "adapter": "hf_llama.py",
+    },
 }
 
 

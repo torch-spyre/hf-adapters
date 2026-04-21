@@ -57,6 +57,11 @@ MODEL_REGISTRY = {
         "path": "HuggingFaceTB/SmolLM3-3B-Base",
         "adapter": "hf_adapters.hf_smollm3",
     },
+    "llama": {
+        "name": "TinyLlama 1.1B",
+        "path": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        "adapter": "hf_adapters.hf_llama",
+    },
 }
 
 
