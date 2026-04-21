@@ -14,7 +14,7 @@ which models are supported on Spyre hardware.
 | SmolLM3 3B | smollm3 | 128 | 64 | Yes | Yes | Yes | Yes |
 | Llama 3.2 3B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | TinyLlama 1.1B | llama | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
-| Phi-4 mini | phi3 | 96 | 48 | **No** | Untested | **No** (sub-stick) | — |
+| Phi-4 mini | phi3 | 128 | 64 | Yes | Yes | Yes | Yes |
 
 **CPU Accurate** = adapter produces identical greedy tokens to stock
 HF on CPU.
@@ -46,7 +46,7 @@ model = load_model("HuggingFaceTB/SmolLM3-3B-Base")
 from hf_adapters.hf_llama import load_model, generate
 model = load_model("meta-llama/Llama-3.2-3B")
 
-# Phi-4 mini (blocked on Spyre — sub-stick head_dim)
+# Phi-4 mini
 from hf_adapters.hf_phi3 import load_model, generate
 model = load_model("microsoft/Phi-4-mini-instruct")
 
@@ -99,7 +99,7 @@ hf_adapters/
 ├── hf_granitemoehybrid.py — Granite 4.0 dense adapter
 ├── hf_smollm3.py          — SmolLM3 adapter
 ├── hf_llama.py            — Llama adapter (Llama 1/2/3, Code Llama, Yi, TinyLlama)
-├── hf_phi3.py             — Phi-4 mini adapter (sub-stick blocked)
+├── hf_phi3.py             — Phi-4 mini adapter
 └── __init__.py
 ```
 
@@ -409,11 +409,10 @@ steps, this causes 63 recompilations on first use.
    call
 3. **Multi-iteration benchmarking** — run 5+ iterations to measure
    steady-state latency (after compilation cache is warm)
-4. **Phi-4 mini on Spyre** — adapter code complete (`hf_phi3.py`)
-   with identity-padded partial RoPE, split fused QKV/MLP, and
-   chunked LM head. Sub-stick `head_dim=96` (`D/2=48 < 64`) could
-   be fixed by applying `pad_attention_heads()` (same technique
-   that fixed Granite 3.3 2B) — untested.
+4. **Phi-4 mini on Spyre** — adapter verified: CPU-accurate and
+   compiles/runs on Spyre. `head_dim=128` (`D/2=64`) needs no
+   padding. Partial RoPE fixed via Q/K weight permutation +
+   identity-padded rotation matrices.
 
 ## Test Scripts
 

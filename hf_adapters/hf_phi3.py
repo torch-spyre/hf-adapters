@@ -127,12 +127,13 @@ def _chunk_lm_head(model, num_chunks=8):
 
     STICK = 64
     chunks = nn.ModuleList()
+    real_sizes = []
     for i in range(num_chunks):
         start = i * chunk_size
         end = min(start + chunk_size, vocab)
         w_chunk = w[start:end].clone()
-        # Pad to stick-aligned size
         sz = w_chunk.shape[0]
+        real_sizes.append(sz)
         padded_sz = ((sz + STICK - 1) // STICK) * STICK
         if padded_sz != sz:
             w_chunk = F.pad(w_chunk, (0, 0, 0, padded_sz - sz))
@@ -141,6 +142,30 @@ def _chunk_lm_head(model, num_chunks=8):
         chunks.append(chunk)
 
     model._spyre_lm_head_chunks = chunks
+    model._spyre_lm_chunk_sizes = real_sizes
+
+
+def _rope_dim_permutation(head_dim, rope_dim):
+    """Build index permutation aligning partial-RoPE pairing with apply_rope_matmul.
+
+    HF rotate_half pairs (j, j+rope_dim//2) within the first rope_dim dims.
+    apply_rope_matmul pairs (j, j+head_dim//2) across full head_dim.
+    This reorders head_dim so both pairings agree.
+    """
+    rope_half = rope_dim // 2
+    pass_half = (head_dim - rope_dim) // 2
+    return torch.cat([
+        torch.arange(0, rope_half),
+        torch.arange(rope_dim, rope_dim + pass_half),
+        torch.arange(rope_half, rope_dim),
+        torch.arange(rope_dim + pass_half, head_dim),
+    ])
+
+
+def _permute_proj_for_rope(proj, num_heads, head_dim, perm):
+    """Permute Q or K projection output dims within each head for RoPE alignment."""
+    w = proj.weight.data.view(num_heads, head_dim, -1)
+    proj.weight.data = w[:, perm, :].contiguous().view(num_heads * head_dim, -1)
 
 
 def _split_fused_qkv(attn, num_q, num_kv, head_dim):
@@ -256,8 +281,9 @@ def _run_forward(model, input_ids, position_ids, attn_mask,
     # Chunked LM head: large vocab (200K+) exceeds Spyre's per-core EAR limit.
     # Split into N chunks, run each on Spyre, cat on CPU.
     logits_parts = []
-    for lm_chunk in model._spyre_lm_head_chunks:
-        logits_parts.append(lm_chunk(h).to("cpu"))
+    for lm_chunk, real_sz in zip(model._spyre_lm_head_chunks,
+                                 model._spyre_lm_chunk_sizes):
+        logits_parts.append(lm_chunk(h).to("cpu")[..., :real_sz])
     logits = torch.cat(logits_parts, dim=-1)
     return logits
 
@@ -282,6 +308,13 @@ def prepare_for_spyre(model):
     num_q = cfg.num_attention_heads
     num_kv = cfg.num_key_value_heads
 
+    # Partial RoPE dimension permutation: HF pairs (j, j+rope_dim//2) but
+    # apply_rope_matmul pairs (j, j+head_dim//2). Permute Q/K weights so
+    # both agree. Q·K^T dot product is invariant under same permutation.
+    prf = getattr(cfg, "partial_rotary_factor", 1.0)
+    rope_dim = int(prf * hd)
+    rope_perm = _rope_dim_permutation(hd, rope_dim) if rope_dim != hd else None
+
     # Split fused weights, register as submodules
     model._spyre_q_projs = nn.ModuleList()
     model._spyre_k_projs = nn.ModuleList()
@@ -291,6 +324,9 @@ def prepare_for_spyre(model):
 
     for layer in model.model.layers:
         q, k, v = _split_fused_qkv(layer.self_attn, num_q, num_kv, hd)
+        if rope_perm is not None:
+            _permute_proj_for_rope(q, num_q, hd, rope_perm)
+            _permute_proj_for_rope(k, num_kv, hd, rope_perm)
         model._spyre_q_projs.append(q)
         model._spyre_k_projs.append(k)
         model._spyre_v_projs.append(v)

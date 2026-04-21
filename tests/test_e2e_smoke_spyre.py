@@ -62,6 +62,11 @@ MODEL_REGISTRY = {
         "path": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         "adapter": "hf_adapters.hf_llama",
     },
+    "phi4": {
+        "name": "Phi-4 mini",
+        "path": "microsoft/Phi-4-mini-instruct",
+        "adapter": "hf_adapters.hf_phi3",
+    },
 }
 
 

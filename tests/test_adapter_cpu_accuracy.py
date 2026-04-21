@@ -234,7 +234,8 @@ def run_model_test(model_name, model_path, adapter_filename, num_decode=4,
     if hasattr(model, "_spyre_compiled_blocks"):
         unwrapped = []
         for cb in model._spyre_compiled_blocks:
-            orig = getattr(cb, "_orig_mod", None)
+            orig = getattr(cb, "_orig_mod",
+                          getattr(cb, "_torchdynamo_orig_callable", None))
             unwrapped.append(orig if orig is not None else cb)
         model._spyre_compiled_blocks = unwrapped
 
@@ -333,6 +334,11 @@ MODELS = {
         "name": "TinyLlama 1.1B",
         "path": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         "adapter": "hf_llama.py",
+    },
+    "phi4": {
+        "name": "Phi-4 mini",
+        "path": "microsoft/Phi-4-mini-instruct",
+        "adapter": "hf_phi3.py",
     },
 }
 
