@@ -174,6 +174,38 @@ def _make_mistral_config():
     return cfg
 
 
+def _make_olmo_config():
+    from transformers import AutoConfig
+    try:
+        cfg = AutoConfig.from_pretrained("allenai/OLMo-1B-hf")
+    except Exception:
+        from transformers import OlmoConfig
+        cfg = OlmoConfig(
+            hidden_size=2048, num_attention_heads=16, num_key_value_heads=16,
+            intermediate_size=8192, num_hidden_layers=3, vocab_size=50304,
+            max_position_embeddings=2048,
+        )
+    cfg.num_hidden_layers = 3
+    cfg._attn_implementation = "eager"
+    return cfg
+
+
+def _make_olmo2_config():
+    from transformers import AutoConfig
+    try:
+        cfg = AutoConfig.from_pretrained("allenai/OLMo-2-0425-1B")
+    except Exception:
+        from transformers import Olmo2Config
+        cfg = Olmo2Config(
+            hidden_size=2048, num_attention_heads=16, num_key_value_heads=16,
+            intermediate_size=8192, num_hidden_layers=3, vocab_size=100352,
+            rms_norm_eps=1e-6, max_position_embeddings=4096,
+        )
+    cfg.num_hidden_layers = 3
+    cfg._attn_implementation = "eager"
+    return cfg
+
+
 MODEL_REGISTRY = {
     "qwen3": {
         "name": "Qwen3 0.6B",
@@ -209,6 +241,16 @@ MODEL_REGISTRY = {
         "name": "Mistral 7B",
         "config_fn": _make_mistral_config,
         "adapter": "hf_adapters.hf_mistral",
+    },
+    "olmo": {
+        "name": "OLMo 1B",
+        "config_fn": _make_olmo_config,
+        "adapter": "hf_adapters.hf_olmo",
+    },
+    "olmo2": {
+        "name": "OLMo2 1B",
+        "config_fn": _make_olmo2_config,
+        "adapter": "hf_adapters.hf_olmo2",
     },
 }
 

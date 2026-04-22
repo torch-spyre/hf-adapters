@@ -77,6 +77,37 @@ MODEL_REGISTRY = {
         "path": "mistralai/Mistral-7B-v0.3",
         "adapter": "hf_adapters.hf_mistral",
     },
+    "olmo": {
+        "name": "OLMo 1B",
+        "path": "allenai/OLMo-1B-hf",
+        "adapter": "hf_adapters.hf_olmo",
+    },
+    "olmo2": {
+        "name": "OLMo2 1B",
+        "path": "allenai/OLMo-2-0425-1B",
+        "adapter": "hf_adapters.hf_olmo2",
+    },
+    "falcon3": {
+        "name": "Falcon 3 1B",
+        "path": "tiiuae/Falcon3-1B-Base",
+        "adapter": "hf_adapters.hf_llama",
+    },
+    "deepseek-coder": {
+        "name": "DeepSeek-Coder 1.3B",
+        "path": "deepseek-ai/deepseek-coder-1.3b-base",
+        "adapter": "hf_adapters.hf_llama",
+    },
+    # Ministral 3B is gated — requires HF auth. HF token configured on Spyre pod.
+    # "ministral": {
+    #     "name": "Ministral 3B",
+    #     "path": "mistralai/Ministral-3B-Instruct",
+    #     "adapter": "hf_adapters.hf_mistral",
+    # },
+    "yi": {
+        "name": "Yi 1.5 6B",
+        "path": "01-ai/Yi-1.5-6B",
+        "adapter": "hf_adapters.hf_llama",
+    },
 }
 
 

@@ -64,6 +64,16 @@ MODEL_REGISTRY = {
         "path": "mistralai/Mistral-7B-v0.3",
         "adapter": "hf_adapters.hf_mistral",
     },
+    "olmo": {
+        "name": "OLMo 1B",
+        "path": "allenai/OLMo-1B-hf",
+        "adapter": "hf_adapters.hf_olmo",
+    },
+    "olmo2": {
+        "name": "OLMo2 1B",
+        "path": "allenai/OLMo-2-0425-1B",
+        "adapter": "hf_adapters.hf_olmo2",
+    },
 }
 
 

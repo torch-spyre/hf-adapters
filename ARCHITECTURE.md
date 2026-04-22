@@ -18,6 +18,11 @@ which models are supported on Spyre.
 | Qwen2.5 1.5B | qwen2 | 128 | 64 | Yes | Yes | Yes | Yes |
 | Mistral 7B v0.3 | mistral | 128 | 64 | Yes | Yes | Yes | Yes |
 | Phi-4 mini | phi3 | 128 | 64 | Yes | Yes | Yes | Yes |
+| OLMo 1B | olmo | 128 | 64 | Yes | Yes | Yes | Yes |
+| OLMo2 1B | olmo2 | 128 | 64 | Yes | Yes | Yes | Yes |
+| Falcon 3 1B | llama | 256 | 128 | Yes | Yes | Untested | Untested |
+| DeepSeek-Coder 1.3B | llama | 128 | 64 | Yes | Yes | Untested | Untested |
+| Yi 1.5 6B | llama | 128 | 64 | Yes | Yes | Untested | Untested |
 
 **CPU Accurate** = adapter produces identical greedy tokens to stock
 HF on CPU.
@@ -30,7 +35,7 @@ fixed.
 
 ```python
 # Import any adapter: hf_granite, hf_qwen3, hf_granitemoehybrid,
-#                     hf_smollm3, hf_llama, hf_qwen2, hf_mistral, hf_phi3
+#   hf_smollm3, hf_llama, hf_qwen2, hf_mistral, hf_phi3, hf_olmo, hf_olmo2
 from hf_adapters.hf_granite import load_model, generate
 
 model = load_model("ibm-granite/granite-3.3-8b-instruct")
@@ -86,6 +91,8 @@ hf_adapters/
 ├── hf_qwen2.py            — Qwen2 adapter (Qwen 1.5, Qwen 2, Qwen 2.5)
 ├── hf_mistral.py          — Mistral adapter (Mistral 7B v0.2, v0.3)
 ├── hf_phi3.py             — Phi-4 mini adapter
+├── hf_olmo.py             — OLMo adapter (OLMo 1B, 7B)
+├── hf_olmo2.py            — OLMo2 adapter (OLMo 2 7B)
 └── __init__.py
 ```
 
@@ -209,19 +216,20 @@ modification:
 
 ### Model-Specific Adaptations
 
-| Feature | Granite 3.3 | Qwen3 | Granite 4.0 | SmolLM3 | Llama | Qwen2 | Mistral | Phi-4 mini |
-|---------|------------|-------|-------------|---------|-------|-------|---------|-----------|
-| Embedding multiplier | Yes | No | Yes | No | No | No | No | No |
-| Residual multiplier | Yes | No | Yes | No | No | No | No | No |
-| Logits scaling | Yes | No | Yes | No | No | No | No | No |
-| Q/K RMSNorm | No | Yes (per-head) | No | No | No | No | No | No |
-| Fused QKV split | No | No | No | No | No | No | No | Yes |
-| Fused MLP split | No | No | Yes | No | No | No | No | Yes |
-| NoPE layers | No | No | No | Yes | No | No | No | No |
-| Partial RoPE | No | No | No | No | No | No | No | Yes |
-| Chunked LM head | No | No | No | No | No | No | No | Yes |
-| Head-dim padding | 2B only | No | No | No | TinyLlama | No | No | No |
-| Attention scaling | `config.attention_multiplier` | `head_dim**-0.5` | `config.attention_multiplier` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` |
+| Feature | Granite 3.3 | Qwen3 | Granite 4.0 | SmolLM3 | Llama | Qwen2 | Mistral | Phi-4 mini | OLMo | OLMo2 |
+|---------|------------|-------|-------------|---------|-------|-------|---------|-----------|------|-------|
+| Embedding multiplier | Yes | No | Yes | No | No | No | No | No | No | No |
+| Residual multiplier | Yes | No | Yes | No | No | No | No | No | No | No |
+| Logits scaling | Yes | No | Yes | No | No | No | No | No | No | No |
+| Q/K RMSNorm | No | Yes (per-head) | No | No | No | No | No | No | No | Yes (flattened) |
+| Fused QKV split | No | No | No | No | No | No | No | Yes | No | No |
+| Fused MLP split | No | No | Yes | No | No | No | No | Yes | No | No |
+| NoPE layers | No | No | No | Yes | No | No | No | No | No | No |
+| Partial RoPE | No | No | No | No | No | No | No | Yes | No | No |
+| Chunked LM head | No | No | No | No | No | No | No | Yes | No | No |
+| Head-dim padding | 2B only | No | No | No | TinyLlama | No | No | No | No | No |
+| Attention scaling | `config.attention_multiplier` | `head_dim**-0.5` | `config.attention_multiplier` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` |
+| Norm type | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | LayerNorm (pre, no weight) | RMSNorm (post) |
 
 **Partial RoPE** (Phi-4): `PartialPrecomputedRotaryEmbedding` pads
 the rotation matrix with identity `[[1,0],[0,1]]` entries so
@@ -240,6 +248,13 @@ offset assertions.
 zero-pads Q/K/V/O projections and RoPE freqs from 64→128 so
 D/2 = 64 (one stick). Q/K use interleaved padding per RoPE
 `[2, D/2]` group; V/O use simple end-padding.
+
+**OLMo LayerNorm** (OLMo): Uses weight-free `OlmoLayerNorm` (no
+learnable parameters). Custom patch keeps it in fp16 on Spyre.
+
+**Post-norm + Q/K RMSNorm** (OLMo2): Norm applied after attention/MLP
+output, before residual add (not pre-norm). Q/K RMSNorm on flattened
+projections before reshape and RoPE.
 
 ## Adding a New Model
 
