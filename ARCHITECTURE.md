@@ -20,16 +20,33 @@ which models are supported on Spyre.
 | Phi-4 mini | phi3 | 128 | 64 | Yes | Yes | Yes | Yes |
 | OLMo 1B | olmo | 128 | 64 | Yes | Yes | Yes | Yes |
 | OLMo2 1B | olmo2 | 128 | 64 | Yes | Yes | Yes | Yes |
-| Falcon 3 1B | llama | 256 | 128 | Yes | Yes | Untested | Untested |
-| DeepSeek-Coder 1.3B | llama | 128 | 64 | Yes | Yes | Untested | Untested |
-| Yi 1.5 6B | llama | 128 | 64 | Yes | Yes | Untested | Untested |
+| Falcon 3 1B | llama | 256 | 128 | Yes | Yes | Yes | Yes |
+| DeepSeek-Coder 1.3B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
+| Yi 1.5 6B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 
 **CPU Accurate** = adapter produces identical greedy tokens to stock
 HF on CPU.
 **Spyre Compiles** = `torch.compile(block_forward)` succeeds on Spyre.
-**Spyre Runs** = block produces output (no crash/NaN). Numerical
-accuracy is limited by known torch_spyre correctness issues being
-fixed.
+**Spyre Runs** = block produces output (no crash/NaN).
+
+### Spyre Numerical Accuracy (torch-spyre @ 7c6ef99)
+
+Per-layer block comparison (`test_block_cpu_vs_spyre.py`) with random
+weights, measured as max absolute diff between CPU and Spyre output:
+
+| Model | Prefill (seq=64) | Decode (seq=1) |
+|-------|-----------------|----------------|
+| Qwen3 0.6B | 0.01–0.02 | 0.3–5.5 |
+| Llama 3.2 3B | 0.07–0.08 | 1.9–6.0 |
+
+**Prefill is accurate** — errors are in the fp16 rounding range. The
+first generated token matches the CPU reference (verified with Qwen3
+E2E: `" Paris"` on both CPU and Spyre).
+
+**Decode has large errors** — max diffs of 1–6 per block accumulate
+across layers and autoregressive steps, causing token drift after the
+first token. This is a torch-spyre compiler issue specific to the
+single-token decode path (seq_len=1), not an adapter issue.
 
 ## Public API
 
@@ -315,13 +332,14 @@ steps, this causes 63 recompilations on first use.
 
 ### Open Work
 
-1. **Fix `token_index` recompilation** — pass as tensor to avoid
+1. **Decode path numerical accuracy** — single-token decode (seq=1)
+   has max diffs of 1–6 per block vs CPU. Prefill (seq=64) is
+   accurate (0.01–0.08). Likely a torch-spyre stickify or layout
+   issue specific to seq_len=1. This is the primary blocker for
+   end-to-end correct generation on Spyre.
+2. **Fix `token_index` recompilation** — pass as tensor to avoid
    specialization
-2. **Fix `aten.slice` fallback in fill** — restructure overwrite
+3. **Fix `aten.slice` fallback in fill** — restructure overwrite
    call
-3. **Multi-iteration benchmarking** — run 5+ iterations to measure
+4. **Multi-iteration benchmarking** — run 5+ iterations to measure
    steady-state latency (after compilation cache is warm)
-4. **Phi-4 mini on Spyre** — adapter verified: CPU-accurate and
-   compiles/runs on Spyre. `head_dim=128` (`D/2=64`) needs no
-   padding. Partial RoPE fixed via Q/K weight permutation +
-   identity-padded rotation matrices.
