@@ -167,6 +167,14 @@ def pad_attention_heads(model, layers, orig_head_dim, padded_head_dim,
     V and O use simple end-padding per head (they don't pass through
     RoPE, so layout within a head doesn't matter).
 
+    Note: only Q/K *need* padding for RoPE stick alignment.  V and O
+    could use the original head_dim (PyTorch SDPA supports E != Ev),
+    which would shrink the KV cache. This is blocked by the Spyre
+    compiler — see https://github.com/torch-spyre/torch-spyre/issues/1739.
+    Once that is resolved, remove V/O padding here and rely on the
+    ``v_head_dim`` infrastructure already wired through the block
+    forwards and cache creation.
+
     Args:
         model: HF model — stores padded dim as ``model._spyre_head_dim``.
         layers: Iterable of decoder layers (each must have ``self_attn``).
@@ -187,7 +195,7 @@ def pad_attention_heads(model, layers, orig_head_dim, padded_head_dim,
     orig_half = orig_head_dim // 2
     padded_half = padded_head_dim // 2
 
-    def _pad_qkv_rope(proj, n_heads):
+    def _pad_qk_rope(proj, n_heads):
         """Interleaved padding for Q/K: pad within each [2, D/2] group."""
         w = proj.weight
         hidden = w.shape[1]
@@ -213,7 +221,8 @@ def pad_attention_heads(model, layers, orig_head_dim, padded_head_dim,
             new_proj.bias = nn.Parameter(new_b, requires_grad=False)
         return new_proj
 
-    def _pad_qkv_simple(proj, n_heads):
+    # V/O padding: needed until torch-spyre/torch-spyre#1739 is resolved.
+    def _pad_v_simple(proj, n_heads):
         """Simple end-padding per head for V."""
         w = proj.weight
         hidden = w.shape[1]
@@ -233,7 +242,7 @@ def pad_attention_heads(model, layers, orig_head_dim, padded_head_dim,
             new_proj.bias = nn.Parameter(new_b, requires_grad=False)
         return new_proj
 
-    def _pad_out(proj, n_heads):
+    def _pad_o(proj, n_heads):
         """Simple end-padding along input dim for O."""
         w = proj.weight
         hidden = w.shape[0]
@@ -251,10 +260,10 @@ def pad_attention_heads(model, layers, orig_head_dim, padded_head_dim,
     for layer in layers:
         attn = layer.self_attn
         orig_scaling = attn.scaling
-        attn.q_proj = _pad_qkv_rope(attn.q_proj, num_heads)
-        attn.k_proj = _pad_qkv_rope(attn.k_proj, num_kv_heads)
-        attn.v_proj = _pad_qkv_simple(attn.v_proj, num_kv_heads)
-        attn.o_proj = _pad_out(attn.o_proj, num_heads)
+        attn.q_proj = _pad_qk_rope(attn.q_proj, num_heads)
+        attn.k_proj = _pad_qk_rope(attn.k_proj, num_kv_heads)
+        attn.v_proj = _pad_v_simple(attn.v_proj, num_kv_heads)
+        attn.o_proj = _pad_o(attn.o_proj, num_heads)
         attn.head_dim = padded_head_dim
         attn.scaling = orig_scaling
 
@@ -415,13 +424,14 @@ def generate(run_forward_fn: Callable, model, tokenizer, prompts,
         or getattr(model.config, "head_dim", None)
         or model.config.hidden_size // model.config.num_attention_heads
     )
+    v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
     key_caches = [
         torch.empty(batch_size, num_kv_heads, 0, head_dim,
                      dtype=torch.float16, device=DEVICE)
         for _ in range(num_layers)
     ]
     value_caches = [
-        torch.empty(batch_size, num_kv_heads, 0, head_dim,
+        torch.empty(batch_size, num_kv_heads, 0, v_head_dim,
                      dtype=torch.float16, device=DEVICE)
         for _ in range(num_layers)
     ]
@@ -580,6 +590,7 @@ def make_standard_gqa_block(layer):
     mlp = layer.mlp
     input_ln = layer.input_layernorm
     post_attn_ln = layer.post_attention_layernorm
+    v_head_dim = getattr(attn, 'v_head_dim', attn.head_dim)
 
     def block_forward(hidden_states, selected_freqs, attn_mask,
                       key_cache, value_cache,
@@ -590,7 +601,7 @@ def make_standard_gqa_block(layer):
         bsz, seq_len, _ = h.shape
         q = attn.q_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
         k = attn.k_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
-        v = attn.v_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
+        v = attn.v_proj(h).view(bsz, seq_len, -1, v_head_dim).transpose(1, 2)
 
         q = apply_rope_matmul(q, selected_freqs)
         k = apply_rope_matmul(k, selected_freqs)

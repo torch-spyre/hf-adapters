@@ -48,6 +48,7 @@ def _make_compiled_block(layer):
     input_ln = layer.input_layernorm
     post_attn_ln = layer.post_attention_layernorm
     res_mult = layer.residual_multiplier
+    v_head_dim = getattr(attn, 'v_head_dim', attn.head_dim)
 
     def block_forward(hidden_states, selected_freqs, attn_mask,
                       key_cache, value_cache,
@@ -58,7 +59,7 @@ def _make_compiled_block(layer):
         bsz, seq_len, _ = h.shape
         q = attn.q_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
         k = attn.k_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
-        v = attn.v_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
+        v = attn.v_proj(h).view(bsz, seq_len, -1, v_head_dim).transpose(1, 2)
 
         q = apply_rope_matmul(q, selected_freqs)
         k = apply_rope_matmul(k, selected_freqs)

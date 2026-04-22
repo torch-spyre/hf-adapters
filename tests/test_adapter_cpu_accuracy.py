@@ -136,6 +136,7 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
         or getattr(model.config, "head_dim", None)
         or model.config.hidden_size // model.config.num_attention_heads
     )
+    v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
     vocab_size = model.config.vocab_size
 
     # Match model dtype for KV caches and masks
@@ -147,7 +148,7 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
         for _ in range(num_layers)
     ]
     value_caches = [
-        torch.empty(batch_size, num_kv_heads, 0, head_dim, dtype=param_dtype)
+        torch.empty(batch_size, num_kv_heads, 0, v_head_dim, dtype=param_dtype)
         for _ in range(num_layers)
     ]
 
