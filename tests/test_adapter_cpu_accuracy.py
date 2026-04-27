@@ -142,19 +142,22 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     # Match model dtype for KV caches and masks
     param_dtype = next(model.parameters()).dtype
 
-    # Empty KV caches
+    # Pre-allocate KV caches at full size
+    max_cache_len = seq_len + num_decode
     key_caches = [
-        torch.empty(batch_size, num_kv_heads, 0, head_dim, dtype=param_dtype)
+        torch.zeros(batch_size, num_kv_heads, max_cache_len, head_dim,
+                     dtype=param_dtype)
         for _ in range(num_layers)
     ]
     value_caches = [
-        torch.empty(batch_size, num_kv_heads, 0, v_head_dim, dtype=param_dtype)
+        torch.zeros(batch_size, num_kv_heads, max_cache_len, v_head_dim,
+                     dtype=param_dtype)
         for _ in range(num_layers)
     ]
 
     # --- Prefill ---
     position_ids = torch.arange(seq_len).unsqueeze(0)
-    causal_mask = torch.zeros((1, 1, seq_len, seq_len), dtype=param_dtype)
+    causal_mask = torch.zeros((1, 1, seq_len, max_cache_len), dtype=param_dtype)
     for i in range(seq_len):
         causal_mask[:, :, i, i + 1:] = -torch.inf
 
@@ -171,18 +174,18 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
 
     cache_len = seq_len
 
-    # --- Decode steps (expand mode) ---
+    # --- Decode steps ---
     for step in range(1, num_decode + 1):
         next_ids = torch.tensor([[token]])
         next_pos = torch.tensor([[seq_len + step - 1]])
-        total_len = cache_len + 1
-        decode_mask = torch.zeros((1, 1, 1, total_len), dtype=param_dtype)
+        decode_mask = torch.zeros((1, 1, 1, max_cache_len), dtype=param_dtype)
+        decode_mask[:, :, :, cache_len + 1:] = -torch.inf
 
         with torch.no_grad():
             logits = run_forward_fn(
                 model, next_ids, next_pos, decode_mask,
                 key_caches, value_caches,
-                is_filling=False, token_index=0, cache_position=0,
+                is_filling=False, token_index=0, cache_position=cache_len,
             )
 
         last_logits = logits[0, -1, :].float()[:vocab_size]

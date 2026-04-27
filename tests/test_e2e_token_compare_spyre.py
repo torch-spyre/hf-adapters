@@ -123,9 +123,11 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     num_layers = model.config.num_hidden_layers
     num_kv_heads = model.config.num_key_value_heads
     head_dim = (
-        getattr(model.config, "head_dim", None)
+        getattr(model, "_spyre_head_dim", None)
+        or getattr(model.config, "head_dim", None)
         or model.config.hidden_size // model.config.num_attention_heads
     )
+    v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
     vocab_size = model.config.vocab_size
 
     # Pad to BLOCK_SIZE
@@ -140,13 +142,15 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     position_ids = torch.zeros((batch_size, padded_len), dtype=torch.long)
     position_ids[:, prompt_offset:] = torch.arange(seq_len)
 
+    max_cache_len = padded_len + math.ceil(num_decode / BLOCK_SIZE) * BLOCK_SIZE + BLOCK_SIZE
+
     key_caches = [
-        torch.empty(batch_size, num_kv_heads, 0, head_dim,
+        torch.zeros(batch_size, num_kv_heads, max_cache_len, head_dim,
                      dtype=torch.float16, device=DEVICE)
         for _ in range(num_layers)
     ]
     value_caches = [
-        torch.empty(batch_size, num_kv_heads, 0, head_dim,
+        torch.zeros(batch_size, num_kv_heads, max_cache_len, v_head_dim,
                      dtype=torch.float16, device=DEVICE)
         for _ in range(num_layers)
     ]
@@ -156,7 +160,8 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     # --- Prefill ---
     from hf_adapters.hf_common import build_prefill_mask
 
-    prefill_mask = build_prefill_mask(batch_size, padded_len, prompt_offset)
+    prefill_mask = build_prefill_mask(batch_size, padded_len, max_cache_len,
+                                      prompt_offset)
 
     with torch.no_grad():
         logits = run_forward_fn(
@@ -189,7 +194,7 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
 
         from hf_adapters.hf_common import build_expansion_mask
         exp_mask = build_expansion_mask(
-            batch_size, BLOCK_SIZE, cache_len, prompt_offset,
+            batch_size, BLOCK_SIZE, max_cache_len, cache_len, prompt_offset,
         )
 
         next_input = result_buf[:, -BLOCK_SIZE:]
@@ -198,7 +203,8 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
             logits = run_forward_fn(
                 model, next_input.to(DEVICE), decode_pos.to(DEVICE),
                 exp_mask.to(DEVICE), key_caches, value_caches,
-                is_filling=False, token_index=0, cache_position=0,
+                is_filling=False, token_index=0,
+                cache_position=cache_len - BLOCK_SIZE,
             )
 
         logits_cpu = logits.to("cpu")

@@ -121,32 +121,30 @@ def apply_rope_matmul(x, selected_freqs):
 
 def kv_cache_update(k, v, key_cache, value_cache,
                     is_filling, token_index, cache_position):
-    """Update KV cache: cat for expansion, spyre.overwrite for fill.
+    """Update pre-allocated KV cache via overwrite at cache_position.
 
     All args are tensors; is_filling/token_index/cache_position are Python
     scalars that torch.compile specializes on.
     """
     if is_filling:
-        k_slice = k[:, :, token_index:token_index + 1, :]
-        v_slice = v[:, :, token_index:token_index + 1, :]
-        if key_cache.device.type == "spyre":
-            key_cache = torch.ops.spyre.overwrite(
-                input=k_slice,
-                output=key_cache, dims=[2], offsets=[cache_position],
-            )
-            value_cache = torch.ops.spyre.overwrite(
-                input=v_slice,
-                output=value_cache, dims=[2], offsets=[cache_position],
-            )
-        else:
-            # CPU fallback: direct index assignment
-            key_cache = key_cache.clone()
-            key_cache[:, :, cache_position:cache_position + 1, :] = k_slice
-            value_cache = value_cache.clone()
-            value_cache[:, :, cache_position:cache_position + 1, :] = v_slice
+        k_write = k[:, :, token_index:token_index + 1, :]
+        v_write = v[:, :, token_index:token_index + 1, :]
     else:
-        key_cache = torch.cat((key_cache, k), dim=2)
-        value_cache = torch.cat((value_cache, v), dim=2)
+        k_write = k
+        v_write = v
+
+    if key_cache.device.type == "spyre":
+        torch.ops.spyre.overwrite(
+            input=k_write, output=key_cache, dims=[2], offsets=[cache_position],
+        )
+        torch.ops.spyre.overwrite(
+            input=v_write, output=value_cache, dims=[2], offsets=[cache_position],
+        )
+    else:
+        seq_len = k_write.shape[2]
+        key_cache[:, :, cache_position:cache_position + seq_len, :] = k_write
+        value_cache[:, :, cache_position:cache_position + seq_len, :] = v_write
+
     return key_cache, value_cache
 
 
@@ -311,23 +309,24 @@ def pad_lm_head(model):
 # ---------------------------------------------------------------------------
 
 
-def build_prefill_mask(batch_size, padded_len, prompt_offset):
-    """Causal mask for prefill, masking left-padding columns."""
-    mask = torch.zeros((batch_size, 1, padded_len, padded_len), dtype=torch.float16)
+def build_prefill_mask(batch_size, padded_len, max_cache_len, prompt_offset):
+    """Causal mask for prefill, masking left-padding and unused cache positions."""
+    mask = torch.zeros((batch_size, 1, padded_len, max_cache_len), dtype=torch.float16)
     mask[:, :, :, :prompt_offset] = -torch.inf
     for i in range(padded_len):
         mask[:, :, i, i + 1:] = -torch.inf
     return mask
 
 
-def build_expansion_mask(batch_size, block_size, total_cache_len, prompt_offset):
+def build_expansion_mask(batch_size, block_size, max_cache_len,
+                         used_cache_len, prompt_offset):
     """Causal mask for an expansion decode step."""
     mask = torch.zeros(
-        (batch_size, 1, block_size, total_cache_len), dtype=torch.float16
+        (batch_size, 1, block_size, max_cache_len), dtype=torch.float16
     )
     mask[:, :, :, :prompt_offset] = -torch.inf
     for j in range(block_size):
-        attend_up_to = total_cache_len - block_size + j + 1
+        attend_up_to = used_cache_len - block_size + j + 1
         mask[:, :, j, attend_up_to:] = -torch.inf
     return mask
 
@@ -409,6 +408,7 @@ def generate(run_forward_fn: Callable, model, tokenizer, prompts,
     # Left-pad to BLOCK_SIZE multiple
     padded_len = math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
     prompt_offset = padded_len - prompt_length
+    max_cache_len = padded_len + math.ceil(max_new_tokens / BLOCK_SIZE) * BLOCK_SIZE
     if prompt_offset > 0:
         pad = input_ids.new_zeros((batch_size, prompt_offset))
         input_ids = torch.cat([pad, input_ids], dim=1)
@@ -426,12 +426,12 @@ def generate(run_forward_fn: Callable, model, tokenizer, prompts,
     )
     v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
     key_caches = [
-        torch.empty(batch_size, num_kv_heads, 0, head_dim,
+        torch.zeros(batch_size, num_kv_heads, max_cache_len, head_dim,
                      dtype=torch.float16, device=DEVICE)
         for _ in range(num_layers)
     ]
     value_caches = [
-        torch.empty(batch_size, num_kv_heads, 0, v_head_dim,
+        torch.zeros(batch_size, num_kv_heads, max_cache_len, v_head_dim,
                      dtype=torch.float16, device=DEVICE)
         for _ in range(num_layers)
     ]
@@ -453,7 +453,7 @@ def generate(run_forward_fn: Callable, model, tokenizer, prompts,
         if i == 0:
             # --- PREFILL ---
             prefill_mask = build_prefill_mask(
-                batch_size, padded_len, prompt_offset
+                batch_size, padded_len, max_cache_len, prompt_offset
             )
             logits = run_forward_fn(
                 model, input_ids.to(DEVICE), position_ids.to(DEVICE),
@@ -499,12 +499,14 @@ def generate(run_forward_fn: Callable, model, tokenizer, prompts,
                 current_cache_len += BLOCK_SIZE
                 decode_pos = decode_pos + BLOCK_SIZE
                 exp_mask = build_expansion_mask(
-                    batch_size, BLOCK_SIZE, current_cache_len, prompt_offset
+                    batch_size, BLOCK_SIZE, max_cache_len,
+                    current_cache_len, prompt_offset,
                 )
                 logits = run_forward_fn(
                     model, next_input, decode_pos.to(DEVICE),
                     exp_mask.to(DEVICE), key_caches, value_caches,
-                    is_filling=False, token_index=0, cache_position=0,
+                    is_filling=False, token_index=0,
+                    cache_position=current_cache_len - BLOCK_SIZE,
                 )
                 logits_cpu = logits.to("cpu")
                 next_logits = logits_cpu[0, -BLOCK_SIZE, :]
