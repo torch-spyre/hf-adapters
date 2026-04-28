@@ -282,39 +282,51 @@ def make_inputs(config, mode, seed, cache_len=64, device="cpu"):
 
     if mode == "prefill":
         L = SEQ_LEN
-        # Create on CPU first, then move (zero-length tensors crash on Spyre
-        # .to(), so create empty KV caches directly on the target device)
+        max_cache_len = L
         hidden = torch.randn(1, L, H, dtype=torch.float16).to(device)
         freqs = torch.randn(1, L, 2, 2, half_dim, dtype=torch.float16).to(
             device
         )
-        mask = torch.zeros(1, 1, L, L, dtype=torch.float16)
+        mask = torch.zeros(1, 1, L, max_cache_len, dtype=torch.float16)
         for i in range(L):
             mask[:, :, i, i + 1:] = -torch.inf
         mask = mask.to(device)
-        # Empty KV caches: create directly on target device (avoids segfault)
-        kc = torch.empty(
-            1, num_kv_heads, 0, head_dim, dtype=torch.float16, device=device
+        kc = torch.zeros(
+            1, num_kv_heads, max_cache_len, head_dim,
+            dtype=torch.float16, device=device,
         )
-        vc = torch.empty(
-            1, num_kv_heads, 0, head_dim, dtype=torch.float16, device=device
+        vc = torch.zeros(
+            1, num_kv_heads, max_cache_len, head_dim,
+            dtype=torch.float16, device=device,
         )
         is_filling = False
+        cache_pos = 0
     else:
         L = 1
-        total = cache_len + 1
+        max_cache_len = cache_len + L
         hidden = torch.randn(1, L, H, dtype=torch.float16).to(device)
         freqs = torch.randn(1, L, 2, 2, half_dim, dtype=torch.float16).to(
             device
         )
-        mask = torch.zeros(1, 1, L, total, dtype=torch.float16).to(device)
-        kc = torch.randn(
+        mask = torch.zeros(1, 1, L, max_cache_len, dtype=torch.float16)
+        mask[:, :, :, cache_len + L:] = -torch.inf
+        mask = mask.to(device)
+        kc = torch.zeros(
+            1, num_kv_heads, max_cache_len, head_dim,
+            dtype=torch.float16, device=device,
+        )
+        kc[:, :, :cache_len, :] = torch.randn(
             1, num_kv_heads, cache_len, head_dim, dtype=torch.float16
         ).to(device)
-        vc = torch.randn(
+        vc = torch.zeros(
+            1, num_kv_heads, max_cache_len, head_dim,
+            dtype=torch.float16, device=device,
+        )
+        vc[:, :, :cache_len, :] = torch.randn(
             1, num_kv_heads, cache_len, head_dim, dtype=torch.float16
         ).to(device)
         is_filling = False
+        cache_pos = cache_len
 
     return {
         "hidden_states": hidden,
@@ -324,7 +336,7 @@ def make_inputs(config, mode, seed, cache_len=64, device="cpu"):
         "value_cache": vc,
         "is_filling": is_filling,
         "token_index": 0,
-        "cache_position": 0,
+        "cache_position": cache_pos,
     }
 
 

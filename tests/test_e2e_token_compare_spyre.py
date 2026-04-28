@@ -173,50 +173,70 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     token = logits_cpu.argmax().item()
     results.append({"logits": logits_cpu, "token": token, "step": 0})
 
-    # --- Decode steps (expansion mode for simplicity) ---
-    cache_len = padded_len
-    # Build decode position tracking
+    # --- Decode steps (fill + expand, mirroring generate() in hf_common.py) ---
+    from hf_adapters.hf_common import build_expansion_mask
+
+    result = padded_ids.clone()
+    current_cache_len = padded_len
+    tokens_in_block = BLOCK_SIZE - 1
     decode_pos = torch.zeros((batch_size, BLOCK_SIZE), dtype=torch.long)
     for j in range(BLOCK_SIZE):
         decode_pos[:, j] = seq_len + j - BLOCK_SIZE
+    fill_mask_device = None
 
-    # We generate one token at a time using expansion blocks
-    result_buf = padded_ids.clone()
-    result_buf = F.pad(result_buf, (0, BLOCK_SIZE))
-    result_buf[:, padded_len] = token
-
-    tokens_in_block = 1
+    # Place first token (mirrors generate()'s post-prefill token placement)
+    if tokens_in_block == BLOCK_SIZE - 1:
+        result = F.pad(result, (0, BLOCK_SIZE))
+    tokens_in_block = (tokens_in_block + 1) % BLOCK_SIZE
+    grab_idx = BLOCK_SIZE if tokens_in_block == 0 else BLOCK_SIZE - tokens_in_block
+    result[:, -grab_idx] = token
 
     for step in range(1, num_decode + 1):
-        # Always use expansion mode (simpler for the comparison test)
-        cache_len += BLOCK_SIZE
-        decode_pos = decode_pos + BLOCK_SIZE
+        is_filling = tokens_in_block > 0
+        next_input = result[:, -BLOCK_SIZE:].to(DEVICE)
 
-        from hf_adapters.hf_common import build_expansion_mask
-        exp_mask = build_expansion_mask(
-            batch_size, BLOCK_SIZE, max_cache_len, cache_len, prompt_offset,
-        )
-
-        next_input = result_buf[:, -BLOCK_SIZE:]
-
-        with torch.no_grad():
-            logits = run_forward_fn(
-                model, next_input.to(DEVICE), decode_pos.to(DEVICE),
-                exp_mask.to(DEVICE), key_caches, value_caches,
-                is_filling=False, token_index=0,
-                cache_position=cache_len - BLOCK_SIZE,
+        if is_filling:
+            fill_pos = (
+                current_cache_len - BLOCK_SIZE + tokens_in_block
             )
+            with torch.no_grad():
+                logits = run_forward_fn(
+                    model, next_input, decode_pos.to(DEVICE),
+                    fill_mask_device, key_caches, value_caches,
+                    is_filling=True,
+                    token_index=tokens_in_block,
+                    cache_position=fill_pos,
+                )
+            logits_cpu = logits.to("cpu")
+            grab_logit = BLOCK_SIZE - tokens_in_block
+            last_logits = logits_cpu[0, -grab_logit, :].float()[:vocab_size]
+        else:
+            current_cache_len += BLOCK_SIZE
+            decode_pos = decode_pos + BLOCK_SIZE
+            exp_mask = build_expansion_mask(
+                batch_size, BLOCK_SIZE, max_cache_len,
+                current_cache_len, prompt_offset,
+            )
+            with torch.no_grad():
+                logits = run_forward_fn(
+                    model, next_input, decode_pos.to(DEVICE),
+                    exp_mask.to(DEVICE), key_caches, value_caches,
+                    is_filling=False, token_index=0,
+                    cache_position=current_cache_len - BLOCK_SIZE,
+                )
+            logits_cpu = logits.to("cpu")
+            last_logits = logits_cpu[0, -BLOCK_SIZE, :].float()[:vocab_size]
+            fill_mask_device = exp_mask.to(DEVICE)
 
-        logits_cpu = logits.to("cpu")
-        # The relevant logit is at the first position of the block
-        # (previous token was placed at result_buf[:, padded_len + ...])
-        last_logits = logits_cpu[0, -BLOCK_SIZE, :].float()[:vocab_size]
         token = last_logits.argmax().item()
         results.append({"logits": last_logits, "token": token, "step": step})
 
-        # Place token and prepare next block
-        result_buf = F.pad(result_buf, (0, BLOCK_SIZE))
-        result_buf[:, -BLOCK_SIZE] = token
+        # Place token (mirrors generate()'s token placement logic)
+        if tokens_in_block == BLOCK_SIZE - 1:
+            result = F.pad(result, (0, BLOCK_SIZE))
+        tokens_in_block = (tokens_in_block + 1) % BLOCK_SIZE
+        grab_idx = BLOCK_SIZE if tokens_in_block == 0 else BLOCK_SIZE - tokens_in_block
+        result[:, -grab_idx] = token
 
     return results
 
