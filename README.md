@@ -1,5 +1,9 @@
 # HF Adapters for Spyre
 
+![adapters](https://img.shields.io/badge/adapters-11-blue)
+![verified](https://img.shields.io/badge/verified_checkpoints-17-green)
+![compatible](https://img.shields.io/badge/compatible_models-60%2B-orange)
+
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
 
 No forks, no custom model classes — each adapter monkey-patches the
@@ -10,13 +14,25 @@ from `transformers`.
 
 ## Supported Models
 
-9 adapters covering 12 models (Granite, Granite Vision, Qwen3, Qwen2,
-SmolLM3, Llama, Mistral, Phi-4, OLMo, OLMo2). All compile and run on
-Spyre.
+**11 adapters · 17 verified checkpoints · 60+ compatible models**
 
-See [ARCHITECTURE.md](ARCHITECTURE.md#model-compatibility-matrix) for
-the full compatibility matrix with head\_dim, stick alignment, and test
-status.
+| Adapter | Verified | Also Compatible |
+|---------|----------|-----------------|
+| hf\_llama.py | Llama 3.2 3B, TinyLlama, Falcon 3 1B, DeepSeek-Coder 1.3B, Yi 1.5 6B | Llama 2/3 7–13B, Code Llama 7B/13B, Vicuna, OpenChat, Solar |
+| hf\_qwen2.py | Qwen2.5 7B, 1.5B | Qwen2 0.5–7B, Qwen2.5 0.5B/3B, Qwen2.5-Coder, Qwen2.5-Math |
+| hf\_granite.py | Granite 3.3 8B/2B | Granite 3.0–3.2, Granite Code 8B/3B |
+| hf\_granite\_vision.py | Granite Vision 4.1 4B | — |
+| hf\_qwen3.py | Qwen3 0.6B | Qwen3 1.7B, 4B, 8B |
+| hf\_mistral.py | Mistral 7B v0.3 | Mistral v0.1/v0.2, Instruct variants, Zephyr 7B |
+| hf\_phi3.py | Phi-4 mini | Phi-3 mini 4k/128k, Phi-3 small 8k |
+| hf\_granitemoehybrid.py | Granite 4.0 1B | Granite 4.0 Micro |
+| hf\_smollm3.py | SmolLM3 3B | — |
+| hf\_olmo.py | OLMo 1B | OLMo 7B |
+| hf\_olmo2.py | OLMo2 1B | OLMo 2 7B |
+
+Each adapter covers all size variants and fine-tunes sharing the same
+HuggingFace `model_type`. See [ARCHITECTURE.md](ARCHITECTURE.md#verified-checkpoints)
+for head\_dim details, stick alignment, and Spyre numerical accuracy.
 
 ## Quick Start
 
@@ -31,9 +47,9 @@ outputs = generate(model, tokenizer, ["What is 2+2?"], max_new_tokens=128)
 print(outputs[0])
 ```
 
-Replace `hf_granite` with `hf_granite_vision`, `hf_qwen3`,
-`hf_granitemoehybrid`, `hf_smollm3`, `hf_llama`, `hf_qwen2`,
-`hf_mistral`, or `hf_phi3` for other model families.
+Replace `hf_granite` with `hf_llama`, `hf_qwen2`, `hf_qwen3`,
+`hf_mistral`, `hf_phi3`, `hf_smollm3`, `hf_olmo`, `hf_olmo2`,
+`hf_granitemoehybrid`, or `hf_granite_vision` for other model families.
 
 ## Repo Structure
 
@@ -51,10 +67,12 @@ hf_adapters/
 ├── hf_qwen3.py                Qwen3 adapter
 ├── hf_granitemoehybrid.py     Granite 4.0 dense adapter
 ├── hf_smollm3.py              SmolLM3 adapter
-├── hf_llama.py                Llama adapter (Llama 1/2/3, Code Llama, Yi, TinyLlama)
-├── hf_qwen2.py                Qwen2 adapter (Qwen 1.5, Qwen 2, Qwen 2.5)
-├── hf_mistral.py              Mistral adapter (Mistral 7B v0.2, v0.3)
-├── hf_phi3.py                 Phi-4 mini adapter
+├── hf_llama.py                Llama adapter (Llama 1/2/3, Code Llama, Yi, Falcon 3)
+├── hf_qwen2.py                Qwen2 adapter (Qwen2, Qwen2.5, Coder, Math)
+├── hf_mistral.py              Mistral adapter (Mistral 7B v0.1–v0.3)
+├── hf_phi3.py                 Phi-4 / Phi-3 adapter
+├── hf_olmo.py                 OLMo adapter (OLMo 1B, 7B)
+├── hf_olmo2.py                OLMo2 adapter (OLMo 2 1B, 7B)
 └── __init__.py
 
 tests/

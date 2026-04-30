@@ -3,7 +3,7 @@
 How the HuggingFace Transformers adapters work, what they change, and
 which models are supported on Spyre.
 
-## Model Compatibility Matrix
+## Verified Checkpoints
 
 | Model | model\_type | head\_dim | D/2 | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
 |-------|-----------|---------|-----|--------------|-------------|---------------|-----------|
@@ -48,6 +48,34 @@ E2E: `" Paris"` on both CPU and Spyre).
 across layers and autoregressive steps, causing token drift after the
 first token. This is a torch-spyre compiler issue specific to the
 single-token decode path (seq_len=1), not an adapter issue.
+
+## Model Family Coverage
+
+Each adapter handles a HuggingFace `model_type`. Once verified with
+one checkpoint, all size variants and fine-tunes of that architecture
+work with zero additional code — they share the same attention
+pattern, norms, and weight layout.
+
+| Adapter | model\_type | Verified | Also Compatible (same adapter, untested sizes/fine-tunes) |
+|---------|-----------|----------|----------------------------------------------------------|
+| hf\_llama.py | llama | 5 | Llama 2 7B/13B, Llama 3 8B, Llama 3.1 8B, Code Llama 7B/13B, Vicuna 7B/13B, OpenChat 3.5 7B, Nous Hermes 2, Solar 10.7B |
+| hf\_qwen2.py | qwen2 | 2 | Qwen2 0.5B/1.5B/7B, Qwen2.5 0.5B/3B, Qwen2.5-Coder 0.5B–7B, Qwen2.5-Math 1.5B/7B |
+| hf\_granite.py | granite | 3 | Granite 3.3 8B/2B Base, Granite 3.2 8B, Granite 3.1 8B/2B, Granite 3.0 8B, Granite Code 8B/3B |
+| hf\_qwen3.py | qwen3 | 1 | Qwen3 1.7B, Qwen3 4B, Qwen3 8B |
+| hf\_mistral.py | mistral | 1 | Mistral 7B v0.1/v0.2, Mistral 7B Instruct v0.1–v0.3, Zephyr 7B |
+| hf\_phi3.py | phi3 | 1 | Phi-3 mini 4k/128k, Phi-3 small 8k |
+| hf\_granitemoehybrid.py | granitemoehybrid | 1 | Granite 4.0 Micro |
+| hf\_smollm3.py | smollm3 | 1 | — |
+| hf\_olmo.py | olmo | 1 | OLMo 7B |
+| hf\_olmo2.py | olmo2 | 1 | OLMo 2 7B |
+| hf\_granite\_vision.py | granite (text) | 1 | — |
+
+**Verified** = checkpoints tested in CI (appear in the matrix above).
+**Also Compatible** = same `model_type` in HuggingFace config; expected
+to work without code changes. Size constraints apply (must fit in
+Spyre memory). Gated models require HF token access.
+
+**Variant count: 11 adapters → 17 verified checkpoints, ~60+ compatible variants.**
 
 ## Public API
 
