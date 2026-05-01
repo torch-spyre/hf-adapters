@@ -32,8 +32,25 @@ import torch
 # Bootstrap: load adapter modules with DEVICE patched to "cpu"
 # ---------------------------------------------------------------------------
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ADAPTERS_DIR = os.path.join(REPO_ROOT, "hf_adapters")
+# Find hf_adapters directory: either relative to this script or via PYTHONPATH
+_script_relative = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hf_adapters"
+)
+if os.path.isdir(_script_relative):
+    ADAPTERS_DIR = _script_relative
+else:
+    import importlib.util as _ilu
+    _found = _ilu.find_spec("hf_adapters")
+    if _found and _found.submodule_search_locations:
+        ADAPTERS_DIR = _found.submodule_search_locations[0]
+    else:
+        for p in sys.path:
+            candidate = os.path.join(p, "hf_adapters")
+            if os.path.isfile(os.path.join(candidate, "hf_common.py")):
+                ADAPTERS_DIR = candidate
+                break
+        else:
+            raise RuntimeError("Cannot find hf_adapters package. Set PYTHONPATH.")
 
 _common_path = os.path.join(ADAPTERS_DIR, "hf_common.py")
 _common_spec = importlib.util.spec_from_file_location("hf_adapters.hf_common", _common_path)
