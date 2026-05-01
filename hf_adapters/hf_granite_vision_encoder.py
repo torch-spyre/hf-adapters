@@ -47,35 +47,87 @@ import json
 from collections import defaultdict
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import DEVICE, BLOCK_SIZE
 
 
 # ---------------------------------------------------------------------------
+# Head-dim padding for vision encoder (no RoPE — simple end-padding for all)
+# ---------------------------------------------------------------------------
+
+def _pad_vision_attention(layers, orig_head_dim, padded_head_dim, num_heads):
+    """Zero-pad Q/K/V/O projections in vision encoder layers.
+
+    Unlike LLM layers, there's no RoPE, so all projections use simple
+    end-padding per head.
+    """
+    def _pad_proj(proj, n_heads, is_output=False):
+        w = proj.weight
+        if is_output:
+            hidden = w.shape[0]
+            new_w = torch.zeros(hidden, n_heads * padded_head_dim, dtype=w.dtype)
+            for h in range(n_heads):
+                s = h * orig_head_dim
+                d = h * padded_head_dim
+                new_w[:, d:d + orig_head_dim] = w[:, s:s + orig_head_dim]
+            new_proj = nn.Linear(n_heads * padded_head_dim, hidden, bias=proj.bias is not None)
+            new_proj.weight = nn.Parameter(new_w, requires_grad=False)
+            if proj.bias is not None:
+                new_proj.bias = nn.Parameter(proj.bias.clone(), requires_grad=False)
+        else:
+            hidden = w.shape[1]
+            new_w = torch.zeros(n_heads * padded_head_dim, hidden, dtype=w.dtype)
+            for h in range(n_heads):
+                s = h * orig_head_dim
+                d = h * padded_head_dim
+                new_w[d:d + orig_head_dim, :] = w[s:s + orig_head_dim, :]
+            new_proj = nn.Linear(hidden, n_heads * padded_head_dim, bias=proj.bias is not None)
+            new_proj.weight = nn.Parameter(new_w, requires_grad=False)
+            if proj.bias is not None:
+                new_b = torch.zeros(n_heads * padded_head_dim, dtype=proj.bias.dtype)
+                for h in range(n_heads):
+                    s = h * orig_head_dim
+                    d = h * padded_head_dim
+                    new_b[d:d + orig_head_dim] = proj.bias[s:s + orig_head_dim]
+                new_proj.bias = nn.Parameter(new_b, requires_grad=False)
+        return new_proj
+
+    for layer in layers:
+        attn = layer.self_attn
+        attn.q_proj = _pad_proj(attn.q_proj, num_heads)
+        attn.k_proj = _pad_proj(attn.k_proj, num_heads)
+        attn.v_proj = _pad_proj(attn.v_proj, num_heads)
+        attn.out_proj = _pad_proj(attn.out_proj, num_heads, is_output=True)
+        attn.head_dim = padded_head_dim
+
+
+# ---------------------------------------------------------------------------
 # Compiled blocks for vision encoder layers (SiglipEncoderLayer)
 # ---------------------------------------------------------------------------
 
-def _make_vision_block(layer):
+def _make_vision_block(layer, padded_head_dim):
     """Compiled block for a single Siglip encoder layer."""
     ln1 = layer.layer_norm1
     attn = layer.self_attn
     ln2 = layer.layer_norm2
     mlp = layer.mlp
+    num_heads = attn.num_heads
+    head_dim = padded_head_dim
 
     def block_forward(hidden_states):
         residual = hidden_states
         h = ln1(hidden_states)
 
-        bsz, seq_len, embed_dim = h.shape
-        head_dim = embed_dim // attn.num_heads
+        bsz, seq_len, _ = h.shape
 
-        q = attn.q_proj(h).view(bsz, seq_len, attn.num_heads, head_dim).transpose(1, 2)
-        k = attn.k_proj(h).view(bsz, seq_len, attn.num_heads, head_dim).transpose(1, 2)
-        v = attn.v_proj(h).view(bsz, seq_len, attn.num_heads, head_dim).transpose(1, 2)
+        q = attn.q_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+        k = attn.k_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+        v = attn.v_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
 
         attn_out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
-        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, embed_dim)
+        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, num_heads * head_dim)
         attn_out = attn.out_proj(attn_out)
 
         h = residual + attn_out
@@ -220,11 +272,25 @@ def prepare_for_spyre(model):
     """Apply Spyre adaptations to the vision encoder model in-place."""
     vision_tower = model.vision_tower.vision_model
 
+    # Pad attention heads to stick-aligned size (72 → 128)
+    vision_config = vision_tower.config
+    orig_head_dim = vision_config.hidden_size // vision_config.num_attention_heads
+    padded_head_dim = (
+        ((orig_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)) * (2 * BLOCK_SIZE)
+    )
+    if padded_head_dim > orig_head_dim:
+        _pad_vision_attention(
+            vision_tower.encoder.layers,
+            orig_head_dim, padded_head_dim,
+            vision_config.num_attention_heads,
+        )
+
     model._vision_embeddings = vision_tower.embeddings
     model._vision_post_layernorm = vision_tower.post_layernorm
+    model._padded_head_dim = padded_head_dim
 
     model._spyre_vision_blocks = [
-        _make_vision_block(layer)
+        _make_vision_block(layer, padded_head_dim)
         for layer in vision_tower.encoder.layers
     ]
 

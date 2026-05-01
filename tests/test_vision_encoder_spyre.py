@@ -35,11 +35,12 @@ from hf_adapters.hf_granite_vision_encoder import (
     _load_vision_encoder,
     _make_vision_block,
     _make_projector_block,
+    _pad_vision_attention,
     _run_vision_tower,
     _run_forward,
     prepare_for_spyre,
 )
-from hf_adapters.hf_common import DEVICE
+from hf_adapters.hf_common import DEVICE, BLOCK_SIZE
 
 MODEL_PATH = "ibm-granite/granite-vision-4.1-4b"
 
@@ -51,20 +52,29 @@ def test_single_vision_layer():
     print(f"{'='*70}\n")
 
     model = _load_vision_encoder(MODEL_PATH, dtype=torch.float16)
+    vision_config = model.vision_tower.vision_model.config
+    orig_head_dim = vision_config.hidden_size // vision_config.num_attention_heads
+    padded_head_dim = (
+        ((orig_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)) * (2 * BLOCK_SIZE)
+    )
+
     layer = model.vision_tower.vision_model.encoder.layers[0]
 
-    # Siglip: image_size=384, patch_size=16 → 24x24=576 patches (+1 CLS? No, Siglip has no CLS)
-    # Actually: SiglipVisionModel has position_embedding for (image_size/patch_size)^2 = 576
     num_patches = (384 // 16) ** 2  # 576
     hidden_size = 1152
 
+    # Pad attention heads before compiling
+    if padded_head_dim > orig_head_dim:
+        print(f"  Padding head_dim: {orig_head_dim} → {padded_head_dim}")
+        _pad_vision_attention([layer], orig_head_dim, padded_head_dim,
+                             vision_config.num_attention_heads)
+
     print(f"  Creating compiled block...")
-    compiled_block = _make_vision_block(layer)
+    compiled_block = _make_vision_block(layer, padded_head_dim)
 
     print(f"  Moving layer to {DEVICE}...")
     layer.to(DEVICE)
 
-    # Create input on Spyre
     print(f"  Input: hidden_states [{1}, {num_patches}, {hidden_size}]")
     hidden_states = torch.randn(1, num_patches, hidden_size, dtype=torch.float16, device=DEVICE)
 
