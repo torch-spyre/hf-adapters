@@ -471,6 +471,52 @@ def split_fused_linear(w: torch.Tensor) -> tuple[nn.Linear, nn.Linear]:
     return _mk(w[:half]), _mk(w[half:])
 
 
+def pad_mlp(layers, intermediate_size, get_mlp_projs):
+    """Pad MLP intermediate dimension to stick-aligned size.
+
+    Many vision models have intermediate_size not divisible by 64 (e.g.,
+    SiglipVisionModel: 4304). The Spyre scheduler requires all tensor
+    dimensions to be stick-aligned for tiling.
+
+    Args:
+        layers: Iterable of layers containing MLP projections.
+        intermediate_size: Original intermediate dimension.
+        get_mlp_projs: Callable(layer) -> (up_proj, down_proj) returning
+            the two MLP linear layers to pad. up_proj: [hidden→intermediate],
+            down_proj: [intermediate→hidden].
+
+    Returns:
+        Padded intermediate size.
+    """
+    padded = ((intermediate_size + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
+    if padded == intermediate_size:
+        return intermediate_size
+
+    pad_amount = padded - intermediate_size
+
+    for layer in layers:
+        up_proj, down_proj = get_mlp_projs(layer)
+
+        # Pad up_proj output: [intermediate, hidden] → [padded, hidden]
+        w = up_proj.weight
+        up_proj.weight = nn.Parameter(
+            F.pad(w, (0, 0, 0, pad_amount)), requires_grad=False
+        )
+        if up_proj.bias is not None:
+            up_proj.bias = nn.Parameter(
+                F.pad(up_proj.bias, (0, pad_amount)), requires_grad=False
+            )
+
+        # Pad down_proj input: [hidden, intermediate] → [hidden, padded]
+        w = down_proj.weight
+        down_proj.weight = nn.Parameter(
+            F.pad(w, (0, pad_amount)), requires_grad=False
+        )
+        # down_proj bias is [hidden], no padding needed
+
+    return padded
+
+
 # ---------------------------------------------------------------------------
 # Mask builders
 # ---------------------------------------------------------------------------

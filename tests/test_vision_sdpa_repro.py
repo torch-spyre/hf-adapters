@@ -31,15 +31,16 @@ MLP_DIM = 4304      # intermediate_size
 
 
 def make_full_vision_layer():
-    """Full SiglipEncoderLayer pattern — this is what fails."""
+    """Full SiglipEncoderLayer pattern with MLP padded to stick alignment."""
+    padded_mlp = ((MLP_DIM + 63) // 64) * 64  # 4304 → 4352
     ln1 = nn.LayerNorm(HIDDEN, eps=1e-6)
     q_proj = nn.Linear(HIDDEN, NUM_HEADS * HEAD_DIM, bias=True)
     k_proj = nn.Linear(HIDDEN, NUM_HEADS * HEAD_DIM, bias=True)
     v_proj = nn.Linear(HIDDEN, NUM_HEADS * HEAD_DIM, bias=True)
     out_proj = nn.Linear(NUM_HEADS * HEAD_DIM, HIDDEN, bias=True)
     ln2 = nn.LayerNorm(HIDDEN, eps=1e-6)
-    fc1 = nn.Linear(HIDDEN, MLP_DIM, bias=True)
-    fc2 = nn.Linear(MLP_DIM, HIDDEN, bias=True)
+    fc1 = nn.Linear(HIDDEN, padded_mlp, bias=True)
+    fc2 = nn.Linear(padded_mlp, HIDDEN, bias=True)
 
     all_modules = [ln1, q_proj, k_proj, v_proj, out_proj, ln2, fc1, fc2]
 
@@ -123,6 +124,42 @@ def run_test(name, make_fn):
     return True
 
 
+def make_mlp_only():
+    """MLP only: fc1 → gelu → fc2 + residual. Padded to stick-aligned."""
+    padded_mlp = ((MLP_DIM + 63) // 64) * 64  # 4304 → 4352
+    fc1 = nn.Linear(HIDDEN, padded_mlp, bias=True)
+    fc2 = nn.Linear(padded_mlp, HIDDEN, bias=True)
+
+    def forward(hidden_states):
+        residual = hidden_states
+        h = fc1(hidden_states)
+        h = F.gelu(h, approximate="tanh")
+        h = fc2(h)
+        h = residual + h
+        return h
+
+    return forward, [fc1, fc2]
+
+
+def make_ln_mlp():
+    """LayerNorm + MLP: ln → fc1 → gelu → fc2 + residual. Padded MLP."""
+    padded_mlp = ((MLP_DIM + 63) // 64) * 64
+    ln = nn.LayerNorm(HIDDEN, eps=1e-6)
+    fc1 = nn.Linear(HIDDEN, padded_mlp, bias=True)
+    fc2 = nn.Linear(padded_mlp, HIDDEN, bias=True)
+
+    def forward(hidden_states):
+        residual = hidden_states
+        h = ln(hidden_states)
+        h = fc1(h)
+        h = F.gelu(h, approximate="tanh")
+        h = fc2(h)
+        h = residual + h
+        return h
+
+    return forward, [ln, fc1, fc2]
+
+
 if __name__ == "__main__":
     import sys
     tests = sys.argv[1:] if len(sys.argv) > 1 else ["attn", "full"]
@@ -130,7 +167,11 @@ if __name__ == "__main__":
     for t in tests:
         try:
             if t == "attn":
-                run_test("Attention only (should pass)", make_attn_only)
+                run_test("Attention only", make_attn_only)
+            elif t == "mlp":
+                run_test("MLP only (fc1 + gelu + fc2 + residual)", make_mlp_only)
+            elif t == "ln_mlp":
+                run_test("LayerNorm + MLP", make_ln_mlp)
             elif t == "full":
                 run_test("Full layer (LayerNorm + Attn + MLP)", make_full_vision_layer)
         except Exception as e:

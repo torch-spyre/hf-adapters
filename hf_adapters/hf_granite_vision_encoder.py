@@ -50,7 +50,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from hf_adapters.hf_common import DEVICE, BLOCK_SIZE
+from hf_adapters.hf_common import DEVICE, BLOCK_SIZE, pad_mlp
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +284,13 @@ def prepare_for_spyre(model):
             orig_head_dim, padded_head_dim,
             vision_config.num_attention_heads,
         )
+
+    # Pad MLP intermediate size to stick-aligned (4304 → 4352)
+    pad_mlp(
+        vision_tower.encoder.layers,
+        vision_config.intermediate_size,
+        lambda layer: (layer.mlp.fc1, layer.mlp.fc2),
+    )
 
     model._vision_embeddings = vision_tower.embeddings
     model._vision_post_layernorm = vision_tower.post_layernorm
