@@ -161,7 +161,12 @@ def _make_projector_block(projector):
 # ---------------------------------------------------------------------------
 
 def _run_vision_tower(model, pixel_values):
-    """Run SiglipVisionModel via compiled blocks, return all hidden states."""
+    """Run SiglipVisionModel via compiled blocks, return all hidden states.
+
+    Returns hidden_states list matching HF's output_hidden_states format:
+    [embeddings, after_layer_0, ..., after_layer_N-1] (length = num_layers + 1).
+    post_layernorm is NOT included — it's applied separately if needed.
+    """
     embeddings = model._vision_embeddings(pixel_values)
     hidden_states = embeddings
 
@@ -169,9 +174,6 @@ def _run_vision_tower(model, pixel_values):
     for compiled_block in model._spyre_vision_blocks:
         hidden_states = compiled_block(hidden_states)
         all_hidden_states.append(hidden_states)
-
-    hidden_states = model._vision_post_layernorm(hidden_states)
-    all_hidden_states.append(hidden_states)
 
     return hidden_states, all_hidden_states
 
