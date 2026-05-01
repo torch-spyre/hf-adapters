@@ -258,12 +258,13 @@ def _load_vision_encoder(model_path, dtype=torch.float16):
         model_path, trust_remote_code=True, torch_dtype=dtype,
     )
 
-    # model is Granite4VisionModel — has vision_tower, layerwise_projectors, etc.
-    # Strip the language_model to save memory
-    if hasattr(model, "language_model"):
-        del model.language_model
-    if hasattr(model, "lm_head"):
-        del model.lm_head
+    # model is Granite4VisionForConditionalGeneration wrapping Granite4VisionModel.
+    # Extract the inner model which has vision_tower, layerwise_projectors, etc.
+    # Then strip the language model to save memory.
+    inner = model.model if hasattr(model, "model") else model
+    if hasattr(inner, "language_model"):
+        inner.language_model = None
+    model = inner
 
     model._deepstack_layer_map = config.deepstack_layer_map
     model._spatial_vision_layer = getattr(config, "spatial_vision_layer", -1)
