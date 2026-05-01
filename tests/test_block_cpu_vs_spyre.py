@@ -206,6 +206,20 @@ def _make_olmo2_config():
     return cfg
 
 
+def _make_granite_vision_config():
+    from transformers import GraniteConfig
+    cfg = GraniteConfig(
+        hidden_size=2560, num_attention_heads=40, num_key_value_heads=8,
+        intermediate_size=8192, num_hidden_layers=3, vocab_size=100353,
+        rms_norm_eps=1e-5, max_position_embeddings=131072,
+        embedding_multiplier=12.0, residual_multiplier=0.22,
+        attention_multiplier=0.0625, logits_scaling=10.0,
+        rope_theta=10000000,
+    )
+    cfg._attn_implementation = "eager"
+    return cfg
+
+
 MODEL_REGISTRY = {
     "qwen3": {
         "name": "Qwen3 0.6B",
@@ -252,6 +266,11 @@ MODEL_REGISTRY = {
         "config_fn": _make_olmo2_config,
         "adapter": "hf_adapters.hf_olmo2",
     },
+    "granite-vision": {
+        "name": "Granite Vision 4.1",
+        "config_fn": _make_granite_vision_config,
+        "adapter": "hf_adapters.hf_granite_vision",
+    },
 }
 
 
@@ -259,7 +278,8 @@ MODEL_REGISTRY = {
 # Input creation
 # ---------------------------------------------------------------------------
 
-def make_inputs(config, mode, seed, cache_len=64, device="cpu"):
+def make_inputs(config, mode, seed, cache_len=64, device="cpu",
+                head_dim_override=None):
     """Create deterministic random inputs for a block_forward call.
 
     Args:
@@ -268,12 +288,13 @@ def make_inputs(config, mode, seed, cache_len=64, device="cpu"):
         seed: random seed
         cache_len: KV cache length for decode mode
         device: target device ("cpu" or "spyre")
+        head_dim_override: if set, use this head_dim (e.g. after padding)
 
     Returns: dict of tensors on the specified device (fp16)
     """
     torch.manual_seed(seed)
     H = config.hidden_size
-    head_dim = (
+    head_dim = head_dim_override or (
         getattr(config, "head_dim", None)
         or H // config.num_attention_heads
     )
@@ -417,6 +438,7 @@ def test_model(model_key):
     adapter.prepare_for_spyre(model)
 
     num_blocks = len(model._spyre_compiled_blocks)
+    padded_hd = getattr(model, "_spyre_head_dim", None)
 
     # --- Phase A: CPU runs ---
     print(f"  Phase A: running {num_blocks} blocks on CPU ...")
@@ -426,7 +448,8 @@ def test_model(model_key):
         uncompiled = getattr(compiled_block, "_orig_mod", compiled_block)
         for mode in ("prefill", "decode"):
             seed = 42 + layer_idx * 100 + (0 if mode == "prefill" else 1)
-            inputs = make_inputs(config, mode, seed, device="cpu")
+            inputs = make_inputs(config, mode, seed, device="cpu",
+                                 head_dim_override=padded_hd)
             with torch.no_grad():
                 h, kc, vc = uncompiled(
                     inputs["hidden_states"], inputs["selected_freqs"],
@@ -448,6 +471,7 @@ def test_model(model_key):
             seed = 42 + layer_idx * 100 + (0 if mode == "prefill" else 1)
             spyre_inputs = make_inputs(
                 config, mode, seed, device=DEVICE,
+                head_dim_override=padded_hd,
             )
 
             try:

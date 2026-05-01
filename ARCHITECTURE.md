@@ -23,6 +23,7 @@ which models are supported on Spyre.
 | Falcon 3 1B | llama | 256 | 128 | Yes | Yes | Yes | Yes |
 | DeepSeek-Coder 1.3B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | Yi 1.5 6B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
+| Granite Vision 4.1 4B | granite (text) | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 
 **CPU Accurate** = adapter produces identical greedy tokens to stock
 HF on CPU.
@@ -52,7 +53,8 @@ single-token decode path (seq_len=1), not an adapter issue.
 
 ```python
 # Import any adapter: hf_granite, hf_qwen3, hf_granitemoehybrid,
-#   hf_smollm3, hf_llama, hf_qwen2, hf_mistral, hf_phi3, hf_olmo, hf_olmo2
+#   hf_smollm3, hf_llama, hf_qwen2, hf_mistral, hf_phi3, hf_olmo, hf_olmo2,
+#   hf_granite_vision
 from hf_adapters.hf_granite import load_model, generate
 
 model = load_model("ibm-granite/granite-3.3-8b-instruct")
@@ -101,6 +103,7 @@ hf_adapters/
 │   kv_cache_update, build_prefill_mask,
 │   build_expansion_mask, load_model_common, generate
 ├── hf_granite.py          — Granite 3.3 adapter
+├── hf_granite_vision.py   — Granite Vision 4.1 text backbone adapter
 ├── hf_qwen3.py            — Qwen3 adapter
 ├── hf_granitemoehybrid.py — Granite 4.0 dense adapter
 ├── hf_smollm3.py          — SmolLM3 adapter
@@ -233,20 +236,21 @@ modification:
 
 ### Model-Specific Adaptations
 
-| Feature | Granite 3.3 | Qwen3 | Granite 4.0 | SmolLM3 | Llama | Qwen2 | Mistral | Phi-4 mini | OLMo | OLMo2 |
-|---------|------------|-------|-------------|---------|-------|-------|---------|-----------|------|-------|
-| Embedding multiplier | Yes | No | Yes | No | No | No | No | No | No | No |
-| Residual multiplier | Yes | No | Yes | No | No | No | No | No | No | No |
-| Logits scaling | Yes | No | Yes | No | No | No | No | No | No | No |
-| Q/K RMSNorm | No | Yes (per-head) | No | No | No | No | No | No | No | Yes (flattened) |
-| Fused QKV split | No | No | No | No | No | No | No | Yes | No | No |
-| Fused MLP split | No | No | Yes | No | No | No | No | Yes | No | No |
-| NoPE layers | No | No | No | Yes | No | No | No | No | No | No |
-| Partial RoPE | No | No | No | No | No | No | No | Yes | No | No |
-| Chunked LM head | No | No | No | No | No | No | No | Yes | No | No |
-| Head-dim padding | 2B only | No | No | No | TinyLlama | No | No | No | No | No |
-| Attention scaling | `config.attention_multiplier` | `head_dim**-0.5` | `config.attention_multiplier` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` |
-| Norm type | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | LayerNorm (pre, no weight) | RMSNorm (post) |
+| Feature | Granite 3.3 | Granite Vision 4.1 | Qwen3 | Granite 4.0 | SmolLM3 | Llama | Qwen2 | Mistral | Phi-4 mini | OLMo | OLMo2 |
+|---------|------------|-------------------|-------|-------------|---------|-------|-------|---------|-----------|------|-------|
+| Embedding multiplier | Yes | Yes | No | Yes | No | No | No | No | No | No | No |
+| Residual multiplier | Yes | Yes | No | Yes | No | No | No | No | No | No | No |
+| Logits scaling | Yes | Yes | No | Yes | No | No | No | No | No | No | No |
+| Q/K RMSNorm | No | No | Yes (per-head) | No | No | No | No | No | No | No | Yes (flattened) |
+| Fused QKV split | No | No | No | No | No | No | No | No | Yes | No | No |
+| Fused MLP split | No | No | No | Yes | No | No | No | No | Yes | No | No |
+| NoPE layers | No | No | No | No | Yes | No | No | No | No | No | No |
+| Partial RoPE | No | No | No | No | No | No | No | No | Yes | No | No |
+| Chunked LM head | No | No | No | No | No | No | No | No | Yes | No | No |
+| Head-dim padding | 2B only | Yes (64→128) | No | No | No | TinyLlama | No | No | No | No | No |
+| Custom model loading | No | Yes (safetensor remap) | No | No | No | No | No | No | No | No | No |
+| Attention scaling | `config.attention_multiplier` | `config.attention_multiplier` | `head_dim**-0.5` | `config.attention_multiplier` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` |
+| Norm type | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | LayerNorm (pre, no weight) | RMSNorm (post) |
 
 **Partial RoPE** (Phi-4): `PartialPrecomputedRotaryEmbedding` pads
 the rotation matrix with identity `[[1,0],[0,1]]` entries so
@@ -261,10 +265,17 @@ cat results on CPU.
 into separate linears at prepare time. Avoids stickify non-zero
 offset assertions.
 
-**Head-dim padding** (Granite 2B, TinyLlama): `pad_attention_heads()`
+**Head-dim padding** (Granite 2B, TinyLlama, Granite Vision): `pad_attention_heads()`
 zero-pads Q/K/V/O projections and RoPE freqs from 64→128 so
 D/2 = 64 (one stick). Q/K use interleaved padding per RoPE
 `[2, D/2]` group; V/O use simple end-padding.
+
+**Custom model loading** (Granite Vision): The text backbone weights
+are extracted from a multimodal checkpoint (vision+text) via safetensor
+key remapping (`model.language_model.*` → `model.*`) into a standard
+`GraniteForCausalLM`. No `trust_remote_code` required. Vision encoder
+and projection layers are discarded — only the text backbone runs on
+Spyre.
 
 **OLMo LayerNorm** (OLMo): Uses weight-free `OlmoLayerNorm` (no
 learnable parameters). Custom patch keeps it in fp16 on Spyre.

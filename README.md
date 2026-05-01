@@ -10,8 +10,9 @@ from `transformers`.
 
 ## Supported Models
 
-8 adapters covering 11 models (Granite, Qwen3, Qwen2, SmolLM3, Llama,
-Mistral, Phi-4). All compile and run on Spyre.
+9 adapters covering 12 models (Granite, Granite Vision, Qwen3, Qwen2,
+SmolLM3, Llama, Mistral, Phi-4, OLMo, OLMo2). All compile and run on
+Spyre.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md#model-compatibility-matrix) for
 the full compatibility matrix with head\_dim, stick alignment, and test
@@ -30,8 +31,9 @@ outputs = generate(model, tokenizer, ["What is 2+2?"], max_new_tokens=128)
 print(outputs[0])
 ```
 
-Replace `hf_granite` with `hf_qwen3`, `hf_granitemoehybrid`, `hf_smollm3`,
-`hf_llama`, `hf_qwen2`, `hf_mistral`, or `hf_phi3` for other model families.
+Replace `hf_granite` with `hf_granite_vision`, `hf_qwen3`,
+`hf_granitemoehybrid`, `hf_smollm3`, `hf_llama`, `hf_qwen2`,
+`hf_mistral`, or `hf_phi3` for other model families.
 
 ## Repo Structure
 
@@ -45,6 +47,7 @@ hf_adapters/
 │                              head-dim padding, mask builders,
 │                              KV cache helpers, generate loop
 ├── hf_granite.py              Granite 3.3 adapter
+├── hf_granite_vision.py       Granite Vision 4.1 text backbone adapter
 ├── hf_qwen3.py                Qwen3 adapter
 ├── hf_granitemoehybrid.py     Granite 4.0 dense adapter
 ├── hf_smollm3.py              SmolLM3 adapter

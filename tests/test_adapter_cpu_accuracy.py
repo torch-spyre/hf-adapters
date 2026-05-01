@@ -62,8 +62,10 @@ sys.modules["hf_adapters.hf_common"] = _common_mod
 _common_spec.loader.exec_module(_common_mod)
 _common_mod.DEVICE = "cpu"
 
-# Also register hf_adapters so relative imports work
-sys.modules.setdefault("hf_adapters", type(sys)("hf_adapters"))
+# Also register hf_adapters so cross-adapter imports work
+_pkg = type(sys)("hf_adapters")
+_pkg.__path__ = [ADAPTERS_DIR]
+sys.modules.setdefault("hf_adapters", _pkg)
 
 
 def load_adapter(filename):
@@ -201,7 +203,7 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
 # ---------------------------------------------------------------------------
 
 def run_model_test(model_name, model_path, adapter_filename, num_decode=4,
-                   dtype="float16"):
+                   dtype="float16", load_fn=False):
     """Load model, run HF ref vs adapter, return comparison list."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -216,9 +218,12 @@ def run_model_test(model_name, model_path, adapter_filename, num_decode=4,
     print(f"{'='*70}")
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path, torch_dtype=torch_dtype, device_map="cpu",
-    )
+    if load_fn:
+        model = adapter_mod.load_hf_model(model_path, torch_dtype)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path, torch_dtype=torch_dtype, device_map="cpu",
+        )
     model.eval()
     model.requires_grad_(False)
 
@@ -386,6 +391,12 @@ MODELS = {
         "path": "01-ai/Yi-1.5-6B",
         "adapter": "hf_llama.py",
     },
+    "granite-vision": {
+        "name": "Granite Vision 4.1 4B",
+        "path": "ibm-granite/granite-vision-4.1-4b",
+        "adapter": "hf_granite_vision.py",
+        "load_fn": True,
+    },
 }
 
 
@@ -402,6 +413,7 @@ if __name__ == "__main__":
             comps, _ = run_model_test(
                 m["name"], m["path"], m["adapter"], num_decode=4,
                 dtype=m.get("dtype", "float16"),
+                load_fn=m.get("load_fn", False),
             )
             ok = print_results_table(m["name"], comps)
             all_results[key] = {"comparisons": comps, "all_match": ok}

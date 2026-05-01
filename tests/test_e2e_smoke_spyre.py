@@ -108,6 +108,11 @@ MODEL_REGISTRY = {
         "path": "01-ai/Yi-1.5-6B",
         "adapter": "hf_adapters.hf_llama",
     },
+    "granite-vision": {
+        "name": "Granite Vision 4.1 4B",
+        "path": "ibm-granite/granite-vision-4.1-4b",
+        "adapter": "hf_adapters.hf_granite_vision",
+    },
 }
 
 
