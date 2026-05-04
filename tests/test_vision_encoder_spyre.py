@@ -40,7 +40,7 @@ from hf_adapters.hf_granite_vision_encoder import (
     _run_forward,
     prepare_for_spyre,
 )
-from hf_adapters.hf_common import DEVICE, BLOCK_SIZE
+from hf_adapters.hf_common import DEVICE, BLOCK_SIZE, pad_mlp
 
 MODEL_PATH = "ibm-granite/granite-vision-4.1-4b"
 
@@ -68,6 +68,13 @@ def test_single_vision_layer():
         print(f"  Padding head_dim: {orig_head_dim} → {padded_head_dim}")
         _pad_vision_attention([layer], orig_head_dim, padded_head_dim,
                              vision_config.num_attention_heads)
+
+    # Pad MLP intermediate size
+    padded_mlp = pad_mlp(
+        [layer], vision_config.intermediate_size,
+        lambda l: (l.mlp.fc1, l.mlp.fc2),
+    )
+    print(f"  Padding MLP: {vision_config.intermediate_size} → {padded_mlp}")
 
     print(f"  Creating compiled block...")
     compiled_block = _make_vision_block(layer, padded_head_dim)
