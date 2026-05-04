@@ -152,8 +152,9 @@ def _make_projector_block(projector):
     qformer = projector.qformer
     out_linear = projector.out_linear
     downsampler = projector.downsampler
-    query = projector.query
-    image_positions = projector.image_positions
+    # Capture the module itself; access .query/.image_positions at call time
+    # so that model.to(DEVICE) updates are reflected.
+    proj_ref = projector
     image_side = projector.image_side
     window_side = projector.window_side
     query_side = projector.query_side
@@ -193,8 +194,8 @@ def _make_projector_block(projector):
         new_side = n * query_side
         downsampled_w = _win(downsampled, new_side, query_side)
 
-        query_embeds = query + downsampled_w
-        encoder_embeds = enc + image_positions
+        query_embeds = proj_ref.query + downsampled_w
+        encoder_embeds = enc + proj_ref.image_positions
 
         out_w = qformer(
             query_embeds=query_embeds,
