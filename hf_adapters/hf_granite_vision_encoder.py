@@ -212,33 +212,28 @@ def _make_projector_block(projector):
 # Patch embedding workaround (Conv2d → unfold + linear)
 # ---------------------------------------------------------------------------
 
-def _patch_embed_as_linear(pixel_values, patch_linear, position_embedding,
-                           patch_size, num_patches):
+def _patch_embed_as_linear(pixel_values, patch_weight, patch_bias,
+                           position_embedding, patch_size, num_patches,
+                           target_device):
     """Replace Conv2d patch embedding with unfold+linear.
 
     Conv2d(3, hidden, k=patch_size, s=patch_size) on [B, 3, H, W] is
     equivalent to unfolding into non-overlapping patches and projecting
     each with a linear layer.
 
-    The unfold/reshape runs on CPU (aten::unfold not supported on Spyre),
-    then the result is moved to the target device for the linear projection.
+    Runs entirely on CPU (unfold + matmul + position add), then moves
+    the result to the target device.
     """
     B = pixel_values.shape[0]
-    target_device = patch_linear.weight.device
 
-    # Unfold on CPU (aten::unfold not available on Spyre)
     pv_cpu = pixel_values.cpu() if pixel_values.device.type != "cpu" else pixel_values
     patches = pv_cpu.unfold(2, patch_size, patch_size).unfold(3, patch_size, patch_size)
     patches = patches.permute(0, 2, 3, 1, 4, 5).reshape(B, num_patches, -1)
 
-    # Move to target device, then project (linear compiles on Spyre)
-    patches = patches.to(target_device)
-    embeddings = patch_linear(patches)
-
-    # Add learned position embeddings
+    embeddings = F.linear(patches, patch_weight, patch_bias)
     embeddings = embeddings + position_embedding
 
-    return embeddings
+    return embeddings.to(target_device)
 
 
 # ---------------------------------------------------------------------------
@@ -254,10 +249,12 @@ def _run_vision_tower(model, pixel_values):
     """
     embeddings = _patch_embed_as_linear(
         pixel_values,
-        model._spyre_patch_linear,
+        model._spyre_patch_weight,
+        model._spyre_patch_bias,
         model._spyre_position_embedding,
         model._spyre_patch_size,
         model._spyre_num_patches,
+        model._spyre_target_device,
     )
     hidden_states = embeddings
 
@@ -331,24 +328,20 @@ def prepare_for_spyre(model):
         lambda layer: (layer.mlp.fc1, layer.mlp.fc2),
     )
 
-    # Replace Conv2d patch embedding with linear (Conv2d not supported on Spyre)
+    # Replace Conv2d patch embedding with CPU tensors for F.linear
+    # (Conv2d and unfold not supported on Spyre; runs entirely on CPU)
     embeddings_mod = vision_tower.embeddings
     patch_conv = embeddings_mod.patch_embedding
     patch_size = patch_conv.kernel_size[0]
     in_features = patch_conv.in_channels * patch_size * patch_size
     out_features = patch_conv.out_channels
 
-    patch_linear = nn.Linear(in_features, out_features, bias=patch_conv.bias is not None)
-    patch_linear.weight = nn.Parameter(
-        patch_conv.weight.reshape(out_features, in_features), requires_grad=False
-    )
-    if patch_conv.bias is not None:
-        patch_linear.bias = nn.Parameter(patch_conv.bias.clone(), requires_grad=False)
-
-    model._spyre_patch_linear = patch_linear
-    model._spyre_position_embedding = embeddings_mod.position_embedding.weight
+    model._spyre_patch_weight = patch_conv.weight.reshape(out_features, in_features).clone()
+    model._spyre_patch_bias = patch_conv.bias.clone() if patch_conv.bias is not None else None
+    model._spyre_position_embedding = embeddings_mod.position_embedding.weight.clone()
     model._spyre_patch_size = patch_size
     model._spyre_num_patches = embeddings_mod.position_embedding.num_embeddings
+    model._spyre_target_device = DEVICE
 
     model._vision_post_layernorm = vision_tower.post_layernorm
     model._padded_head_dim = padded_head_dim
