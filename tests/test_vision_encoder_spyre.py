@@ -93,7 +93,7 @@ def test_single_vision_layer():
 
     print(f"  Output shape: {list(output.shape)}")
     print(f"  Time: {t1-t0:.3f}s")
-    print(f"  Has NaN: {output.isnan().any().item()}")
+    print(f"  Has NaN: {output.cpu().isnan().any().item()}")
     print(f"  PASS")
     return True
 
@@ -124,7 +124,7 @@ def test_full_vision_tower():
     print(f"  Final hidden shape: {list(final_hidden.shape)}")
     print(f"  Num hidden states: {len(all_hidden)}")
     print(f"  Time: {t1-t0:.3f}s")
-    print(f"  Has NaN: {final_hidden.isnan().any().item()}")
+    print(f"  Has NaN: {final_hidden.cpu().isnan().any().item()}")
     print(f"  PASS")
     return True
 
@@ -158,7 +158,7 @@ def test_single_projector():
 
     print(f"  Output shape: {list(output.shape)}")
     print(f"  Time: {t1-t0:.3f}s")
-    print(f"  Has NaN: {output.isnan().any().item()}")
+    print(f"  Has NaN: {output.cpu().isnan().any().item()}")
     print(f"  PASS")
     return True
 
@@ -186,7 +186,7 @@ def test_full_pipeline():
 
     print(f"  Produced {len(all_features)} feature groups:")
     for i, (llm_layer, feat) in enumerate(all_features):
-        has_nan = feat.isnan().any().item()
+        has_nan = feat.cpu().isnan().any().item()
         print(f"    [{i}] llm_layer={llm_layer}, shape={list(feat.shape)}, nan={has_nan}")
 
     print(f"  Time: {t1-t0:.3f}s")
