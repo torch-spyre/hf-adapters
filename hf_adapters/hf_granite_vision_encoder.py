@@ -220,18 +220,19 @@ def _patch_embed_as_linear(pixel_values, patch_linear, position_embedding,
     equivalent to unfolding into non-overlapping patches and projecting
     each with a linear layer.
 
-    The unfold/reshape runs outside the compiled graph (CPU or eager),
-    while the linear projection compiles on Spyre.
+    The unfold/reshape runs on CPU (aten::unfold not supported on Spyre),
+    then the result is moved to the target device for the linear projection.
     """
     B = pixel_values.shape[0]
-    h_patches = pixel_values.shape[2] // patch_size
-    w_patches = pixel_values.shape[3] // patch_size
+    target_device = patch_linear.weight.device
 
-    # Unfold into [B, num_patches, 3*patch_size*patch_size]
-    patches = pixel_values.unfold(2, patch_size, patch_size).unfold(3, patch_size, patch_size)
+    # Unfold on CPU (aten::unfold not available on Spyre)
+    pv_cpu = pixel_values.cpu() if pixel_values.device.type != "cpu" else pixel_values
+    patches = pv_cpu.unfold(2, patch_size, patch_size).unfold(3, patch_size, patch_size)
     patches = patches.permute(0, 2, 3, 1, 4, 5).reshape(B, num_patches, -1)
 
-    # Linear projection (compiles on Spyre)
+    # Move to target device, then project (linear compiles on Spyre)
+    patches = patches.to(target_device)
     embeddings = patch_linear(patches)
 
     # Add learned position embeddings
