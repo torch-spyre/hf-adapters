@@ -209,6 +209,38 @@ def _make_projector_block(projector):
 
 
 # ---------------------------------------------------------------------------
+# Patch embedding workaround (Conv2d → unfold + linear)
+# ---------------------------------------------------------------------------
+
+def _patch_embed_as_linear(pixel_values, patch_linear, position_embedding,
+                           patch_size, num_patches):
+    """Replace Conv2d patch embedding with unfold+linear.
+
+    Conv2d(3, hidden, k=patch_size, s=patch_size) on [B, 3, H, W] is
+    equivalent to unfolding into non-overlapping patches and projecting
+    each with a linear layer.
+
+    The unfold/reshape runs outside the compiled graph (CPU or eager),
+    while the linear projection compiles on Spyre.
+    """
+    B = pixel_values.shape[0]
+    h_patches = pixel_values.shape[2] // patch_size
+    w_patches = pixel_values.shape[3] // patch_size
+
+    # Unfold into [B, num_patches, 3*patch_size*patch_size]
+    patches = pixel_values.unfold(2, patch_size, patch_size).unfold(3, patch_size, patch_size)
+    patches = patches.permute(0, 2, 3, 1, 4, 5).reshape(B, num_patches, -1)
+
+    # Linear projection (compiles on Spyre)
+    embeddings = patch_linear(patches)
+
+    # Add learned position embeddings
+    embeddings = embeddings + position_embedding
+
+    return embeddings
+
+
+# ---------------------------------------------------------------------------
 # Forward pass
 # ---------------------------------------------------------------------------
 
@@ -219,7 +251,13 @@ def _run_vision_tower(model, pixel_values):
     [embeddings, after_layer_0, ..., after_layer_N-1] (length = num_layers + 1).
     post_layernorm is NOT included — it's applied separately if needed.
     """
-    embeddings = model._vision_embeddings(pixel_values)
+    embeddings = _patch_embed_as_linear(
+        pixel_values,
+        model._spyre_patch_linear,
+        model._spyre_position_embedding,
+        model._spyre_patch_size,
+        model._spyre_num_patches,
+    )
     hidden_states = embeddings
 
     all_hidden_states = [hidden_states]
@@ -292,7 +330,25 @@ def prepare_for_spyre(model):
         lambda layer: (layer.mlp.fc1, layer.mlp.fc2),
     )
 
-    model._vision_embeddings = vision_tower.embeddings
+    # Replace Conv2d patch embedding with linear (Conv2d not supported on Spyre)
+    embeddings_mod = vision_tower.embeddings
+    patch_conv = embeddings_mod.patch_embedding
+    patch_size = patch_conv.kernel_size[0]
+    in_features = patch_conv.in_channels * patch_size * patch_size
+    out_features = patch_conv.out_channels
+
+    patch_linear = nn.Linear(in_features, out_features, bias=patch_conv.bias is not None)
+    patch_linear.weight = nn.Parameter(
+        patch_conv.weight.reshape(out_features, in_features), requires_grad=False
+    )
+    if patch_conv.bias is not None:
+        patch_linear.bias = nn.Parameter(patch_conv.bias.clone(), requires_grad=False)
+
+    model._spyre_patch_linear = patch_linear
+    model._spyre_position_embedding = embeddings_mod.position_embedding.weight
+    model._spyre_patch_size = patch_size
+    model._spyre_num_patches = embeddings_mod.position_embedding.num_embeddings
+
     model._vision_post_layernorm = vision_tower.post_layernorm
     model._padded_head_dim = padded_head_dim
 
