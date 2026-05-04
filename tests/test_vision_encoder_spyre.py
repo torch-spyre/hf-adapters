@@ -136,6 +136,7 @@ def test_single_projector():
     print(f"{'='*70}\n")
 
     model = _load_vision_encoder(MODEL_PATH, dtype=torch.float16)
+    prepare_for_spyre(model)
     projector = model.layerwise_projectors[0]
 
     num_patches = (384 // 16) ** 2  # 576
