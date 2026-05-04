@@ -54,53 +54,76 @@ from hf_adapters.hf_common import DEVICE, BLOCK_SIZE, pad_mlp
 
 
 # ---------------------------------------------------------------------------
-# Head-dim padding for vision encoder (no RoPE — simple end-padding for all)
+# Head-dim padding (no RoPE — simple end-padding for all projections)
 # ---------------------------------------------------------------------------
 
+def _pad_proj(proj, n_heads, orig_head_dim, padded_head_dim, is_output=False):
+    """Zero-pad a single Q/K/V/O projection from orig_head_dim to padded_head_dim."""
+    w = proj.weight
+    if is_output:
+        hidden = w.shape[0]
+        new_w = torch.zeros(hidden, n_heads * padded_head_dim, dtype=w.dtype)
+        for h in range(n_heads):
+            s = h * orig_head_dim
+            d = h * padded_head_dim
+            new_w[:, d:d + orig_head_dim] = w[:, s:s + orig_head_dim]
+        new_proj = nn.Linear(n_heads * padded_head_dim, hidden, bias=proj.bias is not None)
+        new_proj.weight = nn.Parameter(new_w, requires_grad=False)
+        if proj.bias is not None:
+            new_proj.bias = nn.Parameter(proj.bias.clone(), requires_grad=False)
+    else:
+        hidden = w.shape[1]
+        new_w = torch.zeros(n_heads * padded_head_dim, hidden, dtype=w.dtype)
+        for h in range(n_heads):
+            s = h * orig_head_dim
+            d = h * padded_head_dim
+            new_w[d:d + orig_head_dim, :] = w[s:s + orig_head_dim, :]
+        new_proj = nn.Linear(hidden, n_heads * padded_head_dim, bias=proj.bias is not None)
+        new_proj.weight = nn.Parameter(new_w, requires_grad=False)
+        if proj.bias is not None:
+            new_b = torch.zeros(n_heads * padded_head_dim, dtype=proj.bias.dtype)
+            for h in range(n_heads):
+                s = h * orig_head_dim
+                d = h * padded_head_dim
+                new_b[d:d + orig_head_dim] = proj.bias[s:s + orig_head_dim]
+            new_proj.bias = nn.Parameter(new_b, requires_grad=False)
+    return new_proj
+
+
 def _pad_vision_attention(layers, orig_head_dim, padded_head_dim, num_heads):
-    """Zero-pad Q/K/V/O projections in vision encoder layers.
-
-    Unlike LLM layers, there's no RoPE, so all projections use simple
-    end-padding per head.
-    """
-    def _pad_proj(proj, n_heads, is_output=False):
-        w = proj.weight
-        if is_output:
-            hidden = w.shape[0]
-            new_w = torch.zeros(hidden, n_heads * padded_head_dim, dtype=w.dtype)
-            for h in range(n_heads):
-                s = h * orig_head_dim
-                d = h * padded_head_dim
-                new_w[:, d:d + orig_head_dim] = w[:, s:s + orig_head_dim]
-            new_proj = nn.Linear(n_heads * padded_head_dim, hidden, bias=proj.bias is not None)
-            new_proj.weight = nn.Parameter(new_w, requires_grad=False)
-            if proj.bias is not None:
-                new_proj.bias = nn.Parameter(proj.bias.clone(), requires_grad=False)
-        else:
-            hidden = w.shape[1]
-            new_w = torch.zeros(n_heads * padded_head_dim, hidden, dtype=w.dtype)
-            for h in range(n_heads):
-                s = h * orig_head_dim
-                d = h * padded_head_dim
-                new_w[d:d + orig_head_dim, :] = w[s:s + orig_head_dim, :]
-            new_proj = nn.Linear(hidden, n_heads * padded_head_dim, bias=proj.bias is not None)
-            new_proj.weight = nn.Parameter(new_w, requires_grad=False)
-            if proj.bias is not None:
-                new_b = torch.zeros(n_heads * padded_head_dim, dtype=proj.bias.dtype)
-                for h in range(n_heads):
-                    s = h * orig_head_dim
-                    d = h * padded_head_dim
-                    new_b[d:d + orig_head_dim] = proj.bias[s:s + orig_head_dim]
-                new_proj.bias = nn.Parameter(new_b, requires_grad=False)
-        return new_proj
-
+    """Zero-pad Q/K/V/O projections in vision encoder layers."""
     for layer in layers:
         attn = layer.self_attn
-        attn.q_proj = _pad_proj(attn.q_proj, num_heads)
-        attn.k_proj = _pad_proj(attn.k_proj, num_heads)
-        attn.v_proj = _pad_proj(attn.v_proj, num_heads)
-        attn.out_proj = _pad_proj(attn.out_proj, num_heads, is_output=True)
+        attn.q_proj = _pad_proj(attn.q_proj, num_heads, orig_head_dim, padded_head_dim)
+        attn.k_proj = _pad_proj(attn.k_proj, num_heads, orig_head_dim, padded_head_dim)
+        attn.v_proj = _pad_proj(attn.v_proj, num_heads, orig_head_dim, padded_head_dim)
+        attn.out_proj = _pad_proj(attn.out_proj, num_heads, orig_head_dim, padded_head_dim, is_output=True)
         attn.head_dim = padded_head_dim
+
+
+def _pad_qformer_attention(projectors, orig_head_dim, padded_head_dim, num_heads):
+    """Zero-pad Q/K/V/O in QFormer self-attention and cross-attention layers."""
+    for projector in projectors:
+        for qformer_layer in projector.qformer.encoder.layer:
+            # Self-attention
+            sa = qformer_layer.attention.attention
+            sa.query = _pad_proj(sa.query, num_heads, orig_head_dim, padded_head_dim)
+            sa.key = _pad_proj(sa.key, num_heads, orig_head_dim, padded_head_dim)
+            sa.value = _pad_proj(sa.value, num_heads, orig_head_dim, padded_head_dim)
+            qformer_layer.attention.output.dense = _pad_proj(
+                qformer_layer.attention.output.dense, num_heads,
+                orig_head_dim, padded_head_dim, is_output=True,
+            )
+
+            # Cross-attention
+            ca = qformer_layer.crossattention.attention
+            ca.query = _pad_proj(ca.query, num_heads, orig_head_dim, padded_head_dim)
+            ca.key = _pad_proj(ca.key, num_heads, orig_head_dim, padded_head_dim)
+            ca.value = _pad_proj(ca.value, num_heads, orig_head_dim, padded_head_dim)
+            qformer_layer.crossattention.output.dense = _pad_proj(
+                qformer_layer.crossattention.output.dense, num_heads,
+                orig_head_dim, padded_head_dim, is_output=True,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +351,18 @@ def prepare_for_spyre(model):
         vision_config.intermediate_size,
         lambda layer: (layer.mlp.fc1, layer.mlp.fc2),
     )
+
+    # Pad QFormer attention heads (head_dim=64 → 128)
+    # QFormer config: hidden_size=1152, num_attention_heads=1152//64=18, head_dim=64
+    qformer_num_heads = vision_config.hidden_size // 64
+    qformer_head_dim = 64
+    qformer_padded = (
+        ((qformer_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)) * (2 * BLOCK_SIZE)
+    )
+    all_projectors = list(model.layerwise_projectors)
+    if model.spatial_projectors is not None:
+        all_projectors += list(model.spatial_projectors)
+    _pad_qformer_attention(all_projectors, qformer_head_dim, qformer_padded, qformer_num_heads)
 
     # Replace Conv2d patch embedding with CPU tensors for F.linear
     # (Conv2d and unfold not supported on Spyre; runs entirely on CPU)
