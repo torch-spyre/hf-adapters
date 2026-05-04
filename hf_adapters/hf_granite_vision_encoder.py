@@ -103,23 +103,27 @@ def _pad_vision_attention(layers, orig_head_dim, padded_head_dim, num_heads):
 
 def _pad_qformer_attention(projectors, orig_head_dim, padded_head_dim, num_heads):
     """Zero-pad Q/K/V/O in QFormer self-attention and cross-attention layers."""
+    padded_all_head_size = num_heads * padded_head_dim
+
+    def _patch_attn_module(attn_mod):
+        """Pad projections and update head_size attributes."""
+        attn_mod.query = _pad_proj(attn_mod.query, num_heads, orig_head_dim, padded_head_dim)
+        attn_mod.key = _pad_proj(attn_mod.key, num_heads, orig_head_dim, padded_head_dim)
+        attn_mod.value = _pad_proj(attn_mod.value, num_heads, orig_head_dim, padded_head_dim)
+        attn_mod.attention_head_size = padded_head_dim
+        attn_mod.all_head_size = padded_all_head_size
+
     for projector in projectors:
         for qformer_layer in projector.qformer.encoder.layer:
             # Self-attention
-            sa = qformer_layer.attention.attention
-            sa.query = _pad_proj(sa.query, num_heads, orig_head_dim, padded_head_dim)
-            sa.key = _pad_proj(sa.key, num_heads, orig_head_dim, padded_head_dim)
-            sa.value = _pad_proj(sa.value, num_heads, orig_head_dim, padded_head_dim)
+            _patch_attn_module(qformer_layer.attention.attention)
             qformer_layer.attention.output.dense = _pad_proj(
                 qformer_layer.attention.output.dense, num_heads,
                 orig_head_dim, padded_head_dim, is_output=True,
             )
 
             # Cross-attention
-            ca = qformer_layer.crossattention.attention
-            ca.query = _pad_proj(ca.query, num_heads, orig_head_dim, padded_head_dim)
-            ca.key = _pad_proj(ca.key, num_heads, orig_head_dim, padded_head_dim)
-            ca.value = _pad_proj(ca.value, num_heads, orig_head_dim, padded_head_dim)
+            _patch_attn_module(qformer_layer.crossattention.attention)
             qformer_layer.crossattention.output.dense = _pad_proj(
                 qformer_layer.crossattention.output.dense, num_heads,
                 orig_head_dim, padded_head_dim, is_output=True,
