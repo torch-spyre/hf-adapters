@@ -131,6 +131,48 @@ def _pad_qformer_attention(projectors, orig_head_dim, padded_head_dim, num_heads
 
 
 # ---------------------------------------------------------------------------
+# Patch QFormer to use F.scaled_dot_product_attention instead of torch.matmul
+# ---------------------------------------------------------------------------
+
+def _patch_qformer_sdpa(projectors):
+    """Replace QFormer's manual matmul attention with F.scaled_dot_product_attention.
+
+    The Blip2QFormerMultiHeadAttention uses torch.matmul on 4D tensors for
+    attention, which the torch-spyre post_grad pass incorrectly rewrites to bmm.
+    SDPA decomposes through a different path that works on Spyre.
+    """
+    from transformers.models.blip_2.modeling_blip_2 import Blip2QFormerMultiHeadAttention
+
+    def _sdpa_forward(self, hidden_states, attention_mask=None,
+                      encoder_hidden_states=None, encoder_attention_mask=None, **kwargs):
+        is_cross_attention = encoder_hidden_states is not None
+
+        if is_cross_attention:
+            key_layer = self.transpose_for_scores(self.key(encoder_hidden_states))
+            value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
+            attn_mask = encoder_attention_mask
+        else:
+            key_layer = self.transpose_for_scores(self.key(hidden_states))
+            value_layer = self.transpose_for_scores(self.value(hidden_states))
+            attn_mask = attention_mask
+
+        query_layer = self.transpose_for_scores(self.query(hidden_states))
+
+        context_layer = F.scaled_dot_product_attention(
+            query_layer, key_layer, value_layer,
+            attn_mask=attn_mask, dropout_p=0.0,
+        )
+
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(*new_context_layer_shape)
+
+        return (context_layer, None)
+
+    Blip2QFormerMultiHeadAttention.forward = _sdpa_forward
+
+
+# ---------------------------------------------------------------------------
 # Compiled blocks for vision encoder layers (SiglipEncoderLayer)
 # ---------------------------------------------------------------------------
 
@@ -367,6 +409,7 @@ def prepare_for_spyre(model):
     if model.spatial_projectors is not None:
         all_projectors += list(model.spatial_projectors)
     _pad_qformer_attention(all_projectors, qformer_head_dim, qformer_padded, qformer_num_heads)
+    _patch_qformer_sdpa(all_projectors)
 
     # Replace Conv2d patch embedding with CPU tensors for F.linear
     # (Conv2d and unfold not supported on Spyre; runs entirely on CPU)
