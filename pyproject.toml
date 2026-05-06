@@ -9,6 +9,7 @@ dependencies = [
     "torch>=2.0",
     "transformers",
     "sentencepiece",
+    "accelerate>=1.13.0",
 ]
 
 [project.optional-dependencies]
