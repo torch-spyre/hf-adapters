@@ -27,9 +27,7 @@ Every adapter applies the following transformations via shared utilities in `hf_
 
 **model\_type:** `llama`
 
-**Unique changes:** None — uses the shared `standard_gqa_forward` and `prepare_standard_gqa` directly. This is the simplest adapter pattern.
-
-**Applies common changes only:** RMSNorm patch (`LlamaRMSNorm`), head-dim padding if needed, RoPE precomputation, LM head padding, compiled blocks.
+**Unique changes:** None — applies only the common changes listed above. This is the simplest adapter pattern.
 
 ---
 
@@ -37,9 +35,7 @@ Every adapter applies the following transformations via shared utilities in `hf_
 
 **model\_type:** `mistral`
 
-**Unique changes:** None — architecturally identical to Llama. Uses shared `standard_gqa_forward` and `prepare_standard_gqa`.
-
-**Applies common changes only:** RMSNorm patch (`MistralRMSNorm`).
+**Unique changes:** None — architecturally identical to Llama. Applies only the common changes.
 
 ---
 
@@ -47,9 +43,7 @@ Every adapter applies the following transformations via shared utilities in `hf_
 
 **model\_type:** `qwen2`
 
-**Unique changes:** None — same standard GQA architecture as Llama/Mistral. Uses shared `standard_gqa_forward` and `prepare_standard_gqa`.
-
-**Applies common changes only:** RMSNorm patch (`Qwen2RMSNorm`).
+**Unique changes:** None — same standard GQA architecture as Llama/Mistral. Applies only the common changes.
 
 ---
 
@@ -159,7 +153,7 @@ Every adapter applies the following transformations via shared utilities in `hf_
 | **Weight-free LayerNorm** | OLMo uses LayerNorm without learnable weight/bias parameters (just `F.layer_norm` with eps). Requires a custom fp16 patch distinct from RMSNorm. |
 | **Head-dim padding** | Same stick-alignment logic as Granite (pads if `head_dim // 2 < 64`) |
 
-**Shared with Llama/Mistral/Qwen2:** Uses `make_standard_gqa_block` for the compiled block (standard GQA forward path). The only difference is the norm class.
+**Shared with Llama/Mistral/Qwen2:** Uses the same forward pass logic (standard GQA). The only difference is the norm class.
 
 ---
 
