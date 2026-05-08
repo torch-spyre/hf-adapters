@@ -276,7 +276,6 @@ def _make_projector_block(projector):
     # Block 2: QFormer — compiled per-layer to avoid post_grad bmm rewrite
     # on the full graph. Each layer split into: self-attn, cross-attn, FFN.
     qformer_layers = qformer.encoder.layer
-    layer_norm = qformer.layernorm
     num_qformer_layers = len(qformer_layers)
 
     compiled_self_attns = []
@@ -312,16 +311,17 @@ def _make_projector_block(projector):
             return torch.compile(ffn_fn, dynamic=False)
         compiled_ffns.append(_make_ffn(iq, oq))
 
-    compiled_ln = torch.compile(layer_norm, dynamic=False)
+    input_ln = qformer.layernorm
+    compiled_input_ln = torch.compile(input_ln, dynamic=False)
 
     def qformer_block(query_embeds, encoder_embeds):
-        hidden_states = query_embeds
+        hidden_states = compiled_input_ln(query_embeds)
         for i in range(num_qformer_layers):
             hidden_states = compiled_self_attns[i](hidden_states)
             if compiled_cross_attns[i] is not None:
                 hidden_states = compiled_cross_attns[i](hidden_states, encoder_embeds)
             hidden_states = compiled_ffns[i](hidden_states)
-        return compiled_ln(hidden_states)
+        return hidden_states
 
     # Block 3: post-QFormer (single input: out_w)
     def post_qformer(out_w):
