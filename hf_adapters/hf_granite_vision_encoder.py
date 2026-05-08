@@ -134,7 +134,7 @@ def _pad_qformer_attention(projectors, orig_head_dim, padded_head_dim, num_heads
 # Patch QFormer to use F.scaled_dot_product_attention instead of torch.matmul
 # ---------------------------------------------------------------------------
 
-def _patch_qformer_sdpa(projectors):
+def _patch_qformer_sdpa(projectors, orig_head_dim):
     """Replace QFormer's manual matmul attention with F.scaled_dot_product_attention.
 
     The Blip2QFormerMultiHeadAttention uses torch.matmul on 4D tensors for
@@ -142,6 +142,8 @@ def _patch_qformer_sdpa(projectors):
     SDPA decomposes through a different path that works on Spyre.
     """
     from transformers.models.blip_2.modeling_blip_2 import Blip2QFormerMultiHeadAttention
+
+    attn_scale = 1.0 / (orig_head_dim ** 0.5)
 
     def _sdpa_forward(self, hidden_states, attention_mask=None,
                       encoder_hidden_states=None, encoder_attention_mask=None, **kwargs):
@@ -160,7 +162,7 @@ def _patch_qformer_sdpa(projectors):
 
         context_layer = F.scaled_dot_product_attention(
             query_layer, key_layer, value_layer,
-            attn_mask=attn_mask, dropout_p=0.0,
+            attn_mask=attn_mask, dropout_p=0.0, scale=attn_scale,
         )
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
@@ -176,7 +178,7 @@ def _patch_qformer_sdpa(projectors):
 # Compiled blocks for vision encoder layers (SiglipEncoderLayer)
 # ---------------------------------------------------------------------------
 
-def _make_vision_block(layer, padded_head_dim):
+def _make_vision_block(layer, padded_head_dim, orig_head_dim):
     """Compiled block for a single Siglip encoder layer."""
     ln1 = layer.layer_norm1
     attn = layer.self_attn
@@ -184,6 +186,7 @@ def _make_vision_block(layer, padded_head_dim):
     mlp = layer.mlp
     num_heads = attn.num_heads
     head_dim = padded_head_dim
+    attn_scale = 1.0 / (orig_head_dim ** 0.5)
 
     def block_forward(hidden_states):
         residual = hidden_states
@@ -195,7 +198,7 @@ def _make_vision_block(layer, padded_head_dim):
         k = attn.k_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
         v = attn.v_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
 
-        attn_out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+        attn_out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, scale=attn_scale)
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, num_heads * head_dim)
         attn_out = attn.out_proj(attn_out)
 
@@ -468,7 +471,7 @@ def prepare_for_spyre(model):
     if model.spatial_projectors is not None:
         all_projectors += list(model.spatial_projectors)
     _pad_qformer_attention(all_projectors, qformer_head_dim, qformer_padded, qformer_num_heads)
-    _patch_qformer_sdpa(all_projectors)
+    _patch_qformer_sdpa(all_projectors, qformer_head_dim)
 
     # Replace Conv2d patch embedding with CPU tensors for F.linear
     # (Conv2d and unfold not supported on Spyre; runs entirely on CPU)
@@ -489,7 +492,7 @@ def prepare_for_spyre(model):
     model._padded_head_dim = padded_head_dim
 
     model._spyre_vision_blocks = [
-        _make_vision_block(layer, padded_head_dim)
+        _make_vision_block(layer, padded_head_dim, orig_head_dim)
         for layer in vision_tower.encoder.layers
     ]
 
