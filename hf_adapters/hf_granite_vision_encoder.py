@@ -216,13 +216,15 @@ def _make_vision_block(layer, padded_head_dim):
 # ---------------------------------------------------------------------------
 
 def _make_projector_block(projector):
-    """Compiled block for a single WindowQFormerDownsampler."""
+    """Compiled blocks for a single WindowQFormerDownsampler.
+
+    Split into 3 blocks to avoid torch-spyre post_grad bmm rewrite issue
+    when the full QFormer graph is compiled as one block.
+    """
     norm = projector.norm
     qformer = projector.qformer
     out_linear = projector.out_linear
     downsampler = projector.downsampler
-    # Capture the module itself; access .query/.image_positions at call time
-    # so that model.to(DEVICE) updates are reflected.
     proj_ref = projector
     image_side = projector.image_side
     window_side = projector.window_side
@@ -251,7 +253,8 @@ def _make_projector_block(projector):
             .flatten(1, 2)
         )
 
-    def projector_forward(image_features):
+    # Block 1: pre-QFormer (single input: image_features)
+    def pre_qformer(image_features):
         B, HW, C = image_features.shape
         n = image_side // window_side
 
@@ -265,17 +268,73 @@ def _make_projector_block(projector):
 
         query_embeds = proj_ref.query + downsampled_w
         encoder_embeds = enc + proj_ref.image_positions
+        return query_embeds, encoder_embeds
 
-        out_w = qformer(
-            query_embeds=query_embeds,
-            encoder_hidden_states=encoder_embeds,
-            return_dict=True,
-        ).last_hidden_state
+    # Block 2: QFormer — compiled per-layer to avoid post_grad bmm rewrite
+    # on the full graph. Each layer split into: self-attn, cross-attn, FFN.
+    qformer_layers = qformer.encoder.layer
+    layer_norm = qformer.layernorm
+    num_qformer_layers = len(qformer_layers)
 
+    compiled_self_attns = []
+    compiled_cross_attns = []
+    compiled_ffns = []
+
+    for layer in qformer_layers:
+        sa = layer.attention
+        def _make_self_attn(sa_mod):
+            def self_attn_fn(hidden_states):
+                return sa_mod(hidden_states=hidden_states)
+            return torch.compile(self_attn_fn, dynamic=False)
+        compiled_self_attns.append(_make_self_attn(sa))
+
+        if layer.has_cross_attention:
+            ca = layer.crossattention
+            def _make_cross_attn(ca_mod):
+                def cross_attn_fn(hidden_states, encoder_hidden_states):
+                    return ca_mod(
+                        hidden_states=hidden_states,
+                        encoder_hidden_states=encoder_hidden_states,
+                    )
+                return torch.compile(cross_attn_fn, dynamic=False)
+            compiled_cross_attns.append(_make_cross_attn(ca))
+        else:
+            compiled_cross_attns.append(None)
+
+        iq = layer.intermediate_query
+        oq = layer.output_query
+        def _make_ffn(intermediate, output):
+            def ffn_fn(hidden_states):
+                return output(intermediate(hidden_states), hidden_states)
+            return torch.compile(ffn_fn, dynamic=False)
+        compiled_ffns.append(_make_ffn(iq, oq))
+
+    compiled_ln = torch.compile(layer_norm, dynamic=False)
+
+    def qformer_block(query_embeds, encoder_embeds):
+        hidden_states = query_embeds
+        for i in range(num_qformer_layers):
+            hidden_states = compiled_self_attns[i](hidden_states)
+            if compiled_cross_attns[i] is not None:
+                hidden_states = compiled_cross_attns[i](hidden_states, encoder_embeds)
+            hidden_states = compiled_ffns[i](hidden_states)
+        return compiled_ln(hidden_states)
+
+    # Block 3: post-QFormer (single input: out_w)
+    def post_qformer(out_w):
+        n = image_side // window_side
         out = _unwin(out_w, n=n, win=query_side)
         return out_linear(out)
 
-    return torch.compile(projector_forward, dynamic=False)
+    compiled_pre = torch.compile(pre_qformer, dynamic=False)
+    compiled_post = torch.compile(post_qformer, dynamic=False)
+
+    def projector_forward(image_features):
+        query_embeds, encoder_embeds = compiled_pre(image_features)
+        out_w = qformer_block(query_embeds, encoder_embeds)
+        return compiled_post(out_w)
+
+    return projector_forward
 
 
 # ---------------------------------------------------------------------------
