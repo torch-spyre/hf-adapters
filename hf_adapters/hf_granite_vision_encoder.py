@@ -35,6 +35,15 @@ Each WindowQFormerDownsampler:
   LayerNorm → window → InterpolateDownsampler/SpatialOffsetDownsampler
   → QFormer cross-attention (1 layer Blip2QFormer) → unwindow → Linear
 
+Accuracy:
+  CPU (adapter vs stock HF): near-exact, max_diff=0.04 after 27 layers + projectors.
+  Spyre (vs CPU): max_diff=2.5–7 per projector output (hardware fp16 numerics).
+
+Known issues:
+  - avg_pool2d (InterpolateDownsampler) uses a temporary pointwise decomposition in
+    torch-spyre. Should be reworked to use deeptools native avg_pool2d OpFunc.
+  - SDPA scale must use original head_dim (72 for vision, 64 for QFormer), not padded (128).
+
 Usage::
 
     from hf_adapters.hf_granite_vision_encoder import load_model, run_forward
@@ -264,6 +273,7 @@ def _make_projector_block(projector):
         image_features = norm(image_features)
         enc = _win(image_features, image_side, window_side)
 
+        # TODO: torch-spyre should lower this to deeptools avg_pool2d OpFunc
         downsampled = downsampler(image_features)
 
         new_side = n * query_side
