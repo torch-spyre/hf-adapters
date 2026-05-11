@@ -33,12 +33,12 @@ repos:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
 
-  # MyPy - Static type checker
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.14.0
+  # MyPy - Static type checker (uses project venv so torch/transformers stubs resolve)
+  - repo: local
     hooks:
       - id: mypy
-        additional_dependencies:
-          - typing-extensions
-        args: [--config-file=pyproject.toml, --explicit-package-bases]
+        name: mypy
+        entry: mypy --config-file=pyproject.toml --explicit-package-bases
+        language: system
+        types: [python]
         files: ^hf_adapters/

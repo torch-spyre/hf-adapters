@@ -37,11 +37,12 @@ import torch.nn.functional as F
 from hf_adapters.hf_common import (
     PrecomputedRotaryEmbedding,
     apply_rope_matmul,
-    generate as _generate,
     kv_cache_update,
     load_model_common,
 )
-
+from hf_adapters.hf_common import (
+    generate as _generate,
+)
 
 # ---------------------------------------------------------------------------
 # Gemma-specific RMSNorm patch
@@ -53,12 +54,15 @@ def _patch_gemma_rmsnorm(rmsnorm_cls):
 
     Gemma's RMSNorm uses (1 + weight) scaling instead of weight directly.
     """
+
     def _forward_fp16(self, hidden_states):
         if hidden_states.device.type == "spyre":
             variance = (hidden_states * hidden_states).mean(-1, keepdim=True)
             eps = torch.ops.spyre.full(
-                (1,), self.eps,
-                hidden_states.device, torch.float16,
+                (1,),
+                self.eps,
+                hidden_states.device,
+                torch.float16,
             )
             return (1.0 + self.weight) * (hidden_states * torch.rsqrt(variance + eps))
         else:
@@ -113,9 +117,16 @@ def _make_compiled_block(layer):
     input_ln = layer.input_layernorm
     post_attn_ln = layer.post_attention_layernorm
 
-    def block_forward(hidden_states, selected_freqs, attn_mask,
-                      key_cache, value_cache,
-                      is_filling, token_index, cache_position):
+    def block_forward(
+        hidden_states,
+        selected_freqs,
+        attn_mask,
+        key_cache,
+        value_cache,
+        is_filling,
+        token_index,
+        cache_position,
+    ):
         residual = hidden_states
         h = input_ln(hidden_states)
 
@@ -128,13 +139,23 @@ def _make_compiled_block(layer):
         k = apply_rope_matmul(k, selected_freqs)
 
         key_cache, value_cache = kv_cache_update(
-            k, v, key_cache, value_cache,
-            is_filling, token_index, cache_position,
+            k,
+            v,
+            key_cache,
+            value_cache,
+            is_filling,
+            token_index,
+            cache_position,
         )
 
         attn_out = F.scaled_dot_product_attention(
-            q, key_cache, value_cache,
-            attn_mask=attn_mask, dropout_p=0.0, scale=attn.scaling, enable_gqa=True,
+            q,
+            key_cache,
+            value_cache,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            scale=attn.scaling,
+            enable_gqa=True,
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
         attn_out = attn.o_proj(attn_out)
@@ -156,9 +177,17 @@ def _make_compiled_block(layer):
 # ---------------------------------------------------------------------------
 
 
-def _run_forward(model, input_ids, position_ids, attn_mask,
-                 key_caches, value_caches,
-                 is_filling, token_index, cache_position):
+def _run_forward(
+    model,
+    input_ids,
+    position_ids,
+    attn_mask,
+    key_caches,
+    value_caches,
+    is_filling,
+    token_index,
+    cache_position,
+):
     """Gemma forward: scaled embedding, blocks, norm, chunked LM head."""
     # GemmaTextScaledWordEmbedding already applies sqrt(hidden_size) multiplier
     h = model.model.embed_tokens(input_ids)
@@ -167,17 +196,23 @@ def _run_forward(model, input_ids, position_ids, attn_mask,
 
     for i, compiled_block in enumerate(model._spyre_compiled_blocks):
         h, key_caches[i], value_caches[i] = compiled_block(
-            h, selected_freqs, attn_mask,
-            key_caches[i], value_caches[i],
-            is_filling, token_index, cache_position,
+            h,
+            selected_freqs,
+            attn_mask,
+            key_caches[i],
+            value_caches[i],
+            is_filling,
+            token_index,
+            cache_position,
         )
 
     h = model.model.norm(h)
 
     # Chunked LM head: 256K vocab exceeds Spyre's per-core EAR limit.
     logits_parts = []
-    for lm_chunk, real_sz in zip(model._spyre_lm_head_chunks,
-                                 model._spyre_lm_chunk_sizes):
+    for lm_chunk, real_sz in zip(
+        model._spyre_lm_head_chunks, model._spyre_lm_chunk_sizes
+    ):
         logits_parts.append(lm_chunk(h).to("cpu")[..., :real_sz])
     logits = torch.cat(logits_parts, dim=-1)
     return logits
