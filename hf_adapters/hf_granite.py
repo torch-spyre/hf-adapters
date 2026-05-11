@@ -32,12 +32,14 @@ from hf_adapters.hf_common import (
     BLOCK_SIZE,
     PrecomputedRotaryEmbedding,
     apply_rope_matmul,
-    generate as _generate,
     kv_cache_update,
     load_model_common,
     pad_attention_heads,
     pad_lm_head,
     patch_rmsnorm,
+)
+from hf_adapters.hf_common import (
+    generate as _generate,
 )
 
 
@@ -48,11 +50,18 @@ def _make_compiled_block(layer):
     input_ln = layer.input_layernorm
     post_attn_ln = layer.post_attention_layernorm
     res_mult = layer.residual_multiplier
-    v_head_dim = getattr(attn, 'v_head_dim', attn.head_dim)
+    v_head_dim = getattr(attn, "v_head_dim", attn.head_dim)
 
-    def block_forward(hidden_states, selected_freqs, attn_mask,
-                      key_cache, value_cache,
-                      is_filling, token_index, cache_position):
+    def block_forward(
+        hidden_states,
+        selected_freqs,
+        attn_mask,
+        key_cache,
+        value_cache,
+        is_filling,
+        token_index,
+        cache_position,
+    ):
         residual = hidden_states
         h = input_ln(hidden_states)
 
@@ -65,13 +74,23 @@ def _make_compiled_block(layer):
         k = apply_rope_matmul(k, selected_freqs)
 
         key_cache, value_cache = kv_cache_update(
-            k, v, key_cache, value_cache,
-            is_filling, token_index, cache_position,
+            k,
+            v,
+            key_cache,
+            value_cache,
+            is_filling,
+            token_index,
+            cache_position,
         )
 
         attn_out = F.scaled_dot_product_attention(
-            q, key_cache, value_cache,
-            attn_mask=attn_mask, dropout_p=0.0, scale=attn.scaling, enable_gqa=True,
+            q,
+            key_cache,
+            value_cache,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            scale=attn.scaling,
+            enable_gqa=True,
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
         attn_out = attn.o_proj(attn_out)
@@ -88,9 +107,17 @@ def _make_compiled_block(layer):
     return torch.compile(block_forward, dynamic=False)
 
 
-def _run_forward(model, input_ids, position_ids, attn_mask,
-                 key_caches, value_caches,
-                 is_filling, token_index, cache_position):
+def _run_forward(
+    model,
+    input_ids,
+    position_ids,
+    attn_mask,
+    key_caches,
+    value_caches,
+    is_filling,
+    token_index,
+    cache_position,
+):
     """Granite 3.3 forward: embedding * multiplier, blocks, norm, head / scaling."""
     h = model.model.embed_tokens(input_ids)
     h = h * model.model.embedding_multiplier
@@ -99,9 +126,14 @@ def _run_forward(model, input_ids, position_ids, attn_mask,
 
     for i, compiled_block in enumerate(model._spyre_compiled_blocks):
         h, key_caches[i], value_caches[i] = compiled_block(
-            h, selected_freqs, attn_mask,
-            key_caches[i], value_caches[i],
-            is_filling, token_index, cache_position,
+            h,
+            selected_freqs,
+            attn_mask,
+            key_caches[i],
+            value_caches[i],
+            is_filling,
+            token_index,
+            cache_position,
         )
 
     h = model.model.norm(h)
@@ -116,24 +148,31 @@ def prepare_for_spyre(model):
 
     cfg = model.config
     orig_head_dim = getattr(
-        cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads,
+        cfg,
+        "head_dim",
+        cfg.hidden_size // cfg.num_attention_heads,
     )
 
     # RoPE reshape [B,L,H,2,D/2] requires D/2 >= BLOCK_SIZE.
     # Compute minimum stick-aligned head_dim: round up to next multiple of 2*BLOCK_SIZE.
     padded_head_dim = None
     stick_aligned_head_dim = (
-        ((orig_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)) * (2 * BLOCK_SIZE)
-    )
+        (orig_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)
+    ) * (2 * BLOCK_SIZE)
     if stick_aligned_head_dim > orig_head_dim:
         padded_head_dim = stick_aligned_head_dim
         pad_attention_heads(
-            model, model.model.layers, orig_head_dim, padded_head_dim,
-            cfg.num_attention_heads, cfg.num_key_value_heads,
+            model,
+            model.model.layers,
+            orig_head_dim,
+            padded_head_dim,
+            cfg.num_attention_heads,
+            cfg.num_key_value_heads,
         )
 
     model._spyre_rope = PrecomputedRotaryEmbedding(
-        model.model.rotary_emb, padded_head_dim=padded_head_dim,
+        model.model.rotary_emb,
+        padded_head_dim=padded_head_dim,
     )
     patch_rmsnorm(GraniteRMSNorm)
     pad_lm_head(model)

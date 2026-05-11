@@ -15,7 +15,6 @@ import re
 import time
 from pathlib import Path
 
-
 SAMPLES_FILE = Path(__file__).parent / "mmlu_samples.json"
 
 
@@ -27,18 +26,21 @@ def load_mmlu(num_samples=50, seed=42):
             return data[:num_samples]
 
     from datasets import load_dataset
+
     ds = load_dataset("cais/mmlu", "all", split="test")
     ds = ds.shuffle(seed=seed).select(range(min(num_samples, len(ds))))
 
     choices = ["A", "B", "C", "D"]
     data = []
     for ex in ds:
-        data.append({
-            "question": ex["question"],
-            "choices": ex["choices"],
-            "answer": choices[ex["answer"]],
-            "subject": ex["subject"],
-        })
+        data.append(
+            {
+                "question": ex["question"],
+                "choices": ex["choices"],
+                "answer": choices[ex["answer"]],
+                "subject": ex["subject"],
+            }
+        )
 
     with open(SAMPLES_FILE, "w") as f:
         json.dump(data, f, indent=2)
@@ -77,19 +79,24 @@ def run_eval(args, backend_label, generate_fn):
         if is_correct:
             correct += 1
 
-        results.append({
-            "index": i,
-            "subject": sample["subject"],
-            "ground_truth": gt,
-            "predicted": predicted,
-            "correct": is_correct,
-            "generated_text": gen_text,
-            "generated_token_ids": gen_token_ids,
-            "time_s": round(elapsed, 2),
-        })
+        results.append(
+            {
+                "index": i,
+                "subject": sample["subject"],
+                "ground_truth": gt,
+                "predicted": predicted,
+                "correct": is_correct,
+                "generated_text": gen_text,
+                "generated_token_ids": gen_token_ids,
+                "time_s": round(elapsed, 2),
+            }
+        )
 
         status = "OK" if is_correct else "WRONG"
-        print(f"[{i+1}/{len(samples)}] {status}  pred={predicted}  gt={gt}  ({elapsed:.1f}s)  {sample['subject']}")
+        print(
+            f"[{i+1}/{len(samples)}] {status}  pred={predicted}  gt={gt}  "
+            f"({elapsed:.1f}s)  {sample['subject']}"
+        )
 
     accuracy = correct / len(results) if results else 0
     metadata = {
@@ -114,7 +121,8 @@ def run_gpu(args):
         tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
-        args.model, torch_dtype=torch.float16, device_map="auto")
+        args.model, torch_dtype=torch.float16, device_map="auto"
+    )
     model.eval()
     print(f"Model: {args.model} (GPU)")
 
@@ -123,10 +131,13 @@ def run_gpu(args):
         t0 = time.time()
         with torch.no_grad():
             out = model.generate(
-                input_ids, max_new_tokens=5, do_sample=False,
-                pad_token_id=tokenizer.eos_token_id)
+                input_ids,
+                max_new_tokens=5,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+            )
         elapsed = time.time() - t0
-        gen_ids = out[0, input_ids.shape[1]:]
+        gen_ids = out[0, input_ids.shape[1] :]
         gen_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
         return gen_text, gen_ids.tolist(), elapsed
 
@@ -137,7 +148,8 @@ def run_spyre(args):
     import torch  # noqa: F401
     import torch_spyre  # noqa: F401
     from transformers import AutoTokenizer
-    from hf_adapters.hf_qwen3 import load_model, generate
+
+    from hf_adapters.hf_qwen3 import generate, load_model
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.pad_token is None:
@@ -153,7 +165,9 @@ def run_spyre(args):
 
     def generate_fn(prompt):
         t0 = time.time()
-        outputs = generate(model, tokenizer, [prompt], max_new_tokens=5, do_sample=False)
+        outputs = generate(
+            model, tokenizer, [prompt], max_new_tokens=5, do_sample=False
+        )
         elapsed = time.time() - t0
         gen_text = outputs[0]
         gen_token_ids = tokenizer.encode(gen_text, add_special_tokens=False)
@@ -181,10 +195,14 @@ def compare(file_a, file_b):
         b_ok = rb[idx]["correct"]
         if ra[idx]["predicted"] == rb[idx]["predicted"]:
             same_pred += 1
-        if a_ok and b_ok: both_ok += 1
-        elif a_ok: a_only += 1
-        elif b_ok: b_only += 1
-        else: both_wrong += 1
+        if a_ok and b_ok:
+            both_ok += 1
+        elif a_ok:
+            a_only += 1
+        elif b_ok:
+            b_only += 1
+        else:
+            both_wrong += 1
 
     n = len(common)
     print(f"\n{'='*60}")
@@ -198,13 +216,20 @@ def compare(file_a, file_b):
     print(f"  Both wrong:      {both_wrong:>3} ({both_wrong/n:.1%})")
     print(f"  Same prediction: {same_pred:>3} ({same_pred/n:.1%})")
 
-    diffs = [(idx, ra[idx], rb[idx]) for idx in common if ra[idx]["predicted"] != rb[idx]["predicted"]]
+    diffs = [
+        (idx, ra[idx], rb[idx])
+        for idx in common
+        if ra[idx]["predicted"] != rb[idx]["predicted"]
+    ]
     if diffs:
-        print(f"\n  Prediction disagreements (first 10):")
+        print("\n  Prediction disagreements (first 10):")
         print(f"  {'Idx':<5} {'GT':<4} {la:<6} {lb:<6} {'Subject'}")
         print(f"  {'-'*40}")
         for idx, a, b in diffs[:10]:
-            print(f"  {idx:<5} {a['ground_truth']:<4} {str(a['predicted']):<6} {str(b['predicted']):<6} {a['subject']}")
+            print(
+                f"  {idx:<5} {a['ground_truth']:<4} {str(a['predicted']):<6} "
+                f"{str(b['predicted']):<6} {a['subject']}"
+            )
 
 
 if __name__ == "__main__":

@@ -32,6 +32,8 @@ import torch
 
 from hf_adapters.hf_common import (
     generate as _generate,
+)
+from hf_adapters.hf_common import (
     load_model_common,
     prepare_standard_gqa,
     standard_gqa_forward,
@@ -43,6 +45,7 @@ _run_forward = standard_gqa_forward
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to Llama model in-place."""
     from transformers.models.llama.modeling_llama import LlamaRMSNorm
+
     prepare_standard_gqa(model, LlamaRMSNorm)
 
 

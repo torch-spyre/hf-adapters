@@ -132,6 +132,33 @@ python tests/test_e2e_token_compare_spyre.py granite
 Note: Spyre has known numerical accuracy limitations. Token mismatches
 between CPU and Spyre are expected until torch\_spyre fixes land.
 
+## Development
+
+### Pre-commit Hooks
+
+This project uses [pre-commit](https://pre-commit.com/) to enforce code quality checks before each commit. The following hooks are configured:
+
+- **Trailing whitespace / end-of-file fixer / mixed line endings**
+- **File checks**: YAML, TOML, JSON validation; large file guard (>1 MB); merge conflict markers; debug statements
+- **[Black](https://github.com/psf/black)** — code formatting
+- **[Ruff](https://github.com/astral-sh/ruff-pre-commit)** — linting with auto-fix
+- **[mypy](https://github.com/pre-commit/mirrors-mypy)** — static type checking (runs on `hf_adapters/` only)
+
+### Setup
+
+```bash
+pip install -e ".[dev]"     # installs pre-commit, black, ruff, mypy as dev deps
+pre-commit install          # activate hooks in your local clone
+```
+
+### Usage
+
+Hooks run automatically on `git commit`. To run manually against all files:
+
+```bash
+pre-commit run --all-files
+```
+
 ## License
 
 Apache 2.0

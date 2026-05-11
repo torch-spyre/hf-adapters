@@ -37,7 +37,8 @@ from collections import defaultdict
 
 import torch
 
-from hf_adapters.hf_common import DEVICE, generate as _generate
+from hf_adapters.hf_common import DEVICE
+from hf_adapters.hf_common import generate as _generate
 from hf_adapters.hf_granite import _run_forward, prepare_for_spyre
 
 

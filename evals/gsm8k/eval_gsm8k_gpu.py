@@ -2,16 +2,22 @@
 """GSM8K evaluation on GPU using stock HuggingFace generate().
 
 Usage:
-    python eval_gsm8k_gpu.py --model Qwen/Qwen3-0.6B --num-samples 50 --output results_gpu.json
+    python eval_gsm8k_gpu.py --model Qwen/Qwen3-0.6B --num-samples 50 \
+        --output results_gpu.json
 """
 
 import argparse
 import time
 
 import torch
+from gsm8k_common import (
+    extract_answer,
+    extract_ground_truth,
+    format_prompt,
+    load_gsm8k,
+    save_results,
+)
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
-from gsm8k_common import load_gsm8k, format_prompt, extract_answer, extract_ground_truth, save_results
 
 
 def main():
@@ -28,7 +34,9 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
-        args.model, torch_dtype=torch.float16, device_map="auto",
+        args.model,
+        torch_dtype=torch.float16,
+        device_map="auto",
     )
     model.eval()
 
@@ -41,7 +49,9 @@ def main():
 
     for i, sample in enumerate(samples):
         prompt_text = format_prompt(sample["question"], tokenizer)
-        input_ids = tokenizer(prompt_text, return_tensors="pt").input_ids.to(model.device)
+        input_ids = tokenizer(prompt_text, return_tensors="pt").input_ids.to(
+            model.device
+        )
 
         t0 = time.time()
         with torch.no_grad():
@@ -53,7 +63,7 @@ def main():
             )
         elapsed = time.time() - t0
 
-        gen_ids = output_ids[0, input_ids.shape[1]:]
+        gen_ids = output_ids[0, input_ids.shape[1] :]
         gen_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
 
         predicted = extract_answer(gen_text)
@@ -62,21 +72,26 @@ def main():
         if is_correct:
             correct += 1
 
-        results.append({
-            "index": i,
-            "question": sample["question"],
-            "ground_truth": ground_truth,
-            "predicted": predicted,
-            "correct": is_correct,
-            "generated_text": gen_text,
-            "generated_token_ids": gen_ids.tolist(),
-            "time_s": round(elapsed, 2),
-            "prompt_tokens": int(input_ids.shape[1]),
-            "gen_tokens": int(len(gen_ids)),
-        })
+        results.append(
+            {
+                "index": i,
+                "question": sample["question"],
+                "ground_truth": ground_truth,
+                "predicted": predicted,
+                "correct": is_correct,
+                "generated_text": gen_text,
+                "generated_token_ids": gen_ids.tolist(),
+                "time_s": round(elapsed, 2),
+                "prompt_tokens": int(input_ids.shape[1]),
+                "gen_tokens": int(len(gen_ids)),
+            }
+        )
 
         status = "OK" if is_correct else "WRONG"
-        print(f"[{i+1}/{len(samples)}] {status}  pred={predicted}  gt={ground_truth}  ({elapsed:.1f}s)")
+        print(
+            f"[{i+1}/{len(samples)}] {status}  pred={predicted}  "
+            f"gt={ground_truth}  ({elapsed:.1f}s)"
+        )
 
     accuracy = correct / len(results) if results else 0
     metadata = {

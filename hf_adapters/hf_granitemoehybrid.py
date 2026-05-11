@@ -41,11 +41,13 @@ import torch.nn.functional as F
 from hf_adapters.hf_common import (
     PrecomputedRotaryEmbedding,
     apply_rope_matmul,
-    generate as _generate,
     kv_cache_update,
     load_model_common,
     pad_lm_head,
     patch_rmsnorm,
+)
+from hf_adapters.hf_common import (
+    generate as _generate,
 )
 
 
@@ -72,9 +74,16 @@ def _make_compiled_block(layer, res_mult, gate_proj, up_proj):
     down_proj = layer.shared_mlp.output_linear
     act_fn = layer.shared_mlp.activation
 
-    def block_forward(hidden_states, selected_freqs, attn_mask,
-                      key_cache, value_cache,
-                      is_filling, token_index, cache_position):
+    def block_forward(
+        hidden_states,
+        selected_freqs,
+        attn_mask,
+        key_cache,
+        value_cache,
+        is_filling,
+        token_index,
+        cache_position,
+    ):
         residual = hidden_states
         h = input_ln(hidden_states)
 
@@ -87,13 +96,23 @@ def _make_compiled_block(layer, res_mult, gate_proj, up_proj):
         k = apply_rope_matmul(k, selected_freqs)
 
         key_cache, value_cache = kv_cache_update(
-            k, v, key_cache, value_cache,
-            is_filling, token_index, cache_position,
+            k,
+            v,
+            key_cache,
+            value_cache,
+            is_filling,
+            token_index,
+            cache_position,
         )
 
         attn_out = F.scaled_dot_product_attention(
-            q, key_cache, value_cache,
-            attn_mask=attn_mask, dropout_p=0.0, scale=attn.scaling, enable_gqa=True,
+            q,
+            key_cache,
+            value_cache,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            scale=attn.scaling,
+            enable_gqa=True,
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
         attn_out = attn.o_proj(attn_out)
@@ -111,9 +130,17 @@ def _make_compiled_block(layer, res_mult, gate_proj, up_proj):
     return torch.compile(block_forward, dynamic=False)
 
 
-def _run_forward(model, input_ids, position_ids, attn_mask,
-                 key_caches, value_caches,
-                 is_filling, token_index, cache_position):
+def _run_forward(
+    model,
+    input_ids,
+    position_ids,
+    attn_mask,
+    key_caches,
+    value_caches,
+    is_filling,
+    token_index,
+    cache_position,
+):
     """Granite 4.0 forward: embedding * multiplier, blocks, norm, head / scaling."""
     h = model.model.embed_tokens(input_ids)
     h = h * model.config.embedding_multiplier
@@ -122,9 +149,14 @@ def _run_forward(model, input_ids, position_ids, attn_mask,
 
     for i, compiled_block in enumerate(model._spyre_compiled_blocks):
         h, key_caches[i], value_caches[i] = compiled_block(
-            h, selected_freqs, attn_mask,
-            key_caches[i], value_caches[i],
-            is_filling, token_index, cache_position,
+            h,
+            selected_freqs,
+            attn_mask,
+            key_caches[i],
+            value_caches[i],
+            is_filling,
+            token_index,
+            cache_position,
         )
 
     h = model.model.norm(h)

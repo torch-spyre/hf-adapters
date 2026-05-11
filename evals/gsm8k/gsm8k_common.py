@@ -4,23 +4,36 @@ import json
 import re
 from pathlib import Path
 
-
 SAMPLES_FILE = Path(__file__).parent / "gsm8k_samples.json"
 
 FEW_SHOT_EXAMPLES = [
     {
-        "question": "There are 15 trees in the grove. Grove workers will plant trees in the grove today. After they are done, there will be 21 trees. How many trees did the grove workers plant today?",
-        "answer": "There are 15 trees originally. Then there were 21 trees after some more were planted. So there must have been 21 - 15 = 6. #### 6",
+        "question": (
+            "There are 15 trees in the grove. Grove workers will plant trees "
+            "in the grove today. After they are done, there will be 21 trees. "
+            "How many trees did the grove workers plant today?"
+        ),
+        "answer": (
+            "There are 15 trees originally. Then there were 21 trees after "
+            "some more were planted. So there must have been 21 - 15 = 6. "
+            "#### 6"
+        ),
     },
     {
-        "question": "If there are 3 cars in the parking lot and 2 more cars arrive, how many cars are in the parking lot?",
+        "question": (
+            "If there are 3 cars in the parking lot and 2 more cars arrive, "
+            "how many cars are in the parking lot?"
+        ),
         "answer": "There are originally 3 cars. 2 more cars arrive. 3 + 2 = 5. #### 5",
     },
 ]
 
 
 def load_gsm8k(num_samples=50, seed=42):
-    """Load GSM8K test samples. Saves to JSON on first call for cross-platform consistency."""
+    """Load GSM8K test samples.
+
+    Saves to JSON on first call for cross-platform consistency.
+    """
     if SAMPLES_FILE.exists():
         with open(SAMPLES_FILE) as f:
             data = json.load(f)
@@ -28,6 +41,7 @@ def load_gsm8k(num_samples=50, seed=42):
             return data[:num_samples]
 
     from datasets import load_dataset
+
     ds = load_dataset("openai/gsm8k", "main", split="test")
     ds = ds.shuffle(seed=seed).select(range(min(num_samples, len(ds))))
     data = [{"question": ex["question"], "answer": ex["answer"]} for ex in ds]
@@ -50,12 +64,16 @@ def format_prompt(question, tokenizer=None):
         msgs = [{"role": "user", "content": prompt}]
         try:
             return tokenizer.apply_chat_template(
-                msgs, tokenize=False, add_generation_prompt=True,
+                msgs,
+                tokenize=False,
+                add_generation_prompt=True,
                 enable_thinking=False,
             )
         except TypeError:
             return tokenizer.apply_chat_template(
-                msgs, tokenize=False, add_generation_prompt=True,
+                msgs,
+                tokenize=False,
+                add_generation_prompt=True,
             )
 
     return prompt

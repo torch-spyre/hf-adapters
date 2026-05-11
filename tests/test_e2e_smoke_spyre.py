@@ -28,7 +28,6 @@ import sys
 import time
 import traceback
 
-import torch
 import torch_spyre  # noqa: F401 — registers Spyre device
 
 MODEL_REGISTRY = {
@@ -142,8 +141,12 @@ def run_smoke(model_key):
     # Generate
     t0 = time.time()
     outputs = adapter.generate(
-        model, tokenizer, [prompt],
-        max_new_tokens=5, do_sample=False, timing=True,
+        model,
+        tokenizer,
+        [prompt],
+        max_new_tokens=5,
+        do_sample=False,
+        timing=True,
     )
     gen_time = time.time() - t0
 
@@ -197,19 +200,23 @@ if __name__ == "__main__":
         except Exception:
             print(f"\n!!! {MODEL_REGISTRY[key]['name']} FAILED:")
             traceback.print_exc()
-            results.append({
-                "model": MODEL_REGISTRY[key]["name"],
-                "status": "ERROR",
-                "tokens": 0,
-                "text": "",
-                "load_s": 0,
-                "gen_s": 0,
-            })
+            results.append(
+                {
+                    "model": MODEL_REGISTRY[key]["name"],
+                    "status": "ERROR",
+                    "tokens": 0,
+                    "text": "",
+                    "load_s": 0,
+                    "gen_s": 0,
+                }
+            )
 
     # Summary table
-    print(f"\n## E2E Smoke Test Results\n")
-    print(f"| Model | Status | Tokens | Generated Text | Load (s) | Gen (s) |")
-    print(f"|-------|--------|--------|----------------|----------|---------|")
+    print("\n## E2E Smoke Test Results\n")
+    print("| Model | Status | Tokens | Generated Text | Load (s) | Gen (s) |")
+    print("|-------|--------|--------|----------------|----------|---------|")
     for r in results:
-        print(f"| {r['model']} | {r['status']} | {r['tokens']} "
-              f"| {r['text']!r} | {r['load_s']:.1f} | {r['gen_s']:.1f} |")
+        print(
+            f"| {r['model']} | {r['status']} | {r['tokens']} "
+            f"| {r['text']!r} | {r['load_s']:.1f} | {r['gen_s']:.1f} |"
+        )

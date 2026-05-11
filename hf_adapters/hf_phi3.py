@@ -38,15 +38,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
+    DEVICE,
     apply_rope_matmul,
-    generate as _generate,
     kv_cache_update,
     load_model_common,
-    pad_lm_head,
     patch_rmsnorm,
-    DEVICE,
 )
-
+from hf_adapters.hf_common import (
+    generate as _generate,
+)
 
 # ---------------------------------------------------------------------------
 # RoPE with identity padding for partial rotary
@@ -83,12 +83,15 @@ class PartialPrecomputedRotaryEmbedding(nn.Module):
         scaling = getattr(self.original, "attention_scaling", 1.0)
 
         # Build rotation matrix [S, 2, 2, rope_half]
-        rot = torch.stack([
-            torch.cos(freqs) * scaling,
-            -torch.sin(freqs) * scaling,
-            torch.sin(freqs) * scaling,
-            torch.cos(freqs) * scaling,
-        ], dim=1).view(target_len, 2, 2, rope_half)
+        rot = torch.stack(
+            [
+                torch.cos(freqs) * scaling,
+                -torch.sin(freqs) * scaling,
+                torch.sin(freqs) * scaling,
+                torch.cos(freqs) * scaling,
+            ],
+            dim=1,
+        ).view(target_len, 2, 2, rope_half)
 
         if pad_half > 0:
             # Identity matrix [[1,0],[0,1]] for non-rotated dims
@@ -154,12 +157,14 @@ def _rope_dim_permutation(head_dim, rope_dim):
     """
     rope_half = rope_dim // 2
     pass_half = (head_dim - rope_dim) // 2
-    return torch.cat([
-        torch.arange(0, rope_half),
-        torch.arange(rope_dim, rope_dim + pass_half),
-        torch.arange(rope_half, rope_dim),
-        torch.arange(rope_dim + pass_half, head_dim),
-    ])
+    return torch.cat(
+        [
+            torch.arange(0, rope_half),
+            torch.arange(rope_dim, rope_dim + pass_half),
+            torch.arange(rope_half, rope_dim),
+            torch.arange(rope_dim + pass_half, head_dim),
+        ]
+    )
 
 
 def _permute_proj_for_rope(proj, num_heads, head_dim, perm):
@@ -182,8 +187,8 @@ def _split_fused_qkv(attn, num_q, num_kv, head_dim):
 
     return (
         _mk(w[:q_dim], q_dim),
-        _mk(w[q_dim:q_dim + k_dim], k_dim),
-        _mk(w[q_dim + k_dim:], k_dim),
+        _mk(w[q_dim : q_dim + k_dim], k_dim),
+        _mk(w[q_dim + k_dim :], k_dim),
     )
 
 
@@ -206,8 +211,7 @@ def _split_fused_mlp(mlp):
 # ---------------------------------------------------------------------------
 
 
-def _make_compiled_block(layer, q_proj, k_proj, v_proj, gate_proj, up_proj,
-                         head_dim):
+def _make_compiled_block(layer, q_proj, k_proj, v_proj, gate_proj, up_proj, head_dim):
     """Compiled block for Phi-3. Full head_dim RoPE via identity-padded freqs."""
     input_ln = layer.input_layernorm
     post_attn_ln = layer.post_attention_layernorm
@@ -216,9 +220,16 @@ def _make_compiled_block(layer, q_proj, k_proj, v_proj, gate_proj, up_proj,
     o_proj = layer.self_attn.o_proj
     scaling = layer.self_attn.scaling
 
-    def block_forward(hidden_states, selected_freqs, attn_mask,
-                      key_cache, value_cache,
-                      is_filling, token_index, cache_position):
+    def block_forward(
+        hidden_states,
+        selected_freqs,
+        attn_mask,
+        key_cache,
+        value_cache,
+        is_filling,
+        token_index,
+        cache_position,
+    ):
         residual = hidden_states
         h = input_ln(hidden_states)
         bsz, seq_len, _ = h.shape
@@ -234,13 +245,23 @@ def _make_compiled_block(layer, q_proj, k_proj, v_proj, gate_proj, up_proj,
         k = apply_rope_matmul(k, selected_freqs)
 
         key_cache, value_cache = kv_cache_update(
-            k, v, key_cache, value_cache,
-            is_filling, token_index, cache_position,
+            k,
+            v,
+            key_cache,
+            value_cache,
+            is_filling,
+            token_index,
+            cache_position,
         )
 
         attn_out = F.scaled_dot_product_attention(
-            q, key_cache, value_cache,
-            attn_mask=attn_mask, dropout_p=0.0, scale=scaling, enable_gqa=True,
+            q,
+            key_cache,
+            value_cache,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            scale=scaling,
+            enable_gqa=True,
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
         attn_out = o_proj(attn_out)
@@ -263,17 +284,30 @@ def _make_compiled_block(layer, q_proj, k_proj, v_proj, gate_proj, up_proj,
 # ---------------------------------------------------------------------------
 
 
-def _run_forward(model, input_ids, position_ids, attn_mask,
-                 key_caches, value_caches,
-                 is_filling, token_index, cache_position):
+def _run_forward(
+    model,
+    input_ids,
+    position_ids,
+    attn_mask,
+    key_caches,
+    value_caches,
+    is_filling,
+    token_index,
+    cache_position,
+):
     h = model.model.embed_tokens(input_ids)
     selected_freqs = model._spyre_rope(h, position_ids)
 
     for i, compiled_block in enumerate(model._spyre_compiled_blocks):
         h, key_caches[i], value_caches[i] = compiled_block(
-            h, selected_freqs, attn_mask,
-            key_caches[i], value_caches[i],
-            is_filling, token_index, cache_position,
+            h,
+            selected_freqs,
+            attn_mask,
+            key_caches[i],
+            value_caches[i],
+            is_filling,
+            token_index,
+            cache_position,
         )
 
     h = model.model.norm(h)
@@ -281,8 +315,9 @@ def _run_forward(model, input_ids, position_ids, attn_mask,
     # Chunked LM head: large vocab (200K+) exceeds Spyre's per-core EAR limit.
     # Split into N chunks, run each on Spyre, cat on CPU.
     logits_parts = []
-    for lm_chunk, real_sz in zip(model._spyre_lm_head_chunks,
-                                 model._spyre_lm_chunk_sizes):
+    for lm_chunk, real_sz in zip(
+        model._spyre_lm_head_chunks, model._spyre_lm_chunk_sizes
+    ):
         logits_parts.append(lm_chunk(h).to("cpu")[..., :real_sz])
     logits = torch.cat(logits_parts, dim=-1)
     return logits
@@ -296,9 +331,7 @@ def prepare_for_spyre(model):
     hd = cfg.hidden_size // cfg.num_attention_heads
 
     # RoPE with identity padding for partial rotary
-    model._spyre_rope = PartialPrecomputedRotaryEmbedding(
-        model.model.rotary_emb, hd
-    )
+    model._spyre_rope = PartialPrecomputedRotaryEmbedding(model.model.rotary_emb, hd)
     patch_rmsnorm(Phi3RMSNorm)
 
     # Chunk LM head for large vocab models (200K+ vocab exceeds EAR limit)

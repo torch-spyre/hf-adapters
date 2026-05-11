@@ -26,13 +26,11 @@ Requires: transformers, torch (2.x), sentencepiece
 
 import importlib
 import importlib.util
-import math
 import os
 import sys
 import traceback
 
 import torch
-import torch.nn.functional as F
 
 # ---------------------------------------------------------------------------
 # Import adapter modules via importlib to patch DEVICE before loading.
@@ -83,6 +81,7 @@ def load_adapter(filename):
 # HF reference: token-by-token greedy with DynamicCache
 # ---------------------------------------------------------------------------
 
+
 def hf_greedy_steps(model, input_ids, num_decode=4):
     """Run stock HF model for prefill + N greedy decode steps.
 
@@ -125,6 +124,7 @@ def hf_greedy_steps(model, input_ids, num_decode=4):
 # Adapter: prefill + decode using adapter _run_forward with KV cache
 # ---------------------------------------------------------------------------
 
+
 def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     """Run adapter forward for prefill + N greedy decode steps on CPU."""
     results = []
@@ -147,13 +147,15 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     # Pre-allocate KV caches at full size
     max_cache_len = seq_len + num_decode
     key_caches = [
-        torch.zeros(batch_size, num_kv_heads, max_cache_len, head_dim,
-                     dtype=param_dtype)
+        torch.zeros(
+            batch_size, num_kv_heads, max_cache_len, head_dim, dtype=param_dtype
+        )
         for _ in range(num_layers)
     ]
     value_caches = [
-        torch.zeros(batch_size, num_kv_heads, max_cache_len, v_head_dim,
-                     dtype=param_dtype)
+        torch.zeros(
+            batch_size, num_kv_heads, max_cache_len, v_head_dim, dtype=param_dtype
+        )
         for _ in range(num_layers)
     ]
 
@@ -161,13 +163,19 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     position_ids = torch.arange(seq_len).unsqueeze(0)
     causal_mask = torch.zeros((1, 1, seq_len, max_cache_len), dtype=param_dtype)
     for i in range(seq_len):
-        causal_mask[:, :, i, i + 1:] = -torch.inf
+        causal_mask[:, :, i, i + 1 :] = -torch.inf
 
     with torch.no_grad():
         logits = run_forward_fn(
-            model, input_ids, position_ids, causal_mask,
-            key_caches, value_caches,
-            is_filling=False, token_index=0, cache_position=0,
+            model,
+            input_ids,
+            position_ids,
+            causal_mask,
+            key_caches,
+            value_caches,
+            is_filling=False,
+            token_index=0,
+            cache_position=0,
         )
 
     last_logits = logits[0, -1, :].float()[:vocab_size]
@@ -181,13 +189,19 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
         next_ids = torch.tensor([[token]])
         next_pos = torch.tensor([[seq_len + step - 1]])
         decode_mask = torch.zeros((1, 1, 1, max_cache_len), dtype=param_dtype)
-        decode_mask[:, :, :, cache_len + 1:] = -torch.inf
+        decode_mask[:, :, :, cache_len + 1 :] = -torch.inf
 
         with torch.no_grad():
             logits = run_forward_fn(
-                model, next_ids, next_pos, decode_mask,
-                key_caches, value_caches,
-                is_filling=False, token_index=0, cache_position=cache_len,
+                model,
+                next_ids,
+                next_pos,
+                decode_mask,
+                key_caches,
+                value_caches,
+                is_filling=False,
+                token_index=0,
+                cache_position=cache_len,
             )
 
         last_logits = logits[0, -1, :].float()[:vocab_size]
@@ -202,8 +216,15 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
 # Test driver
 # ---------------------------------------------------------------------------
 
-def run_model_test(model_name, model_path, adapter_filename, num_decode=4,
-                   dtype="float16", load_fn=False):
+
+def run_model_test(
+    model_name,
+    model_path,
+    adapter_filename,
+    num_decode=4,
+    dtype="float16",
+    load_fn=False,
+):
     """Load model, run HF ref vs adapter, return comparison list."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -222,7 +243,9 @@ def run_model_test(model_name, model_path, adapter_filename, num_decode=4,
         model = adapter_mod.load_hf_model(model_path, torch_dtype)
     else:
         model = AutoModelForCausalLM.from_pretrained(
-            model_path, torch_dtype=torch_dtype, device_map="cpu",
+            model_path,
+            torch_dtype=torch_dtype,
+            device_map="cpu",
         )
     model.eval()
     model.requires_grad_(False)
@@ -244,14 +267,18 @@ def run_model_test(model_name, model_path, adapter_filename, num_decode=4,
     if hasattr(model, "_spyre_compiled_blocks"):
         unwrapped = []
         for cb in model._spyre_compiled_blocks:
-            orig = getattr(cb, "_orig_mod",
-                          getattr(cb, "_torchdynamo_orig_callable", None))
+            orig = getattr(
+                cb, "_orig_mod", getattr(cb, "_torchdynamo_orig_callable", None)
+            )
             unwrapped.append(orig if orig is not None else cb)
         model._spyre_compiled_blocks = unwrapped
 
     print("  Running adapter ...")
     adapter_results = adapter_greedy_steps(
-        run_forward_fn, model, input_ids, num_decode=num_decode,
+        run_forward_fn,
+        model,
+        input_ids,
+        num_decode=num_decode,
     )
 
     # --- Compare ---
@@ -274,17 +301,19 @@ def run_model_test(model_name, model_path, adapter_filename, num_decode=4,
         hf_tok_str = tokenizer.decode([hf_r["token"]])
         ad_tok_str = tokenizer.decode([ad_r["token"]])
 
-        comparisons.append({
-            "step": step_label,
-            "hf_token": hf_r["token"],
-            "hf_tok_str": hf_tok_str,
-            "adapter_token": ad_r["token"],
-            "adapter_tok_str": ad_tok_str,
-            "top1_match": top1_match,
-            "top5_overlap": top5_overlap,
-            "max_diff": max_diff,
-            "mean_diff": mean_diff,
-        })
+        comparisons.append(
+            {
+                "step": step_label,
+                "hf_token": hf_r["token"],
+                "hf_tok_str": hf_tok_str,
+                "adapter_token": ad_r["token"],
+                "adapter_tok_str": ad_tok_str,
+                "top1_match": top1_match,
+                "top5_overlap": top5_overlap,
+                "max_diff": max_diff,
+                "mean_diff": mean_diff,
+            }
+        )
 
     return comparisons, tokenizer
 
@@ -292,10 +321,11 @@ def run_model_test(model_name, model_path, adapter_filename, num_decode=4,
 def print_results_table(model_name, comparisons):
     """Print formatted results table. Returns True if all top-1 match."""
     print(f"\n  {model_name} Results")
-    print(f"  {'Step':<12} {'HF Token':<20} {'Adapter Token':<20} "
-          f"{'Top1':<6} {'Top5':<5} {'MaxDiff':<10} {'MeanDiff':<10}")
-    print(f"  {'-'*12} {'-'*20} {'-'*20} "
-          f"{'-'*6} {'-'*5} {'-'*10} {'-'*10}")
+    print(
+        f"  {'Step':<12} {'HF Token':<20} {'Adapter Token':<20} "
+        f"{'Top1':<6} {'Top5':<5} {'MaxDiff':<10} {'MeanDiff':<10}"
+    )
+    print(f"  {'-'*12} {'-'*20} {'-'*20} " f"{'-'*6} {'-'*5} {'-'*10} {'-'*10}")
     all_match = True
     for c in comparisons:
         match_str = "OK" if c["top1_match"] else "FAIL"
@@ -303,9 +333,11 @@ def print_results_table(model_name, comparisons):
             all_match = False
         hf_str = f"{c['hf_token']:>6} {c['hf_tok_str']!r:<12}"
         ad_str = f"{c['adapter_token']:>6} {c['adapter_tok_str']!r:<12}"
-        print(f"  {c['step']:<12} {hf_str:<20} {ad_str:<20} "
-              f"{match_str:<6} {c['top5_overlap']}/5  "
-              f"{c['max_diff']:<10.4f} {c['mean_diff']:<10.6f}")
+        print(
+            f"  {c['step']:<12} {hf_str:<20} {ad_str:<20} "
+            f"{match_str:<6} {c['top5_overlap']}/5  "
+            f"{c['max_diff']:<10.4f} {c['mean_diff']:<10.6f}"
+        )
     return all_match
 
 
@@ -416,7 +448,10 @@ if __name__ == "__main__":
         m = MODELS[key]
         try:
             comps, _ = run_model_test(
-                m["name"], m["path"], m["adapter"], num_decode=4,
+                m["name"],
+                m["path"],
+                m["adapter"],
+                num_decode=4,
                 dtype=m.get("dtype", "float16"),
                 load_fn=m.get("load_fn", False),
             )

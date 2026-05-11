@@ -82,20 +82,31 @@ def main():
     print(f"    Same prediction:   {same_pred:>4} ({same_pred/n:.1%})")
 
     if disagreements:
-        print(f"\n  Disagreements (first 10):")
-        print(f"  {'Idx':<5} {'GT':<10} {label_a + ' pred':<12} {'ok':<4} {label_b + ' pred':<12} {'ok':<4}")
+        print("\n  Disagreements (first 10):")
+        a_pred_label = label_a + " pred"
+        b_pred_label = label_b + " pred"
+        print(
+            f"  {'Idx':<5} {'GT':<10} {a_pred_label:<12} "
+            f"{'ok':<4} {b_pred_label:<12} {'ok':<4}"
+        )
         print(f"  {'-'*50}")
         for idx, ra, rb in disagreements[:10]:
-            print(f"  {idx:<5} {ra['ground_truth']:<10} {str(ra['predicted']):<12} "
-                  f"{'Y' if ra['correct'] else 'N':<4} "
-                  f"{str(rb['predicted']):<12} {'Y' if rb['correct'] else 'N':<4}")
+            print(
+                f"  {idx:<5} {ra['ground_truth']:<10} {str(ra['predicted']):<12} "
+                f"{'Y' if ra['correct'] else 'N':<4} "
+                f"{str(rb['predicted']):<12} {'Y' if rb['correct'] else 'N':<4}"
+            )
 
     # Token-by-token comparison
-    has_tokens = ("generated_token_ids" in next(iter(results_a.values()), {})
-                  and "generated_token_ids" in next(iter(results_b.values()), {}))
+    has_tokens = "generated_token_ids" in next(
+        iter(results_a.values()), {}
+    ) and "generated_token_ids" in next(iter(results_b.values()), {})
     if has_tokens:
-        print(f"\n  Token-level comparison:")
-        print(f"  {'Idx':<5} {'A toks':>7} {'B toks':>7} {'Match':>6} {'1st diff':>9} {'Match%':>7}")
+        print("\n  Token-level comparison:")
+        print(
+            f"  {'Idx':<5} {'A toks':>7} {'B toks':>7} "
+            f"{'Match':>6} {'1st diff':>9} {'Match%':>7}"
+        )
         print(f"  {'-'*45}")
 
         total_first_diff = []
@@ -120,22 +131,39 @@ def main():
             if first_diff >= 0:
                 total_first_diff.append(first_diff)
 
-            print(f"  {idx:<5} {len(toks_a):>7} {len(toks_b):>7} "
-                  f"{'EXACT' if exact else 'DIFF':>6} "
-                  f"{'—' if first_diff == -1 else str(first_diff):>9} "
-                  f"{match_pct:>6.1f}%")
+            print(
+                f"  {idx:<5} {len(toks_a):>7} {len(toks_b):>7} "
+                f"{'EXACT' if exact else 'DIFF':>6} "
+                f"{'—' if first_diff == -1 else str(first_diff):>9} "
+                f"{match_pct:>6.1f}%"
+            )
 
         if total_first_diff:
             avg_fd = sum(total_first_diff) / len(total_first_diff)
             min_fd = min(total_first_diff)
-            print(f"\n  First divergence: avg={avg_fd:.1f}, min={min_fd} (of {len(total_first_diff)} divergent samples)")
+            num_divergent = len(total_first_diff)
+            print(
+                f"\n  First divergence: avg={avg_fd:.1f}, min={min_fd} "
+                f"(of {num_divergent} divergent samples)"
+            )
         avg_mp = sum(total_match_pct) / len(total_match_pct) if total_match_pct else 0
         print(f"  Average token match: {avg_mp:.1f}%")
 
     # Avg generation time
-    avg_a = sum(r["time_s"] for r in results_a.values()) / len(results_a) if results_a else 0
-    avg_b = sum(r["time_s"] for r in results_b.values()) / len(results_b) if results_b else 0
-    print(f"\n  Avg time/sample:     {avg_a:.1f}s ({label_a})  vs  {avg_b:.1f}s ({label_b})")
+    avg_a = (
+        sum(r["time_s"] for r in results_a.values()) / len(results_a)
+        if results_a
+        else 0
+    )
+    avg_b = (
+        sum(r["time_s"] for r in results_b.values()) / len(results_b)
+        if results_b
+        else 0
+    )
+    print(
+        f"\n  Avg time/sample:     {avg_a:.1f}s ({label_a})  "
+        f"vs  {avg_b:.1f}s ({label_b})"
+    )
 
 
 if __name__ == "__main__":

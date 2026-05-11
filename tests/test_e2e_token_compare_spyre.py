@@ -81,6 +81,7 @@ MODEL_REGISTRY = {
 # HF reference: stock forward on CPU with DynamicCache
 # ---------------------------------------------------------------------------
 
+
 def hf_greedy_steps(model, input_ids, num_decode=4):
     """Run stock HF model for prefill + N decode steps on CPU."""
     from transformers import DynamicCache
@@ -98,8 +99,10 @@ def hf_greedy_steps(model, input_ids, num_decode=4):
 
         with torch.no_grad():
             out = model(
-                input_ids=ids, position_ids=position_ids,
-                past_key_values=past, use_cache=True,
+                input_ids=ids,
+                position_ids=position_ids,
+                past_key_values=past,
+                use_cache=True,
             )
 
         logits = out.logits[0, -1, :].float()
@@ -114,6 +117,7 @@ def hf_greedy_steps(model, input_ids, num_decode=4):
 # ---------------------------------------------------------------------------
 # Adapter forward on Spyre
 # ---------------------------------------------------------------------------
+
 
 def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     """Run adapter forward on Spyre for prefill + N decode steps."""
@@ -142,16 +146,30 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     position_ids = torch.zeros((batch_size, padded_len), dtype=torch.long)
     position_ids[:, prompt_offset:] = torch.arange(seq_len)
 
-    max_cache_len = padded_len + math.ceil(num_decode / BLOCK_SIZE) * BLOCK_SIZE + BLOCK_SIZE
+    max_cache_len = (
+        padded_len + math.ceil(num_decode / BLOCK_SIZE) * BLOCK_SIZE + BLOCK_SIZE
+    )
 
     key_caches = [
-        torch.zeros(batch_size, num_kv_heads, max_cache_len, head_dim,
-                     dtype=torch.float16, device=DEVICE)
+        torch.zeros(
+            batch_size,
+            num_kv_heads,
+            max_cache_len,
+            head_dim,
+            dtype=torch.float16,
+            device=DEVICE,
+        )
         for _ in range(num_layers)
     ]
     value_caches = [
-        torch.zeros(batch_size, num_kv_heads, max_cache_len, v_head_dim,
-                     dtype=torch.float16, device=DEVICE)
+        torch.zeros(
+            batch_size,
+            num_kv_heads,
+            max_cache_len,
+            v_head_dim,
+            dtype=torch.float16,
+            device=DEVICE,
+        )
         for _ in range(num_layers)
     ]
 
@@ -160,14 +178,21 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     # --- Prefill ---
     from hf_adapters.hf_common import build_prefill_mask
 
-    prefill_mask = build_prefill_mask(batch_size, padded_len, max_cache_len,
-                                      prompt_offset)
+    prefill_mask = build_prefill_mask(
+        batch_size, padded_len, max_cache_len, prompt_offset
+    )
 
     with torch.no_grad():
         logits = run_forward_fn(
-            model, padded_ids.to(DEVICE), position_ids.to(DEVICE),
-            prefill_mask.to(DEVICE), key_caches, value_caches,
-            is_filling=False, token_index=0, cache_position=0,
+            model,
+            padded_ids.to(DEVICE),
+            position_ids.to(DEVICE),
+            prefill_mask.to(DEVICE),
+            key_caches,
+            value_caches,
+            is_filling=False,
+            token_index=0,
+            cache_position=0,
         )
     logits_cpu = logits.to("cpu")[0, -1, :].float()[:vocab_size]
     token = logits_cpu.argmax().item()
@@ -196,13 +221,15 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
         next_input = result[:, -BLOCK_SIZE:].to(DEVICE)
 
         if is_filling:
-            fill_pos = (
-                current_cache_len - BLOCK_SIZE + tokens_in_block
-            )
+            fill_pos = current_cache_len - BLOCK_SIZE + tokens_in_block
             with torch.no_grad():
                 logits = run_forward_fn(
-                    model, next_input, decode_pos.to(DEVICE),
-                    fill_mask_device, key_caches, value_caches,
+                    model,
+                    next_input,
+                    decode_pos.to(DEVICE),
+                    fill_mask_device,
+                    key_caches,
+                    value_caches,
                     is_filling=True,
                     token_index=tokens_in_block,
                     cache_position=fill_pos,
@@ -214,14 +241,22 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
             current_cache_len += BLOCK_SIZE
             decode_pos = decode_pos + BLOCK_SIZE
             exp_mask = build_expansion_mask(
-                batch_size, BLOCK_SIZE, max_cache_len,
-                current_cache_len, prompt_offset,
+                batch_size,
+                BLOCK_SIZE,
+                max_cache_len,
+                current_cache_len,
+                prompt_offset,
             )
             with torch.no_grad():
                 logits = run_forward_fn(
-                    model, next_input, decode_pos.to(DEVICE),
-                    exp_mask.to(DEVICE), key_caches, value_caches,
-                    is_filling=False, token_index=0,
+                    model,
+                    next_input,
+                    decode_pos.to(DEVICE),
+                    exp_mask.to(DEVICE),
+                    key_caches,
+                    value_caches,
+                    is_filling=False,
+                    token_index=0,
                     cache_position=current_cache_len - BLOCK_SIZE,
                 )
             logits_cpu = logits.to("cpu")
@@ -244,6 +279,7 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
 # ---------------------------------------------------------------------------
 # Comparison
 # ---------------------------------------------------------------------------
+
 
 def compare_results(hf_results, adapter_results, tokenizer, model_name):
     """Compare HF vs adapter results, return comparison rows."""
@@ -270,19 +306,21 @@ def compare_results(hf_results, adapter_results, tokenizer, model_name):
         h_str = tokenizer.decode([hf_r["token"]])
         a_str = tokenizer.decode([ad_r["token"]])
 
-        rows.append({
-            "model": model_name,
-            "step": step_label,
-            "hf_token": hf_r["token"],
-            "hf_str": h_str,
-            "spyre_token": ad_r["token"],
-            "spyre_str": a_str,
-            "top1_match": match,
-            "max_diff": max_diff,
-            "mean_diff": mean_diff,
-            "hf_nan": h_logits.isnan().any().item(),
-            "spyre_nan": a_logits.isnan().any().item(),
-        })
+        rows.append(
+            {
+                "model": model_name,
+                "step": step_label,
+                "hf_token": hf_r["token"],
+                "hf_str": h_str,
+                "spyre_token": ad_r["token"],
+                "spyre_str": a_str,
+                "top1_match": match,
+                "max_diff": max_diff,
+                "mean_diff": mean_diff,
+                "hf_nan": h_logits.isnan().any().item(),
+                "spyre_nan": a_logits.isnan().any().item(),
+            }
+        )
     return rows
 
 
@@ -299,7 +337,9 @@ def run_model_test(model_key, num_decode=4):
 
     tokenizer = AutoTokenizer.from_pretrained(info["path"])
     model = AutoModelForCausalLM.from_pretrained(
-        info["path"], torch_dtype=torch.float16, device_map="cpu",
+        info["path"],
+        torch_dtype=torch.float16,
+        device_map="cpu",
     )
     model.eval()
     model.requires_grad_(False)
@@ -320,7 +360,10 @@ def run_model_test(model_key, num_decode=4):
     model.to(DEVICE)
     print("  Running adapter on Spyre ...")
     adapter_results = adapter_greedy_steps(
-        adapter._run_forward, model, input_ids, num_decode=num_decode,
+        adapter._run_forward,
+        model,
+        input_ids,
+        num_decode=num_decode,
     )
 
     rows = compare_results(hf_results, adapter_results, tokenizer, info["name"])
@@ -331,22 +374,29 @@ def run_model_test(model_key, num_decode=4):
 # Output
 # ---------------------------------------------------------------------------
 
+
 def print_table(all_rows):
     """Print markdown comparison table."""
-    print(f"\n## E2E Token Comparison: HF (CPU) vs Adapter (Spyre)\n")
-    print(f"| Model | Step | HF Token | Spyre Token | Match "
-          f"| Max Diff | Mean Diff | HF NaN | Spyre NaN |")
-    print(f"|-------|------|----------|-------------|-------"
-          f"|----------|-----------|--------|-----------|")
+    print("\n## E2E Token Comparison: HF (CPU) vs Adapter (Spyre)\n")
+    print(
+        "| Model | Step | HF Token | Spyre Token | Match "
+        "| Max Diff | Mean Diff | HF NaN | Spyre NaN |"
+    )
+    print(
+        "|-------|------|----------|-------------|-------"
+        "|----------|-----------|--------|-----------|"
+    )
     for r in all_rows:
         match = "OK" if r["top1_match"] else "FAIL"
         hf_col = f"{r['hf_token']:>5} {r['hf_str']!r}"
         sp_col = f"{r['spyre_token']:>5} {r['spyre_str']!r}"
         hn = "Yes" if r["hf_nan"] else "No"
         sn = "Yes" if r["spyre_nan"] else "No"
-        print(f"| {r['model']} | {r['step']} | {hf_col} | {sp_col} "
-              f"| {match} | {r['max_diff']:.4f} | {r['mean_diff']:.6f} "
-              f"| {hn} | {sn} |")
+        print(
+            f"| {r['model']} | {r['step']} | {hf_col} | {sp_col} "
+            f"| {match} | {r['max_diff']:.4f} | {r['mean_diff']:.6f} "
+            f"| {hn} | {sn} |"
+        )
 
 
 if __name__ == "__main__":

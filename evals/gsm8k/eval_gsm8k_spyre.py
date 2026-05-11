@@ -9,13 +9,17 @@ Usage (on Spyre pod):
 import argparse
 import time
 
-import torch
 import torch_spyre  # noqa: F401
-
+from gsm8k_common import (
+    extract_answer,
+    extract_ground_truth,
+    format_prompt,
+    load_gsm8k,
+    save_results,
+)
 from transformers import AutoTokenizer
-from hf_adapters.hf_qwen3 import load_model, generate
 
-from gsm8k_common import load_gsm8k, format_prompt, extract_answer, extract_ground_truth, save_results
+from hf_adapters.hf_qwen3 import generate, load_model
 
 
 def main():
@@ -54,7 +58,9 @@ def main():
 
         t0 = time.time()
         outputs = generate(
-            model, tokenizer, [prompt_text],
+            model,
+            tokenizer,
+            [prompt_text],
             max_new_tokens=args.max_new_tokens,
             do_sample=False,
         )
@@ -70,21 +76,26 @@ def main():
 
         gen_token_ids = tokenizer.encode(gen_text, add_special_tokens=False)
 
-        results.append({
-            "index": i,
-            "question": sample["question"],
-            "ground_truth": ground_truth,
-            "predicted": predicted,
-            "correct": is_correct,
-            "generated_text": gen_text,
-            "generated_token_ids": gen_token_ids,
-            "time_s": round(elapsed, 2),
-            "prompt_tokens": len(tokenizer.encode(prompt_text)),
-            "gen_tokens": len(gen_token_ids),
-        })
+        results.append(
+            {
+                "index": i,
+                "question": sample["question"],
+                "ground_truth": ground_truth,
+                "predicted": predicted,
+                "correct": is_correct,
+                "generated_text": gen_text,
+                "generated_token_ids": gen_token_ids,
+                "time_s": round(elapsed, 2),
+                "prompt_tokens": len(tokenizer.encode(prompt_text)),
+                "gen_tokens": len(gen_token_ids),
+            }
+        )
 
         status = "OK" if is_correct else "WRONG"
-        print(f"[{i+1}/{len(samples)}] {status}  pred={predicted}  gt={ground_truth}  ({elapsed:.1f}s)")
+        print(
+            f"[{i+1}/{len(samples)}] {status}  pred={predicted}  "
+            f"gt={ground_truth}  ({elapsed:.1f}s)"
+        )
 
     accuracy = correct / len(results) if results else 0
     metadata = {

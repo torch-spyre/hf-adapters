@@ -119,31 +119,38 @@ def apply_rope_matmul(x, selected_freqs):
 # ---------------------------------------------------------------------------
 
 
-def kv_cache_update(k, v, key_cache, value_cache,
-                    is_filling, token_index, cache_position):
+def kv_cache_update(
+    k, v, key_cache, value_cache, is_filling, token_index, cache_position
+):
     """Update pre-allocated KV cache via overwrite at cache_position.
 
     All args are tensors; is_filling/token_index/cache_position are Python
     scalars that torch.compile specializes on.
     """
     if is_filling:
-        k_write = k[:, :, token_index:token_index + 1, :]
-        v_write = v[:, :, token_index:token_index + 1, :]
+        k_write = k[:, :, token_index : token_index + 1, :]
+        v_write = v[:, :, token_index : token_index + 1, :]
     else:
         k_write = k
         v_write = v
 
     if key_cache.device.type == "spyre":
         torch.ops.spyre.overwrite(
-            input=k_write, output=key_cache, dims=[2], offsets=[cache_position],
+            input=k_write,
+            output=key_cache,
+            dims=[2],
+            offsets=[cache_position],
         )
         torch.ops.spyre.overwrite(
-            input=v_write, output=value_cache, dims=[2], offsets=[cache_position],
+            input=v_write,
+            output=value_cache,
+            dims=[2],
+            offsets=[cache_position],
         )
     else:
         seq_len = k_write.shape[2]
-        key_cache[:, :, cache_position:cache_position + seq_len, :] = k_write
-        value_cache[:, :, cache_position:cache_position + seq_len, :] = v_write
+        key_cache[:, :, cache_position : cache_position + seq_len, :] = k_write
+        value_cache[:, :, cache_position : cache_position + seq_len, :] = v_write
 
     return key_cache, value_cache
 
@@ -153,8 +160,9 @@ def kv_cache_update(k, v, key_cache, value_cache,
 # ---------------------------------------------------------------------------
 
 
-def pad_attention_heads(model, layers, orig_head_dim, padded_head_dim,
-                        num_heads, num_kv_heads):
+def pad_attention_heads(
+    model, layers, orig_head_dim, padded_head_dim, num_heads, num_kv_heads
+):
     """Zero-pad Q/K/V/O attention projections to a larger head_dim.
 
     Q and K use interleaved padding compatible with the RoPE [2, D/2]
@@ -182,12 +190,16 @@ def pad_attention_heads(model, layers, orig_head_dim, padded_head_dim,
         num_kv_heads: Number of key/value heads.
     """
     assert orig_head_dim % 2 == 0, f"head_dim must be even, got {orig_head_dim}"
-    assert padded_head_dim % 2 == 0, f"padded head_dim must be even, got {padded_head_dim}"
+    assert (
+        padded_head_dim % 2 == 0
+    ), f"padded head_dim must be even, got {padded_head_dim}"
     assert padded_head_dim > orig_head_dim, (
-        f"padded_head_dim ({padded_head_dim}) must exceed orig_head_dim ({orig_head_dim})"
+        f"padded_head_dim ({padded_head_dim}) must exceed "
+        f"orig_head_dim ({orig_head_dim})"
     )
     assert padded_head_dim // 2 >= BLOCK_SIZE, (
-        f"padded head_dim/2 ({padded_head_dim // 2}) must be >= BLOCK_SIZE ({BLOCK_SIZE})"
+        f"padded head_dim/2 ({padded_head_dim // 2}) must be >= "
+        f"BLOCK_SIZE ({BLOCK_SIZE})"
     )
 
     orig_half = orig_head_dim // 2
@@ -201,21 +213,23 @@ def pad_attention_heads(model, layers, orig_head_dim, padded_head_dim,
         for h in range(n_heads):
             s = h * orig_head_dim
             d = h * padded_head_dim
-            new_w[d:d + orig_half, :] = w[s:s + orig_half, :]
-            new_w[d + padded_half:d + padded_half + orig_half, :] = (
-                w[s + orig_half:s + orig_head_dim, :]
-            )
-        new_proj = nn.Linear(hidden, n_heads * padded_head_dim, bias=proj.bias is not None)
+            new_w[d : d + orig_half, :] = w[s : s + orig_half, :]
+            new_w[d + padded_half : d + padded_half + orig_half, :] = w[
+                s + orig_half : s + orig_head_dim, :
+            ]
+        new_proj = nn.Linear(
+            hidden, n_heads * padded_head_dim, bias=proj.bias is not None
+        )
         new_proj.weight = nn.Parameter(new_w, requires_grad=False)
         if proj.bias is not None:
             new_b = torch.zeros(n_heads * padded_head_dim, dtype=proj.bias.dtype)
             for h in range(n_heads):
                 s = h * orig_head_dim
                 d = h * padded_head_dim
-                new_b[d:d + orig_half] = proj.bias[s:s + orig_half]
-                new_b[d + padded_half:d + padded_half + orig_half] = (
-                    proj.bias[s + orig_half:s + orig_head_dim]
-                )
+                new_b[d : d + orig_half] = proj.bias[s : s + orig_half]
+                new_b[d + padded_half : d + padded_half + orig_half] = proj.bias[
+                    s + orig_half : s + orig_head_dim
+                ]
             new_proj.bias = nn.Parameter(new_b, requires_grad=False)
         return new_proj
 
@@ -228,15 +242,17 @@ def pad_attention_heads(model, layers, orig_head_dim, padded_head_dim,
         for h in range(n_heads):
             s = h * orig_head_dim
             d = h * padded_head_dim
-            new_w[d:d + orig_head_dim, :] = w[s:s + orig_head_dim, :]
-        new_proj = nn.Linear(hidden, n_heads * padded_head_dim, bias=proj.bias is not None)
+            new_w[d : d + orig_head_dim, :] = w[s : s + orig_head_dim, :]
+        new_proj = nn.Linear(
+            hidden, n_heads * padded_head_dim, bias=proj.bias is not None
+        )
         new_proj.weight = nn.Parameter(new_w, requires_grad=False)
         if proj.bias is not None:
             new_b = torch.zeros(n_heads * padded_head_dim, dtype=proj.bias.dtype)
             for h in range(n_heads):
                 s = h * orig_head_dim
                 d = h * padded_head_dim
-                new_b[d:d + orig_head_dim] = proj.bias[s:s + orig_head_dim]
+                new_b[d : d + orig_head_dim] = proj.bias[s : s + orig_head_dim]
             new_proj.bias = nn.Parameter(new_b, requires_grad=False)
         return new_proj
 
@@ -248,8 +264,10 @@ def pad_attention_heads(model, layers, orig_head_dim, padded_head_dim,
         for h in range(n_heads):
             s = h * orig_head_dim
             d = h * padded_head_dim
-            new_w[:, d:d + orig_head_dim] = w[:, s:s + orig_head_dim]
-        new_proj = nn.Linear(n_heads * padded_head_dim, hidden, bias=proj.bias is not None)
+            new_w[:, d : d + orig_head_dim] = w[:, s : s + orig_head_dim]
+        new_proj = nn.Linear(
+            n_heads * padded_head_dim, hidden, bias=proj.bias is not None
+        )
         new_proj.weight = nn.Parameter(new_w, requires_grad=False)
         if proj.bias is not None:
             new_proj.bias = nn.Parameter(proj.bias.clone(), requires_grad=False)
@@ -274,13 +292,16 @@ def patch_rmsnorm(rmsnorm_cls):
     Args:
         rmsnorm_cls: The RMSNorm class to patch (e.g. GraniteRMSNorm, Qwen3RMSNorm).
     """
+
     def _forward_fp16(self, hidden_states):
         if hidden_states.device.type == "spyre":
             # Spyre path: no dtype conversion, stay in fp16
             variance = (hidden_states * hidden_states).mean(-1, keepdim=True)
             eps = torch.ops.spyre.full(
-                (1,), self.variance_epsilon,
-                hidden_states.device, torch.float16,
+                (1,),
+                self.variance_epsilon,
+                hidden_states.device,
+                torch.float16,
             )
             return self.weight * (hidden_states * torch.rsqrt(variance + eps))
         else:
@@ -314,16 +335,15 @@ def build_prefill_mask(batch_size, padded_len, max_cache_len, prompt_offset):
     mask = torch.zeros((batch_size, 1, padded_len, max_cache_len), dtype=torch.float16)
     mask[:, :, :, :prompt_offset] = -torch.inf
     for i in range(padded_len):
-        mask[:, :, i, i + 1:] = -torch.inf
+        mask[:, :, i, i + 1 :] = -torch.inf
     return mask
 
 
-def build_expansion_mask(batch_size, block_size, max_cache_len,
-                         used_cache_len, prompt_offset):
+def build_expansion_mask(
+    batch_size, block_size, max_cache_len, used_cache_len, prompt_offset
+):
     """Causal mask for an expansion decode step."""
-    mask = torch.zeros(
-        (batch_size, 1, block_size, max_cache_len), dtype=torch.float16
-    )
+    mask = torch.zeros((batch_size, 1, block_size, max_cache_len), dtype=torch.float16)
     mask[:, :, :, :prompt_offset] = -torch.inf
     for j in range(block_size):
         attend_up_to = used_cache_len - block_size + j + 1
@@ -367,7 +387,9 @@ def load_model_common(model_path, prepare_fn, dtype=torch.float16):
     _patch_torch_empty()
     print(f"Loading model from {model_path} ...")
     model = AutoModelForCausalLM.from_pretrained(
-        model_path, dtype=dtype, device_map="cpu",
+        model_path,
+        dtype=dtype,
+        device_map="cpu",
     )
     model.eval()
     model.requires_grad_(False)
@@ -378,9 +400,17 @@ def load_model_common(model_path, prepare_fn, dtype=torch.float16):
     return model
 
 
-def generate(run_forward_fn: Callable, model, tokenizer, prompts,
-             max_new_tokens=128, do_sample=False, temperature=1.0,
-             top_k=50, timing=False):
+def generate(
+    run_forward_fn: Callable,
+    model,
+    tokenizer,
+    prompts,
+    max_new_tokens=128,
+    do_sample=False,
+    temperature=1.0,
+    top_k=50,
+    timing=False,
+):
     """Model-agnostic generation with padded 64-block decode.
 
     Args:
@@ -399,7 +429,10 @@ def generate(run_forward_fn: Callable, model, tokenizer, prompts,
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     encoded = tokenizer(
-        prompts, return_tensors="pt", padding=True, return_attention_mask=True,
+        prompts,
+        return_tensors="pt",
+        padding=True,
+        return_attention_mask=True,
     )
     input_ids = encoded["input_ids"]
     batch_size = input_ids.shape[0]
@@ -426,13 +459,25 @@ def generate(run_forward_fn: Callable, model, tokenizer, prompts,
     )
     v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
     key_caches = [
-        torch.zeros(batch_size, num_kv_heads, max_cache_len, head_dim,
-                     dtype=torch.float16, device=DEVICE)
+        torch.zeros(
+            batch_size,
+            num_kv_heads,
+            max_cache_len,
+            head_dim,
+            dtype=torch.float16,
+            device=DEVICE,
+        )
         for _ in range(num_layers)
     ]
     value_caches = [
-        torch.zeros(batch_size, num_kv_heads, max_cache_len, v_head_dim,
-                     dtype=torch.float16, device=DEVICE)
+        torch.zeros(
+            batch_size,
+            num_kv_heads,
+            max_cache_len,
+            v_head_dim,
+            dtype=torch.float16,
+            device=DEVICE,
+        )
         for _ in range(num_layers)
     ]
 
@@ -456,9 +501,15 @@ def generate(run_forward_fn: Callable, model, tokenizer, prompts,
                 batch_size, padded_len, max_cache_len, prompt_offset
             )
             logits = run_forward_fn(
-                model, input_ids.to(DEVICE), position_ids.to(DEVICE),
-                prefill_mask.to(DEVICE), key_caches, value_caches,
-                is_filling=False, token_index=0, cache_position=0,
+                model,
+                input_ids.to(DEVICE),
+                position_ids.to(DEVICE),
+                prefill_mask.to(DEVICE),
+                key_caches,
+                value_caches,
+                is_filling=False,
+                token_index=0,
+                cache_position=0,
             )
             logits_cpu = logits.to("cpu")
             next_logits = logits_cpu[0, -1, :]
@@ -470,9 +521,7 @@ def generate(run_forward_fn: Callable, model, tokenizer, prompts,
             #   decode_pos = decode_pos + BLOCK_SIZE
             # we need: initial[j] + BLOCK_SIZE = prompt_length + j
             # i.e.  initial[j] = prompt_length + j - BLOCK_SIZE
-            decode_pos = torch.zeros(
-                (batch_size, BLOCK_SIZE), dtype=torch.long
-            )
+            decode_pos = torch.zeros((batch_size, BLOCK_SIZE), dtype=torch.long)
             for j in range(BLOCK_SIZE):
                 decode_pos[:, j] = prompt_length + j - BLOCK_SIZE
 
@@ -481,12 +530,14 @@ def generate(run_forward_fn: Callable, model, tokenizer, prompts,
             next_input = result[:, -BLOCK_SIZE:].to(DEVICE)
 
             if is_filling:
-                fill_pos = (
-                    current_cache_len - BLOCK_SIZE + tokens_in_block
-                )
+                fill_pos = current_cache_len - BLOCK_SIZE + tokens_in_block
                 logits = run_forward_fn(
-                    model, next_input, decode_pos.to(DEVICE),
-                    fill_mask_device, key_caches, value_caches,
+                    model,
+                    next_input,
+                    decode_pos.to(DEVICE),
+                    fill_mask_device,
+                    key_caches,
+                    value_caches,
                     is_filling=True,
                     token_index=tokens_in_block,
                     cache_position=fill_pos,
@@ -499,13 +550,21 @@ def generate(run_forward_fn: Callable, model, tokenizer, prompts,
                 current_cache_len += BLOCK_SIZE
                 decode_pos = decode_pos + BLOCK_SIZE
                 exp_mask = build_expansion_mask(
-                    batch_size, BLOCK_SIZE, max_cache_len,
-                    current_cache_len, prompt_offset,
+                    batch_size,
+                    BLOCK_SIZE,
+                    max_cache_len,
+                    current_cache_len,
+                    prompt_offset,
                 )
                 logits = run_forward_fn(
-                    model, next_input, decode_pos.to(DEVICE),
-                    exp_mask.to(DEVICE), key_caches, value_caches,
-                    is_filling=False, token_index=0,
+                    model,
+                    next_input,
+                    decode_pos.to(DEVICE),
+                    exp_mask.to(DEVICE),
+                    key_caches,
+                    value_caches,
+                    is_filling=False,
+                    token_index=0,
                     cache_position=current_cache_len - BLOCK_SIZE,
                 )
                 logits_cpu = logits.to("cpu")
@@ -530,9 +589,7 @@ def generate(run_forward_fn: Callable, model, tokenizer, prompts,
         if tokens_in_block == BLOCK_SIZE - 1:
             result = F.pad(result, (0, BLOCK_SIZE))
         tokens_in_block = (tokens_in_block + 1) % BLOCK_SIZE
-        grab_idx = (
-            (BLOCK_SIZE - tokens_in_block) if tokens_in_block > 0 else BLOCK_SIZE
-        )
+        grab_idx = (BLOCK_SIZE - tokens_in_block) if tokens_in_block > 0 else BLOCK_SIZE
         result[:, -grab_idx] = next_val.squeeze()
         num_generated += 1
 
@@ -545,11 +602,7 @@ def generate(run_forward_fn: Callable, model, tokenizer, prompts,
         if len(times_list) > 1:
             avg = sum(times_list[1:]) / len(times_list[1:])
             print(f"Avg next-token latency: {avg*1000:.3f} ms")
-        print(
-            "Per-token: "
-            + ", ".join(f"{t*1000:.1f}" for t in times_list)
-            + " ms"
-        )
+        print("Per-token: " + ", ".join(f"{t*1000:.1f}" for t in times_list) + " ms")
 
     # Decode text — use num_generated to extract exactly the tokens we placed,
     # avoiding the old nonzero heuristic which fails when token_id 0 is valid.
@@ -592,11 +645,18 @@ def make_standard_gqa_block(layer):
     mlp = layer.mlp
     input_ln = layer.input_layernorm
     post_attn_ln = layer.post_attention_layernorm
-    v_head_dim = getattr(attn, 'v_head_dim', attn.head_dim)
+    v_head_dim = getattr(attn, "v_head_dim", attn.head_dim)
 
-    def block_forward(hidden_states, selected_freqs, attn_mask,
-                      key_cache, value_cache,
-                      is_filling, token_index, cache_position):
+    def block_forward(
+        hidden_states,
+        selected_freqs,
+        attn_mask,
+        key_cache,
+        value_cache,
+        is_filling,
+        token_index,
+        cache_position,
+    ):
         residual = hidden_states
         h = input_ln(hidden_states)
 
@@ -609,13 +669,23 @@ def make_standard_gqa_block(layer):
         k = apply_rope_matmul(k, selected_freqs)
 
         key_cache, value_cache = kv_cache_update(
-            k, v, key_cache, value_cache,
-            is_filling, token_index, cache_position,
+            k,
+            v,
+            key_cache,
+            value_cache,
+            is_filling,
+            token_index,
+            cache_position,
         )
 
         attn_out = F.scaled_dot_product_attention(
-            q, key_cache, value_cache,
-            attn_mask=attn_mask, dropout_p=0.0, scale=attn.scaling, enable_gqa=True,
+            q,
+            key_cache,
+            value_cache,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            scale=attn.scaling,
+            enable_gqa=True,
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
         attn_out = attn.o_proj(attn_out)
@@ -632,9 +702,17 @@ def make_standard_gqa_block(layer):
     return torch.compile(block_forward, dynamic=False)
 
 
-def standard_gqa_forward(model, input_ids, position_ids, attn_mask,
-                         key_caches, value_caches,
-                         is_filling, token_index, cache_position):
+def standard_gqa_forward(
+    model,
+    input_ids,
+    position_ids,
+    attn_mask,
+    key_caches,
+    value_caches,
+    is_filling,
+    token_index,
+    cache_position,
+):
     """Standard GQA forward: embedding, RoPE, compiled blocks, norm, LM head."""
     h = model.model.embed_tokens(input_ids)
 
@@ -642,9 +720,14 @@ def standard_gqa_forward(model, input_ids, position_ids, attn_mask,
 
     for i, compiled_block in enumerate(model._spyre_compiled_blocks):
         h, key_caches[i], value_caches[i] = compiled_block(
-            h, selected_freqs, attn_mask,
-            key_caches[i], value_caches[i],
-            is_filling, token_index, cache_position,
+            h,
+            selected_freqs,
+            attn_mask,
+            key_caches[i],
+            value_caches[i],
+            is_filling,
+            token_index,
+            cache_position,
         )
 
     h = model.model.norm(h)
@@ -661,23 +744,27 @@ def prepare_standard_gqa(model, rmsnorm_cls):
     """
     cfg = model.config
     orig_head_dim = (
-        getattr(cfg, "head_dim", None)
-        or cfg.hidden_size // cfg.num_attention_heads
+        getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
     )
 
     padded_head_dim = None
     stick_aligned_head_dim = (
-        ((orig_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)) * (2 * BLOCK_SIZE)
-    )
+        (orig_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)
+    ) * (2 * BLOCK_SIZE)
     if stick_aligned_head_dim > orig_head_dim:
         padded_head_dim = stick_aligned_head_dim
         pad_attention_heads(
-            model, model.model.layers, orig_head_dim, padded_head_dim,
-            cfg.num_attention_heads, cfg.num_key_value_heads,
+            model,
+            model.model.layers,
+            orig_head_dim,
+            padded_head_dim,
+            cfg.num_attention_heads,
+            cfg.num_key_value_heads,
         )
 
     model._spyre_rope = PrecomputedRotaryEmbedding(
-        model.model.rotary_emb, padded_head_dim=padded_head_dim,
+        model.model.rotary_emb,
+        padded_head_dim=padded_head_dim,
     )
     patch_rmsnorm(rmsnorm_cls)
     pad_lm_head(model)

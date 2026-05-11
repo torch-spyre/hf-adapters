@@ -39,16 +39,24 @@ SEQ_LEN = 64  # prefill sequence length (one Spyre stick)
 # Model registry: tiny configs for each model family (no weight download)
 # ---------------------------------------------------------------------------
 
+
 def _make_qwen3_config():
     from transformers import AutoConfig
+
     try:
         cfg = AutoConfig.from_pretrained("Qwen/Qwen3-0.6B")
     except Exception:
         from transformers import Qwen3Config
+
         cfg = Qwen3Config(
-            hidden_size=1024, num_attention_heads=16, num_key_value_heads=2,
-            intermediate_size=2560, num_hidden_layers=3, vocab_size=151936,
-            rms_norm_eps=1e-6, max_position_embeddings=4096,
+            hidden_size=1024,
+            num_attention_heads=16,
+            num_key_value_heads=2,
+            intermediate_size=2560,
+            num_hidden_layers=3,
+            vocab_size=151936,
+            rms_norm_eps=1e-6,
+            max_position_embeddings=4096,
         )
     cfg.num_hidden_layers = 3
     cfg._attn_implementation = "eager"
@@ -57,6 +65,7 @@ def _make_qwen3_config():
 
 def _make_granite_config():
     from transformers import AutoConfig
+
     try:
         # Use 8B config (head_dim=128, D/2=64 = one stick — compiles on Spyre).
         # The 2B config has head_dim=64 (D/2=32) which triggers a stickify
@@ -64,12 +73,20 @@ def _make_granite_config():
         cfg = AutoConfig.from_pretrained("ibm-granite/granite-3.3-8b-instruct")
     except Exception:
         from transformers import GraniteConfig
+
         cfg = GraniteConfig(
-            hidden_size=4096, num_attention_heads=32, num_key_value_heads=8,
-            intermediate_size=10944, num_hidden_layers=3, vocab_size=49152,
-            rms_norm_eps=1e-5, max_position_embeddings=4096,
-            embedding_multiplier=12.0, residual_multiplier=0.22,
-            attention_multiplier=0.0625, logits_scaling=13.0,
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+            intermediate_size=10944,
+            num_hidden_layers=3,
+            vocab_size=49152,
+            rms_norm_eps=1e-5,
+            max_position_embeddings=4096,
+            embedding_multiplier=12.0,
+            residual_multiplier=0.22,
+            attention_multiplier=0.0625,
+            logits_scaling=13.0,
         )
     cfg.num_hidden_layers = 3
     cfg._attn_implementation = "eager"
@@ -78,16 +95,25 @@ def _make_granite_config():
 
 def _make_granite4_config():
     from transformers import AutoConfig
+
     try:
         cfg = AutoConfig.from_pretrained("ibm-granite/granite-4.0-1b-base")
     except Exception:
         from transformers import GraniteMoeHybridConfig
+
         cfg = GraniteMoeHybridConfig(
-            hidden_size=2048, num_attention_heads=16, num_key_value_heads=4,
-            shared_intermediate_size=5632, num_hidden_layers=3, vocab_size=49152,
-            rms_norm_eps=1e-5, max_position_embeddings=4096,
-            embedding_multiplier=12.0, residual_multiplier=0.22,
-            attention_multiplier=0.0625, logits_scaling=13.0,
+            hidden_size=2048,
+            num_attention_heads=16,
+            num_key_value_heads=4,
+            shared_intermediate_size=5632,
+            num_hidden_layers=3,
+            vocab_size=49152,
+            rms_norm_eps=1e-5,
+            max_position_embeddings=4096,
+            embedding_multiplier=12.0,
+            residual_multiplier=0.22,
+            attention_multiplier=0.0625,
+            logits_scaling=13.0,
             num_local_experts=0,
             layers_block_type=["attention"] * 3,
         )
@@ -103,14 +129,21 @@ def _make_granite4_config():
 
 def _make_smollm3_config():
     from transformers import AutoConfig
+
     try:
         cfg = AutoConfig.from_pretrained("HuggingFaceTB/SmolLM3-3B-Base")
     except Exception:
         from transformers import SmolLM3Config
+
         cfg = SmolLM3Config(
-            hidden_size=2048, num_attention_heads=16, num_key_value_heads=4,
-            intermediate_size=11008, num_hidden_layers=4, vocab_size=128256,
-            rms_norm_eps=1e-6, max_position_embeddings=4096,
+            hidden_size=2048,
+            num_attention_heads=16,
+            num_key_value_heads=4,
+            intermediate_size=11008,
+            num_hidden_layers=4,
+            vocab_size=128256,
+            rms_norm_eps=1e-6,
+            max_position_embeddings=4096,
             no_rope_layer_interval=4,
         )
     cfg.num_hidden_layers = 4  # keep 4 so NoPE pattern (interval=4) is tested
@@ -128,14 +161,21 @@ def _make_smollm3_config():
 
 def _make_llama_config():
     from transformers import AutoConfig
+
     try:
         cfg = AutoConfig.from_pretrained("meta-llama/Llama-3.2-3B")
     except Exception:
         from transformers import LlamaConfig
+
         cfg = LlamaConfig(
-            hidden_size=3072, num_attention_heads=24, num_key_value_heads=8,
-            intermediate_size=8192, num_hidden_layers=3, vocab_size=128256,
-            rms_norm_eps=1e-5, max_position_embeddings=4096,
+            hidden_size=3072,
+            num_attention_heads=24,
+            num_key_value_heads=8,
+            intermediate_size=8192,
+            num_hidden_layers=3,
+            vocab_size=128256,
+            rms_norm_eps=1e-5,
+            max_position_embeddings=4096,
         )
     cfg.num_hidden_layers = 3
     cfg._attn_implementation = "eager"
@@ -144,14 +184,21 @@ def _make_llama_config():
 
 def _make_qwen2_config():
     from transformers import AutoConfig
+
     try:
         cfg = AutoConfig.from_pretrained("Qwen/Qwen2.5-7B")
     except Exception:
         from transformers import Qwen2Config
+
         cfg = Qwen2Config(
-            hidden_size=3584, num_attention_heads=28, num_key_value_heads=4,
-            intermediate_size=18944, num_hidden_layers=3, vocab_size=152064,
-            rms_norm_eps=1e-6, max_position_embeddings=4096,
+            hidden_size=3584,
+            num_attention_heads=28,
+            num_key_value_heads=4,
+            intermediate_size=18944,
+            num_hidden_layers=3,
+            vocab_size=152064,
+            rms_norm_eps=1e-6,
+            max_position_embeddings=4096,
         )
     cfg.num_hidden_layers = 3
     cfg._attn_implementation = "eager"
@@ -160,14 +207,21 @@ def _make_qwen2_config():
 
 def _make_mistral_config():
     from transformers import AutoConfig
+
     try:
         cfg = AutoConfig.from_pretrained("mistralai/Mistral-7B-v0.3")
     except Exception:
         from transformers import MistralConfig
+
         cfg = MistralConfig(
-            hidden_size=4096, num_attention_heads=32, num_key_value_heads=8,
-            intermediate_size=14336, num_hidden_layers=3, vocab_size=32768,
-            rms_norm_eps=1e-5, max_position_embeddings=4096,
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+            intermediate_size=14336,
+            num_hidden_layers=3,
+            vocab_size=32768,
+            rms_norm_eps=1e-5,
+            max_position_embeddings=4096,
         )
     cfg.num_hidden_layers = 3
     cfg._attn_implementation = "eager"
@@ -176,13 +230,19 @@ def _make_mistral_config():
 
 def _make_olmo_config():
     from transformers import AutoConfig
+
     try:
         cfg = AutoConfig.from_pretrained("allenai/OLMo-1B-hf")
     except Exception:
         from transformers import OlmoConfig
+
         cfg = OlmoConfig(
-            hidden_size=2048, num_attention_heads=16, num_key_value_heads=16,
-            intermediate_size=8192, num_hidden_layers=3, vocab_size=50304,
+            hidden_size=2048,
+            num_attention_heads=16,
+            num_key_value_heads=16,
+            intermediate_size=8192,
+            num_hidden_layers=3,
+            vocab_size=50304,
             max_position_embeddings=2048,
         )
     cfg.num_hidden_layers = 3
@@ -192,14 +252,21 @@ def _make_olmo_config():
 
 def _make_olmo2_config():
     from transformers import AutoConfig
+
     try:
         cfg = AutoConfig.from_pretrained("allenai/OLMo-2-0425-1B")
     except Exception:
         from transformers import Olmo2Config
+
         cfg = Olmo2Config(
-            hidden_size=2048, num_attention_heads=16, num_key_value_heads=16,
-            intermediate_size=8192, num_hidden_layers=3, vocab_size=100352,
-            rms_norm_eps=1e-6, max_position_embeddings=4096,
+            hidden_size=2048,
+            num_attention_heads=16,
+            num_key_value_heads=16,
+            intermediate_size=8192,
+            num_hidden_layers=3,
+            vocab_size=100352,
+            rms_norm_eps=1e-6,
+            max_position_embeddings=4096,
         )
     cfg.num_hidden_layers = 3
     cfg._attn_implementation = "eager"
@@ -208,12 +275,20 @@ def _make_olmo2_config():
 
 def _make_granite_vision_config():
     from transformers import GraniteConfig
+
     cfg = GraniteConfig(
-        hidden_size=2560, num_attention_heads=40, num_key_value_heads=8,
-        intermediate_size=8192, num_hidden_layers=3, vocab_size=100353,
-        rms_norm_eps=1e-5, max_position_embeddings=131072,
-        embedding_multiplier=12.0, residual_multiplier=0.22,
-        attention_multiplier=0.0625, logits_scaling=10.0,
+        hidden_size=2560,
+        num_attention_heads=40,
+        num_key_value_heads=8,
+        intermediate_size=8192,
+        num_hidden_layers=3,
+        vocab_size=100353,
+        rms_norm_eps=1e-5,
+        max_position_embeddings=131072,
+        embedding_multiplier=12.0,
+        residual_multiplier=0.22,
+        attention_multiplier=0.0625,
+        logits_scaling=10.0,
         rope_theta=10000000,
     )
     cfg._attn_implementation = "eager"
@@ -278,8 +353,8 @@ MODEL_REGISTRY = {
 # Input creation
 # ---------------------------------------------------------------------------
 
-def make_inputs(config, mode, seed, cache_len=64, device="cpu",
-                head_dim_override=None):
+
+def make_inputs(config, mode, seed, cache_len=64, device="cpu", head_dim_override=None):
     """Create deterministic random inputs for a block_forward call.
 
     Args:
@@ -295,8 +370,7 @@ def make_inputs(config, mode, seed, cache_len=64, device="cpu",
     torch.manual_seed(seed)
     H = config.hidden_size
     head_dim = head_dim_override or (
-        getattr(config, "head_dim", None)
-        or H // config.num_attention_heads
+        getattr(config, "head_dim", None) or H // config.num_attention_heads
     )
     num_kv_heads = config.num_key_value_heads
     half_dim = head_dim // 2
@@ -305,20 +379,26 @@ def make_inputs(config, mode, seed, cache_len=64, device="cpu",
         L = SEQ_LEN
         max_cache_len = L
         hidden = torch.randn(1, L, H, dtype=torch.float16).to(device)
-        freqs = torch.randn(1, L, 2, 2, half_dim, dtype=torch.float16).to(
-            device
-        )
+        freqs = torch.randn(1, L, 2, 2, half_dim, dtype=torch.float16).to(device)
         mask = torch.zeros(1, 1, L, max_cache_len, dtype=torch.float16)
         for i in range(L):
-            mask[:, :, i, i + 1:] = -torch.inf
+            mask[:, :, i, i + 1 :] = -torch.inf
         mask = mask.to(device)
         kc = torch.zeros(
-            1, num_kv_heads, max_cache_len, head_dim,
-            dtype=torch.float16, device=device,
+            1,
+            num_kv_heads,
+            max_cache_len,
+            head_dim,
+            dtype=torch.float16,
+            device=device,
         )
         vc = torch.zeros(
-            1, num_kv_heads, max_cache_len, head_dim,
-            dtype=torch.float16, device=device,
+            1,
+            num_kv_heads,
+            max_cache_len,
+            head_dim,
+            dtype=torch.float16,
+            device=device,
         )
         is_filling = False
         cache_pos = 0
@@ -326,22 +406,28 @@ def make_inputs(config, mode, seed, cache_len=64, device="cpu",
         L = 1
         max_cache_len = cache_len + L
         hidden = torch.randn(1, L, H, dtype=torch.float16).to(device)
-        freqs = torch.randn(1, L, 2, 2, half_dim, dtype=torch.float16).to(
-            device
-        )
+        freqs = torch.randn(1, L, 2, 2, half_dim, dtype=torch.float16).to(device)
         mask = torch.zeros(1, 1, L, max_cache_len, dtype=torch.float16)
-        mask[:, :, :, cache_len + L:] = -torch.inf
+        mask[:, :, :, cache_len + L :] = -torch.inf
         mask = mask.to(device)
         kc = torch.zeros(
-            1, num_kv_heads, max_cache_len, head_dim,
-            dtype=torch.float16, device=device,
+            1,
+            num_kv_heads,
+            max_cache_len,
+            head_dim,
+            dtype=torch.float16,
+            device=device,
         )
         kc[:, :, :cache_len, :] = torch.randn(
             1, num_kv_heads, cache_len, head_dim, dtype=torch.float16
         ).to(device)
         vc = torch.zeros(
-            1, num_kv_heads, max_cache_len, head_dim,
-            dtype=torch.float16, device=device,
+            1,
+            num_kv_heads,
+            max_cache_len,
+            head_dim,
+            dtype=torch.float16,
+            device=device,
         )
         vc[:, :, :cache_len, :] = torch.randn(
             1, num_kv_heads, cache_len, head_dim, dtype=torch.float16
@@ -364,6 +450,7 @@ def make_inputs(config, mode, seed, cache_len=64, device="cpu",
 # ---------------------------------------------------------------------------
 # Core comparison logic
 # ---------------------------------------------------------------------------
+
 
 def compare_block(uncompiled_fn, compiled_fn, inputs_cpu):
     """Run block on CPU (uncompiled) and Spyre (compiled), compare outputs."""
@@ -414,6 +501,7 @@ def compare_block(uncompiled_fn, compiled_fn, inputs_cpu):
 def test_model(model_key):
     """Run per-layer comparison for one model. Returns list of result dicts."""
     import importlib
+
     from transformers import AutoModelForCausalLM
 
     info = MODEL_REGISTRY[model_key]
@@ -422,9 +510,11 @@ def test_model(model_key):
     print(f"{'='*70}")
 
     config = info["config_fn"]()
-    print(f"  Config: {config.num_hidden_layers} layers, "
-          f"hidden={config.hidden_size}, "
-          f"heads={config.num_attention_heads}/{config.num_key_value_heads}")
+    print(
+        f"  Config: {config.num_hidden_layers} layers, "
+        f"hidden={config.hidden_size}, "
+        f"heads={config.num_attention_heads}/{config.num_key_value_heads}"
+    )
 
     # Create model with random weights
     torch.manual_seed(42)
@@ -434,7 +524,7 @@ def test_model(model_key):
 
     # Prepare adapter (patches RMSNorm, creates compiled blocks, etc.)
     adapter = importlib.import_module(info["adapter"])
-    print(f"  Preparing adapter ...")
+    print("  Preparing adapter ...")
     adapter.prepare_for_spyre(model)
 
     num_blocks = len(model._spyre_compiled_blocks)
@@ -448,19 +538,24 @@ def test_model(model_key):
         uncompiled = getattr(compiled_block, "_orig_mod", compiled_block)
         for mode in ("prefill", "decode"):
             seed = 42 + layer_idx * 100 + (0 if mode == "prefill" else 1)
-            inputs = make_inputs(config, mode, seed, device="cpu",
-                                 head_dim_override=padded_hd)
+            inputs = make_inputs(
+                config, mode, seed, device="cpu", head_dim_override=padded_hd
+            )
             with torch.no_grad():
                 h, kc, vc = uncompiled(
-                    inputs["hidden_states"], inputs["selected_freqs"],
-                    inputs["attn_mask"], inputs["key_cache"],
-                    inputs["value_cache"], inputs["is_filling"],
-                    inputs["token_index"], inputs["cache_position"],
+                    inputs["hidden_states"],
+                    inputs["selected_freqs"],
+                    inputs["attn_mask"],
+                    inputs["key_cache"],
+                    inputs["value_cache"],
+                    inputs["is_filling"],
+                    inputs["token_index"],
+                    inputs["cache_position"],
                 )
             cpu_results[(layer_idx, mode)] = h.clone()
 
     # --- Phase B: Move model to Spyre, run compiled blocks ---
-    print(f"  Moving model to Spyre ...")
+    print("  Moving model to Spyre ...")
     model.to(DEVICE)
     print(f"  Phase B: running {num_blocks} blocks on Spyre ...")
 
@@ -470,7 +565,10 @@ def test_model(model_key):
         for mode in ("prefill", "decode"):
             seed = 42 + layer_idx * 100 + (0 if mode == "prefill" else 1)
             spyre_inputs = make_inputs(
-                config, mode, seed, device=DEVICE,
+                config,
+                mode,
+                seed,
+                device=DEVICE,
                 head_dim_override=padded_hd,
             )
 
@@ -532,44 +630,56 @@ def test_model(model_key):
 # Output formatting
 # ---------------------------------------------------------------------------
 
+
 def print_table(all_results):
     """Print markdown table of all results."""
-    print(f"\n## Per-Layer CPU vs Spyre Block Comparison\n")
-    print(f"| Model | Layer | Mode | Shape | Max Diff | Mean Diff "
-          f"| CPU NaN | Spyre NaN | Error |")
-    print(f"|-------|-------|------|-------|----------|----------- "
-          f"|---------|-----------|-------|")
+    print("\n## Per-Layer CPU vs Spyre Block Comparison\n")
+    print(
+        "| Model | Layer | Mode | Shape | Max Diff | Mean Diff "
+        "| CPU NaN | Spyre NaN | Error |"
+    )
+    print(
+        "|-------|-------|------|-------|----------|----------- "
+        "|---------|-----------|-------|"
+    )
     for r in all_results:
         if r["error"]:
-            print(f"| {r['model']} | {r['layer']} | {r['mode']} "
-                  f"| {r['shape']} | — | — | — | — | {r['error']} |")
+            print(
+                f"| {r['model']} | {r['layer']} | {r['mode']} "
+                f"| {r['shape']} | — | — | — | — | {r['error']} |"
+            )
         else:
             nan_c = "Yes" if r["cpu_nan"] else "No"
             nan_s = "Yes" if r["spyre_nan"] else "No"
-            print(f"| {r['model']} | {r['layer']} | {r['mode']} "
-                  f"| {r['shape']} "
-                  f"| {r['max_abs_diff']:.4f} | {r['mean_abs_diff']:.6f} "
-                  f"| {nan_c} | {nan_s} | — |")
+            print(
+                f"| {r['model']} | {r['layer']} | {r['mode']} "
+                f"| {r['shape']} "
+                f"| {r['max_abs_diff']:.4f} | {r['mean_abs_diff']:.6f} "
+                f"| {nan_c} | {nan_s} | — |"
+            )
 
 
 def print_summary(all_results):
     """Print pass/fail summary per model."""
     from collections import defaultdict
+
     by_model = defaultdict(list)
     for r in all_results:
         by_model[r["model"]].append(r)
 
-    print(f"\n## Summary\n")
-    print(f"| Model | Layers Tested | Errors | Max Diff (worst) | Any NaN |")
-    print(f"|-------|--------------|--------|------------------|---------|")
+    print("\n## Summary\n")
+    print("| Model | Layers Tested | Errors | Max Diff (worst) | Any NaN |")
+    print("|-------|--------------|--------|------------------|---------|")
     for model, rows in by_model.items():
         n_layers = len(set(r["layer"] for r in rows))
         n_errors = sum(1 for r in rows if r["error"])
         valid = [r for r in rows if r["error"] is None]
         worst = max((r["max_abs_diff"] for r in valid), default=0.0)
         any_nan = any(r.get("spyre_nan") for r in valid)
-        print(f"| {model} | {n_layers} | {n_errors} "
-              f"| {worst:.4f} | {'Yes' if any_nan else 'No'} |")
+        print(
+            f"| {model} | {n_layers} | {n_errors} "
+            f"| {worst:.4f} | {'Yes' if any_nan else 'No'} |"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -584,8 +694,10 @@ if __name__ == "__main__":
     all_results = []
     for key in which:
         if key not in MODEL_REGISTRY:
-            print(f"Unknown model: {key}. "
-                  f"Options: {list(MODEL_REGISTRY.keys())} or 'all'")
+            print(
+                f"Unknown model: {key}. "
+                f"Options: {list(MODEL_REGISTRY.keys())} or 'all'"
+            )
             continue
         try:
             results = test_model(key)
