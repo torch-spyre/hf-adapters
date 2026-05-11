@@ -1,3 +1,38 @@
+# Copyright 2025 The Torch-Spyre Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+Unified auto-loading interface for HuggingFace Transformers models on Spyre.
+
+Provides a HuggingFace-style API that automatically selects the correct
+adapter based on the model's config type.
+
+Usage::
+
+    from hf_adapters import AutoSpyreModelForCausalLM
+    from transformers import AutoTokenizer
+
+    model = AutoSpyreModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-3B")
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-3B")
+    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+
+The model is automatically prepared for Spyre (RoPE precomputation, RMSNorm
+patching, LM head padding, compiled blocks) and moved to the Spyre device.
+A `generate` method is attached to the model that handles the 64-block
+padded decode generation loop.
+"""
+
 import types
 
 import torch
