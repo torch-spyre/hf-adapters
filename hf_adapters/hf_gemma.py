@@ -31,12 +31,12 @@ Usage::
 """
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
     PrecomputedRotaryEmbedding,
     apply_rope_matmul,
+    chunk_lm_head,
     kv_cache_update,
 )
 
@@ -68,37 +68,6 @@ def _patch_gemma_rmsnorm(rmsnorm_cls):
             return ((1.0 + self.weight.float()) * xf).to(hidden_states.dtype)
 
     rmsnorm_cls.forward = _forward_fp16
-
-
-# ---------------------------------------------------------------------------
-# Chunked LM head (vocab 256K exceeds Spyre per-core EAR limit)
-# ---------------------------------------------------------------------------
-
-
-def _chunk_lm_head(model, num_chunks=8):
-    """Split LM head weight into N chunks along vocab dim."""
-    w = model.lm_head.weight  # [vocab, hidden]
-    vocab, hidden = w.shape
-    chunk_size = (vocab + num_chunks - 1) // num_chunks
-
-    STICK = 64
-    chunks = nn.ModuleList()
-    real_sizes = []
-    for i in range(num_chunks):
-        start = i * chunk_size
-        end = min(start + chunk_size, vocab)
-        w_chunk = w[start:end].clone()
-        sz = w_chunk.shape[0]
-        real_sizes.append(sz)
-        padded_sz = ((sz + STICK - 1) // STICK) * STICK
-        if padded_sz != sz:
-            w_chunk = F.pad(w_chunk, (0, 0, 0, padded_sz - sz))
-        chunk = nn.Linear(hidden, padded_sz, bias=False)
-        chunk.weight = nn.Parameter(w_chunk, requires_grad=False)
-        chunks.append(chunk)
-
-    model._spyre_lm_head_chunks = chunks
-    model._spyre_lm_chunk_sizes = real_sizes
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +194,7 @@ def prepare_for_spyre(model):
 
     _patch_gemma_rmsnorm(GemmaRMSNorm)
     model._spyre_rope = PrecomputedRotaryEmbedding(model.model.rotary_emb)
-    _chunk_lm_head(model)
+    chunk_lm_head(model)
     model._spyre_compiled_blocks = [
         _make_compiled_block(layer) for layer in model.model.layers
     ]

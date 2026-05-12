@@ -325,6 +325,37 @@ def pad_lm_head(model):
         )
 
 
+def chunk_lm_head(model, num_chunks=8):
+    """Split LM head weight into N chunks along vocab dim.
+
+    Large vocab (200K+) exceeds Spyre's per-core 256 MB EAR limit.
+    We replace the single lm_head with N smaller nn.Linear modules.
+    Each chunk processes vocab_size/N output dims.
+    """
+    w = model.lm_head.weight  # [vocab, hidden]
+    vocab, hidden = w.shape
+    chunk_size = (vocab + num_chunks - 1) // num_chunks
+
+    STICK = 64
+    chunks = nn.ModuleList()
+    real_sizes = []
+    for i in range(num_chunks):
+        start = i * chunk_size
+        end = min(start + chunk_size, vocab)
+        w_chunk = w[start:end].clone()
+        sz = w_chunk.shape[0]
+        real_sizes.append(sz)
+        padded_sz = ((sz + STICK - 1) // STICK) * STICK
+        if padded_sz != sz:
+            w_chunk = F.pad(w_chunk, (0, 0, 0, padded_sz - sz))
+        chunk = nn.Linear(hidden, padded_sz, bias=False)
+        chunk.weight = nn.Parameter(w_chunk, requires_grad=False)
+        chunks.append(chunk)
+
+    model._spyre_lm_head_chunks = chunks
+    model._spyre_lm_chunk_sizes = real_sizes
+
+
 # ---------------------------------------------------------------------------
 # Mask builders
 # ---------------------------------------------------------------------------
