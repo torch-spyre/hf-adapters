@@ -31,13 +31,11 @@ Usage::
 """
 
 import torch
-import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
     PrecomputedRotaryEmbedding,
-    apply_rope_matmul,
     chunk_lm_head,
-    kv_cache_update,
+    make_standard_gqa_block,
 )
 
 # ---------------------------------------------------------------------------
@@ -68,73 +66,6 @@ def _patch_gemma_rmsnorm(rmsnorm_cls):
             return ((1.0 + self.weight.float()) * xf).to(hidden_states.dtype)
 
     rmsnorm_cls.forward = _forward_fp16
-
-
-# ---------------------------------------------------------------------------
-# Compiled block
-# ---------------------------------------------------------------------------
-
-
-def _make_compiled_block(layer):
-    """Compiled block for Gemma: pre-norm, standard GQA, no multipliers."""
-    attn = layer.self_attn
-    mlp = layer.mlp
-    input_ln = layer.input_layernorm
-    post_attn_ln = layer.post_attention_layernorm
-
-    def block_forward(
-        hidden_states,
-        selected_freqs,
-        attn_mask,
-        key_cache,
-        value_cache,
-        is_filling,
-        token_index,
-        cache_position,
-    ):
-        residual = hidden_states
-        h = input_ln(hidden_states)
-
-        bsz, seq_len, _ = h.shape
-        q = attn.q_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
-        k = attn.k_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
-        v = attn.v_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
-
-        q = apply_rope_matmul(q, selected_freqs)
-        k = apply_rope_matmul(k, selected_freqs)
-
-        key_cache, value_cache = kv_cache_update(
-            k,
-            v,
-            key_cache,
-            value_cache,
-            is_filling,
-            token_index,
-            cache_position,
-        )
-
-        attn_out = F.scaled_dot_product_attention(
-            q,
-            key_cache,
-            value_cache,
-            attn_mask=attn_mask,
-            dropout_p=0.0,
-            scale=attn.scaling,
-            enable_gqa=True,
-        )
-        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
-        attn_out = attn.o_proj(attn_out)
-
-        h = residual + attn_out
-
-        residual = h
-        h = post_attn_ln(h)
-        h = mlp(h)
-        h = residual + h
-
-        return h, key_cache, value_cache
-
-    return torch.compile(block_forward, dynamic=False)
 
 
 # ---------------------------------------------------------------------------
@@ -196,5 +127,5 @@ def prepare_for_spyre(model):
     model._spyre_rope = PrecomputedRotaryEmbedding(model.model.rotary_emb)
     chunk_lm_head(model)
     model._spyre_compiled_blocks = [
-        _make_compiled_block(layer) for layer in model.model.layers
+        make_standard_gqa_block(layer) for layer in model.model.layers
     ]
