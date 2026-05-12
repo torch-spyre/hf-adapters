@@ -39,7 +39,10 @@ from collections import defaultdict
 import torch
 
 from hf_adapters.hf_common import DEVICE
-from hf_adapters.hf_granite import prepare_for_spyre
+from hf_adapters.hf_granite import _run_forward, prepare_for_spyre
+
+# Assignment of _run_forward method for explicit module access
+_run_forward = _run_forward
 
 
 def _load_text_backbone(model_path, dtype=torch.float16):
