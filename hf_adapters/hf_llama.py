@@ -20,21 +20,15 @@ models that register as ``llama`` in HF Transformers.
 
 Usage::
 
-    from hf_adapters.hf_llama import load_model, generate
+    from hf_adapters import AutoSpyreModelForCausalLM
     from transformers import AutoTokenizer
 
-    model = load_model("meta-llama/Llama-3.2-3B")
+    model = AutoSpyreModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-3B")
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-3B")
-    outputs = generate(model, tokenizer, ["Hello!"], max_new_tokens=32)
+    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
-import torch
-
 from hf_adapters.hf_common import (
-    generate as _generate,
-)
-from hf_adapters.hf_common import (
-    load_model_common,
     prepare_standard_gqa,
     standard_gqa_forward,
 )
@@ -47,13 +41,3 @@ def prepare_for_spyre(model):
     from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
     prepare_standard_gqa(model, LlamaRMSNorm)
-
-
-def load_model(model_path, dtype=torch.float16):
-    """Load Llama model for Spyre."""
-    return load_model_common(model_path, prepare_for_spyre, dtype)
-
-
-def generate(model, tokenizer, prompts, **kwargs):
-    """Generate text with Llama on Spyre."""
-    return _generate(standard_gqa_forward, model, tokenizer, prompts, **kwargs)

@@ -25,12 +25,12 @@ Phi-3 differences from Granite:
 
 Usage::
 
-    from hf_adapters.hf_phi3 import load_model, generate
+    from hf_adapters import AutoSpyreModelForCausalLM
     from transformers import AutoTokenizer
 
-    model = load_model("microsoft/Phi-4-mini-instruct")
+    model = AutoSpyreModelForCausalLM.from_pretrained("microsoft/Phi-4-mini-instruct")
     tokenizer = AutoTokenizer.from_pretrained("microsoft/Phi-4-mini-instruct")
-    outputs = generate(model, tokenizer, ["Hello!"], max_new_tokens=32)
+    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
 import torch
@@ -40,12 +40,9 @@ import torch.nn.functional as F
 from hf_adapters.hf_common import (
     DEVICE,
     apply_rope_matmul,
+    chunk_lm_head,
     kv_cache_update,
-    load_model_common,
     patch_rmsnorm,
-)
-from hf_adapters.hf_common import (
-    generate as _generate,
 )
 
 # ---------------------------------------------------------------------------
@@ -115,37 +112,6 @@ class PartialPrecomputedRotaryEmbedding(nn.Module):
 # ---------------------------------------------------------------------------
 # Weight splitting
 # ---------------------------------------------------------------------------
-
-
-def _chunk_lm_head(model, num_chunks=8):
-    """Split LM head weight into N chunks along vocab dim.
-
-    Large vocab (200K+) exceeds Spyre's per-core 256 MB EAR limit.
-    We replace the single lm_head with N smaller nn.Linear modules.
-    Each chunk processes vocab_size/N output dims.
-    """
-    w = model.lm_head.weight  # [vocab, hidden]
-    vocab, hidden = w.shape
-    chunk_size = (vocab + num_chunks - 1) // num_chunks
-
-    STICK = 64
-    chunks = nn.ModuleList()
-    real_sizes = []
-    for i in range(num_chunks):
-        start = i * chunk_size
-        end = min(start + chunk_size, vocab)
-        w_chunk = w[start:end].clone()
-        sz = w_chunk.shape[0]
-        real_sizes.append(sz)
-        padded_sz = ((sz + STICK - 1) // STICK) * STICK
-        if padded_sz != sz:
-            w_chunk = F.pad(w_chunk, (0, 0, 0, padded_sz - sz))
-        chunk = nn.Linear(hidden, padded_sz, bias=False)
-        chunk.weight = nn.Parameter(w_chunk, requires_grad=False)
-        chunks.append(chunk)
-
-    model._spyre_lm_head_chunks = chunks
-    model._spyre_lm_chunk_sizes = real_sizes
 
 
 def _rope_dim_permutation(head_dim, rope_dim):
@@ -336,7 +302,7 @@ def prepare_for_spyre(model):
 
     # Chunk LM head for large vocab models (200K+ vocab exceeds EAR limit)
     # Each chunk is stick-padded internally. Don't call pad_lm_head.
-    _chunk_lm_head(model, num_chunks=8)
+    chunk_lm_head(model, num_chunks=8)
 
     num_q = cfg.num_attention_heads
     num_kv = cfg.num_key_value_heads
@@ -379,13 +345,3 @@ def prepare_for_spyre(model):
             model._spyre_up_projs,
         )
     ]
-
-
-def load_model(model_path, dtype=torch.float16):
-    """Load Phi-3/Phi-4 model for Spyre."""
-    return load_model_common(model_path, prepare_for_spyre, dtype)
-
-
-def generate(model, tokenizer, prompts, **kwargs):
-    """Generate text with Phi-3/Phi-4 on Spyre."""
-    return _generate(_run_forward, model, tokenizer, prompts, **kwargs)

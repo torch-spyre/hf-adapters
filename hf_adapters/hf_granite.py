@@ -17,29 +17,24 @@ HuggingFace Transformers adapter for Granite 3.3 models on Spyre.
 
 Usage::
 
-    from hf_adapters.hf_granite import load_model, generate
+    from hf_adapters import AutoSpyreModelForCausalLM
     from transformers import AutoTokenizer
 
-    model = load_model("/path/to/granite-3.3-8b-instruct")
+    model = AutoSpyreModelForCausalLM.from_pretrained(
+        "/path/to/granite-3.3-8b-instruct")
     tokenizer = AutoTokenizer.from_pretrained("/path/to/granite-3.3-8b-instruct")
-    outputs = generate(model, tokenizer, ["Hello!"], max_new_tokens=32)
+    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
 import torch
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
-    BLOCK_SIZE,
-    PrecomputedRotaryEmbedding,
     apply_rope_matmul,
     kv_cache_update,
-    load_model_common,
-    pad_attention_heads,
     pad_lm_head,
     patch_rmsnorm,
-)
-from hf_adapters.hf_common import (
-    generate as _generate,
+    prepare_rope_and_heads,
 )
 
 
@@ -146,46 +141,9 @@ def prepare_for_spyre(model):
     """Apply Spyre adaptations to Granite 3.3 model in-place."""
     from transformers.models.granite.modeling_granite import GraniteRMSNorm
 
-    cfg = model.config
-    orig_head_dim = getattr(
-        cfg,
-        "head_dim",
-        cfg.hidden_size // cfg.num_attention_heads,
-    )
-
-    # RoPE reshape [B,L,H,2,D/2] requires D/2 >= BLOCK_SIZE.
-    # Compute minimum stick-aligned head_dim: round up to next multiple of 2*BLOCK_SIZE.
-    padded_head_dim = None
-    stick_aligned_head_dim = (
-        (orig_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)
-    ) * (2 * BLOCK_SIZE)
-    if stick_aligned_head_dim > orig_head_dim:
-        padded_head_dim = stick_aligned_head_dim
-        pad_attention_heads(
-            model,
-            model.model.layers,
-            orig_head_dim,
-            padded_head_dim,
-            cfg.num_attention_heads,
-            cfg.num_key_value_heads,
-        )
-
-    model._spyre_rope = PrecomputedRotaryEmbedding(
-        model.model.rotary_emb,
-        padded_head_dim=padded_head_dim,
-    )
+    prepare_rope_and_heads(model)
     patch_rmsnorm(GraniteRMSNorm)
     pad_lm_head(model)
     model._spyre_compiled_blocks = [
         _make_compiled_block(layer) for layer in model.model.layers
     ]
-
-
-def load_model(model_path, dtype=torch.float16):
-    """Load Granite 3.3 model for Spyre."""
-    return load_model_common(model_path, prepare_for_spyre, dtype)
-
-
-def generate(model, tokenizer, prompts, **kwargs):
-    """Generate text with Granite 3.3 on Spyre."""
-    return _generate(_run_forward, model, tokenizer, prompts, **kwargs)

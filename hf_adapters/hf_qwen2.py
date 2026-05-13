@@ -20,21 +20,15 @@ Qwen 2.5 (0.5B-7B).  Like Qwen3 but without per-head Q/K RMSNorm.
 
 Usage::
 
-    from hf_adapters.hf_qwen2 import load_model, generate
+    from hf_adapters import AutoSpyreModelForCausalLM
     from transformers import AutoTokenizer
 
-    model = load_model("Qwen/Qwen2.5-7B")
+    model = AutoSpyreModelForCausalLM.from_pretrained("Qwen/Qwen2.5-7B")
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B")
-    outputs = generate(model, tokenizer, ["Hello!"], max_new_tokens=32)
+    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
-import torch
-
 from hf_adapters.hf_common import (
-    generate as _generate,
-)
-from hf_adapters.hf_common import (
-    load_model_common,
     prepare_standard_gqa,
     standard_gqa_forward,
 )
@@ -47,13 +41,3 @@ def prepare_for_spyre(model):
     from transformers.models.qwen2.modeling_qwen2 import Qwen2RMSNorm
 
     prepare_standard_gqa(model, Qwen2RMSNorm)
-
-
-def load_model(model_path, dtype=torch.float16):
-    """Load Qwen2 model for Spyre."""
-    return load_model_common(model_path, prepare_for_spyre, dtype)
-
-
-def generate(model, tokenizer, prompts, **kwargs):
-    """Generate text with Qwen2 on Spyre."""
-    return _generate(standard_gqa_forward, model, tokenizer, prompts, **kwargs)

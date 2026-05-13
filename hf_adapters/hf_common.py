@@ -325,6 +325,37 @@ def pad_lm_head(model):
         )
 
 
+def chunk_lm_head(model, num_chunks=8):
+    """Split LM head weight into N chunks along vocab dim.
+
+    Large vocab (200K+) exceeds Spyre's per-core 256 MB EAR limit.
+    We replace the single lm_head with N smaller nn.Linear modules.
+    Each chunk processes vocab_size/N output dims.
+    """
+    w = model.lm_head.weight  # [vocab, hidden]
+    vocab, hidden = w.shape
+    chunk_size = (vocab + num_chunks - 1) // num_chunks
+
+    STICK = 64
+    chunks = nn.ModuleList()
+    real_sizes = []
+    for i in range(num_chunks):
+        start = i * chunk_size
+        end = min(start + chunk_size, vocab)
+        w_chunk = w[start:end].clone()
+        sz = w_chunk.shape[0]
+        real_sizes.append(sz)
+        padded_sz = ((sz + STICK - 1) // STICK) * STICK
+        if padded_sz != sz:
+            w_chunk = F.pad(w_chunk, (0, 0, 0, padded_sz - sz))
+        chunk = nn.Linear(hidden, padded_sz, bias=False)
+        chunk.weight = nn.Parameter(w_chunk, requires_grad=False)
+        chunks.append(chunk)
+
+    model._spyre_lm_head_chunks = chunks
+    model._spyre_lm_chunk_sizes = real_sizes
+
+
 # ---------------------------------------------------------------------------
 # Mask builders
 # ---------------------------------------------------------------------------
@@ -735,18 +766,14 @@ def standard_gqa_forward(
     return logits
 
 
-def prepare_standard_gqa(model, rmsnorm_cls):
-    """Apply Spyre adaptations for standard GQA models in-place.
-
-    Args:
-        model: HF model (on CPU, eval mode, requires_grad=False).
-        rmsnorm_cls: The model's RMSNorm class to patch.
-    """
+def prepare_rope_and_heads(model):
     cfg = model.config
     orig_head_dim = (
         getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
     )
 
+    # RoPE reshape [B,L,H,2,D/2] requires D/2 >= BLOCK_SIZE.
+    # Compute minimum stick-aligned head_dim: round up to next multiple of 2*BLOCK_SIZE.
     padded_head_dim = None
     stick_aligned_head_dim = (
         (orig_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)
@@ -766,6 +793,16 @@ def prepare_standard_gqa(model, rmsnorm_cls):
         model.model.rotary_emb,
         padded_head_dim=padded_head_dim,
     )
+
+
+def prepare_standard_gqa(model, rmsnorm_cls):
+    """Apply Spyre adaptations for standard GQA models in-place.
+
+    Args:
+        model: HF model (on CPU, eval mode, requires_grad=False).
+        rmsnorm_cls: The model's RMSNorm class to patch.
+    """
+    prepare_rope_and_heads(model)
     patch_rmsnorm(rmsnorm_cls)
     pad_lm_head(model)
     model._spyre_compiled_blocks = [

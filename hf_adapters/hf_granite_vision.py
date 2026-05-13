@@ -24,12 +24,13 @@ compiled block, forward, and prepare logic are reused from hf_granite.
 
 Usage::
 
-    from hf_adapters.hf_granite_vision import load_model, generate
+    from hf_adapters import AutoSpyreModelForCausalLM
     from transformers import AutoTokenizer
 
-    model = load_model("ibm-granite/granite-vision-4.1-4b")
+    model = AutoSpyreModelForCausalLM.from_pretrained(
+        "ibm-granite/granite-vision-4.1-4b")
     tokenizer = AutoTokenizer.from_pretrained("ibm-granite/granite-vision-4.1-4b")
-    outputs = generate(model, tokenizer, ["Hello!"], max_new_tokens=32)
+    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
 import json
@@ -38,8 +39,10 @@ from collections import defaultdict
 import torch
 
 from hf_adapters.hf_common import DEVICE
-from hf_adapters.hf_common import generate as _generate
 from hf_adapters.hf_granite import _run_forward, prepare_for_spyre
+
+# Assignment of _run_forward method for explicit module access
+_run_forward = _run_forward
 
 
 def _load_text_backbone(model_path, dtype=torch.float16):
@@ -97,8 +100,3 @@ def load_model(model_path, dtype=torch.float16):
     model.to(DEVICE)
     print("Model ready.")
     return model
-
-
-def generate(model, tokenizer, prompts, **kwargs):
-    """Generate text with Granite Vision text backbone on Spyre."""
-    return _generate(_run_forward, model, tokenizer, prompts, **kwargs)

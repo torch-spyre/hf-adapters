@@ -21,29 +21,23 @@ with Q/K RMSNorm applied to flattened projections before reshape.
 
 Usage::
 
-    from hf_adapters.hf_olmo2 import load_model, generate
+    from hf_adapters import AutoSpyreModelForCausalLM
     from transformers import AutoTokenizer
 
-    model = load_model("allenai/OLMo-2-0425-1B")
+    model = AutoSpyreModelForCausalLM.from_pretrained("allenai/OLMo-2-0425-1B")
     tokenizer = AutoTokenizer.from_pretrained("allenai/OLMo-2-0425-1B")
-    outputs = generate(model, tokenizer, ["Hello!"], max_new_tokens=32)
+    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
 import torch
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
-    BLOCK_SIZE,
-    PrecomputedRotaryEmbedding,
     apply_rope_matmul,
     kv_cache_update,
-    load_model_common,
-    pad_attention_heads,
     pad_lm_head,
     patch_rmsnorm,
-)
-from hf_adapters.hf_common import (
-    generate as _generate,
+    prepare_rope_and_heads,
 )
 
 
@@ -152,42 +146,9 @@ def prepare_for_spyre(model):
     """Apply Spyre adaptations to OLMo2 model in-place."""
     from transformers.models.olmo2.modeling_olmo2 import Olmo2RMSNorm
 
-    cfg = model.config
-    orig_head_dim = (
-        getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
-    )
-
-    padded_head_dim = None
-    stick_aligned_head_dim = (
-        (orig_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)
-    ) * (2 * BLOCK_SIZE)
-    if stick_aligned_head_dim > orig_head_dim:
-        padded_head_dim = stick_aligned_head_dim
-        pad_attention_heads(
-            model,
-            model.model.layers,
-            orig_head_dim,
-            padded_head_dim,
-            cfg.num_attention_heads,
-            cfg.num_key_value_heads,
-        )
-
-    model._spyre_rope = PrecomputedRotaryEmbedding(
-        model.model.rotary_emb,
-        padded_head_dim=padded_head_dim,
-    )
+    prepare_rope_and_heads(model)
     patch_rmsnorm(Olmo2RMSNorm)
     pad_lm_head(model)
     model._spyre_compiled_blocks = [
         _make_compiled_block(layer) for layer in model.model.layers
     ]
-
-
-def load_model(model_path, dtype=torch.float16):
-    """Load OLMo2 model for Spyre."""
-    return load_model_common(model_path, prepare_for_spyre, dtype)
-
-
-def generate(model, tokenizer, prompts, **kwargs):
-    """Generate text with OLMo2 on Spyre."""
-    return _generate(_run_forward, model, tokenizer, prompts, **kwargs)

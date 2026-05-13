@@ -26,12 +26,12 @@ Differences from Granite 3.3:
 
 Usage::
 
-    from hf_adapters.hf_granitemoehybrid import load_model, generate
+    from hf_adapters import AutoSpyreModelForCausalLM
     from transformers import AutoTokenizer
 
-    model = load_model("ibm-granite/granite-4.0-1b-base")
+    model = AutoSpyreModelForCausalLM.from_pretrained("ibm-granite/granite-4.0-1b-base")
     tokenizer = AutoTokenizer.from_pretrained("ibm-granite/granite-4.0-1b-base")
-    outputs = generate(model, tokenizer, ["Hello!"], max_new_tokens=32)
+    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
 import torch
@@ -42,12 +42,8 @@ from hf_adapters.hf_common import (
     PrecomputedRotaryEmbedding,
     apply_rope_matmul,
     kv_cache_update,
-    load_model_common,
     pad_lm_head,
     patch_rmsnorm,
-)
-from hf_adapters.hf_common import (
-    generate as _generate,
 )
 
 
@@ -193,13 +189,3 @@ def prepare_for_spyre(model):
             model._spyre_up_projs,
         )
     ]
-
-
-def load_model(model_path, dtype=torch.float16):
-    """Load Granite 4.0 dense model for Spyre."""
-    return load_model_common(model_path, prepare_for_spyre, dtype)
-
-
-def generate(model, tokenizer, prompts, **kwargs):
-    """Generate text with Granite 4.0 on Spyre."""
-    return _generate(_run_forward, model, tokenizer, prompts, **kwargs)

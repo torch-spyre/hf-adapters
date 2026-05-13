@@ -21,28 +21,21 @@ Standard pre-norm architecture like Llama, but uses a weight-free LayerNorm
 
 Usage::
 
-    from hf_adapters.hf_olmo import load_model, generate
+    from hf_adapters import AutoSpyreModelForCausalLM
     from transformers import AutoTokenizer
 
-    model = load_model("allenai/OLMo-1B-hf")
+    model = AutoSpyreModelForCausalLM.from_pretrained("allenai/OLMo-1B-hf")
     tokenizer = AutoTokenizer.from_pretrained("allenai/OLMo-1B-hf")
-    outputs = generate(model, tokenizer, ["Hello!"], max_new_tokens=32)
+    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
-import torch
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
-    BLOCK_SIZE,
-    PrecomputedRotaryEmbedding,
-    load_model_common,
     make_standard_gqa_block,
-    pad_attention_heads,
     pad_lm_head,
+    prepare_rope_and_heads,
     standard_gqa_forward,
-)
-from hf_adapters.hf_common import (
-    generate as _generate,
 )
 
 _run_forward = standard_gqa_forward
@@ -82,42 +75,9 @@ def prepare_for_spyre(model):
     """Apply Spyre adaptations to OLMo model in-place."""
     from transformers.models.olmo.modeling_olmo import OlmoLayerNorm
 
-    cfg = model.config
-    orig_head_dim = (
-        getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
-    )
-
-    padded_head_dim = None
-    stick_aligned_head_dim = (
-        (orig_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)
-    ) * (2 * BLOCK_SIZE)
-    if stick_aligned_head_dim > orig_head_dim:
-        padded_head_dim = stick_aligned_head_dim
-        pad_attention_heads(
-            model,
-            model.model.layers,
-            orig_head_dim,
-            padded_head_dim,
-            cfg.num_attention_heads,
-            cfg.num_key_value_heads,
-        )
-
-    model._spyre_rope = PrecomputedRotaryEmbedding(
-        model.model.rotary_emb,
-        padded_head_dim=padded_head_dim,
-    )
+    prepare_rope_and_heads(model)
     _patch_olmo_layernorm(OlmoLayerNorm)
     pad_lm_head(model)
     model._spyre_compiled_blocks = [
         make_standard_gqa_block(layer) for layer in model.model.layers
     ]
-
-
-def load_model(model_path, dtype=torch.float16):
-    """Load OLMo model for Spyre."""
-    return load_model_common(model_path, prepare_for_spyre, dtype)
-
-
-def generate(model, tokenizer, prompts, **kwargs):
-    """Generate text with OLMo on Spyre."""
-    return _generate(standard_gqa_forward, model, tokenizer, prompts, **kwargs)

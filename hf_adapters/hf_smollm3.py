@@ -21,12 +21,12 @@ SmolLM3 differences from Granite:
 
 Usage::
 
-    from hf_adapters.hf_smollm3 import load_model, generate
+    from hf_adapters import AutoSpyreModelForCausalLM
     from transformers import AutoTokenizer
 
-    model = load_model("HuggingFaceTB/SmolLM3-3B-Base")
+    model = AutoSpyreModelForCausalLM.from_pretrained("HuggingFaceTB/SmolLM3-3B-Base")
     tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM3-3B-Base")
-    outputs = generate(model, tokenizer, ["Hello!"], max_new_tokens=32)
+    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
 import torch
@@ -36,12 +36,8 @@ from hf_adapters.hf_common import (
     PrecomputedRotaryEmbedding,
     apply_rope_matmul,
     kv_cache_update,
-    load_model_common,
     pad_lm_head,
     patch_rmsnorm,
-)
-from hf_adapters.hf_common import (
-    generate as _generate,
 )
 
 
@@ -160,13 +156,3 @@ def prepare_for_spyre(model):
         if no_rope is not None and idx < len(no_rope):
             use_rope = bool(no_rope[idx])
         model._spyre_compiled_blocks.append(_make_compiled_block(layer, use_rope))
-
-
-def load_model(model_path, dtype=torch.float16):
-    """Load SmolLM3 model for Spyre."""
-    return load_model_common(model_path, prepare_for_spyre, dtype)
-
-
-def generate(model, tokenizer, prompts, **kwargs):
-    """Generate text with SmolLM3 on Spyre."""
-    return _generate(_run_forward, model, tokenizer, prompts, **kwargs)

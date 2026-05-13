@@ -79,32 +79,31 @@ Spyre memory). Gated models require HF token access.
 
 ## Public API
 
+### Unified Auto API (Recommended)
+
 ```python
-# Import any adapter: hf_granite, hf_qwen3, hf_granitemoehybrid,
-#   hf_smollm3, hf_llama, hf_qwen2, hf_mistral, hf_phi3, hf_olmo, hf_olmo2,
-#   hf_granite_vision
-from hf_adapters.hf_granite import load_model, generate
-
-model = load_model("ibm-granite/granite-3.3-8b-instruct")
-
+from hf_adapters import AutoSpyreModelForCausalLM
 from transformers import AutoTokenizer
+
+model = AutoSpyreModelForCausalLM.from_pretrained("ibm-granite/granite-3.3-8b-instruct")
 tokenizer = AutoTokenizer.from_pretrained("ibm-granite/granite-3.3-8b-instruct")
-outputs = generate(
-    model, tokenizer, ["What is 2+2?"], max_new_tokens=128,
-)
+outputs = model.generate(tokenizer, ["What is 2+2?"], max_new_tokens=128)
 ```
 
-Each adapter also exposes `prepare_for_spyre(model)` for manual
-control:
+`AutoSpyreModelForCausalLM` automatically selects the correct adapter based on the model's config type.
+
+### Manual Control API
+
+Each adapter also exposes `prepare_for_spyre(model)` for manual control:
 
 ```python
 from transformers import AutoModelForCausalLM
-from hf_adapters.hf_granite import (  # or hf_qwen3, hf_phi3, etc.
-    prepare_for_spyre, generate,
-)
+from hf_adapters.hf_granite import prepare_for_spyre
 
 model = AutoModelForCausalLM.from_pretrained(
-    path, dtype=torch.float16, device_map="cpu",
+    "ibm-granite/granite-3.3-8b-instruct",
+    dtype=torch.float16,
+    device_map="cpu",
 )
 prepare_for_spyre(model)
 model.to("spyre")

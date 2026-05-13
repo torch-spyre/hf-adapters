@@ -20,6 +20,10 @@ logits and greedy token selections at each step.
 
 Usage:
     python tests/test_adapter_cpu_accuracy.py [granite|granite2b|qwen3|granite4|smollm3]
+    python tests/test_adapter_cpu_accuracy.py --auto-loader [granite2b|llama|...]
+
+The --auto-loader flag runs an end-to-end test through AutoSpyreModelForCausalLM,
+comparing generate() output against HF native generation.
 
 Requires: transformers, torch (2.x), sentencepiece
 """
@@ -31,6 +35,8 @@ import sys
 import traceback
 
 import torch
+
+import hf_adapters.auto_spyre_model as _auto_spyre_model
 
 # ---------------------------------------------------------------------------
 # Import adapter modules via importlib to patch DEVICE before loading.
@@ -75,6 +81,35 @@ def load_adapter(filename):
     sys.modules[mod_name] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+# ---------------------------------------------------------------------------
+# Auto-loader support: pre-load all adapters for AutoSpyreModelForCausalLM
+# ---------------------------------------------------------------------------
+
+# Extract adapter module names from CONFIG_TO_ADAPTER_MODULE_MAPPING
+
+ADAPTER_FILES = []
+for v in _auto_spyre_model.CONFIG_TO_ADAPTER_MODULE_MAPPING.values():
+    ADAPTER_FILES.append(v.__name__.split(".")[-1])
+
+_AutoSpyreModelForCausalLM = None
+
+
+def _get_auto_model_class():
+    """Lazily pre-load all adapters and return AutoSpyreModelForCausalLM."""
+    global _AutoSpyreModelForCausalLM
+    if _AutoSpyreModelForCausalLM is not None:
+        return _AutoSpyreModelForCausalLM
+
+    for name in ADAPTER_FILES:
+        mod = load_adapter(f"{name}.py")
+        setattr(_pkg, name, mod)
+
+    auto_mod = load_adapter("auto_spyre_model.py")
+    setattr(_pkg, "auto_spyre_model", auto_mod)
+    _AutoSpyreModelForCausalLM = auto_mod.AutoSpyreModelForCausalLM
+    return _AutoSpyreModelForCausalLM
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +377,79 @@ def print_results_table(model_name, comparisons):
 
 
 # ---------------------------------------------------------------------------
+# Auto-loader end-to-end test
+# ---------------------------------------------------------------------------
+
+
+def run_model_test_auto_loader(
+    model_name, model_path, num_decode=4, dtype="float16", load_fn=False
+):
+    """Load via AutoSpyreModelForCausalLM, compare generate() output vs HF."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    AutoModel = _get_auto_model_class()
+    torch_dtype = torch.float32 if dtype == "float32" else torch.float16
+
+    print(f"\n{'='*70}")
+    print(f"  [AUTO] {model_name}: loading {model_path} ({dtype})")
+    print(f"{'='*70}")
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+    # --- Auto-loader path ---
+    print("  Loading via AutoSpyreModelForCausalLM ...")
+    model = AutoModel.from_pretrained(model_path, dtype=torch_dtype)
+
+    # Unwrap torch.compile for CPU
+    if hasattr(model, "_spyre_compiled_blocks"):
+        unwrapped = []
+        for cb in model._spyre_compiled_blocks:
+            orig = getattr(
+                cb, "_orig_mod", getattr(cb, "_torchdynamo_orig_callable", None)
+            )
+            unwrapped.append(orig if orig is not None else cb)
+        model._spyre_compiled_blocks = unwrapped
+
+    prompt = "The capital of France is"
+    print(f"  Prompt: {prompt!r}")
+    print("  Running auto-loader generate ...")
+    auto_outputs = model.generate(tokenizer, [prompt], max_new_tokens=num_decode)
+
+    # --- HF reference ---
+    print("  Loading HF reference model ...")
+    if load_fn:
+        adapter_mod = load_adapter(
+            "hf_granite_vision.py"
+            if "vision" in model_path.lower()
+            else "hf_granite.py"
+        )
+        hf_model = adapter_mod.load_hf_model(model_path, torch_dtype)
+    else:
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            model_path, torch_dtype=torch_dtype, device_map="cpu"
+        )
+    hf_model.eval()
+    hf_model.requires_grad_(False)
+
+    encoded = tokenizer(prompt, return_tensors="pt")
+    print("  Running HF generate ...")
+    with torch.no_grad():
+        hf_out = hf_model.generate(
+            **encoded, max_new_tokens=num_decode, do_sample=False
+        )
+    hf_text = tokenizer.decode(
+        hf_out[0][encoded["input_ids"].shape[1] :], skip_special_tokens=True
+    )
+
+    match = auto_outputs[0].strip() == hf_text.strip()
+    return {
+        "auto_output": auto_outputs[0],
+        "hf_output": hf_text,
+        "match": match,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Model registry
 # ---------------------------------------------------------------------------
 
@@ -433,42 +541,91 @@ MODELS = {
 
 
 if __name__ == "__main__":
-    which = sys.argv[1:] if len(sys.argv) > 1 else list(MODELS.keys())
+    args = sys.argv[1:]
+    auto_loader_mode = "--auto-loader" in args
+    if auto_loader_mode:
+        args.remove("--auto-loader")
 
-    all_results = {}
-    for key in which:
-        if key not in MODELS:
-            print(f"Unknown model: {key}. Options: {list(MODELS.keys())}")
-            continue
-        m = MODELS[key]
-        try:
-            comps, _ = run_model_test(
-                m["name"],
-                m["path"],
-                m["adapter"],
-                num_decode=4,
-                dtype=m.get("dtype", "float16"),
-                load_fn=m.get("load_fn", False),
-            )
-            ok = print_results_table(m["name"], comps)
-            all_results[key] = {"comparisons": comps, "all_match": ok}
-        except Exception as e:
-            print(f"\n!!! {m['name']} FAILED:")
-            traceback.print_exc()
-            all_results[key] = {"error": str(e)}
+    which = args if args else list(MODELS.keys())
 
-    # Summary
-    print(f"\n{'='*70}")
-    print("  SUMMARY")
-    print(f"{'='*70}")
-    for key in which:
-        if key not in MODELS or key not in all_results:
-            continue
-        name = MODELS[key]["name"]
-        res = all_results[key]
-        if "error" in res:
-            print(f"  {name:<22} ERROR: {res['error']}")
-        else:
-            status = "PASS" if res["all_match"] else "FAIL"
-            print(f"  {name:<22} {status}")
-    print(f"{'='*70}")
+    if auto_loader_mode:
+        # ---- Auto-loader end-to-end test ----
+        all_results = {}
+        for key in which:
+            if key not in MODELS:
+                print(f"Unknown model: {key}. Options: {list(MODELS.keys())}")
+                continue
+            m = MODELS[key]
+            try:
+                result = run_model_test_auto_loader(
+                    m["name"],
+                    m["path"],
+                    num_decode=4,
+                    dtype=m.get("dtype", "float16"),
+                    load_fn=m.get("load_fn", False),
+                )
+                all_results[key] = result
+                status = "PASS" if result["match"] else "FAIL"
+                print(f"\n  {m['name']}: {status}")
+                print(f"    Auto:  {result['auto_output']!r}")
+                print(f"    HF:    {result['hf_output']!r}")
+            except Exception as e:
+                print(f"\n!!! {m['name']} FAILED:")
+                traceback.print_exc()
+                all_results[key] = {"error": str(e)}
+
+        # Summary
+        print(f"\n{'='*70}")
+        print("  AUTO-LOADER SUMMARY")
+        print(f"{'='*70}")
+        for key in which:
+            if key not in MODELS or key not in all_results:
+                continue
+            name = MODELS[key]["name"]
+            res = all_results[key]
+            if "error" in res:
+                print(f"  {name:<22} ERROR: {res['error']}")
+            else:
+                status = "PASS" if res["match"] else "FAIL"
+                print(f"  {name:<22} {status}")
+        print(f"{'='*70}")
+
+    else:
+        # ---- Existing low-level logit comparison test ----
+        all_results = {}
+        for key in which:
+            if key not in MODELS:
+                print(f"Unknown model: {key}. Options: {list(MODELS.keys())}")
+                continue
+            m = MODELS[key]
+            try:
+                comps, _ = run_model_test(
+                    m["name"],
+                    m["path"],
+                    m["adapter"],
+                    num_decode=4,
+                    dtype=m.get("dtype", "float16"),
+                    load_fn=m.get("load_fn", False),
+                )
+                ok = print_results_table(m["name"], comps)
+                all_results[key] = {"comparisons": comps, "all_match": ok}
+            except Exception as e:
+                print(f"\n!!! {m['name']} FAILED:")
+                traceback.print_exc()
+                all_results[key] = {"error": str(e)}
+
+        # Summary
+        print(f"\n{'='*70}")
+        print("  SUMMARY")
+        print(f"{'='*70}")
+        for key in which:
+            if key not in MODELS or key not in all_results:
+                continue
+            name = MODELS[key]["name"]
+            res = all_results[key]
+            if "error" in res:
+                print(f"  {name:<22} ERROR: {res['error']}")
+            else:
+                status = "PASS" if res["all_match"] else "FAIL"
+                print(f"  {name:<22} {status}")
+        print(f"{'='*70}")

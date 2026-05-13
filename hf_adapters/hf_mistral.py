@@ -20,21 +20,15 @@ Same architecture as Llama with GQA.
 
 Usage::
 
-    from hf_adapters.hf_mistral import load_model, generate
+    from hf_adapters import AutoSpyreModelForCausalLM
     from transformers import AutoTokenizer
 
-    model = load_model("mistralai/Mistral-7B-v0.3")
+    model = AutoSpyreModelForCausalLM.from_pretrained("mistralai/Mistral-7B-v0.3")
     tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.3")
-    outputs = generate(model, tokenizer, ["Hello!"], max_new_tokens=32)
+    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
-import torch
-
 from hf_adapters.hf_common import (
-    generate as _generate,
-)
-from hf_adapters.hf_common import (
-    load_model_common,
     prepare_standard_gqa,
     standard_gqa_forward,
 )
@@ -47,13 +41,3 @@ def prepare_for_spyre(model):
     from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
     prepare_standard_gqa(model, MistralRMSNorm)
-
-
-def load_model(model_path, dtype=torch.float16):
-    """Load Mistral model for Spyre."""
-    return load_model_common(model_path, prepare_for_spyre, dtype)
-
-
-def generate(model, tokenizer, prompts, **kwargs):
-    """Generate text with Mistral on Spyre."""
-    return _generate(standard_gqa_forward, model, tokenizer, prompts, **kwargs)
