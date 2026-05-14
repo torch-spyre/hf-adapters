@@ -36,8 +36,6 @@ import traceback
 
 import torch
 
-import hf_adapters.auto_spyre_model as _auto_spyre_model
-
 # ---------------------------------------------------------------------------
 # Import adapter modules via importlib to patch DEVICE before loading.
 # ---------------------------------------------------------------------------
@@ -55,21 +53,27 @@ def _load_adapter_module(filename):
     return mod, spec
 
 
-# Step 1: load hf_common first so adapters can import from it
+# Step 1: load hf_common with DEVICE="cpu" and register it BEFORE any adapter
+# imports, so that all subsequent imports (including auto_spyre_model and the
+# adapter modules it pulls in) bind to this patched version.
 _common_path = os.path.join(ADAPTERS_DIR, "hf_common.py")
 _common_spec = importlib.util.spec_from_file_location(
     "hf_adapters.hf_common", _common_path
 )
 _common_mod = importlib.util.module_from_spec(_common_spec)
-# Patch DEVICE to cpu BEFORE executing the module
 sys.modules["hf_adapters.hf_common"] = _common_mod
 _common_spec.loader.exec_module(_common_mod)
 _common_mod.DEVICE = "cpu"
 
-# Also register hf_adapters so cross-adapter imports work
+# Step 2: register the hf_adapters package so cross-adapter imports resolve
+# to our local directory rather than the installed package.
 _pkg = type(sys)("hf_adapters")
 _pkg.__path__ = [ADAPTERS_DIR]
-sys.modules.setdefault("hf_adapters", _pkg)
+sys.modules["hf_adapters"] = _pkg
+
+# Step 3: now import auto_spyre_model — all adapter modules it loads will
+# find the patched hf_common in sys.modules and bind DEVICE="cpu".
+import hf_adapters.auto_spyre_model as _auto_spyre_model  # noqa: E402
 
 
 def load_adapter(filename):
