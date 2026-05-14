@@ -36,6 +36,8 @@ import traceback
 
 import torch
 
+import hf_adapters.auto_spyre_model as _auto_spyre_model
+
 # ---------------------------------------------------------------------------
 # Import adapter modules via importlib to patch DEVICE before loading.
 # ---------------------------------------------------------------------------
@@ -85,20 +87,11 @@ def load_adapter(filename):
 # Auto-loader support: pre-load all adapters for AutoSpyreModelForCausalLM
 # ---------------------------------------------------------------------------
 
-ADAPTER_FILES = [
-    "hf_gemma",
-    "hf_granite",
-    "hf_granite_vision",
-    "hf_granitemoehybrid",
-    "hf_llama",
-    "hf_mistral",
-    "hf_olmo",
-    "hf_olmo2",
-    "hf_phi3",
-    "hf_qwen2",
-    "hf_qwen3",
-    "hf_smollm3",
-]
+# Extract adapter module names from CONFIG_TO_ADAPTER_MODULE_MAPPING
+
+ADAPTER_FILES = []
+for v in _auto_spyre_model.CONFIG_TO_ADAPTER_MODULE_MAPPING.values():
+    ADAPTER_FILES.append(v.__name__.split(".")[-1])
 
 _AutoSpyreModelForCausalLM = None
 
@@ -537,11 +530,6 @@ MODELS = {
         "name": "Yi 1.5 6B",
         "path": "01-ai/Yi-1.5-6B",
         "adapter": "hf_llama.py",
-    },
-    "gemma": {
-        "name": "Gemma 2B",
-        "path": "unsloth/gemma-2b",
-        "adapter": "hf_gemma.py",
     },
     "granite-vision": {
         "name": "Granite Vision 4.1 4B",

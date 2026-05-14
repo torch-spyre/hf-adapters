@@ -39,6 +39,7 @@ from hf_adapters.hf_common import (
     kv_cache_update,
     pad_lm_head,
     patch_rmsnorm,
+    standard_gqa_forward,
 )
 
 
@@ -112,37 +113,7 @@ def _make_compiled_block(layer):
     return torch.compile(block_forward, dynamic=False)
 
 
-def _run_forward(
-    model,
-    input_ids,
-    position_ids,
-    attn_mask,
-    key_caches,
-    value_caches,
-    is_filling,
-    token_index,
-    cache_position,
-):
-    """Qwen3 forward: no embedding multiplier, no logits scaling."""
-    h = model.model.embed_tokens(input_ids)
-
-    selected_freqs = model._spyre_rope(h, position_ids)
-
-    for i, compiled_block in enumerate(model._spyre_compiled_blocks):
-        h, key_caches[i], value_caches[i] = compiled_block(
-            h,
-            selected_freqs,
-            attn_mask,
-            key_caches[i],
-            value_caches[i],
-            is_filling,
-            token_index,
-            cache_position,
-        )
-
-    h = model.model.norm(h)
-    logits = model.lm_head(h)
-    return logits
+_run_forward = standard_gqa_forward
 
 
 def prepare_for_spyre(model):

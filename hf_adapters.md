@@ -15,7 +15,6 @@
 | 9 | hf\_smollm3.py | `smollm3` | 1 | — |
 | 10 | hf\_olmo.py | `olmo` | 1 | 1+ |
 | 11 | hf\_olmo2.py | `olmo2` | 1 | 1+ |
-| 12 | hf\_gemma.py | `gemma` | 1 | 3+ | **NEW** |
 
 ---
 
@@ -218,21 +217,3 @@ No additional compatible models listed.
 ### Compatible Models
 
 - OLMo 2 7B
-
----
-
-## 12. hf\_gemma.py — *NEW*
-
-**HF model\_type:** `gemma`
-
-### Verified Checkpoints
-
-| Checkpoint | head\_dim | Notes |
-|-----------|---------|-------|
-| Gemma 2B (`unsloth/gemma-2b`) | 256 | Chunked LM head (vocab 256K), custom RMSNorm `(1 + weight)` |
-
-### Compatible Models
-
-- Gemma 7B (`google/gemma-7b`, gated)
-- Gemma 2B (`google/gemma-2b`, gated)
-- Any model registering as `model_type=gemma` in HF Transformers

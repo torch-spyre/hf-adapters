@@ -40,8 +40,10 @@ import torch.nn.functional as F
 from hf_adapters.hf_common import (
     DEVICE,
     apply_rope_matmul,
+    chunk_lm_head,
     kv_cache_update,
     patch_rmsnorm,
+    split_fused_linear,
 )
 
 # ---------------------------------------------------------------------------
@@ -113,37 +115,6 @@ class PartialPrecomputedRotaryEmbedding(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-def _chunk_lm_head(model, num_chunks=8):
-    """Split LM head weight into N chunks along vocab dim.
-
-    Large vocab (200K+) exceeds Spyre's per-core 256 MB EAR limit.
-    We replace the single lm_head with N smaller nn.Linear modules.
-    Each chunk processes vocab_size/N output dims.
-    """
-    w = model.lm_head.weight  # [vocab, hidden]
-    vocab, hidden = w.shape
-    chunk_size = (vocab + num_chunks - 1) // num_chunks
-
-    STICK = 64
-    chunks = nn.ModuleList()
-    real_sizes = []
-    for i in range(num_chunks):
-        start = i * chunk_size
-        end = min(start + chunk_size, vocab)
-        w_chunk = w[start:end].clone()
-        sz = w_chunk.shape[0]
-        real_sizes.append(sz)
-        padded_sz = ((sz + STICK - 1) // STICK) * STICK
-        if padded_sz != sz:
-            w_chunk = F.pad(w_chunk, (0, 0, 0, padded_sz - sz))
-        chunk = nn.Linear(hidden, padded_sz, bias=False)
-        chunk.weight = nn.Parameter(w_chunk, requires_grad=False)
-        chunks.append(chunk)
-
-    model._spyre_lm_head_chunks = chunks
-    model._spyre_lm_chunk_sizes = real_sizes
-
-
 def _rope_dim_permutation(head_dim, rope_dim):
     """Build index permutation aligning partial-RoPE pairing with apply_rope_matmul.
 
@@ -186,20 +157,6 @@ def _split_fused_qkv(attn, num_q, num_kv, head_dim):
         _mk(w[q_dim : q_dim + k_dim], k_dim),
         _mk(w[q_dim + k_dim :], k_dim),
     )
-
-
-def _split_fused_mlp(mlp):
-    """Split fused gate_up_proj into separate gate/up projections."""
-    w = mlp.gate_up_proj.weight
-    half = w.shape[0] // 2
-    hidden = w.shape[1]
-
-    def _mk(w_data, out_dim):
-        p = nn.Linear(hidden, out_dim, bias=False)
-        p.weight = nn.Parameter(w_data.clone(), requires_grad=False)
-        return p
-
-    return _mk(w[:half], half), _mk(w[half:], half)
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +289,7 @@ def prepare_for_spyre(model):
 
     # Chunk LM head for large vocab models (200K+ vocab exceeds EAR limit)
     # Each chunk is stick-padded internally. Don't call pad_lm_head.
-    _chunk_lm_head(model, num_chunks=8)
+    chunk_lm_head(model, num_chunks=8)
 
     num_q = cfg.num_attention_heads
     num_kv = cfg.num_key_value_heads
@@ -360,7 +317,7 @@ def prepare_for_spyre(model):
         model._spyre_k_projs.append(k)
         model._spyre_v_projs.append(v)
 
-        gate, up = _split_fused_mlp(layer.mlp)
+        gate, up = split_fused_linear(layer.mlp.gate_up_proj.weight)
         model._spyre_gate_projs.append(gate)
         model._spyre_up_projs.append(up)
 

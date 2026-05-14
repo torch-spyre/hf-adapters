@@ -44,22 +44,8 @@ from hf_adapters.hf_common import (
     kv_cache_update,
     pad_lm_head,
     patch_rmsnorm,
+    split_fused_linear,
 )
-
-
-def _split_fused_mlp(mlp):
-    """Split a fused input_linear into separate gate_proj and up_proj.
-
-    Spyre's stickify pass cannot handle non-zero offsets from fused weight
-    splits. We replace the fused linear with two separate linears.
-    """
-    w = mlp.input_linear.weight  # [2*intermediate, hidden]
-    half = w.shape[0] // 2
-    gate_proj = nn.Linear(w.shape[1], half, bias=False)
-    up_proj = nn.Linear(w.shape[1], half, bias=False)
-    gate_proj.weight = nn.Parameter(w[:half].clone(), requires_grad=False)
-    up_proj.weight = nn.Parameter(w[half:].clone(), requires_grad=False)
-    return gate_proj, up_proj
 
 
 def _make_compiled_block(layer, res_mult, gate_proj, up_proj):
@@ -177,7 +163,7 @@ def prepare_for_spyre(model):
     model._spyre_gate_projs = nn.ModuleList()
     model._spyre_up_projs = nn.ModuleList()
     for layer in model.model.layers:
-        gate_proj, up_proj = _split_fused_mlp(layer.shared_mlp)
+        gate_proj, up_proj = split_fused_linear(layer.shared_mlp.input_linear.weight)
         model._spyre_gate_projs.append(gate_proj)
         model._spyre_up_projs.append(up_proj)
 

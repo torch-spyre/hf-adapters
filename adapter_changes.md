@@ -173,39 +173,20 @@ Every adapter applies the following transformations via shared utilities in `hf_
 
 ---
 
-### Gemma (`hf_gemma.py`) — *NEW*
-
-**model\_type:** `gemma`
-
-**Unique changes:**
-
-| Change | Description |
-|--------|-------------|
-| **RMSNorm `(1 + weight)` scaling** | Gemma's RMSNorm uses `(1 + weight)` instead of `weight` directly (weight initialized to 0, not 1). Requires a custom fp16 patch distinct from the shared `patch_rmsnorm`. |
-| **Embedding multiplier (built-in)** | `GemmaTextScaledWordEmbedding` multiplies by `sqrt(hidden_size)`. No manual multiplier needed in `_run_forward` — it's built into the embedding module. |
-| **Chunked LM head** | 256K vocab exceeds Spyre's per-core 256 MB EAR limit. Same approach as Phi-4: split into 8 chunks, each padded and run independently. |
-
-**Shared with Phi-3/4:** Chunked LM head pattern (same `_chunk_lm_head` implementation).
-
-**Difference from Granite multipliers:** Granite applies the multiplier explicitly in `_run_forward`; Gemma's multiplier is embedded in the `nn.Embedding` subclass and applies automatically.
-
----
-
 ## Feature Matrix
 
-| Feature | Llama | Mistral | Qwen2 | Qwen3 | Granite | Granite Vision | Granite 4.0 | Phi-3/4 | SmolLM3 | OLMo | OLMo2 | Gemma |
-|---------|:-----:|:-------:|:-----:|:-----:|:-------:|:--------------:|:-----------:|:-------:|:-------:|:----:|:-----:|:-----:|
-| Standard GQA (shared code) | ✓ | ✓ | ✓ | — | — | — | — | — | — | ✓ | — | — |
-| Head-dim padding | auto | auto | auto | — | ✓ | ✓ | — | — | — | auto | auto | — |
-| Embedding multiplier | — | — | — | — | ✓ | ✓ | ✓ | — | — | — | — | built-in |
-| Residual multiplier | — | — | — | — | ✓ | ✓ | ✓ | — | — | — | — | — |
-| Logits scaling | — | — | — | — | ✓ | ✓ | ✓ | — | — | — | — | — |
-| Per-head Q/K norm | — | — | — | ✓ | — | — | — | — | — | — | ✓ | — |
-| Fused weight splitting | — | — | — | — | — | — | ✓ (MLP) | ✓ (QKV+MLP) | — | — | — | — |
-| Partial RoPE | — | — | — | — | — | — | — | ✓ | — | — | — | — |
-| Chunked LM head | — | — | — | — | — | — | — | ✓ | — | — | — | ✓ |
-| Conditional RoPE (NoPE) | — | — | — | — | — | — | — | — | ✓ | — | — | — |
-| Post-norm architecture | — | — | — | — | — | — | — | — | — | — | ✓ | — |
-| Weight-free LayerNorm | — | — | — | — | — | — | — | — | — | ✓ | — | — |
-| Text backbone extraction | — | — | — | — | — | ✓ | — | — | — | — | — | — |
-| Custom RMSNorm (1+weight) | — | — | — | — | — | — | — | — | — | — | — | ✓ |
+| Feature | Llama | Mistral | Qwen2 | Qwen3 | Granite | Granite Vision | Granite 4.0 | Phi-3/4 | SmolLM3 | OLMo | OLMo2 |
+|---------|:-----:|:-------:|:-----:|:-----:|:-------:|:--------------:|:-----------:|:-------:|:-------:|:----:|:-----:|
+| Standard GQA (shared code) | ✓ | ✓ | ✓ | — | — | — | — | — | — | ✓ | — |
+| Head-dim padding | auto | auto | auto | — | ✓ | ✓ | — | — | — | auto | auto |
+| Embedding multiplier | — | — | — | — | ✓ | ✓ | ✓ | — | — | — | — |
+| Residual multiplier | — | — | — | — | ✓ | ✓ | ✓ | — | — | — | — |
+| Logits scaling | — | — | — | — | ✓ | ✓ | ✓ | — | — | — | — |
+| Per-head Q/K norm | — | — | — | ✓ | — | — | — | — | — | — | ✓ |
+| Fused weight splitting | — | — | — | — | — | — | ✓ (MLP) | ✓ (QKV+MLP) | — | — | — |
+| Partial RoPE | — | — | — | — | — | — | — | ✓ | — | — | — |
+| Chunked LM head | — | — | — | — | — | — | — | ✓ | — | — | — |
+| Conditional RoPE (NoPE) | — | — | — | — | — | — | — | — | ✓ | — | — |
+| Post-norm architecture | — | — | — | — | — | — | — | — | — | — | ✓ |
+| Weight-free LayerNorm | — | — | — | — | — | — | — | — | — | ✓ | — |
+| Text backbone extraction | — | — | — | — | — | ✓ | — | — | — | — | — |

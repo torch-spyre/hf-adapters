@@ -38,7 +38,6 @@ import types
 import torch
 from transformers import (
     AutoConfig,
-    GemmaConfig,
     Granite4VisionConfig,
     GraniteConfig,
     GraniteMoeHybridConfig,
@@ -53,7 +52,6 @@ from transformers import (
 )
 
 from hf_adapters import (
-    hf_gemma,
     hf_granite,
     hf_granite_vision,
     hf_granitemoehybrid,
@@ -69,7 +67,6 @@ from hf_adapters import (
 from hf_adapters.hf_common import load_model_common
 
 CONFIG_TO_ADAPTER_MODULE_MAPPING = {
-    GemmaConfig: hf_gemma,
     Granite4VisionConfig: hf_granite_vision,
     GraniteConfig: hf_granite,
     GraniteMoeHybridConfig: hf_granitemoehybrid,
