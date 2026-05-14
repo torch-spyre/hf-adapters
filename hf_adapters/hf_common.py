@@ -378,21 +378,29 @@ def split_fused_linear(w: torch.Tensor) -> tuple[nn.Linear, nn.Linear]:
 # ---------------------------------------------------------------------------
 
 
-def build_prefill_mask(batch_size, padded_len, max_cache_len, prompt_offset):
+def build_prefill_mask(batch_size, padded_len, max_cache_len, prompt_offsets):
     """Causal mask for prefill, masking left-padding and unused cache positions."""
     mask = torch.zeros((batch_size, 1, padded_len, max_cache_len), dtype=torch.float16)
-    mask[:, :, :, :prompt_offset] = -torch.inf
+    if isinstance(prompt_offsets, torch.Tensor):
+        for b in range(batch_size):
+            mask[b, :, :, : prompt_offsets[b].item()] = -torch.inf
+    else:
+        mask[:, :, :, :prompt_offsets] = -torch.inf
     for i in range(padded_len):
         mask[:, :, i, i + 1 :] = -torch.inf
     return mask
 
 
 def build_expansion_mask(
-    batch_size, block_size, max_cache_len, used_cache_len, prompt_offset
+    batch_size, block_size, max_cache_len, used_cache_len, prompt_offsets
 ):
     """Causal mask for an expansion decode step."""
     mask = torch.zeros((batch_size, 1, block_size, max_cache_len), dtype=torch.float16)
-    mask[:, :, :, :prompt_offset] = -torch.inf
+    if isinstance(prompt_offsets, torch.Tensor):
+        for b in range(batch_size):
+            mask[b, :, :, : prompt_offsets[b].item()] = -torch.inf
+    else:
+        mask[:, :, :, :prompt_offsets] = -torch.inf
     for j in range(block_size):
         attend_up_to = used_cache_len - block_size + j + 1
         mask[:, :, j, attend_up_to:] = -torch.inf
@@ -476,26 +484,43 @@ def generate(
     """
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    # Force left-padding: with right-padding, shorter sequences end with
+    # padding tokens, and logits[:, -1, :] would predict from a pad position.
+    # Left-padding aligns all sequences to end at the same position.
     encoded = tokenizer(
         prompts,
         return_tensors="pt",
         padding=True,
+        padding_side="left",
         return_attention_mask=True,
     )
     input_ids = encoded["input_ids"]
+    attention_mask = encoded["attention_mask"]
     batch_size = input_ids.shape[0]
     prompt_length = input_ids.shape[1]
 
-    # Left-pad to BLOCK_SIZE multiple
+    # Per-sequence actual prompt length (excluding tokenizer left-padding)
+    actual_prompt_lengths = attention_mask.sum(dim=1)  # [B]
+
+    # Pad further to BLOCK_SIZE multiple (uniform left-pad for all sequences)
     padded_len = math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
-    prompt_offset = padded_len - prompt_length
+    block_pad_offset = padded_len - prompt_length
     max_cache_len = padded_len + math.ceil(max_new_tokens / BLOCK_SIZE) * BLOCK_SIZE
-    if prompt_offset > 0:
-        pad = input_ids.new_zeros((batch_size, prompt_offset))
+    if block_pad_offset > 0:
+        pad = input_ids.new_zeros((batch_size, block_pad_offset))
         input_ids = torch.cat([pad, input_ids], dim=1)
 
+    # Per-sequence total left-padding (tokenizer pad + block-alignment pad)
+    prompt_offsets = padded_len - actual_prompt_lengths  # [B]
+
+    # Position IDs: real tokens at the END of the padded sequence.
+    # Each sequence's real tokens span positions 0..actual_len-1, placed at
+    # padded indices prompt_offsets[b]..padded_len-1.
     position_ids = torch.zeros((batch_size, padded_len), dtype=torch.long)
-    position_ids[:, prompt_offset:] = torch.arange(prompt_length)
+    for b in range(batch_size):
+        actual_len = actual_prompt_lengths[b].item()
+        offset = prompt_offsets[b].item()
+        position_ids[b, offset:] = torch.arange(actual_len)
 
     # Initialize empty KV caches
     num_layers = model.config.num_hidden_layers
@@ -538,7 +563,8 @@ def generate(
 
     times_list = []
     eos_token_id = getattr(tokenizer, "eos_token_id", None)
-    num_generated = 0
+    finished = torch.zeros(batch_size, dtype=torch.bool)
+    num_generated = torch.zeros(batch_size, dtype=torch.long)
 
     for i in range(max_new_tokens):
         t0 = time.time()
@@ -546,7 +572,7 @@ def generate(
         if i == 0:
             # --- PREFILL ---
             prefill_mask = build_prefill_mask(
-                batch_size, padded_len, max_cache_len, prompt_offset
+                batch_size, padded_len, max_cache_len, prompt_offsets
             )
             logits = run_forward_fn(
                 model,
@@ -560,18 +586,17 @@ def generate(
                 cache_position=0,
             )
             logits_cpu = logits.to("cpu")
-            next_logits = logits_cpu[0, -1, :]
+            next_logits = logits_cpu[:, -1, :]
             current_cache_len = padded_len
-            # Initialize decode_pos so that after the first +BLOCK_SIZE
-            # increment (which happens BEFORE the first expansion forward
-            # call), position 0 of the block gets position_id =
-            # prompt_length.  Since the expansion code does
-            #   decode_pos = decode_pos + BLOCK_SIZE
-            # we need: initial[j] + BLOCK_SIZE = prompt_length + j
-            # i.e.  initial[j] = prompt_length + j - BLOCK_SIZE
+            # Initialize per-sequence decode_pos. After the first +BLOCK_SIZE
+            # increment (before the first expansion forward), position 0 of
+            # the block must equal actual_prompt_lengths[b] for that row.
+            # So initial[b, j] = actual_prompt_lengths[b] + j - BLOCK_SIZE.
             decode_pos = torch.zeros((batch_size, BLOCK_SIZE), dtype=torch.long)
-            for j in range(BLOCK_SIZE):
-                decode_pos[:, j] = prompt_length + j - BLOCK_SIZE
+            for b in range(batch_size):
+                actual_len = actual_prompt_lengths[b].item()
+                for j in range(BLOCK_SIZE):
+                    decode_pos[b, j] = actual_len + j - BLOCK_SIZE
 
         else:
             is_filling = tokens_in_block > 0
@@ -592,7 +617,7 @@ def generate(
                 )
                 logits_cpu = logits.to("cpu")
                 grab_idx = BLOCK_SIZE - tokens_in_block
-                next_logits = logits_cpu[0, -grab_idx, :]
+                next_logits = logits_cpu[:, -grab_idx, :]
 
             else:
                 current_cache_len += BLOCK_SIZE
@@ -602,7 +627,7 @@ def generate(
                     BLOCK_SIZE,
                     max_cache_len,
                     current_cache_len,
-                    prompt_offset,
+                    prompt_offsets,
                 )
                 logits = run_forward_fn(
                     model,
@@ -616,32 +641,35 @@ def generate(
                     cache_position=current_cache_len - BLOCK_SIZE,
                 )
                 logits_cpu = logits.to("cpu")
-                next_logits = logits_cpu[0, -BLOCK_SIZE, :]
+                next_logits = logits_cpu[:, -BLOCK_SIZE, :]
                 fill_mask_device = exp_mask.to(DEVICE)
 
         # Token selection (CPU)
         if do_sample:
             scaled = next_logits / temperature
             if top_k > 0:
-                v, _ = torch.topk(scaled, min(top_k, scaled.size(-1)))
-                scaled[scaled < v[-1]] = -torch.inf
+                v, _ = torch.topk(scaled, min(top_k, scaled.size(-1)), dim=-1)
+                scaled[scaled < v[:, -1:]] = -torch.inf
             probs = F.softmax(scaled, dim=-1)
-            next_val = torch.multinomial(probs.unsqueeze(0), num_samples=1)
+            next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [B]
         else:
-            next_val = torch.argmax(next_logits).unsqueeze(0).unsqueeze(0)
+            next_tokens = torch.argmax(next_logits, dim=-1)  # [B]
 
         if timing:
             times_list.append(time.time() - t0)
 
         # Place token in result (FMS logic)
-        if tokens_in_block == BLOCK_SIZE - 1:
-            result = F.pad(result, (0, BLOCK_SIZE))
         tokens_in_block = (tokens_in_block + 1) % BLOCK_SIZE
+        if tokens_in_block == 0:
+            # Just finished a block, pad for next block
+            result = F.pad(result, (0, BLOCK_SIZE))
         grab_idx = (BLOCK_SIZE - tokens_in_block) if tokens_in_block > 0 else BLOCK_SIZE
-        result[:, -grab_idx] = next_val.squeeze()
-        num_generated += 1
+        result[:, -grab_idx] = next_tokens  # [B]
+        if eos_token_id is not None:
+            finished |= next_tokens == eos_token_id
+        num_generated += (~finished).long()
 
-        if eos_token_id is not None and next_val.item() == eos_token_id:
+        if finished.all():
             break
 
     # Timing
@@ -652,24 +680,23 @@ def generate(
             print(f"Avg next-token latency: {avg*1000:.3f} ms")
         print("Per-token: " + ", ".join(f"{t*1000:.1f}" for t in times_list) + " ms")
 
-    # Decode text — use num_generated to extract exactly the tokens we placed,
-    # avoiding the old nonzero heuristic which fails when token_id 0 is valid.
-    # Generated tokens are scattered across blocks in the result buffer.
-    # Collect them by walking the block structure.
-    all_gen_ids = []
-    block_start = padded_len
-    remaining = num_generated
-    while remaining > 0:
-        # First token in a block is at block_start, then block_start+1, etc.
-        take = min(remaining, BLOCK_SIZE)
-        for j in range(take):
-            all_gen_ids.append(result[0, block_start + j].item())
-        remaining -= take
-        block_start += BLOCK_SIZE
-
+    # Decode text — walk the block structure per sequence using each
+    # sequence's own num_generated count. Within a sequence, generated
+    # tokens are contiguous within each BLOCK_SIZE block but blocks may
+    # be separated by unused slots; all sequences share the same block
+    # layout starting at padded_len.
     results = []
     for b in range(batch_size):
-        gen_ids = torch.tensor(all_gen_ids)
+        gen_ids = []
+        block_start = padded_len
+        remaining = num_generated[b].item()
+        while remaining > 0:
+            take = min(remaining, BLOCK_SIZE)
+            for j in range(take):
+                gen_ids.append(result[b, block_start + j].item())
+            remaining -= take
+            block_start += BLOCK_SIZE
+        gen_ids = torch.tensor(gen_ids)
         if eos_token_id is not None:
             eos_pos = (gen_ids == eos_token_id).nonzero(as_tuple=True)[0]
             if len(eos_pos) > 0:
