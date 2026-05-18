@@ -271,7 +271,7 @@ def create_data_table(data: List[Dict[str, Any]], columns: List[str]):
                 # Add color coding for supported status
                 formatted_row[col] = "✅" if value.lower() == "true" else "❌"
             elif col == "is_moe":
-                formatted_row[col] = "✓" if value.lower() == "true" else ""
+                formatted_row[col] = "✅" if value.lower() == "true" else "❌"
             elif col == "is_gated":
                 formatted_row[col] = "🔒" if value.lower() == "true" else ""
             else:
@@ -342,27 +342,38 @@ def create_filter_panel():
                 ("Year", "Year"),
             ]
 
+            default_filters: Dict[str, List[str]] = {
+                "is_gated": ["False"],
+                "is_moe": ["False"],
+            }
+
             for field, label in filter_fields:
                 options = list(viewer.unique_values.get(field, []))
                 if options:
+                    default = [
+                        v for v in default_filters.get(field, []) if v in options
+                    ]
+                    if default:
+                        viewer.filters[field] = default
                     ui.select(
                         label=label,
                         options=options,
+                        value=default or None,
                         multiple=True,
                         clearable=True,
                         on_change=lambda e, f=field: update_filter(f, e.value),
                     ).classes("flex-1 min-w-[200px]").props("use-chips")
 
         with ui.row().classes("gap-2 mt-2"):
-            ui.button("Apply Filters", on_click=refresh_display).props("color=primary")
             ui.button("Clear All Filters", on_click=clear_filters).props(
                 "color=secondary"
             )
 
 
 def update_filter(field: str, value: List[str]):
-    """Update a specific filter (without refreshing)."""
+    """Update a specific filter and refresh the display immediately."""
     viewer.filters[field] = value if value else []
+    refresh_display()
 
 
 def clear_filters():
