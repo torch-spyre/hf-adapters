@@ -202,6 +202,7 @@ def create_data_table(data: List[Dict[str, Any]], columns: List[str]):
             "field": "downloads",
             "sortable": True,
             "align": "right",
+            ":format": "v => v == null ? '' : v.toLocaleString()",
         },
         {
             "name": "likes",
@@ -209,6 +210,7 @@ def create_data_table(data: List[Dict[str, Any]], columns: List[str]):
             "field": "likes",
             "sortable": True,
             "align": "right",
+            ":format": "v => v == null ? '' : v.toLocaleString()",
         },
         {
             "name": "model_type",
@@ -281,12 +283,11 @@ def create_data_table(data: List[Dict[str, Any]], columns: List[str]):
         formatted_row = {}
         for col in columns:
             value = row.get(col, "")
-            # Format large numbers
-            if col == "downloads" and value:
+            if col in ("downloads", "likes"):
                 try:
-                    formatted_row[col] = f"{int(value):,}"
-                except ValueError:
-                    formatted_row[col] = value
+                    formatted_row[col] = int(value) if value not in ("", None) else None
+                except (TypeError, ValueError):
+                    formatted_row[col] = None
             elif col == "is_supported":
                 # Add color coding for supported status
                 formatted_row[col] = "✅" if value.lower() == "true" else "❌"
@@ -302,7 +303,7 @@ def create_data_table(data: List[Dict[str, Any]], columns: List[str]):
         columns=column_configs,
         rows=rows,
         row_key="rank",
-        pagination={"rowsPerPage": 20, "sortBy": "rank", "descending": False},
+        pagination={"rowsPerPage": 20, "sortBy": "downloads", "descending": True},
     ).classes("w-full")
 
     table.add_slot(
