@@ -313,24 +313,9 @@ projections before reshape and RoPE.
 
 ## Adding a New Model
 
-### Checklist
-
-1. Check `head_dim` — if `head_dim/2 < 64` with RoPE (or
-   `head_dim < 64` without), use `pad_attention_heads()` to pad
-   to the required size (see Known Issues > sub-stick)
-2. Check for fused weights that need splitting (QKV like Phi-4's
-   `qkv_proj`, MLP like Granite 4.0's `input_linear` or Phi-4's
-   `gate_up_proj`)
-3. Check for partial RoPE (`partial_rotary_factor < 1.0`) — use
-   `PartialPrecomputedRotaryEmbedding` with identity padding (see
-   `hf_phi3.py`)
-4. Check for model-specific multipliers (embedding, residual,
-   attention, logits) — must be preserved in the block function
-5. Check for per-layer variations (NoPE layers, sliding window,
-   MoE routing)
-6. Check vocab size — models with 200K+ vocab may need chunked LM
-   head to stay within Spyre's per-core EAR limit (see `hf_phi3.py`)
-7. Verify CPU accuracy before testing on Spyre
+See [ONBOARDING.md](ONBOARDING.md) for the full step-by-step guide,
+constraint checklist, and a worked example (Granite 3.3 2B with
+head_dim padding).
 
 For a side-by-side comparison with the FMS `eager_spyre` approach,
 see [docs/fms_comparison.md](docs/fms_comparison.md).
