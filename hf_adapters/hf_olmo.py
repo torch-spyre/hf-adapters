@@ -35,10 +35,12 @@ from hf_adapters.hf_common import (
     make_standard_gqa_block,
     pad_lm_head,
     prepare_rope_and_heads,
+    standard_gqa_backbone_forward,
     standard_gqa_forward,
 )
 
 _run_forward = standard_gqa_forward
+_run_backbone_forward = standard_gqa_backbone_forward
 
 
 def _patch_olmo_layernorm(layernorm_cls):

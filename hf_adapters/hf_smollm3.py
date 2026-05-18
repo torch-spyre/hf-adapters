@@ -38,6 +38,7 @@ from hf_adapters.hf_common import (
     kv_cache_update,
     pad_lm_head,
     patch_rmsnorm,
+    standard_gqa_backbone_forward,
     standard_gqa_forward,
 )
 
@@ -107,6 +108,7 @@ def _make_compiled_block(layer, use_rope):
 
 
 _run_forward = standard_gqa_forward
+_run_backbone_forward = standard_gqa_backbone_forward
 
 
 def prepare_for_spyre(model):

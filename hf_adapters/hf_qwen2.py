@@ -30,10 +30,12 @@ Usage::
 
 from hf_adapters.hf_common import (
     prepare_standard_gqa,
+    standard_gqa_backbone_forward,
     standard_gqa_forward,
 )
 
 _run_forward = standard_gqa_forward
+_run_backbone_forward = standard_gqa_backbone_forward
 
 
 def prepare_for_spyre(model):
