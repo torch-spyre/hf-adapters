@@ -430,19 +430,24 @@ def _patch_torch_empty():
     torch.empty._hf_adapters_patched = True
 
 
-def load_model_common(model_path, prepare_fn, dtype=torch.float16):
+def load_model_common(model_path, prepare_fn, dtype=torch.float16, auto_model_cls=None):
     """Load an HF model, apply Spyre adaptations, move to device.
 
     Args:
         model_path: HF model path or local directory.
         prepare_fn: Model-specific ``prepare_for_spyre(model)`` callable.
         dtype: Weight dtype (default fp16).
+        auto_model_cls: HF auto-model class to use (e.g. ``AutoModel``,
+            ``AutoModelForCausalLM``). Defaults to ``AutoModel``.
     """
-    from transformers import AutoModelForCausalLM
+    if auto_model_cls is None:
+        from transformers import AutoModel
+
+        auto_model_cls = AutoModel
 
     _patch_torch_empty()
     print(f"Loading model from {model_path} ...")
-    model = AutoModelForCausalLM.from_pretrained(
+    model = auto_model_cls.from_pretrained(
         model_path,
         dtype=dtype,
         device_map="cpu",
