@@ -5,10 +5,13 @@ Displays CSV data with elegant filtering and coverage statistics.
 """
 
 import ast
+import asyncio
 import csv
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from threading import Lock
+from typing import Any, Dict, List, Optional, Set
 
 from nicegui import ui
 
@@ -43,20 +46,88 @@ def _parse_config_to_module_map() -> Dict[str, str]:
 CONFIG_CLASS_TO_MODULE = _parse_config_to_module_map()
 
 
+@dataclass
+class FilterState:
+    """Immutable filter state to prevent race conditions."""
+
+    filters: Dict[str, List[str]] = field(default_factory=dict)
+    params_min: Optional[float] = None
+    params_max: Optional[float] = 20e9
+
+    def copy(self) -> "FilterState":
+        """Create a deep copy of the filter state."""
+        return FilterState(
+            filters={k: v.copy() for k, v in self.filters.items()},
+            params_min=self.params_min,
+            params_max=self.params_max,
+        )
+
+
 class ModelDataViewer:
     """Handles loading and filtering of model data."""
 
     def __init__(self, csv_path: str):
         self.csv_path = csv_path
         self.all_data: List[Dict[str, Any]] = []
-        self.filtered_data: List[Dict[str, Any]] = []
         self.columns: List[str] = []
-        self.filters: Dict[str, List[str]] = {}
         self.unique_values: Dict[str, Set[str]] = {}
-        # Numeric range filter on `parameters` column, in raw param count.
-        # None means unbounded on that side.
-        self.params_min: float | None = None
-        self.params_max: float | None = 20e9
+
+        # Use immutable filter state with thread-safe access
+        self._filter_state = FilterState()
+        self._state_lock = Lock()
+
+        # Debouncing for rapid filter changes
+        self._refresh_task: Optional[asyncio.Task] = None
+        self._refresh_delay = 0.3  # 300ms debounce
+
+    @property
+    def filters(self) -> Dict[str, List[str]]:
+        """Thread-safe access to filters."""
+        with self._state_lock:
+            return {k: v.copy() for k, v in self._filter_state.filters.items()}
+
+    @property
+    def params_min(self) -> Optional[float]:
+        """Thread-safe access to params_min."""
+        with self._state_lock:
+            return self._filter_state.params_min
+
+    @property
+    def params_max(self) -> Optional[float]:
+        """Thread-safe access to params_max."""
+        with self._state_lock:
+            return self._filter_state.params_max
+
+    def update_filter_state(
+        self,
+        filters: Optional[Dict[str, List[str]]] = None,
+        params_min: Any = None,
+        params_max: Any = None,
+        _clear: bool = False,
+    ) -> FilterState:
+        """Thread-safe update of filter state. Returns new state."""
+        with self._state_lock:
+            if _clear:
+                self._filter_state = FilterState()
+            else:
+                new_state = self._filter_state.copy()
+
+                if filters is not None:
+                    new_state.filters = {k: v.copy() for k, v in filters.items()}
+
+                if params_min is not None:
+                    new_state.params_min = params_min
+
+                if params_max is not None:
+                    new_state.params_max = params_max
+
+                self._filter_state = new_state
+
+            return self._filter_state.copy()
+
+    def clear_filters(self) -> FilterState:
+        """Clear all filters. Returns new state."""
+        return self.update_filter_state(_clear=True)
 
     def load_data(self) -> bool:
         """Load data from CSV file."""
@@ -67,7 +138,6 @@ class ModelDataViewer:
             reader = csv.DictReader(f)
             self.columns = list(reader.fieldnames or [])
             self.all_data = list(reader)
-            self.filtered_data = self.all_data.copy()
 
         # Extract unique values for each column
         self._extract_unique_values()
@@ -83,23 +153,38 @@ class ModelDataViewer:
                     values.add(str(value))
             self.unique_values[column] = set(sorted(values))
 
-    def apply_filters(self):
-        """Apply current filters to data."""
-        self.filtered_data = self.all_data.copy()
+    def apply_filters(self) -> List[Dict[str, Any]]:
+        """Apply current filters to data. Returns NEW filtered list (immutable)."""
+        # Get a snapshot of current filter state
+        with self._state_lock:
+            current_state = self._filter_state.copy()
 
-        for column, selected_values in self.filters.items():
+        # Work on a copy to avoid modifying shared state
+        filtered = self.all_data.copy()
+
+        # Apply column filters
+        for column, selected_values in current_state.filters.items():
             if selected_values:  # If any values are selected for this column
-                self.filtered_data = [
+                filtered = [
                     row
-                    for row in self.filtered_data
+                    for row in filtered
                     if str(row.get(column, "")) in selected_values
                 ]
 
-        if self.params_min is not None or self.params_max is not None:
-            lo = self.params_min if self.params_min is not None else float("-inf")
-            hi = self.params_max if self.params_max is not None else float("inf")
+        # Apply parameter range filter
+        if current_state.params_min is not None or current_state.params_max is not None:
+            lo = (
+                current_state.params_min
+                if current_state.params_min is not None
+                else float("-inf")
+            )
+            hi = (
+                current_state.params_max
+                if current_state.params_max is not None
+                else float("inf")
+            )
             kept = []
-            for row in self.filtered_data:
+            for row in filtered:
                 raw = row.get("parameters", "")
                 try:
                     n = float(raw)
@@ -107,11 +192,13 @@ class ModelDataViewer:
                     continue
                 if lo <= n <= hi:
                     kept.append(row)
-            self.filtered_data = kept
+            filtered = kept
 
-    def get_coverage_stats(self) -> Dict[str, Any]:
-        """Calculate coverage statistics for supported models."""
-        total = len(self.filtered_data)
+        return filtered  # Return new list instead of modifying self.filtered_data
+
+    def get_coverage_stats(self, filtered_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Calculate coverage statistics for filtered data."""
+        total = len(filtered_data)
         if total == 0:
             return {
                 "total": 0,
@@ -121,9 +208,7 @@ class ModelDataViewer:
             }
 
         supported = sum(
-            1
-            for row in self.filtered_data
-            if row.get("is_supported", "").lower() == "true"
+            1 for row in filtered_data if row.get("is_supported", "").lower() == "true"
         )
 
         return {
@@ -133,10 +218,12 @@ class ModelDataViewer:
             "percentage": (supported / total * 100) if total > 0 else 0.0,
         }
 
-    def get_model_type_stats(self) -> Dict[str, int]:
-        """Get statistics by model type."""
+    def get_model_type_stats(
+        self, filtered_data: List[Dict[str, Any]]
+    ) -> Dict[str, int]:
+        """Get statistics by model type from filtered data."""
         stats = {}
-        for row in self.filtered_data:
+        for row in filtered_data:
             model_type = row.get("model_type", "Unknown")
             if not model_type:
                 model_type = "Unknown"
@@ -379,52 +466,75 @@ def create_data_table(data: List[Dict[str, Any]], columns: List[str]):
     )
 
 
-def refresh_display(viewer: ModelDataViewer, content_container) -> None:
-    """Refresh the entire display with current filters."""
-    viewer.apply_filters()
-
+async def refresh_display_async(viewer: ModelDataViewer, content_container) -> None:
+    """Async refresh with proper state handling."""
     if content_container is None:
         return
 
+    # Get filtered data (immutable operation)
+    filtered_data = viewer.apply_filters()
+
+    # Clear and rebuild UI
     content_container.clear()
 
     with content_container:
         # Statistics
-        stats = viewer.get_coverage_stats()
+        stats = viewer.get_coverage_stats(filtered_data)
         create_stats_card(stats)
 
         # Model type distribution
-        # type_stats = viewer.get_model_type_stats()
+        # type_stats = viewer.get_model_type_stats(filtered_data)
         # create_model_type_chart(type_stats)
 
         # Data table
         with ui.card().classes("w-full"):
-            ui.label(f"📋 Models Table ({len(viewer.filtered_data)} models)").classes(
+            ui.label(f"📋 Models Table ({len(filtered_data)} models)").classes(
                 "text-xl font-bold mb-2"
             )
-            create_data_table(viewer.filtered_data, viewer.columns)
+            create_data_table(filtered_data, viewer.columns)
 
 
-def create_filter_panel_lazy(viewer: ModelDataViewer, refresh: Any) -> None:
-    """Create the filter panel. `refresh` is a zero-arg callback invoked
-    after every filter mutation; it should re-render the content container."""
+def create_filter_panel_lazy(viewer: ModelDataViewer, content_container) -> None:
+    """Create the filter panel with debounced refresh."""
+
+    async def debounced_refresh():
+        """Debounced refresh to prevent race conditions."""
+        # Cancel any pending refresh
+        if viewer._refresh_task and not viewer._refresh_task.done():
+            viewer._refresh_task.cancel()
+            try:
+                await viewer._refresh_task
+            except asyncio.CancelledError:
+                pass
+
+        # Schedule new refresh after delay
+        async def delayed_refresh():
+            await asyncio.sleep(viewer._refresh_delay)
+            await refresh_display_async(viewer, content_container)
+
+        viewer._refresh_task = asyncio.create_task(delayed_refresh())
 
     def update_filter(field: str, value: List[str]) -> None:
-        viewer.filters[field] = value if value else []
-        refresh()
+        new_filters = viewer.filters  # Get current filters
+        new_filters[field] = value if value else []
+        viewer.update_filter_state(filters=new_filters)
+        asyncio.create_task(debounced_refresh())
 
     def update_params_range(min_b: Any, max_b: Any) -> None:
+        params_min = None
+        params_max = None
+
         if min_b is not _UNSET:
-            viewer.params_min = float(min_b) * 1e9 if min_b not in (None, "") else None
+            params_min = float(min_b) * 1e9 if min_b not in (None, "") else None
         if max_b is not _UNSET:
-            viewer.params_max = float(max_b) * 1e9 if max_b not in (None, "") else None
-        refresh()
+            params_max = float(max_b) * 1e9 if max_b not in (None, "") else None
+
+        viewer.update_filter_state(params_min=params_min, params_max=params_max)
+        asyncio.create_task(debounced_refresh())
 
     def clear_filters() -> None:
-        viewer.filters.clear()
-        viewer.params_min = None
-        viewer.params_max = None
-        refresh()
+        viewer.clear_filters()
+        asyncio.create_task(debounced_refresh())
 
     with ui.card().classes("w-full mb-4"):
         ui.label("🔍 Filters").classes("text-xl font-bold mb-2")
@@ -543,20 +653,13 @@ def main_page():
     with ui.column().classes("w-full max-w-[1600px] mx-auto p-4"):
         # Filter panel — renders first (at top of page).
         # The content container is created right after so filter callbacks
-        # can refresh it. We pass a one-element list as a late-bound reference
-        # because the container doesn't exist yet at panel-creation time.
-        content_ref: List[Any] = [None]
+        # can refresh it.
+        content_container = ui.column().classes("w-full")
 
-        def refresh() -> None:
-            refresh_display(viewer, content_ref[0])
-
-        create_filter_panel_lazy(viewer, refresh)
-
-        # Content container (rendered below the filter panel).
-        content_ref[0] = ui.column().classes("w-full")
+        create_filter_panel_lazy(viewer, content_container)
 
         # Initial display
-        refresh()
+        asyncio.create_task(refresh_display_async(viewer, content_container))
 
 
 def main():
