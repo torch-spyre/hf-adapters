@@ -38,6 +38,7 @@ Usage::
     python tests/test_embed_cpu_accuracy.py --auto-loader [qwen3-embed]
 """
 
+import gc
 import importlib
 import importlib.util
 import os
@@ -203,6 +204,8 @@ def run_model_test(model_name, model_path, adapter_filename, dtype="float16"):
         adapter_hidden, returned_mask = _common_mod.prefill_embed(
             run_backbone_forward_fn, model, input_ids, attention_mask
         )
+    del model
+    gc.collect()
 
     # --- Compare ---
     assert (
@@ -272,6 +275,8 @@ def run_model_test_auto_loader(model_name, model_path, dtype="float16"):
             input_ids=input_ids, attention_mask=attention_mask, return_dict=True
         )
     ref_hidden = ref_out.last_hidden_state
+    del ref_model
+    gc.collect()
 
     # --- Adapter via AutoSpyreModel ---
     print("  Loading via AutoSpyreModel.from_pretrained ...")
@@ -287,6 +292,8 @@ def run_model_test_auto_loader(model_name, model_path, dtype="float16"):
         adapter_hidden, _ = _common_mod.prefill_embed(
             run_backbone_forward_fn, model, input_ids, attention_mask
         )
+    del model
+    gc.collect()
 
     # --- Compare ---
     assert (

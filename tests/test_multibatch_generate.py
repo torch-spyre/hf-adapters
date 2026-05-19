@@ -20,6 +20,7 @@ Usage:
     python tests/test_multibatch_generate.py [granite2b|qwen3|smollm3|llama|...]
 """
 
+import gc
 import importlib
 import importlib.util
 import os
@@ -155,6 +156,8 @@ def run_multibatch_test(
     adapter_outputs = adapter_batch_outputs(
         adapter_mod, model, tokenizer, PROMPTS, max_new_tokens
     )
+    del model
+    gc.collect()
 
     # Compare
     print(f"\n  Results (max_new_tokens={max_new_tokens}):")

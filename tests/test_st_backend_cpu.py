@@ -28,6 +28,7 @@ Usage::
     python tests/test_st_backend_cpu.py qwen3_embed
 """
 
+import gc
 import importlib.util
 import os
 import sys
@@ -110,6 +111,8 @@ def test_st_backend_cpu(model_key):
     print("  Loading reference (stock SentenceTransformer) ...")
     ref_model = SentenceTransformer(cfg["path"], device="cpu")
     ref_embeddings = ref_model.encode(TEST_SENTENCES, convert_to_tensor=True)  # [N, H]
+    del ref_model
+    gc.collect()
 
     # --- Ours: ST with backend="spyre" (DEVICE patched to cpu) ---
     print("  Loading spyre backend model ...")
@@ -118,6 +121,8 @@ def test_st_backend_cpu(model_key):
     spyre_embeddings = spyre_model.encode(
         TEST_SENTENCES, convert_to_tensor=True
     )  # [N, H]
+    del spyre_model
+    gc.collect()
 
     # Normalize both before cosine sim (ref may already be normalized, but be explicit)
     ref_norm = F.normalize(ref_embeddings.float(), dim=-1)
