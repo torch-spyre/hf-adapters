@@ -41,6 +41,7 @@ import torch.nn.functional as F
 from hf_adapters.hf_common import (
     PrecomputedRotaryEmbedding,
     apply_rope_matmul,
+    get_backbone,
     kv_cache_update,
     pad_lm_head,
     patch_rmsnorm,
@@ -112,7 +113,7 @@ def _make_compiled_block(layer, res_mult, gate_proj, up_proj):
     return torch.compile(block_forward, dynamic=False)
 
 
-def _run_forward(
+def _run_backbone_forward(
     model,
     input_ids,
     position_ids,
@@ -123,8 +124,9 @@ def _run_forward(
     token_index,
     cache_position,
 ):
-    """Granite 4.0 forward: embedding * multiplier, blocks, norm, head / scaling."""
-    h = model.model.embed_tokens(input_ids)
+    """Granite 4.0 backbone: embedding * multiplier, blocks, norm."""
+    backbone = get_backbone(model)
+    h = backbone.embed_tokens(input_ids)
     h = h * model.config.embedding_multiplier
 
     selected_freqs = model._spyre_rope(h, position_ids)
@@ -141,7 +143,33 @@ def _run_forward(
             cache_position,
         )
 
-    h = model.model.norm(h)
+    h = backbone.norm(h)
+    return h
+
+
+def _run_forward(
+    model,
+    input_ids,
+    position_ids,
+    attn_mask,
+    key_caches,
+    value_caches,
+    is_filling,
+    token_index,
+    cache_position,
+):
+    """Granite 4.0 causal-LM forward: backbone + head / scaling."""
+    h = _run_backbone_forward(
+        model,
+        input_ids,
+        position_ids,
+        attn_mask,
+        key_caches,
+        value_caches,
+        is_filling,
+        token_index,
+        cache_position,
+    )
     logits = model.lm_head(h)
     logits = logits / model.config.logits_scaling
     return logits
@@ -153,7 +181,7 @@ def prepare_for_spyre(model):
         GraniteMoeHybridRMSNorm,
     )
 
-    model._spyre_rope = PrecomputedRotaryEmbedding(model.model.rotary_emb)
+    model._spyre_rope = PrecomputedRotaryEmbedding(get_backbone(model).rotary_emb)
     patch_rmsnorm(GraniteMoeHybridRMSNorm)
     pad_lm_head(model)
 
@@ -162,7 +190,7 @@ def prepare_for_spyre(model):
     # Split fused MLP weights and register as submodules so .to() moves them
     model._spyre_gate_projs = nn.ModuleList()
     model._spyre_up_projs = nn.ModuleList()
-    for layer in model.model.layers:
+    for layer in get_backbone(model).layers:
         gate_proj, up_proj = split_fused_linear(layer.shared_mlp.input_linear.weight)
         model._spyre_gate_projs.append(gate_proj)
         model._spyre_up_projs.append(up_proj)
@@ -170,7 +198,7 @@ def prepare_for_spyre(model):
     model._spyre_compiled_blocks = [
         _make_compiled_block(layer, res_mult, gate, up)
         for layer, gate, up in zip(
-            model.model.layers,
+            get_backbone(model).layers,
             model._spyre_gate_projs,
             model._spyre_up_projs,
         )

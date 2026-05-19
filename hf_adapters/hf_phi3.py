@@ -41,6 +41,7 @@ from hf_adapters.hf_common import (
     DEVICE,
     apply_rope_matmul,
     chunk_lm_head,
+    get_backbone,
     kv_cache_update,
     patch_rmsnorm,
     split_fused_linear,
@@ -237,7 +238,7 @@ def _make_compiled_block(layer, q_proj, k_proj, v_proj, gate_proj, up_proj, head
 # ---------------------------------------------------------------------------
 
 
-def _run_forward(
+def _run_backbone_forward(
     model,
     input_ids,
     position_ids,
@@ -248,7 +249,9 @@ def _run_forward(
     token_index,
     cache_position,
 ):
-    h = model.model.embed_tokens(input_ids)
+    """Phi-3 backbone: embedding, blocks, norm."""
+    backbone = get_backbone(model)
+    h = backbone.embed_tokens(input_ids)
     selected_freqs = model._spyre_rope(h, position_ids)
 
     for i, compiled_block in enumerate(model._spyre_compiled_blocks):
@@ -263,7 +266,33 @@ def _run_forward(
             cache_position,
         )
 
-    h = model.model.norm(h)
+    h = backbone.norm(h)
+    return h
+
+
+def _run_forward(
+    model,
+    input_ids,
+    position_ids,
+    attn_mask,
+    key_caches,
+    value_caches,
+    is_filling,
+    token_index,
+    cache_position,
+):
+    """Phi-3 causal-LM forward: backbone + chunked LM head."""
+    h = _run_backbone_forward(
+        model,
+        input_ids,
+        position_ids,
+        attn_mask,
+        key_caches,
+        value_caches,
+        is_filling,
+        token_index,
+        cache_position,
+    )
 
     # Chunked LM head: large vocab (200K+) exceeds Spyre's per-core EAR limit.
     # Split into N chunks, run each on Spyre, cat on CPU.
@@ -284,7 +313,9 @@ def prepare_for_spyre(model):
     hd = cfg.hidden_size // cfg.num_attention_heads
 
     # RoPE with identity padding for partial rotary
-    model._spyre_rope = PartialPrecomputedRotaryEmbedding(model.model.rotary_emb, hd)
+    model._spyre_rope = PartialPrecomputedRotaryEmbedding(
+        get_backbone(model).rotary_emb, hd
+    )
     patch_rmsnorm(Phi3RMSNorm)
 
     # Chunk LM head for large vocab models (200K+ vocab exceeds EAR limit)
@@ -308,7 +339,7 @@ def prepare_for_spyre(model):
     model._spyre_gate_projs = nn.ModuleList()
     model._spyre_up_projs = nn.ModuleList()
 
-    for layer in model.model.layers:
+    for layer in get_backbone(model).layers:
         q, k, v = _split_fused_qkv(layer.self_attn, num_q, num_kv, hd)
         if rope_perm is not None:
             _permute_proj_for_rope(q, num_q, hd, rope_perm)
@@ -324,7 +355,7 @@ def prepare_for_spyre(model):
     model._spyre_compiled_blocks = [
         _make_compiled_block(layer, qp, kp, vp, gp, up, hd)
         for layer, qp, kp, vp, gp, up in zip(
-            model.model.layers,
+            get_backbone(model).layers,
             model._spyre_q_projs,
             model._spyre_k_projs,
             model._spyre_v_projs,

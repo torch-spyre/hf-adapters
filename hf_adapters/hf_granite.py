@@ -31,6 +31,7 @@ import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
     apply_rope_matmul,
+    get_backbone,
     kv_cache_update,
     pad_lm_head,
     patch_rmsnorm,
@@ -102,7 +103,7 @@ def _make_compiled_block(layer):
     return torch.compile(block_forward, dynamic=False)
 
 
-def _run_forward(
+def _run_backbone_forward(
     model,
     input_ids,
     position_ids,
@@ -113,9 +114,10 @@ def _run_forward(
     token_index,
     cache_position,
 ):
-    """Granite 3.3 forward: embedding * multiplier, blocks, norm, head / scaling."""
-    h = model.model.embed_tokens(input_ids)
-    h = h * model.model.embedding_multiplier
+    """Granite 3.3 backbone: embedding * multiplier, blocks, norm."""
+    backbone = get_backbone(model)
+    h = backbone.embed_tokens(input_ids)
+    h = h * backbone.embedding_multiplier
 
     selected_freqs = model._spyre_rope(h, position_ids)
 
@@ -131,7 +133,33 @@ def _run_forward(
             cache_position,
         )
 
-    h = model.model.norm(h)
+    h = backbone.norm(h)
+    return h
+
+
+def _run_forward(
+    model,
+    input_ids,
+    position_ids,
+    attn_mask,
+    key_caches,
+    value_caches,
+    is_filling,
+    token_index,
+    cache_position,
+):
+    """Granite 3.3 causal-LM forward: backbone + head / scaling."""
+    h = _run_backbone_forward(
+        model,
+        input_ids,
+        position_ids,
+        attn_mask,
+        key_caches,
+        value_caches,
+        is_filling,
+        token_index,
+        cache_position,
+    )
     logits = model.lm_head(h)
     logits = logits / model.config.logits_scaling
     return logits
@@ -145,5 +173,5 @@ def prepare_for_spyre(model):
     patch_rmsnorm(GraniteRMSNorm)
     pad_lm_head(model)
     model._spyre_compiled_blocks = [
-        _make_compiled_block(layer) for layer in model.model.layers
+        _make_compiled_block(layer) for layer in get_backbone(model).layers
     ]

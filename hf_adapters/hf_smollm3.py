@@ -35,9 +35,11 @@ import torch.nn.functional as F
 from hf_adapters.hf_common import (
     PrecomputedRotaryEmbedding,
     apply_rope_matmul,
+    get_backbone,
     kv_cache_update,
     pad_lm_head,
     patch_rmsnorm,
+    standard_gqa_backbone_forward,
     standard_gqa_forward,
 )
 
@@ -107,13 +109,14 @@ def _make_compiled_block(layer, use_rope):
 
 
 _run_forward = standard_gqa_forward
+_run_backbone_forward = standard_gqa_backbone_forward
 
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to SmolLM3 model in-place."""
     from transformers.models.smollm3.modeling_smollm3 import SmolLM3RMSNorm
 
-    model._spyre_rope = PrecomputedRotaryEmbedding(model.model.rotary_emb)
+    model._spyre_rope = PrecomputedRotaryEmbedding(get_backbone(model).rotary_emb)
     patch_rmsnorm(SmolLM3RMSNorm)
     pad_lm_head(model)
 
@@ -122,7 +125,7 @@ def prepare_for_spyre(model):
     no_rope = getattr(model.config, "no_rope_layers", None)
 
     model._spyre_compiled_blocks = []
-    for idx, layer in enumerate(model.model.layers):
+    for idx, layer in enumerate(get_backbone(model).layers):
         use_rope = True
         if no_rope is not None and idx < len(no_rope):
             use_rope = bool(no_rope[idx])

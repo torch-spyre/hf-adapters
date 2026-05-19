@@ -33,6 +33,24 @@ DEVICE = "spyre"
 BLOCK_SIZE = 64  # Spyre stick size at fp16 (128 bytes / 2 bytes per element)
 
 
+def get_backbone(model):
+    """Return the transformer backbone of an HF model.
+
+    Auto-loaded models come in two shapes:
+
+    - ``AutoModelForCausalLM`` returns a wrapper (``Qwen3ForCausalLM``,
+      ``LlamaForCausalLM``, ...) whose backbone lives at ``model.model``
+      and which exposes ``model.lm_head``.
+    - ``AutoModel`` returns the bare backbone (``Qwen3Model``,
+      ``LlamaModel``, ...) — no ``.model`` attribute, no ``lm_head``.
+
+    Adapter code reaches into the backbone to access ``embed_tokens``,
+    ``layers``, ``norm``, ``rotary_emb``. This accessor resolves the right
+    object regardless of how the model was loaded.
+    """
+    return model.model if hasattr(model, "model") else model
+
+
 # ---------------------------------------------------------------------------
 # RoPE: precompute rotation matrices on CPU (FMS approach)
 # ---------------------------------------------------------------------------
@@ -315,7 +333,13 @@ def patch_rmsnorm(rmsnorm_cls):
 
 
 def pad_lm_head(model):
-    """Pad LM head vocab dim to stick-aligned size (+64 for work division)."""
+    """Pad LM head vocab dim to stick-aligned size (+64 for work division).
+
+    No-op when ``model`` has no ``lm_head`` (e.g. backbones loaded via
+    ``AutoModel`` for embedding workloads).
+    """
+    if not hasattr(model, "lm_head"):
+        return
     w = model.lm_head.weight
     vocab = w.shape[0]
     padded = ((vocab + BLOCK_SIZE - 1) // BLOCK_SIZE * BLOCK_SIZE) + BLOCK_SIZE
@@ -331,7 +355,11 @@ def chunk_lm_head(model, num_chunks=8):
     Large vocab (200K+) exceeds Spyre's per-core 256 MB EAR limit.
     We replace the single lm_head with N smaller nn.Linear modules.
     Each chunk processes vocab_size/N output dims.
+
+    No-op when ``model`` has no ``lm_head``.
     """
+    if not hasattr(model, "lm_head"):
+        return
     w = model.lm_head.weight  # [vocab, hidden]
     vocab, hidden = w.shape
     chunk_size = (vocab + num_chunks - 1) // num_chunks
@@ -407,6 +435,35 @@ def build_expansion_mask(
     return mask
 
 
+def build_prefill_mask_right_padded(batch_size, padded_len, actual_lengths):
+    """Causal prefill mask for right-padded sequences.
+
+    Used by the embedding path. Sequences are right-padded: real tokens
+    occupy positions ``0..actual_lengths[b]-1`` and trailing positions
+    ``actual_lengths[b]..padded_len-1`` hold padding. Cache length equals
+    ``padded_len`` since there is no decode budget — embeddings are
+    prefill-only.
+
+    Compared to ``build_prefill_mask`` (left-padded, used by ``generate``):
+      - Causal triangle is identical (token ``i`` attends to ``0..i``).
+      - Padding columns to mask are at the **end** of the row, not the start.
+      - Output shape is ``[B, 1, padded_len, padded_len]``; there is no
+        separate ``max_cache_len`` because no decode follows.
+
+    Padding-position rows compute garbage; callers crop them away when
+    returning ``[B, actual_length, H]``.
+    """
+    mask = torch.zeros((batch_size, 1, padded_len, padded_len), dtype=torch.float16)
+    for i in range(padded_len):
+        mask[:, :, i, i + 1 :] = -torch.inf
+    if isinstance(actual_lengths, torch.Tensor):
+        for b in range(batch_size):
+            mask[b, :, :, actual_lengths[b].item() :] = -torch.inf
+    else:
+        mask[:, :, :, actual_lengths:] = -torch.inf
+    return mask
+
+
 # ---------------------------------------------------------------------------
 # Model-agnostic load + generate
 # ---------------------------------------------------------------------------
@@ -430,19 +487,24 @@ def _patch_torch_empty():
     torch.empty._hf_adapters_patched = True
 
 
-def load_model_common(model_path, prepare_fn, dtype=torch.float16):
+def load_model_common(model_path, prepare_fn, dtype=torch.float16, auto_model_cls=None):
     """Load an HF model, apply Spyre adaptations, move to device.
 
     Args:
         model_path: HF model path or local directory.
         prepare_fn: Model-specific ``prepare_for_spyre(model)`` callable.
         dtype: Weight dtype (default fp16).
+        auto_model_cls: HF auto-model class to use (e.g. ``AutoModel``,
+            ``AutoModelForCausalLM``). Defaults to ``AutoModel``.
     """
-    from transformers import AutoModelForCausalLM
+    if auto_model_cls is None:
+        from transformers import AutoModel
+
+        auto_model_cls = AutoModel
 
     _patch_torch_empty()
     print(f"Loading model from {model_path} ...")
-    model = AutoModelForCausalLM.from_pretrained(
+    model = auto_model_cls.from_pretrained(
         model_path,
         dtype=dtype,
         device_map="cpu",
@@ -777,7 +839,7 @@ def make_standard_gqa_block(layer):
     return torch.compile(block_forward, dynamic=False)
 
 
-def standard_gqa_forward(
+def standard_gqa_backbone_forward(
     model,
     input_ids,
     position_ids,
@@ -788,8 +850,13 @@ def standard_gqa_forward(
     token_index,
     cache_position,
 ):
-    """Standard GQA forward: embedding, RoPE, compiled blocks, norm, LM head."""
-    h = model.model.embed_tokens(input_ids)
+    """Standard GQA backbone: embedding, RoPE, compiled blocks, norm.
+
+    Returns ``last_hidden_state`` (no ``lm_head``). Used directly by embedding
+    callers; wrapped by ``standard_gqa_forward`` for causal-LM callers.
+    """
+    backbone = get_backbone(model)
+    h = backbone.embed_tokens(input_ids)
 
     selected_freqs = model._spyre_rope(h, position_ids)
 
@@ -805,9 +872,34 @@ def standard_gqa_forward(
             cache_position,
         )
 
-    h = model.model.norm(h)
-    logits = model.lm_head(h)
-    return logits
+    h = backbone.norm(h)
+    return h
+
+
+def standard_gqa_forward(
+    model,
+    input_ids,
+    position_ids,
+    attn_mask,
+    key_caches,
+    value_caches,
+    is_filling,
+    token_index,
+    cache_position,
+):
+    """Standard GQA causal-LM forward: backbone + LM head."""
+    h = standard_gqa_backbone_forward(
+        model,
+        input_ids,
+        position_ids,
+        attn_mask,
+        key_caches,
+        value_caches,
+        is_filling,
+        token_index,
+        cache_position,
+    )
+    return model.lm_head(h)
 
 
 def prepare_rope_and_heads(model):
@@ -826,7 +918,7 @@ def prepare_rope_and_heads(model):
         padded_head_dim = stick_aligned_head_dim
         pad_attention_heads(
             model,
-            model.model.layers,
+            get_backbone(model).layers,
             orig_head_dim,
             padded_head_dim,
             cfg.num_attention_heads,
@@ -834,7 +926,7 @@ def prepare_rope_and_heads(model):
         )
 
     model._spyre_rope = PrecomputedRotaryEmbedding(
-        model.model.rotary_emb,
+        get_backbone(model).rotary_emb,
         padded_head_dim=padded_head_dim,
     )
 
@@ -850,5 +942,120 @@ def prepare_standard_gqa(model, rmsnorm_cls):
     patch_rmsnorm(rmsnorm_cls)
     pad_lm_head(model)
     model._spyre_compiled_blocks = [
-        make_standard_gqa_block(layer) for layer in model.model.layers
+        make_standard_gqa_block(layer) for layer in get_backbone(model).layers
     ]
+
+
+# ---------------------------------------------------------------------------
+# Embedding-path prefill driver
+# ---------------------------------------------------------------------------
+
+
+def prefill_embed(
+    run_backbone_forward_fn: Callable,
+    model,
+    input_ids,
+    attention_mask,
+):
+    """One-shot prefill that returns ``last_hidden_state``.
+
+    Counterpart of ``generate``'s prefill arm, specialized for embedding
+    workloads. Differences:
+
+    - **Right-padded** instead of left-padded. ST tokenizes with right-pad
+      and pooling layers depend on ``attention_mask`` to find real tokens;
+      flipping to left-pad would silently break pooling.
+    - **No decode follow-up.** Caches are sized to ``padded_len`` only and
+      thrown away after this call. The compiled block still writes to them
+      (we can't change its signature), but we don't reuse them.
+    - **No ``lm_head``.** Returns ``[B, L, H]`` hidden states directly,
+      so callers (pooling, normalize) operate on the backbone output.
+
+    Args:
+        run_backbone_forward_fn: ``fn(model, input_ids, position_ids,
+            attn_mask, key_caches, value_caches, is_filling, token_index,
+            cache_position) -> [B, padded_len, H]``. Pass the adapter's
+            ``_run_backbone_forward`` (or ``standard_gqa_backbone_forward``).
+        model: Prepared HF backbone on Spyre (loaded via ``AutoModel``).
+        input_ids: ``[B, L]`` token ids on CPU. Right-padded to ``L`` by
+            the tokenizer; this function further pads to a ``BLOCK_SIZE``
+            multiple.
+        attention_mask: ``[B, L]`` mask on CPU; ``1`` for real tokens,
+            ``0`` for tokenizer pads.
+
+    Returns:
+        Tuple ``(last_hidden_state, attention_mask)``:
+          - ``last_hidden_state``: ``[B, L, H]`` on Spyre, cropped back to
+            the input ``L``. Caller moves to CPU as needed.
+          - ``attention_mask``: the input mask, unchanged. Returned for
+            convenience so the caller can pipe ``(h, mask)`` straight
+            into a pooling layer.
+    """
+    bsz, seq_len = input_ids.shape
+
+    # Pad to BLOCK_SIZE multiple on the right
+    padded_len = math.ceil(seq_len / BLOCK_SIZE) * BLOCK_SIZE
+    pad_amount = padded_len - seq_len
+    if pad_amount > 0:
+        input_ids = F.pad(input_ids, (0, pad_amount), value=0)
+
+    # Per-sequence real-token count (excludes both tokenizer pad and block pad)
+    actual_lengths = attention_mask.sum(dim=1)  # [B]
+
+    # Position ids: real tokens get 0..actual_len-1, pads get 0 (masked out
+    # in attention so the rotation applied at those positions doesn't matter)
+    position_ids = torch.zeros((bsz, padded_len), dtype=torch.long)
+    for b in range(bsz):
+        actual = actual_lengths[b].item()
+        position_ids[b, :actual] = torch.arange(actual)
+
+    # Causal right-padded mask
+    mask = build_prefill_mask_right_padded(bsz, padded_len, actual_lengths)
+
+    # Throwaway KV caches sized to padded_len (no decode budget)
+    num_layers = model.config.num_hidden_layers
+    num_kv_heads = model.config.num_key_value_heads
+    head_dim = (
+        getattr(model, "_spyre_head_dim", None)
+        or getattr(model.config, "head_dim", None)
+        or model.config.hidden_size // model.config.num_attention_heads
+    )
+    v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
+    key_caches = [
+        torch.zeros(
+            bsz,
+            num_kv_heads,
+            padded_len,
+            head_dim,
+            dtype=torch.float16,
+            device=DEVICE,
+        )
+        for _ in range(num_layers)
+    ]
+    value_caches = [
+        torch.zeros(
+            bsz,
+            num_kv_heads,
+            padded_len,
+            v_head_dim,
+            dtype=torch.float16,
+            device=DEVICE,
+        )
+        for _ in range(num_layers)
+    ]
+
+    h = run_backbone_forward_fn(
+        model,
+        input_ids.to(DEVICE),
+        position_ids.to(DEVICE),
+        mask.to(DEVICE),
+        key_caches,
+        value_caches,
+        is_filling=False,
+        token_index=0,
+        cache_position=0,
+    )
+
+    # Crop the block-pad back off; tokenizer pad stays so pooling can mask it
+    h = h[:, :seq_len, :]
+    return h, attention_mask

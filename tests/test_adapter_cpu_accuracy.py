@@ -28,6 +28,7 @@ comparing generate() output against HF native generation.
 Requires: transformers, torch (2.x), sentencepiece
 """
 
+import gc
 import importlib
 import importlib.util
 import os
@@ -319,6 +320,8 @@ def run_model_test(
         input_ids,
         num_decode=num_decode,
     )
+    del model
+    gc.collect()
 
     # --- Compare ---
     comparisons = []
@@ -418,6 +421,8 @@ def run_model_test_auto_loader(
     print(f"  Prompt: {prompt!r}")
     print("  Running auto-loader generate ...")
     auto_outputs = model.generate(tokenizer, [prompt], max_new_tokens=num_decode)
+    del model
+    gc.collect()
 
     # --- HF reference ---
     print("  Loading HF reference model ...")
@@ -444,6 +449,8 @@ def run_model_test_auto_loader(
     hf_text = tokenizer.decode(
         hf_out[0][encoded["input_ids"].shape[1] :], skip_special_tokens=True
     )
+    del hf_model
+    gc.collect()
 
     match = auto_outputs[0].strip() == hf_text.strip()
     return {

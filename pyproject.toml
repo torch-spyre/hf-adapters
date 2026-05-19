@@ -10,7 +10,7 @@ dependencies = [
     "transformers",
     "sentencepiece",
     "accelerate",
-
+    "sentence_transformers",
 ]
 
 [project.optional-dependencies]

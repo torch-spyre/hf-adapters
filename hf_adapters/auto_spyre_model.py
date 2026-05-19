@@ -38,6 +38,8 @@ import types
 import torch
 from transformers import (
     AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
     Granite4VisionConfig,
     GraniteConfig,
     GraniteMoeHybridConfig,
@@ -81,30 +83,58 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING = {
 }
 
 
-class AutoSpyreModelForCausalLM:
+def _resolve_adapter_module(model_name_or_path):
+    model_config = AutoConfig.from_pretrained(model_name_or_path)
+    if type(model_config) not in CONFIG_TO_ADAPTER_MODULE_MAPPING:
+        raise Exception(
+            f"Model {model_name_or_path} of type {type(model_config)} "
+            "is not supported"
+        )
+    return CONFIG_TO_ADAPTER_MODULE_MAPPING[type(model_config)]
 
-    @staticmethod
-    def from_pretrained(model_name_or_path, dtype=torch.float16):
-        # Determine the appropriate Spyre adapter module for the model
-        model_config = AutoConfig.from_pretrained(model_name_or_path)
-        if type(model_config) not in CONFIG_TO_ADAPTER_MODULE_MAPPING:
-            raise Exception(
-                f"Model {model_name_or_path} of type {type(model_config)} "
-                "is not supported"
-            )
 
-        module = CONFIG_TO_ADAPTER_MODULE_MAPPING[type(model_config)]
+class AutoSpyreModel:
+    """Load an HF model via ``transformers.AutoModel`` and prepare it for Spyre.
 
-        # Check if module has custom load_model function
+    ``AutoModel`` is the generic auto-class: it dispatches based on the model
+    config and may return any of several model classes (often, but not always,
+    the bare backbone). Use a more specific ``AutoSpyreModelFor*`` subclass
+    when the task is known.
+    """
+
+    _auto_model_cls = AutoModel
+
+    @classmethod
+    def from_pretrained(cls, model_name_or_path, dtype=torch.float16):
+        module = _resolve_adapter_module(model_name_or_path)
+
         if hasattr(module, "load_model"):
-            # Custom adapter loading method (e.g., Granite Vision)
             model = module.load_model(model_name_or_path, dtype)
         else:
             model = load_model_common(
-                model_name_or_path, module.prepare_for_spyre, dtype
+                model_name_or_path,
+                module.prepare_for_spyre,
+                dtype,
+                auto_model_cls=cls._auto_model_cls,
             )
 
-        # Attach generate method using the module's forward function
+        return model
+
+
+class AutoSpyreModelForCausalLM(AutoSpyreModel):
+    """Load an HF causal-LM model and prepare it for Spyre.
+
+    Attaches a Spyre-aware ``generate`` method that runs the 64-block padded
+    decode loop.
+    """
+
+    _auto_model_cls = AutoModelForCausalLM
+
+    @classmethod
+    def from_pretrained(cls, model_name_or_path, dtype=torch.float16):
+        module = _resolve_adapter_module(model_name_or_path)
+        model = super().from_pretrained(model_name_or_path, dtype=dtype)
+
         def model_generate(self, tokenizer, prompts, **kwargs):
             from hf_adapters.hf_common import generate
 
