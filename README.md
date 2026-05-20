@@ -30,26 +30,39 @@ from `transformers`.
 | hf\_olmo.py | OLMo 1B | OLMo 7B |
 | hf\_olmo2.py | OLMo2 1B | OLMo 2 7B |
 
-Each adapter covers all size variants and fine-tunes sharing the same
+Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. See [ARCHITECTURE.md](ARCHITECTURE.md#verified-checkpoints)
 for head\_dim details, stick alignment, and Spyre numerical accuracy.
 
 ## Quick Start
 
 ```python
-from hf_adapters.hf_granite import load_model, generate
+from hf_adapters import AutoSpyreModelForCausalLM
 from transformers import AutoTokenizer
 
-model = load_model("ibm-granite/granite-3.3-8b-instruct")
+model = AutoSpyreModelForCausalLM.from_pretrained("ibm-granite/granite-3.3-8b-instruct")
 tokenizer = AutoTokenizer.from_pretrained("ibm-granite/granite-3.3-8b-instruct")
 
-outputs = generate(model, tokenizer, ["What is 2+2?"], max_new_tokens=128)
+outputs = model.generate(tokenizer, ["What is 2+2?"], max_new_tokens=128)
 print(outputs[0])
 ```
 
-Replace `hf_granite` with `hf_llama`, `hf_qwen2`, `hf_qwen3`,
-`hf_mistral`, `hf_phi3`, `hf_smollm3`, `hf_olmo`, `hf_olmo2`,
-`hf_granitemoehybrid`, or `hf_granite_vision` for other model families.
+The `AutoSpyreModelForCausalLM` class automatically selects the correct adapter module based on the model's config type.
+
+## Embedding Models
+
+For embedding models, use the `sentence-transformers` library with the `backend="spyre"` parameter:
+
+```python
+import hf_adapters.st_backend  # Register Spyre backend
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("Qwen/Qwen3-Embedding-0.6B", backend="spyre")
+embeddings = model.encode(["hello world", "how are you"])
+```
+
+The `st_backend` module automatically patches `sentence-transformers` to apply the relevant Spyre adapter when loading the model. All standard SentenceTransformer methods (`encode()`, `similarity()`, etc.) work unchanged.
+Currently just decoder-only models are supported.
 
 ## Repo Structure
 
@@ -58,21 +71,22 @@ README.md
 ARCHITECTURE.md                        Detailed status, architecture docs
 
 hf_adapters/
-├── hf_common.py              Shared utilities: RoPE precomputation,
-│                              RMSNorm patching, LM head padding,
-│                              head-dim padding, mask builders,
-│                              KV cache helpers, generate loop
-├── hf_granite.py              Granite 3.3 adapter
-├── hf_granite_vision.py       Granite Vision 4.1 text backbone adapter
-├── hf_qwen3.py                Qwen3 adapter
-├── hf_granitemoehybrid.py     Granite 4.0 dense adapter
-├── hf_smollm3.py              SmolLM3 adapter
-├── hf_llama.py                Llama adapter (Llama 1/2/3, Code Llama, Yi, Falcon 3)
-├── hf_qwen2.py                Qwen2 adapter (Qwen2, Qwen2.5, Coder, Math)
-├── hf_mistral.py              Mistral adapter (Mistral 7B v0.1–v0.3)
-├── hf_phi3.py                 Phi-4 / Phi-3 adapter
-├── hf_olmo.py                 OLMo adapter (OLMo 1B, 7B)
-├── hf_olmo2.py                OLMo2 adapter (OLMo 2 1B, 7B)
+├── auto_spyre_model.py        Unified auto-loading interface (AutoSpyreModel, AutoSpyreModelForCausalLM)
+├── hf_common.py               Shared utilities: RoPE precomputation,
+│                               RMSNorm patching, LM head padding,
+│                               head-dim padding, mask builders,
+│                               KV cache helpers, generate loop
+├── hf_granite.py               Granite 3.3 adapter
+├── hf_granite_vision.py        Granite Vision 4.1 text backbone adapter
+├── hf_qwen3.py                 Qwen3 adapter
+├── hf_granitemoehybrid.py      Granite 4.0 dense adapter
+├── hf_smollm3.py               SmolLM3 adapter
+├── hf_llama.py                 Llama adapter (Llama 1/2/3, Code Llama, Yi, Falcon 3)
+├── hf_qwen2.py                 Qwen2 adapter (Qwen2, Qwen2.5, Coder, Math)
+├── hf_mistral.py               Mistral adapter (Mistral 7B v0.1–v0.3)
+├── hf_phi3.py                  Phi-4 / Phi-3 adapter
+├── hf_olmo.py                  OLMo adapter (OLMo 1B, 7B)
+├── hf_olmo2.py                 OLMo2 adapter (OLMo 2 1B, 7B)
 └── __init__.py
 
 tests/
@@ -87,8 +101,10 @@ tests/
 - Python 3.10+
 - PyTorch 2.x
 - `transformers`
-- `sentencepiece` (for some tokenizers)
-- `torch_spyre` (for Spyre tests only — not needed for CPU tests)
+- `sentencepiece`
+- `accelerate`
+- `sentence_transformers`
+- `torch_spyre` (for Spyre hardware only — not needed for CPU tests)
 
 ## Running Tests
 
