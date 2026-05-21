@@ -41,7 +41,7 @@ import torch
 from transformers.modeling_outputs import BaseModelOutput
 
 from hf_adapters.auto_spyre_model import AutoSpyreModel, _resolve_adapter_module
-from hf_adapters.hf_common import prefill_embed
+from hf_adapters.hf_common import prefill_embed, prefill_encoder
 
 
 def _spyre_load_model(
@@ -71,9 +71,28 @@ def _spyre_load_model(
     adapter_module = _resolve_adapter_module(model_name_or_path)
     run_backbone_forward = adapter_module._run_backbone_forward
 
-    def _spyre_forward(self, input_ids=None, attention_mask=None, **kwargs):
-        h, _ = prefill_embed(run_backbone_forward, self, input_ids, attention_mask)
-        return BaseModelOutput(last_hidden_state=h)
+    # Route to the right prefill driver. Encoder-only adapters set
+    # _is_encoder_only = True; decoder adapters leave it absent.
+    is_encoder_only = getattr(adapter_module, "_is_encoder_only", False)
+
+    if is_encoder_only:
+
+        def _spyre_forward(self, input_ids=None, attention_mask=None, **kwargs):
+            token_type_ids = kwargs.get("token_type_ids", None)
+            h, _ = prefill_encoder(
+                run_backbone_forward,
+                self,
+                input_ids,
+                attention_mask,
+                token_type_ids=token_type_ids,
+            )
+            return BaseModelOutput(last_hidden_state=h)
+
+    else:
+
+        def _spyre_forward(self, input_ids=None, attention_mask=None, **kwargs):
+            h, _ = prefill_embed(run_backbone_forward, self, input_ids, attention_mask)
+            return BaseModelOutput(last_hidden_state=h)
 
     model.forward = types.MethodType(_spyre_forward, model)
 

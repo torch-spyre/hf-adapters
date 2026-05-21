@@ -15,27 +15,31 @@
 """
 CPU accuracy test for the embedding path.
 
+Covers both decoder-backbone embedders (Qwen3-Embedding, etc.)
+and encoder-only models (e.g., BERT-family).
+
 Two test modes:
 
-  Default (manual load): for each registered embedder backbone,
+  Default (manual load): for each registered embedder,
     1. Load via stock ``AutoModel`` on CPU and run ``model.forward(...)`` to
        get a reference ``last_hidden_state``.
-    2. Apply ``prepare_for_spyre`` (which makes ``pad_lm_head`` a no-op when
-       the backbone has no ``lm_head``), unwrap compiled blocks, and call
-       ``prefill_embed(module._run_backbone_forward, ...)``.
-    3. Compare per-token cosine similarity and max abs diff between the
-       two ``last_hidden_state`` tensors.
+    2. Apply ``prepare_for_spyre``, unwrap compiled blocks, and call the
+       appropriate prefill driver:
+       - ``prefill_encoder`` for encoder-only adapters
+         (adapter sets ``_is_encoder_only = True``).
+       - ``prefill_embed`` for decoder-backbone embedders.
+    3. Compare per-token cosine similarity and max abs diff.
 
-  --auto-loader: loads via ``AutoSpyreModelForEmbedding.from_pretrained(...)``
-    (single entry point that resolves the adapter from config and prepares
-    the model). Reference forward still runs against a separately-loaded
-    stock ``AutoModel`` instance, since the adapter load patches RMSNorm
-    globally and we want a clean reference.
+  --auto-loader: loads via ``AutoSpyreModel.from_pretrained(...)``
+    (single entry point that resolves the adapter from config). Reference
+    forward still runs against a separately-loaded stock ``AutoModel``
+    instance, since the adapter load patches RMSNorm globally and we
+    want a clean reference.
 
 Usage::
 
-    python tests/test_embed_cpu_accuracy.py [qwen3-embed]
-    python tests/test_embed_cpu_accuracy.py --auto-loader [qwen3-embed]
+    python tests/test_embed_cpu_accuracy.py [qwen3-embed,bge-base,minilm]
+    python tests/test_embed_cpu_accuracy.py --auto-loader [bge-base]
 """
 
 import gc
@@ -99,8 +103,8 @@ def _get_auto_model_class():
     if _AutoSpyreModel is not None:
         return _AutoSpyreModel
 
-    # Adapter filenames (matches CONFIG_TO_ADAPTER_MODULE_MAPPING values)
     adapter_files = [
+        "hf_bert.py",
         "hf_granite.py",
         "hf_granite_vision.py",
         "hf_granitemoehybrid.py",
@@ -148,6 +152,18 @@ def _per_token_cosine(a, b, attention_mask):
     return cos[mask].mean().item(), cos[mask].min().item()
 
 
+def _run_prefill(adapter_mod, model, input_ids, attention_mask):
+    """Dispatch to prefill_encoder or prefill_embed based on adapter type."""
+    if getattr(adapter_mod, "_is_encoder_only", False):
+        return _common_mod.prefill_encoder(
+            adapter_mod._run_backbone_forward, model, input_ids, attention_mask
+        )
+    else:
+        return _common_mod.prefill_embed(
+            adapter_mod._run_backbone_forward, model, input_ids, attention_mask
+        )
+
+
 # ---------------------------------------------------------------------------
 # Test driver
 # ---------------------------------------------------------------------------
@@ -157,7 +173,6 @@ def run_model_test(model_name, model_path, adapter_filename, dtype="float16"):
     from transformers import AutoModel, AutoTokenizer
 
     adapter_mod = load_adapter(adapter_filename)
-    run_backbone_forward_fn = adapter_mod._run_backbone_forward
     prepare_fn = adapter_mod.prepare_for_spyre
 
     torch_dtype = torch.float32 if dtype == "float32" else torch.float16
@@ -186,7 +201,9 @@ def run_model_test(model_name, model_path, adapter_filename, dtype="float16"):
     print(f"  Inputs: {len(prompts)} prompts, padded to {input_ids.shape[1]} tokens")
 
     # --- HF reference ---
-    # (BEFORE patching: prepare_for_spyre patches RMSNorm globally)
+    # Run BEFORE prepare_for_spyre: the RMSNorm patch (decoder adapters) modifies
+    # the class globally. Encoder adapters do not patch globally, but keeping the
+    # same ordering discipline avoids surprises when mixing model types.
     print("  Running HF reference (AutoModel.forward) ...")
     with torch.no_grad():
         ref_out = model(
@@ -199,10 +216,15 @@ def run_model_test(model_name, model_path, adapter_filename, dtype="float16"):
     prepare_fn(model)
     _unwrap_compiled_blocks(model)
 
-    print("  Running adapter (prefill_embed) ...")
+    prefill_label = (
+        "prefill_encoder"
+        if getattr(adapter_mod, "_is_encoder_only", False)
+        else "prefill_embed"
+    )
+    print(f"  Running adapter ({prefill_label}) ...")
     with torch.no_grad():
-        adapter_hidden, returned_mask = _common_mod.prefill_embed(
-            run_backbone_forward_fn, model, input_ids, attention_mask
+        adapter_hidden, returned_mask = _run_prefill(
+            adapter_mod, model, input_ids, attention_mask
         )
     del model
     gc.collect()
@@ -233,7 +255,7 @@ def run_model_test(model_name, model_path, adapter_filename, dtype="float16"):
 
 
 def run_model_test_auto_loader(model_name, model_path, dtype="float16"):
-    """Load via AutoSpyreModel.from_pretrained, compare prefill_embed output vs HF."""
+    """Load via AutoSpyreModel.from_pretrained, compare prefill output vs HF."""
     from transformers import AutoModel, AutoTokenizer
 
     AutoSpyre = _get_auto_model_class()
@@ -250,7 +272,7 @@ def run_model_test_auto_loader(model_name, model_path, dtype="float16"):
         tokenizer.pad_token = tokenizer.eos_token
 
     # --- HF reference ---
-    # (load a clean instance; AutoSpyre load patches RMSNorm globally)
+    # (load a clean instance; AutoSpyre load patches RMSNorm globally for decoders)
     print("  Loading HF reference (stock AutoModel) ...")
     ref_model = AutoModel.from_pretrained(
         model_path, dtype=torch_dtype, device_map="cpu"
@@ -283,14 +305,17 @@ def run_model_test_auto_loader(model_name, model_path, dtype="float16"):
     model = AutoSpyre.from_pretrained(model_path, dtype=torch_dtype)
     _unwrap_compiled_blocks(model)
 
-    # Resolve which adapter module was selected so we can grab its backbone fn
     adapter_module = auto_mod._resolve_adapter_module(model_path)
-    run_backbone_forward_fn = adapter_module._run_backbone_forward
 
-    print("  Running adapter (prefill_embed) ...")
+    prefill_label = (
+        "prefill_encoder"
+        if getattr(adapter_module, "_is_encoder_only", False)
+        else "prefill_embed"
+    )
+    print(f"  Running adapter ({prefill_label}) ...")
     with torch.no_grad():
-        adapter_hidden, _ = _common_mod.prefill_embed(
-            run_backbone_forward_fn, model, input_ids, attention_mask
+        adapter_hidden, _ = _run_prefill(
+            adapter_module, model, input_ids, attention_mask
         )
     del model
     gc.collect()
@@ -332,10 +357,22 @@ def print_results(result, threshold=0.9999):
 # ---------------------------------------------------------------------------
 
 MODELS = {
+    # Decoder-backbone embedders
     "qwen3-embed": {
         "name": "Qwen3-Embedding 0.6B",
         "path": "Qwen/Qwen3-Embedding-0.6B",
         "adapter": "hf_qwen3.py",
+    },
+    # Encoder-only embedders
+    "bge-base": {
+        "name": "BGE-base-en-v1.5",
+        "path": "BAAI/bge-base-en-v1.5",
+        "adapter": "hf_bert.py",
+    },
+    "minilm": {
+        "name": "all-MiniLM-L6-v2",
+        "path": "sentence-transformers/all-MiniLM-L6-v2",
+        "adapter": "hf_bert.py",
     },
 }
 

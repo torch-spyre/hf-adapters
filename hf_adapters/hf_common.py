@@ -492,15 +492,30 @@ def _patch_torch_empty():
 def _embedding_param_ids(model):
     """Data-pointers of weights that must keep the default (column-major) layout.
 
-    The token embedding is used as a gather, not a matmul, so it should not
-    get a row-major SpyreTensorLayout. Returns the set of ``data_ptr()`` values
-    for the embedding weight(s) we want to leave alone.
+    Gather-only embedding weights (used via nn.Embedding, not matmul) must not
+    receive a row-major SpyreTensorLayout. Returns the set of ``data_ptr()``
+    values for all such weights.
+
+    Covers:
+    - Decoder-style backbones: ``backbone.embed_tokens``.
+    - BERT-style backbones: ``backbone.embeddings.{word,position,token_type}_embeddings``.
     """
     ids = set()
     backbone = get_backbone(model)
+
+    # Decoder-style: single embed_tokens
     embed = getattr(backbone, "embed_tokens", None)
     if embed is not None and hasattr(embed, "weight"):
         ids.add(embed.weight.data_ptr())
+
+    # Encoder-style: embeddings submodule with multiple gather tables
+    embeddings = getattr(backbone, "embeddings", None)
+    if embeddings is not None:
+        for name in ("word_embeddings", "position_embeddings", "token_type_embeddings"):
+            sub = getattr(embeddings, name, None)
+            if sub is not None and hasattr(sub, "weight") and sub.weight.dim() == 2:
+                ids.add(sub.weight.data_ptr())
+
     return ids
 
 
@@ -983,6 +998,48 @@ def standard_gqa_forward(
     return model.lm_head(h)
 
 
+# ---------------------------------------------------------------------------
+# Encoder-only forward (BERT-family: no RoPE, no KV cache)
+# ---------------------------------------------------------------------------
+
+
+def encoder_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_ids):
+    """Encoder backbone forward: embedding table + LN + compiled encoder blocks.
+
+    Used by BERT-style (no RoPE, no KV cache) encoder-only models. Counterpart
+    of ``standard_gqa_backbone_forward`` for decoder models.
+
+    Args:
+        model: Prepared BertModel (or equivalent) on Spyre. Must have
+            ``model._spyre_compiled_blocks`` set by ``prepare_for_spyre``.
+        input_ids: ``[B, padded_len]`` token ids.
+        attn_mask: ``[B, 1, padded_len, padded_len]`` additive fp16 mask built
+            with ``is_causal=False`` (zeros for real-token pairs, -inf elsewhere).
+        position_ids: ``[B, padded_len]`` position indices (0..actual_len-1 for
+            real tokens, 0 for pad slots).
+        token_type_ids: ``[B, padded_len]`` long tensor (all zeros for
+            single-sentence embedding workloads).
+
+    Returns:
+        ``last_hidden_state`` ``[B, padded_len, H]``.
+
+    Note: ``nn.LayerNorm`` runs as-is inside the compiled block on CPU. On
+    Spyre the compiler should lower it via the ``spyre::layer_norm`` op; if not,
+    a per-instance wrapper will be needed in a follow-up.
+    """
+    backbone = get_backbone(model)
+    emb = backbone.embeddings
+    h = (
+        emb.word_embeddings(input_ids)
+        + emb.position_embeddings(position_ids)
+        + emb.token_type_embeddings(token_type_ids)
+    )
+    h = emb.LayerNorm(h)
+    for compiled_block in model._spyre_compiled_blocks:
+        h = compiled_block(h, attn_mask)
+    return h
+
+
 def prepare_rope_and_heads(model):
     cfg = model.config
     orig_head_dim = (
@@ -1142,5 +1199,84 @@ def prefill_embed(
     )
 
     # Crop the block-pad back off; tokenizer pad stays so pooling can mask it
+    h = h[:, :seq_len, :]
+    return h, attention_mask
+
+
+# ---------------------------------------------------------------------------
+# Encoder-only prefill driver (BERT-family)
+# ---------------------------------------------------------------------------
+
+
+def prefill_encoder(
+    run_encoder_forward_fn: Callable,
+    model,
+    input_ids,
+    attention_mask,
+    token_type_ids=None,
+):
+    """One-shot prefill for encoder-only (BERT-style) embedding models.
+
+    Counterpart of ``prefill_embed`` for models with no KV cache and no RoPE.
+    (``prefill_embed`` reads `model.config.num_key_value_heads`` and
+    allocates KV caches, which ``BertConfig`` and similar encoder configs do not provide.
+
+    Args:
+        run_encoder_forward_fn: ``fn(model, input_ids, attn_mask, position_ids,
+            token_type_ids) -> [B, padded_len, H]``. Pass the adapter's
+            ``_run_backbone_forward`` (i.e. ``encoder_backbone_forward``).
+        model: Prepared encoder backbone on device (loaded via ``AutoModel``).
+        input_ids: ``[B, L]`` token ids. Right-padded by the tokenizer.
+        attention_mask: ``[B, L]`` mask; 1 for real tokens, 0 for pad.
+        token_type_ids: Optional ``[B, L]``. Defaults to all-zeros when None
+            (correct for single-sentence embedding workloads).
+
+    Returns:
+        Tuple ``(last_hidden_state, attention_mask)``:
+          - ``last_hidden_state``: ``[B, L, H]`` cropped to the input length.
+          - ``attention_mask``: the input mask, unchanged (for pooling callers).
+    """
+    bsz, seq_len = input_ids.shape
+
+    # Pad to BLOCK_SIZE multiple on the right
+    padded_len = math.ceil(seq_len / BLOCK_SIZE) * BLOCK_SIZE
+    pad_amount = padded_len - seq_len
+    if pad_amount > 0:
+        input_ids = F.pad(input_ids, (0, pad_amount), value=0)
+
+    # Per-sequence real-token count
+    actual_lengths = attention_mask.sum(dim=1)  # [B]
+
+    # Position ids: 0..actual_len-1 for real tokens, 0 for pads
+    position_ids = torch.zeros((bsz, padded_len), dtype=torch.long)
+    for b in range(bsz):
+        actual = actual_lengths[b].item()
+        position_ids[b, :actual] = torch.arange(actual)
+
+    # Token type ids: zero tensor if not provided
+    if token_type_ids is None:
+        tt_ids = torch.zeros((bsz, padded_len), dtype=torch.long)
+    else:
+        tt_pad = padded_len - token_type_ids.shape[1]
+        tt_ids = (
+            F.pad(token_type_ids, (0, tt_pad), value=0)
+            if tt_pad > 0
+            else token_type_ids
+        )
+
+    # Bidirectional mask: real tokens attend to all other real tokens
+    mask = build_prefill_mask_right_padded(
+        bsz, padded_len, actual_lengths, is_causal=False
+    )
+
+    h = run_encoder_forward_fn(
+        model,
+        input_ids.to(DEVICE),
+        mask.to(DEVICE),
+        position_ids.to(DEVICE),
+        tt_ids.to(DEVICE),
+    )
+
+    # Crop the block-pad back off
     h = h[:, :seq_len, :]
     return h, attention_mask

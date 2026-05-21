@@ -83,6 +83,14 @@ TEST_MODELS = {
         "name": "E5-Mistral-7B",
         "path": "intfloat/e5-mistral-7b-instruct",
     },
+    "bge_base": {
+        "name": "BGE-base-en-v1.5",
+        "path": "BAAI/bge-base-en-v1.5",
+    },
+    "minilm": {
+        "name": "all-MiniLM-L6-v2",
+        "path": "sentence-transformers/all-MiniLM-L6-v2",
+    },
 }
 
 
