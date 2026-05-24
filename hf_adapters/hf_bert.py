@@ -47,7 +47,12 @@ Usage::
 import torch
 import torch.nn.functional as F
 
-from hf_adapters.hf_common import encoder_backbone_forward, get_backbone
+from hf_adapters.hf_common import (
+    BLOCK_SIZE,
+    encoder_backbone_forward,
+    get_backbone,
+    pad_attention_heads_simple,
+)
 
 
 def _make_compiled_encoder_block(layer):
@@ -69,6 +74,12 @@ def _make_compiled_encoder_block(layer):
     v_proj = attn_self.value
     num_heads = attn_self.num_attention_heads
     head_dim = attn_self.attention_head_size
+    # When pad_attention_heads_simple was applied, head_dim is the padded
+    # value but Q·K^T only sums over the original non-zero entries; we must
+    # scale by 1/sqrt(orig). Otherwise SDPA's default 1/sqrt(head_dim) is
+    # already correct.
+    orig_head_dim = getattr(attn_self, "_spyre_orig_head_dim", head_dim)
+    sdpa_scale = orig_head_dim**-0.5
 
     o_proj = layer.attention.output.dense
     attn_ln = layer.attention.output.LayerNorm
@@ -101,7 +112,13 @@ def _make_compiled_encoder_block(layer):
 
         # No RoPE. No KV cache. Bidirectional: is_causal=False.
         attn_out = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=False
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            is_causal=False,
+            scale=sdpa_scale,
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
 
@@ -126,10 +143,28 @@ _is_encoder_only = True
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to a BERT-family encoder model in-place.
 
-    Walks ``model.encoder.layer``, builds a compiled encoder block for each
+    Pads attention heads up to a Spyre stick boundary when ``head_dim`` is
+    below ``BLOCK_SIZE`` (e.g. all-MiniLM-L6-v2 with head_dim=32 → 64). Then
+    walks ``model.encoder.layer``, builds a compiled encoder block for each
     layer, and stores them on ``model._spyre_compiled_blocks``.
     """
     backbone = get_backbone(model)
+    cfg = model.config
+    orig_head_dim = (
+        getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
+    )
+    stick_aligned_head_dim = (
+        (orig_head_dim + BLOCK_SIZE - 1) // BLOCK_SIZE
+    ) * BLOCK_SIZE
+    if stick_aligned_head_dim > orig_head_dim:
+        pad_attention_heads_simple(
+            model,
+            backbone.encoder.layer,
+            orig_head_dim,
+            stick_aligned_head_dim,
+            cfg.num_attention_heads,
+        )
+
     model._spyre_compiled_blocks = [
         _make_compiled_encoder_block(layer) for layer in backbone.encoder.layer
     ]

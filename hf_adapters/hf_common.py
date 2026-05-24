@@ -178,6 +178,51 @@ def kv_cache_update(
 # ---------------------------------------------------------------------------
 
 
+def _pad_proj_output_simple(proj, n_heads, orig_head_dim, padded_head_dim):
+    """End-pad each head of a [n_heads*head_dim, hidden] output projection.
+
+    Used for V (no RoPE) and for Q/K/V on non-RoPE encoders.
+    """
+    w = proj.weight
+    hidden = w.shape[1]
+    new_w = torch.zeros(n_heads * padded_head_dim, hidden, dtype=w.dtype)
+    for h in range(n_heads):
+        s = h * orig_head_dim
+        d = h * padded_head_dim
+        new_w[d : d + orig_head_dim, :] = w[s : s + orig_head_dim, :]
+    new_proj = nn.Linear(hidden, n_heads * padded_head_dim, bias=proj.bias is not None)
+    new_proj.weight = nn.Parameter(new_w, requires_grad=False)
+    if proj.bias is not None:
+        new_b = torch.zeros(n_heads * padded_head_dim, dtype=proj.bias.dtype)
+        for h in range(n_heads):
+            s = h * orig_head_dim
+            d = h * padded_head_dim
+            new_b[d : d + orig_head_dim] = proj.bias[s : s + orig_head_dim]
+        new_proj.bias = nn.Parameter(new_b, requires_grad=False)
+    return new_proj
+
+
+def _pad_proj_input_simple(proj, n_heads, orig_head_dim, padded_head_dim):
+    """End-pad each head along the input dim of an O-style projection.
+
+    Shape goes from [hidden, n_heads*orig_head_dim] to
+    [hidden, n_heads*padded_head_dim]. Bias is along the output dim and is
+    unchanged.
+    """
+    w = proj.weight
+    hidden = w.shape[0]
+    new_w = torch.zeros(hidden, n_heads * padded_head_dim, dtype=w.dtype)
+    for h in range(n_heads):
+        s = h * orig_head_dim
+        d = h * padded_head_dim
+        new_w[:, d : d + orig_head_dim] = w[:, s : s + orig_head_dim]
+    new_proj = nn.Linear(n_heads * padded_head_dim, hidden, bias=proj.bias is not None)
+    new_proj.weight = nn.Parameter(new_w, requires_grad=False)
+    if proj.bias is not None:
+        new_proj.bias = nn.Parameter(proj.bias.clone(), requires_grad=False)
+    return new_proj
+
+
 def pad_attention_heads(
     model, layers, orig_head_dim, padded_head_dim, num_heads, num_kv_heads
 ):
@@ -251,55 +296,80 @@ def pad_attention_heads(
             new_proj.bias = nn.Parameter(new_b, requires_grad=False)
         return new_proj
 
-    # V/O padding: needed until torch-spyre/torch-spyre#1739 is resolved.
-    def _pad_v_simple(proj, n_heads):
-        """Simple end-padding per head for V."""
-        w = proj.weight
-        hidden = w.shape[1]
-        new_w = torch.zeros(n_heads * padded_head_dim, hidden, dtype=w.dtype)
-        for h in range(n_heads):
-            s = h * orig_head_dim
-            d = h * padded_head_dim
-            new_w[d : d + orig_head_dim, :] = w[s : s + orig_head_dim, :]
-        new_proj = nn.Linear(
-            hidden, n_heads * padded_head_dim, bias=proj.bias is not None
-        )
-        new_proj.weight = nn.Parameter(new_w, requires_grad=False)
-        if proj.bias is not None:
-            new_b = torch.zeros(n_heads * padded_head_dim, dtype=proj.bias.dtype)
-            for h in range(n_heads):
-                s = h * orig_head_dim
-                d = h * padded_head_dim
-                new_b[d : d + orig_head_dim] = proj.bias[s : s + orig_head_dim]
-            new_proj.bias = nn.Parameter(new_b, requires_grad=False)
-        return new_proj
-
-    def _pad_o(proj, n_heads):
-        """Simple end-padding along input dim for O."""
-        w = proj.weight
-        hidden = w.shape[0]
-        new_w = torch.zeros(hidden, n_heads * padded_head_dim, dtype=w.dtype)
-        for h in range(n_heads):
-            s = h * orig_head_dim
-            d = h * padded_head_dim
-            new_w[:, d : d + orig_head_dim] = w[:, s : s + orig_head_dim]
-        new_proj = nn.Linear(
-            n_heads * padded_head_dim, hidden, bias=proj.bias is not None
-        )
-        new_proj.weight = nn.Parameter(new_w, requires_grad=False)
-        if proj.bias is not None:
-            new_proj.bias = nn.Parameter(proj.bias.clone(), requires_grad=False)
-        return new_proj
-
     for layer in layers:
         attn = layer.self_attn
         orig_scaling = attn.scaling
         attn.q_proj = _pad_qk_rope(attn.q_proj, num_heads)
         attn.k_proj = _pad_qk_rope(attn.k_proj, num_kv_heads)
-        attn.v_proj = _pad_v_simple(attn.v_proj, num_kv_heads)
-        attn.o_proj = _pad_o(attn.o_proj, num_heads)
+        # V/O padding: needed until torch-spyre/torch-spyre#1739 is resolved.
+        attn.v_proj = _pad_proj_output_simple(
+            attn.v_proj, num_kv_heads, orig_head_dim, padded_head_dim
+        )
+        attn.o_proj = _pad_proj_input_simple(
+            attn.o_proj, num_heads, orig_head_dim, padded_head_dim
+        )
         attn.head_dim = padded_head_dim
         attn.scaling = orig_scaling
+
+    model._spyre_head_dim = padded_head_dim
+
+
+def pad_attention_heads_simple(
+    model, layers, orig_head_dim, padded_head_dim, num_heads
+):
+    """Zero-pad Q/K/V/O attention projections for non-RoPE encoders (BERT).
+
+    Counterpart of ``pad_attention_heads`` for encoders that do not run RoPE.
+    All four projections use simple end-padding per head (no interleaved
+    ``[2, D/2]`` layout). Used to lift ``head_dim`` to a Spyre stick boundary
+    (one stick = ``BLOCK_SIZE`` elements at fp16) so SDPA / Q-K matmul lower
+    cleanly — e.g. all-MiniLM-L6-v2 (head_dim=32 → 64).
+
+    Updates ``BertSelfAttention`` attributes that the compiled block closes
+    over: ``attention_head_size`` and ``all_head_size``. ``num_attention_heads``
+    stays. The SDPA scale is auto-computed from the tensor's last dim, so no
+    explicit scale fixup is needed.
+
+    Args:
+        model: HF model — stores padded dim as ``model._spyre_head_dim``.
+        layers: Iterable of encoder layers (each must have ``attention.self``
+            and ``attention.output.dense``).
+        orig_head_dim: Original head dimension.
+        padded_head_dim: Target head dimension (must be > orig_head_dim and
+            >= BLOCK_SIZE).
+        num_heads: Number of attention heads.
+    """
+    assert padded_head_dim > orig_head_dim, (
+        f"padded_head_dim ({padded_head_dim}) must exceed "
+        f"orig_head_dim ({orig_head_dim})"
+    )
+    assert (
+        padded_head_dim >= BLOCK_SIZE
+    ), f"padded_head_dim ({padded_head_dim}) must be >= BLOCK_SIZE ({BLOCK_SIZE})"
+
+    for layer in layers:
+        attn = layer.attention.self
+        attn.query = _pad_proj_output_simple(
+            attn.query, num_heads, orig_head_dim, padded_head_dim
+        )
+        attn.key = _pad_proj_output_simple(
+            attn.key, num_heads, orig_head_dim, padded_head_dim
+        )
+        attn.value = _pad_proj_output_simple(
+            attn.value, num_heads, orig_head_dim, padded_head_dim
+        )
+        layer.attention.output.dense = _pad_proj_input_simple(
+            layer.attention.output.dense,
+            num_heads,
+            orig_head_dim,
+            padded_head_dim,
+        )
+        attn.attention_head_size = padded_head_dim
+        attn.all_head_size = num_heads * padded_head_dim
+        # SDPA's default scale is 1/sqrt(D) on the *padded* dim, but Q·K^T
+        # only sums over the original non-zero entries. Stash the original
+        # so the compiled block can pass scale=1/sqrt(orig) explicitly.
+        attn._spyre_orig_head_dim = orig_head_dim
 
     model._spyre_head_dim = padded_head_dim
 
