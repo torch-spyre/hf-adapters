@@ -80,8 +80,10 @@ class PrecomputedRotaryEmbedding(nn.Module):
         if max_len <= self._cached_len:
             return
         target_len = max(max_len, self._cached_len * 2, 2048)
-        inv_freq = self.original.inv_freq.to("cpu").float()
-        rope_half = inv_freq.shape[0]
+        inv_freq_raw = self.original.inv_freq.to("cpu").float()
+        assert isinstance(inv_freq_raw, torch.Tensor)  # Type narrowing for mypy
+        inv_freq: torch.Tensor = inv_freq_raw
+        rope_half = int(inv_freq.shape[0])
         t = torch.arange(target_len, dtype=inv_freq.dtype)
         freqs = torch.outer(t, inv_freq).float()  # [S, rope_half]
         scaling = getattr(self.original, "attention_scaling", 1.0)
@@ -98,7 +100,7 @@ class PrecomputedRotaryEmbedding(nn.Module):
         if self.padded_head_dim is not None:
             padded_half = self.padded_head_dim // 2
             if padded_half > rope_half:
-                pad_half = padded_half - rope_half
+                pad_half = int(padded_half - rope_half)
                 ident = torch.zeros(target_len, 2, 2, pad_half)
                 ident[:, 0, 0, :] = 1.0
                 ident[:, 1, 1, :] = 1.0
@@ -525,7 +527,7 @@ def _move_to_spyre_with_layout(model, dtype):
     # device_layout kwarg fail kwarg validation before dispatch.
     torch.empty(1, device=DEVICE)
 
-    from torch_spyre._C import SpyreTensorLayout
+    from torch_spyre._C import SpyreTensorLayout  # type: ignore[import-not-found]
 
     skip_layout_ptrs = _embedding_param_ids(model)
 
@@ -534,7 +536,7 @@ def _move_to_spyre_with_layout(model, dtype):
             stl = SpyreTensorLayout(t.shape, t.stride(), dtype, [1, 0])
         else:
             stl = None
-        new = torch.empty(
+        new: torch.Tensor = torch.empty(  # type: ignore[call-overload]
             t.shape,
             device=torch.device(DEVICE),
             device_layout=stl,
@@ -741,6 +743,7 @@ def generate(
 
             if is_filling:
                 fill_pos = current_cache_len - BLOCK_SIZE + tokens_in_block
+                assert decode_pos is not None
                 logits = run_forward_fn(
                     model,
                     next_input,
@@ -758,6 +761,7 @@ def generate(
 
             else:
                 current_cache_len += BLOCK_SIZE
+                assert decode_pos is not None
                 decode_pos = decode_pos + BLOCK_SIZE
                 exp_mask = build_expansion_mask(
                     batch_size,
@@ -824,16 +828,16 @@ def generate(
     # layout starting at padded_len.
     results = []
     for b in range(batch_size):
-        gen_ids = []
+        gen_ids_list = []
         block_start = padded_len
         remaining = num_generated[b].item()
         while remaining > 0:
-            take = min(remaining, BLOCK_SIZE)
+            take = int(min(remaining, BLOCK_SIZE))
             for j in range(take):
-                gen_ids.append(result[b, block_start + j].item())
+                gen_ids_list.append(result[b, block_start + j].item())
             remaining -= take
             block_start += BLOCK_SIZE
-        gen_ids = torch.tensor(gen_ids)
+        gen_ids = torch.tensor(gen_ids_list)
         if eos_token_id is not None:
             eos_pos = (gen_ids == eos_token_id).nonzero(as_tuple=True)[0]
             if len(eos_pos) > 0:
