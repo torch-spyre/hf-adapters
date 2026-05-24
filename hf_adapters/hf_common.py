@@ -80,12 +80,12 @@ class PrecomputedRotaryEmbedding(nn.Module):
         if max_len <= self._cached_len:
             return
         target_len = max(max_len, self._cached_len * 2, 2048)
-        inv_freq_raw = self.original.inv_freq.to("cpu").float()
-        assert isinstance(inv_freq_raw, torch.Tensor)  # Type narrowing for mypy
-        inv_freq: torch.Tensor = inv_freq_raw
-        rope_half = int(inv_freq.shape[0])
-        t = torch.arange(target_len, dtype=inv_freq.dtype)
-        freqs = torch.outer(t, inv_freq).float()  # [S, rope_half]
+        inv_freq = self.original.inv_freq.to("cpu").float()
+        rope_half = inv_freq.shape[0]  # type: ignore[index]
+        t = torch.arange(target_len, dtype=inv_freq.dtype)  # type: ignore[arg-type]
+        freqs = torch.outer(
+            t, inv_freq  # type: ignore[arg-type]
+        ).float()  # [S, rope_half] # type: ignore[arg-type]
         scaling = getattr(self.original, "attention_scaling", 1.0)
         rot = torch.stack(
             [
@@ -95,13 +95,15 @@ class PrecomputedRotaryEmbedding(nn.Module):
                 torch.cos(freqs) * scaling,
             ],
             dim=1,
-        ).view(target_len, 2, 2, rope_half)
+        ).view(
+            target_len, 2, 2, rope_half  # type: ignore[arg-type]
+        )  # type: ignore[arg-type]
 
         if self.padded_head_dim is not None:
             padded_half = self.padded_head_dim // 2
             if padded_half > rope_half:
-                pad_half = int(padded_half - rope_half)
-                ident = torch.zeros(target_len, 2, 2, pad_half)
+                pad_half = padded_half - rope_half
+                ident = torch.zeros(target_len, 2, 2, pad_half)  # type: ignore[arg-type]
                 ident[:, 0, 0, :] = 1.0
                 ident[:, 1, 1, :] = 1.0
                 rot = torch.cat([rot, ident], dim=-1)
@@ -749,11 +751,10 @@ def generate(
 
             if is_filling:
                 fill_pos = current_cache_len - BLOCK_SIZE + tokens_in_block
-                assert decode_pos is not None
                 logits = run_forward_fn(
                     model,
                     next_input,
-                    decode_pos.to(DEVICE),
+                    decode_pos.to(DEVICE),  # type: ignore[union-attr]
                     fill_mask_device,
                     key_caches,
                     value_caches,
@@ -767,8 +768,7 @@ def generate(
 
             else:
                 current_cache_len += BLOCK_SIZE
-                assert decode_pos is not None
-                decode_pos = decode_pos + BLOCK_SIZE
+                decode_pos = decode_pos + BLOCK_SIZE  # type: ignore[assignment, operator]
                 exp_mask = build_expansion_mask(
                     batch_size,
                     BLOCK_SIZE,
@@ -779,7 +779,7 @@ def generate(
                 logits = run_forward_fn(
                     model,
                     next_input,
-                    decode_pos.to(DEVICE),
+                    decode_pos.to(DEVICE),  # type: ignore[union-attr]
                     exp_mask.to(DEVICE),
                     key_caches,
                     value_caches,
@@ -838,8 +838,8 @@ def generate(
         block_start = padded_len
         remaining = num_generated[b].item()
         while remaining > 0:
-            take = int(min(remaining, BLOCK_SIZE))
-            for j in range(take):
+            take = min(remaining, BLOCK_SIZE)
+            for j in range(take):  # type: ignore[arg-type]
                 gen_ids_list.append(result[b, block_start + j].item())
             remaining -= take
             block_start += BLOCK_SIZE
