@@ -583,6 +583,10 @@ def load_model_common(model_path, prepare_fn, dtype=torch.float16, auto_model_cl
     model.requires_grad_(False)
     _untie_embedding_and_lm_head(model)
     prepare_fn(model)
+    if DEVICE == "cpu":
+        # CPU-only test path: skip Spyre device move (which requires torch_spyre).
+        print("Model ready (CPU).")
+        return model
     print("Moving model to Spyre ...")
     _move_to_spyre_with_layout(model, dtype)
     print("Model ready.")
