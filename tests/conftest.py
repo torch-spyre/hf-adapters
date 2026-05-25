@@ -58,6 +58,23 @@ _pkg.__path__ = [ADAPTERS_DIR]
 sys.modules["hf_adapters"] = _pkg
 
 
+EMBEDDING_MODELS = {
+    "qwen3_embed": {
+        "name": "Qwen3-Embedding 0.6B",
+        "path": "Qwen/Qwen3-Embedding-0.6B",
+        "adapter": "hf_qwen3.py",
+    },
+    "qwen2_embed": {
+        "name": "GTE-Qwen2-1.5B",
+        "path": "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+    },
+    "e5_mistral": {
+        "name": "E5-Mistral-7B",
+        "path": "intfloat/e5-mistral-7b-instruct",
+    },
+}
+
+
 def _load_adapter(filename):
     """Load an adapter .py file under hf_adapters/ as a real submodule."""
     mod_name = f"hf_adapters.{filename.replace('.py', '')}"

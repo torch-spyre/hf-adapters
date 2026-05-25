@@ -34,6 +34,7 @@ import gc
 
 import pytest
 import torch.nn.functional as F
+from conftest import EMBEDDING_MODELS
 
 # sentence_transformers is an optional dependency; skip the whole module if
 # it's missing. The hf_adapters.st_backend import is deferred to inside the
@@ -49,31 +50,16 @@ TEST_SENTENCES = [
     "Paris is the capital of France.",
 ]
 
-TEST_MODELS = {
-    "qwen3_embed": {
-        "name": "Qwen3-Embedding-0.6B",
-        "path": "Qwen/Qwen3-Embedding-0.6B",
-    },
-    "qwen2_embed": {
-        "name": "GTE-Qwen2-1.5B",
-        "path": "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
-    },
-    "e5_mistral": {
-        "name": "E5-Mistral-7B",
-        "path": "intfloat/e5-mistral-7b-instruct",
-    },
-}
-
 
 @pytest.mark.parametrize(
-    "model_key", list(TEST_MODELS.keys()), ids=list(TEST_MODELS.keys())
+    "model_key", list(EMBEDDING_MODELS.keys()), ids=list(EMBEDDING_MODELS.keys())
 )
 def test_st_backend(model_key, unwrap_compiled_blocks):
     from sentence_transformers import SentenceTransformer
 
     import hf_adapters.st_backend  # noqa: F401  (registers "spyre" backend with ST)
 
-    cfg = TEST_MODELS[model_key]
+    cfg = EMBEDDING_MODELS[model_key]
 
     # Reference: stock ST on CPU
     ref_model = SentenceTransformer(cfg["path"], device="cpu")

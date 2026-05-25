@@ -37,6 +37,7 @@ import gc
 import pytest
 import torch
 import torch.nn.functional as F
+from conftest import EMBEDDING_MODELS
 from transformers import AutoModel, AutoTokenizer
 
 PROMPTS = [
@@ -45,13 +46,7 @@ PROMPTS = [
 ]
 COS_THRESHOLD = 0.9999
 
-MODELS = {
-    "qwen3-embed": {
-        "name": "Qwen3-Embedding 0.6B",
-        "path": "Qwen/Qwen3-Embedding-0.6B",
-        "adapter": "hf_qwen3.py",
-    },
-}
+MODELS = {k: v for k, v in EMBEDDING_MODELS.items() if v["adapter"] is not None}
 
 
 def _per_token_cosine(a, b, attention_mask):
