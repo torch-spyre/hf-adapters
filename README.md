@@ -121,14 +121,24 @@ Two classes: **CPU-only** (adapter vs stock HF on CPU) and **Spyre**
 Compares adapter's patched forward pass against stock HF on CPU.
 Greedy tokens must match at every step. Downloads weights on first run.
 
+**Important**: CPU tests must be run from the repository root with pytest to ensure proper module patching:
+
 ```bash
+# Adapter accuracy tests (causal-LM logits)
 pytest tests/test_adapter_cpu_accuracy.py                          # all causal-LM models
 pytest tests/test_adapter_cpu_accuracy.py -k qwen3                 # one model (manual + auto-loader)
 pytest tests/test_adapter_cpu_accuracy.py -k "qwen3 and manual"    # manual adapter only
 
+# Embedding accuracy tests (hidden-states)
 pytest tests/test_embed_cpu_accuracy.py                            # all embedding models
 pytest tests/test_embed_cpu_accuracy.py -k bge_base                # one model
+
+# Load tests (verify models load without errors)
+pytest tests/test_load_cpu.py                                      # CPU load test
+pytest tests/test_load_spyre.py                                    # Spyre load test (requires hardware)
 ```
+
+**Note**: Do not run CPU tests with `python tests/test_*.py` — this bypasses pytest's conftest.py setup and will cause import errors. Always use `pytest tests/test_*.py`.
 
 ### Spyre Tests (requires Spyre hardware)
 

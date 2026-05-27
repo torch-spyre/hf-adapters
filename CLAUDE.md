@@ -11,11 +11,16 @@ HF Adapters for Spyre — runtime monkey-patches that make stock HuggingFace Tra
 pip install -e .
 
 # CPU accuracy tests (causal-LM logits + embedding hidden-states)
-# Each runs both manual-adapter and auto-loader paths per model.
+# IMPORTANT: Always use pytest from repo root, never `python tests/test_*.py`
+# conftest.py patches hf_adapters modules at collection time for CPU testing
 pytest tests/test_adapter_cpu_accuracy.py
 pytest tests/test_adapter_cpu_accuracy.py -k qwen3   # one model (selects both paths)
 pytest tests/test_adapter_cpu_accuracy.py -k "qwen3 and manual"  # one path
 pytest tests/test_embed_cpu_accuracy.py
+
+# Load tests (verify models load without errors)
+pytest tests/test_load_cpu.py      # CPU load test
+pytest tests/test_load_spyre.py    # Spyre load test (requires hardware)
 
 # Spyre tests (on pod only — requires torch_spyre)
 python3 tests/test_block_cpu_vs_spyre.py all

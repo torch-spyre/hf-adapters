@@ -36,96 +36,11 @@ import gc
 import pytest
 import torch
 from conftest import load_hf_causal_lm, torch_dtype_for
+from model_registry import CAUSAL_LM_MODELS as MODELS
 from transformers import AutoTokenizer
 
 PROMPT = "The capital of France is"
 NUM_DECODE = 4
-
-MODELS = {
-    "qwen3": {
-        "name": "Qwen3 0.6B",
-        "path": "Qwen/Qwen3-0.6B",
-        "adapter": "hf_qwen3.py",
-    },
-    "granite": {
-        "name": "Granite 3.3 8B",
-        "path": "ibm-granite/granite-3.3-8b-instruct",
-        "adapter": "hf_granite.py",
-    },
-    "granite2b": {
-        "name": "Granite 3.3 2B",
-        "path": "ibm-granite/granite-3.3-2b-instruct",
-        "adapter": "hf_granite.py",
-    },
-    "granite4": {
-        "name": "Granite 4.0 1B",
-        "path": "ibm-granite/granite-4.0-1b-base",
-        "adapter": "hf_granitemoehybrid.py",
-        "dtype": "float32",  # fp16 overflows on CPU due to multipliers
-    },
-    "smollm3": {
-        "name": "SmolLM3 3B",
-        "path": "HuggingFaceTB/SmolLM3-3B-Base",
-        "adapter": "hf_smollm3.py",
-    },
-    "llama": {
-        "name": "TinyLlama 1.1B",
-        "path": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        "adapter": "hf_llama.py",
-    },
-    "phi4": {
-        "name": "Phi-4 mini",
-        "path": "microsoft/Phi-4-mini-instruct",
-        "adapter": "hf_phi3.py",
-    },
-    "qwen2": {
-        "name": "Qwen2.5 1.5B",
-        "path": "Qwen/Qwen2.5-1.5B",
-        "adapter": "hf_qwen2.py",
-    },
-    "mistral": {
-        "name": "Mistral 7B v0.3",
-        "path": "mistralai/Mistral-7B-v0.3",
-        "adapter": "hf_mistral.py",
-    },
-    "olmo": {
-        "name": "OLMo 1B",
-        "path": "allenai/OLMo-1B-hf",
-        "adapter": "hf_olmo.py",
-    },
-    "olmo2": {
-        "name": "OLMo2 1B",
-        "path": "allenai/OLMo-2-0425-1B",
-        "adapter": "hf_olmo2.py",
-    },
-    "falcon3": {
-        "name": "Falcon 3 1B",
-        "path": "tiiuae/Falcon3-1B-Base",
-        "adapter": "hf_llama.py",
-    },
-    "deepseek-coder": {
-        "name": "DeepSeek-Coder 1.3B",
-        "path": "deepseek-ai/deepseek-coder-1.3b-base",
-        "adapter": "hf_llama.py",
-    },
-    # Ministral 3B is gated — requires HF auth. Tested on Spyre pod only.
-    # "ministral": {
-    #     "name": "Ministral 3B",
-    #     "path": "mistralai/Ministral-3B-Instruct",
-    #     "adapter": "hf_mistral.py",
-    # },
-    "yi": {
-        "name": "Yi 1.5 6B",
-        "path": "01-ai/Yi-1.5-6B",
-        "adapter": "hf_llama.py",
-    },
-    "granite-vision": {
-        "name": "Granite Vision 4.1 4B",
-        "path": "ibm-granite/granite-vision-4.1-4b",
-        "adapter": "hf_granite_vision.py",
-        "load_fn": True,
-    },
-}
 
 
 def hf_greedy_steps(model, input_ids, num_decode=NUM_DECODE):

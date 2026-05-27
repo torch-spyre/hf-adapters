@@ -65,35 +65,6 @@ _pkg.__path__ = [ADAPTERS_DIR]
 sys.modules["hf_adapters"] = _pkg
 
 
-EMBEDDING_MODELS = {
-    "qwen3_embed": {
-        "name": "Qwen3-Embedding 0.6B",
-        "path": "Qwen/Qwen3-Embedding-0.6B",
-        "adapter": "hf_qwen3.py",
-    },
-    "qwen2_embed": {
-        "name": "GTE-Qwen2-1.5B",
-        "path": "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
-        "adapter": "hf_qwen2.py",
-    },
-    "e5_mistral": {
-        "name": "E5-Mistral-7B",
-        "path": "intfloat/e5-mistral-7b-instruct",
-        "adapter": "hf_mistral.py",
-    },
-    "bge_base": {
-        "name": "BGE-base-en-v1.5",
-        "path": "BAAI/bge-base-en-v1.5",
-        "adapter": "hf_bert.py",
-    },
-    "minilm": {
-        "name": "all-MiniLM-L6-v2",
-        "path": "sentence-transformers/all-MiniLM-L6-v2",
-        "adapter": "hf_bert.py",
-    },
-}
-
-
 def _load_adapter(filename):
     """Load an adapter .py file under hf_adapters/ as a real submodule."""
     mod_name = f"hf_adapters.{filename.replace('.py', '')}"
@@ -119,6 +90,16 @@ _auto_mod = importlib.util.module_from_spec(_auto_spec)
 sys.modules["hf_adapters.auto_spyre_model"] = _auto_mod
 _auto_spec.loader.exec_module(_auto_mod)
 setattr(_pkg, "auto_spyre_model", _auto_mod)
+
+# Now that auto_spyre_model is loaded with patched hf_common, populate the model lists
+# Import model_registry here (after patching) and update its CAUSAL_KEYS/EMBED_KEYS
+import model_registry  # noqa: E402
+
+model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
+    model_registry._select_representative_models(
+        _auto_mod.CONFIG_TO_ADAPTER_MODULE_MAPPING
+    )
+)
 
 
 def _unwrap_compiled_blocks(model):

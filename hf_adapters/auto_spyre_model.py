@@ -34,6 +34,7 @@ padded decode generation loop.
 """
 
 import types
+from types import ModuleType
 
 import torch
 from transformers import (
@@ -53,6 +54,7 @@ from transformers import (
     Qwen3Config,
     SmolLM3Config,
 )
+from transformers.configuration_utils import PretrainedConfig
 
 from hf_adapters import (
     hf_bert,
@@ -70,7 +72,7 @@ from hf_adapters import (
 )
 from hf_adapters.hf_common import load_model_common
 
-CONFIG_TO_ADAPTER_MODULE_MAPPING = {
+CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     BertConfig: hf_bert,
     Granite4VisionConfig: hf_granite_vision,
     GraniteConfig: hf_granite,
