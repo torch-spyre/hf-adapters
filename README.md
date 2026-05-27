@@ -1,7 +1,7 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-11-blue)
-![verified](https://img.shields.io/badge/verified_checkpoints-17-green)
+![adapters](https://img.shields.io/badge/adapters-12-blue)
+![verified](https://img.shields.io/badge/verified_checkpoints-22-green)
 ![compatible](https://img.shields.io/badge/compatible_models-60%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -14,21 +14,22 @@ from `transformers`.
 
 ## Supported Models
 
-**11 adapters · 17 verified checkpoints · 60+ compatible models**
+**12 adapters · 22 verified checkpoints · 60+ compatible models**
 
-| Adapter | Verified | Also Compatible |
-|---------|----------|-----------------|
-| hf\_llama.py | Llama 3.2 3B, TinyLlama, Falcon 3 1B, DeepSeek-Coder 1.3B, Yi 1.5 6B | Llama 2/3 7–13B, Code Llama 7B/13B, Vicuna, OpenChat, Solar |
-| hf\_qwen2.py | Qwen2.5 7B, 1.5B | Qwen2 0.5–7B, Qwen2.5 0.5B/3B, Qwen2.5-Coder, Qwen2.5-Math |
-| hf\_granite.py | Granite 3.3 8B/2B | Granite 3.0–3.2, Granite Code 8B/3B |
-| hf\_granite\_vision.py | Granite Vision 4.1 4B | — |
-| hf\_qwen3.py | Qwen3 0.6B | Qwen3 1.7B, 4B, 8B |
-| hf\_mistral.py | Mistral 7B v0.3 | Mistral v0.1/v0.2, Instruct variants, Zephyr 7B |
-| hf\_phi3.py | Phi-4 mini | Phi-3 mini 4k/128k, Phi-3 small 8k |
-| hf\_granitemoehybrid.py | Granite 4.0 1B | Granite 4.0 Micro |
-| hf\_smollm3.py | SmolLM3 3B | — |
-| hf\_olmo.py | OLMo 1B | OLMo 7B |
-| hf\_olmo2.py | OLMo2 1B | OLMo 2 7B |
+| Adapter | Verified | Also Compatible | Usage |
+|---------|----------|-----------------|-------|
+| hf\_llama.py | Llama 3.2 3B, TinyLlama, Falcon 3 1B, DeepSeek-Coder 1.3B, Yi 1.5 6B | Llama 2/3 7–13B, Code Llama 7B/13B, Vicuna, OpenChat, Solar | Generative |
+| hf\_qwen2.py | Qwen2.5 7B, 1.5B, GTE-Qwen2-1.5B | Qwen2 0.5–7B, Qwen2.5 0.5B/3B, Qwen2.5-Coder, Qwen2.5-Math | Generative + Embedding |
+| hf\_granite.py | Granite 3.3 8B/2B | Granite 3.0–3.2, Granite Code 8B/3B | Generative |
+| hf\_granite\_vision.py | Granite Vision 4.1 4B | — | Generative |
+| hf\_qwen3.py | Qwen3 0.6B, Qwen3-Embedding 0.6B | Qwen3 1.7B, 4B, 8B | Generative + Embedding |
+| hf\_mistral.py | Mistral 7B v0.3, E5-Mistral-7B | Mistral v0.1/v0.2, Instruct variants, Zephyr 7B | Generative + Embedding |
+| hf\_phi3.py | Phi-4 mini | Phi-3 mini 4k/128k, Phi-3 small 8k | Generative |
+| hf\_granitemoehybrid.py | Granite 4.0 1B | Granite 4.0 Micro | Generative |
+| hf\_smollm3.py | SmolLM3 3B | — | Generative |
+| hf\_olmo.py | OLMo 1B | OLMo 7B | Generative |
+| hf\_olmo2.py | OLMo2 1B | OLMo 2 7B | Generative |
+| hf\_bert.py | BGE-base-en-v1.5, all-MiniLM-L6-v2 | BERT-family encoder models | Embedding |
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. See [ARCHITECTURE.md](ARCHITECTURE.md#verified-checkpoints)
@@ -76,6 +77,7 @@ hf_adapters/
 │                               RMSNorm patching, LM head padding,
 │                               head-dim padding, mask builders,
 │                               KV cache helpers, generate loop
+├── hf_bert.py                  BERT-family encoder adapter (BGE, MiniLM)
 ├── hf_granite.py               Granite 3.3 adapter
 ├── hf_granite_vision.py        Granite Vision 4.1 text backbone adapter
 ├── hf_qwen3.py                 Qwen3 adapter
@@ -87,13 +89,16 @@ hf_adapters/
 ├── hf_phi3.py                  Phi-4 / Phi-3 adapter
 ├── hf_olmo.py                  OLMo adapter (OLMo 1B, 7B)
 ├── hf_olmo2.py                 OLMo2 adapter (OLMo 2 1B, 7B)
+├── st_backend.py               sentence-transformers Spyre backend (all decoder adapters)
 └── __init__.py
 
 tests/
-├── test_adapter_cpu_accuracy.py       CPU: adapter vs stock HF
+├── test_adapter_cpu_accuracy.py       CPU: adapter vs stock HF (causal-LM)
+├── test_embed_cpu_accuracy.py         CPU: embedding hidden-states vs stock HF
 ├── test_block_cpu_vs_spyre.py         Per-layer CPU vs Spyre comparison
 ├── test_e2e_smoke_spyre.py            E2E: load + generate on Spyre
-└── test_e2e_token_compare_spyre.py    E2E: HF CPU vs adapter Spyre tokens
+├── test_e2e_token_compare_spyre.py    E2E: HF CPU vs adapter Spyre tokens
+└── test_e2e_embed_compare_spyre.py    E2E: HF CPU vs adapter Spyre embeddings
 ```
 
 ## Requirements
@@ -111,17 +116,18 @@ tests/
 Two classes: **CPU-only** (adapter vs stock HF on CPU) and **Spyre**
 (requires Spyre hardware + `torch_spyre`).
 
-Every test script accepts model aliases as arguments. Run with no args
-to test all models.
-
 ### CPU Tests (no Spyre required)
 
 Compares adapter's patched forward pass against stock HF on CPU.
 Greedy tokens must match at every step. Downloads weights on first run.
 
 ```bash
-python tests/test_adapter_cpu_accuracy.py            # all models
-python tests/test_adapter_cpu_accuracy.py granite     # one model
+pytest tests/test_adapter_cpu_accuracy.py                          # all causal-LM models
+pytest tests/test_adapter_cpu_accuracy.py -k qwen3                 # one model (manual + auto-loader)
+pytest tests/test_adapter_cpu_accuracy.py -k "qwen3 and manual"    # manual adapter only
+
+pytest tests/test_embed_cpu_accuracy.py                            # all embedding models
+pytest tests/test_embed_cpu_accuracy.py -k bge_base                # one model
 ```
 
 ### Spyre Tests (requires Spyre hardware)
@@ -143,6 +149,13 @@ python tests/test_e2e_smoke_spyre.py granite
 
 ```bash
 python tests/test_e2e_token_compare_spyre.py granite
+```
+
+**E2E embedding comparison** (HF CPU vs adapter Spyre, hidden-states cosine):
+
+```bash
+python tests/test_e2e_embed_compare_spyre.py bge-base
+python tests/test_e2e_embed_compare_spyre.py minilm
 ```
 
 Note: Spyre has known numerical accuracy limitations. Token mismatches

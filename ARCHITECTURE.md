@@ -5,6 +5,8 @@ which models are supported on Spyre.
 
 ## Verified Checkpoints
 
+### Generative (causal-LM)
+
 | Model | model\_type | head\_dim | D/2 | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
 |-------|-----------|---------|-----|--------------|-------------|---------------|-----------|
 | Qwen3 0.6B | qwen3 | 128 | 64 | Yes | Yes | Yes | Yes |
@@ -25,10 +27,24 @@ which models are supported on Spyre.
 | Yi 1.5 6B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite Vision 4.1 4B | granite (text) | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 
-**CPU Accurate** = adapter produces identical greedy tokens to stock
-HF on CPU.
+**CPU Accurate** = adapter produces identical greedy tokens to stock HF on CPU.
 **Spyre Compiles** = `torch.compile(block_forward)` succeeds on Spyre.
 **Spyre Runs** = block produces output (no crash/NaN).
+
+### Embedding
+
+Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `prefill_encoder` directly from stock HF models.
+
+| Model | model\_type | head\_dim | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
+|-------|-----------|---------|--------------|-------------|---------------|-----------|
+| Qwen3-Embedding 0.6B | qwen3 | 128 | Yes | Yes | — | — |
+| GTE-Qwen2-1.5B | qwen2 | 128 | Yes | Yes | — | — |
+| E5-Mistral-7B | mistral | 128 | Yes | Yes | — | — |
+| BGE-base-en-v1.5 | bert | 64 | Yes | Yes | Yes | Yes |
+| all-MiniLM-L6-v2 | bert | 32→64 | Yes (padded) | Yes | Yes | Yes |
+
+**CPU Accurate** = adapter hidden-states have cosine similarity ≥ 0.9999 vs stock HF on CPU.
+**Spyre Compiles / Spyre Runs** = via `test_e2e_embed_compare_spyre.py`; decoder embedding models not yet tested on Spyre.
 
 ### Spyre Numerical Accuracy (torch-spyre @ 7c6ef99)
 
@@ -59,23 +75,24 @@ pattern, norms, and weight layout.
 | Adapter | model\_type | Verified | Also Compatible (same adapter, untested sizes/fine-tunes) |
 |---------|-----------|----------|----------------------------------------------------------|
 | hf\_llama.py | llama | 5 | Llama 2 7B/13B, Llama 3 8B, Llama 3.1 8B, Code Llama 7B/13B, Vicuna 7B/13B, OpenChat 3.5 7B, Nous Hermes 2, Solar 10.7B |
-| hf\_qwen2.py | qwen2 | 2 | Qwen2 0.5B/1.5B/7B, Qwen2.5 0.5B/3B, Qwen2.5-Coder 0.5B–7B, Qwen2.5-Math 1.5B/7B |
+| hf\_qwen2.py | qwen2 | 3 | Qwen2 0.5B/1.5B/7B, Qwen2.5 0.5B/3B, Qwen2.5-Coder 0.5B–7B, Qwen2.5-Math 1.5B/7B |
 | hf\_granite.py | granite | 3 | Granite 3.3 8B/2B Base, Granite 3.2 8B, Granite 3.1 8B/2B, Granite 3.0 8B, Granite Code 8B/3B |
-| hf\_qwen3.py | qwen3 | 1 | Qwen3 1.7B, Qwen3 4B, Qwen3 8B |
-| hf\_mistral.py | mistral | 1 | Mistral 7B v0.1/v0.2, Mistral 7B Instruct v0.1–v0.3, Zephyr 7B |
+| hf\_qwen3.py | qwen3 | 2 | Qwen3 1.7B, Qwen3 4B, Qwen3 8B |
+| hf\_mistral.py | mistral | 2 | Mistral 7B v0.1/v0.2, Mistral 7B Instruct v0.1–v0.3, Zephyr 7B |
 | hf\_phi3.py | phi3 | 1 | Phi-3 mini 4k/128k, Phi-3 small 8k |
 | hf\_granitemoehybrid.py | granitemoehybrid | 1 | Granite 4.0 Micro |
 | hf\_smollm3.py | smollm3 | 1 | — |
 | hf\_olmo.py | olmo | 1 | OLMo 7B |
 | hf\_olmo2.py | olmo2 | 1 | OLMo 2 7B |
 | hf\_granite\_vision.py | granite (text) | 1 | — |
+| hf\_bert.py | bert | 2 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants |
 
 **Verified** = checkpoints tested in CI (appear in the matrix above).
 **Also Compatible** = same `model_type` in HuggingFace config; expected
 to work without code changes. Size constraints apply (must fit in
 Spyre memory). Gated models require HF token access.
 
-**Variant count: 11 adapters → 17 verified checkpoints, ~60+ compatible variants.**
+**Variant count: 12 adapters → 22 verified checkpoints, ~60+ compatible variants.**
 
 ## Public API
 
