@@ -67,6 +67,12 @@ class PartialPrecomputedRotaryEmbedding(nn.Module):
         self.head_dim = head_dim
         self._freq_cache = None
         self._cached_len = 0
+        self._freq_dtype = torch.float16
+
+    def set_dtype(self, dtype):
+        self._freq_dtype = dtype
+        if self._freq_cache is not None:
+            self._freq_cache = self._freq_cache.to(dtype)
 
     def _extend_cache(self, max_len):
         if max_len <= self._cached_len:
@@ -100,7 +106,7 @@ class PartialPrecomputedRotaryEmbedding(nn.Module):
             # -sin = 0, sin = 0 already
             rot = torch.cat([rot, ident], dim=-1)  # [S, 2, 2, full_half]
 
-        self._freq_cache = rot.contiguous().to(torch.float16)
+        self._freq_cache = rot.contiguous().to(self._freq_dtype)
         self._cached_len = target_len
 
     def forward(self, hidden_states, position_ids):

@@ -75,6 +75,14 @@ class PrecomputedRotaryEmbedding(nn.Module):
         self.padded_head_dim = padded_head_dim
         self._freq_cache: Optional[torch.Tensor] = None
         self._cached_len = 0
+        self._freq_dtype: torch.dtype = torch.float16
+
+    def set_dtype(self, dtype: torch.dtype) -> None:
+        """Switch the freq cache to a different dtype. Called when the model
+        is moved to Spyre with a non-fp16 dtype (e.g. bf16 for Mistral)."""
+        self._freq_dtype = dtype
+        if self._freq_cache is not None:
+            self._freq_cache = self._freq_cache.to(dtype)
 
     def _extend_cache(self, max_len: int):
         if max_len <= self._cached_len:
@@ -108,7 +116,7 @@ class PrecomputedRotaryEmbedding(nn.Module):
                 ident[:, 1, 1, :] = 1.0
                 rot = torch.cat([rot, ident], dim=-1)
 
-        self._freq_cache = rot.contiguous().to(torch.float16)
+        self._freq_cache = rot.contiguous().to(self._freq_dtype)
         self._cached_len = target_len
 
     def forward(self, hidden_states, position_ids):
@@ -476,9 +484,15 @@ def split_fused_linear(w: torch.Tensor) -> tuple[nn.Linear, nn.Linear]:
 # ---------------------------------------------------------------------------
 
 
-def build_prefill_mask(batch_size, padded_len, max_cache_len, prompt_offsets):
+def build_prefill_mask(
+    batch_size,
+    padded_len,
+    max_cache_len,
+    prompt_offsets,
+    dtype=torch.float16,
+):
     """Causal mask for prefill, masking left-padding and unused cache positions."""
-    mask = torch.zeros((batch_size, 1, padded_len, max_cache_len), dtype=torch.float16)
+    mask = torch.zeros((batch_size, 1, padded_len, max_cache_len), dtype=dtype)
     if isinstance(prompt_offsets, torch.Tensor):
         for b in range(batch_size):
             mask[b, :, :, : prompt_offsets[b].item()] = -torch.inf
@@ -490,10 +504,15 @@ def build_prefill_mask(batch_size, padded_len, max_cache_len, prompt_offsets):
 
 
 def build_expansion_mask(
-    batch_size, block_size, max_cache_len, used_cache_len, prompt_offsets
+    batch_size,
+    block_size,
+    max_cache_len,
+    used_cache_len,
+    prompt_offsets,
+    dtype=torch.float16,
 ):
     """Causal mask for an expansion decode step."""
-    mask = torch.zeros((batch_size, 1, block_size, max_cache_len), dtype=torch.float16)
+    mask = torch.zeros((batch_size, 1, block_size, max_cache_len), dtype=dtype)
     if isinstance(prompt_offsets, torch.Tensor):
         for b in range(batch_size):
             mask[b, :, :, : prompt_offsets[b].item()] = -torch.inf
@@ -506,7 +525,11 @@ def build_expansion_mask(
 
 
 def build_prefill_mask_right_padded(
-    batch_size, padded_len, actual_lengths, is_causal=True
+    batch_size,
+    padded_len,
+    actual_lengths,
+    is_causal=True,
+    dtype=torch.float16,
 ):
     """Prefill mask for right-padded sequences.
 
@@ -528,7 +551,7 @@ def build_prefill_mask_right_padded(
     Padding-position rows compute garbage; callers crop them away when
     returning ``[B, actual_length, H]``.
     """
-    mask = torch.zeros((batch_size, 1, padded_len, padded_len), dtype=torch.float16)
+    mask = torch.zeros((batch_size, 1, padded_len, padded_len), dtype=dtype)
     if is_causal:
         for i in range(padded_len):
             mask[:, :, i, i + 1 :] = -torch.inf
@@ -611,6 +634,18 @@ def _untie_embedding_and_lm_head(model):
             model.config.tie_word_embeddings = False
 
 
+def _model_dtype(model: nn.Module) -> torch.dtype:
+    """Infer the floating-point dtype of a prepared model from its parameters.
+
+    Used by KV-cache and mask allocators so they match the model dtype
+    instead of hardcoding fp16. Falls back to fp16 for empty models.
+    """
+    for p in model.parameters():
+        if p.is_floating_point():
+            return p.dtype
+    return torch.float16
+
+
 def _move_to_spyre_with_layout(model, dtype):
     """Move all parameters and buffers to Spyre with row-major layout for 2D
     matmul weights, except embedding weights which keep the default layout.
@@ -654,6 +689,13 @@ def _move_to_spyre_with_layout(model, dtype):
         owner = model.get_submodule(module_path) if module_path else model
         persistent = attr not in owner._non_persistent_buffers_set
         owner.register_buffer(attr, new, persistent=persistent)
+
+    # Propagate dtype to the precomputed RoPE module so its freq cache
+    # matches the model's weight dtype (avoids fp16/bf16 mismatch in
+    # apply_rope_matmul when dtype != fp16).
+    rope = getattr(model, "_spyre_rope", None)
+    if rope is not None and hasattr(rope, "set_dtype"):
+        rope.set_dtype(dtype)
 
 
 def load_model_common(model_path, prepare_fn, dtype=torch.float16, auto_model_cls=None):
@@ -763,13 +805,15 @@ def generate(
         or model.config.hidden_size // model.config.num_attention_heads
     )
     v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
+    # Match KV cache and mask dtype to the model's weight dtype.
+    model_dtype = _model_dtype(model)
     key_caches = [
         torch.zeros(
             batch_size,
             num_kv_heads,
             max_cache_len,
             head_dim,
-            dtype=torch.float16,
+            dtype=model_dtype,
             device=DEVICE,
         )
         for _ in range(num_layers)
@@ -780,7 +824,7 @@ def generate(
             num_kv_heads,
             max_cache_len,
             v_head_dim,
-            dtype=torch.float16,
+            dtype=model_dtype,
             device=DEVICE,
         )
         for _ in range(num_layers)
@@ -804,7 +848,11 @@ def generate(
         if i == 0:
             # --- PREFILL ---
             prefill_mask = build_prefill_mask(
-                batch_size, padded_len, max_cache_len, prompt_offsets
+                batch_size,
+                padded_len,
+                max_cache_len,
+                prompt_offsets,
+                dtype=model_dtype,
             )
             logits = run_forward_fn(
                 model,
@@ -860,6 +908,7 @@ def generate(
                     max_cache_len,
                     current_cache_len,
                     prompt_offsets,
+                    dtype=model_dtype,
                 )
                 logits = run_forward_fn(
                     model,
@@ -1230,11 +1279,20 @@ def prefill_embed(
         actual = actual_lengths[b].item()
         position_ids[b, :actual] = torch.arange(actual)
 
+    # Match KV cache and mask dtype to the model's weight dtype so the
+    # compiled block sees a consistent dtype across q/k/v_proj outputs and
+    # the SDPA inputs.
+    model_dtype = _model_dtype(model)
+
     # Causal right-padded mask (or bidirectional for models with
     # ``config.is_causal=False``)
     is_causal = getattr(model.config, "is_causal", True)
     mask = build_prefill_mask_right_padded(
-        bsz, padded_len, actual_lengths, is_causal=is_causal
+        bsz,
+        padded_len,
+        actual_lengths,
+        is_causal=is_causal,
+        dtype=model_dtype,
     )
 
     # Throwaway KV caches sized to padded_len (no decode budget)
@@ -1252,7 +1310,7 @@ def prefill_embed(
             num_kv_heads,
             padded_len,
             head_dim,
-            dtype=torch.float16,
+            dtype=model_dtype,
             device=DEVICE,
         )
         for _ in range(num_layers)
@@ -1263,7 +1321,7 @@ def prefill_embed(
             num_kv_heads,
             padded_len,
             v_head_dim,
-            dtype=torch.float16,
+            dtype=model_dtype,
             device=DEVICE,
         )
         for _ in range(num_layers)
