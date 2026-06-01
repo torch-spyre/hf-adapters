@@ -43,7 +43,8 @@ import gc
 
 import pytest
 import torch
-from conftest import EMBEDDING_MODELS, encode_padded, min_cosine, torch_dtype_for
+from conftest import encode_padded, min_cosine, torch_dtype_for
+from model_registry import EMBEDDING_MODELS
 from transformers import AutoModel, AutoTokenizer
 
 PROMPTS = [

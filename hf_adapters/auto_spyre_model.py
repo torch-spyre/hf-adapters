@@ -53,6 +53,7 @@ from transformers import (
     Qwen2Config,
     Qwen3Config,
     SmolLM3Config,
+    XLMRobertaConfig,
 )
 from transformers.configuration_utils import PretrainedConfig
 
@@ -69,6 +70,7 @@ from hf_adapters import (
     hf_qwen2,
     hf_qwen3,
     hf_smollm3,
+    hf_xlm_roberta,
 )
 from hf_adapters.hf_common import load_model_common
 
@@ -85,6 +87,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     Qwen2Config: hf_qwen2,
     Qwen3Config: hf_qwen3,
     SmolLM3Config: hf_smollm3,
+    XLMRobertaConfig: hf_xlm_roberta,
 }
 
 

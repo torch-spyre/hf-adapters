@@ -137,6 +137,11 @@ EMBEDDING_MODELS = {
         "path": "sentence-transformers/all-MiniLM-L6-v2",
         "adapter": "hf_bert.py",
     },
+    "bge_m3": {
+        "name": "BGE-M3",
+        "path": "BAAI/bge-m3",
+        "adapter": "hf_xlm_roberta.py",
+    },
 }
 
 
