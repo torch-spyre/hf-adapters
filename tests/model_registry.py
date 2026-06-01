@@ -142,6 +142,11 @@ EMBEDDING_MODELS = {
         "path": "BAAI/bge-m3",
         "adapter": "hf_xlm_roberta.py",
     },
+    "mpnet": {
+        "name": "all-mpnet-base-v2",
+        "path": "sentence-transformers/all-mpnet-base-v2",
+        "adapter": "hf_mpnet.py",
+    },
 }
 
 
