@@ -1,7 +1,7 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-12-blue)
-![verified](https://img.shields.io/badge/verified_checkpoints-22-green)
+![adapters](https://img.shields.io/badge/adapters-14-blue)
+![verified](https://img.shields.io/badge/verified_checkpoints-24-green)
 ![compatible](https://img.shields.io/badge/compatible_models-60%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -14,7 +14,7 @@ from `transformers`.
 
 ## Supported Models
 
-**12 adapters · 22 verified checkpoints · 60+ compatible models**
+**14 adapters · 24 verified checkpoints · 60+ compatible models**
 
 | Adapter | Verified | Also Compatible | Usage |
 |---------|----------|-----------------|-------|
@@ -30,6 +30,8 @@ from `transformers`.
 | hf\_olmo.py | OLMo 1B | OLMo 7B | Generative |
 | hf\_olmo2.py | OLMo2 1B | OLMo 2 7B | Generative |
 | hf\_bert.py | BGE-base-en-v1.5, all-MiniLM-L6-v2 | BERT-family encoder models | Embedding |
+| hf\_xlm\_roberta.py | BGE-M3 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes | Embedding |
+| hf\_mpnet.py | all-mpnet-base-v2 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base | Embedding |
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. See [ARCHITECTURE.md](ARCHITECTURE.md#verified-checkpoints)
@@ -89,6 +91,8 @@ hf_adapters/
 ├── hf_phi3.py                  Phi-4 / Phi-3 adapter
 ├── hf_olmo.py                  OLMo adapter (OLMo 1B, 7B)
 ├── hf_olmo2.py                 OLMo2 adapter (OLMo 2 1B, 7B)
+├── hf_xlm_roberta.py           XLM-RoBERTa encoder adapter (BGE-M3, multilingual-e5)
+├── hf_mpnet.py                 MPNet encoder adapter (all-mpnet-base-v2 and variants)
 ├── st_backend.py               sentence-transformers Spyre backend (all decoder adapters)
 └── __init__.py
 
