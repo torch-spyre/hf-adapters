@@ -38,7 +38,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
-    DEVICE,
+    PrecomputedRotaryEmbedding,
     apply_rope_matmul,
     chunk_lm_head,
     get_backbone,
@@ -46,76 +46,6 @@ from hf_adapters.hf_common import (
     patch_rmsnorm,
     split_fused_linear,
 )
-
-# ---------------------------------------------------------------------------
-# RoPE with identity padding for partial rotary
-# ---------------------------------------------------------------------------
-
-
-class PartialPrecomputedRotaryEmbedding(nn.Module):
-    """Like PrecomputedRotaryEmbedding, but pads with identity for non-rotated dims.
-
-    For partial_rotary_factor < 1.0, the inv_freq covers only ``rope_dim/2``
-    frequencies. We pad the ``[S, 2, 2, rope_dim/2]`` rotation matrix to
-    ``[S, 2, 2, head_dim/2]`` using identity entries ``[[1,0],[0,1]]`` so that
-    ``apply_rope_matmul`` on the full head_dim passes through non-rotated dims.
-    """
-
-    def __init__(self, original_rope, head_dim):
-        super().__init__()
-        self.original = original_rope
-        self.head_dim = head_dim
-        self._freq_cache = None
-        self._cached_len = 0
-        self._freq_dtype = torch.float16
-
-    def set_dtype(self, dtype):
-        self._freq_dtype = dtype
-        if self._freq_cache is not None:
-            self._freq_cache = self._freq_cache.to(dtype)
-
-    def _extend_cache(self, max_len):
-        if max_len <= self._cached_len:
-            return
-        target_len = max(max_len, self._cached_len * 2, 2048)
-        inv_freq = self.original.inv_freq.to("cpu").float()
-        rope_half = inv_freq.shape[0]  # rope_dim / 2
-        full_half = self.head_dim // 2  # head_dim / 2
-        pad_half = full_half - rope_half
-
-        t = torch.arange(target_len, dtype=inv_freq.dtype)
-        freqs = torch.outer(t, inv_freq).float()  # [S, rope_half]
-        scaling = getattr(self.original, "attention_scaling", 1.0)
-
-        # Build rotation matrix [S, 2, 2, rope_half]
-        rot = torch.stack(
-            [
-                torch.cos(freqs) * scaling,
-                -torch.sin(freqs) * scaling,
-                torch.sin(freqs) * scaling,
-                torch.cos(freqs) * scaling,
-            ],
-            dim=1,
-        ).view(target_len, 2, 2, rope_half)
-
-        if pad_half > 0:
-            # Identity matrix [[1,0],[0,1]] for non-rotated dims
-            ident = torch.zeros(target_len, 2, 2, pad_half)
-            ident[:, 0, 0, :] = 1.0  # cos = 1
-            ident[:, 1, 1, :] = 1.0  # cos = 1
-            # -sin = 0, sin = 0 already
-            rot = torch.cat([rot, ident], dim=-1)  # [S, 2, 2, full_half]
-
-        self._freq_cache = rot.contiguous().to(self._freq_dtype)
-        self._cached_len = target_len
-
-    def forward(self, hidden_states, position_ids):
-        pos_cpu = position_ids.to("cpu")
-        max_pos = int(pos_cpu.max().item()) + 1
-        self._extend_cache(max_pos)
-        selected = self._freq_cache[pos_cpu]
-        return selected.to(DEVICE)
-
 
 # ---------------------------------------------------------------------------
 # Weight splitting
@@ -319,8 +249,8 @@ def prepare_for_spyre(model):
     hd = cfg.hidden_size // cfg.num_attention_heads
 
     # RoPE with identity padding for partial rotary
-    model._spyre_rope = PartialPrecomputedRotaryEmbedding(
-        get_backbone(model).rotary_emb, hd
+    model._spyre_rope = PrecomputedRotaryEmbedding(
+        get_backbone(model).rotary_emb, padded_head_dim=hd
     )
     patch_rmsnorm(Phi3RMSNorm)
 
