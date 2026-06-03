@@ -4,8 +4,10 @@ import csv
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 from huggingface_hub import HfApi
+from tqdm import tqdm
 from transformers import AutoConfig
 
 # Import the mapping to get supported config classes dynamically
@@ -19,11 +21,21 @@ MOE_MODEL_TYPES = {
     "jamba",
     "arctic",
     "olmoe",
+    "gpt_oss",
 }
 
 MOE_MODEL_TYPE_PREFIXES = ("deepseek_v2", "deepseek_v3", "deepseek_v4")
 
-MOE_ARCH_SUBSTRINGS = ["mixtral", "moe", "dbrx", "jamba", "arctic", "olmoe", "deepseek"]
+MOE_ARCH_SUBSTRINGS = [
+    "mixtral",
+    "moe",
+    "dbrx",
+    "jamba",
+    "arctic",
+    "olmoe",
+    "deepseek",
+    "gptoss",
+]
 
 # Get supported config class names dynamically from the mapping
 SUPPORTED_CONFIG_CLASSES = {
@@ -38,17 +50,29 @@ def _is_supported_config(config_class_name):
     return config_class_name in SUPPORTED_CONFIG_CLASSES
 
 
-def _is_moe(config):
-    if not config:
-        return False
+def _is_moe(model):
+    has_moe_tags = any("moe" in t.lower() for t in (getattr(model, "tags") or []))
+    if has_moe_tags:
+        return True
+
+    config = model.config
     model_type = (config.get("model_type") or "").lower()
     if model_type in MOE_MODEL_TYPES:
         return True
     if model_type.startswith(MOE_MODEL_TYPE_PREFIXES):
         return True
+
     architectures = config.get("architectures") or []
     arch_lower = " ".join(architectures).lower()
     return any(sub in arch_lower for sub in MOE_ARCH_SUBSTRINGS)
+
+
+def _is_custom_code(model):
+    tags = {t.lower() for t in (getattr(model, "tags") or [])}
+    if "custom_code" in tags:
+        return True
+    config = model.config or {}
+    return bool(config.get("auto_map"))
 
 
 def _format_number_to_billions_smart(num: int | float) -> str:
@@ -136,14 +160,14 @@ def fetch_top_generative_models(limit, output_csv="top_generative_models.csv"):
                 "downloads",
                 "createdAt",
                 "library_name",
+                "tags",
             ],
         )
     )
 
-    models = [m for m in models if m.library_name != "gguf" and m.config]
-
+    models = [m for m in models if m.library_name not in ["gguf", "mlx"] and m.config]
     print(
-        f"Retrieved {len(models)} models (after filtering GGUF-only)."
+        f"Retrieved {len(models)} models (after filtering GGUF-only/MLX). "
         f"Writing to {output_csv}"
     )
 
@@ -162,15 +186,24 @@ def fetch_top_generative_models(limit, output_csv="top_generative_models.csv"):
                 "library",
                 "is_gated",
                 "is_moe",
+                "is_custom_code",
                 "config_class",
                 "is_supported",
                 "Year",
             ]
         )
 
-        for rank, m in enumerate(models, start=1):
-            if rank > limit:
-                break
+        models = models[:limit]
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            config_classes = list(
+                tqdm(
+                    ex.map(lambda m: _get_config_type(m.id, token), models),
+                    total=len(models),
+                    desc="Fetching config classes",
+                )
+            )
+
+        for rank, (m, config_class) in enumerate(zip(models, config_classes), start=1):
             model_type = m.config.get("model_type") if m.config else None
             architectures = m.config.get("architectures") if m.config else None
             arch_str = ";".join(architectures) if architectures else None
@@ -181,7 +214,6 @@ def fetch_top_generative_models(limit, output_csv="top_generative_models.csv"):
                     param_count_str = _format_number_to_billions_smart(param_count)
             else:  # Param Count is not None
                 param_count = _parse_number_suffix(param_count_str)
-            config_class = _get_config_type(m.id, token)
             is_supported = _is_supported_config(config_class)
             writer.writerow(
                 [
@@ -195,7 +227,8 @@ def fetch_top_generative_models(limit, output_csv="top_generative_models.csv"):
                     param_count,
                     m.library_name,
                     bool(m.gated),
-                    _is_moe(m.config),
+                    _is_moe(model=m),
+                    _is_custom_code(m),
                     config_class,
                     is_supported,
                     m.created_at.year if m.created_at else None,
@@ -208,6 +241,5 @@ def fetch_top_generative_models(limit, output_csv="top_generative_models.csv"):
 
 
 if __name__ == "__main__":
-    limit_ = int(sys.argv[1]) if len(sys.argv) > 1 else 1000
+    limit_ = int(sys.argv[1]) if len(sys.argv) > 1 else 10000
     fetch_top_generative_models(limit=limit_)
-7
