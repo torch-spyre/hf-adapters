@@ -83,6 +83,10 @@ EOS_CASES = {
     # a block boundary; verifies the long row keeps producing correct tokens
     # after finished[short_row] = True.
     "eos_short_finishes_long_continues": ([2, BLOCK_SIZE + 10], 2 * BLOCK_SIZE),
+    # EOS on the very last allowed step: ``finished.all()`` and the
+    # ``i == max_new_tokens - 1`` loop end coincide. max_new_tokens is set to
+    # eos_offset + 1 so the EOS token is the last one emitted.
+    "eos_on_last_step": ([7], 8),
 }
 
 
@@ -104,7 +108,15 @@ SPYRE_EOS_CASE_KEYS = [
     "eos_first_token",
     "eos_mid_block",
     "eos_first_of_second_block",
+    "eos_on_last_step",
 ]
+
+
+# Sampling kwargs used by both the CPU pytest sampling-determinism test and the
+# Spyre script. Kept here so the two stay in sync.
+SAMPLING_KWARGS = dict(do_sample=True, temperature=1.0, top_k=20)
+SAMPLING_MAX_NEW = BLOCK_SIZE + 4  # cross a block boundary under sampling
+SAMPLING_TARGETS = [8, 16]
 
 
 # ---------------------------------------------------------------------------
@@ -175,9 +187,10 @@ def greedy_token_ids(model, tokenizer, prompt, max_new_tokens):
 class EosOverrideTokenizer:
     """Forwards everything to a real tokenizer except ``eos_token_id``.
 
-    ``__call__`` and ``decode`` are forwarded explicitly because
-    ``hf_common.generate`` invokes them; everything else falls through
-    ``__getattr__`` so attributes like ``pad_token`` keep working.
+    Defined as its own class (rather than inheriting from
+    ``_DelegatingTokenizer``) so that ``eos_token_id`` is set as an instance
+    attribute and does not collide with the no-EOS subclass's class-level
+    override.
     """
 
     def __init__(self, base, eos_token_id):
@@ -216,3 +229,88 @@ def pick_forced_eos_id(per_prompt_ids, eos_offsets):
         ):
             return cand
     return None
+
+
+def forced_eos_expected(per_prompt_ids, eos_offsets, tokenizer):
+    """Decode the per-row tokens up to (not including) each row's EOS offset."""
+    return [
+        tokenizer.decode(per_prompt_ids[b][: eos_offsets[b]], skip_special_tokens=True)
+        for b in range(len(eos_offsets))
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Tokenizer overrides for branch coverage in ``hf_common.generate``
+# ---------------------------------------------------------------------------
+
+
+class _DelegatingTokenizer:
+    """Forwards ``__call__``/``decode`` and unknown attribute reads to a base
+    tokenizer. Subclasses override specific attributes to exercise branches in
+    ``hf_common.generate`` (no EOS id, no pad token).
+    """
+
+    def __init__(self, base):
+        self._base = base
+
+    def __call__(self, *args, **kwargs):
+        return self._base(*args, **kwargs)
+
+    def decode(self, *args, **kwargs):
+        return self._base.decode(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+
+class NoEosTokenizer(_DelegatingTokenizer):
+    """Hides ``eos_token_id`` so ``generate()`` takes the no-EOS branches.
+
+    Generation should then run exactly ``max_new_tokens`` steps with no early
+    stop and no EOS truncation in the decode walk.
+    """
+
+    eos_token_id = None
+    eos_token = None
+
+
+class NoPadTokenizer(_DelegatingTokenizer):
+    """Hides ``pad_token`` so ``generate()`` exercises the
+    ``pad_token = eos_token`` fallback at the top of the function. Reading
+    ``pad_token`` returns ``None``; writes are stored on the base tokenizer
+    so ``generate()``'s assignment takes effect.
+    """
+
+    @property
+    def pad_token(self):
+        return None
+
+    @pad_token.setter
+    def pad_token(self, value):
+        # generate() does ``tokenizer.pad_token = tokenizer.eos_token`` when
+        # pad_token is None — let that assignment land on the real tokenizer
+        # so subsequent ``tokenizer(... padding=True ...)`` calls work.
+        self._base.pad_token = value
+
+
+# ---------------------------------------------------------------------------
+# In-prompt EOS — verify generate() does NOT mistake an EOS id appearing in
+# the prompt for an emission and stop early.
+# ---------------------------------------------------------------------------
+
+
+def make_prompt_with_eos_inside(tokenizer, eos_token_id, target_tokens=10):
+    """Build a prompt whose token ids include ``eos_token_id`` somewhere in
+    the middle. The ``finished`` mask is only updated on emitted tokens (line
+    949 of hf_common.generate), so generation should proceed normally.
+
+    Returns the decoded prompt string. The prompt is ~target_tokens long with
+    the EOS id placed at position ``target_tokens // 2``.
+    """
+    base_ids = tokenizer(
+        "The quick brown fox jumps over the lazy dog.",
+        add_special_tokens=False,
+    )["input_ids"][: target_tokens - 1]
+    mid = max(1, len(base_ids) // 2)
+    ids = base_ids[:mid] + [eos_token_id] + base_ids[mid:]
+    return tokenizer.decode(ids, skip_special_tokens=False)

@@ -40,9 +40,16 @@ from _generate_edge_case_helpers import (
     BLOCK_SIZE,
     CASES,
     EOS_CASES,
+    SAMPLING_KWARGS,
+    SAMPLING_MAX_NEW,
+    SAMPLING_TARGETS,
     EosOverrideTokenizer,
+    NoEosTokenizer,
+    NoPadTokenizer,
+    forced_eos_expected,
     greedy_token_ids,
     hf_reference_outputs,
+    make_prompt_with_eos_inside,
     make_prompts,
     pick_forced_eos_id,
 )
@@ -234,10 +241,7 @@ def test_generate_forced_eos(
         )
 
     # Build the expected per-row output: tokens up to (not including) the EOS.
-    expected = [
-        tokenizer.decode(per_prompt_ids[b][: eos_offsets[b]], skip_special_tokens=True)
-        for b in range(batch_size)
-    ]
+    expected = forced_eos_expected(per_prompt_ids, eos_offsets, tokenizer)
 
     # Step 2: run the adapter with the override tokenizer.
     wrapped = EosOverrideTokenizer(tokenizer, eos_token_id)
@@ -302,10 +306,10 @@ def test_generate_sampling_determinism(
     info = MODELS[model_key]
     adapter_mod = load_adapter(info["adapter"])
     tokenizer = AutoTokenizer.from_pretrained(info["path"])
-    prompts = make_prompts(tokenizer, [8, 16])
-    max_new_tokens = BLOCK_SIZE + 4  # cross a block boundary under sampling
+    prompts = make_prompts(tokenizer, SAMPLING_TARGETS)
+    max_new_tokens = SAMPLING_MAX_NEW
 
-    sampling = dict(do_sample=True, temperature=1.0, top_k=20)
+    sampling = SAMPLING_KWARGS
 
     torch.manual_seed(1234)
     out_a1 = _run_adapter_generate(
@@ -350,4 +354,207 @@ def test_generate_sampling_determinism(
     assert out_a1 != out_b, (
         f"different seeds produced identical outputs (top_k=20 should diverge):\n"
         f"  seed=1234: {out_a1}\n  seed=9999: {out_b}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# eos_token_id is None: must run full max_new_tokens with no early stop
+# ---------------------------------------------------------------------------
+#
+# When the tokenizer exposes ``eos_token_id = None`` (line 841 of
+# hf_common.generate), the ``finished`` mask is never set and the decode walk
+# does not truncate. The adapter should emit exactly max_new_tokens per row.
+
+
+@pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
+def test_generate_no_eos_runs_full_budget(
+    model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod
+):
+    info = MODELS[model_key]
+    adapter_mod = load_adapter(info["adapter"])
+    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    prompts = make_prompts(tokenizer, [5, 12])
+    max_new_tokens = BLOCK_SIZE + 7  # cross a block boundary
+
+    # HF reference with eos_token_id=None so HF also runs the full budget.
+    torch_dtype = _torch_dtype(info)
+    ref_model = AutoModelForCausalLM.from_pretrained(
+        info["path"], torch_dtype=torch_dtype, device_map="cpu"
+    )
+    ref_model.eval()
+    ref_model.requires_grad_(False)
+    hf_outputs = []
+    for prompt in prompts:
+        encoded = tokenizer(prompt, return_tensors="pt")
+        with torch.no_grad():
+            out = ref_model.generate(
+                **encoded,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                eos_token_id=None,
+                pad_token_id=(
+                    tokenizer.pad_token_id
+                    if tokenizer.pad_token_id is not None
+                    else tokenizer.eos_token_id
+                ),
+            )
+        new_ids = out[0][encoded["input_ids"].shape[1] :]
+        assert len(new_ids) == max_new_tokens
+        hf_outputs.append(tokenizer.decode(new_ids, skip_special_tokens=True))
+    del ref_model
+    gc.collect()
+
+    wrapped = NoEosTokenizer(tokenizer)
+    adapter_outputs = _run_adapter_generate(
+        info,
+        adapter_mod,
+        hf_common_mod,
+        unwrap_compiled_blocks,
+        wrapped,
+        prompts,
+        max_new_tokens,
+    )
+
+    assert len(adapter_outputs) == len(prompts)
+    for i, (hf_out, ad_out) in enumerate(zip(hf_outputs, adapter_outputs)):
+        assert (
+            hf_out.strip() == ad_out.strip()
+        ), f"no-eos prompt[{i}]:\n  HF:      {hf_out!r}\n  adapter: {ad_out!r}"
+
+
+# ---------------------------------------------------------------------------
+# pad_token is None: triggers ``pad_token = eos_token`` fallback (line 759)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
+def test_generate_no_pad_token_fallback(
+    model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod
+):
+    info = MODELS[model_key]
+    adapter_mod = load_adapter(info["adapter"])
+    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    prompts = make_prompts(tokenizer, [5, 12])  # mixed lengths -> left-padding
+    max_new_tokens = 16
+
+    torch_dtype = _torch_dtype(info)
+    ref_model = AutoModelForCausalLM.from_pretrained(
+        info["path"], torch_dtype=torch_dtype, device_map="cpu"
+    )
+    ref_model.eval()
+    ref_model.requires_grad_(False)
+    hf_outputs = hf_reference_outputs(ref_model, tokenizer, prompts, max_new_tokens)
+    del ref_model
+    gc.collect()
+
+    wrapped = NoPadTokenizer(tokenizer)
+    adapter_outputs = _run_adapter_generate(
+        info,
+        adapter_mod,
+        hf_common_mod,
+        unwrap_compiled_blocks,
+        wrapped,
+        prompts,
+        max_new_tokens,
+    )
+
+    for i, (hf_out, ad_out) in enumerate(zip(hf_outputs, adapter_outputs)):
+        assert (
+            hf_out.strip() == ad_out.strip()
+        ), f"no-pad-token prompt[{i}]:\n  HF:      {hf_out!r}\n  adapter: {ad_out!r}"
+
+
+# ---------------------------------------------------------------------------
+# top_k=0 sampling: skips the top-k filter branch (line 931 of generate)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
+def test_generate_sampling_top_k_zero(
+    model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod
+):
+    info = MODELS[model_key]
+    adapter_mod = load_adapter(info["adapter"])
+    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    prompts = make_prompts(tokenizer, SAMPLING_TARGETS)
+    max_new_tokens = SAMPLING_MAX_NEW
+
+    sampling = dict(do_sample=True, temperature=1.0, top_k=0)
+
+    torch.manual_seed(2024)
+    out1 = _run_adapter_generate(
+        info,
+        adapter_mod,
+        hf_common_mod,
+        unwrap_compiled_blocks,
+        tokenizer,
+        prompts,
+        max_new_tokens,
+        **sampling,
+    )
+    torch.manual_seed(2024)
+    out2 = _run_adapter_generate(
+        info,
+        adapter_mod,
+        hf_common_mod,
+        unwrap_compiled_blocks,
+        tokenizer,
+        prompts,
+        max_new_tokens,
+        **sampling,
+    )
+
+    assert len(out1) == len(prompts)
+    for i, s in enumerate(out1):
+        assert s, f"top_k=0 prompt[{i}] produced empty output"
+    assert (
+        out1 == out2
+    ), f"top_k=0 sampling not reproducible:\n  run1: {out1}\n  run2: {out2}"
+
+
+# ---------------------------------------------------------------------------
+# EOS id appearing inside the prompt: must NOT trip the finished mask.
+# ---------------------------------------------------------------------------
+#
+# generate() updates ``finished`` only on emitted next_tokens (line 949 of
+# hf_common.generate), not on prompt content. A prompt containing the model's
+# eos_token_id should still produce a normal greedy continuation matching HF.
+
+
+@pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
+def test_generate_eos_inside_prompt(
+    model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod
+):
+    info = MODELS[model_key]
+    adapter_mod = load_adapter(info["adapter"])
+    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    eos_id = tokenizer.eos_token_id
+    if eos_id is None:
+        pytest.skip("tokenizer has no eos_token_id; case not applicable")
+    prompts = [make_prompt_with_eos_inside(tokenizer, eos_id, target_tokens=12)]
+    max_new_tokens = BLOCK_SIZE + 8  # cross a block boundary
+
+    torch_dtype = _torch_dtype(info)
+    ref_model = AutoModelForCausalLM.from_pretrained(
+        info["path"], torch_dtype=torch_dtype, device_map="cpu"
+    )
+    ref_model.eval()
+    ref_model.requires_grad_(False)
+    hf_outputs = hf_reference_outputs(ref_model, tokenizer, prompts, max_new_tokens)
+    del ref_model
+    gc.collect()
+
+    adapter_outputs = _run_adapter_generate(
+        info,
+        adapter_mod,
+        hf_common_mod,
+        unwrap_compiled_blocks,
+        tokenizer,
+        prompts,
+        max_new_tokens,
+    )
+
+    assert hf_outputs[0].strip() == adapter_outputs[0].strip(), (
+        f"eos-in-prompt:\n  HF:      {hf_outputs[0]!r}\n"
+        f"  adapter: {adapter_outputs[0]!r}"
     )
