@@ -30,7 +30,20 @@ def _parse_config_to_module_map() -> Dict[str, str]:
     except (OSError, SyntaxError):
         return {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
+        # Handle annotated assignment (e.g., var: type = value)
+        if isinstance(node, ast.AnnAssign):
+            if (
+                isinstance(node.target, ast.Name)
+                and node.target.id == "CONFIG_TO_ADAPTER_MODULE_MAPPING"
+                and isinstance(node.value, ast.Dict)
+            ):
+                result = {}
+                for k, v in zip(node.value.keys, node.value.values):
+                    if isinstance(k, ast.Name) and isinstance(v, ast.Name):
+                        result[k.id] = v.id
+                return result
+        # Handle regular assignment (e.g., var = value)
+        elif isinstance(node, ast.Assign):
             targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
             if "CONFIG_TO_ADAPTER_MODULE_MAPPING" in targets and isinstance(
                 node.value, ast.Dict
