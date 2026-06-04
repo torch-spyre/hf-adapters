@@ -239,6 +239,12 @@ def run_model(model_key, case_filter=None):
             }
         )
 
+    # If case filter was specified, only run those cases and return early
+    if case_filter:
+        del model
+        gc.collect()
+        return rows
+
     # --- max_new_tokens=0 (locks in empty-output contract) ---
     print("  Running max_new_tokens=0 case ...")
     try:
