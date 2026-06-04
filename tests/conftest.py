@@ -113,6 +113,32 @@ def _unwrap_compiled_blocks(model):
     model._spyre_compiled_blocks = unwrapped
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "requires_spyre: mark test as requiring the Spyre backend device",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip spyre tests if torch_spyre is not installed / device unavailable."""
+    try:
+        import torch
+        import torch_spyre  # noqa: F401 — side effect: registers "spyre" device
+
+        # Verify the device actually registered
+        _ = torch.device("spyre")
+        spyre_available = True
+    except (ImportError, RuntimeError):
+        spyre_available = False
+
+    if not spyre_available:
+        skip_marker = pytest.mark.skip(reason="torch_spyre not installed or spyre device unavailable")
+        for item in items:
+            if "spyre" in item.nodeid or item.get_closest_marker("requires_spyre"):
+                item.add_marker(skip_marker)
+
+
 @pytest.fixture(scope="session")
 def hf_common_mod():
     return sys.modules["hf_adapters.hf_common"]
