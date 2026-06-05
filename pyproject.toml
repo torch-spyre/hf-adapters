@@ -64,6 +64,13 @@ dev = [
     "typing-extensions",
     "nicegui"
 ]
+models-ops = [
+    "huggingface_hub",
+    "mistral_common",
+    "python-dotenv",
+    "PyYAML",
+    "regex",
+]
 test = [
     "pytest",
 ]
