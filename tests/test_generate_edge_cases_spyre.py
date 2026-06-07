@@ -33,7 +33,15 @@ this script and the CPU pytest stay in sync.
 
 Usage (on the Spyre pod)::
 
-    python3 tests/test_generate_edge_cases_spyre.py [model_key ...]
+    # Run all tests for default model (qwen3)
+    python3 tests/test_generate_edge_cases_spyre.py
+
+    # Run all tests for specific models
+    python3 tests/test_generate_edge_cases_spyre.py qwen3 granite2b
+
+    # Run only specific test case(s)
+    python3 tests/test_generate_edge_cases_spyre.py qwen3 --case short_two_blocks_plus
+    python3 tests/test_generate_edge_cases_spyre.py qwen3 --case short_two_blocks_plus single_token_prompt
 
 Model keys come from ``tests/model_registry.py`` (e.g. ``qwen3``, ``granite2b``,
 ``llama``). Default is ``qwen3``.
@@ -41,6 +49,7 @@ Model keys come from ``tests/model_registry.py`` (e.g. ``qwen3``, ``granite2b``,
 Exit code is 0 only if every case passes.
 """
 
+import argparse
 import gc
 import sys
 import time
@@ -92,8 +101,13 @@ EOS_CASES = {k: ALL_EOS_CASES[k] for k in SPYRE_EOS_CASE_KEYS}
 # ---------------------------------------------------------------------------
 
 
-def run_model(model_key):
-    """Load one model, run every case, return a list of result rows."""
+def run_model(model_key, case_filter=None):
+    """Load one model, run every case (or filtered cases), return a list of result rows.
+
+    Args:
+        model_key: Key from MODELS registry
+        case_filter: Optional list of case names to run. If None, runs all cases.
+    """
     info = MODELS[model_key]
     print(f"\n{'='*70}")
     print(f"  {info['name']}: {info['path']}")
@@ -191,8 +205,15 @@ def run_model(model_key):
     rows = []
 
     # --- Greedy correctness cases ---
-    print(f"  Running {len(CASES)} greedy correctness cases ...")
-    for case_id, (targets, max_new) in CASES.items():
+    # Filter cases if requested
+    cases_to_run = CASES
+    if case_filter:
+        cases_to_run = {k: v for k, v in CASES.items() if k in case_filter}
+        if not cases_to_run:
+            print(f"  No matching greedy cases found for filter: {case_filter}")
+
+    print(f"  Running {len(cases_to_run)} greedy correctness cases ...")
+    for case_id, (targets, max_new) in cases_to_run.items():
         prompts, hf_outputs = case_refs[case_id]
         try:
             t0 = time.time()
@@ -217,6 +238,12 @@ def run_model(model_key):
                 "detail": "" if ok else f"hf={hf_outputs!r} spyre={spyre_outputs!r}",
             }
         )
+
+    # If case filter was specified, only run those cases and return early
+    if case_filter:
+        del model
+        gc.collect()
+        return rows
 
     # --- max_new_tokens=0 (locks in empty-output contract) ---
     print("  Running max_new_tokens=0 case ...")
@@ -510,7 +537,49 @@ def print_summary(model_to_rows):
 
 
 if __name__ == "__main__":
-    which = sys.argv[1:] if len(sys.argv) > 1 else ["qwen3"]
+    parser = argparse.ArgumentParser(
+        description="Run Spyre generate() edge-case tests",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Run all tests for qwen3 (default)
+  python3 tests/test_generate_edge_cases_spyre.py
+
+  # Run all tests for specific models
+  python3 tests/test_generate_edge_cases_spyre.py qwen3 granite2b
+
+  # Run only short_two_blocks_plus test for qwen3
+  python3 tests/test_generate_edge_cases_spyre.py qwen3 --case short_two_blocks_plus
+
+  # Run multiple specific cases
+  python3 tests/test_generate_edge_cases_spyre.py qwen3 --case short_two_blocks_plus single_token_prompt
+        """,
+    )
+    parser.add_argument(
+        "models",
+        nargs="*",
+        default=["qwen3"],
+        help=f"Model keys to test. Options: {list(MODELS.keys())}. Default: qwen3",
+    )
+    parser.add_argument(
+        "--case",
+        nargs="+",
+        dest="cases",
+        help=f"Run only specific test cases. Options: {list(CASES.keys())}",
+    )
+
+    args = parser.parse_args()
+    which = args.models
+    case_filter = args.cases
+
+    if case_filter:
+        print(f"Running filtered cases: {case_filter}")
+        # Validate case names
+        invalid_cases = [c for c in case_filter if c not in CASES]
+        if invalid_cases:
+            print(f"ERROR: Unknown case(s): {invalid_cases}")
+            print(f"Available cases: {list(CASES.keys())}")
+            sys.exit(1)
 
     model_to_rows = {}
     for key in which:
@@ -518,7 +587,7 @@ if __name__ == "__main__":
             print(f"Unknown: {key}. Options: {list(MODELS.keys())}")
             continue
         try:
-            model_to_rows[MODELS[key]["name"]] = run_model(key)
+            model_to_rows[MODELS[key]["name"]] = run_model(key, case_filter)
         except Exception:
             print(f"\n!!! {MODELS[key]['name']} FAILED to set up:")
             traceback.print_exc()
