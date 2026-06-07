@@ -13,6 +13,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Optional, Set
 
+from hf_model_catalog import RESOURCES_DIR
 from nicegui import ui
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -79,7 +80,7 @@ class FilterState:
 class ModelDataViewer:
     """Handles loading and filtering of model data."""
 
-    def __init__(self, csv_path: str):
+    def __init__(self, csv_path: str | Path):
         self.csv_path = csv_path
         self.all_data: List[Dict[str, Any]] = []
         self.columns: List[str] = []
@@ -244,7 +245,7 @@ class ModelDataViewer:
         return dict(sorted(stats.items(), key=lambda x: x[1], reverse=True))
 
 
-CSV_PATH = "resources/top_generative_models.csv"
+CSV_PATH: Path = RESOURCES_DIR / "top_generative_models.csv"
 
 _UNSET = object()
 
