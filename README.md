@@ -1,7 +1,7 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-14-blue)
-![verified](https://img.shields.io/badge/verified_checkpoints-24-green)
+![adapters](https://img.shields.io/badge/adapters-15-blue)
+![verified](https://img.shields.io/badge/verified_checkpoints-27-green)
 ![compatible](https://img.shields.io/badge/compatible_models-60%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -14,7 +14,7 @@ from `transformers`.
 
 ## Supported Models
 
-**14 adapters · 24 verified checkpoints · 60+ compatible models**
+**15 adapters · 27 verified checkpoints · 60+ compatible models**
 
 | Adapter | Verified | Also Compatible | Usage |
 |---------|----------|-----------------|-------|
@@ -32,6 +32,7 @@ from `transformers`.
 | hf\_bert.py | BGE-base-en-v1.5, all-MiniLM-L6-v2 | BERT-family encoder models | Embedding |
 | hf\_xlm\_roberta.py | BGE-M3 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes | Embedding |
 | hf\_mpnet.py | all-mpnet-base-v2 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base | Embedding |
+| hf\_modernbert.py | ModernBERT-embed-base, GTE-ModernBERT-base, Granite-Embedding-97m-multilingual-r2 | ModernBERT-base/large, other ModernBERT embed/classifier fine-tunes | Embedding |
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. See [ARCHITECTURE.md](ARCHITECTURE.md#verified-checkpoints)
@@ -94,6 +95,7 @@ hf_adapters/
 ├── hf_olmo2.py                 OLMo2 adapter (OLMo 2 1B, 7B)
 ├── hf_xlm_roberta.py           XLM-RoBERTa encoder adapter (BGE-M3, multilingual-e5)
 ├── hf_mpnet.py                 MPNet encoder adapter (all-mpnet-base-v2 and variants)
+├── hf_modernbert.py            ModernBERT encoder adapter (RoPE, GeGLU, local/global attention)
 ├── st_backend.py               sentence-transformers Spyre backend (all decoder adapters)
 └── __init__.py
 
