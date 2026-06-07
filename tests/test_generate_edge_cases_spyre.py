@@ -87,6 +87,29 @@ CASES = {k: ALL_CASES[k] for k in SPYRE_CASE_KEYS}
 EOS_CASES = {k: ALL_EOS_CASES[k] for k in SPYRE_EOS_CASE_KEYS}
 
 
+def release_spyre_memory():
+    """Drop Python refs and ask torch_spyre to release device memory.
+
+    Each generate() can leave behind tensors / VFIO DMA mappings that aren't
+    freed until the next GC cycle. On long runs this exhausts the device's
+    IOMMU mapping table (RAS::VFIO::MapDMAFailed). Calling this between case
+    groups bounds the live set.
+    """
+    gc.collect()
+    try:
+        import torch_spyre  # type: ignore[import-not-found]
+
+        for name in ("empty_cache", "release_cache", "synchronize"):
+            fn = getattr(torch_spyre, name, None)
+            if callable(fn):
+                try:
+                    fn()
+                except Exception:
+                    pass
+    except ImportError:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # One-model driver
 # ---------------------------------------------------------------------------
@@ -217,6 +240,7 @@ def run_model(model_key):
                 "detail": "" if ok else f"hf={hf_outputs!r} spyre={spyre_outputs!r}",
             }
         )
+        release_spyre_memory()
 
     # --- max_new_tokens=0 (locks in empty-output contract) ---
     print("  Running max_new_tokens=0 case ...")
@@ -246,6 +270,7 @@ def run_model(model_key):
                 "detail": "",
             }
         )
+    release_spyre_memory()
 
     # --- Forced EOS cases ---
     print(f"  Running {len(EOS_CASES)} forced EOS cases ...")
@@ -296,6 +321,7 @@ def run_model(model_key):
                 "detail": "" if ok else f"expected={expected!r} got={out!r}",
             }
         )
+        release_spyre_memory()
 
     # --- Sampling determinism (same seed -> equal; different seed -> differ) ---
     print("  Running sampling determinism case ...")
@@ -338,6 +364,7 @@ def run_model(model_key):
                 "detail": "",
             }
         )
+    release_spyre_memory()
 
     # --- eos_token_id is None: full-budget generation, no early stop ---
     print("  Running no-EOS full-budget case ...")
@@ -374,6 +401,7 @@ def run_model(model_key):
                 "detail": "",
             }
         )
+    release_spyre_memory()
 
     # --- pad_token is None: ``pad_token = eos_token`` fallback ---
     print("  Running no-pad-token fallback case ...")
@@ -405,6 +433,7 @@ def run_model(model_key):
                 "detail": "",
             }
         )
+    release_spyre_memory()
 
     # --- top_k=0 sampling: skip the top-k filter branch ---
     print("  Running top_k=0 sampling case ...")
@@ -441,6 +470,7 @@ def run_model(model_key):
                 "detail": "",
             }
         )
+    release_spyre_memory()
 
     # --- EOS id inside the prompt: must NOT be mistaken for an emission ---
     print("  Running EOS-inside-prompt case ...")
