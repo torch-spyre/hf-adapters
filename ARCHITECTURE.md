@@ -37,16 +37,19 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 
 | Model | model\_type | head\_dim | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
 |-------|-----------|---------|--------------|-------------|---------------|-----------|
-| Qwen3-Embedding 0.6B | qwen3 | 128 | Yes | Yes | — | — |
+| Qwen3-Embedding 0.6B | qwen3 | 128 | Yes | Yes | Yes | Yes |
 | GTE-Qwen2-1.5B | qwen2 | 128 | Yes | Yes | Yes | Yes (accuracy diverges from CPU) |
 | E5-Mistral-7B | mistral | 128 | Yes | Yes | Yes | Yes (accuracy diverges from CPU) |
 | BGE-base-en-v1.5 | bert | 64 | Yes | Yes | Yes | Yes |
 | all-MiniLM-L6-v2 | bert | 32→64 | Yes (padded) | Yes | Yes | Yes |
 | BGE-M3 | xlm-roberta | 64 | Yes | Yes | Yes | Yes |
 | all-mpnet-base-v2 | mpnet | 64 | Yes | Yes | Yes | Yes |
+| ModernBERT-embed-base | modernbert | 64→128 | Yes (padded) | Yes | Yes | Yes |
+| GTE-ModernBERT-base | modernbert | 64→128 | Yes (padded) | Yes | Yes | Yes |
+| Granite-Embedding-97m-multilingual-r2 | modernbert | 32→128 | Yes (padded) | Yes | Yes | Yes |
 
 **CPU Accurate** = adapter hidden-states have cosine similarity ≥ 0.9999 vs stock HF on CPU.
-**Spyre Compiles / Spyre Runs** = via `test_e2e_embed_compare_spyre.py`. GTE-Qwen2 and E5-Mistral compile and execute end-to-end on Spyre but their pooled embeddings drift from the CPU reference; Qwen3/BERT/XLM-RoBERTa/MPNet encoder paths match within fp16 noise.
+**Spyre Compiles / Spyre Runs** = via `test_e2e_embed_compare_spyre.py`. GTE-Qwen2 and E5-Mistral compile and execute end-to-end on Spyre but their pooled embeddings drift from the CPU reference; the Qwen3/BERT/XLM-RoBERTa/MPNet/ModernBERT encoder paths match within fp16 noise.
 
 ### Spyre Numerical Accuracy (torch-spyre @ 7c6ef99)
 
@@ -90,13 +93,14 @@ pattern, norms, and weight layout.
 | hf\_bert.py | bert | 2 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants |
 | hf\_xlm\_roberta.py | xlm-roberta | 1 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes |
 | hf\_mpnet.py | mpnet | 1 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base, all-mpnet-base-v1 |
+| hf\_modernbert.py | modernbert | 3 | answerdotai/ModernBERT-base, answerdotai/ModernBERT-large, other ModernBERT embed/classifier fine-tunes |
 
 **Verified** = checkpoints tested in CI (appear in the matrix above).
 **Also Compatible** = same `model_type` in HuggingFace config; expected
 to work without code changes. Size constraints apply (must fit in
 Spyre memory). Gated models require HF token access.
 
-**Variant count: 14 adapters → 24 verified checkpoints, ~60+ compatible variants.**
+**Variant count: 15 adapters → 27 verified checkpoints, ~60+ compatible variants.**
 
 ## Public API
 
@@ -164,6 +168,7 @@ hf_adapters/
 ├── hf_bert.py             — BERT-family encoder adapter (BGE, MiniLM)
 ├── hf_xlm_roberta.py      — XLM-RoBERTa encoder adapter (BGE-M3, multilingual-e5)
 ├── hf_mpnet.py            — MPNet encoder adapter (all-mpnet-base-v2 and variants)
+├── hf_modernbert.py       — ModernBERT encoder adapter (RoPE, GeGLU, local/global attention)
 └── __init__.py
 ```
 
@@ -334,6 +339,19 @@ learnable parameters). Custom patch keeps it in fp16 on Spyre.
 **Post-norm + Q/K RMSNorm** (OLMo2): Norm applied after attention/MLP
 output, before residual add (not pre-norm). Q/K RMSNorm on flattened
 projections before reshape and RoPE.
+
+**Local/global attention + dual-theta RoPE** (ModernBERT): A pre-norm
+RoPE encoder. Every `global_attn_every_n_layers`-th layer uses full
+bidirectional attention with a high RoPE theta (160000); the rest use
+local sliding-window attention (`±sliding_window` band) with a low
+theta (10000). The adapter precomputes one `PrecomputedRotaryEmbedding`
+per theta and builds both masks once per forward (the local mask is the
+global mask intersected with the band via `add_sliding_window_band`),
+selecting per layer by `layer.attention_type`. Fused `Wqkv` is split
+into padded q/k/v (head_dim 64→128, like all-MiniLM); MLP is GeGLU
+(`Wo(act(input) * gate)` from a single `Wi`). Layer 0's `attn_norm` is
+`Identity` (the embedding LayerNorm already normalized the input). No
+biases by default.
 
 ## Adding a New Model
 

@@ -147,6 +147,21 @@ EMBEDDING_MODELS = {
         "path": "sentence-transformers/all-mpnet-base-v2",
         "adapter": "hf_mpnet.py",
     },
+    "modernbert": {
+        "name": "ModernBERT-embed-base",
+        "path": "nomic-ai/modernbert-embed-base",
+        "adapter": "hf_modernbert.py",
+    },
+    "gte_modernbert": {
+        "name": "GTE-ModernBERT-base",
+        "path": "Alibaba-NLP/gte-modernbert-base",
+        "adapter": "hf_modernbert.py",
+    },
+    "granite_embed": {
+        "name": "Granite-Embedding-97m-multilingual-r2",
+        "path": "ibm-granite/granite-embedding-97m-multilingual-r2",
+        "adapter": "hf_modernbert.py",
+    },
 }
 
 

@@ -563,6 +563,31 @@ def build_prefill_mask_right_padded(
     return mask
 
 
+def add_sliding_window_band(mask, sliding_window, dtype=torch.float16):
+    """Restrict an additive bidirectional mask to a local ``±sliding_window`` band.
+
+    ModernBERT alternates global (full) attention layers with local
+    (sliding-window) layers. The local layers let token ``i`` attend only to
+    tokens ``j`` with ``|i - j| <= sliding_window`` — matching HF's
+    ``create_bidirectional_sliding_window_mask`` (inclusive on both sides,
+    using ``config.sliding_window`` directly).
+
+    Takes the global additive mask ``[B, 1, L, L]`` (zeros for allowed pairs,
+    ``-inf`` for padding) and returns a new mask with the same padding plus
+    ``-inf`` on every off-band pair. The global padding is preserved by adding,
+    so padded columns stay masked in the local layers too.
+
+    Built on CPU (the band is a static ``[L, L]`` pattern) then left for the
+    caller to move to ``DEVICE`` alongside the global mask.
+    """
+    padded_len = mask.shape[-1]
+    idx = torch.arange(padded_len)
+    off_band = (idx[:, None] - idx[None, :]).abs() > sliding_window  # [L, L]
+    band = torch.zeros((padded_len, padded_len), dtype=dtype)
+    band[off_band] = -torch.inf
+    return mask + band[None, None, :, :]
+
+
 # ---------------------------------------------------------------------------
 # Model-agnostic load + generate
 # ---------------------------------------------------------------------------
