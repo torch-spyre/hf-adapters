@@ -11,7 +11,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 from hf_model_catalog import RESOURCES_DIR
 from nicegui import ui
@@ -60,6 +60,9 @@ def _parse_config_to_module_map() -> Dict[str, str]:
 CONFIG_CLASS_TO_MODULE = _parse_config_to_module_map()
 
 
+_UNSET = object()
+
+
 @dataclass
 class FilterState:
     """Immutable filter state to prevent race conditions."""
@@ -84,7 +87,7 @@ class ModelDataViewer:
         self.csv_path = csv_path
         self.all_data: List[Dict[str, Any]] = []
         self.columns: List[str] = []
-        self.unique_values: Dict[str, Set[str]] = {}
+        self.unique_values: Dict[str, List[str]] = {}
 
         # Use immutable filter state with thread-safe access
         self._filter_state = FilterState()
@@ -115,11 +118,17 @@ class ModelDataViewer:
     def update_filter_state(
         self,
         filters: Optional[Dict[str, List[str]]] = None,
-        params_min: Any = None,
-        params_max: Any = None,
+        params_min: Any = _UNSET,
+        params_max: Any = _UNSET,
         _clear: bool = False,
     ) -> FilterState:
-        """Thread-safe update of filter state. Returns new state."""
+        """Thread-safe update of filter state. Returns new state.
+
+        params_min / params_max use the _UNSET sentinel so that explicitly
+        passing None (e.g. when the user clears the Min/Max number input)
+        actually clears the bound — using None as the "not provided" marker
+        would silently drop clear operations.
+        """
         with self._state_lock:
             if _clear:
                 self._filter_state = FilterState()
@@ -129,10 +138,10 @@ class ModelDataViewer:
                 if filters is not None:
                     new_state.filters = {k: v.copy() for k, v in filters.items()}
 
-                if params_min is not None:
+                if params_min is not _UNSET:
                     new_state.params_min = params_min
 
-                if params_max is not None:
+                if params_max is not _UNSET:
                     new_state.params_max = params_max
 
                 self._filter_state = new_state
@@ -158,14 +167,18 @@ class ModelDataViewer:
         return True
 
     def _extract_unique_values(self):
-        """Extract unique values for each column for filter dropdowns."""
+        """Extract unique values for each column for filter dropdowns.
+
+        Stored as a case-insensitively sorted list so the select dropdowns
+        display options alphabetically.
+        """
         for column in self.columns:
             values = set()
             for row in self.all_data:
                 value = row.get(column, "")
                 if value:  # Only add non-empty values
                     values.add(str(value))
-            self.unique_values[column] = set(sorted(values))
+            self.unique_values[column] = sorted(values, key=str.casefold)
 
     def apply_filters(self) -> List[Dict[str, Any]]:
         """Apply current filters to data. Returns NEW filtered list (immutable)."""
@@ -243,9 +256,6 @@ class ModelDataViewer:
                 model_type = "Unknown"
             stats[model_type] = stats.get(model_type, 0) + 1
         return dict(sorted(stats.items(), key=lambda x: x[1], reverse=True))
-
-
-_UNSET = object()
 
 
 @dataclass(frozen=True)
@@ -599,8 +609,8 @@ def create_filter_panel_lazy(
         asyncio.create_task(debounced_refresh())
 
     def update_params_range(min_b: Any, max_b: Any) -> None:
-        params_min = None
-        params_max = None
+        params_min: Any = _UNSET
+        params_max: Any = _UNSET
 
         if min_b is not _UNSET:
             params_min = float(min_b) * 1e9 if min_b not in (None, "") else None
@@ -643,6 +653,13 @@ def create_filter_panel_lazy(
                 "is_moe": ["False"],
             }
 
+            # Accumulate defaults and push them to the viewer's filter state
+            # in one shot. Assigning to `viewer.filters[...]` does NOT work —
+            # the `filters` property returns a copy, so per-field assignments
+            # mutate a throwaway dict and the initial refresh would run with
+            # no filters applied (e.g. MoE=True models would still appear).
+            initial_filters: Dict[str, List[str]] = {}
+
             for field, label in filter_fields:
                 options = list(viewer.unique_values.get(field, []))
                 if options:
@@ -650,15 +667,51 @@ def create_filter_panel_lazy(
                         v for v in default_filters.get(field, []) if v in options
                     ]
                     if default:
-                        viewer.filters[field] = default
-                    ui.select(
-                        label=label,
-                        options=options,
-                        value=default or None,
-                        multiple=True,
-                        clearable=True,
-                        on_change=lambda e, f=field: update_filter(f, e.value),
-                    ).classes("w-full").props("use-chips")
+                        initial_filters[field] = default
+
+                    # Boolean-only fields (True/False) get a single-select with
+                    # a "no selection means show all" semantics — multi-select
+                    # with both values picked is equivalent to no filter, which
+                    # is confusing.
+                    is_boolean = set(options) <= {"True", "False"}
+
+                    if is_boolean:
+                        ui.select(
+                            label=label,
+                            options=options,
+                            value=(default[0] if default else None),
+                            multiple=False,
+                            clearable=True,
+                            on_change=lambda e, f=field: update_filter(
+                                f, [e.value] if e.value else []
+                            ),
+                        ).classes("w-full")
+                        continue
+
+                    def _on_change(e, f=field, sel=None):
+                        update_filter(f, e.value)
+                        # Clear the typed search text after each selection so the
+                        # input doesn't keep stale fragments like "openb"
+                        # alongside the selected chip "openba". This calls the
+                        # underlying Quasar QSelect.updateInputValue() method.
+                        if sel is not None:
+                            sel.run_method("updateInputValue", "", True)
+
+                    select = (
+                        ui.select(
+                            label=label,
+                            options=options,
+                            value=default or None,
+                            multiple=True,
+                            clearable=True,
+                            with_input=True,
+                        )
+                        .classes("w-full")
+                        .props("use-chips")
+                    )
+                    select.on_value_change(
+                        lambda e, f=field, sel=select: _on_change(e, f, sel)
+                    )
 
             # Numeric range filter on parameters (in billions, B)
             with ui.row().classes("items-center gap-2 w-full"):
@@ -679,6 +732,12 @@ def create_filter_panel_lazy(
                     format="%.2f",
                     on_change=lambda e: update_params_range(_UNSET, e.value),
                 ).classes("flex-1").props("clearable")
+
+        # Commit accumulated default filter selections to the shared filter
+        # state so the initial render honors them (the per-widget default=
+        # only seeds the UI control's displayed value).
+        if initial_filters:
+            viewer.update_filter_state(filters=initial_filters)
 
         with ui.row().classes("gap-2 mt-2"):
             ui.button("Clear All Filters", on_click=clear_filters).props(
