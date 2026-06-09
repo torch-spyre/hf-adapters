@@ -623,15 +623,23 @@ def add_causal_sliding_window_band(mask, query_cache_coords, sliding_window):
 
     Returns a new mask with the base padding/causality preserved plus -inf on
     every key outside ``(q - sliding_window, q]``. Same device/dtype as ``mask``.
+
+    The band is computed on **CPU** (integer comparisons + a ``bool`` mask),
+    then converted to a float additive tensor and moved to ``mask``'s device for
+    the add. The comparisons must not run on Spyre: its Inductor backend rejects
+    ``int64`` compare-to-constant and ``bool`` intermediates (it only handles the
+    additive float masks the other builders here produce). Mirrors how
+    ``add_sliding_window_band`` builds its band on CPU before the caller moves
+    it to ``DEVICE``.
     """
     lk = mask.shape[-1]
-    k_col = torch.arange(lk, device=mask.device)[None, None, :]  # [1, 1, Lk]
-    q_coord = query_cache_coords[:, :, None].to(k_col.dtype)  # [B, Lq, 1]
+    k_col = torch.arange(lk)[None, None, :]  # [1, 1, Lk] on CPU
+    q_coord = query_cache_coords.to("cpu")[:, :, None].to(k_col.dtype)  # [B, Lq, 1]
     delta = q_coord - k_col  # [B, Lq, Lk]
-    out_of_band = (delta < 0) | (delta >= sliding_window)
-    band = torch.zeros(out_of_band.shape, dtype=mask.dtype, device=mask.device)
+    out_of_band = (delta < 0) | (delta >= sliding_window)  # CPU bool
+    band = torch.zeros(out_of_band.shape, dtype=mask.dtype)  # CPU float
     band = band.masked_fill(out_of_band, -torch.inf)
-    return mask + band[:, None, :, :]
+    return mask + band[:, None, :, :].to(mask.device)
 
 
 # ---------------------------------------------------------------------------
@@ -791,7 +799,13 @@ def _move_to_spyre_with_layout(model, dtype):
     skip_layout_ptrs = _embedding_param_ids(model)
 
     def _alloc_on_spyre(t: torch.Tensor) -> torch.Tensor:
-        if t.dim() > 1 and t.data_ptr() not in skip_layout_ptrs:
+        # The row-major [1, 0] dim_order describes a 2-D permutation, so it only
+        # applies to 2-D matmul weights. 1-D tensors (norms, biases) and any
+        # higher-rank weight (e.g. the 3-D/4-D Conv2d and position-embedding
+        # tables in a multimodal checkpoint's vision/audio towers) keep the
+        # default layout — forcing [1, 0] on them raises "Incompatible host_size
+        # and dim_order". Embedding tables are gather-only and also skipped.
+        if t.dim() == 2 and t.data_ptr() not in skip_layout_ptrs:
             stl = SpyreTensorLayout(t.shape, t.stride(), dtype, [1, 0])
         else:
             stl = None

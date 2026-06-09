@@ -193,7 +193,12 @@ def _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v)
     pre_ff_ln = layer.pre_feedforward_layernorm
     post_ff_ln = layer.post_feedforward_layernorm
     mlp = layer.mlp
-    layer_scalar = layer.layer_scalar
+    # Capture the per-layer scalar as a Python float, not the buffer tensor:
+    # the tensor is captured here (pre-Spyre-move), so a captured tensor would
+    # stay the old CPU buffer while the move rebinds layer.layer_scalar to a new
+    # Spyre tensor — mixing devices in ``h * layer_scalar``. A float folds into
+    # the graph as a constant, like Granite's ``residual_multiplier``.
+    layer_scalar = float(layer.layer_scalar)
 
     def block_forward(
         hidden_states,
@@ -296,12 +301,12 @@ def _run_backbone_forward(
     }
 
     # Sliding mask: base causal mask restricted to a backward window. Query row
-    # j occupies cache coordinate block_base + j.
+    # j occupies cache coordinate block_base + j. Built on CPU (int arange +
+    # scalar offset); add_causal_sliding_window_band keeps the int/bool work off
+    # Spyre and returns a float additive mask on attn_mask's device.
     bsz, seq_len = input_ids.shape[0], input_ids.shape[1]
     block_base = cache_position - token_index
-    query_coords = (
-        torch.arange(seq_len, device=attn_mask.device)[None, :] + block_base
-    ).expand(bsz, seq_len)
+    query_coords = (torch.arange(seq_len)[None, :] + block_base).expand(bsz, seq_len)
     sliding_mask = add_causal_sliding_window_band(
         attn_mask, query_coords, cfg.sliding_window
     )
