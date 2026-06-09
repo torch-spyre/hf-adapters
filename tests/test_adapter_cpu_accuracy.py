@@ -82,35 +82,25 @@ def hf_greedy_steps(model, input_ids, num_decode=NUM_DECODE):
 
 def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=NUM_DECODE):
     """Run adapter forward for prefill + N greedy decode steps on CPU."""
+    from hf_adapters.hf_common import allocate_kv_caches
+
     results = []
     batch_size = input_ids.shape[0]
     seq_len = input_ids.shape[1]
 
-    num_layers = model.config.num_hidden_layers
-    num_kv_heads = model.config.num_key_value_heads
-    head_dim = (
-        getattr(model, "_spyre_head_dim", None)
-        or getattr(model.config, "head_dim", None)
-        or model.config.hidden_size // model.config.num_attention_heads
-    )
-    v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
-    vocab_size = model.config.vocab_size
+    # vocab_size lives on the text config for multimodal-wrapped causal LMs
+    # (e.g. Gemma 4's composite Gemma4UnifiedConfig); fall back to it.
+    cfg = model.config
+    vocab_size = getattr(cfg, "vocab_size", None) or cfg.text_config.vocab_size
 
     param_dtype = next(model.parameters()).dtype
     max_cache_len = seq_len + num_decode
 
-    key_caches = [
-        torch.zeros(
-            batch_size, num_kv_heads, max_cache_len, head_dim, dtype=param_dtype
-        )
-        for _ in range(num_layers)
-    ]
-    value_caches = [
-        torch.zeros(
-            batch_size, num_kv_heads, max_cache_len, v_head_dim, dtype=param_dtype
-        )
-        for _ in range(num_layers)
-    ]
+    # Per-layer KV-cache shapes (honors model._spyre_kv_shapes for
+    # heterogeneous architectures like Gemma 4; uniform otherwise).
+    key_caches, value_caches = allocate_kv_caches(
+        model, batch_size, max_cache_len, param_dtype, device="cpu"
+    )
 
     # --- Prefill ---
     position_ids = torch.arange(seq_len).unsqueeze(0)

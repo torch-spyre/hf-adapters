@@ -47,8 +47,14 @@ def get_backbone(model):
     Adapter code reaches into the backbone to access ``embed_tokens``,
     ``layers``, ``norm``, ``rotary_emb``. This accessor resolves the right
     object regardless of how the model was loaded.
+
+    Multimodal causal-LM wrappers (e.g. Gemma 4's
+    ``Gemma4ForConditionalGeneration``) nest the text decoder one level deeper
+    at ``model.model.language_model``; descend into ``.language_model`` when
+    present so the text backbone is returned.
     """
-    return model.model if hasattr(model, "model") else model
+    inner = model.model if hasattr(model, "model") else model
+    return getattr(inner, "language_model", inner)
 
 
 # ---------------------------------------------------------------------------
@@ -588,6 +594,102 @@ def add_sliding_window_band(mask, sliding_window, dtype=torch.float16):
     return mask + band[None, None, :, :]
 
 
+def add_causal_sliding_window_band(mask, query_cache_coords, sliding_window):
+    """Restrict an additive *causal* mask to a backward ``sliding_window`` band.
+
+    Gemma 4's sliding ("local") attention layers are causal AND windowed: a
+    query may attend to a key only when ``0 <= query_pos - key_pos <
+    sliding_window`` (HF's ``create_sliding_window_causal_mask`` uses an
+    exclusive lower bound — a window of ``sliding_window`` keys ending at the
+    query). The global ("full") layers use the plain causal mask unchanged.
+
+    This works in the **KV-cache coordinate system** used by ``generate`` and
+    the test harness, where cache column ``c`` holds the token whose absolute
+    position is ``c - prompt_offset`` and a query row's cache coordinate ``r``
+    has absolute position ``r - prompt_offset``. The ``prompt_offset`` cancels
+    in the difference, so ``query_pos - key_pos == r - c`` — the band is an
+    index distance between the query's cache coordinate and the key column.
+    This is why the caller passes cache coordinates, not absolute positions.
+
+    Unlike ``add_sliding_window_band`` (symmetric ±window, for bidirectional
+    encoders), the band here is one-sided (causal).
+
+    Args:
+        mask: additive causal mask ``[B, 1, Lq, Lk]`` (0 allowed, -inf masked);
+            ``Lk`` is the cache length.
+        query_cache_coords: ``[B, Lq]`` cache coordinate of each query row
+            (column index the row's token occupies / will occupy in the cache).
+        sliding_window: window size (number of keys, exclusive lower bound).
+
+    Returns a new mask with the base padding/causality preserved plus -inf on
+    every key outside ``(q - sliding_window, q]``. Same device/dtype as ``mask``.
+    """
+    lk = mask.shape[-1]
+    k_col = torch.arange(lk, device=mask.device)[None, None, :]  # [1, 1, Lk]
+    q_coord = query_cache_coords[:, :, None].to(k_col.dtype)  # [B, Lq, 1]
+    delta = q_coord - k_col  # [B, Lq, Lk]
+    out_of_band = (delta < 0) | (delta >= sliding_window)
+    band = torch.zeros(out_of_band.shape, dtype=mask.dtype, device=mask.device)
+    band = band.masked_fill(out_of_band, -torch.inf)
+    return mask + band[:, None, :, :]
+
+
+# ---------------------------------------------------------------------------
+# KV-cache allocation
+# ---------------------------------------------------------------------------
+
+
+def kv_cache_shapes(model):
+    """Resolve the per-layer ``(num_kv_heads, head_dim, v_head_dim)`` KV shapes.
+
+    Most models use one uniform shape across all layers, derived from
+    ``num_key_value_heads`` and ``head_dim`` (with optional ``_spyre_head_dim`` /
+    ``_spyre_v_head_dim`` overrides from head padding). Models whose layers
+    differ — e.g. Gemma 4, where global ("full_attention") layers use a larger
+    ``global_head_dim`` and a different KV-head count than the sliding layers —
+    set ``model._spyre_kv_shapes`` to an explicit per-layer list. When present,
+    that list wins and this returns it verbatim.
+
+    Returns a list of length ``num_hidden_layers`` of
+    ``(num_kv_heads, head_dim, v_head_dim)`` tuples.
+    """
+    explicit = getattr(model, "_spyre_kv_shapes", None)
+    if explicit is not None:
+        return list(explicit)
+
+    num_layers = model.config.num_hidden_layers
+    num_kv_heads = model.config.num_key_value_heads
+    head_dim = (
+        getattr(model, "_spyre_head_dim", None)
+        or getattr(model.config, "head_dim", None)
+        or model.config.hidden_size // model.config.num_attention_heads
+    )
+    v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
+    return [(num_kv_heads, head_dim, v_head_dim) for _ in range(num_layers)]
+
+
+def allocate_kv_caches(model, batch_size, max_cache_len, dtype, device=None):
+    """Allocate zeroed per-layer key/value caches matching the model's shapes.
+
+    Honors ``model._spyre_kv_shapes`` (see ``kv_cache_shapes``) so models with
+    heterogeneous layer shapes get correctly-sized caches per layer. Returns
+    ``(key_caches, value_caches)`` lists. ``device`` defaults to the module
+    ``DEVICE`` resolved at call time (so the conftest CPU patch applies).
+    """
+    if device is None:
+        device = DEVICE
+    shapes = kv_cache_shapes(model)
+    key_caches = [
+        torch.zeros(batch_size, n_kv, max_cache_len, hd, dtype=dtype, device=device)
+        for (n_kv, hd, _vhd) in shapes
+    ]
+    value_caches = [
+        torch.zeros(batch_size, n_kv, max_cache_len, vhd, dtype=dtype, device=device)
+        for (n_kv, _hd, vhd) in shapes
+    ]
+    return key_caches, value_caches
+
+
 # ---------------------------------------------------------------------------
 # Model-agnostic load + generate
 # ---------------------------------------------------------------------------
@@ -925,39 +1027,14 @@ def generate(
         offset = prompt_offsets[b].item()
         position_ids[b, offset:] = torch.arange(actual_len)
 
-    # Initialize empty KV caches
-    num_layers = model.config.num_hidden_layers
-    num_kv_heads = model.config.num_key_value_heads
-    head_dim = (
-        getattr(model, "_spyre_head_dim", None)
-        or getattr(model.config, "head_dim", None)
-        or model.config.hidden_size // model.config.num_attention_heads
-    )
-    v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
+    # Initialize empty KV caches. Per-layer shapes come from the model
+    # (``_spyre_kv_shapes``) for heterogeneous architectures like Gemma 4,
+    # otherwise a single uniform shape derived from the config.
     # Match KV cache and mask dtype to the model's weight dtype.
     model_dtype = _model_dtype(model)
-    key_caches = [
-        torch.zeros(
-            batch_size,
-            num_kv_heads,
-            max_cache_len,
-            head_dim,
-            dtype=model_dtype,
-            device=DEVICE,
-        )
-        for _ in range(num_layers)
-    ]
-    value_caches = [
-        torch.zeros(
-            batch_size,
-            num_kv_heads,
-            max_cache_len,
-            v_head_dim,
-            dtype=model_dtype,
-            device=DEVICE,
-        )
-        for _ in range(num_layers)
-    ]
+    key_caches, value_caches = allocate_kv_caches(
+        model, batch_size, max_cache_len, model_dtype
+    )
 
     # Decode state
     result = input_ids.clone()

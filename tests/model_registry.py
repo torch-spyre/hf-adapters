@@ -108,6 +108,11 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_granite_vision.py",
         "load_fn": True,
     },
+    "gemma4": {
+        "name": "Gemma 4 12B",
+        "path": "google/gemma-4-12B-it",
+        "adapter": "hf_gemma4.py",
+    },
 }
 
 
