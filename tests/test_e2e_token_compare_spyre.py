@@ -32,6 +32,7 @@ import traceback
 
 import torch
 import torch.nn.functional as F
+from model_registry import CAUSAL_LM_MODELS as MODEL_REGISTRY
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
@@ -40,44 +41,6 @@ from hf_adapters.hf_common import (
 )
 
 DEVICE = "spyre"
-
-MODEL_REGISTRY = {
-    "qwen3": {
-        "name": "Qwen3 0.6B",
-        "path": "Qwen/Qwen3-0.6B",
-        "adapter": "hf_adapters.hf_qwen3",
-    },
-    "granite": {
-        "name": "Granite 3.3 2B",
-        "path": "ibm-granite/granite-3.3-2b-instruct",
-        "adapter": "hf_adapters.hf_granite",
-    },
-    "llama": {
-        "name": "TinyLlama 1.1B",
-        "path": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        "adapter": "hf_adapters.hf_llama",
-    },
-    "qwen2": {
-        "name": "Qwen2.5 1.5B",
-        "path": "Qwen/Qwen2.5-1.5B",
-        "adapter": "hf_adapters.hf_qwen2",
-    },
-    "mistral": {
-        "name": "Mistral 7B v0.3",
-        "path": "mistralai/Mistral-7B-v0.3",
-        "adapter": "hf_adapters.hf_mistral",
-    },
-    "olmo": {
-        "name": "OLMo 1B",
-        "path": "allenai/OLMo-1B-hf",
-        "adapter": "hf_adapters.hf_olmo",
-    },
-    "olmo2": {
-        "name": "OLMo2 1B",
-        "path": "allenai/OLMo-2-0425-1B",
-        "adapter": "hf_adapters.hf_olmo2",
-    },
-}
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +275,9 @@ def run_model_test(model_key, num_decode=4):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     info = MODEL_REGISTRY[model_key]
-    adapter = importlib.import_module(info["adapter"])
+    # Convert e.g., "hf_qwen3.py" to "hf_adapters.hf_qwen3"
+    adapter_module_name = info["adapter"].replace(".py", "")
+    adapter = importlib.import_module(f"hf_adapters.{adapter_module_name}")
 
     print(f"\n{'='*70}")
     print(f"  {info['name']}: {info['path']}")
