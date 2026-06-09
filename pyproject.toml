@@ -4,26 +4,13 @@ version = "0.1.0"
 description = "Minimal runtime patches that make stock HuggingFace Transformers models run on Spyre accelerators"
 readme = "README.md"
 license = { file = "LICENSE.txt" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "torch>=2.0",
     "transformers>=5.8.0",
     "sentencepiece",
     "accelerate",
     "sentence_transformers",
-]
-
-[project.optional-dependencies]
-test = [
-    "pytest",
-]
-dev = [
-    "pre-commit>=3.5.0",
-    "black>=26.3.1",
-    "ruff>=0.15.6",
-    "mypy>=1.14.0,<2",
-    "typing-extensions",
-    "nicegui"
 ]
 
 [build-system]
@@ -63,3 +50,20 @@ testpaths = ["tests"]
 # module level; running them under pytest on a CPU-only host fails at
 # collection. Run them directly with `python3 tests/test_*_spyre*.py`.
 addopts = "--ignore-glob=tests/test_*spyre*.py"
+
+[tool.uv.sources]
+torch-spyre = { git = "https://github.com/torch-spyre/torch-spyre", rev = "main" }
+
+[dependency-groups]
+spyre = ["torch-spyre"]
+dev = [
+    "pre-commit>=3.5.0",
+    "black>=26.3.1",
+    "ruff>=0.15.6",
+    "mypy>=1.14.0,<2",
+    "typing-extensions",
+    "nicegui"
+]
+test = [
+    "pytest",
+]

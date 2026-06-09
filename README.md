@@ -38,6 +38,25 @@ Each adapter covers all size variants and fine-tuned checkpoints sharing the sam
 HuggingFace `model_type`. See [ARCHITECTURE.md](ARCHITECTURE.md#verified-checkpoints)
 for head\_dim details, stick alignment, and Spyre numerical accuracy.
 
+## Installation
+
+```bash
+# Install core deps
+uv sync
+
+# Install core + dev deps
+uv sync --group dev
+
+# Install core + torch-spyre deps
+uv sync --group spyre
+
+# Install core + test deps
+uv sync --group test
+
+# Install everything
+uv sync --group dev --group spyre --group test
+```
+
 ## Quick Start
 
 ```python
@@ -132,20 +151,20 @@ Greedy tokens must match at every step. Downloads weights on first run.
 
 ```bash
 # Adapter accuracy tests (causal-LM logits)
-pytest tests/test_adapter_cpu_accuracy.py                          # all causal-LM models
-pytest tests/test_adapter_cpu_accuracy.py -k qwen3                 # one model (manual + auto-loader)
-pytest tests/test_adapter_cpu_accuracy.py -k "qwen3 and manual"    # manual adapter only
+uv run pytest tests/test_adapter_cpu_accuracy.py                  # all causal-LM models
+uv run pytest tests/test_adapter_cpu_accuracy.py -k qwen3         # one model (manual + auto-loader)
+uv run pytest tests/test_adapter_cpu_accuracy.py -k "qwen3 and manual"    # manual adapter only
 
 # Embedding accuracy tests (hidden-states)
-pytest tests/test_embed_cpu_accuracy.py                            # all embedding models
-pytest tests/test_embed_cpu_accuracy.py -k bge_base                # one model
+uv run pytest tests/test_embed_cpu_accuracy.py                    # all embedding models
+uv run pytest tests/test_embed_cpu_accuracy.py -k bge_base        # one model
 
 # Load tests (verify models load without errors)
-pytest tests/test_load_cpu.py                                      # CPU load test
-pytest tests/test_load_spyre.py                                    # Spyre load test (requires hardware)
+uv run pytest tests/test_load_cpu.py                              # CPU load test
+uv run pytest tests/test_load_spyre.py                            # Spyre load test (requires hardware)
 ```
 
-**Note**: Do not run CPU tests with `python tests/test_*.py` — this bypasses pytest's conftest.py setup and will cause import errors. Always use `pytest tests/test_*.py`.
+**Note**: Do not run CPU tests with `python tests/test_*.py` — this bypasses pytest's conftest.py setup and will cause import errors. Always use `pytest` (or `uv run pytest`).
 
 ### Spyre Tests (requires Spyre hardware)
 
@@ -193,7 +212,8 @@ This project uses [pre-commit](https://pre-commit.com/) to enforce code quality 
 ### Setup
 
 ```bash
-pip install -e ".[dev]"     # installs pre-commit, black, ruff, mypy as dev deps
+uv sync --group dev
+
 pre-commit install          # activate hooks in your local clone
 ```
 
