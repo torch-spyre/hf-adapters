@@ -656,6 +656,25 @@ def create_filter_panel_lazy(
                     if default:
                         viewer.filters[field] = default
 
+                    # Boolean-only fields (True/False) get a single-select with
+                    # a "no selection means show all" semantics — multi-select
+                    # with both values picked is equivalent to no filter, which
+                    # is confusing.
+                    is_boolean = set(options) <= {"True", "False"}
+
+                    if is_boolean:
+                        ui.select(
+                            label=label,
+                            options=options,
+                            value=(default[0] if default else None),
+                            multiple=False,
+                            clearable=True,
+                            on_change=lambda e, f=field: update_filter(
+                                f, [e.value] if e.value else []
+                            ),
+                        ).classes("w-full")
+                        continue
+
                     def _on_change(e, f=field, sel=None):
                         update_filter(f, e.value)
                         # Clear the typed search text after each selection so the
