@@ -36,7 +36,9 @@ in several ways, so it gets a custom compiled block rather than reusing
   block.
 - **K == V on global layers** (12B ``attention_k_eq_v=true``). Global layers
   have no ``v_proj``; V is the *raw* ``k_proj`` output (pre-k_norm, pre-RoPE)
-  reshaped to the KV-head layout. Sliding layers keep a separate V.
+  reshaped to the KV-head layout, then passed through ``v_norm`` (matching
+  stock HF, which applies ``v_norm`` to the aliased value tensor). Sliding
+  layers keep a separate V.
 - **Embedding scaling.** ``embed_tokens`` multiplies by ``sqrt(hidden_size)``
   (``Gemma4TextScaledWordEmbedding``); this is part of the loaded module and
   runs as-is.
@@ -157,7 +159,8 @@ def _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v)
     Gemma applies Q/K/V RMSNorm before RoPE, uses the four-norm "sandwich"
     structure, an unscaled (scale=1.0) attention, and a final per-layer scalar.
     On global ``attention_k_eq_v`` layers (``is_kv_eq_v=True``) there is no
-    ``v_proj``: V is the raw ``k_proj`` output (before k_norm and RoPE).
+    ``v_proj``: V is the raw ``k_proj`` output (before k_norm and RoPE) put
+    through ``v_norm``, mirroring stock HF.
     """
     attn = layer.self_attn
     q_proj = attn.q_proj
@@ -202,8 +205,12 @@ def _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v)
         k_lin = k_proj(h).view(bsz, seq_len, num_kv_heads, head_dim)
 
         if is_kv_eq_v:
-            # V reuses the raw k_proj output (pre-norm, pre-RoPE).
-            v = k_lin.transpose(1, 2)
+            # V reuses the raw k_proj output (pre-k_norm, pre-RoPE) but still
+            # passes through v_norm: stock HF aliases value_states = key_states
+            # *before* k_norm/RoPE, then applies self.v_norm(value_states)
+            # unconditionally (modeling_gemma4 Gemma4TextAttention.forward). The
+            # norm exists on these layers even though v_proj is None.
+            v = v_norm(k_lin).transpose(1, 2)
         else:
             v = v_proj(h).view(bsz, seq_len, num_kv_heads, head_dim)
             v = v_norm(v).transpose(1, 2)
