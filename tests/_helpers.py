@@ -26,10 +26,14 @@ from transformers import AutoModelForCausalLM
 def torch_dtype_for(info):
     """Map a registry entry's ``dtype`` field to a torch dtype.
 
-    Defaults to float16; only "float32" is special-cased (e.g. Granite 4 1B,
-    where fp16 overflows on CPU).
+    Defaults to float16. ``"float32"`` (e.g. Granite 4 1B, where fp16 overflows
+    on CPU) and ``"bfloat16"`` (e.g. EmbeddingGemma, which is bf16-native and
+    overflows fp16) are recognized explicitly.
     """
-    return torch.float32 if info.get("dtype") == "float32" else torch.float16
+    return {
+        "float32": torch.float32,
+        "bfloat16": torch.bfloat16,
+    }.get(info.get("dtype"), torch.float16)
 
 
 def load_hf_causal_lm(info, torch_dtype, adapter_mod=None):

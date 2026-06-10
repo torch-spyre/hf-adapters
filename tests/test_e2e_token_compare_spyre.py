@@ -32,10 +32,12 @@ import traceback
 
 import torch
 import torch.nn.functional as F
+from _helpers import torch_dtype_for
 from model_registry import CAUSAL_LM_MODELS as MODEL_REGISTRY
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
+    _model_dtype,
     _move_to_spyre_with_layout,
     _untie_embedding_and_lm_head,
 )
@@ -113,10 +115,15 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
         padded_len + math.ceil(num_decode / BLOCK_SIZE) * BLOCK_SIZE + BLOCK_SIZE
     )
 
+    # KV caches and masks must match the (post-move) model weight dtype so the
+    # compiled block's SDPA sees a single dtype — fp16 for most models, bf16 for
+    # bf16-native ones like EmbeddingGemma.
+    dtype = _model_dtype(model)
+
     # Per-layer KV-cache shapes (honors model._spyre_kv_shapes for
     # heterogeneous architectures like Gemma 4; uniform otherwise).
     key_caches, value_caches = allocate_kv_caches(
-        model, batch_size, max_cache_len, torch.float16, device=DEVICE
+        model, batch_size, max_cache_len, dtype, device=DEVICE
     )
 
     results = []
@@ -125,7 +132,7 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     from hf_adapters.hf_common import build_prefill_mask
 
     prefill_mask = build_prefill_mask(
-        batch_size, padded_len, max_cache_len, prompt_offset
+        batch_size, padded_len, max_cache_len, prompt_offset, dtype=dtype
     )
 
     with torch.no_grad():
@@ -192,6 +199,7 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
                 max_cache_len,
                 current_cache_len,
                 prompt_offset,
+                dtype=dtype,
             )
             with torch.no_grad():
                 logits = run_forward_fn(
@@ -284,9 +292,12 @@ def run_model_test(model_key, num_decode=4):
     print(f"{'='*70}")
 
     tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    # fp16 for most models; bf16/fp32 ones (e.g. EmbeddingGemma, Granite 4)
+    # declare ``dtype`` in the registry.
+    dtype = torch_dtype_for(info)
     model = AutoModelForCausalLM.from_pretrained(
         info["path"],
-        torch_dtype=torch.float16,
+        torch_dtype=dtype,
         device_map="cpu",
     )
     model.eval()
@@ -306,7 +317,7 @@ def run_model_test(model_key, num_decode=4):
     _untie_embedding_and_lm_head(model)
     adapter.prepare_for_spyre(model)
     print("  Moving model to Spyre ...")
-    _move_to_spyre_with_layout(model, torch.float16)
+    _move_to_spyre_with_layout(model, dtype)
     print("  Running adapter on Spyre ...")
     adapter_results = adapter_greedy_steps(
         adapter._run_forward,

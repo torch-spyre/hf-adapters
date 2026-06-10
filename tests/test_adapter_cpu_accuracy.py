@@ -156,7 +156,7 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=NUM_DECODE
 
 
 @pytest.mark.parametrize("model_key", list(MODELS.keys()), ids=list(MODELS.keys()))
-def test_manual_path(model_key, load_adapter, unwrap_compiled_blocks):
+def test_manual_path(model_key, load_adapter, unwrap_compiled_blocks, set_rope_dtype):
     info = MODELS[model_key]
     adapter_mod = load_adapter(info["adapter"])
     torch_dtype = torch_dtype_for(info)
@@ -177,6 +177,9 @@ def test_manual_path(model_key, load_adapter, unwrap_compiled_blocks):
     model.eval()
     model.requires_grad_(False)
     adapter_mod.prepare_for_spyre(model)
+    # Manual path skips load_model_common; propagate the chosen dtype to the
+    # RoPE freq cache like the production move does (needed for bf16 models).
+    set_rope_dtype(model, torch_dtype)
     unwrap_compiled_blocks(model)
     adapter_results = adapter_greedy_steps(
         adapter_mod._run_forward, model, input_ids, num_decode=NUM_DECODE

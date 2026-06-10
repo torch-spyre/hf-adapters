@@ -122,6 +122,12 @@ CAUSAL_LM_MODELS = {
 
 
 EMBEDDING_MODELS = {
+    "embeddinggemma": {
+        "name": "EmbeddingGemma 300M",
+        "path": "google/embeddinggemma-300m",
+        "adapter": "hf_gemma3.py",
+        "dtype": "bfloat16",  # bf16-native; fp16 overflows the residual stream
+    },
     "qwen3_embed": {
         "name": "Qwen3-Embedding 0.6B",
         "path": "Qwen/Qwen3-Embedding-0.6B",

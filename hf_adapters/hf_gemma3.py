@@ -211,6 +211,46 @@ def _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim):
     return torch.compile(block_forward, dynamic=False)
 
 
+def _add_bidirectional_sliding_window_band(mask, query_cache_coords, sliding_window):
+    """Restrict an additive *bidirectional* mask to a symmetric ``±window`` band.
+
+    The bidirectional counterpart of ``hf_common.add_causal_sliding_window_band``,
+    used by bidirectional Gemma 3 embedders (``use_bidirectional_attention=True``,
+    e.g. EmbeddingGemma). A query may attend to a key in either direction as long
+    as their absolute distance is within the window: ``abs(q_pos - k_pos) <
+    sliding_window`` — the **exclusive** bound matching HF's
+    ``_bidirectional_window_overlay`` (``abs(q_idx - kv_idx) < sliding_window``).
+
+    This is gemma3-private: it has a single caller and Gemma 3's exclusive bound
+    differs from ModernBERT's inclusive ``add_sliding_window_band``
+    (``|i - j| <= sliding_window``), so the two are not interchangeable.
+
+    Operates in the same cache-coordinate system as the causal variant: with
+    ``block_base = 0`` in the embedding prefill, a query row's cache coordinate
+    equals its absolute position, so ``q_coord - k_col`` is the signed position
+    distance.
+
+    Args:
+        mask: additive bidirectional mask ``[B, 1, Lq, Lk]`` (0 allowed, -inf
+            masked); ``Lk`` is the cache length.
+        query_cache_coords: ``[B, Lq]`` cache coordinate of each query row.
+        sliding_window: window size (exclusive bound on absolute distance).
+
+    Returns a new mask with the base padding preserved plus -inf on every key
+    whose absolute distance from the query is ``>= sliding_window``. Same
+    device/dtype as ``mask``. Built on CPU (int compare + bool) — Spyre's
+    Inductor backend rejects int64 compare-to-constant and bool intermediates.
+    """
+    lk = mask.shape[-1]
+    k_col = torch.arange(lk)[None, None, :]  # [1, 1, Lk] on CPU
+    q_coord = query_cache_coords.to("cpu")[:, :, None].to(k_col.dtype)  # [B, Lq, 1]
+    delta = q_coord - k_col  # [B, Lq, Lk]
+    out_of_band = delta.abs() >= sliding_window  # CPU bool
+    band = torch.zeros(out_of_band.shape, dtype=mask.dtype)  # CPU float
+    band = band.masked_fill(out_of_band, -torch.inf)
+    return mask + band[:, None, :, :].to(mask.device)
+
+
 def _run_backbone_forward(
     model,
     input_ids,
@@ -224,11 +264,14 @@ def _run_backbone_forward(
 ):
     """Gemma 3 backbone: scaled embedding, per-type RoPE + masks, blocks, norm.
 
-    The base ``attn_mask`` is the causal mask the caller built (column index =
-    cache slot). Sliding layers intersect it with a causal sliding-window band
-    using each query row's cache coordinate ``block_base + j`` where
-    ``block_base = cache_position - token_index`` (see ``hf_gemma4`` /
-    ``add_causal_sliding_window_band``). Global layers use the base mask as-is.
+    The base ``attn_mask`` is whatever mask the caller built (column index =
+    cache slot): causal for the LM path, bidirectional for embedders
+    (``use_bidirectional_attention=True``). Sliding layers intersect it with a
+    sliding-window band using each query row's cache coordinate ``block_base +
+    j`` where ``block_base = cache_position - token_index`` (see ``hf_gemma4``).
+    The band is one-sided causal (``add_causal_sliding_window_band``) for the LM
+    path and symmetric (``_add_bidirectional_sliding_window_band``) for embedders;
+    global layers use the base mask as-is.
     """
     backbone = get_backbone(model)
     cfg = _text_config(model)
@@ -241,16 +284,22 @@ def _run_backbone_forward(
         for layer_type, rope in model._spyre_rope.items()
     }
 
-    # Sliding mask: base causal mask restricted to a backward window. Query row
-    # j occupies cache coordinate block_base + j. Built on CPU (int arange +
-    # scalar offset); add_causal_sliding_window_band keeps the int/bool work off
-    # Spyre and returns a float additive mask on attn_mask's device.
+    # Sliding mask: base mask restricted to a local window. Query row j occupies
+    # cache coordinate block_base + j. Built on CPU (int arange + scalar offset);
+    # the band helpers keep the int/bool work off Spyre and return a float
+    # additive mask on attn_mask's device. Direction matches the base mask:
+    # causal (backward) for the LM path, symmetric for bidirectional embedders.
     bsz, seq_len = input_ids.shape[0], input_ids.shape[1]
     block_base = cache_position - token_index
     query_coords = (torch.arange(seq_len)[None, :] + block_base).expand(bsz, seq_len)
-    sliding_mask = add_causal_sliding_window_band(
-        attn_mask, query_coords, cfg.sliding_window
-    )
+    if getattr(cfg, "use_bidirectional_attention", False):
+        sliding_mask = _add_bidirectional_sliding_window_band(
+            attn_mask, query_coords, cfg.sliding_window
+        )
+    else:
+        sliding_mask = add_causal_sliding_window_band(
+            attn_mask, query_coords, cfg.sliding_window
+        )
     masks = {"full_attention": attn_mask, "sliding_attention": sliding_mask}
 
     for i, compiled_block in enumerate(model._spyre_compiled_blocks):
@@ -314,13 +363,20 @@ def _run_forward(
 
 
 def prepare_for_spyre(model):
-    """Apply Spyre adaptations to a dense Gemma 3 causal-LM model in-place.
+    """Apply Spyre adaptations to a dense Gemma 3 model in-place.
+
+    Handles both the causal-LM path (``AutoModelForCausalLM`` → ``generate``)
+    and the bidirectional embedder path (``AutoModel`` → ``prefill_embed``, e.g.
+    EmbeddingGemma with ``use_bidirectional_attention=True``). The attention
+    direction is read from the config in both ``prefill_embed`` (base mask) and
+    ``_run_backbone_forward`` (sliding-window band) — no config mutation here.
 
     1. Patch ``Gemma3RMSNorm`` for the fp16 Spyre path.
     2. Build one ``PrecomputedRotaryEmbedding`` per layer type from the model's
        per-type ``inv_freq`` buffers (no head padding — D/2 >= 64 already).
     3. Record per-layer KV-cache shapes (single head_dim for all layers).
-    4. Chunk the LM head for the large vocab.
+    4. Chunk the LM head for the large vocab (no-op for the bare embedder
+       backbone, which has no ``lm_head``).
     5. Compile each decoder layer's block.
     """
     backbone = get_backbone(model)

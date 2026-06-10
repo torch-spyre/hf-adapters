@@ -133,6 +133,23 @@ class PrecomputedRotaryEmbedding(nn.Module):
         return selected.to(DEVICE)
 
 
+def set_rope_dtype(model, dtype: torch.dtype) -> None:
+    """Explicitly set the freq-cache dtype on a model's precomputed RoPE.
+
+    ``model._spyre_rope`` is either a single ``PrecomputedRotaryEmbedding``
+    (most adapters) or a ``dict`` of them keyed by layer type (Gemma 3/4, which
+    use different RoPE per sliding/global layer). This applies ``set_dtype`` to
+    whichever shape is present.
+    """
+    rope = getattr(model, "_spyre_rope", None)
+    if rope is None:
+        return
+    ropes = rope.values() if isinstance(rope, dict) else [rope]
+    for r in ropes:
+        if hasattr(r, "set_dtype"):
+            r.set_dtype(dtype)
+
+
 class InvFreqShim(nn.Module):
     """Minimal ``original_rope`` stand-in for ``PrecomputedRotaryEmbedding``.
 
@@ -810,6 +827,12 @@ def _move_to_spyre_with_layout(model, dtype):
     """Move all parameters and buffers to Spyre with row-major layout for 2D
     matmul weights, except embedding weights which keep the default layout.
     """
+    # Propagate dtype to the precomputed RoPE module(s) so the freq cache
+    # matches the chosen weight dtype (avoids fp16/bf16 mismatch in
+    # apply_rope_matmul when dtype != fp16). Done before the CPU early-return so
+    # both the CPU and Spyre paths get it.
+    set_rope_dtype(model, dtype)
+
     if torch.device(DEVICE).type != "spyre":
         model.to(dtype=dtype)
         return
@@ -855,13 +878,6 @@ def _move_to_spyre_with_layout(model, dtype):
         owner = model.get_submodule(module_path) if module_path else model
         persistent = attr not in owner._non_persistent_buffers_set
         owner.register_buffer(attr, new, persistent=persistent)
-
-    # Propagate dtype to the precomputed RoPE module so its freq cache
-    # matches the model's weight dtype (avoids fp16/bf16 mismatch in
-    # apply_rope_matmul when dtype != fp16).
-    rope = getattr(model, "_spyre_rope", None)
-    if rope is not None and hasattr(rope, "set_dtype"):
-        rope.set_dtype(dtype)
 
 
 def load_model_common(model_path, prepare_fn, dtype=torch.float16, auto_model_cls=None):
@@ -1636,9 +1652,10 @@ def prefill_embed(
     # the SDPA inputs.
     model_dtype = _model_dtype(model)
 
-    # Causal right-padded mask (or bidirectional for models with
-    # ``config.is_causal=False``)
-    is_causal = getattr(model.config, "is_causal", True)
+    # Causal right-padded mask, or bidirectional for some embedders
+    is_causal = getattr(model.config, "is_causal", True) and not getattr(
+        model.config, "use_bidirectional_attention", False
+    )
     mask = build_prefill_mask_right_padded(
         bsz,
         padded_len,
