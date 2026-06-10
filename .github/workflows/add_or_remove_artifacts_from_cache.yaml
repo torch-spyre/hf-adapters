@@ -1,0 +1,60 @@
+name: 'add_or_remove_artifacts_from_cache'
+
+on:
+  workflow_dispatch:
+    inputs:
+      cache_config_file:
+        description: 'Path to the models YAML file'
+        required: true
+        type: string
+        default: '.github/cache_config/hf_models_and_datasets.yaml'
+      force_download:
+        description: 'Force re-download even if files exist?'
+        # set required to true for the JSON payload to never be null
+        required: true
+        type: boolean
+        default: false
+
+# Prevents multiple runs from updating the same storage simultaneously
+concurrency:
+  group: 'add_or_remove_model_from_cache'
+  # cancel-in-progress: true
+  # queue instead to avoid downloads being cancelled early and inconsistent cache state
+  # queue: single # this is the default anyway https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency#using-concurrency-in-different-scenarios
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  update_cache:
+    runs-on:
+      - x86_64
+      - spyre_pf_x0__pvc_1tb_x1
+      - linux
+      - image_spyre_inference # set having 0 spyre cards and pvc mounted
+    timeout-minutes: 720
+    env:
+      CACHE_CONFIG_FILE_PATH: ${{ inputs.cache_config_file }}
+      FORCE_DOWNLOAD: ${{ inputs.force_download }}
+      GITHUB_SHA: ${{ github.sha }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      STORAGE_1_DIR: /storage-1/hf-adapaters
+      HF_HOME: /storage-1/hf-adapters/.cache/huggingface
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: 'hf-adapters-repo'
+          fetch-depth: 1
+
+      - name: Run Caching Script
+        working-directory: 'hf-adapters-repo'
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          uv run .github/cache_config/manage_cache.py
