@@ -1,4 +1,8 @@
-
-# List of HF models to cache
 models:
-  - meta-llama/Meta-Llama-3-8B
+  - Qwen/Qwen3-0.6B                                             # qwen3
+  - ibm-granite/granite-3.3-8b-instruct                         # granite
+  - ibm-granite/granite-3.3-2b-instruct                         # granite2b
+  - ibm-granite/granite-4.0-1b-base                             # granite4
+  # Embedding models
+  - BAAI/bge-base-en-v1.5                                       # bge_base (embed-compare)
+  - BAAI/bge-m3                                                 # bge_m3 (load)
