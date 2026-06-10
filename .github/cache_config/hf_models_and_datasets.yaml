@@ -1,0 +1,4 @@
+
+# List of HF models to cache
+models:
+  - meta-llama/Meta-Llama-3-8B
