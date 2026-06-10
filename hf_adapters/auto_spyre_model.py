@@ -41,6 +41,8 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     BertConfig,
+    Gemma3Config,
+    Gemma3TextConfig,
     Gemma4Config,
     Gemma4TextConfig,
     Gemma4UnifiedConfig,
@@ -64,6 +66,7 @@ from transformers.configuration_utils import PretrainedConfig
 
 from hf_adapters import (
     hf_bert,
+    hf_gemma3,
     hf_gemma4,
     hf_granite,
     hf_granite_vision,
@@ -84,6 +87,8 @@ from hf_adapters.hf_common import load_model_common
 
 CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     BertConfig: hf_bert,
+    Gemma3Config: hf_gemma3,
+    Gemma3TextConfig: hf_gemma3,
     Gemma4Config: hf_gemma4,
     Gemma4TextConfig: hf_gemma4,
     Gemma4UnifiedConfig: hf_gemma4,

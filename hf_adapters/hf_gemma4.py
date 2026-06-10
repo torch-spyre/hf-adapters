@@ -71,6 +71,7 @@ import torch
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
+    InvFreqShim,
     PrecomputedRotaryEmbedding,
     add_causal_sliding_window_band,
     apply_rope_matmul,
@@ -106,26 +107,6 @@ def _text_config(model):
     """
     cfg = model.config
     return getattr(cfg, "text_config", None) or cfg
-
-
-class _InvFreqShim(torch.nn.Module):
-    """Minimal ``original_rope`` stand-in for ``PrecomputedRotaryEmbedding``.
-
-    ``PrecomputedRotaryEmbedding`` reads ``.inv_freq`` and ``.attention_scaling``
-    off its ``original`` module. ``Gemma4TextRotaryEmbedding`` instead stores one
-    ``<layer_type>_inv_freq`` buffer and ``<layer_type>_attention_scaling`` per
-    layer type, so we wrap the relevant pair in this shim.
-
-    The ``inv_freq`` length equals ``head_dim / 2`` for that layer type (256 for
-    global, where the proportional partial-rotary tail is zeros; 128 for
-    sliding). ``PrecomputedRotaryEmbedding`` derives the rotation-matrix width
-    from this length, so the two layer types get correctly-sized RoPE matrices.
-    """
-
-    def __init__(self, inv_freq, attention_scaling):
-        super().__init__()
-        self.register_buffer("inv_freq", inv_freq.clone(), persistent=False)
-        self.attention_scaling = attention_scaling
 
 
 def _patch_gemma4_rmsnorm(rmsnorm_cls):
@@ -427,7 +408,7 @@ def prepare_for_spyre(model):
         inv_freq = getattr(rope, f"{layer_type}_inv_freq")
         scaling = getattr(rope, f"{layer_type}_attention_scaling")
         model._spyre_rope[layer_type] = PrecomputedRotaryEmbedding(
-            _InvFreqShim(inv_freq, scaling)
+            InvFreqShim(inv_freq, scaling)
         )
 
     # Per-layer KV-cache shapes. Global (full_attention) layers use

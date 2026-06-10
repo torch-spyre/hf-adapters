@@ -113,6 +113,11 @@ CAUSAL_LM_MODELS = {
         "path": "google/gemma-4-12B-it",
         "adapter": "hf_gemma4.py",
     },
+    "gemma3": {
+        "name": "Gemma 3 1B",
+        "path": "google/gemma-3-1b-it",
+        "adapter": "hf_gemma3.py",
+    },
 }
 
 

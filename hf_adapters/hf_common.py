@@ -133,6 +133,31 @@ class PrecomputedRotaryEmbedding(nn.Module):
         return selected.to(DEVICE)
 
 
+class InvFreqShim(nn.Module):
+    """Minimal ``original_rope`` stand-in for ``PrecomputedRotaryEmbedding``.
+
+    ``PrecomputedRotaryEmbedding`` reads ``.inv_freq`` and ``.attention_scaling``
+    off its ``original`` module — the layout of stock HF's ``RotaryEmbedding``,
+    which stores a single ``inv_freq`` buffer. Several models instead store one
+    ``<layer_type>_inv_freq`` buffer (and, for Gemma, a matching
+    ``<layer_type>_attention_scaling``) *per* layer type — sliding vs full
+    attention with different theta. To build one ``PrecomputedRotaryEmbedding``
+    per layer type, wrap each per-type ``inv_freq`` (+ scaling) in this shim.
+
+    The ``inv_freq`` length equals ``head_dim / 2`` for that layer type;
+    ``PrecomputedRotaryEmbedding`` derives the rotation-matrix width from it.
+
+    ``attention_scaling`` defaults to ``1.0`` (the "default" RoPE type, e.g.
+    ModernBERT, where no post-scaling is applied); pass the model's per-type
+    scaling for RoPE types that use it.
+    """
+
+    def __init__(self, inv_freq, attention_scaling=1.0):
+        super().__init__()
+        self.register_buffer("inv_freq", inv_freq.clone(), persistent=False)
+        self.attention_scaling = attention_scaling
+
+
 def apply_rope_matmul(x, selected_freqs):
     """Apply RoPE via matmul with [2,2,D/2] rotation matrix. No slicing.
 
