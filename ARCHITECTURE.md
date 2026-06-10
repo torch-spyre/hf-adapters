@@ -26,6 +26,8 @@ which models are supported on Spyre.
 | DeepSeek-Coder 1.3B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | Yi 1.5 6B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite Vision 4.1 4B | granite (text) | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
+| Gemma 4 12B | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Pending | Pending |
+| Gemma 3 1B | gemma3\_text | 256 | 128 | Yes | Yes | Yes | Yes |
 
 **CPU Accurate** = adapter produces identical greedy tokens to stock HF on CPU.
 **Spyre Compiles** = `torch.compile(block_forward)` succeeds on Spyre.
@@ -39,9 +41,9 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 |-------|-----------|---------|--------------|-------------|---------------|-----------|
 | Qwen3-Embedding 0.6B | qwen3 | 128 | Yes | Yes | Yes | Yes |
 | GTE-Qwen2-1.5B | qwen2 | 128 | Yes | Yes | Yes | Yes (accuracy diverges from CPU) |
-| E5-Mistral-7B | mistral | 128 | Yes | Yes | Yes | Yes (accuracy diverges from CPU) |
-| Linq-Embed-Mistral | mistral | 128 | Yes | Yes | Yes | Yes (accuracy diverges from CPU) |
-| SFR-Embedding-Mistral | mistral | 128 | Yes | Yes | Yes | Yes (accuracy diverges from CPU) |
+| E5-Mistral-7B | mistral | 128 | Yes | Yes | Yes | Yes |
+| Linq-Embed-Mistral | mistral | 128 | Yes | Yes | Yes | Yes |
+| SFR-Embedding-Mistral | mistral | 128 | Yes | Yes | Yes | Yes |
 | BGE-base-en-v1.5 | bert | 64 | Yes | Yes | Yes | Yes |
 | all-MiniLM-L6-v2 | bert | 32→64 | Yes (padded) | Yes | Yes | Yes |
 | BGE-M3 | xlm-roberta | 64 | Yes | Yes | Yes | Yes |
@@ -49,9 +51,10 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 | ModernBERT-embed-base | modernbert | 64→128 | Yes (padded) | Yes | Yes | Yes |
 | GTE-ModernBERT-base | modernbert | 64→128 | Yes (padded) | Yes | Yes | Yes |
 | Granite-Embedding-97m-multilingual-r2 | modernbert | 32→128 | Yes (padded) | Yes | Yes | Yes |
+| EmbeddingGemma 300M | gemma3\_text | 256 | Yes | Yes | Yes | Yes (bf16) |
 
-**CPU Accurate** = adapter hidden-states have cosine similarity ≥ 0.9999 vs stock HF on CPU.
-**Spyre Compiles / Spyre Runs** = via `test_e2e_embed_compare_spyre.py`. GTE-Qwen2 and the Mistral-backbone embedding models (E5-Mistral, Linq-Embed-Mistral, SFR-Embedding-Mistral) compile and execute end-to-end on Spyre but their pooled embeddings drift from the CPU reference; the Qwen3/BERT/XLM-RoBERTa/MPNet/ModernBERT encoder paths match within fp16 noise.
+**CPU Accurate** = adapter hidden-states have cosine similarity ≥ 0.999 vs stock HF on CPU (the bound accommodates the bf16-native EmbeddingGemma; fp16 models clear it with wide margin).
+**Spyre Compiles / Spyre Runs** = via `test_e2e_embed_compare_spyre.py`. GTE-Qwen2 compiles and executes end-to-end on Spyre but its pooled embeddings drift from the CPU reference; the Qwen3/Mistral/BERT/XLM-RoBERTa/MPNet/ModernBERT encoder paths match within fp16 noise. EmbeddingGemma runs in **bf16** (fp16 overflows its residual stream) and matches the bf16 CPU reference within bf16 noise (per-token cosine ≥ 0.999; pooled ≥ 0.99).
 
 ### Spyre Numerical Accuracy (torch-spyre @ 7c6ef99)
 
@@ -89,6 +92,8 @@ pattern, norms, and weight layout.
 | hf\_phi3.py | phi3 | 1 | Phi-3 mini 4k/128k, Phi-3 small 8k |
 | hf\_granitemoehybrid.py | granitemoehybrid | 1 | Granite 4.0 Micro |
 | hf\_smollm3.py | smollm3 | 1 | — |
+| hf\_gemma4.py | gemma4\_unified / gemma4 (dense) | 1 | Gemma 4 31B (dense). Not E2B/E4B (PLE) or 26B-A4B (MoE). |
+| hf\_gemma3.py | gemma3\_text / gemma3 (dense) | 2 | Gemma 3 4B/12B/27B (text decoder of the multimodal checkpoints); EmbeddingGemma (bidirectional embedder). Not Gemma 3n (PLE). |
 | hf\_olmo.py | olmo | 1 | OLMo 7B |
 | hf\_olmo2.py | olmo2 | 1 | OLMo 2 7B |
 | hf\_granite\_vision.py | granite (text) | 1 | — |
@@ -102,7 +107,6 @@ pattern, norms, and weight layout.
 to work without code changes. Size constraints apply (must fit in
 Spyre memory). Gated models require HF token access.
 
-**Variant count: 15 adapters → 27 verified checkpoints, ~60+ compatible variants.**
 
 ## Public API
 
@@ -294,21 +298,21 @@ modification:
 
 ### Model-Specific Adaptations
 
-| Feature | Granite 3.3 | Granite Vision 4.1 | Qwen3 | Granite 4.0 | SmolLM3 | Llama | Qwen2 | Mistral | Phi-4 mini | OLMo | OLMo2 |
-|---------|------------|-------------------|-------|-------------|---------|-------|-------|---------|-----------|------|-------|
-| Embedding multiplier | Yes | Yes | No | Yes | No | No | No | No | No | No | No |
-| Residual multiplier | Yes | Yes | No | Yes | No | No | No | No | No | No | No |
-| Logits scaling | Yes | Yes | No | Yes | No | No | No | No | No | No | No |
-| Q/K RMSNorm | No | No | Yes (per-head) | No | No | No | No | No | No | No | Yes (flattened) |
-| Fused QKV split | No | No | No | No | No | No | No | No | Yes | No | No |
-| Fused MLP split | No | No | No | Yes | No | No | No | No | Yes | No | No |
-| NoPE layers | No | No | No | No | Yes | No | No | No | No | No | No |
-| Partial RoPE | No | No | No | No | No | No | No | No | Yes | No | No |
-| Chunked LM head | No | No | No | No | No | No | No | No | Yes | No | No |
-| Head-dim padding | 2B only | Yes (64→128) | No | No | No | TinyLlama | No | No | No | No | No |
-| Custom model loading | No | Yes (safetensor remap) | No | No | No | No | No | No | No | No | No |
-| Attention scaling | `config.attention_multiplier` | `config.attention_multiplier` | `head_dim**-0.5` | `config.attention_multiplier` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` |
-| Norm type | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | LayerNorm (pre, no weight) | RMSNorm (post) |
+| Feature | Granite 3.3 | Granite Vision 4.1 | Qwen3 | Granite 4.0 | SmolLM3 | Llama | Qwen2 | Mistral | Phi-4 mini | OLMo | OLMo2 | Gemma 3 | Gemma 4 |
+|---------|------------|-------------------|-------|-------------|---------|-------|-------|---------|-----------|------|-------|---------|---------|
+| Embedding multiplier | Yes | Yes | No | Yes | No | No | No | No | No | No | No | Yes | Yes |
+| Residual multiplier | Yes | Yes | No | Yes | No | No | No | No | No | No | No | No | No |
+| Logits scaling | Yes | Yes | No | Yes | No | No | No | No | No | No | No | No | No |
+| Q/K RMSNorm | No | No | Yes (per-head) | No | No | No | No | No | No | No | Yes (flattened) | Yes (per-head Q/K) | Yes (per-head Q/K/V) |
+| Fused QKV split | No | No | No | No | No | No | No | No | Yes | No | No | No | No |
+| Fused MLP split | No | No | No | Yes | No | No | No | No | Yes | No | No | No | No |
+| NoPE layers | No | No | No | No | Yes | No | No | No | No | No | No | No | No |
+| Partial RoPE | No | No | No | No | No | No | No | No | Yes | No | No | No | Yes (global layers) |
+| Chunked LM head | No | No | No | No | No | No | No | No | Yes | No | No | Yes | Yes |
+| Head-dim padding | 2B only | Yes (64→128) | No | No | No | TinyLlama | No | No | No | No | No | No | No |
+| Custom model loading | No | Yes (safetensor remap) | No | No | No | No | No | No | No | No | No | No | No |
+| Attention scaling | `config.attention_multiplier` | `config.attention_multiplier` | `head_dim**-0.5` | `config.attention_multiplier` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `query_pre_attn_scalar**-0.5` | `1.0` (unscaled) |
+| Norm type | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | LayerNorm (pre, no weight) | RMSNorm (post) | RMSNorm (sandwich) | RMSNorm (sandwich) |
 
 **Partial RoPE** (Phi-4): `PartialPrecomputedRotaryEmbedding` pads
 the rotation matrix with identity `[[1,0],[0,1]]` entries so
@@ -355,6 +359,37 @@ into padded q/k/v (head_dim 64→128, like all-MiniLM); MLP is GeGLU
 `Identity` (the embedding LayerNorm already normalized the input). No
 biases by default.
 
+**Sliding/global attention** (Gemma 3): `hf_gemma3.py` alternates sliding
+(local, θ=1e4) and full (global, θ=1e6) attention, with full rotary on both
+and a **single** `head_dim` (one KV-cache shape). Beyond a plain RoPE decoder
+it adds: a four-norm "sandwich" layer, per-head Q/K RMSNorm, scaled word
+embedding, a chunked LM head (262K vocab), unit-offset RMSNorm
+(`x * (1 + weight)`), and attention scaled by `query_pre_attn_scalar ** -0.5`
+(not `head_dim ** -0.5` in general — 27B has `head_dim=128`,
+`query_pre_attn_scalar=168`). `final_logit_softcapping` is `None` on published
+Gemma 3 but applied if present. The Gemma 3n on-device variant is a separate
+model type and not supported.
+
+The same adapter serves **EmbeddingGemma**, a bidirectional embedder
+(`use_bidirectional_attention=True`): the base mask becomes bidirectional (read
+in `prefill_embed`) and the sliding layers use a symmetric `±window` band
+(`_add_bidirectional_sliding_window_band`) instead of the causal one. It is
+bf16-native — fp16 overflows the residual stream (stock HF NaNs in fp16 too) —
+so its RoPE freq cache is matched to bf16 via the explicit `set_rope_dtype`
+propagation, which handles Gemma's per-layer-type dict of RoPE modules.
+
+**Dual head_dim + proportional RoPE** (Gemma 4): `hf_gemma4.py` is Gemma 3
+plus its hardest features, targeting the **dense** decoders (12B / 31B). The
+sliding and global layers use a different `head_dim` each — sliding keeps full
+rotary over `head_dim`, global uses *proportional* RoPE
+(`partial_rotary_factor=0.25`, θ=1e6) over `global_head_dim` (the NoPE tail is
+zero frequencies, so the identity-rotation path applies). The two head_dims
+give two KV-cache shapes per model (`model._spyre_kv_shapes`). It further adds
+per-head V-norm (Q/K/V RMSNorm), a per-layer scalar, K==V projection sharing
+on global layers, unscaled attention (`scale=1.0`), and final-logit
+softcapping. PLE-based (E2B/E4B) and MoE (26B-A4B) variants are **not**
+supported — `prepare_for_spyre` asserts those features are absent.
+
 ## Adding a New Model
 
 See [ONBOARDING.md](ONBOARDING.md) for the full step-by-step guide,
@@ -392,10 +427,25 @@ graphs.
 triggers an `aten.slice.Tensor` CPU fallback per layer per fill
 step.
 
-**Recompilation per `token_index`:** Each unique `token_index`
-value in fill mode triggers a new graph specialization (because
-`torch.compile` specializes on Python int arguments). Over 63 fill
-steps, this causes 63 recompilations on first use.
+**Recompilation per `token_index` (and a correctness cliff behind
+it):** Each unique `token_index` / `cache_position` value in fill mode
+triggers a new graph specialization, because the KV write
+(`torch.ops.spyre.overwrite(..., offsets=[cache_position])`) installs
+an `offset == N` guard per value (the op forces `specialize_int=True`;
+see torch-spyre `_inductor/customops.py`). Over 63 fill steps this
+causes 63 recompilations on first use — one compiled binary per offset.
+
+This is **not only** a performance issue. The binding cap is dynamo's
+`accumulated_recompile_limit` (default **256**), checked before the
+larger `cache_size_limit` (1024). Once a shared block frame accumulates
+past 256 distinct offsets, dynamo stops compiling and the over-limit
+steps fall back to Spyre eager — the KV write lands in the wrong slot →
+corrupted attention context → divergent tokens, with **no error**. A
+generation that crosses ~256 cumulative offsets in one process degrades
+silently. Reproduced in `tests/test_generate_edge_cases_spyre.py`:
+heavy cases that pass in isolation fail when accumulated past the limit
+in the same process. The real fix is a runtime-symbolic offset (one
+binary, any value) — see Open Work.
 
 ### Open Work
 
@@ -404,8 +454,25 @@ steps, this causes 63 recompilations on first use.
    accurate (0.01–0.08). Likely a torch-spyre stickify or layout
    issue specific to seq_len=1. This is the primary blocker for
    end-to-end correct generation on Spyre.
-2. **Fix `token_index` recompilation** — pass as tensor to avoid
-   specialization
+2. **Fix `token_index` / `cache_position` specialization** — the goal
+   is one compiled binary for any offset (a runtime-symbolic offset),
+   which removes both the recompilation cost and the
+   `accumulated_recompile_limit` correctness cliff above. The offset is currently a compile-time
+   constant, so every value forces a fresh binary. Passing the offset as
+   a tensor does **not** work on the current torch-spyre version: a
+   tensor offset becomes a `Scatter` with a data-dependent (indirect)
+   store index, and the Spyre inductor backend returns
+   `UnimplementedOp(op='indirect_indexing')`, surfacing as
+   `InductorError: SympifyError: ... UnimplementedOp(op=
+   'indirect_indexing')`. Both `spyre::overwrite` (deprecated,
+   torch-spyre#2488) and `Tensor.copy_` + slicing still specialize one
+   binary per int offset; the constant-offset lowering work
+   (torch-spyre#1333) is necessary for the `copy_` migration but does
+   not make the offset symbolic, so it does not remove the cliff. The
+   enabling capability is a runtime-symbolic offset, tracked under
+   torch-spyre#220/#827 (symbolic addresses) and the #866 indirect-access
+   epic (still at the exploration stage). Migrate off `overwrite` once a
+   tensor-offset write compiles to a single on-device binary.
 3. **Fix `aten.slice` fallback in fill** — restructure overwrite
    call
 4. **Multi-iteration benchmarking** — run 5+ iterations to measure
