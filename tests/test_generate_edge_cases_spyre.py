@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """
-Spyre counterpart of ``test_generate_edge_cases.py``.
+Spyre counterpart of ``test_generate_edge_cases_cpu.py``.
 
 Same control-flow regimes (prefill / fill / expansion, block boundaries,
 single-token prompts, ``max_new_tokens=0``, forced EOS at controlled offsets,

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared helpers for ``test_generate_edge_cases.py`` (CPU pytest) and
+"""Shared helpers for ``test_generate_edge_cases_cpu.py`` (CPU pytest) and
 ``test_generate_edge_cases_spyre.py`` (Spyre script).
 
 Pulls the model/device-agnostic pieces — prompt synthesis, HF reference
