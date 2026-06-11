@@ -8,19 +8,160 @@ inputs:
     description: >
       Space-separated list of uv groups to install (e.g. "dev test" or "dev spyre test").
     required: true
+    type: string
+  rpm_names:
+    description: A space separated list of RPM names to download and install
+    required: true
+  rpm_location:
+    description: |
+      Full Artifactory URL to download RPMs from (e.g.
+      https://artifactory.example.com/path/to/rpms). When set, overrides the
+      ARTIFACTORY_BASE_URL + ARTIFACTORY_RPM_PATH secrets.
+    required: false
+    default: ''
+  output_dir:
+    description: Path to the download the RPMs to
+    required: false
+    default: rpms
+  torch_spyre_ref:
+    description: Branch, tag, or SHA of torch-spyre to check out and test
+    required: false
+    default: ''
+  artifactory_user:
+    description: Artifactory username
+    required: false
+    default: ''
+  artifactory_api_key:
+    description: Artifactory API key
+    required: false
+    default: ''
+  artifactory_base_url:
+    description: Artifactory base URL
+    required: false
+    default: ''
+  artifactory_rpm_path:
+    description: Artifactory RPM path
+    required: false
+    default: ''
+outputs:
+  target_sha:
+    description: The resolved commit SHA that was checked out
+    value: ${{ steps.resolve-sha.outputs.target_sha }}
+
 
 runs:
   using: composite
   steps:
-    - name: Build hf-adapters
+    - name: Checkout target commit
+      id: resolve-sha
       shell: bash
+      working-directory: /home/senuser
       env:
-        UV_GROUPS: ${{ inputs.uv_groups }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        GITHUB_SHA: ${{ github.sha }}
+        GITHUB_REF: ${{ github.ref }}
       run: |
         source "$HOME/.bashrc"
         source /etc/profile.d/ibm-aiu-setup.sh
+        git config --global --add safe.directory '*'
+        rm -fr "$CLONED_HF_ADAPTERS_DIR"
+        git clone --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$CLONED_HF_ADAPTERS_DIR"
         cd "$CLONED_HF_ADAPTERS_DIR"
-        # shellcheck disable=SC2086
-        uv sync --frozen --verbose --refresh --group $UV_GROUPS
+        TARGET_SHA="${PR_HEAD_SHA:-$GITHUB_SHA}"
+        TARGET_REF="${PR_HEAD_REF:-$GITHUB_REF}"
+        echo "TARGET_REF=${TARGET_REF}"
+        echo "TARGET_SHA=${TARGET_SHA}"
+        git fetch --tags --force origin "+${TARGET_SHA}" || \
+          git fetch --tags --force origin
+        git checkout --force "${TARGET_SHA}"
+        git log -1 --oneline
+        echo "target_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
+
+    - name: Gather runner info
+      shell: bash
+      working-directory: /home/senuser
+      run: |
+        source "$HOME/.bashrc"
+        source /etc/profile.d/ibm-aiu-setup.sh
+        date
+        pwd
+        whoami
+        id
+        echo "GHA_RUNNER_POD_NODE_NAME $GHA_RUNNER_POD_NODE_NAME"
+        echo "PATH $PATH"
+        echo "HOME $HOME"
+        python3 --version
+        python3 -c 'import sys; print(sys.path)'
+        echo "--- env ---"
+        env | sort
+        echo "--- AIU env ---"
+        env | sort | grep AIU || true
+
+    - name: Download RPMs
+      if: ${{ inputs.rpm_names != '' }}
+      shell: bash
+      working-directory: /home/senuser
+      env:
+        ARTIFACTORY_USER: ${{ inputs.artifactory_user }}
+        ARTIFACTORY_API_KEY: ${{ inputs.artifactory_api_key }}
+        ARTIFACTORY_BASE_URL: ${{ inputs.artifactory_base_url }}
+        ARTIFACTORY_RPM_PATH: ${{ inputs.artifactory_rpm_path }}
+        ARTIFACTORY_LOCATION: ${{ inputs.rpm_location }}
+        DOWNLOAD_SCRIPT: .github/scripts/download_rpms.sh
+        RPM_NAMES: ${{ inputs.rpm_names }}
+        RPMS_DOWNLOAD_DIR: ${{ inputs.output_dir }}
+      run: |
+        source "$HOME/.bashrc"
+        source /etc/profile.d/ibm-aiu-setup.sh
+        cd /home/senuser/torch-spyre
+        ls -la "$DOWNLOAD_SCRIPT"
+        "$DOWNLOAD_SCRIPT"
+
+    - name: Install RPMs
+      if: ${{ inputs.rpm_names != '' }}
+      shell: bash
+      working-directory: /home/senuser
+      run: |
+        ls -la
+        ls -la rpms/
+        sudo dnf install -y rpms/*.rpm
+
+    - name: Build hf-adapters
+      shell: bash
+      working-directory: /home/senuser
+      env:
+        UV_GROUPS: "${{ inputs.uv_groups }}"
+        INPUT_REF: "${{ inputs.torch_spyre_ref }}"
+      run: |
+        source "$HOME/.bashrc"
+        source /etc/profile.d/ibm-aiu-setup.sh
+        git config --global --add safe.directory '*'
+
+        # Build group flags from space-separated list
+        GROUP_FLAGS=""
+        for group in $UV_GROUPS; do
+          GROUP_FLAGS="$GROUP_FLAGS --group $group"
+        done
+
+        if [[ -n "$INPUT_REF" ]]; then
+          cd /home/senuser/torch-spyre
+          TARGET_SHA="$INPUT_REF"
+          TARGET_REF="$INPUT_REF"
+          echo "TARGET_REF=${TARGET_REF}"
+          echo "TARGET_SHA=${TARGET_SHA}"
+          git fetch --tags --force origin "+${TARGET_SHA}" || \
+            git fetch --tags --force origin
+          git checkout --force "${TARGET_SHA}"
+          git submodule sync --recursive
+          git submodule update --init --recursive --force
+          git log -1 --oneline
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv add torch-spyre /home/senuser/torch-spyre
+          uv sync --verbose --refresh $GROUP_FLAGS
+        else
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv sync --frozen --verbose --refresh $GROUP_FLAGS
+        fi
         uv pip show torch
         uv pip freeze
