@@ -50,6 +50,9 @@ testpaths = ["tests"]
 # module level; running them under pytest on a CPU-only host fails at
 # collection. Run them directly with `python3 tests/test_*_spyre*.py`.
 addopts = "--ignore-glob=tests/test_*spyre*.py"
+markers = [
+    "slow: deselected by default; opt in with --run-slow",
+]
 
 [tool.uv.sources]
 torch-spyre = { git = "https://github.com/torch-spyre/torch-spyre", rev = "main" }
