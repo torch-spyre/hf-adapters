@@ -1,0 +1,24 @@
+name: Gather runner info
+description: Collect diagnostic info about the CI runner.
+
+runs:
+  using: composite
+  steps:
+    - name: Gather runner info
+      shell: bash
+      run: |
+        source "$HOME/.bashrc"
+        source /etc/profile.d/ibm-aiu-setup.sh
+        date
+        pwd
+        whoami
+        id
+        echo "GHA_RUNNER_POD_NODE_NAME $GHA_RUNNER_POD_NODE_NAME"
+        echo "PATH $PATH"
+        echo "HOME $HOME"
+        python3 --version
+        python3 -c 'import sys; print(sys.path)'
+        echo "--- env ---"
+        env | sort
+        echo "--- AIU env ---"
+        env | sort | grep AIU || true
