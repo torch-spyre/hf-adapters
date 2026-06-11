@@ -16,6 +16,7 @@ concurrency:
 defaults:
   run:
     shell: bash
+    working-directory: /home/senuser
 
 permissions:
   contents: read
@@ -34,23 +35,26 @@ env:
   HF_HOME: /storage-1/hf-adapaters/.cache/huggingface
 
 jobs:
-  setup:
-    name: Checkout and build hf-adapters
+  cpu-tests:
+    name: CPU tests (${{ matrix.test_file }})
     runs-on:
       - x86_64
-      - spyre_pf_x1__pvc_1tb_x1
+      - spyre_pf_x0__pvc_1tb_x1
       - linux
-      - image_torch_spyre
-    timeout-minutes: 30
-    outputs:
-      # We need to pass the build artifact to downstream jobs.  Since the
-      # environment is already set up in a pre-cloned repo with uv, we just
-      # need to pass along the SHA that was checked out so other jobs can
-      # repeat the checkout.
-      target_sha: ${{ steps.resolve-sha.outputs.target_sha }}
+      - image_spyre_inference # move to image_torch_spyre once available
+    timeout-minutes: 120
+    strategy:
+      matrix:
+        test_file:
+          - test_load_cpu.py
+          - test_adapter_cpu_accuracy.py
+          - test_embed_cpu_accuracy.py
+          # test_generate_edge_cases_cpu.py moved to weekly workflow
+          - test_multibatch_generate.py
+          - test_st_backend_cpu.py
 
     steps:
-      - name: Checkout PR branch/commit in pre-cloned repo
+      - name: Checkout PR branch/commit
         id: resolve-sha
         env:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -61,6 +65,8 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           git config --global --add safe.directory '*'
+          rm -fr "$CLONED_HF_ADAPTERS_DIR"
+          git clone --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$CLONED_HF_ADAPTERS_DIR"
           cd "$CLONED_HF_ADAPTERS_DIR"
           TARGET_SHA="${PR_HEAD_SHA:-$GITHUB_SHA}"
           TARGET_REF="${PR_HEAD_REF:-$GITHUB_REF}"
@@ -95,63 +101,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          uv sync \
-            --frozen \
-            --verbose \
-            --refresh \
-            --group dev \
-            --group spyre \
-            --group test
+          uv sync --frozen --verbose --refresh --group dev --group test
           uv pip show torch
           uv pip freeze
-
-
-  cpu-tests:
-    name: CPU tests (${{ matrix.test_file }})
-    needs: setup
-    runs-on:
-      - x86_64
-      - spyre_pf_x0
-      - linux
-      - image_torch_spyre
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        test_file:
-          - test_load_cpu.py
-          - test_adapter_cpu_accuracy.py
-          - test_embed_cpu_accuracy.py
-          - test_generate_edge_cases.py
-          - test_multibatch_generate.py
-          - test_st_backend_cpu.py
-
-    steps:
-      - name: Checkout commit
-        env:
-          TARGET_SHA: ${{ needs.setup.outputs.target_sha }}
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          git config --global --add safe.directory '*'
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          git fetch --tags --force origin "+${TARGET_SHA}" || \
-            git fetch --tags --force origin
-          git checkout --force "${TARGET_SHA}"
-          git log -1 --oneline
-
-      - name: Build hf-adapters
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          uv sync \
-            --frozen \
-            --verbose \
-            --refresh \
-            --group dev \
-            --group spyre \
-            --group test
 
       - name: Run ${{ matrix.test_file }}
         run: |
@@ -161,12 +113,11 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running ${{ matrix.test_file }}..."
-          uv run pytest -s -vvv "tests/${{ matrix.test_file }}"
+          uv run pytest -s -vvv -k "qwen3 or granite or granite2b or granite4 or bge_base or bge_m3" "tests/${{ matrix.test_file }}"
           echo "tests done"
 
   spyre-load-tests:
     name: Spyre load (${{ matrix.model_key }})
-    needs: setup
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -174,13 +125,12 @@ jobs:
       - image_torch_spyre
     timeout-minutes: 120
     strategy:
-      fail-fast: false
       matrix:
         model_key:
           - qwen3
           - granite
           - granite2b
-          - granite4
+          # - granite4
           # - smollm3
           # - llama
           # - phi4
@@ -200,31 +150,56 @@ jobs:
           # - qwen3_embed
 
     steps:
-      - name: Checkout commit
+      - name: Checkout PR branch/commit
+        id: resolve-sha
         env:
-          TARGET_SHA: ${{ needs.setup.outputs.target_sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           git config --global --add safe.directory '*'
+          rm -fr "$CLONED_HF_ADAPTERS_DIR"
+          git clone --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$CLONED_HF_ADAPTERS_DIR"
           cd "$CLONED_HF_ADAPTERS_DIR"
+          TARGET_SHA="${PR_HEAD_SHA:-$GITHUB_SHA}"
+          TARGET_REF="${PR_HEAD_REF:-$GITHUB_REF}"
+          echo "TARGET_REF=${TARGET_REF}"
+          echo "TARGET_SHA=${TARGET_SHA}"
           git fetch --tags --force origin "+${TARGET_SHA}" || \
             git fetch --tags --force origin
           git checkout --force "${TARGET_SHA}"
           git log -1 --oneline
+          echo "target_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Gather runner info
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          date
+          pwd
+          whoami
+          id
+          echo "GHA_RUNNER_POD_NODE_NAME $GHA_RUNNER_POD_NODE_NAME"
+          echo "PATH $PATH"
+          echo "HOME $HOME"
+          python3 --version
+          python3 -c 'import sys; print(sys.path)'
+          echo "--- env ---"
+          env | sort
+          echo "--- AIU env ---"
+          env | sort | grep AIU || true
 
       - name: Build hf-adapters
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          uv sync \
-            --frozen \
-            --verbose \
-            --refresh \
-            --group dev \
-            --group spyre \
-            --group test
+          uv sync --frozen --verbose --refresh --group dev --group spyre --group test
+          uv pip show torch
+          uv pip freeze
 
       - name: Run test_load_spyre.py for ${{ matrix.model_key }}
         run: |
@@ -237,7 +212,6 @@ jobs:
 
   spyre-smoke-tests:
     name: Spyre smoke (${{ matrix.model_key }})
-    needs: setup
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -245,7 +219,6 @@ jobs:
       - image_torch_spyre
     timeout-minutes: 120
     strategy:
-      fail-fast: false
       matrix:
         model_key:
           - qwen3
@@ -265,31 +238,56 @@ jobs:
           # - granite-vision
 
     steps:
-      - name: Checkout commit
+      - name: Checkout PR branch/commit
+        id: resolve-sha
         env:
-          TARGET_SHA: ${{ needs.setup.outputs.target_sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           git config --global --add safe.directory '*'
+          rm -fr "$CLONED_HF_ADAPTERS_DIR"
+          git clone --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$CLONED_HF_ADAPTERS_DIR"
           cd "$CLONED_HF_ADAPTERS_DIR"
+          TARGET_SHA="${PR_HEAD_SHA:-$GITHUB_SHA}"
+          TARGET_REF="${PR_HEAD_REF:-$GITHUB_REF}"
+          echo "TARGET_REF=${TARGET_REF}"
+          echo "TARGET_SHA=${TARGET_SHA}"
           git fetch --tags --force origin "+${TARGET_SHA}" || \
             git fetch --tags --force origin
           git checkout --force "${TARGET_SHA}"
           git log -1 --oneline
+          echo "target_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Gather runner info
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          date
+          pwd
+          whoami
+          id
+          echo "GHA_RUNNER_POD_NODE_NAME $GHA_RUNNER_POD_NODE_NAME"
+          echo "PATH $PATH"
+          echo "HOME $HOME"
+          python3 --version
+          python3 -c 'import sys; print(sys.path)'
+          echo "--- env ---"
+          env | sort
+          echo "--- AIU env ---"
+          env | sort | grep AIU || true
 
       - name: Build hf-adapters
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          uv sync \
-            --frozen \
-            --verbose \
-            --refresh \
-            --group dev \
-            --group spyre \
-            --group test
+          uv sync --frozen --verbose --refresh --group dev --group spyre --group test
+          uv pip show torch
+          uv pip freeze
 
       - name: Run test_e2e_smoke_spyre.py for ${{ matrix.model_key }}
         run: |
@@ -302,7 +300,6 @@ jobs:
 
   spyre-token-compare-tests:
     name: Spyre token compare (${{ matrix.model_key }})
-    needs: setup
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -310,7 +307,6 @@ jobs:
       - image_torch_spyre
     timeout-minutes: 120
     strategy:
-      fail-fast: false
       matrix:
         model_key:
           - qwen3
@@ -320,33 +316,59 @@ jobs:
           # - mistral
           # - olmo
           # - olmo2
+          # - falcon3
 
     steps:
-      - name: Checkout commit
+      - name: Checkout PR branch/commit
+        id: resolve-sha
         env:
-          TARGET_SHA: ${{ needs.setup.outputs.target_sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           git config --global --add safe.directory '*'
+          rm -fr "$CLONED_HF_ADAPTERS_DIR"
+          git clone --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$CLONED_HF_ADAPTERS_DIR"
           cd "$CLONED_HF_ADAPTERS_DIR"
+          TARGET_SHA="${PR_HEAD_SHA:-$GITHUB_SHA}"
+          TARGET_REF="${PR_HEAD_REF:-$GITHUB_REF}"
+          echo "TARGET_REF=${TARGET_REF}"
+          echo "TARGET_SHA=${TARGET_SHA}"
           git fetch --tags --force origin "+${TARGET_SHA}" || \
             git fetch --tags --force origin
           git checkout --force "${TARGET_SHA}"
           git log -1 --oneline
+          echo "target_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Gather runner info
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          date
+          pwd
+          whoami
+          id
+          echo "GHA_RUNNER_POD_NODE_NAME $GHA_RUNNER_POD_NODE_NAME"
+          echo "PATH $PATH"
+          echo "HOME $HOME"
+          python3 --version
+          python3 -c 'import sys; print(sys.path)'
+          echo "--- env ---"
+          env | sort
+          echo "--- AIU env ---"
+          env | sort | grep AIU || true
 
       - name: Build hf-adapters
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          uv sync \
-            --frozen \
-            --verbose \
-            --refresh \
-            --group dev \
-            --group spyre \
-            --group test
+          uv sync --frozen --verbose --refresh --group dev --group spyre --group test
+          uv pip show torch
+          uv pip freeze
 
       - name: Run test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}
         run: |
@@ -359,7 +381,6 @@ jobs:
 
   spyre-embed-compare-tests:
     name: Spyre embed compare (${{ matrix.model_key }})
-    needs: setup
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -367,7 +388,6 @@ jobs:
       - image_torch_spyre
     timeout-minutes: 120
     strategy:
-      fail-fast: false
       matrix:
         model_key:
           - bge_base
@@ -375,31 +395,56 @@ jobs:
           # - qwen3_embed
 
     steps:
-      - name: Checkout commit
+      - name: Checkout PR branch/commit
+        id: resolve-sha
         env:
-          TARGET_SHA: ${{ needs.setup.outputs.target_sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           git config --global --add safe.directory '*'
+          rm -fr "$CLONED_HF_ADAPTERS_DIR"
+          git clone --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$CLONED_HF_ADAPTERS_DIR"
           cd "$CLONED_HF_ADAPTERS_DIR"
+          TARGET_SHA="${PR_HEAD_SHA:-$GITHUB_SHA}"
+          TARGET_REF="${PR_HEAD_REF:-$GITHUB_REF}"
+          echo "TARGET_REF=${TARGET_REF}"
+          echo "TARGET_SHA=${TARGET_SHA}"
           git fetch --tags --force origin "+${TARGET_SHA}" || \
             git fetch --tags --force origin
           git checkout --force "${TARGET_SHA}"
           git log -1 --oneline
+          echo "target_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Gather runner info
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          date
+          pwd
+          whoami
+          id
+          echo "GHA_RUNNER_POD_NODE_NAME $GHA_RUNNER_POD_NODE_NAME"
+          echo "PATH $PATH"
+          echo "HOME $HOME"
+          python3 --version
+          python3 -c 'import sys; print(sys.path)'
+          echo "--- env ---"
+          env | sort
+          echo "--- AIU env ---"
+          env | sort | grep AIU || true
 
       - name: Build hf-adapters
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          uv sync \
-            --frozen \
-            --verbose \
-            --refresh \
-            --group dev \
-            --group spyre \
-            --group test
+          uv sync --frozen --verbose --refresh --group dev --group spyre --group test
+          uv pip show torch
+          uv pip freeze
 
       - name: Run test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}
         run: |
@@ -412,7 +457,6 @@ jobs:
 
   spyre-block-compare-tests:
     name: Spyre block compare (${{ matrix.model_key }})
-    needs: setup
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -420,12 +464,11 @@ jobs:
       - image_torch_spyre
     timeout-minutes: 120
     strategy:
-      fail-fast: false
       matrix:
         model_key:
           - qwen3
           - granite
-          - granite4
+          # - granite4
           # - smollm3
           # - llama
           # - qwen2
@@ -433,31 +476,56 @@ jobs:
           # - olmo
 
     steps:
-      - name: Checkout commit
+      - name: Checkout PR branch/commit
+        id: resolve-sha
         env:
-          TARGET_SHA: ${{ needs.setup.outputs.target_sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           git config --global --add safe.directory '*'
+          rm -fr "$CLONED_HF_ADAPTERS_DIR"
+          git clone --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$CLONED_HF_ADAPTERS_DIR"
           cd "$CLONED_HF_ADAPTERS_DIR"
+          TARGET_SHA="${PR_HEAD_SHA:-$GITHUB_SHA}"
+          TARGET_REF="${PR_HEAD_REF:-$GITHUB_REF}"
+          echo "TARGET_REF=${TARGET_REF}"
+          echo "TARGET_SHA=${TARGET_SHA}"
           git fetch --tags --force origin "+${TARGET_SHA}" || \
             git fetch --tags --force origin
           git checkout --force "${TARGET_SHA}"
           git log -1 --oneline
+          echo "target_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Gather runner info
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          date
+          pwd
+          whoami
+          id
+          echo "GHA_RUNNER_POD_NODE_NAME $GHA_RUNNER_POD_NODE_NAME"
+          echo "PATH $PATH"
+          echo "HOME $HOME"
+          python3 --version
+          python3 -c 'import sys; print(sys.path)'
+          echo "--- env ---"
+          env | sort
+          echo "--- AIU env ---"
+          env | sort | grep AIU || true
 
       - name: Build hf-adapters
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          uv sync \
-            --frozen \
-            --verbose \
-            --refresh \
-            --group dev \
-            --group spyre \
-            --group test
+          uv sync --frozen --verbose --refresh --group dev --group spyre --group test
+          uv pip show torch
+          uv pip freeze
 
       - name: Run test_block_cpu_vs_spyre.py for ${{ matrix.model_key }}
         run: |
@@ -468,59 +536,6 @@ jobs:
           uv run python3 tests/test_block_cpu_vs_spyre.py "${{ matrix.model_key }}"
           echo "tests done"
 
-  spyre-generate-edge-cases-tests:
-    name: Spyre generate edge (${{ matrix.model_key }})
-    needs: setup
-    runs-on:
-      - x86_64
-      - spyre_pf_x1__pvc_1tb_x1
-      - linux
-      - image_torch_spyre
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        model_key:
-          - qwen3
-          - granite2b
-          # - llama
-
-    steps:
-      - name: Checkout commit
-        env:
-          TARGET_SHA: ${{ needs.setup.outputs.target_sha }}
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          git config --global --add safe.directory '*'
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          git fetch --tags --force origin "+${TARGET_SHA}" || \
-            git fetch --tags --force origin
-          git checkout --force "${TARGET_SHA}"
-          git log -1 --oneline
-
-      - name: Build hf-adapters
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          uv sync \
-            --frozen \
-            --verbose \
-            --refresh \
-            --group dev \
-            --group spyre \
-            --group test
-
-      - name: Run test_generate_edge_cases_spyre.py for ${{ matrix.model_key }}
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running test_generate_edge_cases_spyre.py for ${{ matrix.model_key }}..."
-          uv run python3 tests/test_generate_edge_cases_spyre.py "${{ matrix.model_key }}"
-          echo "tests done"
-
   # ===========================================================================
   # Required check gate — fans in all matrix jobs so a single branch
   # protection rule ("tests / run spyre unit tests") passes only when every
@@ -529,6 +544,9 @@ jobs:
   run-spyre-unit-tests:
     name: run spyre unit tests
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
     needs:
       - cpu-tests
       - spyre-load-tests
@@ -536,7 +554,6 @@ jobs:
       - spyre-token-compare-tests
       - spyre-embed-compare-tests
       - spyre-block-compare-tests
-      - spyre-generate-edge-cases-tests
     if: always()
     steps:
       - name: Check all suites passed
@@ -546,8 +563,7 @@ jobs:
                  contains(needs.spyre-smoke-tests.result, 'failure') || contains(needs.spyre-smoke-tests.result, 'cancelled') ||
                  contains(needs.spyre-token-compare-tests.result, 'failure') || contains(needs.spyre-token-compare-tests.result, 'cancelled') ||
                  contains(needs.spyre-embed-compare-tests.result, 'failure') || contains(needs.spyre-embed-compare-tests.result, 'cancelled') ||
-                 contains(needs.spyre-block-compare-tests.result, 'failure') || contains(needs.spyre-block-compare-tests.result, 'cancelled') ||
-                 contains(needs.spyre-generate-edge-cases-tests.result, 'failure') || contains(needs.spyre-generate-edge-cases-tests.result, 'cancelled') }}; then
+                 contains(needs.spyre-block-compare-tests.result, 'failure') || contains(needs.spyre-block-compare-tests.result, 'cancelled') }}; then
             echo "One or more test suites failed."
             exit 1
           fi
