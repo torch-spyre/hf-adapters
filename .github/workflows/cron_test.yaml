@@ -59,10 +59,6 @@ jobs:
       - uses: ./.github/actions/build-hf-adapters
         with:
           uv_groups: dev test
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run ${{ matrix.test_file }}
         run: |
@@ -118,10 +114,6 @@ jobs:
       - uses: ./.github/actions/build-hf-adapters
         with:
           uv_groups: dev spyre test
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run test_load_spyre.py for ${{ matrix.model_key }}
         run: |
@@ -169,10 +161,6 @@ jobs:
       - uses: ./.github/actions/build-hf-adapters
         with:
           uv_groups: dev spyre test
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run test_e2e_smoke_spyre.py for ${{ matrix.model_key }}
         run: |
@@ -213,10 +201,6 @@ jobs:
       - uses: ./.github/actions/build-hf-adapters
         with:
           uv_groups: dev spyre test
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}
         run: |
@@ -252,10 +236,6 @@ jobs:
       - uses: ./.github/actions/build-hf-adapters
         with:
           uv_groups: dev spyre test
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}
         run: |
@@ -296,10 +276,6 @@ jobs:
       - uses: ./.github/actions/build-hf-adapters
         with:
           uv_groups: dev spyre test
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run test_block_cpu_vs_spyre.py for ${{ matrix.model_key }}
         run: |
@@ -335,10 +311,6 @@ jobs:
       - uses: ./.github/actions/build-hf-adapters
         with:
           uv_groups: dev spyre test
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run test_generate_edge_cases_spyre.py for ${{ matrix.model_key }}
         run: |

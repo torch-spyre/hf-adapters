@@ -250,6 +250,10 @@ jobs:
           rpm_location: ${{ inputs.rpm_location }}
           output_dir: ${{ inputs.output_dir }}
           torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}
         run: |
@@ -289,6 +293,10 @@ jobs:
           rpm_location: ${{ inputs.rpm_location }}
           output_dir: ${{ inputs.output_dir }}
           torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}
         run: |
@@ -333,6 +341,10 @@ jobs:
           rpm_location: ${{ inputs.rpm_location }}
           output_dir: ${{ inputs.output_dir }}
           torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run test_block_cpu_vs_spyre.py for ${{ matrix.model_key }}
         run: |
