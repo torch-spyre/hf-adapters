@@ -152,7 +152,7 @@ def apply_rope_matmul(x, selected_freqs):
 def kv_cache_update(
     k, v, key_cache, value_cache, is_filling, token_index, cache_position
 ):
-    """Update pre-allocated KV cache via overwrite at cache_position.
+    """Update pre-allocated KV cache via native slice assignment at cache_position.
 
     All args are tensors; is_filling/token_index/cache_position are Python
     scalars that torch.compile specializes on.
@@ -164,23 +164,13 @@ def kv_cache_update(
         k_write = k
         v_write = v
 
-    if key_cache.device.type == "spyre":
-        torch.ops.spyre.overwrite(
-            input=k_write,
-            output=key_cache,
-            dims=[2],
-            offsets=[cache_position],
-        )
-        torch.ops.spyre.overwrite(
-            input=v_write,
-            output=value_cache,
-            dims=[2],
-            offsets=[cache_position],
-        )
-    else:
-        seq_len = k_write.shape[2]
-        key_cache[:, :, cache_position : cache_position + seq_len, :] = k_write
-        value_cache[:, :, cache_position : cache_position + seq_len, :] = v_write
+    # Native slicing assignment, replacing the deprecated torch.ops.spyre.overwrite
+    # cache_position is a Python int the compiler specializes on, so the slice
+    # bound is a compile-time constant on both CPU and Spyre.
+    # NOTE: on Spyre this still compiles one binary per distinct cache_position
+    seq_len = k_write.shape[2]
+    key_cache[:, :, cache_position : cache_position + seq_len, :] = k_write
+    value_cache[:, :, cache_position : cache_position + seq_len, :] = v_write
 
     return key_cache, value_cache
 
