@@ -1,4 +1,4 @@
-name: test_each_commit
+name: test_pull_request
 
 on:
   push:
@@ -62,12 +62,14 @@ jobs:
     timeout-minutes: 120
     strategy:
       matrix:
+        # Tests marked `@pytest.mark.slow` are dropped from PR runs (see the
+        # `-m "not slow"` flag below) and instead exercised by the weekly cron.
         test_file:
           - test_load_cpu.py
           - test_adapter_cpu_accuracy.py
           - test_embed_cpu_accuracy.py
-          # test_generate_edge_cases_cpu.py moved to weekly workflow
-          - test_multibatch_generate.py
+          - test_generate_edge_cases_cpu.py
+          - test_multibatch_generate_cpu.py
           - test_st_backend_cpu.py
 
     steps:
@@ -97,7 +99,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running ${{ matrix.test_file }}..."
-          uv run pytest -s -vvv -k "qwen3 or granite or granite2b or granite4 or bge_base or bge_m3" "tests/${{ matrix.test_file }}"
+          uv run pytest -s -vvv -m "not slow" -k "qwen3 or granite or granite2b or granite4 or bge_base or bge_m3" "tests/${{ matrix.test_file }}"
           echo "tests done"
 
   spyre-load-tests:
