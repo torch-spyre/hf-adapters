@@ -29,6 +29,12 @@ env:
   CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
   STORAGE_1_DIR: /storage-1/hf-adapaters
   HF_HOME: /storage-1/hf-adapaters/.cache/huggingface
+  # Pytest -k filter and xdist worker count for the CPU test job.
+  # Edit here to change the model coverage / parallelism of the weekly run.
+  CPU_MODELS_FILTER: "qwen3 or granite or granite2b or granite4 or bge_base or bge_m3"
+  CPU_XDIST_WORKERS: "2"
+  # Set to a non-empty string to pass --run-slow to pytest (weekly runs slow tests).
+  RUN_SLOW: "1"
 
 jobs:
   cpu-tests:
@@ -58,9 +64,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          uv run pytest -s -vvv --run-slow \
-            -k "qwen3 or granite or granite2b or granite4 or bge_base or bge_m3" \
-            -n 2 --dist loadgroup --maxfail=0 \
+          uv run pytest -s -vvv ${RUN_SLOW:+--run-slow} \
+            -k "$CPU_MODELS_FILTER" \
+            -n "$CPU_XDIST_WORKERS" --dist loadgroup --maxfail=0 \
             tests/test_*cpu*.py
           echo "tests done"
 
