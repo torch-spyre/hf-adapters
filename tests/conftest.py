@@ -113,6 +113,19 @@ def _unwrap_compiled_blocks(model):
     model._spyre_compiled_blocks = unwrapped
 
 
+def _set_rope_dtype(model, dtype):
+    """Propagate the chosen dtype to the model's precomputed RoPE freq cache.
+
+    The manual CPU-test paths load via ``AutoModel`` + ``prepare_for_spyre``
+    directly, bypassing ``load_model_common`` / ``_move_to_spyre_with_layout``
+    (where the production paths make this explicit ``set_dtype`` call). Mirror
+    it here so a non-fp16 model (e.g. bf16 EmbeddingGemma) gets a matching freq
+    cache instead of the fp16 default — otherwise ``apply_rope_matmul`` promotes
+    the query to fp32 and SDPA rejects the mismatched key/value dtype.
+    """
+    sys.modules["hf_adapters.hf_common"].set_rope_dtype(model, dtype)
+
+
 @pytest.fixture(scope="session")
 def hf_common_mod():
     return sys.modules["hf_adapters.hf_common"]
@@ -131,6 +144,11 @@ def load_adapter():
 @pytest.fixture
 def unwrap_compiled_blocks():
     return _unwrap_compiled_blocks
+
+
+@pytest.fixture
+def set_rope_dtype():
+    return _set_rope_dtype
 
 
 @pytest.fixture(autouse=True)

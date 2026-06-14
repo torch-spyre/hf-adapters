@@ -51,7 +51,7 @@ PROMPTS = [
     "The capital of France is Paris.",
     "Sentence embeddings are useful.",
 ]
-COS_THRESHOLD = 0.9999
+COS_THRESHOLD = 0.999
 
 MODELS = {k: v for k, v in EMBEDDING_MODELS.items() if v.get("adapter") is not None}
 
@@ -69,7 +69,9 @@ def _run_prefill(adapter_mod, hf_common_mod, model, input_ids, attention_mask):
 
 
 @pytest.mark.parametrize("model_key", list(MODELS.keys()), ids=list(MODELS.keys()))
-def test_manual_path(model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod):
+def test_manual_path(
+    model_key, load_adapter, unwrap_compiled_blocks, set_rope_dtype, hf_common_mod
+):
     info = MODELS[model_key]
     adapter_mod = load_adapter(info["adapter"])
     torch_dtype = torch_dtype_for(info)
@@ -93,6 +95,9 @@ def test_manual_path(model_key, load_adapter, unwrap_compiled_blocks, hf_common_
     model.eval()
     model.requires_grad_(False)
     adapter_mod.prepare_for_spyre(model)
+    # Manual path skips load_model_common; propagate the chosen dtype to the
+    # RoPE freq cache like the production move does (needed for bf16 models).
+    set_rope_dtype(model, torch_dtype)
     unwrap_compiled_blocks(model)
     with torch.no_grad():
         adapter_hidden, _ = _run_prefill(

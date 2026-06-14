@@ -108,10 +108,29 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_granite_vision.py",
         "load_fn": True,
     },
+    "gemma4": {
+        "name": "Gemma 4 12B",
+        "path": "google/gemma-4-12B-it",
+        "adapter": "hf_gemma4.py",
+        "dtype": "bfloat16",
+    },
+    # Gemma 3 is a gated checkpoint — requires HF auth. Tested on Spyre pod only.
+    # "gemma3": {
+    #     "name": "Gemma 3 1B",
+    #     "path": "google/gemma-3-1b-it",
+    #     "adapter": "hf_gemma3.py",
+    # },
 }
 
 
 EMBEDDING_MODELS = {
+    # EmbeddingGemma is a gated checkpoint — requires HF auth. Tested on Spyre pod only.
+    # "embeddinggemma": {
+    #     "name": "EmbeddingGemma 300M",
+    #     "path": "google/embeddinggemma-300m",
+    #     "adapter": "hf_gemma3.py",
+    #     "dtype": "bfloat16",  # bf16-native; fp16 overflows the residual stream
+    # },
     "qwen3_embed": {
         "name": "Qwen3-Embedding 0.6B",
         "path": "Qwen/Qwen3-Embedding-0.6B",

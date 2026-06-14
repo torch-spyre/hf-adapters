@@ -32,52 +32,17 @@ import traceback
 
 import torch
 import torch.nn.functional as F
+from _helpers import torch_dtype_for
+from model_registry import CAUSAL_LM_MODELS as MODEL_REGISTRY
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
+    _model_dtype,
     _move_to_spyre_with_layout,
     _untie_embedding_and_lm_head,
 )
 
 DEVICE = "spyre"
-
-MODEL_REGISTRY = {
-    "qwen3": {
-        "name": "Qwen3 0.6B",
-        "path": "Qwen/Qwen3-0.6B",
-        "adapter": "hf_adapters.hf_qwen3",
-    },
-    "granite": {
-        "name": "Granite 3.3 2B",
-        "path": "ibm-granite/granite-3.3-2b-instruct",
-        "adapter": "hf_adapters.hf_granite",
-    },
-    "llama": {
-        "name": "TinyLlama 1.1B",
-        "path": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        "adapter": "hf_adapters.hf_llama",
-    },
-    "qwen2": {
-        "name": "Qwen2.5 1.5B",
-        "path": "Qwen/Qwen2.5-1.5B",
-        "adapter": "hf_adapters.hf_qwen2",
-    },
-    "mistral": {
-        "name": "Mistral 7B v0.3",
-        "path": "mistralai/Mistral-7B-v0.3",
-        "adapter": "hf_adapters.hf_mistral",
-    },
-    "olmo": {
-        "name": "OLMo 1B",
-        "path": "allenai/OLMo-1B-hf",
-        "adapter": "hf_adapters.hf_olmo",
-    },
-    "olmo2": {
-        "name": "OLMo2 1B",
-        "path": "allenai/OLMo-2-0425-1B",
-        "adapter": "hf_adapters.hf_olmo2",
-    },
-}
 
 
 # ---------------------------------------------------------------------------
@@ -124,18 +89,15 @@ def hf_greedy_steps(model, input_ids, num_decode=4):
 
 def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     """Run adapter forward on Spyre for prefill + N decode steps."""
+    from hf_adapters.hf_common import allocate_kv_caches
+
     batch_size = input_ids.shape[0]
     seq_len = input_ids.shape[1]
 
-    num_layers = model.config.num_hidden_layers
-    num_kv_heads = model.config.num_key_value_heads
-    head_dim = (
-        getattr(model, "_spyre_head_dim", None)
-        or getattr(model.config, "head_dim", None)
-        or model.config.hidden_size // model.config.num_attention_heads
-    )
-    v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
-    vocab_size = model.config.vocab_size
+    # vocab_size lives on the text config for multimodal-wrapped causal LMs
+    # (e.g. Gemma 4's composite config); fall back to it.
+    cfg = model.config
+    vocab_size = getattr(cfg, "vocab_size", None) or cfg.text_config.vocab_size
 
     # Pad to BLOCK_SIZE
     padded_len = math.ceil(seq_len / BLOCK_SIZE) * BLOCK_SIZE
@@ -153,28 +115,16 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
         padded_len + math.ceil(num_decode / BLOCK_SIZE) * BLOCK_SIZE + BLOCK_SIZE
     )
 
-    key_caches = [
-        torch.zeros(
-            batch_size,
-            num_kv_heads,
-            max_cache_len,
-            head_dim,
-            dtype=torch.float16,
-            device=DEVICE,
-        )
-        for _ in range(num_layers)
-    ]
-    value_caches = [
-        torch.zeros(
-            batch_size,
-            num_kv_heads,
-            max_cache_len,
-            v_head_dim,
-            dtype=torch.float16,
-            device=DEVICE,
-        )
-        for _ in range(num_layers)
-    ]
+    # KV caches and masks must match the (post-move) model weight dtype so the
+    # compiled block's SDPA sees a single dtype — fp16 for most models, bf16 for
+    # bf16-native ones like EmbeddingGemma.
+    dtype = _model_dtype(model)
+
+    # Per-layer KV-cache shapes (honors model._spyre_kv_shapes for
+    # heterogeneous architectures like Gemma 4; uniform otherwise).
+    key_caches, value_caches = allocate_kv_caches(
+        model, batch_size, max_cache_len, dtype, device=DEVICE
+    )
 
     results = []
 
@@ -182,7 +132,7 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     from hf_adapters.hf_common import build_prefill_mask
 
     prefill_mask = build_prefill_mask(
-        batch_size, padded_len, max_cache_len, prompt_offset
+        batch_size, padded_len, max_cache_len, prompt_offset, dtype=dtype
     )
 
     with torch.no_grad():
@@ -249,6 +199,7 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
                 max_cache_len,
                 current_cache_len,
                 prompt_offset,
+                dtype=dtype,
             )
             with torch.no_grad():
                 logits = run_forward_fn(
@@ -332,16 +283,21 @@ def run_model_test(model_key, num_decode=4):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     info = MODEL_REGISTRY[model_key]
-    adapter = importlib.import_module(info["adapter"])
+    # Convert e.g., "hf_qwen3.py" to "hf_adapters.hf_qwen3"
+    adapter_module_name = info["adapter"].replace(".py", "")
+    adapter = importlib.import_module(f"hf_adapters.{adapter_module_name}")
 
     print(f"\n{'='*70}")
     print(f"  {info['name']}: {info['path']}")
     print(f"{'='*70}")
 
     tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    # fp16 for most models; bf16/fp32 ones (e.g. EmbeddingGemma, Granite 4)
+    # declare ``dtype`` in the registry.
+    dtype = torch_dtype_for(info)
     model = AutoModelForCausalLM.from_pretrained(
         info["path"],
-        torch_dtype=torch.float16,
+        torch_dtype=dtype,
         device_map="cpu",
     )
     model.eval()
@@ -361,7 +317,7 @@ def run_model_test(model_key, num_decode=4):
     _untie_embedding_and_lm_head(model)
     adapter.prepare_for_spyre(model)
     print("  Moving model to Spyre ...")
-    _move_to_spyre_with_layout(model, torch.float16)
+    _move_to_spyre_with_layout(model, dtype)
     print("  Running adapter on Spyre ...")
     adapter_results = adapter_greedy_steps(
         adapter._run_forward,

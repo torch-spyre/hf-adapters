@@ -1,8 +1,8 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-15-blue)
-![verified](https://img.shields.io/badge/verified_checkpoints-27-green)
-![compatible](https://img.shields.io/badge/compatible_models-60%2B-orange)
+![adapters](https://img.shields.io/badge/adapters-17-blue)
+![verified](https://img.shields.io/badge/verified_checkpoints-31-green)
+![compatible](https://img.shields.io/badge/compatible_models-100%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
 
@@ -14,7 +14,7 @@ from `transformers`.
 
 ## Supported Models
 
-**15 adapters · 27 verified checkpoints · 60+ compatible models**
+**17 adapters · 31 verified checkpoints · 100+ compatible models**
 
 | Adapter | Verified | Also Compatible | Usage |
 |---------|----------|-----------------|-------|
@@ -23,8 +23,10 @@ from `transformers`.
 | hf\_granite.py | Granite 3.3 8B/2B | Granite 3.0–3.2, Granite Code 8B/3B | Generative |
 | hf\_granite\_vision.py | Granite Vision 4.1 4B | — | Generative |
 | hf\_qwen3.py | Qwen3 0.6B, Qwen3-Embedding 0.6B | Qwen3 1.7B, 4B, 8B | Generative + Embedding |
-| hf\_mistral.py | Mistral 7B v0.3, E5-Mistral-7B | Mistral v0.1/v0.2, Instruct variants, Zephyr 7B | Generative + Embedding |
+| hf\_mistral.py | Mistral 7B v0.3, E5-Mistral-7B, Linq-Embed-Mistral, SFR-Embedding-Mistral | Mistral v0.1/v0.2, Instruct variants, Zephyr 7B | Generative + Embedding |
 | hf\_phi3.py | Phi-4 mini | Phi-3 mini 4k/128k, Phi-3 small 8k | Generative |
+| hf\_gemma3.py | Gemma 3 1B, EmbeddingGemma 300M | Gemma 3 4B/12B/27B text | Generative + Embedding |
+| hf\_gemma4.py | Gemma 4 12B (CPU; Spyre pending) | — | Generative |
 | hf\_granitemoehybrid.py | Granite 4.0 1B | Granite 4.0 Micro | Generative |
 | hf\_smollm3.py | SmolLM3 3B | — | Generative |
 | hf\_olmo.py | OLMo 1B | OLMo 7B | Generative |
@@ -112,6 +114,8 @@ hf_adapters/
 ├── hf_phi3.py                  Phi-4 / Phi-3 adapter
 ├── hf_olmo.py                  OLMo adapter (OLMo 1B, 7B)
 ├── hf_olmo2.py                 OLMo2 adapter (OLMo 2 1B, 7B)
+├── hf_gemma3.py                Gemma 3 adapter (Gemma 3 text, EmbeddingGemma)
+├── hf_gemma4.py                Gemma 4 adapter (unified text backbone)
 ├── hf_xlm_roberta.py           XLM-RoBERTa encoder adapter (BGE-M3, multilingual-e5)
 ├── hf_mpnet.py                 MPNet encoder adapter (all-mpnet-base-v2 and variants)
 ├── hf_modernbert.py            ModernBERT encoder adapter (RoPE, GeGLU, local/global attention)

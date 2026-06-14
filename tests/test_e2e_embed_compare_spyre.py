@@ -36,6 +36,7 @@ import traceback
 
 import torch
 import torch.nn.functional as F
+from _helpers import torch_dtype_for
 from model_registry import EMBEDDING_MODELS
 
 from hf_adapters.hf_common import (
@@ -172,9 +173,12 @@ def run_model_test(model_key):
     print(f"{'='*70}")
 
     tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    # Most embedders run fp16; bf16-native ones (e.g. EmbeddingGemma, which
+    # overflows fp16) declare ``dtype`` in the registry.
+    dtype = torch_dtype_for(info)
     model = AutoModel.from_pretrained(
         info["path"],
-        torch_dtype=torch.float16,
+        torch_dtype=dtype,
         device_map="cpu",
     )
     model.eval()
@@ -206,7 +210,7 @@ def run_model_test(model_key):
     _untie_embedding_and_lm_head(model)  # no-op for encoders, mirrors decoder path
     adapter.prepare_for_spyre(model)
     print("  Moving model to Spyre ...")
-    _move_to_spyre_with_layout(model, torch.float16)
+    _move_to_spyre_with_layout(model, dtype)
     print("  Running adapter on Spyre ...")
     ad_hidden = adapter_forward(adapter, model, input_ids, attention_mask)
 
