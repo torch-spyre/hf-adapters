@@ -1,0 +1,26 @@
+name: Build hf-adapters
+description: >
+  Install hf-adapters and its dependencies using uv.
+  The uv_groups input controls which dependency groups are installed.
+
+inputs:
+  uv_groups:
+    description: >
+      Space-separated list of uv groups to install (e.g. "dev test" or "dev spyre test").
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Build hf-adapters
+      shell: bash
+      env:
+        UV_GROUPS: ${{ inputs.uv_groups }}
+      run: |
+        source "$HOME/.bashrc"
+        source /etc/profile.d/ibm-aiu-setup.sh
+        cd "$CLONED_HF_ADAPTERS_DIR"
+        # shellcheck disable=SC2086
+        uv sync --frozen --verbose --refresh --group $UV_GROUPS
+        uv pip show torch
+        uv pip freeze

@@ -1,14 +1,10 @@
-name: test_each_commit
+name: cron_test
 
 on:
-  push:
-    branches: [main]
-    tags: ["*"]
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
-  merge_group:
-    types: [checks_requested]
+  schedule:
+    # Runs at 06:00 UTC every Monday
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -49,13 +45,11 @@ jobs:
           - test_load_cpu.py
           - test_adapter_cpu_accuracy.py
           - test_embed_cpu_accuracy.py
-          # test_generate_edge_cases_cpu.py moved to weekly workflow
+          - test_generate_edge_cases_cpu.py
           - test_multibatch_generate.py
           - test_st_backend_cpu.py
 
     steps:
-      # Checkout the workflow code first so local composite actions are findable.
-
       - uses: ./.github/actions/checkout-repo
 
       - uses: ./.github/actions/gather-runner-info
@@ -280,35 +274,35 @@ jobs:
           uv run python3 tests/test_block_cpu_vs_spyre.py "${{ matrix.model_key }}"
           echo "tests done"
 
-  # ===========================================================================
-  # Required check gate — fans in all matrix jobs so a single branch
-  # protection rule ("tests / run spyre unit tests") passes only when every
-  # suite passes.
-  # ===========================================================================
-  run-spyre-unit-tests:
-    name: run spyre unit tests
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
-    needs:
-      - cpu-tests
-      - spyre-load-tests
-      - spyre-smoke-tests
-      - spyre-token-compare-tests
-      - spyre-embed-compare-tests
-      - spyre-block-compare-tests
-    if: always()
+  spyre-generate-edge-cases-tests:
+    name: Spyre generate edge (${{ matrix.model_key }})
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - image_torch_spyre
+    timeout-minutes: 120
+    strategy:
+      matrix:
+        model_key:
+          - qwen3
+          - granite2b
+          - llama
+
     steps:
-      - name: Check all suites passed
-        run: |-
-          if ${{ contains(needs.cpu-tests.result, 'failure') || contains(needs.cpu-tests.result, 'cancelled') ||
-                 contains(needs.spyre-load-tests.result, 'failure') || contains(needs.spyre-load-tests.result, 'cancelled') ||
-                 contains(needs.spyre-smoke-tests.result, 'failure') || contains(needs.spyre-smoke-tests.result, 'cancelled') ||
-                 contains(needs.spyre-token-compare-tests.result, 'failure') || contains(needs.spyre-token-compare-tests.result, 'cancelled') ||
-                 contains(needs.spyre-embed-compare-tests.result, 'failure') || contains(needs.spyre-embed-compare-tests.result, 'cancelled') ||
-                 contains(needs.spyre-block-compare-tests.result, 'failure') || contains(needs.spyre-block-compare-tests.result, 'cancelled') }}; then
-            echo "One or more test suites failed."
-            exit 1
-          fi
-          echo "All test suites passed."
+      - uses: ./.github/actions/checkout-repo
+
+      - uses: ./.github/actions/gather-runner-info
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: dev spyre test
+
+      - name: Run test_generate_edge_cases_spyre.py for ${{ matrix.model_key }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_generate_edge_cases_spyre.py for ${{ matrix.model_key }}..."
+          uv run python3 tests/test_generate_edge_cases_spyre.py "${{ matrix.model_key }}"
+          echo "tests done"

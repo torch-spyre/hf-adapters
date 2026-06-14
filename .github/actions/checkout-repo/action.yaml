@@ -1,0 +1,39 @@
+name: Checkout PR branch/commit
+description: >
+  Clones the repo into CLONED_HF_ADAPTERS_DIR at the correct SHA.
+  Sets the target_sha output for downstream steps.
+  NOTE: The job must run actions/checkout before this action so the
+  runner can find local composite action metadata.
+
+outputs:
+  target_sha:
+    description: The resolved commit SHA that was checked out
+    value: ${{ steps.resolve-sha.outputs.target_sha }}
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout target commit
+      id: resolve-sha
+      shell: bash
+      env:
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        GITHUB_SHA: ${{ github.sha }}
+        GITHUB_REF: ${{ github.ref }}
+      run: |
+        source "$HOME/.bashrc"
+        source /etc/profile.d/ibm-aiu-setup.sh
+        git config --global --add safe.directory '*'
+        rm -fr "$CLONED_HF_ADAPTERS_DIR"
+        git clone --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$CLONED_HF_ADAPTERS_DIR"
+        cd "$CLONED_HF_ADAPTERS_DIR"
+        TARGET_SHA="${PR_HEAD_SHA:-$GITHUB_SHA}"
+        TARGET_REF="${PR_HEAD_REF:-$GITHUB_REF}"
+        echo "TARGET_REF=${TARGET_REF}"
+        echo "TARGET_SHA=${TARGET_SHA}"
+        git fetch --tags --force origin "+${TARGET_SHA}" || \
+          git fetch --tags --force origin
+        git checkout --force "${TARGET_SHA}"
+        git log -1 --oneline
+        echo "target_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"

@@ -242,12 +242,12 @@ multiples that cause poor work distribution.
 |---|---|
 | `*DecoderLayer.forward()` | `block_forward()` — plain function closure wrapping the same weights |
 | `DynamicCache` Python object | Raw tensor lists passed as function args |
-| `torch.cat` inside `DynamicCache.update()` | `torch.cat` (expand) or `spyre.overwrite` (fill) |
+| `torch.cat` inside `DynamicCache.update()` | `torch.cat` (expand) or native slice assignment (fill) |
 | Not compiled by default | `torch.compile(block_forward, dynamic=False)` |
 
 **Why:** `DynamicCache` causes graph breaks in `torch.compile`. Raw
-tensor args trace cleanly. `torch.ops.spyre.overwrite` must execute
-inside the compiled graph to produce Spyre device code.
+tensor args trace cleanly. The KV-cache slice-assignment write must
+execute inside the compiled graph to produce Spyre device code.
 
 #### 5. Generation Loop: Custom Implementation
 
@@ -256,11 +256,11 @@ inside the compiled graph to produce Spyre device code.
 | `GenerationMixin.generate()` | `generate()` in `hf_common.py` |
 | Token-by-token with dynamic cache growth | 64-block padded decode: prefill, expand, fill (x63), expand cycle |
 | Right-padded or unpadded prompts | Left-padded to multiple of 64 |
-| Grows by 1 per token | Grows by 64 per expansion, then 63 single-slot overwrites |
+| Grows by 1 per token | Grows by 64 per expansion, then 63 single-slot writes |
 | Full sampling, beam search, etc. | Greedy + top-k sampling, per-token timing |
 
 **Why:** Spyre requires fixed-size block decode with
-`spyre.overwrite` for KV cache updates. HF's generate has dynamic
+slice-assignment KV cache updates. HF's generate has dynamic
 shapes and DynamicCache incompatible with static-shape compilation.
 
 #### 6. Attention Mask: Built Externally
@@ -407,7 +407,7 @@ see [docs/fms_comparison.md](docs/fms_comparison.md).
 |-----------|--------|------------|
 | No `sin`/`cos` ops | RoPE must be precomputed | `PrecomputedRotaryEmbedding` |
 | No dtype conversion | RMSNorm must stay fp16 | Patched forward with device check |
-| No `aten.slice` in compiled graphs | KV cache indexing falls back to CPU | `spyre.overwrite` for fill mode |
+| No `aten.slice` in compiled graphs | KV cache indexing falls back to CPU | Native slice-assignment write for fill mode (int offset, compile-time constant) |
 | `head_dim/2 < 64` (sub-stick) | Stickify assertion: `Could not find a host dimension matching stick expr d4 in [...]`. Rule: RoPE matmul requires `head_dim >= 128` (`D/2 >= 64`). | `pad_attention_heads()` pads Q/K/V/O and RoPE freqs to stick-aligned size (e.g. Granite 3.3 2B: 64→128) |
 | `partial_rotary_factor < 1.0` | Non-zero offset assertion in stickify | Identity-padded rotation matrices in `PartialPrecomputedRotaryEmbedding` (implemented in `hf_phi3.py`) |
 | Zero-length tensors crash `copy_host_to_device` | Segfault on `.to("spyre")` | Create empty tensors directly on device |
@@ -423,17 +423,21 @@ minutes. Subsequent runs with the same shapes reuse cached compiled
 graphs.
 
 **`aten.slice` fallback in fill mode:** The KV cache fill operation
-`k[:, :, token_index:token_index+1, :]` inside `spyre.overwrite`
-triggers an `aten.slice.Tensor` CPU fallback per layer per fill
+`k[:, :, token_index:token_index+1, :]` feeding the slice-assignment
+write triggers an `aten.slice.Tensor` CPU fallback per layer per fill
 step.
 
 **Recompilation per `token_index` (and a correctness cliff behind
 it):** Each unique `token_index` / `cache_position` value in fill mode
 triggers a new graph specialization, because the KV write
-(`torch.ops.spyre.overwrite(..., offsets=[cache_position])`) installs
-an `offset == N` guard per value (the op forces `specialize_int=True`;
-see torch-spyre `_inductor/customops.py`). Over 63 fill steps this
+(`key_cache[:, :, cache_position : cache_position + seq_len, :] = k_write`)
+carries the offset as a compile-time constant, installing an
+`offset == N` guard per value. Over 63 fill steps this
 causes 63 recompilations on first use — one compiled binary per offset.
+(This specialization is unchanged from the previous
+`torch.ops.spyre.overwrite` write, which forced `specialize_int=True`;
+moving to native slicing satisfied the op's deprecation but did not make
+the offset symbolic.)
 
 This is **not only** a performance issue. The binding cap is dynamo's
 `accumulated_recompile_limit` (default **256**), checked before the
@@ -464,16 +468,15 @@ binary, any value) — see Open Work.
    store index, and the Spyre inductor backend returns
    `UnimplementedOp(op='indirect_indexing')`, surfacing as
    `InductorError: SympifyError: ... UnimplementedOp(op=
-   'indirect_indexing')`. Both `spyre::overwrite` (deprecated,
-   torch-spyre#2488) and `Tensor.copy_` + slicing still specialize one
-   binary per int offset; the constant-offset lowering work
-   (torch-spyre#1333) is necessary for the `copy_` migration but does
-   not make the offset symbolic, so it does not remove the cliff. The
-   enabling capability is a runtime-symbolic offset, tracked under
-   torch-spyre#220/#827 (symbolic addresses) and the #866 indirect-access
-   epic (still at the exploration stage). Migrate off `overwrite` once a
-   tensor-offset write compiles to a single on-device binary.
-3. **Fix `aten.slice` fallback in fill** — restructure overwrite
-   call
+   'indirect_indexing')`. The write has been migrated off the deprecated
+   `spyre::overwrite` (torch-spyre#2488) to native `Tensor` slice
+   assignment, but that still specializes one binary per int offset; the
+   constant-offset lowering work (torch-spyre#1333) makes the slice write
+   lower at all but does not make the offset symbolic, so it does not
+   remove the cliff. The enabling capability is a runtime-symbolic
+   offset, tracked under torch-spyre#220/#827 (symbolic addresses) and
+   the #866 indirect-access epic (still at the exploration stage).
+3. **Fix `aten.slice` fallback in fill** — restructure the
+   overwrite call
 4. **Multi-iteration benchmarking** — run 5+ iterations to measure
    steady-state latency (after compilation cache is warm)
