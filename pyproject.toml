@@ -69,4 +69,5 @@ dev = [
 ]
 test = [
     "pytest",
+    "pytest-xdist>=3.0",
 ]
