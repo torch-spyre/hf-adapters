@@ -657,12 +657,12 @@ def add_causal_sliding_window_band(mask, query_cache_coords, sliding_window):
     every key outside ``(q - sliding_window, q]``. Same device/dtype as ``mask``.
 
     The band is computed on **CPU** (integer comparisons + a ``bool`` mask),
-    then converted to a float additive tensor and moved to ``mask``'s device for
-    the add. The comparisons must not run on Spyre: its Inductor backend rejects
-    ``int64`` compare-to-constant and ``bool`` intermediates (it only handles the
-    additive float masks the other builders here produce). Mirrors how
-    ``add_sliding_window_band`` builds its band on CPU before the caller moves
-    it to ``DEVICE``.
+    then added to ``mask`` **on CPU**, and the combined mask is moved back to
+    ``mask``'s original device. The comparisons must not run on Spyre: its
+    Inductor backend rejects ``int64`` compare-to-constant and ``bool``
+    intermediates. The *add* is also kept off-device because an on-device
+    ``-inf + -inf`` has been observed to produce NaN on Spyre in bf16 (see the
+    note at the return). Mirrors ``add_sliding_window_band``.
     """
     lk = mask.shape[-1]
     k_col = torch.arange(lk)[None, None, :]  # [1, 1, Lk] on CPU
@@ -671,7 +671,16 @@ def add_causal_sliding_window_band(mask, query_cache_coords, sliding_window):
     out_of_band = (delta < 0) | (delta >= sliding_window)  # CPU bool
     band = torch.zeros(out_of_band.shape, dtype=mask.dtype)  # CPU float
     band = band.masked_fill(out_of_band, -torch.inf)
-    return mask + band[:, None, :, :].to(mask.device)
+    # Combine on CPU, then move the result to the input's device. Doing the
+    # add on-device has been observed to NaN on Spyre in bf16 when the band's
+    # -inf lands on an already -inf cell (-inf + -inf): the result poisons the
+    # SDPA softmax, giving all-NaN Gemma 4 logits. fp16 happened not to hit this.
+    # A finite sentinel (e.g. finfo.min) is not a reliable substitute here — it
+    # can overflow once cells are summed. Combining on CPU avoids the issue; the
+    # mask is tiny so the round-trip is cheap.
+    orig_device = mask.device
+    combined = mask.to("cpu") + band[:, None, :, :]
+    return combined.to(orig_device)
 
 
 # ---------------------------------------------------------------------------

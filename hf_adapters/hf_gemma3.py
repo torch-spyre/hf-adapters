@@ -248,7 +248,14 @@ def _add_bidirectional_sliding_window_band(mask, query_cache_coords, sliding_win
     out_of_band = delta.abs() >= sliding_window  # CPU bool
     band = torch.zeros(out_of_band.shape, dtype=mask.dtype)  # CPU float
     band = band.masked_fill(out_of_band, -torch.inf)
-    return mask + band[:, None, :, :].to(mask.device)
+    # Combine on CPU, then move to the device. An on-device -inf + -inf has been
+    # observed to NaN on Spyre in bf16 (see add_causal_sliding_window_band). This
+    # path doesn't currently overlap two -inf regions at EmbeddingGemma's window
+    # sizes, but the CPU combine is kept in lockstep with the causal variant so a
+    # shorter window or longer sequence cannot reintroduce the hazard.
+    orig_device = mask.device
+    combined = mask.to("cpu") + band[:, None, :, :]
+    return combined.to(orig_device)
 
 
 def _run_backbone_forward(
