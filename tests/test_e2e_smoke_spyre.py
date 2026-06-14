@@ -28,6 +28,7 @@ import sys
 import time
 import traceback
 
+from _helpers import torch_dtype_for
 from model_registry import CAUSAL_LM_MODELS as MODEL_REGISTRY
 
 
@@ -44,8 +45,9 @@ def run_smoke(model_key):
     print(f"{'='*70}")
 
     # Load model (downloads weights, prepares, moves to Spyre)
+    dtype = torch_dtype_for(info)
     t0 = time.time()
-    model = AutoSpyreModelForCausalLM.from_pretrained(info["path"])
+    model = AutoSpyreModelForCausalLM.from_pretrained(info["path"], dtype=dtype)
     load_time = time.time() - t0
     print(f"  Load time: {load_time:.1f}s")
 
