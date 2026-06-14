@@ -55,6 +55,11 @@ from _generate_edge_case_helpers import (
 from model_registry import CAUSAL_LM_MODELS as MODELS
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+# Whole-module slow gate: every test in this file is opt-in via --run-slow.
+# Per-commit CI runs without --run-slow and skips this file entirely;
+# the weekly cron passes --run-slow and exercises the full suite.
+pytestmark = pytest.mark.slow
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
