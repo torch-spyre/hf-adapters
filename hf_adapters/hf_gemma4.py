@@ -153,11 +153,14 @@ def _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v)
 
         block_forward(hidden_states, selected_freqs, attn_mask,
                       key_cache, value_cache,
-                      is_filling, token_index, cache_position)
+                      is_filling, token_index, cache_position,
+                      layer_scalar)
             -> (hidden_states, key_cache, value_cache)
 
     Gemma applies Q/K/V RMSNorm before RoPE, uses the four-norm "sandwich"
     structure, an unscaled (scale=1.0) attention, and a final per-layer scalar.
+    The per-layer scalar is a *tensor argument* (not a captured constant) so all
+    layers share one compiled binary — see the note in the body.
     On global ``attention_k_eq_v`` layers (``is_kv_eq_v=True``) there is no
     ``v_proj``: V is the raw ``k_proj`` output (before k_norm and RoPE) put
     through ``v_norm``, mirroring stock HF.
@@ -177,12 +180,26 @@ def _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v)
     pre_ff_ln = layer.pre_feedforward_layernorm
     post_ff_ln = layer.post_feedforward_layernorm
     mlp = layer.mlp
-    # Capture the per-layer scalar as a Python float, not the buffer tensor:
-    # the tensor is captured here (pre-Spyre-move), so a captured tensor would
-    # stay the old CPU buffer while the move rebinds layer.layer_scalar to a new
-    # Spyre tensor — mixing devices in ``h * layer_scalar``. A float folds into
-    # the graph as a constant, like Granite's ``residual_multiplier``.
-    layer_scalar = float(layer.layer_scalar)
+    # NOTE: the per-layer ``layer_scalar`` is NOT captured here. It is passed as
+    # a tensor *argument* to ``block_forward`` instead (see below). All 48 layers
+    # share one ``block_forward`` ``__code__`` (loop-created closures). If the
+    # scalar were folded in as a Python float constant, dynamo would guard each
+    # compiled entry on its exact value (``layer_scalar == 0.296875``) — and
+    # because the 48 layers carry ~43 *distinct* learned scalars, layer N's call
+    # would miss every prior layer's guard and recompile. That banks ~N_layers
+    # cache entries per forward on the shared frame, crossing dynamo's
+    # ``accumulated_recompile_limit`` (256) after only a handful of decode steps
+    # and dropping the tail of generation onto the slow/inaccurate eager path.
+    # Passing the scalar as a *tensor* makes dynamo guard on tensor metadata
+    # (shape/dtype — identical across layers), so all layers reuse one binary per
+    # offset (~1 entry/step, like Granite/Qwen3). Granite's ``residual_multiplier``
+    # can be a captured float because it is a single config value shared by every
+    # layer; Gemma 4's is per-layer, so it must be a tensor arg.
+    #
+    # The scalar tensor is read fresh from ``layer.layer_scalar`` at call time in
+    # ``_run_backbone_forward`` (NOT captured), so it is always the post-Spyre-move
+    # buffer on the right device — avoiding the device-mismatch the old float
+    # capture sidestepped.
 
     def block_forward(
         hidden_states,
@@ -193,6 +210,7 @@ def _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v)
         is_filling,
         token_index,
         cache_position,
+        layer_scalar,
     ):
         residual = hidden_states
         h = input_ln(hidden_states)
@@ -300,8 +318,13 @@ def _run_backbone_forward(
     )
     masks = {"full_attention": attn_mask, "sliding_attention": sliding_mask}
 
+    backbone_layers = backbone.layers
     for i, compiled_block in enumerate(model._spyre_compiled_blocks):
         lt = cfg.layer_types[i]
+        # Pass the per-layer scalar as a tensor read fresh from the (already
+        # device-moved) buffer — NOT a captured float — so the 48 layers share
+        # one compiled binary instead of recompiling per distinct scalar value.
+        # See the note in _make_compiled_block.
         h, key_caches[i], value_caches[i] = compiled_block(
             h,
             freqs[lt],
@@ -311,6 +334,7 @@ def _run_backbone_forward(
             is_filling,
             token_index,
             cache_position,
+            backbone_layers[i].layer_scalar,
         )
 
     h = backbone.norm(h)
