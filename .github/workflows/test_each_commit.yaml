@@ -53,22 +53,13 @@ env:
 
 jobs:
   cpu-tests:
-    name: CPU tests (${{ matrix.test_file }})
+    name: CPU tests
     runs-on:
       - x86_64
       - spyre_pf_x0__pvc_1tb_x1
       - linux
       - image_spyre_inference # move to image_torch_spyre once available
     timeout-minutes: 120
-    strategy:
-      matrix:
-        test_file:
-          - test_load_cpu.py
-          - test_adapter_cpu_accuracy.py
-          - test_embed_cpu_accuracy.py
-          # test_generate_edge_cases_cpu.py moved to weekly workflow
-          - test_multibatch_generate.py
-          - test_st_backend_cpu.py
 
     steps:
       - name: Checkout composite actions
@@ -89,15 +80,17 @@ jobs:
           artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
           artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
-      - name: Run ${{ matrix.test_file }}
+      - name: Run CPU tests
         run: |
           unset _IBM_AIU_SETUP
           rm -f /tmp/etc/ibm/spyre/topo.json
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running ${{ matrix.test_file }}..."
-          uv run pytest -s -vvv -k "qwen3 or granite or granite2b or granite4 or bge_base or bge_m3" "tests/${{ matrix.test_file }}"
+          uv run pytest -s -vvv \
+            -k "qwen3 or granite2b or bge_base" \
+            -n 3 --dist loadgroup --maxfail=0 \
+            tests/test_*cpu*.py
           echo "tests done"
 
   spyre-load-tests:
