@@ -26,7 +26,7 @@ env:
   # due to a mix of fallbacks and decompositions.
   # Here we set it to an empty string (or we could also unset it).
   CI: ""
-  CLONED_HF_ADAPTERS_DIR: /home/senuser/hf-adapters
+  CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
   STORAGE_1_DIR: /storage-1/hf-adapaters
   HF_HOME: /storage-1/hf-adapaters/.cache/huggingface
 
@@ -50,9 +50,11 @@ jobs:
           - test_st_backend_cpu.py
 
     steps:
-      - uses: ./.github/actions/checkout-repo
-
-      - uses: ./.github/actions/gather-runner-info
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
         with:
@@ -103,9 +105,11 @@ jobs:
           # - qwen3_embed
 
     steps:
-      - uses: ./.github/actions/checkout-repo
-
-      - uses: ./.github/actions/gather-runner-info
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
         with:
@@ -148,9 +152,11 @@ jobs:
           # - granite-vision
 
     steps:
-      - uses: ./.github/actions/checkout-repo
-
-      - uses: ./.github/actions/gather-runner-info
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
         with:
@@ -186,9 +192,11 @@ jobs:
           # - falcon3
 
     steps:
-      - uses: ./.github/actions/checkout-repo
-
-      - uses: ./.github/actions/gather-runner-info
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
         with:
@@ -219,9 +227,11 @@ jobs:
           # - qwen3_embed
 
     steps:
-      - uses: ./.github/actions/checkout-repo
-
-      - uses: ./.github/actions/gather-runner-info
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
         with:
@@ -257,9 +267,11 @@ jobs:
           # - olmo
 
     steps:
-      - uses: ./.github/actions/checkout-repo
-
-      - uses: ./.github/actions/gather-runner-info
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
         with:
@@ -290,9 +302,11 @@ jobs:
           - llama
 
     steps:
-      - uses: ./.github/actions/checkout-repo
-
-      - uses: ./.github/actions/gather-runner-info
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
         with:

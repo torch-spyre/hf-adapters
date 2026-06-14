@@ -9,6 +9,23 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
     types: [checks_requested]
+  workflow_dispatch:
+    inputs:
+      torch_spyre_ref:
+        description: Branch, tag, or SHA of torch-spyre to check out and test
+        required: false
+        type: string
+        default: ""
+      rpm_location:
+        description: The Artifactory location where to download the RPM from
+        required: false
+        type: string
+        default: ""
+      rpm_names:
+        description: A space separated list of RPM names to download and install
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -30,7 +47,7 @@ env:
   # due to a mix of fallbacks and decompositions.
   # Here we set it to an empty string (or we could also unset it).
   CI: ""
-  CLONED_HF_ADAPTERS_DIR: /home/senuser/hf-adapters
+  CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
   STORAGE_1_DIR: /storage-1/hf-adapaters
   HF_HOME: /storage-1/hf-adapaters/.cache/huggingface
 
@@ -54,15 +71,23 @@ jobs:
           - test_st_backend_cpu.py
 
     steps:
-      # Checkout the workflow code first so local composite actions are findable.
-
-      - uses: ./.github/actions/checkout-repo
-
-      - uses: ./.github/actions/gather-runner-info
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
         with:
-          uv_groups: dev test
+          uv_groups: "dev test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run ${{ matrix.test_file }}
         run: |
@@ -109,13 +134,23 @@ jobs:
           # - qwen3_embed
 
     steps:
-      - uses: ./.github/actions/checkout-repo
-
-      - uses: ./.github/actions/gather-runner-info
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
         with:
-          uv_groups: dev spyre test
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run test_load_spyre.py for ${{ matrix.model_key }}
         run: |
@@ -154,13 +189,23 @@ jobs:
           # - granite-vision
 
     steps:
-      - uses: ./.github/actions/checkout-repo
-
-      - uses: ./.github/actions/gather-runner-info
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
         with:
-          uv_groups: dev spyre test
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run test_e2e_smoke_spyre.py for ${{ matrix.model_key }}
         run: |
@@ -192,13 +237,23 @@ jobs:
           # - falcon3
 
     steps:
-      - uses: ./.github/actions/checkout-repo
-
-      - uses: ./.github/actions/gather-runner-info
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
         with:
-          uv_groups: dev spyre test
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}
         run: |
@@ -225,13 +280,23 @@ jobs:
           # - qwen3_embed
 
     steps:
-      - uses: ./.github/actions/checkout-repo
-
-      - uses: ./.github/actions/gather-runner-info
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
         with:
-          uv_groups: dev spyre test
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}
         run: |
@@ -263,13 +328,23 @@ jobs:
           # - olmo
 
     steps:
-      - uses: ./.github/actions/checkout-repo
-
-      - uses: ./.github/actions/gather-runner-info
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
         with:
-          uv_groups: dev spyre test
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run test_block_cpu_vs_spyre.py for ${{ matrix.model_key }}
         run: |
