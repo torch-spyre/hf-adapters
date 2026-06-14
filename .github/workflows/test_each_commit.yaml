@@ -53,7 +53,7 @@ env:
   # Pytest -k filter and xdist worker count for the CPU test job.
   # Edit here to change the model coverage / parallelism of per-commit CI.
   CPU_MODELS_FILTER: "qwen3 or granite2b or bge_base"
-  CPU_XDIST_WORKERS: "1"
+  CPU_XDIST_WORKERS: "3"
 
 jobs:
   cpu-tests:
