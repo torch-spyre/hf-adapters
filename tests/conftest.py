@@ -149,6 +149,17 @@ def pytest_addoption(parser):
 
 
 def pytest_collection_modifyitems(config, items):
+    # Tag each parametrized item with an xdist_group keyed on model_key so that
+    # `pytest -n N --dist loadgroup` keeps all tests for one model on a single
+    # worker — weights load once per worker, not once per test.
+    for item in items:
+        callspec = getattr(item, "callspec", None)
+        if callspec is None:
+            continue
+        model_key = callspec.params.get("model_key")
+        if model_key:
+            item.add_marker(pytest.mark.xdist_group(model_key))
+
     if config.getoption("--run-slow"):
         return
     skip_slow = pytest.mark.skip(reason="slow test; pass --run-slow to run")
