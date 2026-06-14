@@ -26,7 +26,7 @@ from `transformers`.
 | hf\_mistral.py | Mistral 7B v0.3, E5-Mistral-7B, Linq-Embed-Mistral, SFR-Embedding-Mistral | Mistral v0.1/v0.2, Instruct variants, Zephyr 7B | Generative + Embedding |
 | hf\_phi3.py | Phi-4 mini | Phi-3 mini 4k/128k, Phi-3 small 8k | Generative |
 | hf\_gemma3.py | Gemma 3 1B, EmbeddingGemma 300M | Gemma 3 4B/12B/27B text | Generative + Embedding |
-| hf\_gemma4.py | Gemma 4 12B (CPU; Spyre pending) | — | Generative |
+| hf\_gemma4.py | Gemma 4 12B (fp16) | — | Generative |
 | hf\_granitemoehybrid.py | Granite 4.0 1B | Granite 4.0 Micro | Generative |
 | hf\_smollm3.py | SmolLM3 3B | — | Generative |
 | hf\_olmo.py | OLMo 1B | OLMo 7B | Generative |
