@@ -52,6 +52,30 @@ env:
   HF_HOME: /storage-1/hf-adapaters/.cache/huggingface
 
 jobs:
+  pre-commit:
+    name: pre-commit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run pre-commit
+        uses: pre-commit/action@v3.0.1
+        with:
+          # Skip the local mypy hook — it requires the project venv with
+          # torch/transformers installed, which we don't set up in this lint job.
+          extra_args: --all-files --hook-stage commit --show-diff-on-failure
+        env:
+          SKIP: mypy
+
   cpu-tests:
     name: CPU tests (${{ matrix.test_file }})
     runs-on:
@@ -369,6 +393,7 @@ jobs:
       run:
         working-directory: .
     needs:
+      - pre-commit
       - cpu-tests
       - spyre-load-tests
       - spyre-smoke-tests
@@ -379,7 +404,8 @@ jobs:
     steps:
       - name: Check all suites passed
         run: |-
-          if ${{ contains(needs.cpu-tests.result, 'failure') || contains(needs.cpu-tests.result, 'cancelled') ||
+          if ${{ contains(needs.pre-commit.result, 'failure') || contains(needs.pre-commit.result, 'cancelled') ||
+                 contains(needs.cpu-tests.result, 'failure') || contains(needs.cpu-tests.result, 'cancelled') ||
                  contains(needs.spyre-load-tests.result, 'failure') || contains(needs.spyre-load-tests.result, 'cancelled') ||
                  contains(needs.spyre-smoke-tests.result, 'failure') || contains(needs.spyre-smoke-tests.result, 'cancelled') ||
                  contains(needs.spyre-token-compare-tests.result, 'failure') || contains(needs.spyre-token-compare-tests.result, 'cancelled') ||
