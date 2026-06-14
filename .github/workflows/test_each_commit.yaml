@@ -53,7 +53,7 @@ env:
   # Pytest -k filter and xdist worker count for the CPU test job.
   # Edit here to change the model coverage / parallelism of per-commit CI.
   CPU_MODELS_FILTER: "qwen3 or granite2b or bge_base"
-  CPU_XDIST_WORKERS: "3"
+  CPU_XDIST_WORKERS: "1"
 
 jobs:
   cpu-tests:
@@ -91,9 +91,13 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          XDIST_FLAGS=""
+          if [[ "$CPU_XDIST_WORKERS" -gt 1 ]]; then
+            XDIST_FLAGS="-n $CPU_XDIST_WORKERS --dist loadgroup"
+          fi
           uv run pytest -s -vvv ${RUN_SLOW:+--run-slow} \
             -k "$CPU_MODELS_FILTER" \
-            -n "$CPU_XDIST_WORKERS" --dist loadgroup --maxfail=0 \
+            $XDIST_FLAGS --maxfail=0 \
             tests/test_*cpu*.py
           echo "tests done"
 
