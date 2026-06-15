@@ -10,7 +10,7 @@
 #
 #   1. Trigger
 #      - Daily:  schedule (06:00 UTC every day) + workflow_dispatch.
-#      - Weekly: schedule (06:00 UTC every Monday) + workflow_dispatch.
+#      - Weekly: schedule (22:00 UTC every Saturday) + workflow_dispatch.
 #
 #   2. CPU `MODELS_FILTER` covers every adapter
 #      Short-substring form matches all 27 keys across the causal-LM and
@@ -39,8 +39,8 @@ name: weekly_test
 
 on:
   schedule:
-    # Runs at 06:00 UTC every Monday
-    - cron: "0 6 * * 1"
+    # Runs at 22:00 UTC every Saturday
+    - cron: "0 22 * * 6"
   workflow_dispatch:
 
 concurrency:
