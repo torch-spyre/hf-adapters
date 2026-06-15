@@ -172,6 +172,28 @@ EMBEDDING_MODELS = {
         "path": "ibm-granite/granite-embedding-97m-multilingual-r2",
         "adapter": "hf_modernbert.py",
     },
+
+    "granite_125m": {
+        "name": "Granite-Embedding-125m-English",
+        "path": "ibm-granite/granite-embedding-125m-english",
+        "adapter": "hf_bert.py",
+    },
+    "granite_278m": {
+        "name": "Granite-Embedding-278m-Multilingual",
+        "path": "ibm-granite/granite-embedding-278m-multilingual",
+        "adapter": "hf_xlm_roberta.py",
+    },
+    "granite_30m": {
+        "name": "Granite-Embedding-30m-English",
+        "path": "ibm-granite/granite-embedding-30m-english",
+        "adapter": "hf_bert.py",
+    },
+    "granite_107m": {
+        "name": "Granite-Embedding-107m-Multilingual",
+        "path": "ibm-granite/granite-embedding-107m-multilingual",
+        "adapter": "hf_xlm_roberta.py",
+    },
+
 }
 
 

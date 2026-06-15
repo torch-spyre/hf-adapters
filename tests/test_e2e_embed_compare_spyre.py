@@ -163,9 +163,10 @@ def run_model_test(model_key):
 
     info = EMBEDDING_MODELS[model_key]
     # Convert e.g., "hf_qwen3.py" to "hf_adapters.hf_qwen3"
-    adapter_module_name = info["adapter"].replace(".py", "")
-    adapter_module_path = f"hf_adapters.{adapter_module_name}"
-    adapter = importlib.import_module(adapter_module_path)
+    adapter_name = info["adapter"].replace(".py", "")
+    adapter_module = f"hf_adapters.{adapter_name}"
+    adapter = importlib.import_module(adapter_module)
+
 
     print(f"\n{'='*70}")
     print(f"  {info['name']}: {info['path']}")
