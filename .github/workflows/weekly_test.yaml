@@ -72,7 +72,7 @@ env:
   # Daily (daily_test.yaml) covers the known-good subset.
   # Invariant: every model_key used in a Spyre matrix below must have its
   # substring present here so CPU sanity-checks anything that runs on hardware.
-  MODELS_FILTER: "qwen or granite or smollm3 or llama or phi4 or mistral or olmo or falcon3 or deepseek-coder or yi or bge or minilm or mpnet or modernbert"
+  MODELS_FILTER: "qwen or granite or smollm3 or llama or phi4 or mistral or olmo or falcon3 or deepseek-coder or yi_6b or bge or minilm or mpnet or modernbert"
 
 jobs:
   cpu-tests:

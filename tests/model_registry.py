@@ -97,7 +97,7 @@ CAUSAL_LM_MODELS = {
     #     "path": "mistralai/Ministral-3B-Instruct",
     #     "adapter": "hf_mistral.py",
     # },
-    "yi": {
+    "yi_6b": {
         "name": "Yi 1.5 6B",
         "path": "01-ai/Yi-1.5-6B",
         "adapter": "hf_llama.py",

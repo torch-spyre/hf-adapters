@@ -100,7 +100,7 @@ MODEL_REGISTRY = {
     #     "path": "mistralai/Ministral-3B-Instruct",
     #     "adapter": "hf_adapters.hf_mistral",
     # },
-    "yi": {
+    "yi_6b": {
         "name": "Yi 1.5 6B",
         "path": "01-ai/Yi-1.5-6B",
         "adapter": "hf_adapters.hf_llama",
