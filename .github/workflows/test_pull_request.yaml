@@ -48,8 +48,8 @@ env:
   # Here we set it to an empty string (or we could also unset it).
   CI: ""
   CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
-  STORAGE_1_DIR: /storage-1/hf-adapaters
-  HF_HOME: /storage-1/hf-adapaters/.cache/huggingface
+  STORAGE_1_DIR: /storage-1/hf-adapters
+  HF_HOME: /storage-1/hf-adapters/.cache/huggingface
   # Single source of truth for the set of models exercised by the CPU
   # test matrix's `-k` filter. PR is the fast smoke — qwen3 (causal LM) and
   # bge_base (embedding) on CPU; the same bge_base runs on the Spyre

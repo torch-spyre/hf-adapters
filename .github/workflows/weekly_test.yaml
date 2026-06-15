@@ -64,8 +64,8 @@ env:
   # Here we set it to an empty string (or we could also unset it).
   CI: ""
   CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
-  STORAGE_1_DIR: /storage-1/hf-adapaters
-  HF_HOME: /storage-1/hf-adapaters/.cache/huggingface
+  STORAGE_1_DIR: /storage-1/hf-adapters
+  HF_HOME: /storage-1/hf-adapters/.cache/huggingface
   # Single source of truth for the set of models exercised by the CPU
   # test matrix's `-k` filter. Weekly sweeps every adapter via short
   # substrings (e.g. `qwen` matches qwen2/qwen3/qwen2_embed/qwen3_embed).
