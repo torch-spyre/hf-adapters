@@ -83,7 +83,11 @@ from hf_adapters import (
     hf_smollm3,
     hf_xlm_roberta,
 )
-from hf_adapters.hf_common import load_model_common
+from hf_adapters.hf_common import (
+    SpyreNoAdapterError,
+    assert_spyre_dimensions,
+    load_model_common,
+)
 
 CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     BertConfig: hf_bert,
@@ -113,10 +117,11 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
 def _resolve_adapter_module(model_name_or_path):
     model_config = AutoConfig.from_pretrained(model_name_or_path)
     if type(model_config) not in CONFIG_TO_ADAPTER_MODULE_MAPPING:
-        raise Exception(
+        raise SpyreNoAdapterError(
             f"Model {model_name_or_path} of type {type(model_config)} "
             "is not supported"
         )
+    assert_spyre_dimensions(model_config, model_name=str(model_name_or_path))
     return CONFIG_TO_ADAPTER_MODULE_MAPPING[type(model_config)]
 
 

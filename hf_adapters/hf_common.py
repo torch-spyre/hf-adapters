@@ -33,6 +33,41 @@ DEVICE = "spyre"
 BLOCK_SIZE = 64  # Spyre stick size at fp16 (128 bytes / 2 bytes per element)
 
 
+class SpyreUnsupportedModelError(ValueError):
+    """Architecture is supported, but this config can't run on Spyre."""
+
+
+class SpyreNoAdapterError(ValueError):
+    """No Spyre adapter is registered for this model's architecture."""
+
+
+def assert_spyre_dimensions(config, model_name):
+    """Reject configs whose ``hidden_size``/``intermediate_size`` is sub-stick.
+
+    Matmuls over a dimension smaller than one ``BLOCK_SIZE`` stick produce
+    stick index expressions the Spyre compiler can't lower (surfacing as a
+    cryptic ``Unsupported stick expression`` deep in ``torch.compile``).
+    ``head_dim`` is not checked — adapters auto-pad it (see
+    ``prepare_rope_and_heads``); ``hidden_size``/``intermediate_size`` can't be
+    padded without changing the model's arithmetic. Real models clear this bar;
+    it fires on tiny test fixtures (e.g. ``trl-internal-testing/tiny-*``).
+    """
+    # text_config holds the dims for multimodal wrappers (Gemma 4, Granite Vision).
+    dim_config = getattr(config, "text_config", None) or config
+    too_small = [
+        (f, v)
+        for f in ("hidden_size", "intermediate_size")
+        if (v := getattr(dim_config, f, None)) is not None and v < BLOCK_SIZE
+    ]
+    if too_small:
+        details = ", ".join(f"{f}={v}" for f, v in too_small)
+        raise SpyreUnsupportedModelError(
+            f"Model {model_name} is too small for Spyre: {details} < one stick "
+            f"({BLOCK_SIZE}). Use a real model whose hidden_size and "
+            f"intermediate_size are both >= {BLOCK_SIZE}."
+        )
+
+
 def get_backbone(model):
     """Return the transformer backbone of an HF model.
 
@@ -1541,6 +1576,9 @@ def encoder_backbone_forward(model, input_ids, attn_mask, position_ids, token_ty
 
 def prepare_rope_and_heads(model):
     cfg = model.config
+    assert_spyre_dimensions(
+        cfg, model_name=getattr(cfg, "name_or_path", "") or "<unknown>"
+    )
     orig_head_dim = (
         getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
     )
