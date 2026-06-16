@@ -79,12 +79,7 @@ jobs:
       rpm_names: ${{ inputs.rpm_names }}
       # PR workflow does not include the slow generate-edge-cases suite
       include_generate_edge_cases: false
-    secrets:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      ARTIFACTORY_USER: ${{ secrets.ARTIFACTORY_USER }}
-      ARTIFACTORY_API_KEY: ${{ secrets.ARTIFACTORY_API_KEY }}
-      ARTIFACTORY_BASE_URL: ${{ secrets.ARTIFACTORY_BASE_URL }}
-      ARTIFACTORY_RPM_PATH: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+    secrets: inherit
 
   # ===========================================================================
   # Required check gate — fans in all matrix jobs so a single branch
