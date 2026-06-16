@@ -77,7 +77,6 @@ jobs:
       torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
       rpm_location: ${{ inputs.rpm_location }}
       rpm_names: ${{ inputs.rpm_names }}
-      output_dir: ${{ inputs.output_dir }}
       # PR workflow does not include the slow generate-edge-cases suite
       include_generate_edge_cases: false
     secrets:
