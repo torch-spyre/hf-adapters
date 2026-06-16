@@ -145,9 +145,45 @@ jobs:
       - image_torch_spyre
     timeout-minutes: 120
     strategy:
+      fail-fast: false
       matrix:
+        # All causal-LM and embedding keys from tests/model_registry.py.
+        # Commented-out entries are valid registry keys we deliberately exclude
+        # from PR runs — each comment names the reason.
         model_key:
+          # Causal LM
           - qwen3
+          - granite
+          - granite2b
+          - granite4
+          - smollm3
+          - tiny_llama
+          # phi4 — partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md);
+          #        load path itself works, but excluded for parity with the rest of the Spyre matrices.
+          # - phi4
+          - qwen2
+          - ministral
+          - olmo
+          - olmo2
+          - falcon3
+          - deepseek-coder
+          - granite-vision
+          # gemma4 — no public checkpoint at google/gemma-4-12B-it yet; the registry
+          #          path 404s on HF so the load test cannot pull weights.
+          # - gemma4
+          # Embedding
+          - qwen3_embed
+          - qwen2_embed
+          - e5_mistral
+          - linq_embed_mistral
+          - sfr_embedding_mistral
+          - bge_base
+          - minilm
+          - bge_m3
+          - mpnet
+          - modernbert
+          - gte_modernbert
+          - granite_embed
 
     steps:
       - name: Checkout composite actions
@@ -188,9 +224,30 @@ jobs:
       - image_torch_spyre
     timeout-minutes: 120
     strategy:
+      fail-fast: false
       matrix:
+        # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
         model_key:
           - qwen3
+          - granite
+          - granite2b
+          - granite4
+          - smollm3
+          - tiny_llama
+          # phi4 — partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md).
+          # - phi4
+          - qwen2
+          - ministral
+          - olmo
+          - olmo2
+          - falcon3
+          - deepseek-coder
+          # granite-vision — multimodal; load_fn=True in the registry. The smoke
+          #                   driver calls AutoSpyreModelForCausalLM.from_pretrained
+          #                   directly and does not handle the custom loader.
+          # - granite-vision
+          # gemma4 — no public checkpoint at google/gemma-4-12B-it (HF 404).
+          # - gemma4
 
     steps:
       - name: Checkout composite actions
@@ -231,9 +288,30 @@ jobs:
       - image_torch_spyre
     timeout-minutes: 120
     strategy:
+      fail-fast: false
       matrix:
+        # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
         model_key:
           - qwen3
+          - granite
+          - granite2b
+          - granite4
+          - smollm3
+          - tiny_llama
+          # phi4 — partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md).
+          # - phi4
+          - qwen2
+          - ministral
+          - olmo
+          - olmo2
+          - falcon3
+          - deepseek-coder
+          # granite-vision — multimodal; the token-compare driver calls
+          #                   AutoSpyreModelForCausalLM.from_pretrained and does
+          #                   not handle the custom loader (load_fn=True).
+          # - granite-vision
+          # gemma4 — no public checkpoint at google/gemma-4-12B-it (HF 404).
+          # - gemma4
 
     steps:
       - name: Checkout composite actions
@@ -274,9 +352,22 @@ jobs:
       - image_torch_spyre
     timeout-minutes: 120
     strategy:
+      fail-fast: false
       matrix:
+        # All embedding keys from tests/model_registry.py::EMBEDDING_MODELS.
         model_key:
+          - qwen3_embed
+          - qwen2_embed
+          - e5_mistral
+          - linq_embed_mistral
+          - sfr_embedding_mistral
           - bge_base
+          - minilm
+          - bge_m3
+          - mpnet
+          - modernbert
+          - gte_modernbert
+          - granite_embed
 
     steps:
       - name: Checkout composite actions
@@ -317,9 +408,56 @@ jobs:
       - image_torch_spyre
     timeout-minutes: 120
     strategy:
+      fail-fast: false
       matrix:
+        # Block-compare uses tests/test_block_cpu_vs_spyre.py, which has its own
+        # architecture-keyed registry (one entry per adapter family, not per
+        # checkpoint). We enumerate every key from tests/model_registry.py here
+        # and route checkpoint keys to their architecture key — duplicates
+        # within the same family are commented out because they exercise the
+        # same compiled block path.
         model_key:
           - qwen3
+          - granite
+          # granite2b — same adapter (hf_granite) as `granite`; block-compare
+          #             registry keys are architecture-level.
+          # - granite2b
+          - granite4
+          - smollm3
+          # tiny_llama, falcon3, deepseek-coder all use hf_llama — covered by
+          # the `llama` architecture key in the block-compare registry.
+          - llama
+          # - tiny_llama
+          # - falcon3
+          # - deepseek-coder
+          # phi4 — uses hf_phi3, which is not in the block-compare registry; also
+          #        partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md).
+          # - phi4
+          - qwen2
+          # ministral uses hf_mistral — covered by the `mistral` architecture key.
+          - mistral
+          # - ministral
+          - olmo
+          - olmo2
+          - granite-vision
+          # gemma4 — uses hf_gemma4, which is not in the block-compare registry,
+          #          and there is no public google/gemma-4-12B-it checkpoint yet.
+          # - gemma4
+          # Embedding models — block-compare today only covers causal-LM
+          # architectures. Embedding adapters (hf_bert, hf_xlm_roberta, hf_mpnet,
+          # hf_modernbert) are not in the block-compare registry.
+          # - qwen3_embed
+          # - qwen2_embed
+          # - e5_mistral
+          # - linq_embed_mistral
+          # - sfr_embedding_mistral
+          # - bge_base
+          # - minilm
+          # - bge_m3
+          # - mpnet
+          # - modernbert
+          # - gte_modernbert
+          # - granite_embed
 
     steps:
       - name: Checkout composite actions
