@@ -43,9 +43,9 @@ from hf_adapters.hf_common import (
     _pad_proj_input_simple,
     _pad_proj_output_simple,
     apply_rope_matmul,
-    chunk_lm_head,
     get_backbone,
     kv_cache_update,
+    pad_lm_head,
     patch_rmsnorm,
     split_fused_linear,
 )
@@ -248,7 +248,7 @@ def _run_forward(
     token_index,
     cache_position,
 ):
-    """Phi-3 causal-LM forward: backbone + chunked LM head."""
+    """Phi-3 causal-LM forward: backbone + LM head."""
     h = _run_backbone_forward(
         model,
         input_ids,
@@ -261,15 +261,7 @@ def _run_forward(
         cache_position,
     )
 
-    # Chunked LM head: large vocab (200K+) exceeds Spyre's per-core EAR limit.
-    # Split into N chunks, run each on Spyre, cat on CPU.
-    logits_parts = []
-    for lm_chunk, real_sz in zip(
-        model._spyre_lm_head_chunks, model._spyre_lm_chunk_sizes
-    ):
-        logits_parts.append(lm_chunk(h).to("cpu")[..., :real_sz])
-    logits = torch.cat(logits_parts, dim=-1)
-    return logits
+    return model.lm_head(h)
 
 
 def prepare_for_spyre(model):
@@ -299,9 +291,9 @@ def prepare_for_spyre(model):
     )
     patch_rmsnorm(Phi3RMSNorm)
 
-    # Chunk LM head for large vocab models (200K+ vocab exceeds EAR limit)
-    # Each chunk is stick-padded internally. Don't call pad_lm_head.
-    chunk_lm_head(model, num_chunks=8)
+    # LM head: smooth-padded to a stick-aligned vocab whose per-core span fits
+    # the 256 MB EAR limit (see hf_common.pad_lm_head).
+    pad_lm_head(model)
 
     num_q = cfg.num_attention_heads
     num_kv = cfg.num_key_value_heads
