@@ -20,11 +20,23 @@ runs:
         HF_TOKEN: ${{ inputs.hf_token }}
       shell: bash
       run: |
+        unset _IBM_AIU_SETUP
+        rm -f /tmp/etc/ibm/spyre/topo.json
         source "$HOME/.bashrc"
         source /etc/profile.d/ibm-aiu-setup.sh
         cd "$CLONED_HF_ADAPTERS_DIR"
-        echo "Running ${{ inputs.test_script }} for ${{ inputs.model_key }}..."
+        echo "=========================================="
+        echo "Running ${{ inputs.test_script }} for ${{ inputs.model_key }}"
+        echo "Working directory: $(pwd)"
+        echo "Python: $(which python3)"
+        echo "=========================================="
+        set -x
         uv run python3 tests/${{ inputs.test_script }} "${{ inputs.model_key }}"
-        echo "tests done"
+        TEST_EXIT_CODE=$?
+        set +x
+        echo "=========================================="
+        echo "Test exit code: $TEST_EXIT_CODE"
+        echo "=========================================="
+        exit $TEST_EXIT_CODE
 
 # Made with Bob
