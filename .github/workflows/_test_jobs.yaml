@@ -124,6 +124,7 @@ jobs:
       - name: Run ${{ matrix.test_file }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PYTEST_MARKER_FILTER: ${{ inputs.pytest_marker_filter }}
         run: |
           unset _IBM_AIU_SETUP
           rm -f /tmp/etc/ibm/spyre/topo.json
@@ -131,7 +132,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running ${{ matrix.test_file }}..."
-          uv run pytest -s -vvv ${{ inputs.pytest_marker_filter }} -k "${{ inputs.models_filter }}" "tests/${{ matrix.test_file }}"
+          uv run pytest -s -vvv ${PYTEST_MARKER_FILTER} -k "${{ inputs.models_filter }}" "tests/${{ matrix.test_file }}"
           echo "tests done"
 
   spyre-load-tests:

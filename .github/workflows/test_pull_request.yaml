@@ -73,7 +73,7 @@ jobs:
       models_filter: "qwen3 or bge_base"
       # Tests marked `@pytest.mark.slow` are dropped from PR runs and instead
       # exercised by the weekly cron.
-      pytest_marker_filter: '-m "not slow"'
+      pytest_marker_filter: -m "not slow"
       torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
       rpm_location: ${{ inputs.rpm_location }}
       rpm_names: ${{ inputs.rpm_names }}
