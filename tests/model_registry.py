@@ -61,6 +61,11 @@ CAUSAL_LM_MODELS = {
         "path": "microsoft/Phi-4-mini-instruct",
         "adapter": "hf_phi3.py",
     },
+    "phi3": {
+        "name": "Phi-3.5 mini",
+        "path": "microsoft/Phi-3.5-mini-instruct",
+        "adapter": "hf_phi3.py",
+    },
     "qwen2": {
         "name": "Qwen2.5 1.5B",
         "path": "Qwen/Qwen2.5-1.5B",
