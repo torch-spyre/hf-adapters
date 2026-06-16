@@ -60,3 +60,6 @@ runs:
         artifactory_api_key: ${{ inputs.artifactory_api_key }}
         artifactory_base_url: ${{ inputs.artifactory_base_url }}
         artifactory_rpm_path: ${{ inputs.artifactory_rpm_path }}
+
+
+# Made with Bob
