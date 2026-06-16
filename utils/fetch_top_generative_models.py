@@ -23,7 +23,11 @@ def _fetch(api, limit):
 
 
 def _keep(model):
-    return bool(model.config) and model.library_name not in ("gguf", "mlx")
+    return (
+        bool(model.config)
+        and model.library_name not in ("gguf", "mlx")
+        and "onnx" not in model.id.lower()
+    )
 
 
 def fetch_top_generative_models(limit, output_csv: Path | str | None = None):

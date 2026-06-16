@@ -124,6 +124,8 @@ def _keep(model):
         return False
     if model.library_name in ("gguf", "mlx"):
         return False
+    if "onnx" in model.id.lower():
+        return False
     if not _has_embedding_signal(model):
         return False
     if _is_reranker(model):
