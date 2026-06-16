@@ -33,6 +33,48 @@ DEVICE = "spyre"
 BLOCK_SIZE = 64  # Spyre stick size at fp16 (128 bytes / 2 bytes per element)
 
 
+class SpyreUnsupportedModelError(ValueError):
+    """Architecture is supported, but this config can't run on Spyre."""
+
+
+class SpyreNoAdapterError(ValueError):
+    """No Spyre adapter is registered for this model's architecture."""
+
+
+def assert_spyre_dimensions(config, model_name):
+    """Reject configs whose ``hidden_size``/``intermediate_size`` is stick-misaligned.
+
+    The Spyre compiler lays tensors out in ``BLOCK_SIZE``-element sticks.
+    Matmuls over a dimension that is not a multiple of ``BLOCK_SIZE`` produce
+    stick index expressions it can't lower (e.g. ``floor(d2/320)`` for a 312-wide
+    dim), surfacing as a cryptic ``Unsupported stick expression`` deep in
+    ``torch.compile``. This covers both sub-stick dims (e.g. ``hidden_size=8``)
+    and misaligned ones (e.g. ``hidden_size=312``).
+
+    ``head_dim`` is not checked — adapters auto-pad it to a stick boundary (see
+    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``);
+    ``hidden_size``/``intermediate_size`` can't be padded without changing the
+    model's arithmetic. Real models clear this bar; it fires on tiny test
+    fixtures (e.g. ``trl-internal-testing/tiny-*``, ``cointegrated/rubert-tiny2``).
+    """
+    # text_config holds the dims for multimodal wrappers (Gemma 4, Granite Vision).
+    dim_config = getattr(config, "text_config", None) or config
+    misaligned = [
+        (f, v)
+        for f in ("hidden_size", "intermediate_size")
+        if (v := getattr(dim_config, f, None)) is not None and v % BLOCK_SIZE != 0
+    ]
+    if misaligned:
+        details = ", ".join(f"{f}={v}" for f, v in misaligned)
+        raise SpyreUnsupportedModelError(
+            f"Model {model_name} has Spyre-incompatible dimensions: {details} "
+            f"(not a multiple of one stick, {BLOCK_SIZE}). The Spyre compiler "
+            f"cannot lower matmuls over stick-misaligned dimensions. Use a model "
+            f"whose hidden_size and intermediate_size are both multiples of "
+            f"{BLOCK_SIZE}."
+        )
+
+
 def get_backbone(model):
     """Return the transformer backbone of an HF model.
 
@@ -1541,6 +1583,9 @@ def encoder_backbone_forward(model, input_ids, attn_mask, position_ids, token_ty
 
 def prepare_rope_and_heads(model):
     cfg = model.config
+    assert_spyre_dimensions(
+        cfg, model_name=getattr(cfg, "name_or_path", "") or "<unknown>"
+    )
     orig_head_dim = (
         getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
     )

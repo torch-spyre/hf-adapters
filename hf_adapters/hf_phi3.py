@@ -38,7 +38,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
+    BLOCK_SIZE,
     PrecomputedRotaryEmbedding,
+    _pad_proj_input_simple,
+    _pad_proj_output_simple,
     apply_rope_matmul,
     chunk_lm_head,
     get_backbone,
@@ -75,6 +78,34 @@ def _permute_proj_for_rope(proj, num_heads, head_dim, perm):
     """Permute Q or K projection output dims within each head for RoPE alignment."""
     w = proj.weight.data.view(num_heads, head_dim, -1)
     proj.weight.data = w[:, perm, :].contiguous().view(num_heads * head_dim, -1)
+
+
+def _pad_qk_proj_for_rope(proj, n_heads, orig_head_dim, padded_head_dim):
+    """Interleave-pad a split Q/K projection from orig_head_dim to padded_head_dim.
+
+    Mirrors ``hf_common.pad_attention_heads._pad_qk_rope`` but operates on an
+    already-split ``nn.Linear``. Each head's data is placed so that
+    ``apply_rope_matmul``'s ``[2, padded_head_dim//2]`` reshape sees the first
+    rotary half in ``[0:orig_half]`` and the second in
+    ``[padded_half:padded_half+orig_half]``; the gaps are zero and the RoPE
+    identity-padding leaves them untouched. Zero dims contribute nothing to
+    Q·K^T, so the result is numerically identical to the unpadded head.
+    """
+    orig_half = orig_head_dim // 2
+    padded_half = padded_head_dim // 2
+    w = proj.weight.data
+    hidden = w.shape[1]
+    new_w = torch.zeros(n_heads * padded_head_dim, hidden, dtype=w.dtype)
+    for h in range(n_heads):
+        s = h * orig_head_dim
+        d = h * padded_head_dim
+        new_w[d : d + orig_half, :] = w[s : s + orig_half, :]
+        new_w[d + padded_half : d + padded_half + orig_half, :] = w[
+            s + orig_half : s + orig_head_dim, :
+        ]
+    new_proj = nn.Linear(hidden, n_heads * padded_head_dim, bias=False)
+    new_proj.weight = nn.Parameter(new_w, requires_grad=False)
+    return new_proj
 
 
 def _split_fused_qkv(attn, num_q, num_kv, head_dim):
@@ -248,9 +279,23 @@ def prepare_for_spyre(model):
     cfg = model.config
     hd = cfg.hidden_size // cfg.num_attention_heads
 
-    # RoPE with identity padding for partial rotary
+    # RoPE reshape [B,L,H,2,D/2] needs D/2 >= BLOCK_SIZE (one Spyre stick).
+    # head_dim < 2*BLOCK_SIZE (e.g. Phi-3.5-mini: 96) produces an unaligned
+    # stick expression the compiler rejects. Pad Q/K/V/O up to the next
+    # multiple of 2*BLOCK_SIZE (96 -> 128). Phi-4-mini (head_dim=128) needs
+    # no padding. work_hd is the head_dim used everywhere downstream.
+    stick_aligned = ((hd + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)) * (2 * BLOCK_SIZE)
+    padded_head_dim = stick_aligned if stick_aligned > hd else None
+    work_hd = padded_head_dim or hd
+
+    # KV caches are sized from _spyre_head_dim (see hf_common.kv_cache_shapes).
+    # The compiled block writes work_hd-wide K/V, so the cache must match.
+    model._spyre_head_dim = work_hd
+
+    # RoPE with identity padding: pads the rotation matrix to work_hd//2 so the
+    # zero-padded Q/K dims (partial rotary and/or stick padding) pass through.
     model._spyre_rope = PrecomputedRotaryEmbedding(
-        get_backbone(model).rotary_emb, padded_head_dim=hd
+        get_backbone(model).rotary_emb, padded_head_dim=work_hd
     )
     patch_rmsnorm(Phi3RMSNorm)
 
@@ -264,6 +309,7 @@ def prepare_for_spyre(model):
     # Partial RoPE dimension permutation: HF pairs (j, j+rope_dim//2) but
     # apply_rope_matmul pairs (j, j+head_dim//2). Permute Q/K weights so
     # both agree. Q·K^T dot product is invariant under same permutation.
+    # Computed on the original head_dim; stick padding (below) happens after.
     prf = getattr(cfg, "partial_rotary_factor", 1.0)
     rope_dim = int(prf * hd)
     rope_perm = _rope_dim_permutation(hd, rope_dim) if rope_dim != hd else None
@@ -280,6 +326,14 @@ def prepare_for_spyre(model):
         if rope_perm is not None:
             _permute_proj_for_rope(q, num_q, hd, rope_perm)
             _permute_proj_for_rope(k, num_kv, hd, rope_perm)
+        if padded_head_dim is not None:
+            # Interleave-pad Q/K (RoPE layout), end-pad V, input-pad O.
+            q = _pad_qk_proj_for_rope(q, num_q, hd, padded_head_dim)
+            k = _pad_qk_proj_for_rope(k, num_kv, hd, padded_head_dim)
+            v = _pad_proj_output_simple(v, num_kv, hd, padded_head_dim)
+            layer.self_attn.o_proj = _pad_proj_input_simple(
+                layer.self_attn.o_proj, num_q, hd, padded_head_dim
+            )
         model._spyre_q_projs.append(q)
         model._spyre_k_projs.append(k)
         model._spyre_v_projs.append(v)
@@ -289,7 +343,7 @@ def prepare_for_spyre(model):
         model._spyre_up_projs.append(up)
 
     model._spyre_compiled_blocks = [
-        _make_compiled_block(layer, qp, kp, vp, gp, up, hd)
+        _make_compiled_block(layer, qp, kp, vp, gp, up, work_hd)
         for layer, qp, kp, vp, gp, up in zip(
             get_backbone(model).layers,
             model._spyre_q_projs,

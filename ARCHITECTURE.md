@@ -20,6 +20,7 @@ which models are supported on Spyre.
 | Qwen2.5 1.5B | qwen2 | 128 | 64 | Yes | Yes | Yes | Yes |
 | Mistral 7B v0.3 | mistral | 128 | 64 | Yes | Yes | Yes | Yes |
 | Phi-4 mini | phi3 | 128 | 64 | Yes | Yes | Yes | Yes |
+| Phi-3.5 mini | phi3 | 96→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | OLMo 1B | olmo | 128 | 64 | Yes | Yes | Yes | Yes |
 | OLMo2 1B | olmo2 | 128 | 64 | Yes | Yes | Yes | Yes |
 | Falcon 3 1B | llama | 256 | 128 | Yes | Yes | Yes | Yes |
