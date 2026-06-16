@@ -92,7 +92,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     Phi3Config: hf_phi3,
     Qwen2Config: hf_qwen2,
     Qwen3Config: hf_qwen3,
-    RobertaConfig: hf_bert,
+    RobertaConfig: hf_xlm_roberta,
     SmolLM3Config: hf_smollm3,
     XLMRobertaConfig: hf_xlm_roberta,
 }
