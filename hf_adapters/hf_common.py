@@ -42,29 +42,36 @@ class SpyreNoAdapterError(ValueError):
 
 
 def assert_spyre_dimensions(config, model_name):
-    """Reject configs whose ``hidden_size``/``intermediate_size`` is sub-stick.
+    """Reject configs whose ``hidden_size``/``intermediate_size`` is stick-misaligned.
 
-    Matmuls over a dimension smaller than one ``BLOCK_SIZE`` stick produce
-    stick index expressions the Spyre compiler can't lower (surfacing as a
-    cryptic ``Unsupported stick expression`` deep in ``torch.compile``).
-    ``head_dim`` is not checked — adapters auto-pad it (see
-    ``prepare_rope_and_heads``); ``hidden_size``/``intermediate_size`` can't be
-    padded without changing the model's arithmetic. Real models clear this bar;
-    it fires on tiny test fixtures (e.g. ``trl-internal-testing/tiny-*``).
+    The Spyre compiler lays tensors out in ``BLOCK_SIZE``-element sticks.
+    Matmuls over a dimension that is not a multiple of ``BLOCK_SIZE`` produce
+    stick index expressions it can't lower (e.g. ``floor(d2/320)`` for a 312-wide
+    dim), surfacing as a cryptic ``Unsupported stick expression`` deep in
+    ``torch.compile``. This covers both sub-stick dims (e.g. ``hidden_size=8``)
+    and misaligned ones (e.g. ``hidden_size=312``).
+
+    ``head_dim`` is not checked — adapters auto-pad it to a stick boundary (see
+    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``);
+    ``hidden_size``/``intermediate_size`` can't be padded without changing the
+    model's arithmetic. Real models clear this bar; it fires on tiny test
+    fixtures (e.g. ``trl-internal-testing/tiny-*``, ``cointegrated/rubert-tiny2``).
     """
     # text_config holds the dims for multimodal wrappers (Gemma 4, Granite Vision).
     dim_config = getattr(config, "text_config", None) or config
-    too_small = [
+    misaligned = [
         (f, v)
         for f in ("hidden_size", "intermediate_size")
-        if (v := getattr(dim_config, f, None)) is not None and v < BLOCK_SIZE
+        if (v := getattr(dim_config, f, None)) is not None and v % BLOCK_SIZE != 0
     ]
-    if too_small:
-        details = ", ".join(f"{f}={v}" for f, v in too_small)
+    if misaligned:
+        details = ", ".join(f"{f}={v}" for f, v in misaligned)
         raise SpyreUnsupportedModelError(
-            f"Model {model_name} is too small for Spyre: {details} < one stick "
-            f"({BLOCK_SIZE}). Use a real model whose hidden_size and "
-            f"intermediate_size are both >= {BLOCK_SIZE}."
+            f"Model {model_name} has Spyre-incompatible dimensions: {details} "
+            f"(not a multiple of one stick, {BLOCK_SIZE}). The Spyre compiler "
+            f"cannot lower matmuls over stick-misaligned dimensions. Use a model "
+            f"whose hidden_size and intermediate_size are both multiples of "
+            f"{BLOCK_SIZE}."
         )
 
 
