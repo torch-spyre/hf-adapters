@@ -1,0 +1,30 @@
+name: Run Spyre Test
+description: Execute a Spyre test script with common setup and teardown
+
+inputs:
+  test_script:
+    description: Name of the test script to run (e.g., test_load_spyre.py)
+    required: true
+  model_key:
+    description: Model key to pass to the test script
+    required: true
+  hf_token:
+    description: Hugging Face token for authentication
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Run ${{ inputs.test_script }} for ${{ inputs.model_key }}
+      env:
+        HF_TOKEN: ${{ inputs.hf_token }}
+      shell: bash
+      run: |
+        source "$HOME/.bashrc"
+        source /etc/profile.d/ibm-aiu-setup.sh
+        cd "$CLONED_HF_ADAPTERS_DIR"
+        echo "Running ${{ inputs.test_script }} for ${{ inputs.model_key }}..."
+        uv run python3 tests/${{ inputs.test_script }} "${{ inputs.model_key }}"
+        echo "tests done"
+
+# Made with Bob

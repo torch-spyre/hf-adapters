@@ -1,0 +1,494 @@
+# =============================================================================
+# Reusable workflow for common test jobs
+#
+# Shared by test_pull_request.yaml and daily_test.yaml. The three boolean/string
+# inputs below (models_filter, include_slow_tests, include_edge_cases) capture
+# every intentional difference between PR and daily runs — see each input's
+# description for the PR-vs-daily contract. All other configuration (runners,
+# matrices, steps) is identical across callers.
+# =============================================================================
+name: Common Test Jobs
+
+on:
+  workflow_call:
+    inputs:
+      models_filter:
+        description: >
+          pytest -k filter for the cpu-tests matrix. The Spyre matrices are
+          fixed; this only narrows the CPU sweep. PR uses a small filter
+          ("qwen3 or bge_base") for speed; daily broadens it; weekly is
+          broadest. Invariant: every model_key used in any Spyre matrix must
+          appear here as a substring so CPU sanity-checks anything that runs
+          on hardware.
+        required: true
+        type: string
+      include_slow_tests:
+        description: >
+          When true, the cpu-tests step omits the `-m "not slow"` marker so
+          @pytest.mark.slow tests run. PR sets false (fast lane); daily sets
+          true.
+        required: true
+        type: boolean
+      include_edge_cases:
+        description: >
+          Gates the spyre-generate-edge-cases-tests job. PR sets false (slow
+          on hardware); daily sets true.
+        required: true
+        type: boolean
+      torch_spyre_ref:
+        description: Branch, tag, or SHA of torch-spyre to check out and test
+        required: false
+        type: string
+        default: ""
+      rpm_location:
+        description: The Artifactory location where to download the RPM from
+        required: false
+        type: string
+        default: ""
+      rpm_names:
+        description: A space separated list of RPM names to download and install
+        required: false
+        type: string
+        default: ""
+      output_dir:
+        description: Output directory for build artifacts
+        required: false
+        type: string
+        default: ""
+    secrets:
+      HF_TOKEN:
+        required: true
+      ARTIFACTORY_USER:
+        required: true
+      ARTIFACTORY_API_KEY:
+        required: true
+      ARTIFACTORY_BASE_URL:
+        required: true
+      ARTIFACTORY_RPM_PATH:
+        required: true
+
+defaults:
+  run:
+    shell: bash
+    working-directory: /home/senuser
+
+permissions:
+  contents: read
+  checks: write
+
+env:
+  # The CI env var is very important.
+  # GitHub actions automatically sets CI=true
+  # which causes the pytest inductor tests to fail with AssertionError
+  # due to a mix of fallbacks and decompositions.
+  # Here we set it to an empty string (or we could also unset it).
+  CI: ""
+  CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
+  STORAGE_1_DIR: /storage-1/hf-adapters
+  HF_HOME: /storage-1/hf-adapters/.cache/huggingface
+  MODELS_FILTER: ${{ inputs.models_filter }}
+
+jobs:
+  cpu-tests:
+    name: CPU tests (${{ matrix.test_file }})
+    runs-on:
+      - x86_64
+      - spyre_pf_x0__pvc_1tb_x1
+      - linux
+      - image_spyre_inference # move to image_torch_spyre once available
+    timeout-minutes: 120
+    strategy:
+      matrix:
+        test_file:
+          - test_load_cpu.py
+          - test_adapter_cpu_accuracy.py
+          - test_embed_cpu_accuracy.py
+          - test_generate_edge_cases_cpu.py
+          - test_multibatch_generate_cpu.py
+          - test_st_backend_cpu.py
+
+    steps:
+      - uses: ./.github/actions/setup-spyre-test
+        with:
+          uv_groups: "dev test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - name: Run ${{ matrix.test_file }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          unset _IBM_AIU_SETUP
+          rm -f /tmp/etc/ibm/spyre/topo.json
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running ${{ matrix.test_file }}..."
+          if [ "${{ inputs.include_slow_tests }}" = "true" ]; then
+            uv run pytest -s -vvv -k "$MODELS_FILTER" "tests/${{ matrix.test_file }}"
+          else
+            uv run pytest -s -vvv -m "not slow" -k "$MODELS_FILTER" "tests/${{ matrix.test_file }}"
+          fi
+          echo "tests done"
+
+  spyre-load-tests:
+    name: Spyre load (${{ matrix.model_key }})
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - image_torch_spyre
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # All causal-LM and embedding keys from tests/model_registry.py.
+        # Commented-out entries are valid registry keys we deliberately exclude
+        # from PR runs — each comment names the reason.
+        model_key:
+          # Causal LM
+          - qwen3
+          - granite
+          - granite2b
+          - granite4
+          - smollm3
+          - tiny_llama
+          # phi4 — partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md);
+          #        load path itself works, but excluded for parity with the rest of the Spyre matrices.
+          # - phi4
+          - qwen2
+          - ministral
+          - olmo
+          - olmo2
+          - falcon3
+          - deepseek-coder
+          - granite-vision
+          # gemma4 — no public checkpoint at google/gemma-4-12B-it yet; the registry
+          #          path 404s on HF so the load test cannot pull weights.
+          # - gemma4
+          # Embedding
+          - qwen3_embed
+          - qwen2_embed
+          - e5_mistral
+          - linq_embed_mistral
+          - sfr_embedding_mistral
+          - bge_base
+          - minilm
+          - bge_m3
+          - mpnet
+          - modernbert
+          - gte_modernbert
+          - granite_embed
+
+    steps:
+      - uses: ./.github/actions/setup-spyre-test
+        with:
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - uses: ./.github/actions/run-spyre-test
+        with:
+          test_script: test_load_spyre.py
+          model_key: ${{ matrix.model_key }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+
+  spyre-smoke-tests:
+    name: Spyre smoke (${{ matrix.model_key }})
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - image_torch_spyre
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
+        model_key:
+          - qwen3
+          - granite
+          - granite2b
+          - granite4
+          - smollm3
+          - tiny_llama
+          # phi4 — partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md).
+          # - phi4
+          - qwen2
+          - ministral
+          - olmo
+          - olmo2
+          - falcon3
+          - deepseek-coder
+          # granite-vision — multimodal; load_fn=True in the registry. The smoke
+          #                   driver calls AutoSpyreModelForCausalLM.from_pretrained
+          #                   directly and does not handle the custom loader.
+          # - granite-vision
+          # gemma4 — no public checkpoint at google/gemma-4-12B-it (HF 404).
+          # - gemma4
+
+    steps:
+      - uses: ./.github/actions/setup-spyre-test
+        with:
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - uses: ./.github/actions/run-spyre-test
+        with:
+          test_script: test_e2e_smoke_spyre.py
+          model_key: ${{ matrix.model_key }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+
+  spyre-token-compare-tests:
+    name: Spyre token compare (${{ matrix.model_key }})
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - image_torch_spyre
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
+        model_key:
+          - qwen3
+          - granite
+          - granite2b
+          - granite4
+          - smollm3
+          - tiny_llama
+          # phi4 — partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md).
+          # - phi4
+          - qwen2
+          - ministral
+          - olmo
+          - olmo2
+          - falcon3
+          - deepseek-coder
+          # granite-vision — multimodal; the token-compare driver calls
+          #                   AutoSpyreModelForCausalLM.from_pretrained and does
+          #                   not handle the custom loader (load_fn=True).
+          # - granite-vision
+          # gemma4 — no public checkpoint at google/gemma-4-12B-it (HF 404).
+          # - gemma4
+
+    steps:
+      - uses: ./.github/actions/setup-spyre-test
+        with:
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - uses: ./.github/actions/run-spyre-test
+        with:
+          test_script: test_e2e_token_compare_spyre.py
+          model_key: ${{ matrix.model_key }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+
+  spyre-embed-compare-tests:
+    name: Spyre embed compare (${{ matrix.model_key }})
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - image_torch_spyre
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # All embedding keys from tests/model_registry.py::EMBEDDING_MODELS.
+        model_key:
+          - qwen3_embed
+          - qwen2_embed
+          - e5_mistral
+          - linq_embed_mistral
+          - sfr_embedding_mistral
+          - bge_base
+          - minilm
+          - bge_m3
+          - mpnet
+          - modernbert
+          - gte_modernbert
+          - granite_embed
+
+    steps:
+      - uses: ./.github/actions/setup-spyre-test
+        with:
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - uses: ./.github/actions/run-spyre-test
+        with:
+          test_script: test_e2e_embed_compare_spyre.py
+          model_key: ${{ matrix.model_key }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+
+  spyre-block-compare-tests:
+    name: Spyre block compare (${{ matrix.model_key }})
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - image_torch_spyre
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Block-compare uses tests/test_block_cpu_vs_spyre.py, which has its own
+        # architecture-keyed registry (one entry per adapter family, not per
+        # checkpoint). We enumerate every key from tests/model_registry.py here
+        # and route checkpoint keys to their architecture key — duplicates
+        # within the same family are commented out because they exercise the
+        # same compiled block path.
+        model_key:
+          - qwen3
+          - granite
+          # granite2b — same adapter (hf_granite) as `granite`; block-compare
+          #             registry keys are architecture-level.
+          # - granite2b
+          - granite4
+          - smollm3
+          # tiny_llama, falcon3, deepseek-coder all use hf_llama — covered by
+          # the `llama` architecture key in the block-compare registry.
+          - llama
+          # - tiny_llama
+          # - falcon3
+          # - deepseek-coder
+          # phi4 — uses hf_phi3, which is not in the block-compare registry; also
+          #        partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md).
+          # - phi4
+          - qwen2
+          # ministral uses hf_mistral — covered by the `mistral` architecture key.
+          - mistral
+          # - ministral
+          - olmo
+          - olmo2
+          - granite-vision
+          # gemma4 — uses hf_gemma4, which is not in the block-compare registry,
+          #          and there is no public google/gemma-4-12B-it checkpoint yet.
+          # - gemma4
+          # Embedding models — block-compare today only covers causal-LM
+          # architectures. Embedding adapters (hf_bert, hf_xlm_roberta, hf_mpnet,
+          # hf_modernbert) are not in the block-compare registry.
+          # - qwen3_embed
+          # - qwen2_embed
+          # - e5_mistral
+          # - linq_embed_mistral
+          # - sfr_embedding_mistral
+          # - bge_base
+          # - minilm
+          # - bge_m3
+          # - mpnet
+          # - modernbert
+          # - gte_modernbert
+          # - granite_embed
+
+    steps:
+      - uses: ./.github/actions/setup-spyre-test
+        with:
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - uses: ./.github/actions/run-spyre-test
+        with:
+          test_script: test_block_cpu_vs_spyre.py
+          model_key: ${{ matrix.model_key }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+
+  spyre-generate-edge-cases-tests:
+    name: Spyre generate edge (${{ matrix.model_key }})
+    if: ${{ inputs.include_edge_cases }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - image_torch_spyre
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
+        # Same set as the smoke/token-compare matrices above; the generate
+        # edge-case driver also calls AutoSpyreModelForCausalLM.from_pretrained.
+        model_key:
+          - qwen3
+          - granite
+          - granite2b
+          - granite4
+          - smollm3
+          - tiny_llama
+          # phi4 — partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md).
+          # - phi4
+          - qwen2
+          - ministral
+          - olmo
+          - olmo2
+          - falcon3
+          - deepseek-coder
+          # granite-vision — multimodal; the edge-case driver calls
+          #                   AutoSpyreModelForCausalLM.from_pretrained and does
+          #                   not handle the custom loader (load_fn=True).
+          # - granite-vision
+          # gemma4 — no public checkpoint at google/gemma-4-12B-it (HF 404).
+          # - gemma4
+
+    steps:
+      - uses: ./.github/actions/setup-spyre-test
+        with:
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - uses: ./.github/actions/run-spyre-test
+        with:
+          test_script: test_generate_edge_cases_spyre.py
+          model_key: ${{ matrix.model_key }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+
+# Made with Bob

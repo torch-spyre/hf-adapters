@@ -1,0 +1,62 @@
+name: Set up Spyre test job
+description: >
+  Sparse-checkout of .github/actions, run build-hf-adapters, and source the
+  Spyre setup files. Leaves the shell ready to invoke a test driver from
+  $CLONED_HF_ADAPTERS_DIR. Used by every Spyre matrix job in _test_common.yaml.
+
+inputs:
+  uv_groups:
+    description: Space-separated list of uv groups to install (e.g. "dev spyre test").
+    required: true
+  rpm_names:
+    description: A space separated list of RPM names to download and install
+    required: true
+  rpm_location:
+    description: Full Artifactory URL to download RPMs from
+    required: false
+    default: ''
+  output_dir:
+    description: Path to download the RPMs to
+    required: false
+    default: ''
+  torch_spyre_ref:
+    description: Branch, tag, or SHA of torch-spyre to check out and test
+    required: false
+    default: ''
+  artifactory_user:
+    description: Artifactory username
+    required: false
+    default: ''
+  artifactory_api_key:
+    description: Artifactory API key
+    required: false
+    default: ''
+  artifactory_base_url:
+    description: Artifactory base URL
+    required: false
+    default: ''
+  artifactory_rpm_path:
+    description: Artifactory RPM path
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout composite actions
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        sparse-checkout: .github/actions
+        sparse-checkout-cone-mode: false
+
+    - uses: ./.github/actions/build-hf-adapters
+      with:
+        uv_groups: ${{ inputs.uv_groups }}
+        rpm_names: ${{ inputs.rpm_names }}
+        rpm_location: ${{ inputs.rpm_location }}
+        output_dir: ${{ inputs.output_dir }}
+        torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+        artifactory_user: ${{ inputs.artifactory_user }}
+        artifactory_api_key: ${{ inputs.artifactory_api_key }}
+        artifactory_base_url: ${{ inputs.artifactory_base_url }}
+        artifactory_rpm_path: ${{ inputs.artifactory_rpm_path }}
