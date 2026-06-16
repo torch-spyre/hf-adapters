@@ -43,7 +43,6 @@ from _generate_edge_case_helpers import (
     SAMPLING_KWARGS,
     SAMPLING_MAX_NEW,
     SAMPLING_TARGETS,
-    SLOW_CPU_CASE_KEYS,
     NoPadTokenizer,
     forced_eos_expected,
     greedy_token_ids,
@@ -54,6 +53,10 @@ from _generate_edge_case_helpers import (
 )
 from model_registry import CAUSAL_LM_MODELS as MODELS
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# All tests in this file are marked `slow` and dropped from PR runs except
+# `test_generate_zero_new_tokens`, which is the lightest case and acts as the
+# PR-eligible smoke test for this module. The full suite runs in the weekly cron.
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -159,15 +162,9 @@ def _hf_reference_cached(info, tokenizer, prompts, max_new_tokens):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("model_key", list(MODELS.keys()), ids=list(MODELS.keys()))
-@pytest.mark.parametrize(
-    "case_id",
-    [
-        pytest.param(k, marks=pytest.mark.slow) if k in SLOW_CPU_CASE_KEYS else k
-        for k in CASES.keys()
-    ],
-    ids=list(CASES.keys()),
-)
+@pytest.mark.parametrize("case_id", list(CASES.keys()), ids=list(CASES.keys()))
 def test_generate_edge_case(
     model_key, case_id, load_adapter, unwrap_compiled_blocks, hf_common_mod
 ):
@@ -209,6 +206,7 @@ def test_generate_edge_case(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
 def test_generate_is_deterministic(
     model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod
@@ -251,6 +249,7 @@ def test_generate_is_deterministic(
 # model's own greedy continuation at the desired offset.
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
 @pytest.mark.parametrize("case_id", list(EOS_CASES.keys()), ids=list(EOS_CASES.keys()))
 def test_generate_forced_eos(
@@ -344,6 +343,7 @@ def test_generate_zero_new_tokens(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
 def test_generate_sampling_determinism(
     model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod
@@ -413,6 +413,7 @@ def test_generate_sampling_determinism(
 # does not truncate. The adapter should emit exactly max_new_tokens per row.
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
 def test_generate_no_eos_runs_full_budget(
     model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod
@@ -475,6 +476,7 @@ def test_generate_no_eos_runs_full_budget(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
 def test_generate_no_pad_token_fallback(
     model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod
@@ -509,6 +511,7 @@ def test_generate_no_pad_token_fallback(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
 def test_generate_sampling_top_k_zero(
     model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod
@@ -564,6 +567,7 @@ def test_generate_sampling_top_k_zero(
 # eos_token_id should still produce a normal greedy continuation matching HF.
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
 def test_generate_eos_inside_prompt(
     model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod

@@ -1,31 +1,47 @@
-name: test_each_commit
+# =============================================================================
+# Weekly test workflow
+#
+# Mirrors daily_test.yaml's structure (same job shape, same composite build
+# action, same `MODELS_FILTER` invariant). Weekly's purpose is the *full
+# coverage sweep*: it widens the model surface beyond daily's known-good set
+# to catch regressions in adapters that nobody touched recently.
+#
+# Differences vs daily_test.yaml, all intentional:
+#
+#   1. Trigger
+#      - Daily:  schedule (06:00 UTC every day) + workflow_dispatch.
+#      - Weekly: schedule (22:00 UTC every Saturday) + workflow_dispatch.
+#
+#   2. CPU `MODELS_FILTER` covers every adapter
+#      Short-substring form matches all 27 keys across the causal-LM and
+#      embedding registries. CPU is cheap, so weekly tests every adapter
+#      against every CPU test file.
+#      Invariant: every model_key in a Spyre matrix below has its substring
+#      present here so CPU sanity-checks anything that runs on hardware.
+#
+#   3. Spyre matrices = daily Spyre + tier-2 overflow
+#      Daily covers the proven-good set. Weekly adds adapters that have been
+#      validated to load but aren't part of the daily heartbeat. Expansion is
+#      gradual — a few entries per week as new adapters get their first green
+#      Spyre run, until full Spyre coverage is reached.
+#      Skipped for now: phi4 (compiler fix in flight), granite-vision (custom
+#      loader needs job-specific handling), mistral-family (license click-
+#      through pending on the CI HF account).
+#
+# Same as daily (not differences):
+#   - No pre-commit job, no fan-in gate (same reasoning as daily).
+#   - CPU step has no `-m` filter; slow tests run.
+#   - HF_TOKEN plumbed through every step.
+#   - Same workloads as daily — weekly varies the X axis (models), not Y
+#     (workload). Stress testing, if needed, belongs in a separate workflow.
+# =============================================================================
+name: weekly_test
 
 on:
-  push:
-    branches: [main]
-    tags: ["*"]
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
-  merge_group:
-    types: [checks_requested]
+  schedule:
+    # Runs at 22:00 UTC every Saturday
+    - cron: "0 22 * * 6"
   workflow_dispatch:
-    inputs:
-      torch_spyre_ref:
-        description: Branch, tag, or SHA of torch-spyre to check out and test
-        required: false
-        type: string
-        default: ""
-      rpm_location:
-        description: The Artifactory location where to download the RPM from
-        required: false
-        type: string
-        default: ""
-      rpm_names:
-        description: A space separated list of RPM names to download and install
-        required: false
-        type: string
-        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -48,8 +64,15 @@ env:
   # Here we set it to an empty string (or we could also unset it).
   CI: ""
   CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
-  STORAGE_1_DIR: /storage-1/hf-adapaters
-  HF_HOME: /storage-1/hf-adapaters/.cache/huggingface
+  STORAGE_1_DIR: /storage-1/hf-adapters
+  HF_HOME: /storage-1/hf-adapters/.cache/huggingface
+  # Single source of truth for the set of models exercised by the CPU
+  # test matrix's `-k` filter. Weekly sweeps every adapter via short
+  # substrings (e.g. `qwen` matches qwen2/qwen3/qwen2_embed/qwen3_embed).
+  # Daily (daily_test.yaml) covers the known-good subset.
+  # Invariant: every model_key used in a Spyre matrix below must have its
+  # substring present here so CPU sanity-checks anything that runs on hardware.
+  MODELS_FILTER: "qwen or granite or smollm3 or llama or phi4 or mistral or olmo or falcon3 or deepseek-coder or bge or minilm or mpnet or modernbert"
 
 jobs:
   cpu-tests:
@@ -66,8 +89,8 @@ jobs:
           - test_load_cpu.py
           - test_adapter_cpu_accuracy.py
           - test_embed_cpu_accuracy.py
-          # test_generate_edge_cases_cpu.py moved to weekly workflow
-          - test_multibatch_generate.py
+          - test_generate_edge_cases_cpu.py
+          - test_multibatch_generate_cpu.py
           - test_st_backend_cpu.py
 
     steps:
@@ -79,17 +102,11 @@ jobs:
 
       - uses: ./.github/actions/build-hf-adapters
         with:
-          uv_groups: "dev test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          output_dir: ${{ inputs.output_dir }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+          uv_groups: dev test
 
       - name: Run ${{ matrix.test_file }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           unset _IBM_AIU_SETUP
           rm -f /tmp/etc/ibm/spyre/topo.json
@@ -97,7 +114,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running ${{ matrix.test_file }}..."
-          uv run pytest -s -vvv -k "qwen3 or granite or granite2b or granite4 or bge_base or bge_m3" "tests/${{ matrix.test_file }}"
+          uv run pytest -s -vvv -k "$MODELS_FILTER" "tests/${{ matrix.test_file }}"
           echo "tests done"
 
   spyre-load-tests:
@@ -111,12 +128,17 @@ jobs:
     strategy:
       matrix:
         model_key:
+          # Daily set
           - qwen3
           - granite
           - granite2b
-          # - granite4
+          - bge_m3
+          # Weekly tier-2 expansion
+          - granite4
+          - llama
+          - minilm
+          # Skipped (re-enable as adapters are validated):
           # - smollm3
-          # - llama
           # - phi4
           # - qwen2
           # - mistral
@@ -126,9 +148,6 @@ jobs:
           # - deepseek-coder
           # - yi
           # - granite-vision
-          # Embedding models (one per adapter)
-          # - minilm
-          - bge_m3
           # - mpnet
           # - modernbert
           # - qwen3_embed
@@ -142,17 +161,11 @@ jobs:
 
       - uses: ./.github/actions/build-hf-adapters
         with:
-          uv_groups: "dev spyre test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          output_dir: ${{ inputs.output_dir }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+          uv_groups: dev spyre test
 
       - name: Run test_load_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -172,12 +185,15 @@ jobs:
     strategy:
       matrix:
         model_key:
+          # Daily set
           - qwen3
           - granite
           - granite2b
           - granite4
+          # Weekly tier-2 expansion
+          - llama
+          # Skipped (re-enable as adapters are validated):
           # - smollm3
-          # - llama
           # - phi4
           # - qwen2
           # - mistral
@@ -197,17 +213,11 @@ jobs:
 
       - uses: ./.github/actions/build-hf-adapters
         with:
-          uv_groups: "dev spyre test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          output_dir: ${{ inputs.output_dir }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+          uv_groups: dev spyre test
 
       - name: Run test_e2e_smoke_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -227,9 +237,13 @@ jobs:
     strategy:
       matrix:
         model_key:
+          # Daily set
           - qwen3
           - granite
-          # - llama
+          # Weekly tier-2 expansion
+          - granite2b
+          - llama
+          # Skipped (re-enable as adapters are validated):
           # - qwen2
           # - mistral
           # - olmo
@@ -245,17 +259,11 @@ jobs:
 
       - uses: ./.github/actions/build-hf-adapters
         with:
-          uv_groups: "dev spyre test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          output_dir: ${{ inputs.output_dir }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+          uv_groups: dev spyre test
 
       - name: Run test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -275,9 +283,18 @@ jobs:
     strategy:
       matrix:
         model_key:
+          # Daily set
+          - qwen3_embed
           - bge_base
-          # - minilm
-          # - qwen3_embed
+          - bge_m3
+          # Weekly tier-2 expansion
+          - minilm
+          # Skipped (re-enable as adapters are validated):
+          # - mpnet
+          # - modernbert
+          # - gte_modernbert
+          # - granite_embed
+          # - qwen2_embed
 
     steps:
       - name: Checkout composite actions
@@ -288,17 +305,11 @@ jobs:
 
       - uses: ./.github/actions/build-hf-adapters
         with:
-          uv_groups: "dev spyre test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          output_dir: ${{ inputs.output_dir }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+          uv_groups: dev spyre test
 
       - name: Run test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -318,11 +329,15 @@ jobs:
     strategy:
       matrix:
         model_key:
+          # Daily set
           - qwen3
           - granite
+          - granite2b
+          # Weekly tier-2 expansion
+          - llama
+          # Skipped (re-enable as adapters are validated):
           # - granite4
           # - smollm3
-          # - llama
           # - qwen2
           # - mistral
           # - olmo
@@ -336,17 +351,11 @@ jobs:
 
       - uses: ./.github/actions/build-hf-adapters
         with:
-          uv_groups: "dev spyre test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          output_dir: ${{ inputs.output_dir }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+          uv_groups: dev spyre test
 
       - name: Run test_block_cpu_vs_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -355,35 +364,43 @@ jobs:
           uv run python3 tests/test_block_cpu_vs_spyre.py "${{ matrix.model_key }}"
           echo "tests done"
 
-  # ===========================================================================
-  # Required check gate — fans in all matrix jobs so a single branch
-  # protection rule ("tests / run spyre unit tests") passes only when every
-  # suite passes.
-  # ===========================================================================
-  run-spyre-unit-tests:
-    name: run spyre unit tests
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
-    needs:
-      - cpu-tests
-      - spyre-load-tests
-      - spyre-smoke-tests
-      - spyre-token-compare-tests
-      - spyre-embed-compare-tests
-      - spyre-block-compare-tests
-    if: always()
+  spyre-generate-edge-cases-tests:
+    name: Spyre generate edge (${{ matrix.model_key }})
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - image_torch_spyre
+    timeout-minutes: 120
+    strategy:
+      matrix:
+        model_key:
+          # Daily set
+          - qwen3
+          - granite
+          - granite2b
+          # Weekly tier-2 expansion
+          - granite4
+          - llama
+
     steps:
-      - name: Check all suites passed
-        run: |-
-          if ${{ contains(needs.cpu-tests.result, 'failure') || contains(needs.cpu-tests.result, 'cancelled') ||
-                 contains(needs.spyre-load-tests.result, 'failure') || contains(needs.spyre-load-tests.result, 'cancelled') ||
-                 contains(needs.spyre-smoke-tests.result, 'failure') || contains(needs.spyre-smoke-tests.result, 'cancelled') ||
-                 contains(needs.spyre-token-compare-tests.result, 'failure') || contains(needs.spyre-token-compare-tests.result, 'cancelled') ||
-                 contains(needs.spyre-embed-compare-tests.result, 'failure') || contains(needs.spyre-embed-compare-tests.result, 'cancelled') ||
-                 contains(needs.spyre-block-compare-tests.result, 'failure') || contains(needs.spyre-block-compare-tests.result, 'cancelled') }}; then
-            echo "One or more test suites failed."
-            exit 1
-          fi
-          echo "All test suites passed."
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: dev spyre test
+
+      - name: Run test_generate_edge_cases_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_generate_edge_cases_spyre.py for ${{ matrix.model_key }}..."
+          uv run python3 tests/test_generate_edge_cases_spyre.py "${{ matrix.model_key }}"
+          echo "tests done"

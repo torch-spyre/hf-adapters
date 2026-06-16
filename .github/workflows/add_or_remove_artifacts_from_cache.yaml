@@ -42,7 +42,7 @@ jobs:
       FORCE_DOWNLOAD: ${{ inputs.force_download }}
       GITHUB_SHA: ${{ github.sha }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      STORAGE_1_DIR: /storage-1/hf-adapaters
+      STORAGE_1_DIR: /storage-1/hf-adapters
       HF_HOME: /storage-1/hf-adapters/.cache/huggingface
 
     steps:

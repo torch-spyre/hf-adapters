@@ -51,7 +51,7 @@ CAUSAL_LM_MODELS = {
         "path": "HuggingFaceTB/SmolLM3-3B-Base",
         "adapter": "hf_smollm3.py",
     },
-    "llama": {
+    "tiny_llama": {
         "name": "TinyLlama 1.1B",
         "path": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         "adapter": "hf_llama.py",
@@ -66,9 +66,9 @@ CAUSAL_LM_MODELS = {
         "path": "Qwen/Qwen2.5-1.5B",
         "adapter": "hf_qwen2.py",
     },
-    "mistral": {
-        "name": "Mistral 7B v0.3",
-        "path": "mistralai/Mistral-7B-v0.3",
+    "ministral": {
+        "name": "Ministral 3b instruct",
+        "path": "ministral/Ministral-3b-instruct",
         "adapter": "hf_mistral.py",
     },
     "olmo": {
@@ -97,11 +97,11 @@ CAUSAL_LM_MODELS = {
     #     "path": "mistralai/Ministral-3B-Instruct",
     #     "adapter": "hf_mistral.py",
     # },
-    "yi": {
-        "name": "Yi 1.5 6B",
-        "path": "01-ai/Yi-1.5-6B",
-        "adapter": "hf_llama.py",
-    },
+    # "yi_6b": {
+    #     "name": "Yi 1.5 6B",
+    #     "path": "01-ai/Yi-1.5-6B",
+    #     "adapter": "hf_llama.py",
+    # },
     "granite-vision": {
         "name": "Granite Vision 4.1 4B",
         "path": "ibm-granite/granite-vision-4.1-4b",
