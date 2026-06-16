@@ -136,8 +136,8 @@ EMBEDDING_MODELS = {
         "adapter": "hf_qwen3.py",
     },
     "qwen2_embed": {
-        "name": "GTE-Qwen2-1.5B",
-        "path": "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+        "name": "Jina-Qwen2-embed-0.5B",
+        "path": "jinaai/jina-code-embeddings-0.5b",
         "adapter": "hf_qwen2.py",
     },
     "e5_mistral": {
