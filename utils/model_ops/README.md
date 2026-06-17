@@ -17,10 +17,10 @@ Currently, we confirmed that a yaml file can be generated for the following mode
 ## How to generate a yaml file
 
 If running for the first time, install the parent project together with the
-`models-ops` extra from the repository root:
+`models-ops` dependency group from the repository root:
 
 ```
-pip install -e ".[models-ops]"
+uv sync --group models-ops
 ```
 
 The driver scripts require an NVIDIA GPU, so install a CUDA-enabled build of
@@ -28,7 +28,7 @@ PyTorch separately. The exact index URL depends on your CUDA version (replace
 `cu128` with the build that matches your driver, e.g. `cu121`, `cu124`):
 
 ```
-pip install --upgrade torch --index-url https://download.pytorch.org/whl/cu128
+uv pip install --upgrade torch --index-url https://download.pytorch.org/whl/cu128
 ```
 
 Then change directory into `utils/models_ops/` to run the drivers (the absolute
