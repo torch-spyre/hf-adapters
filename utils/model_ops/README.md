@@ -44,4 +44,3 @@ python -m models.<model folder>.run_huggingface
 The desired level of logging can be controlled via the environment variable **TEST_GEN_LOGGING_LEVEL**, which can be set to standard python logging levels, namely, one of **DEBUG**, **INFO**, **WARNING**, **ERROR**, and **CRITICAL**.
 
 The variable can be defined via command line or **.env** file in the current folder.
-

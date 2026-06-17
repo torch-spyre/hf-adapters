@@ -30,8 +30,8 @@ import yaml
 from dotenv import load_dotenv
 from torch.fx.experimental.symbolic_shapes import has_free_symbols, is_concrete_int
 
-
 USE_OLDFORMAT = os.getenv("USE_OLDFORMAT", None) is not None
+
 
 def _get_transformers_version():
     ver = os.getenv("TRANSFORMERS_VERSION", None)
