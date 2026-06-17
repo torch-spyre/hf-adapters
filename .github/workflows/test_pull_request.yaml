@@ -90,7 +90,7 @@ jobs:
       - x86_64
       - spyre_pf_x0__pvc_1tb_x1
       - linux
-      - image_spyre_inference # move to image_torch_spyre once available
+      - image_torch_spyre
     timeout-minutes: 120
     strategy:
       matrix:
