@@ -27,6 +27,11 @@ on:
         required: false
         type: string
         default: ""
+      run_generate_edge_cases:
+        description: Run the slow Spyre generate-edge-cases matrix (daily/weekly only)
+        required: false
+        type: boolean
+        default: false
       torch_spyre_ref:
         description: Branch, tag, or SHA of torch-spyre to check out and test
         required: false
@@ -478,4 +483,73 @@ jobs:
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_block_cpu_vs_spyre.py for ${{ matrix.model_key }}..."
           uv run python3 tests/test_block_cpu_vs_spyre.py "${{ matrix.model_key }}"
+          echo "tests done"
+
+  spyre-generate-edge-cases-tests:
+    name: Spyre generate edge (${{ matrix.model_key }})
+    # Slow Spyre edge-case suite. Off by default (PR skips it); daily/weekly
+    # opt in via run_generate_edge_cases=true. When the flag is false this
+    # job appears as a "Skipped" check on the PR — that's expected.
+    if: ${{ inputs.run_generate_edge_cases }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - image_torch_spyre
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
+        # Same set as the smoke/token-compare matrices above; the generate
+        # edge-case driver also calls AutoSpyreModelForCausalLM.from_pretrained.
+        model_key:
+          - qwen3
+          - granite
+          - granite2b
+          - granite4
+          - smollm3
+          - tiny_llama
+          # phi4 — partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md).
+          # - phi4
+          - qwen2
+          - ministral
+          - olmo
+          - olmo2
+          - falcon3
+          - deepseek-coder
+          # granite-vision — multimodal; the edge-case driver calls
+          #                   AutoSpyreModelForCausalLM.from_pretrained and does
+          #                   not handle the custom loader (load_fn=True).
+          # - granite-vision
+          # gemma4 — no public checkpoint at google/gemma-4-12B-it (HF 404).
+          # - gemma4
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - name: Run test_generate_edge_cases_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_generate_edge_cases_spyre.py for ${{ matrix.model_key }}..."
+          uv run python3 tests/test_generate_edge_cases_spyre.py "${{ matrix.model_key }}"
           echo "tests done"
