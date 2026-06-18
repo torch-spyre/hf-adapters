@@ -101,26 +101,11 @@ EOS_CASES = {
 }
 
 
-# Subset of CASES the Spyre script runs (each Spyre case takes minutes).
-SPYRE_CASE_KEYS = [
-    "single_token_prompt",
-    "short_one_token",
-    "short_block_minus_one",
-    "short_cross_block",
-    "short_two_blocks_plus",
-    "prompt_exactly_block",
-    "long_multi_block",
-    "mixed_short",
-    "mixed_with_single_token",
-]
-
-# Subset of EOS_CASES the Spyre script runs.
-SPYRE_EOS_CASE_KEYS = [
-    "eos_first_token",
-    "eos_mid_block",
-    "eos_first_of_second_block",
-    "eos_on_last_step",
-]
+# The Spyre side of these tests now lives as one file per case under
+# tests/spyre/edge_cases/, parametrized over models. The CI matrix gives each
+# (model, case) cell its own runner process — that's the process boundary
+# replaced what test_generate_edge_cases_spyre.py used to do via a size-1
+# multiprocessing.Pool.
 
 
 # Sampling kwargs used by both the CPU pytest sampling-determinism test and the

@@ -449,10 +449,12 @@ past 256 distinct offsets, dynamo stops compiling and the over-limit
 steps fall back to Spyre eager — the KV write lands in the wrong slot →
 corrupted attention context → divergent tokens, with **no error**. A
 generation that crosses ~256 cumulative offsets in one process degrades
-silently. Reproduced in `tests/test_generate_edge_cases_spyre.py`:
-heavy cases that pass in isolation fail when accumulated past the limit
-in the same process. The real fix is a runtime-symbolic offset (one
-binary, any value) — see Open Work.
+silently. Originally surfaced in the per-case Spyre edge-case suite
+(now split across `tests/spyre/edge_cases/test_*.py`, one process per
+case): heavy cases that pass in isolation failed when accumulated past
+the limit in the same process. The split itself sidesteps the bug for
+this suite — the real fix is a runtime-symbolic offset (one binary,
+any value) — see Open Work.
 
 ### Open Work
 

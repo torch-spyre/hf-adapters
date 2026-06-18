@@ -14,7 +14,10 @@
 #   5. `pytest_marker` is empty — daily picks up `@pytest.mark.slow` tests
 #      that PR drops via `-m "not slow"`.
 #   6. `run_generate_edge_cases: true` — turns on the slow Spyre edge-case
-#      matrix in the reusable workflow (PR leaves it off).
+#      matrix in the reusable workflow (PR leaves it off). Each (model, case)
+#      pair is its own runner cell — the per-case files under
+#      tests/spyre/edge_cases/ replaced the size-1 multiprocessing.Pool the
+#      old driver used. Expect ~(models × cases) cells on this lane.
 # =============================================================================
 name: daily_test
 

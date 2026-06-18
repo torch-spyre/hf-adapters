@@ -19,13 +19,14 @@ pytest tests/test_adapter_cpu_accuracy.py -k "qwen3 and manual"  # one path
 pytest tests/test_embed_cpu_accuracy.py
 
 # Load tests (verify models load without errors)
-pytest tests/test_load_cpu.py      # CPU load test
-pytest tests/test_load_spyre.py    # Spyre load test (requires hardware)
+pytest tests/test_load_cpu.py                    # CPU load test
+pytest tests/spyre/test_load_spyre.py            # Spyre load test (requires hardware)
 
 # Spyre tests (on pod only — requires torch_spyre)
-python3 tests/test_block_cpu_vs_spyre.py all
-python3 tests/test_e2e_smoke_spyre.py qwen3
-python3 tests/test_e2e_token_compare_spyre.py qwen3
+pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k qwen3
+pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k qwen3
+pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k bge_base
+pytest -s -vvv tests/spyre/test_block_cpu_vs_spyre.py -m spyre_block   # opt-in marker
 ```
 
 ## Spyre Pod

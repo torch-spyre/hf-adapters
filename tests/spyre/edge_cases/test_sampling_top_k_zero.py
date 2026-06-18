@@ -1,0 +1,60 @@
+# Copyright 2025 The Torch-Spyre Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""``top_k=0`` sampling: skips the top-k filter branch.
+
+Adapter-vs-adapter reproducibility check; no HF reference needed.
+"""
+
+import pytest
+import torch
+from _common import free, load_spyre_model, model_info
+from _generate_edge_case_helpers import (
+    SAMPLING_MAX_NEW,
+    SAMPLING_TARGETS,
+    make_prompts,
+)
+from model_registry import CAUSAL_LM_MODELS
+from transformers import AutoTokenizer
+
+
+@pytest.mark.parametrize("model_key", list(CAUSAL_LM_MODELS.keys()))
+def test_sampling_top_k_zero(model_key):
+    info = model_info(model_key)
+    print(f"\n  {info['name']}: {info['path']}")
+
+    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    prompts = make_prompts(tokenizer, SAMPLING_TARGETS)
+    sampling = dict(do_sample=True, temperature=1.0, top_k=0)
+
+    model = load_spyre_model(info)
+    try:
+        torch.manual_seed(2024)
+        out1 = model.generate(
+            tokenizer, prompts, max_new_tokens=SAMPLING_MAX_NEW, **sampling
+        )
+        torch.manual_seed(2024)
+        out2 = model.generate(
+            tokenizer, prompts, max_new_tokens=SAMPLING_MAX_NEW, **sampling
+        )
+    finally:
+        free(model)
+
+    assert len(out1) == len(prompts)
+    for i, s in enumerate(out1):
+        assert s, f"{model_key} top_k=0 prompt[{i}] produced empty output"
+    assert out1 == out2, (
+        f"{model_key} top_k=0 sampling not reproducible:\n"
+        f"  run1: {out1}\n  run2: {out2}"
+    )

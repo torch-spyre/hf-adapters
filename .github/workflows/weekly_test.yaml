@@ -170,8 +170,8 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running test_load_spyre.py for ${{ matrix.model_key }}..."
-          uv run python3 tests/test_load_spyre.py "${{ matrix.model_key }}"
+          echo "Running tests/spyre/test_load_spyre.py for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv "tests/spyre/test_load_spyre.py" -k "${{ matrix.model_key }}"
           echo "tests done"
 
   spyre-smoke-tests:
@@ -222,8 +222,8 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
-          uv run python3 tests/test_e2e_smoke_spyre.py "${{ matrix.model_key }}"
+          echo "Running tests/spyre/test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv "tests/spyre/test_e2e_smoke_spyre.py" -k "${{ matrix.model_key }}"
           echo "tests done"
 
   spyre-token-compare-tests:
@@ -268,8 +268,8 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run python3 tests/test_e2e_token_compare_spyre.py "${{ matrix.model_key }}"
+          echo "Running tests/spyre/test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv "tests/spyre/test_e2e_token_compare_spyre.py" -k "${{ matrix.model_key }}"
           echo "tests done"
 
   spyre-embed-compare-tests:
@@ -314,8 +314,8 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run python3 tests/test_e2e_embed_compare_spyre.py "${{ matrix.model_key }}"
+          echo "Running tests/spyre/test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv "tests/spyre/test_e2e_embed_compare_spyre.py" -k "${{ matrix.model_key }}"
           echo "tests done"
 
   spyre-block-compare-tests:
@@ -360,12 +360,12 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running test_block_cpu_vs_spyre.py for ${{ matrix.model_key }}..."
-          uv run python3 tests/test_block_cpu_vs_spyre.py "${{ matrix.model_key }}"
+          echo "Running tests/spyre/test_block_cpu_vs_spyre.py for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv "tests/spyre/test_block_cpu_vs_spyre.py" -m spyre_block -k "${{ matrix.model_key }}"
           echo "tests done"
 
   spyre-generate-edge-cases-tests:
-    name: Spyre generate edge (${{ matrix.model_key }})
+    name: Spyre edge ${{ matrix.case_file }} (${{ matrix.model_key }})
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -382,6 +382,29 @@ jobs:
           # Weekly tier-2 expansion
           - granite4
           - llama
+        # One file per case under tests/spyre/edge_cases/. Each (model × case)
+        # cell is its own runner process — fresh VFIO DMA mappings without
+        # multiprocessing wiring.
+        case_file:
+          - test_greedy_single_token_prompt
+          - test_greedy_short_one_token
+          - test_greedy_short_block_minus_one
+          - test_greedy_short_cross_block
+          - test_greedy_short_two_blocks_plus
+          - test_greedy_prompt_exactly_block
+          - test_greedy_long_multi_block
+          - test_greedy_mixed_short
+          - test_greedy_mixed_with_single_token
+          - test_eos_first_token
+          - test_eos_mid_block
+          - test_eos_first_of_second_block
+          - test_eos_on_last_step
+          - test_zero_new_tokens
+          - test_sampling_determinism
+          - test_no_eos_runs_full_budget
+          - test_no_pad_token_fallback
+          - test_sampling_top_k_zero
+          - test_eos_inside_prompt
 
     steps:
       - name: Checkout composite actions
@@ -394,13 +417,13 @@ jobs:
         with:
           uv_groups: dev spyre test
 
-      - name: Run test_generate_edge_cases_spyre.py for ${{ matrix.model_key }}
+      - name: Run ${{ matrix.case_file }} for ${{ matrix.model_key }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running test_generate_edge_cases_spyre.py for ${{ matrix.model_key }}..."
-          uv run python3 tests/test_generate_edge_cases_spyre.py "${{ matrix.model_key }}"
+          echo "Running tests/spyre/edge_cases/${{ matrix.case_file }}.py for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv "tests/spyre/edge_cases/${{ matrix.case_file }}.py" -k "${{ matrix.model_key }}"
           echo "tests done"
