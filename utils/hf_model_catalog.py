@@ -9,9 +9,11 @@ columns* it wants on top of the shared schema.
 
 import csv
 import re
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from huggingface_hub.hf_api import ModelInfo
 from tqdm import tqdm
 from transformers import AutoConfig
 
@@ -19,10 +21,10 @@ from transformers import AutoConfig
 from hf_adapters.auto_spyre_model import CONFIG_TO_ADAPTER_MODULE_MAPPING
 
 # Get the resources directory (parent of resources/__init__.py)
-RESOURCES_DIR = Path(__file__).resolve().parent.parent / "resources"
+RESOURCES_DIR: Path = Path(__file__).resolve().parent.parent / "resources"
 
 # Metadata fields requested from list_models for every fetcher.
-EXPAND_FIELDS = [
+EXPAND_FIELDS: list[str] = [
     "config",
     "safetensors",
     "gated",
@@ -33,7 +35,7 @@ EXPAND_FIELDS = [
     "tags",
 ]
 
-MOE_MODEL_TYPES = {
+MOE_MODEL_TYPES: set[str] = {
     "mixtral",
     "qwen2_moe",
     "qwen3_moe",
@@ -44,9 +46,9 @@ MOE_MODEL_TYPES = {
     "gpt_oss",
 }
 
-MOE_MODEL_TYPE_PREFIXES = ("deepseek_v2", "deepseek_v3", "deepseek_v4")
+MOE_MODEL_TYPE_PREFIXES: tuple[str, ...] = ("deepseek_v2", "deepseek_v3", "deepseek_v4")
 
-MOE_ARCH_SUBSTRINGS = [
+MOE_ARCH_SUBSTRINGS: list[str] = [
     "mixtral",
     "moe",
     "dbrx",
@@ -58,53 +60,53 @@ MOE_ARCH_SUBSTRINGS = [
 ]
 
 # Get supported config class names dynamically from the mapping
-SUPPORTED_CONFIG_CLASSES = {
+SUPPORTED_CONFIG_CLASSES: set[str] = {
     config_class.__name__ for config_class in CONFIG_TO_ADAPTER_MODULE_MAPPING.keys()
 }
 
 
-def tags(model):
+def tags(model: ModelInfo) -> set[str]:
     """Lower-cased set of a model's tags (empty set if none)."""
     return {t.lower() for t in (getattr(model, "tags", None) or [])}
 
 
-def is_supported_config(config_class_name):
+def is_supported_config(config_class_name: str | None) -> bool:
     """Check if the config class is supported by our adapter code."""
     if config_class_name is None:
         return False
     return config_class_name in SUPPORTED_CONFIG_CLASSES
 
 
-def is_moe(model):
+def is_moe(model: ModelInfo) -> bool:
     if any("moe" in t for t in tags(model)):
         return True
 
-    config = model.config or {}
-    model_type = (config.get("model_type") or "").lower()
+    config: dict = model.config or {}
+    model_type: str = (config.get("model_type") or "").lower()
     if model_type in MOE_MODEL_TYPES:
         return True
     if model_type.startswith(MOE_MODEL_TYPE_PREFIXES):
         return True
 
-    architectures = config.get("architectures") or []
-    arch_lower = " ".join(architectures).lower()
+    architectures: list[str] = config.get("architectures") or []
+    arch_lower: str = " ".join(architectures).lower()
     return any(sub in arch_lower for sub in MOE_ARCH_SUBSTRINGS)
 
 
-def is_custom_code(model):
+def is_custom_code(model: ModelInfo) -> bool:
     if "custom_code" in tags(model):
         return True
-    config = model.config or {}
+    config: dict = model.config or {}
     return bool(config.get("auto_map"))
 
 
 def format_number_to_billions_smart(num: int | float) -> str:
     """Smart formatting that adjusts precision based on magnitude."""
-    billions = num / 1_000_000_000
+    billions: float = num / 1_000_000_000
 
     if billions >= 10:
         # For numbers >= 10B, round to nearest integer
-        result = round(billions)
+        result: int | float = round(billions)
         return f"{result}B"
     elif billions >= 1:
         # For 1B-10B, show 1 decimal place
@@ -119,43 +121,45 @@ def format_number_to_billions_smart(num: int | float) -> str:
 def parse_number_suffix(value: str) -> int:
     value = value.strip().upper()
 
-    multipliers = {
+    multipliers: dict[str, int] = {
         "K": 1_000,
         "M": 1_000_000,
         "B": 1_000_000_000,
         "T": 1_000_000_000_000,
     }
 
-    suffix = value[-1]
+    suffix: str = value[-1]
 
     if suffix in multipliers:
-        number = float(value[:-1])
+        number: float = float(value[:-1])
         return int(number * multipliers[suffix])
 
     # No suffix → return as integer
     return int(float(value))
 
 
-def extract_model_size_from_model_name(model_name, allow_millions=False):
+def extract_model_size_from_model_name(
+    model_name: str, allow_millions: bool = False
+) -> str | None:
     """Pull a parameter-size token (e.g. "7B", "33M") out of a model id.
 
     ``allow_millions`` also matches an ``M`` suffix — useful for embedding
     models, which are frequently sized in the tens/hundreds of millions.
     Returns the token only if exactly one match is found (avoids ambiguity).
     """
-    units = "MBmb" if allow_millions else "Bb"
-    pattern = rf"\b\d+(?:\.\d+)?[{units}]\b"
-    matches = re.findall(pattern, model_name)
+    units: str = "MBmb" if allow_millions else "Bb"
+    pattern: str = rf"\b\d+(?:\.\d+)?[{units}]\b"
+    matches: list[str] = re.findall(pattern, model_name)
     return matches[0] if len(matches) == 1 else None
 
 
-def get_param_count(model):
+def get_param_count(model: ModelInfo) -> int | None:
     if model.safetensors and model.safetensors.parameters:
         return sum(model.safetensors.parameters.values())
     return None
 
 
-def get_config_type(model_id, token):
+def get_config_type(model_id: str, token: str | bool) -> str | None:
     try:
         model_config = AutoConfig.from_pretrained(
             model_id, token=token, trust_remote_code=True
@@ -169,9 +173,12 @@ def get_config_type(model_id, token):
 # (header, value_fn) where value_fn(model, config_class) -> cell value. The
 # rank/config-class/param columns are interleaved by build_catalog because they
 # depend on per-row computed state.
-def _resolve_param_columns(model, allow_millions):
+def _resolve_param_columns(
+    model: ModelInfo, allow_millions: bool
+) -> tuple[str | None, int | None]:
     """Return (param_str, param_int) for a model, name first then safetensors."""
-    param_str = extract_model_size_from_model_name(model.id, allow_millions)
+    param_str: str | None = extract_model_size_from_model_name(model.id, allow_millions)
+    param_int: int | None
     if param_str is None:
         param_int = get_param_count(model)
         if param_int is not None:
@@ -183,15 +190,17 @@ def _resolve_param_columns(model, allow_millions):
 
 def build_catalog(
     *,
-    fetch_fn,
-    filter_fn,
-    limit,
-    output_csv,
-    label,
-    extra_columns=None,
-    allow_millions=False,
-    token,
-):
+    fetch_fn: Callable[[int], Iterable[ModelInfo]],
+    filter_fn: Callable[[ModelInfo], bool],
+    limit: int,
+    output_csv: Path | str,
+    label: str,
+    extra_columns: (
+        list[tuple[str, Callable[[ModelInfo, str | None], object]]] | None
+    ) = None,
+    allow_millions: bool = False,
+    token: str | bool,
+) -> None:
     """Fetch → filter → enrich → write a ranked model catalog CSV.
 
     Args:
@@ -207,16 +216,16 @@ def build_catalog(
     """
     extra_columns = extra_columns or []
 
-    candidates = fetch_fn(limit)
+    candidates: list[ModelInfo] = list(fetch_fn(limit))
     print(f"Retrieved {len(candidates)} raw {label} candidates.")
 
-    models = [m for m in candidates if filter_fn(m)]
+    models: list[ModelInfo] = [m for m in candidates if filter_fn(m)]
     print(f"Kept {len(models)} {label} models after filtering.")
 
     models = models[:limit]
     print(f"Writing top {len(models)} to {output_csv}")
 
-    base_head = [
+    base_head: list[str] = [
         "rank",
         "model_id",
         "downloads",
@@ -229,15 +238,15 @@ def build_catalog(
         "is_gated",
         "is_moe",
     ]
-    extra_head = [h for h, _ in extra_columns]
-    tail_head = ["is_custom_code", "config_class", "is_supported", "Year"]
+    extra_head: list[str] = [h for h, _ in extra_columns]
+    tail_head: list[str] = ["is_custom_code", "config_class", "is_supported", "Year"]
 
     with open(output_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(base_head + extra_head + tail_head)
 
         with ThreadPoolExecutor(max_workers=16) as ex:
-            config_classes = list(
+            config_classes: list[str | None] = list(
                 tqdm(
                     ex.map(lambda m: get_config_type(m.id, token), models),
                     total=len(models),
@@ -246,10 +255,10 @@ def build_catalog(
             )
 
         for rank, (m, config_class) in enumerate(zip(models, config_classes), start=1):
-            architectures = (m.config or {}).get("architectures")
-            arch_str = ";".join(architectures) if architectures else None
+            architectures: list[str] | None = (m.config or {}).get("architectures")
+            arch_str: str | None = ";".join(architectures) if architectures else None
             param_str, param_int = _resolve_param_columns(m, allow_millions)
-            extra_vals = [fn(m, config_class) for _, fn in extra_columns]
+            extra_vals: list[object] = [fn(m, config_class) for _, fn in extra_columns]
             writer.writerow(
                 [
                     rank,
