@@ -25,15 +25,16 @@ from pathlib import Path
 
 from hf_model_catalog import EXPAND_FIELDS, RESOURCES_DIR, build_catalog, tags
 from huggingface_hub import HfApi
+from huggingface_hub.hf_api import ModelInfo
 
 # Pipeline tags that embedding models are filed under. They are mutually
 # exclusive (one primary tag per model), so we query both and union.
-EMBEDDING_PIPELINE_TAGS = ("feature-extraction", "sentence-similarity")
+EMBEDDING_PIPELINE_TAGS: tuple[str, ...] = ("feature-extraction", "sentence-similarity")
 
 # Substrings (in model_type, architectures or tags) that mark a model as
 # multimodal — i.e. it consumes images/audio/video in addition to (or instead
 # of) text. These are kept but flagged, not dropped.
-MULTIMODAL_SUBSTRINGS = [
+MULTIMODAL_SUBSTRINGS: list[str] = [
     "clip",
     "vision",
     "_vl",
@@ -61,10 +62,10 @@ MULTIMODAL_SUBSTRINGS = [
 
 # Markers that identify rerankers / cross-encoders (excluded entirely — they
 # are not bi-encoder embedders).
-RERANKER_SUBSTRINGS = ["rerank", "cross-encoder", "cross_encoder"]
+RERANKER_SUBSTRINGS: list[str] = ["rerank", "cross-encoder", "cross_encoder"]
 
 
-def _has_embedding_signal(model):
+def _has_embedding_signal(model: ModelInfo) -> bool:
     """True if the model looks like a sentence-transformers / embedding model.
 
     This is the core inclusion gate: it separates genuine text embedders from
@@ -72,39 +73,44 @@ def _has_embedding_signal(model):
     """
     if model.library_name == "sentence-transformers":
         return True
-    t = tags(model)
+    t: set[str] = tags(model)
     return "sentence-similarity" in t or "sentence-transformers" in t
 
 
-def _is_reranker(model):
+def _is_reranker(model: ModelInfo) -> bool:
     """True if the model is a reranker / cross-encoder (excluded)."""
     if any(any(sub in t for sub in RERANKER_SUBSTRINGS) for t in tags(model)):
         return True
     return any(sub in model.id.lower() for sub in RERANKER_SUBSTRINGS)
 
 
-def _is_multimodal(model, _config_class=None):
+def _is_multimodal(model: ModelInfo, _config_class: str | None = None) -> bool:
     """True if the embedder also handles images/audio/video (flagged, kept)."""
-    config = model.config or {}
-    model_type = (config.get("model_type") or "").lower()
+    config: dict = model.config or {}
+    model_type: str = (config.get("model_type") or "").lower()
     if any(sub in model_type for sub in MULTIMODAL_SUBSTRINGS):
         return True
 
-    architectures = config.get("architectures") or []
-    arch_lower = " ".join(architectures).lower()
+    architectures: list[str] = config.get("architectures") or []
+    arch_lower: str = " ".join(architectures).lower()
     if any(sub in arch_lower for sub in MULTIMODAL_SUBSTRINGS):
         return True
 
-    multimodal_tags = {"image-feature-extraction", "multimodal", "vision", "audio"}
+    multimodal_tags: set[str] = {
+        "image-feature-extraction",
+        "multimodal",
+        "vision",
+        "audio",
+    }
     return bool(tags(model) & multimodal_tags)
 
 
-def _fetch(api, limit):
+def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
     """Query both embedding pipeline tags and return a deduplicated list,
     sorted by downloads descending. Over-fetched (x2) to absorb the noise +
     rerankers + GGUF/MLX entries removed by the filter."""
-    per_tag_limit = int(limit * 2)
-    by_id = {}
+    per_tag_limit: int = int(limit * 2)
+    by_id: dict[str, ModelInfo] = {}
     for tag in EMBEDDING_PIPELINE_TAGS:
         print(f"Fetching up to {per_tag_limit} '{tag}' models by downloads...")
         for m in api.list_models(
@@ -119,7 +125,7 @@ def _fetch(api, limit):
     return sorted(by_id.values(), key=lambda m: (m.downloads or 0), reverse=True)
 
 
-def _keep(model):
+def _keep(model: ModelInfo) -> bool:
     if not model.config:
         return False
     if model.library_name in ("gguf", "mlx"):
@@ -133,11 +139,13 @@ def _keep(model):
     return True
 
 
-def fetch_top_embedding_models(limit, output_csv: Path | str | None = None):
+def fetch_top_embedding_models(
+    limit: int, output_csv: Path | str | None = None
+) -> None:
     if output_csv is None:
         output_csv = RESOURCES_DIR / "top_embedding_models.csv"
-    token = os.environ.get("HF_TOKEN", True)
-    api = HfApi(token=token)
+    token: str | bool = os.environ.get("HF_TOKEN", True)
+    api: HfApi = HfApi(token=token)
     build_catalog(
         fetch_fn=lambda lim: _fetch(api, lim),
         filter_fn=_keep,
@@ -151,5 +159,5 @@ def fetch_top_embedding_models(limit, output_csv: Path | str | None = None):
 
 
 if __name__ == "__main__":
-    limit_ = int(sys.argv[1]) if len(sys.argv) > 1 else 10000
+    limit_: int = int(sys.argv[1]) if len(sys.argv) > 1 else 10000
     fetch_top_embedding_models(limit=limit_)
