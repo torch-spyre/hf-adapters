@@ -18,6 +18,12 @@ No forward pass — just verifies that ``AutoSpyreModelForCausalLM`` and
 ``AutoSpyreModel`` resolve, prepare, and move the model onto Spyre without
 error. Causal-LM entries also check that a ``generate`` method is attached.
 
+Parametrized over the full ``CAUSAL_LM_MODELS`` / ``EMBEDDING_MODELS`` registries
+so the CI matrix's ``-k <model_key>`` filter always matches a parametrize id;
+the per-adapter ``CAUSAL_KEYS`` / ``EMBED_KEYS`` selection used by the CPU side
+would silently deselect models like ``tiny_llama`` whose adapter family has
+another representative.
+
 Usage (on Spyre pod):
     pytest -s -vvv tests/spyre/test_load_spyre.py
     pytest -s -vvv tests/spyre/test_load_spyre.py -k qwen3
@@ -27,19 +33,14 @@ import time
 
 import pytest
 import torch
-from model_registry import (
-    CAUSAL_KEYS,
-    CAUSAL_LM_MODELS,
-    EMBED_KEYS,
-    EMBEDDING_MODELS,
-)
+from model_registry import CAUSAL_LM_MODELS, EMBEDDING_MODELS
 
 
 def _causal_dtype(key):
     return torch.float32 if key == "granite4" else torch.float16
 
 
-@pytest.mark.parametrize("key", CAUSAL_KEYS)
+@pytest.mark.parametrize("key", list(CAUSAL_LM_MODELS.keys()))
 def test_load_causal_lm(key):
     from hf_adapters import AutoSpyreModelForCausalLM
 
@@ -57,7 +58,7 @@ def test_load_causal_lm(key):
     ), f"{key}: AutoSpyreModelForCausalLM did not attach generate()"
 
 
-@pytest.mark.parametrize("key", EMBED_KEYS)
+@pytest.mark.parametrize("key", list(EMBEDDING_MODELS.keys()))
 def test_load_embedding(key):
     from hf_adapters import AutoSpyreModel
 
