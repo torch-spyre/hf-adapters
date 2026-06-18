@@ -95,8 +95,15 @@ def get_backbone(model):
     ``Gemma4ForConditionalGeneration``) nest the text decoder one level deeper
     at ``model.model.language_model``; descend into ``.language_model`` when
     present so the text backbone is returned.
+
+    GPT-2-family wrappers (``GPT2LMHeadModel``) keep the backbone at
+    ``model.transformer`` rather than ``model.model``; fall back to it when
+    ``.model`` is absent. The bare ``GPT2Model`` (``AutoModel``) has neither, so
+    it is returned as-is — it already is the backbone.
     """
-    inner = model.model if hasattr(model, "model") else model
+    inner = (
+        model.model if hasattr(model, "model") else getattr(model, "transformer", model)
+    )
     return getattr(inner, "language_model", inner)
 
 
@@ -863,6 +870,8 @@ def _embedding_param_ids(model):
     Covers:
     - Decoder-style backbones: ``backbone.embed_tokens``.
     - BERT-style backbones: ``backbone.embeddings.{word,position,token_type}_embeddings``.
+    - GPT-2-style backbones: ``backbone.{wte,wpe}`` (token + learned-position
+      tables — both gathered, never matmul'd).
     """
     ids = set()
     backbone = get_backbone(model)
@@ -880,17 +889,26 @@ def _embedding_param_ids(model):
             if sub is not None and hasattr(sub, "weight") and sub.weight.dim() == 2:
                 ids.add(sub.weight.data_ptr())
 
+    # GPT-2-style: word (wte) + learned-position (wpe) gather tables
+    for name in ("wte", "wpe"):
+        sub = getattr(backbone, name, None)
+        if sub is not None and hasattr(sub, "weight") and sub.weight.dim() == 2:
+            ids.add(sub.weight.data_ptr())
+
     return ids
 
 
 def _untie_embedding_and_lm_head(model):
-    """If ``embed_tokens.weight`` and ``lm_head.weight`` share storage, clone the
-    LM head's weight so each can take a different Spyre layout.
+    """If the token-embedding weight and ``lm_head.weight`` share storage, clone
+    the LM head's weight so each can take a different Spyre layout.
+
+    The token table is ``backbone.embed_tokens`` for decoder models and
+    ``backbone.wte`` for GPT-2-family models (which tie ``wte`` <-> ``lm_head``).
     """
     if not hasattr(model, "lm_head"):
         return
     backbone = get_backbone(model)
-    embed = getattr(backbone, "embed_tokens", None)
+    embed = getattr(backbone, "embed_tokens", None) or getattr(backbone, "wte", None)
     if embed is None:
         return
     if embed.weight.data_ptr() == model.lm_head.weight.data_ptr():
@@ -1412,6 +1430,109 @@ def make_standard_gqa_block(layer):
         h = post_attn_ln(h)
         h = mlp(h)
         h = residual + h
+
+        return h, key_cache, value_cache
+
+    return torch.compile(block_forward, dynamic=False)
+
+
+def make_decoder_block(
+    *,
+    q_proj,
+    k_proj,
+    v_proj,
+    o_proj,
+    attn_ln,
+    ffn_in,
+    act,
+    ffn_out,
+    ffn_ln,
+    num_heads,
+    head_dim,
+    scale,
+    pre_ln=True,
+):
+    """Compiled causal-decoder block for non-RoPE (learned-abs-pos) models.
+
+    Shared by the non-RoPE decoder family — ``hf_gpt2`` today, OPT/BLOOM/MPT to
+    come. These all have the standard-GQA block *shape* (pre/post-LN, KV cache,
+    causal SDPA, residual + FFN tail) but differ from ``make_standard_gqa_block``
+    in three ways, and from each other only in *where* their modules live — so,
+    like ``make_encoder_block``, adapters resolve their own module layout and
+    pass it in by keyword.
+
+    Differences from ``make_standard_gqa_block``:
+      - **no RoPE** — positions are learned absolute (added to the token
+        embeddings in the backbone), so ``selected_freqs`` is accepted for
+        signature parity with the generate/test harness and ignored;
+      - **MHA** — kv heads == attention heads, so no ``enable_gqa=True``;
+      - **explicit ``scale``** and a configurable ``pre_ln`` LN placement
+        (``True`` = norm before each sublayer, as in GPT-2 / BLOOM / OPT≥1.3B;
+        ``False`` = norm after, as in OPT-350m).
+
+    Block signature matches the decoder harness::
+
+        block_forward(hidden_states, selected_freqs, attn_mask,
+                      key_cache, value_cache, is_filling, token_index,
+                      cache_position) -> (h, key_cache, value_cache)
+
+    Dropout is skipped — these adapters are eval-only. ``act`` is the (possibly
+    patched) activation module; the FFN is passed decomposed as
+    ``ffn_out(act(ffn_in(x)))`` rather than as a single module, since some
+    models (OPT) have no wrapping MLP module.
+    """
+
+    def block_forward(
+        hidden_states,
+        selected_freqs,  # unused — non-RoPE; kept for signature parity
+        attn_mask,
+        key_cache,
+        value_cache,
+        is_filling,
+        token_index,
+        cache_position,
+    ):
+        # --- attention sublayer ---
+        residual = hidden_states
+        h = attn_ln(hidden_states) if pre_ln else hidden_states
+
+        bsz, seq_len, _ = h.shape
+        q = q_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+        k = k_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+        v = v_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+
+        key_cache, value_cache = kv_cache_update(
+            k,
+            v,
+            key_cache,
+            value_cache,
+            is_filling,
+            token_index,
+            cache_position,
+        )
+
+        attn_out = F.scaled_dot_product_attention(
+            q,
+            key_cache,
+            value_cache,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            scale=scale,
+        )
+        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
+        attn_out = o_proj(attn_out)
+
+        h = residual + attn_out
+        if not pre_ln:
+            h = attn_ln(h)
+
+        # --- FFN sublayer ---
+        residual = h
+        f = ffn_ln(h) if pre_ln else h
+        f = ffn_out(act(ffn_in(f)))
+        h = residual + f
+        if not pre_ln:
+            h = ffn_ln(h)
 
         return h, key_cache, value_cache
 

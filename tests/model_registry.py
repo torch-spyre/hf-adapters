@@ -30,6 +30,11 @@ CAUSAL_LM_MODELS = {
         "path": "Qwen/Qwen3-0.6B",
         "adapter": "hf_qwen3.py",
     },
+    "gpt2": {
+        "name": "GPT-2 124M",
+        "path": "gpt2",
+        "adapter": "hf_gpt2.py",
+    },
     "granite8b": {
         "name": "Granite 3.3 8B",
         "path": "ibm-granite/granite-3.3-8b-instruct",
