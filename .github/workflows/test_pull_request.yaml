@@ -90,7 +90,7 @@ jobs:
       - x86_64
       - spyre_pf_x0__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - image_torch_spyre_shadow
     timeout-minutes: 120
     strategy:
       matrix:
@@ -142,7 +142,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - image_torch_spyre_shadow
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -221,7 +221,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - image_torch_spyre_shadow
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -285,7 +285,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - image_torch_spyre_shadow
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -349,7 +349,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - image_torch_spyre_shadow
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -405,7 +405,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - image_torch_spyre_shadow
     timeout-minutes: 120
     strategy:
       fail-fast: false

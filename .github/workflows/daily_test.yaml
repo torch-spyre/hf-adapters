@@ -38,6 +38,11 @@
 name: daily_test
 
 on:
+  # SHADOW VALIDATION (do not merge): pull_request enabled so this suite runs on
+  # the shadow runners (image_torch_spyre_shadow) for resource-limit validation.
+  # Revert before any real merge.
+  pull_request:
+    branches: [main]
   schedule:
     # Runs at 06:00 UTC every day
     - cron: "0 6 * * *"
@@ -96,7 +101,7 @@ jobs:
       - x86_64
       - spyre_pf_x0__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - image_torch_spyre_shadow
     timeout-minutes: 120
     strategy:
       matrix:
@@ -148,7 +153,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - image_torch_spyre_shadow
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -228,7 +233,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - image_torch_spyre_shadow
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -293,7 +298,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - image_torch_spyre_shadow
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -358,7 +363,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - image_torch_spyre_shadow
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -415,7 +420,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - image_torch_spyre_shadow
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -504,7 +509,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - image_torch_spyre_shadow
     timeout-minutes: 120
     strategy:
       fail-fast: false
