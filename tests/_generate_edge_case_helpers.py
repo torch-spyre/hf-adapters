@@ -69,7 +69,7 @@ CASES = {
 
 # Subset of CASES marked @pytest.mark.slow on the CPU lane: each is covered by
 # a cheaper sibling regime (see issue #35), so on the default lane they are
-# deselected. Run them with `--run-slow`.
+# deselected. Run them with `pytest -m ""` (or `-m slow`).
 SLOW_CPU_CASE_KEYS = {
     "short_three_blocks",  # 3rd expansion is the same path as 2nd (covered by short_two_blocks_plus)
     "short_two_blocks_exact",  # exact-block boundary == same path as +N (covered by short_two_blocks_plus)

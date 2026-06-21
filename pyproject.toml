@@ -48,8 +48,11 @@ files = ["hf_adapters/**/*.py"]
 testpaths = ["tests"]
 # Spyre tests live under tests/spyre/ and are skipped at collection on hosts
 # without torch_spyre via tests/spyre/conftest.py.
+# Slow tests are deselected by default; CI's daily/weekly lanes (and any
+# manual run) opt in by overriding the -m filter on the CLI, e.g. `pytest -m ""`.
+addopts = '-m "not slow"'
 markers = [
-    "slow: deselected by default; opt in with --run-slow",
+    "slow: deselected by default; opt in with `pytest -m ''` (or `-m slow`)",
     "spyre_block: per-layer block-compare on Spyre; deselected by default until the senlib/torch shutdown SIGABRT is root-caused",
 ]
 
