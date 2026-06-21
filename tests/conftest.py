@@ -47,7 +47,7 @@ ADAPTERS_DIR = os.path.join(REPO_ROOT, "hf_adapters")
 
 
 def _running_spyre_only():
-    """True iff every pytest target argument is under tests/spyre/.
+    """True iff every positional pytest target lives under tests/spyre/.
 
     Spyre tests live in a sibling subdir with their own conftest and must run
     against the canonical (DEVICE="spyre") install — not the CPU-patched
@@ -55,19 +55,51 @@ def _running_spyre_only():
     ``pytest tests/spyre/...`` directly, skip the CPU-patching block below so
     the Spyre tests see the unpatched ``hf_common``.
 
+    Subtlety: a few pytest flags take a value as the *next* argv entry —
+    ``-k qwen3``, ``-m spyre_block``, etc. A naive walk over ``sys.argv``
+    would misclassify ``qwen3`` as a positional that doesn't match
+    ``tests/spyre`` and then conclude "not spyre-only," which silently
+    re-enables the CPU patch on Spyre runs and skips every Spyre test. We
+    enumerate the value-taking flags we actually care about and skip their
+    value when parsing.
+
     Mixed invocations (e.g. ``pytest tests/`` or ``pytest tests/spyre/x.py
     tests/test_load_cpu.py``) keep the CPU patch active. The Spyre conftest
-    skips every test on a CPU-only host anyway, and pod runs are expected to
-    target ``tests/spyre/`` exclusively.
+    has its own backstop that skips every Spyre test if ``DEVICE == "cpu"``.
     """
-    args = [a for a in sys.argv[1:] if not a.startswith("-")]
-    if not args:
+    # Pytest options whose value is the NEXT argv entry. Limited to the ones
+    # we use in practice plus a few common neighbours; not a full parser.
+    VALUE_TAKING_FLAGS = {
+        "-k",
+        "-m",
+        "-p",
+        "-o",
+        "--tb",
+        "--rootdir",
+        "--deselect",
+        "--ignore",
+        "--ignore-glob",
+        "--basetemp",
+        "--maxfail",
+        "--log-level",
+    }
+
+    positionals = []
+    skip_next = False
+    for a in sys.argv[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if a in VALUE_TAKING_FLAGS:
+            skip_next = True
+            continue
+        if a.startswith("-"):
+            continue  # boolean flag (-s, -vvv) or `--flag=value` form
+        positionals.append(a)
+
+    if not positionals:
         return False
-    for a in args:
-        norm = a.replace("\\", "/")
-        if "tests/spyre" not in norm:
-            return False
-    return True
+    return all("tests/spyre" in p.replace("\\", "/") for p in positionals)
 
 
 _SPYRE_ONLY = _running_spyre_only()
