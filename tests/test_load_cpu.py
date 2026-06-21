@@ -15,11 +15,10 @@
 """
 CPU loading test: every auto-class entry loads cleanly without forward.
 
-Picks one small representative per adapter module from the shared
-``CAUSAL_LM_MODELS`` / ``EMBEDDING_MODELS`` registries in ``conftest.py``,
-and asserts that ``from_pretrained`` returns a model. Causal-LM entries
-also verify that ``AutoSpyreModelForCausalLM`` attached a ``generate``
-method.
+Parametrises over the full ``CAUSAL_LM_MODELS`` / ``EMBEDDING_MODELS``
+registries from ``tests/model_registry.py``, and asserts that
+``from_pretrained`` returns a model. Causal-LM entries also verify that
+``AutoSpyreModelForCausalLM`` attached a ``generate`` method.
 
 DEVICE='cpu' patching of ``hf_common`` happens once in ``tests/conftest.py``.
 """
@@ -28,10 +27,12 @@ import gc
 
 import pytest
 from conftest import torch_dtype_for
-from model_registry import CAUSAL_KEYS, CAUSAL_LM_MODELS, EMBED_KEYS, EMBEDDING_MODELS
+from model_registry import CAUSAL_LM_MODELS, EMBEDDING_MODELS
 
 
-@pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
+@pytest.mark.parametrize(
+    "model_key", list(CAUSAL_LM_MODELS.keys()), ids=list(CAUSAL_LM_MODELS.keys())
+)
 def test_load_causal_lm(model_key, auto_spyre_model):
     info = CAUSAL_LM_MODELS[model_key]
     model = auto_spyre_model.AutoSpyreModelForCausalLM.from_pretrained(
@@ -45,7 +46,9 @@ def test_load_causal_lm(model_key, auto_spyre_model):
     gc.collect()
 
 
-@pytest.mark.parametrize("model_key", EMBED_KEYS, ids=EMBED_KEYS)
+@pytest.mark.parametrize(
+    "model_key", list(EMBEDDING_MODELS.keys()), ids=list(EMBEDDING_MODELS.keys())
+)
 def test_load_embedding(model_key, auto_spyre_model):
     info = EMBEDDING_MODELS[model_key]
     model = auto_spyre_model.AutoSpyreModel.from_pretrained(

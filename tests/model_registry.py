@@ -13,14 +13,12 @@
 # limitations under the License.
 
 """
-Model registries and programmatic selection for tests.
+Model registries shared by all tests.
 
-This module contains:
-1. CAUSAL_LM_MODELS and EMBEDDING_MODELS registries (moved from conftest.py)
-2. Programmatic selection of representative models based on CONFIG_TO_ADAPTER_MODULE_MAPPING
-
-When new adapters are added to CONFIG_TO_ADAPTER_MODULE_MAPPING, tests will
-automatically cover them by selecting one representative model per adapter.
+Exports ``CAUSAL_LM_MODELS`` and ``EMBEDDING_MODELS``: dictionaries keyed by a
+short model key, mapping to a small dict of metadata (``name``, ``path``,
+``adapter``, optional ``dtype`` / ``load_fn``). Tests parametrise over these
+directly; CI's ``-k`` filter selects which keys actually run.
 """
 
 # Model registries - shared by all tests
@@ -196,96 +194,5 @@ EMBEDDING_MODELS = {
         "adapter": "hf_modernbert.py",
     },
 }
-
-
-def _get_adapter_module_name(adapter_module):  # type: ignore[no-untyped-def]
-    """Extract module name from adapter module object (e.g., hf_qwen3)."""
-    return adapter_module.__name__.split(".")[-1]
-
-
-def _select_representative_models(config_mapping=None):
-    """
-    Programmatically select one representative model per adapter module.
-
-    Analyzes CONFIG_TO_ADAPTER_MODULE_MAPPING and selects one model per adapter
-    from the registries above. Prefers smaller models for faster test execution.
-
-    Args:
-        config_mapping: Optional CONFIG_TO_ADAPTER_MODULE_MAPPING to use.
-                       If None, will be imported from hf_adapters.auto_spyre_model.
-
-    Returns:
-        tuple: (causal_keys, embed_keys) where each is a list of model keys
-    """
-    # Import here to avoid issues with conftest.py patching
-    if config_mapping is None:
-        from hf_adapters.auto_spyre_model import CONFIG_TO_ADAPTER_MODULE_MAPPING
-
-        config_mapping = CONFIG_TO_ADAPTER_MODULE_MAPPING
-
-    # Get set of adapter module names from CONFIG_TO_ADAPTER_MODULE_MAPPING
-    adapter_modules_in_config = {
-        _get_adapter_module_name(adapter_mod) for adapter_mod in config_mapping.values()
-    }
-
-    # Map adapter module names to model keys
-    adapter_to_causal_keys = {}
-    adapter_to_embed_keys = {}
-
-    # Group causal LM models by adapter
-    for key, info in CAUSAL_LM_MODELS.items():
-        adapter = info["adapter"].replace(".py", "")
-        # Only include if adapter is in CONFIG_TO_ADAPTER_MODULE_MAPPING
-        if adapter in adapter_modules_in_config:
-            if adapter not in adapter_to_causal_keys:
-                adapter_to_causal_keys[adapter] = []
-            adapter_to_causal_keys[adapter].append(key)
-
-    # Group embedding models by adapter
-    for key, info in EMBEDDING_MODELS.items():
-        adapter = info["adapter"].replace(".py", "")
-        # Only include if adapter is in CONFIG_TO_ADAPTER_MODULE_MAPPING
-        if adapter in adapter_modules_in_config:
-            if adapter not in adapter_to_embed_keys:
-                adapter_to_embed_keys[adapter] = []
-            adapter_to_embed_keys[adapter].append(key)
-
-    # Select one representative per adapter for causal LM
-    # Prefer smaller models (by key name heuristics) for faster tests
-    causal_keys = []
-    for adapter in sorted(adapter_modules_in_config):
-        if adapter in adapter_to_causal_keys:
-            keys = adapter_to_causal_keys[adapter]
-            # Sort to get consistent selection; prefer keys with "2b", "1b", or shorter names
-            sorted_keys = sorted(
-                keys,
-                key=lambda k: (
-                    "2b" not in k and "1b" not in k,  # Prefer smaller models
-                    len(CAUSAL_LM_MODELS[k]["path"]),  # Then by path length
-                    k,  # Finally by key name for consistency
-                ),
-            )
-            causal_keys.append(sorted_keys[0])
-
-    # Select one representative per adapter for embeddings
-    embed_keys = []
-    for adapter in sorted(adapter_modules_in_config):
-        if adapter in adapter_to_embed_keys:
-            keys = adapter_to_embed_keys[adapter]
-            # Sort for consistent selection
-            sorted_keys = sorted(
-                keys, key=lambda k: (len(EMBEDDING_MODELS[k]["path"]), k)
-            )
-            embed_keys.append(sorted_keys[0])
-
-    return causal_keys, embed_keys
-
-
-# Initialize with all keys from the registries as defaults.
-# conftest.py will override these with programmatically selected representative
-# models when it runs, but having defaults ensures tests can be collected even
-# if conftest hasn't executed yet (e.g., during pytest collection phase).
-CAUSAL_KEYS = list(CAUSAL_LM_MODELS.keys())
-EMBED_KEYS = list(EMBEDDING_MODELS.keys())
 
 # Made with Bob

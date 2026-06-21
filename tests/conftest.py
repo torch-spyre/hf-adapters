@@ -153,17 +153,6 @@ if not _SPYRE_ONLY:
     _auto_spec.loader.exec_module(_auto_mod)
     setattr(_pkg, "auto_spyre_model", _auto_mod)
 
-    # Now that auto_spyre_model is loaded with patched hf_common, populate the
-    # model lists. Import model_registry here (after patching) and update its
-    # CAUSAL_KEYS/EMBED_KEYS.
-    import model_registry  # noqa: E402
-
-    model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
-        model_registry._select_representative_models(
-            _auto_mod.CONFIG_TO_ADAPTER_MODULE_MAPPING
-        )
-    )
-
 
 def _unwrap_compiled_blocks(model):
     """Replace torch.compile-wrapped blocks with their CPU-runnable originals."""

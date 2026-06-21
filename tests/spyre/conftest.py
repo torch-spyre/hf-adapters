@@ -19,10 +19,6 @@ The CPU sibling at ``tests/conftest.py`` reloads ``hf_adapters.hf_common`` with
 opposite: it leaves the canonical install untouched so Spyre tests bind to
 ``DEVICE = "spyre"`` (the source default).
 
-It also pre-populates ``model_registry.CAUSAL_KEYS`` / ``EMBED_KEYS`` from the
-real ``CONFIG_TO_ADAPTER_MODULE_MAPPING`` so test parametrization sees the same
-representative-model selection the CPU side uses.
-
 If ``torch_spyre`` is not importable, every test in this directory is skipped
 at collection time. That keeps a plain ``pytest tests/`` run on a CPU host from
 failing — Spyre tests are meaningful only on the pod.
@@ -73,28 +69,6 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_no_spyre)
         if skip_cpu_patched is not None:
             item.add_marker(skip_cpu_patched)
-
-
-# Pre-populate model_registry.CAUSAL_KEYS / EMBED_KEYS once per session, before
-# any Spyre test parametrizes over them. Mirrors what tests/conftest.py does for
-# the CPU side, but reads from the canonical hf_adapters install.
-import model_registry  # noqa: E402
-
-if not model_registry.CAUSAL_KEYS or not model_registry.EMBED_KEYS:
-    try:
-        from hf_adapters.auto_spyre_model import CONFIG_TO_ADAPTER_MODULE_MAPPING
-
-        model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
-            model_registry._select_representative_models(
-                CONFIG_TO_ADAPTER_MODULE_MAPPING
-            )
-        )
-    except Exception:
-        # Without hf_adapters importable (CPU-only host without torch_spyre, or
-        # transformers too old for some adapter's imports), fall back to the
-        # full registry. The skip marker above ensures nothing actually runs.
-        model_registry.CAUSAL_KEYS = list(model_registry.CAUSAL_LM_MODELS.keys())
-        model_registry.EMBED_KEYS = list(model_registry.EMBEDDING_MODELS.keys())
 
 
 @pytest.fixture(scope="session")
