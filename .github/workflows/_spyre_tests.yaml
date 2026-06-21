@@ -134,6 +134,7 @@ jobs:
             MARKER_ARGS=(-m "$PYTEST_MARKER")
           fi
           echo "Running ${{ matrix.test_file }}..."
+          echo "uv run pytest -s -vvv ${MARKER_ARGS[@]} -k $MODELS_FILTER tests/${{ matrix.test_file }}"
           uv run pytest -s -vvv "${MARKER_ARGS[@]}" -k "$MODELS_FILTER" "tests/${{ matrix.test_file }}"
           echo "tests done"
 
