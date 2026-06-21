@@ -30,6 +30,8 @@ which models are supported on Spyre.
 | Gemma 4 12B | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 3 1B | gemma3\_text | 256 | 128 | Yes | Yes | Yes | Yes |
 | GPT-2 124M | gpt2 | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
+| GPT-Neo 125M | gpt_neo | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
+| Pythia 70M | gpt_neox | 64→128 | 16 (partial) | Yes (padded) | Yes | Yes | Yes |
 
 **CPU Accurate** = adapter produces identical greedy tokens to stock HF on CPU.
 **Spyre Compiles** = `torch.compile(block_forward)` succeeds on Spyre.
@@ -101,6 +103,8 @@ pattern, norms, and weight layout.
 | hf\_olmo.py | olmo | 1 | OLMo 7B |
 | hf\_olmo2.py | olmo2 | 1 | OLMo 2 7B |
 | hf\_gpt2.py | gpt2 | 1 | GPT-2 medium/large/xl, DistilGPT-2, Cerebras-GPT (111M–6.7B) |
+| hf\_gpt\_neo.py | gpt_neo | 1 | GPT-Neo 1.3B/2.7B, GPT-Neo-style fine-tunes |
+| hf\_gpt\_neox.py | gpt_neox | 1 | Pythia 160M–12B, GPT-NeoX-20B, Dolly v2, StableLM-base-alpha, other GPT-NeoX-arch checkpoints |
 | hf\_granite\_vision.py | granite (text) | 1 | — |
 | hf\_bert.py | bert | 2 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants |
 | hf\_xlm\_roberta.py | xlm-roberta | 1 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes |
@@ -177,6 +181,8 @@ hf_adapters/
 ├── hf_olmo.py             — OLMo adapter (OLMo 1B, 7B)
 ├── hf_olmo2.py            — OLMo2 adapter (OLMo 2 7B)
 ├── hf_gpt2.py             — GPT-2 adapter (learned abs pos, LayerNorm, Conv1D)
+├── hf_gpt_neo.py          — GPT-Neo adapter (learned abs pos, LayerNorm, nn.Linear)
+├── hf_gpt_neox.py         — GPT-NeoX adapter (partial RoPE, parallel residual, fused QKV)
 ├── hf_bert.py             — BERT-family encoder adapter (BGE, MiniLM)
 ├── hf_xlm_roberta.py      — XLM-RoBERTa encoder adapter (BGE-M3, multilingual-e5)
 ├── hf_mpnet.py            — MPNet encoder adapter (all-mpnet-base-v2 and variants)
@@ -414,35 +420,42 @@ softcapping. PLE-based (E2B/E4B) and MoE (26B-A4B) variants are **not**
 supported — `prepare_for_spyre` asserts those features are absent.
 
 **Learned absolute positions + Conv1D** (GPT-2): `hf_gpt2.py` is the first
-non-RoPE decoder. It has **no rotary embedding at all** — positions come from a
-learned `wpe` table added to the token embeddings (`wte`), so the block's
-`selected_freqs` argument is accepted for signature parity and ignored, and
-`prepare_for_spyre` sets no `_spyre_rope`. Norms are pre-norm `nn.LayerNorm`
-(weight + bias), run as-is inside the compiled block (lowered via
-`spyre::layer_norm`, like the BERT encoder). The weights ship as HF `Conv1D`
-(`y = x @ W + b`, `W` shaped `[in, out]` — the transpose of `nn.Linear`); at
-prepare time every `Conv1D` is rewritten to an `nn.Linear` (so the Spyre
-row-major matmul layout applies) and the fused `c_attn` `[H, 3H]` is split into
-separate q/k/v linears. The backbone lives at `model.transformer` (not
-`model.model`), `wte`↔`lm_head` are untied (they need different Spyre layouts),
-and the config uses `n_head`/`n_embd`/`n_layer` rather than the standard names,
-so the KV shapes are set explicitly via `_spyre_kv_shapes` (MHA: kv heads ==
-attention heads). `head_dim=64` for every size, but the `head_dim/2 >= 64` stick
-rule is RoPE-matmul specific and does not apply — SDPA over a 64-wide head is one
-full stick (BERT-base runs head_dim=64 unpadded), so no head padding is needed.
-`_run_forward` crops logits to the true vocab: `pad_lm_head`'s zero-weight
-padding rows produce logit 0, which can outrank real fp16 logits and be
-argmax-selected into an out-of-vocab id, crashing the next `wte` lookup. The
-MLP's tanh-approximation GELU (`gelu_new`) is patched on-device to replace
-`torch.pow(x, 3)` with `x * x * x` — `torch.pow` does not lower on the Spyre
-Inductor backend (same class as RMSNorm's `pow(2)`), while element-wise
-multiply is native; the CPU path keeps `torch.pow` so adapter outputs stay
-bit-exact vs stock HF. Verified on Spyre in fp16: the smoke test generates
-coherent output (`"The capital of France is"` → `" the capital of the French"`),
-so — unlike some models — fp16 is not degenerate here. The CPU-vs-Spyre token
-comparison matches **5/5 (prefill + 4 decode), with no decode drift** (max diff
-0.4–0.9) — the seq=1 decode error documented for the RoPE models is tied to the
-RoPE matmul path, which GPT-2 does not have.
+non-RoPE decoder — positions come from a learned `wpe` table added to `wte`, so
+the block's `selected_freqs` is ignored and `prepare_for_spyre` sets no
+`_spyre_rope`. Norms are pre-norm `nn.LayerNorm`, run as-is in the compiled
+block. The weights ship as HF `Conv1D` (`y = x @ W + b`, the transpose of
+`nn.Linear`); every `Conv1D` is rewritten to `nn.Linear` for the Spyre matmul
+layout, and the fused `c_attn` is split into separate q/k/v. Backbone at
+`model.transformer`, `wte`↔`lm_head` untied (different Spyre layouts), and the
+config's `n_head`/`n_embd`/`n_layer` names mean KV shapes are set explicitly
+(MHA). `head_dim=64` needs no padding (the `head_dim/2 >= 64` rule is
+RoPE-matmul specific). `_run_forward` crops logits to the true vocab —
+`pad_lm_head`'s zero-weight rows produce logit 0, which can outrank real fp16
+logits and be argmax-selected into an out-of-vocab id. The `gelu_new` MLP
+replaces `torch.pow(x, 3)` with `x * x * x` on Spyre.
+
+**Learned absolute positions, `nn.Linear`** (GPT-Neo): `hf_gpt_neo.py` shares
+GPT-2's shape — non-RoPE pre-norm MHA, learned `wpe` table, the same `gelu_new`
+MLP (`torch.pow(x, 3)` → `x * x * x` on Spyre), and `make_decoder_block`. It
+differs only in weight layout: GPT-Neo already uses `nn.Linear` everywhere (no
+`Conv1D` rewrite) with separate `q_proj`/`k_proj`/`v_proj` (no fused `c_attn`).
+The attention nests at `layer.attn.attention` (output `out_proj`), it omits the
+`1/sqrt(head_dim)` scale (`scale=1.0`), and its stock alternating global/local
+attention runs as full causal on Spyre. `head_dim=64` needs no padding.
+
+**Partial RoPE + parallel residual + fused QKV** (GPT-NeoX): `hf_gpt_neox.py`
+covers GPT-NeoX / Pythia (also Dolly v2, StableLM-base-alpha). It is a
+**partial**-RoPE model — only `partial_rotary_factor` of `head_dim` rotates
+(Pythia: 16 of 64), so the Q/K projections (and their bias) are permuted to
+align HF's `rotate_half` pairing with `apply_rope_matmul`. Since
+`head_dim/2 = 32 < 64`, head_dim is stick-padded 64→128 (interleaved Q/K,
+end-padded V, input-padded `dense`) with the attention scale held at the
+original head_dim. The **fused `query_key_value`** has a per-head interleaved
+layout (`[q_h,k_h,v_h]` per head), so `_split_fused_qkv` is GPT-NeoX-specific.
+The block uses a **parallel residual**: attention and MLP both read the same
+pre-norm state and sum into the residual together. `nn.LayerNorm` and exact
+`gelu` need no patching. Backbone at `model.gpt_neox`
+(`embed_in`/`layers`/`final_layer_norm`); LM head is `embed_out`.
 
 ## Adding a New Model
 

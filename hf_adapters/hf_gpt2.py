@@ -44,9 +44,6 @@ Usage::
     outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
-import math
-
-import torch
 import torch.nn as nn
 
 from hf_adapters.hf_common import (
@@ -54,35 +51,8 @@ from hf_adapters.hf_common import (
     get_backbone,
     make_decoder_block,
     pad_lm_head,
+    patch_new_gelu,
 )
-
-_GELU_COEFF = math.sqrt(2.0 / math.pi)
-
-
-def _patch_gpt2_gelu(gelu_cls):
-    """Patch ``NewGELUActivation`` to avoid ``torch.pow`` on Spyre.
-
-    GPT-2's MLP uses the tanh-approximation GELU
-    ``0.5 x (1 + tanh(sqrt(2/pi) (x + 0.044715 x**3)))``. Stock HF computes the
-    ``x**3`` term with ``torch.pow(x, 3.0)``, which the Spyre Inductor backend
-    cannot lower (``Unsupported: ... PointwiseOp(op='mul', ...)`` on the
-    ``[1, 64, 3072]`` MLP intermediate — same class of issue as RMSNorm's
-    ``pow(2)``). Element-wise multiply is native, so the Spyre path uses
-    ``x * x * x``. ``tanh`` itself lowers fine (Gemma softcapping uses it).
-
-    Like ``patch_rmsnorm``, the CPU path keeps the original ``torch.pow`` form so
-    adapter outputs stay bit-identical to stock HF on CPU; only the on-device
-    path takes the multiply rewrite (within fp16 noise, ~1e-3).
-    """
-
-    def _forward(self, input):
-        if input.device.type == "spyre":
-            inner = _GELU_COEFF * (input + 0.044715 * (input * input * input))
-        else:
-            inner = _GELU_COEFF * (input + 0.044715 * torch.pow(input, 3.0))
-        return 0.5 * input * (1.0 + torch.tanh(inner))
-
-    gelu_cls.forward = _forward
 
 
 def _conv1d_to_linear(conv):
@@ -135,7 +105,7 @@ def _make_compiled_block(layer):
     ``c_proj`` for output, ``mlp.{c_fc,act,c_proj}`` for the FFN). The FFN is
     passed decomposed; ``mlp(h)``'s trailing dropout is identity in eval, so
     ``c_proj(act(c_fc(h)))`` is equivalent. ``act`` is the gelu instance already
-    patched by ``_patch_gpt2_gelu``. ``scale == head_dim**-0.5 == attn.scaling``
+    patched by ``patch_new_gelu``. ``scale == head_dim**-0.5 == attn.scaling``
     (GPT-2's ``scale_attn_weights`` default).
     """
     attn = layer.attn
@@ -245,7 +215,7 @@ def prepare_for_spyre(model):
     # Patch the MLP activation (gelu_new / NewGELUActivation) to drop torch.pow
     # on Spyre. Patch the actual instantiated class so we follow whichever GELU
     # variant the config selected (gpt2 default is gelu_new).
-    _patch_gpt2_gelu(type(bb.h[0].mlp.act))
+    patch_new_gelu(type(bb.h[0].mlp.act))
 
     for layer in bb.h:
         attn = layer.attn

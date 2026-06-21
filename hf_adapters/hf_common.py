@@ -100,10 +100,19 @@ def get_backbone(model):
     ``model.transformer`` rather than ``model.model``; fall back to it when
     ``.model`` is absent. The bare ``GPT2Model`` (``AutoModel``) has neither, so
     it is returned as-is — it already is the backbone.
+
+    GPT-NeoX wrappers (``GPTNeoXForCausalLM``) keep the backbone at
+    ``model.gpt_neox`` (with ``embed_in``/``layers``/``final_layer_norm``);
+    fall back to it as well. The bare ``GPTNeoXModel`` is returned as-is.
     """
-    inner = (
-        model.model if hasattr(model, "model") else getattr(model, "transformer", model)
-    )
+    if hasattr(model, "model"):
+        inner = model.model
+    elif hasattr(model, "transformer"):
+        inner = model.transformer
+    elif hasattr(model, "gpt_neox"):
+        inner = model.gpt_neox
+    else:
+        inner = model
     return getattr(inner, "language_model", inner)
 
 
@@ -323,6 +332,92 @@ def _pad_proj_input_simple(proj, n_heads, orig_head_dim, padded_head_dim):
     return new_proj
 
 
+# ---------------------------------------------------------------------------
+# Partial-RoPE alignment for split Q/K projections
+#
+# Shared by adapters whose model rotates only the first ``rope_dim`` dims of
+# each head (partial RoPE) and/or needs the head padded to a Spyre stick.
+# HF's ``rotate_half`` pairs (j, j + rope_dim//2) within the first ``rope_dim``
+# dims; ``apply_rope_matmul`` pairs (j, j + head_dim//2) across the full head.
+# These helpers reorder/pad the split projection weights (and biases, when
+# present) so the two pairings agree. Used by hf_phi3 (bias-free) and
+# hf_gpt_neox (bias-carrying); the bias branches no-op when ``proj.bias`` is None.
+# ---------------------------------------------------------------------------
+
+
+def rope_dim_permutation(head_dim, rope_dim):
+    """Build index permutation aligning partial-RoPE pairing with apply_rope_matmul.
+
+    HF rotate_half pairs (j, j+rope_dim//2) within the first rope_dim dims.
+    apply_rope_matmul pairs (j, j+head_dim//2) across full head_dim.
+    This reorders head_dim so both pairings agree.
+    """
+    rope_half = rope_dim // 2
+    pass_half = (head_dim - rope_dim) // 2
+    return torch.cat(
+        [
+            torch.arange(0, rope_half),
+            torch.arange(rope_dim, rope_dim + pass_half),
+            torch.arange(rope_half, rope_dim),
+            torch.arange(rope_dim + pass_half, head_dim),
+        ]
+    )
+
+
+def permute_proj_for_rope(proj, num_heads, head_dim, perm):
+    """Permute a split Q/K projection's output dims within each head for RoPE.
+
+    Permutes the weight, and the bias when present (e.g. GPT-NeoX carries an
+    ``attention_bias`` on QKV; the bias must follow the same output-dim
+    reordering as the weight or the rotary dims pick up the wrong offsets).
+    Bias-free projections (Phi-3) skip the bias branch.
+    """
+    w = proj.weight.data.view(num_heads, head_dim, -1)
+    proj.weight.data = w[:, perm, :].contiguous().view(num_heads * head_dim, -1)
+    if proj.bias is not None:
+        b = proj.bias.data.view(num_heads, head_dim)
+        proj.bias.data = b[:, perm].contiguous().view(num_heads * head_dim)
+
+
+def pad_qk_proj_for_rope(proj, n_heads, orig_head_dim, padded_head_dim):
+    """Interleave-pad a split Q/K projection from orig_head_dim to padded_head_dim.
+
+    Each head's data is placed so that ``apply_rope_matmul``'s
+    ``[2, padded_head_dim//2]`` reshape sees the first rotary half in
+    ``[0:orig_half]`` and the second in ``[padded_half:padded_half+orig_half]``;
+    the gaps are zero and RoPE's identity-padding leaves them untouched. Zero
+    dims contribute nothing to Q·K^T, so the result is numerically identical to
+    the unpadded head. The bias (when present) is padded the same way.
+    """
+    orig_half = orig_head_dim // 2
+    padded_half = padded_head_dim // 2
+    w = proj.weight.data
+    has_bias = proj.bias is not None
+    hidden = w.shape[1]
+    new_w = torch.zeros(n_heads * padded_head_dim, hidden, dtype=w.dtype)
+    for h in range(n_heads):
+        s = h * orig_head_dim
+        d = h * padded_head_dim
+        new_w[d : d + orig_half, :] = w[s : s + orig_half, :]
+        new_w[d + padded_half : d + padded_half + orig_half, :] = w[
+            s + orig_half : s + orig_head_dim, :
+        ]
+    new_proj = nn.Linear(hidden, n_heads * padded_head_dim, bias=has_bias)
+    new_proj.weight = nn.Parameter(new_w, requires_grad=False)
+    if has_bias:
+        b = proj.bias.data
+        new_b = torch.zeros(n_heads * padded_head_dim, dtype=b.dtype)
+        for h in range(n_heads):
+            s = h * orig_head_dim
+            d = h * padded_head_dim
+            new_b[d : d + orig_half] = b[s : s + orig_half]
+            new_b[d + padded_half : d + padded_half + orig_half] = b[
+                s + orig_half : s + orig_head_dim
+            ]
+        new_proj.bias = nn.Parameter(new_b, requires_grad=False)
+    return new_proj
+
+
 def pad_attention_heads(
     model, layers, orig_head_dim, padded_head_dim, num_heads, num_kv_heads
 ):
@@ -498,6 +593,36 @@ def patch_rmsnorm(rmsnorm_cls):
     rmsnorm_cls.forward = _forward_fp16
 
 
+_GELU_TANH_COEFF = math.sqrt(2.0 / math.pi)
+
+
+def patch_new_gelu(gelu_cls):
+    """Patch a tanh-approximation GELU class to avoid ``torch.pow`` on Spyre.
+
+    The ``gelu_new`` / ``NewGELUActivation`` form
+    ``0.5 x (1 + tanh(sqrt(2/pi) (x + 0.044715 x**3)))`` computes the ``x**3``
+    term with ``torch.pow(x, 3.0)``, which the Spyre Inductor backend cannot
+    lower (same class of issue as RMSNorm's ``pow(2)``). The Spyre path uses
+    element-wise ``x * x * x`` instead; the CPU path keeps the original
+    ``torch.pow`` form so adapter outputs stay bit-identical to stock HF on CPU.
+
+    Shared by the learned-absolute-position decoders that use this activation
+    (``hf_gpt2``, ``hf_gpt_neo``). ``tanh`` itself lowers fine on Spyre.
+
+    Args:
+        gelu_cls: the activation class to patch (e.g. ``NewGELUActivation``).
+    """
+
+    def _forward(self, input):
+        if input.device.type == "spyre":
+            inner = _GELU_TANH_COEFF * (input + 0.044715 * (input * input * input))
+        else:
+            inner = _GELU_TANH_COEFF * (input + 0.044715 * torch.pow(input, 3.0))
+        return 0.5 * input * (1.0 + torch.tanh(inner))
+
+    gelu_cls.forward = _forward
+
+
 def _largest_prime_factor(n: int) -> int:
     """Largest prime factor of ``n`` (n >= 2). Used to bound the lm_head span."""
     return int(max(factorint(n)))
@@ -505,6 +630,15 @@ def _largest_prime_factor(n: int) -> int:
 
 # Spyre per-core EAR (effective address range) limit for one tensor: 256 MB.
 _EAR_LIMIT_BYTES = 256 * 1024 * 1024
+
+
+def _get_lm_head(model):
+    """Return the model's output-projection (LM head) module, or ``None``."""
+    for name in ("lm_head", "embed_out"):
+        head = getattr(model, name, None)
+        if head is not None and hasattr(head, "weight"):
+            return head
+    return None
 
 
 def pad_lm_head(model):
@@ -536,9 +670,10 @@ def pad_lm_head(model):
     No-op when ``model`` has no ``lm_head`` (e.g. backbones loaded via
     ``AutoModel`` for embedding workloads).
     """
-    if not hasattr(model, "lm_head"):
+    head = _get_lm_head(model)
+    if head is None:
         return
-    w = model.lm_head.weight
+    w = head.weight
     vocab = w.shape[0]
     hidden = w.shape[1]
     dtype_bytes = w.element_size()
@@ -549,7 +684,7 @@ def pad_lm_head(model):
         sticks += 1
     padded = sticks * BLOCK_SIZE
     if padded != vocab:
-        model.lm_head.weight = nn.Parameter(
+        head.weight = nn.Parameter(
             F.pad(w, (0, 0, 0, padded - vocab)), requires_grad=False
         )
 
@@ -872,14 +1007,16 @@ def _embedding_param_ids(model):
     - BERT-style backbones: ``backbone.embeddings.{word,position,token_type}_embeddings``.
     - GPT-2-style backbones: ``backbone.{wte,wpe}`` (token + learned-position
       tables — both gathered, never matmul'd).
+    - GPT-NeoX backbones: ``backbone.embed_in`` (token gather table).
     """
     ids = set()
     backbone = get_backbone(model)
 
-    # Decoder-style: single embed_tokens
-    embed = getattr(backbone, "embed_tokens", None)
-    if embed is not None and hasattr(embed, "weight"):
-        ids.add(embed.weight.data_ptr())
+    # Decoder-style: single embed_tokens; GPT-NeoX: embed_in
+    for name in ("embed_tokens", "embed_in"):
+        embed = getattr(backbone, name, None)
+        if embed is not None and hasattr(embed, "weight"):
+            ids.add(embed.weight.data_ptr())
 
     # Encoder-style: embeddings submodule with multiple gather tables
     embeddings = getattr(backbone, "embeddings", None)
@@ -899,22 +1036,22 @@ def _embedding_param_ids(model):
 
 
 def _untie_embedding_and_lm_head(model):
-    """If the token-embedding weight and ``lm_head.weight`` share storage, clone
+    """If the token-embedding weight and the LM head weight share storage, clone
     the LM head's weight so each can take a different Spyre layout.
-
-    The token table is ``backbone.embed_tokens`` for decoder models and
-    ``backbone.wte`` for GPT-2-family models (which tie ``wte`` <-> ``lm_head``).
     """
-    if not hasattr(model, "lm_head"):
+    head = _get_lm_head(model)
+    if head is None:
         return
     backbone = get_backbone(model)
-    embed = getattr(backbone, "embed_tokens", None) or getattr(backbone, "wte", None)
+    embed = (
+        getattr(backbone, "embed_tokens", None)
+        or getattr(backbone, "wte", None)
+        or getattr(backbone, "embed_in", None)
+    )
     if embed is None:
         return
-    if embed.weight.data_ptr() == model.lm_head.weight.data_ptr():
-        model.lm_head.weight = nn.Parameter(
-            model.lm_head.weight.detach().clone(), requires_grad=False
-        )
+    if embed.weight.data_ptr() == head.weight.data_ptr():
+        head.weight = nn.Parameter(head.weight.detach().clone(), requires_grad=False)
         if hasattr(model, "config"):
             model.config.tie_word_embeddings = False
 

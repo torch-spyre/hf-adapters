@@ -35,6 +35,16 @@ CAUSAL_LM_MODELS = {
         "path": "gpt2",
         "adapter": "hf_gpt2.py",
     },
+    "gpt_neo": {
+        "name": "GPT-Neo 125M",
+        "path": "EleutherAI/gpt-neo-125m",
+        "adapter": "hf_gpt_neo.py",
+    },
+    "gpt_neox": {
+        "name": "Pythia 70M",
+        "path": "EleutherAI/pythia-70m",
+        "adapter": "hf_gpt_neox.py",
+    },
     "granite8b": {
         "name": "Granite 3.3 8B",
         "path": "ibm-granite/granite-3.3-8b-instruct",
