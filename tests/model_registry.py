@@ -281,9 +281,11 @@ def _select_representative_models(config_mapping=None):
     return causal_keys, embed_keys
 
 
-# Defer initialization until after conftest.py has patched hf_adapters
-# These will be populated by conftest.py after it sets up the patched modules
-CAUSAL_KEYS = []
-EMBED_KEYS = []
+# Initialize with all keys from the registries as defaults.
+# conftest.py will override these with programmatically selected representative
+# models when it runs, but having defaults ensures tests can be collected even
+# if conftest hasn't executed yet (e.g., during pytest collection phase).
+CAUSAL_KEYS = list(CAUSAL_LM_MODELS.keys())
+EMBED_KEYS = list(EMBEDDING_MODELS.keys())
 
 # Made with Bob
