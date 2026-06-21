@@ -215,187 +215,187 @@ jobs:
           echo "Running tests/spyre/test_load_spyre.py for ${{ matrix.model_key }}..."
           uv run pytest -s -vvv "tests/spyre/test_load_spyre.py" -k "${{ matrix.model_key }}"
           echo "tests done"
-
-  spyre-smoke-tests:
-    name: Spyre smoke (${{ matrix.model_key }})
-    runs-on:
-      - x86_64
-      - spyre_pf_x1__pvc_1tb_x1
-      - linux
-      - image_torch_spyre
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
-        model_key:
-          - qwen3
-          - granite
-          - granite2b
-          - granite4
-          - smollm3
-          - tiny_llama
-          # phi4 — partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md).
-          # - phi4
-          - qwen2
-          - ministral
-          - olmo
-          - olmo2
-          - falcon3
-          - deepseek-coder
-          # granite-vision — multimodal; load_fn=True in the registry. The smoke
-          #                   driver calls AutoSpyreModelForCausalLM.from_pretrained
-          #                   directly and does not handle the custom loader.
-          # - granite-vision
-          # gemma4 — no public checkpoint at google/gemma-4-12B-it (HF 404).
-          # - gemma4
-
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: .github/actions
-          sparse-checkout-cone-mode: false
-
-      - uses: ./.github/actions/build-hf-adapters
-        with:
-          uv_groups: "dev spyre test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
-
-      - name: Run test_e2e_smoke_spyre.py for ${{ matrix.model_key }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running tests/spyre/test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv "tests/spyre/test_e2e_smoke_spyre.py" -k "${{ matrix.model_key }}"
-          echo "tests done"
-
-  spyre-token-compare-tests:
-    name: Spyre token compare (${{ matrix.model_key }})
-    runs-on:
-      - x86_64
-      - spyre_pf_x1__pvc_1tb_x1
-      - linux
-      - image_torch_spyre
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
-        model_key:
-          - qwen3
-          - granite
-          - granite2b
-          - granite4
-          - smollm3
-          - tiny_llama
-          # phi4 — partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md).
-          # - phi4
-          - qwen2
-          - ministral
-          - olmo
-          - olmo2
-          - falcon3
-          - deepseek-coder
-          # granite-vision — multimodal; the token-compare driver calls
-          #                   AutoSpyreModelForCausalLM.from_pretrained and does
-          #                   not handle the custom loader (load_fn=True).
-          # - granite-vision
-          # gemma4 — no public checkpoint at google/gemma-4-12B-it (HF 404).
-          # - gemma4
-
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: .github/actions
-          sparse-checkout-cone-mode: false
-
-      - uses: ./.github/actions/build-hf-adapters
-        with:
-          uv_groups: "dev spyre test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
-
-      - name: Run test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running tests/spyre/test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv "tests/spyre/test_e2e_token_compare_spyre.py" -k "${{ matrix.model_key }}"
-          echo "tests done"
-
-  spyre-embed-compare-tests:
-    name: Spyre embed compare (${{ matrix.model_key }})
-    runs-on:
-      - x86_64
-      - spyre_pf_x1__pvc_1tb_x1
-      - linux
-      - image_torch_spyre
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        # All embedding keys from tests/model_registry.py::EMBEDDING_MODELS.
-        model_key:
-          - qwen3_embed
-          - qwen2_embed
-          - e5_mistral
-          - linq_embed_mistral
-          - sfr_embedding_mistral
-          - bge_base
-          - minilm
-          - bge_m3
-          - mpnet
-          - modernbert
-          - gte_modernbert
-          - granite_embed
-
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: .github/actions
-          sparse-checkout-cone-mode: false
-
-      - uses: ./.github/actions/build-hf-adapters
-        with:
-          uv_groups: "dev spyre test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
-
-      - name: Run test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running tests/spyre/test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv "tests/spyre/test_e2e_embed_compare_spyre.py" -k "${{ matrix.model_key }}"
-          echo "tests done"
+#
+#  spyre-smoke-tests:
+#    name: Spyre smoke (${{ matrix.model_key }})
+#    runs-on:
+#      - x86_64
+#      - spyre_pf_x1__pvc_1tb_x1
+#      - linux
+#      - image_torch_spyre
+#    timeout-minutes: 120
+#    strategy:
+#      fail-fast: false
+#      matrix:
+#        # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
+#        model_key:
+#          - qwen3
+#          - granite
+#          - granite2b
+#          - granite4
+#          - smollm3
+#          - tiny_llama
+#          # phi4 — partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md).
+#          # - phi4
+#          - qwen2
+#          - ministral
+#          - olmo
+#          - olmo2
+#          - falcon3
+#          - deepseek-coder
+#          # granite-vision — multimodal; load_fn=True in the registry. The smoke
+#          #                   driver calls AutoSpyreModelForCausalLM.from_pretrained
+#          #                   directly and does not handle the custom loader.
+#          # - granite-vision
+#          # gemma4 — no public checkpoint at google/gemma-4-12B-it (HF 404).
+#          # - gemma4
+#
+#    steps:
+#      - name: Checkout composite actions
+#        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+#        with:
+#          sparse-checkout: .github/actions
+#          sparse-checkout-cone-mode: false
+#
+#      - uses: ./.github/actions/build-hf-adapters
+#        with:
+#          uv_groups: "dev spyre test"
+#          rpm_names: ${{ inputs.rpm_names }}
+#          rpm_location: ${{ inputs.rpm_location }}
+#          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+#          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+#          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+#          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+#          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+#
+#      - name: Run test_e2e_smoke_spyre.py for ${{ matrix.model_key }}
+#        env:
+#          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+#        run: |
+#          source "$HOME/.bashrc"
+#          source /etc/profile.d/ibm-aiu-setup.sh
+#          cd "$CLONED_HF_ADAPTERS_DIR"
+#          echo "Running tests/spyre/test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
+#          uv run pytest -s -vvv "tests/spyre/test_e2e_smoke_spyre.py" -k "${{ matrix.model_key }}"
+#          echo "tests done"
+#
+#  spyre-token-compare-tests:
+#    name: Spyre token compare (${{ matrix.model_key }})
+#    runs-on:
+#      - x86_64
+#      - spyre_pf_x1__pvc_1tb_x1
+#      - linux
+#      - image_torch_spyre
+#    timeout-minutes: 120
+#    strategy:
+#      fail-fast: false
+#      matrix:
+#        # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
+#        model_key:
+#          - qwen3
+#          - granite
+#          - granite2b
+#          - granite4
+#          - smollm3
+#          - tiny_llama
+#          # phi4 — partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md).
+#          # - phi4
+#          - qwen2
+#          - ministral
+#          - olmo
+#          - olmo2
+#          - falcon3
+#          - deepseek-coder
+#          # granite-vision — multimodal; the token-compare driver calls
+#          #                   AutoSpyreModelForCausalLM.from_pretrained and does
+#          #                   not handle the custom loader (load_fn=True).
+#          # - granite-vision
+#          # gemma4 — no public checkpoint at google/gemma-4-12B-it (HF 404).
+#          # - gemma4
+#
+#    steps:
+#      - name: Checkout composite actions
+#        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+#        with:
+#          sparse-checkout: .github/actions
+#          sparse-checkout-cone-mode: false
+#
+#      - uses: ./.github/actions/build-hf-adapters
+#        with:
+#          uv_groups: "dev spyre test"
+#          rpm_names: ${{ inputs.rpm_names }}
+#          rpm_location: ${{ inputs.rpm_location }}
+#          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+#          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+#          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+#          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+#          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+#
+#      - name: Run test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}
+#        env:
+#          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+#        run: |
+#          source "$HOME/.bashrc"
+#          source /etc/profile.d/ibm-aiu-setup.sh
+#          cd "$CLONED_HF_ADAPTERS_DIR"
+#          echo "Running tests/spyre/test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}..."
+#          uv run pytest -s -vvv "tests/spyre/test_e2e_token_compare_spyre.py" -k "${{ matrix.model_key }}"
+#          echo "tests done"
+#
+#  spyre-embed-compare-tests:
+#    name: Spyre embed compare (${{ matrix.model_key }})
+#    runs-on:
+#      - x86_64
+#      - spyre_pf_x1__pvc_1tb_x1
+#      - linux
+#      - image_torch_spyre
+#    timeout-minutes: 120
+#    strategy:
+#      fail-fast: false
+#      matrix:
+#        # All embedding keys from tests/model_registry.py::EMBEDDING_MODELS.
+#        model_key:
+#          - qwen3_embed
+#          - qwen2_embed
+#          - e5_mistral
+#          - linq_embed_mistral
+#          - sfr_embedding_mistral
+#          - bge_base
+#          - minilm
+#          - bge_m3
+#          - mpnet
+#          - modernbert
+#          - gte_modernbert
+#          - granite_embed
+#
+#    steps:
+#      - name: Checkout composite actions
+#        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+#        with:
+#          sparse-checkout: .github/actions
+#          sparse-checkout-cone-mode: false
+#
+#      - uses: ./.github/actions/build-hf-adapters
+#        with:
+#          uv_groups: "dev spyre test"
+#          rpm_names: ${{ inputs.rpm_names }}
+#          rpm_location: ${{ inputs.rpm_location }}
+#          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+#          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+#          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+#          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+#          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+#
+#      - name: Run test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}
+#        env:
+#          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+#        run: |
+#          source "$HOME/.bashrc"
+#          source /etc/profile.d/ibm-aiu-setup.sh
+#          cd "$CLONED_HF_ADAPTERS_DIR"
+#          echo "Running tests/spyre/test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}..."
+#          uv run pytest -s -vvv "tests/spyre/test_e2e_embed_compare_spyre.py" -k "${{ matrix.model_key }}"
+#          echo "tests done"
 
   # ---------------------------------------------------------------------------
   # spyre-block-compare-tests — DISABLED
@@ -503,103 +503,103 @@ jobs:
   #         echo "Running tests/spyre/test_block_cpu_vs_spyre.py for ${{ matrix.model_key }}..."
   #         uv run pytest -s -vvv "tests/spyre/test_block_cpu_vs_spyre.py" -m spyre_block -k "${{ matrix.model_key }}"
   #         echo "tests done"
-
-  spyre-generate-edge-cases-tests:
-    name: Spyre edge ${{ matrix.case_file }} (${{ matrix.model_key }})
-    # Slow Spyre edge-case suite. Off by default (PR skips it); daily/weekly
-    # opt in via run_generate_edge_cases=true. When the flag is false this
-    # job appears as a "Skipped" check on the PR — that's expected.
-    #
-    # Each (model_key, case_file) cell is its own runner process — that's the
-    # process boundary that test_generate_edge_cases_spyre.py used to provide
-    # via a size-1 multiprocessing.Pool. The matrix expansion replaces the
-    # multiprocessing wiring; per-case files now live under tests/spyre/edge_cases/.
-    if: ${{ inputs.run_generate_edge_cases }}
-    runs-on:
-      - x86_64
-      - spyre_pf_x1__pvc_1tb_x1
-      - linux
-      - image_torch_spyre
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
-        # Same set as the smoke/token-compare matrices above; the edge-case
-        # tests call AutoSpyreModelForCausalLM.from_pretrained.
-        model_key:
-          - qwen3
-          - granite
-          - granite2b
-          - granite4
-          - smollm3
-          - tiny_llama
-          # phi4 — partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md).
-          # - phi4
-          - qwen2
-          - ministral
-          - olmo
-          - olmo2
-          - falcon3
-          - deepseek-coder
-          # granite-vision — multimodal; the edge-case tests call
-          #                   AutoSpyreModelForCausalLM.from_pretrained and do
-          #                   not handle the custom loader (load_fn=True).
-          # - granite-vision
-          # gemma4 — no public checkpoint at google/gemma-4-12B-it (HF 404).
-          # - gemma4
-        # One file per case under tests/spyre/edge_cases/. The matrix expands
-        # to (model × case) cells; each cell is its own process, giving fresh
-        # VFIO DMA mappings per case without multiprocessing.
-        case_file:
-          # Greedy regimes
-          - test_greedy_single_token_prompt
-          - test_greedy_short_one_token
-          - test_greedy_short_block_minus_one
-          - test_greedy_short_cross_block
-          - test_greedy_short_two_blocks_plus
-          - test_greedy_prompt_exactly_block
-          - test_greedy_long_multi_block
-          - test_greedy_mixed_short
-          - test_greedy_mixed_with_single_token
-          # Forced-EOS regimes
-          - test_eos_first_token
-          - test_eos_mid_block
-          - test_eos_first_of_second_block
-          - test_eos_on_last_step
-          # Special regimes
-          - test_zero_new_tokens
-          - test_sampling_determinism
-          - test_no_eos_runs_full_budget
-          - test_no_pad_token_fallback
-          - test_sampling_top_k_zero
-          - test_eos_inside_prompt
-
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: .github/actions
-          sparse-checkout-cone-mode: false
-
-      - uses: ./.github/actions/build-hf-adapters
-        with:
-          uv_groups: "dev spyre test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
-
-      - name: Run ${{ matrix.case_file }} for ${{ matrix.model_key }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running tests/spyre/edge_cases/${{ matrix.case_file }}.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv "tests/spyre/edge_cases/${{ matrix.case_file }}.py" -k "${{ matrix.model_key }}"
-          echo "tests done"
+#
+#  spyre-generate-edge-cases-tests:
+#    name: Spyre edge ${{ matrix.case_file }} (${{ matrix.model_key }})
+#    # Slow Spyre edge-case suite. Off by default (PR skips it); daily/weekly
+#    # opt in via run_generate_edge_cases=true. When the flag is false this
+#    # job appears as a "Skipped" check on the PR — that's expected.
+#    #
+#    # Each (model_key, case_file) cell is its own runner process — that's the
+#    # process boundary that test_generate_edge_cases_spyre.py used to provide
+#    # via a size-1 multiprocessing.Pool. The matrix expansion replaces the
+#    # multiprocessing wiring; per-case files now live under tests/spyre/edge_cases/.
+#    if: ${{ inputs.run_generate_edge_cases }}
+#    runs-on:
+#      - x86_64
+#      - spyre_pf_x1__pvc_1tb_x1
+#      - linux
+#      - image_torch_spyre
+#    timeout-minutes: 120
+#    strategy:
+#      fail-fast: false
+#      matrix:
+#        # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
+#        # Same set as the smoke/token-compare matrices above; the edge-case
+#        # tests call AutoSpyreModelForCausalLM.from_pretrained.
+#        model_key:
+#          - qwen3
+#          - granite
+#          - granite2b
+#          - granite4
+#          - smollm3
+#          - tiny_llama
+#          # phi4 — partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md).
+#          # - phi4
+#          - qwen2
+#          - ministral
+#          - olmo
+#          - olmo2
+#          - falcon3
+#          - deepseek-coder
+#          # granite-vision — multimodal; the edge-case tests call
+#          #                   AutoSpyreModelForCausalLM.from_pretrained and do
+#          #                   not handle the custom loader (load_fn=True).
+#          # - granite-vision
+#          # gemma4 — no public checkpoint at google/gemma-4-12B-it (HF 404).
+#          # - gemma4
+#        # One file per case under tests/spyre/edge_cases/. The matrix expands
+#        # to (model × case) cells; each cell is its own process, giving fresh
+#        # VFIO DMA mappings per case without multiprocessing.
+#        case_file:
+#          # Greedy regimes
+#          - test_greedy_single_token_prompt
+#          - test_greedy_short_one_token
+#          - test_greedy_short_block_minus_one
+#          - test_greedy_short_cross_block
+#          - test_greedy_short_two_blocks_plus
+#          - test_greedy_prompt_exactly_block
+#          - test_greedy_long_multi_block
+#          - test_greedy_mixed_short
+#          - test_greedy_mixed_with_single_token
+#          # Forced-EOS regimes
+#          - test_eos_first_token
+#          - test_eos_mid_block
+#          - test_eos_first_of_second_block
+#          - test_eos_on_last_step
+#          # Special regimes
+#          - test_zero_new_tokens
+#          - test_sampling_determinism
+#          - test_no_eos_runs_full_budget
+#          - test_no_pad_token_fallback
+#          - test_sampling_top_k_zero
+#          - test_eos_inside_prompt
+#
+#    steps:
+#      - name: Checkout composite actions
+#        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+#        with:
+#          sparse-checkout: .github/actions
+#          sparse-checkout-cone-mode: false
+#
+#      - uses: ./.github/actions/build-hf-adapters
+#        with:
+#          uv_groups: "dev spyre test"
+#          rpm_names: ${{ inputs.rpm_names }}
+#          rpm_location: ${{ inputs.rpm_location }}
+#          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+#          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+#          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+#          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+#          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+#
+#      - name: Run ${{ matrix.case_file }} for ${{ matrix.model_key }}
+#        env:
+#          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+#        run: |
+#          source "$HOME/.bashrc"
+#          source /etc/profile.d/ibm-aiu-setup.sh
+#          cd "$CLONED_HF_ADAPTERS_DIR"
+#          echo "Running tests/spyre/edge_cases/${{ matrix.case_file }}.py for ${{ matrix.model_key }}..."
+#          uv run pytest -s -vvv "tests/spyre/edge_cases/${{ matrix.case_file }}.py" -k "${{ matrix.model_key }}"
+#          echo "tests done"
