@@ -26,6 +26,16 @@ on:
         required: false
         type: string
         default: ""
+      image_label:
+        description: |
+          Image scaleSetLabel to select for runs-on (image_torch_spyre |
+          image_hf_adapters | image_hf_adapters_pr_<KEY>). The per-PR ephemeral flow
+          passes that PR's set label so jobs land on the per-PR image (the RPM is
+          baked in -> no runtime sudo). Default keeps push/PR/merge_group runs on
+          the standing torch-spyre image set (today's behaviour).
+        required: false
+        type: string
+        default: image_torch_spyre
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -90,7 +100,7 @@ jobs:
       - x86_64
       - spyre_pf_x0__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - ${{ inputs.image_label }}
     timeout-minutes: 120
     strategy:
       matrix:
@@ -142,7 +152,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - ${{ inputs.image_label }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -221,7 +231,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - ${{ inputs.image_label }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -285,7 +295,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - ${{ inputs.image_label }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -349,7 +359,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - ${{ inputs.image_label }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -405,7 +415,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - ${{ inputs.image_label }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
