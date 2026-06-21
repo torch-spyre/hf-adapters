@@ -16,9 +16,10 @@
 Multi-batch generate() test: verify that ``hf_common.generate()`` produces
 correct per-sequence outputs when called with batch_size > 1.
 
-For each registered model, ``test_multibatch[<key>]`` runs the same prompts
-through stock HF ``generate(do_sample=False)`` per-prompt, then through the
-adapter's batched ``generate()``, and asserts the decoded text matches.
+For each registered causal-LM in ``tests/model_registry.py``,
+``test_multibatch[<key>]`` runs the same prompts through stock HF
+``generate(do_sample=False)`` per-prompt, then through the adapter's batched
+``generate()``, and asserts the decoded text matches.
 
 DEVICE='cpu' patching of ``hf_common`` happens once in ``tests/conftest.py``;
 this file is plain pytest.
@@ -28,6 +29,7 @@ import gc
 
 import pytest
 import torch
+from model_registry import CAUSAL_LM_MODELS
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 PROMPTS = [
@@ -35,45 +37,6 @@ PROMPTS = [
     "The chemical formula for water is",
 ]
 MAX_NEW_TOKENS = 8
-
-MODELS = {
-    "qwen3": {
-        "name": "Qwen3 0.6B",
-        "path": "Qwen/Qwen3-0.6B",
-        "adapter": "hf_qwen3.py",
-    },
-    "granite2b": {
-        "name": "Granite 3.3 2B",
-        "path": "ibm-granite/granite-3.3-2b-instruct",
-        "adapter": "hf_granite.py",
-    },
-    "smollm3": {
-        "name": "SmolLM3 3B",
-        "path": "HuggingFaceTB/SmolLM3-3B-Base",
-        "adapter": "hf_smollm3.py",
-    },
-    "llama": {
-        "name": "TinyLlama 1.1B",
-        "path": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        "adapter": "hf_llama.py",
-    },
-    "granite4": {
-        "name": "Granite 4.0 1B",
-        "path": "ibm-granite/granite-4.0-1b-base",
-        "adapter": "hf_granitemoehybrid.py",
-        "dtype": "float32",
-    },
-    "qwen2": {
-        "name": "Qwen2.5 1.5B",
-        "path": "Qwen/Qwen2.5-1.5B",
-        "adapter": "hf_qwen2.py",
-    },
-    "olmo": {
-        "name": "OLMo 1B",
-        "path": "allenai/OLMo-1B-hf",
-        "adapter": "hf_olmo.py",
-    },
-}
 
 
 def _torch_dtype(info):
@@ -94,9 +57,13 @@ def _hf_reference_outputs(model, tokenizer, prompts, max_new_tokens):
     return results
 
 
-@pytest.mark.parametrize("model_key", list(MODELS.keys()), ids=list(MODELS.keys()))
+@pytest.mark.parametrize(
+    "model_key",
+    list(CAUSAL_LM_MODELS.keys()),
+    ids=list(CAUSAL_LM_MODELS.keys()),
+)
 def test_multibatch(model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod):
-    info = MODELS[model_key]
+    info = CAUSAL_LM_MODELS[model_key]
     adapter_mod = load_adapter(info["adapter"])
     torch_dtype = _torch_dtype(info)
 
