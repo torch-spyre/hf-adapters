@@ -82,61 +82,61 @@ env:
   PYTEST_MARKER: ${{ inputs.pytest_marker }}
 
 jobs:
-#  cpu-tests:
-#    name: CPU tests (${{ matrix.test_file }})
-#    runs-on:
-#      - x86_64
-#      - spyre_pf_x0__pvc_1tb_x1
-#      - linux
-#      - image_torch_spyre
-#    timeout-minutes: 120
-#    strategy:
-#      matrix:
-#        # Tests marked `@pytest.mark.slow` are dropped from PR runs (the caller
-#        # passes pytest_marker="not slow") and exercised by daily/weekly.
-#        test_file:
-#          - test_load_cpu.py
-##          - test_adapter_cpu_accuracy.py
-##          - test_embed_cpu_accuracy.py
-##          - test_generate_edge_cases_cpu.py
-##          - test_multibatch_generate_cpu.py
-##          - test_st_backend_cpu.py
-#
-#    steps:
-#      - name: Checkout composite actions
-#        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-#        with:
-#          sparse-checkout: .github/actions
-#          sparse-checkout-cone-mode: false
-#
-#      - uses: ./.github/actions/build-hf-adapters
-#        with:
-#          uv_groups: "dev test"
-#          rpm_names: ${{ inputs.rpm_names }}
-#          rpm_location: ${{ inputs.rpm_location }}
-#          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-#          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-#          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-#          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-#          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
-#
-#      - name: Run ${{ matrix.test_file }}
-#        env:
-#          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-#        run: |
-#          unset _IBM_AIU_SETUP
-#          rm -f /tmp/etc/ibm/spyre/topo.json
-#          source "$HOME/.bashrc"
-#          source /etc/profile.d/ibm-aiu-setup.sh
-#          cd "$CLONED_HF_ADAPTERS_DIR"
-#          MARKER_ARGS=()
-#          if [[ -n "$PYTEST_MARKER" ]]; then
-#            MARKER_ARGS=(-m "$PYTEST_MARKER")
-#          fi
-#          echo "Running ${{ matrix.test_file }}..."
-#          echo "uv run pytest -s -vvv ${MARKER_ARGS[@]} -k $MODELS_FILTER tests/${{ matrix.test_file }}"
-#          uv run pytest -s -vvv "${MARKER_ARGS[@]}" -k "$MODELS_FILTER" "tests/${{ matrix.test_file }}"
-#          echo "tests done"
+  cpu-tests:
+    name: CPU tests (${{ matrix.test_file }})
+    runs-on:
+      - x86_64
+      - spyre_pf_x0__pvc_1tb_x1
+      - linux
+      - image_torch_spyre
+    timeout-minutes: 120
+    strategy:
+      matrix:
+        # Tests marked `@pytest.mark.slow` are dropped from PR runs (the caller
+        # passes pytest_marker="not slow") and exercised by daily/weekly.
+        test_file:
+          - test_load_cpu.py
+#          - test_adapter_cpu_accuracy.py
+#          - test_embed_cpu_accuracy.py
+#          - test_generate_edge_cases_cpu.py
+#          - test_multibatch_generate_cpu.py
+#          - test_st_backend_cpu.py
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - name: Run ${{ matrix.test_file }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          unset _IBM_AIU_SETUP
+          rm -f /tmp/etc/ibm/spyre/topo.json
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          MARKER_ARGS=()
+          if [[ -n "$PYTEST_MARKER" ]]; then
+            MARKER_ARGS=(-m "$PYTEST_MARKER")
+          fi
+          echo "Running ${{ matrix.test_file }}..."
+          echo "uv run pytest -s -vvv ${MARKER_ARGS[@]} -k $MODELS_FILTER tests/${{ matrix.test_file }}"
+          uv run pytest -s -vvv "${MARKER_ARGS[@]}" -k "$MODELS_FILTER" "tests/${{ matrix.test_file }}"
+          echo "tests done"
 
 #  spyre-load-tests:
 #    name: Spyre load (${{ matrix.model_key }})
