@@ -26,6 +26,42 @@ on:
         required: false
         type: string
         default: ""
+      ref:
+        description: Branch, tag, or SHA of hf-adapters to check out and test
+        required: false
+        type: string
+        default: ""
+      repository:
+        description: |
+          Full clone URL of the hf-adapters fork to check out (e.g.
+          "https://github.com/myuser/hf-adapters.git"); leave empty for the base repo.
+          Used by the cross-repo Test-With: flow to test a companion fork/branch.
+        required: false
+        type: string
+        default: ""
+      pr_url_hash:
+        description: |
+          Hash of the full URL of the PR that triggered this run.
+          Sent by the internal integration pipeline; unused on push/PR/merge_group.
+        required: false
+        type: string
+        default: ""
+      build_torch_spyre:
+        description: Accepted for dispatch-contract parity with torch-spyre; unused here.
+        required: false
+        type: boolean
+        default: true
+      runner_label:
+        description: |
+          Per-PR ephemeral runner-set IMAGE label to select for runs-on
+          (image_hf_adapters_pr_<component>_<sha12>, e.g.
+          image_hf_adapters_pr_flex_8ddcf3e155e9). The per-PR ephemeral flow passes
+          that PR's set label so jobs land on the per-PR image (the changed RPM is
+          baked in -> no runtime sudo). Empty keeps push/PR/merge_group runs on the
+          standing image_torch_spyre set (today's behaviour).
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -90,7 +126,7 @@ jobs:
 #      - x86_64
 #      - spyre_pf_x0__pvc_1tb_x1
 #      - linux
-#      - image_torch_spyre
+#      - ${{ inputs.runner_label || 'image_torch_spyre' }}
 #    timeout-minutes: 120
 #    strategy:
 #      matrix:
@@ -100,9 +136,9 @@ jobs:
 #          - test_load_cpu.py
 #          - test_adapter_cpu_accuracy.py
 #          - test_embed_cpu_accuracy.py
-##          - test_generate_edge_cases_cpu.py
-##          - test_multibatch_generate_cpu.py
-##          - test_st_backend_cpu.py
+#          - test_generate_edge_cases_cpu.py
+#          - test_multibatch_generate_cpu.py
+#          - test_st_backend_cpu.py
 #
 #    steps:
 #      - name: Checkout composite actions
@@ -118,6 +154,8 @@ jobs:
 #          rpm_location: ${{ inputs.rpm_location }}
 #          output_dir: ${{ inputs.output_dir }}
 #          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+#          ref: ${{ inputs.ref }}
+#          repository: ${{ inputs.repository }}
 #          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
 #          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
 #          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
@@ -142,7 +180,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - ${{ inputs.runner_label || 'image_torch_spyre' }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -199,6 +237,8 @@ jobs:
           rpm_location: ${{ inputs.rpm_location }}
           output_dir: ${{ inputs.output_dir }}
           torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
           artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
           artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
           artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
@@ -221,7 +261,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - ${{ inputs.runner_label || 'image_torch_spyre' }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -263,6 +303,8 @@ jobs:
           rpm_location: ${{ inputs.rpm_location }}
           output_dir: ${{ inputs.output_dir }}
           torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
           artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
           artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
           artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
@@ -285,7 +327,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - ${{ inputs.runner_label || 'image_torch_spyre' }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -327,6 +369,8 @@ jobs:
           rpm_location: ${{ inputs.rpm_location }}
           output_dir: ${{ inputs.output_dir }}
           torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
           artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
           artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
           artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
@@ -349,7 +393,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - ${{ inputs.runner_label || 'image_torch_spyre' }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -383,6 +427,8 @@ jobs:
           rpm_location: ${{ inputs.rpm_location }}
           output_dir: ${{ inputs.output_dir }}
           torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
           artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
           artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
           artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
@@ -405,7 +451,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - ${{ inputs.runner_label || 'image_torch_spyre' }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -473,6 +519,8 @@ jobs:
           rpm_location: ${{ inputs.rpm_location }}
           output_dir: ${{ inputs.output_dir }}
           torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
           artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
           artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
           artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}

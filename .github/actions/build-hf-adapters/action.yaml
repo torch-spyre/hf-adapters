@@ -27,6 +27,19 @@ inputs:
     description: Branch, tag, or SHA of torch-spyre to check out and test
     required: false
     default: ''
+  ref:
+    description: >
+      Branch, tag, or SHA of hf-adapters to check out. Empty = the PR/push head
+      (today's behaviour). Set by the cross-repo Test-With: flow to test a companion ref.
+    required: false
+    default: ''
+  repository:
+    description: >
+      Full clone URL of the hf-adapters fork to check out (e.g.
+      https://github.com/myuser/hf-adapters.git). Empty = the base repo
+      ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY). Set by the Test-With: flow.
+    required: false
+    default: ''
   artifactory_user:
     description: Artifactory username
     required: false
@@ -61,20 +74,38 @@ runs:
         PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         GITHUB_SHA: ${{ github.sha }}
         GITHUB_REF: ${{ github.ref }}
+        # Cross-repo Test-With: overrides. Empty = today's behaviour (base repo, PR/push head).
+        INPUT_REF: ${{ inputs.ref }}
+        INPUT_REPOSITORY: ${{ inputs.repository }}
       run: |
         source "$HOME/.bashrc"
         source /etc/profile.d/ibm-aiu-setup.sh
         git config --global --add safe.directory '*'
         rm -fr "$CLONED_HF_ADAPTERS_DIR"
-        git clone --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$CLONED_HF_ADAPTERS_DIR"
+        CLONE_URL="${INPUT_REPOSITORY:-$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git}"
+        if [[ -n "$INPUT_REF" || -n "$INPUT_REPOSITORY" ]]; then
+          git clone "$CLONE_URL" "$CLONED_HF_ADAPTERS_DIR"
+        else
+          git clone --depth=1 "$CLONE_URL" "$CLONED_HF_ADAPTERS_DIR"
+        fi
         cd "$CLONED_HF_ADAPTERS_DIR"
-        TARGET_SHA="${PR_HEAD_SHA:-$GITHUB_SHA}"
-        TARGET_REF="${PR_HEAD_REF:-$GITHUB_REF}"
-        echo "TARGET_REF=${TARGET_REF}"
-        echo "TARGET_SHA=${TARGET_SHA}"
-        git fetch --tags --force origin "+${TARGET_SHA}" || \
-          git fetch --tags --force origin
-        git checkout --force "${TARGET_SHA}"
+        if [[ -n "$INPUT_REF" ]]; then
+          # Explicit ref (Test-With: companion fork/branch).
+          TARGET_REF="$INPUT_REF"
+          echo "TARGET_REF=${TARGET_REF} (from input.ref)"
+          git fetch --tags --force origin "+${TARGET_REF}:refs/remotes/origin/_target" || \
+            git fetch --tags --force origin
+          git checkout --force "${TARGET_REF}" 2>/dev/null || git checkout --force origin/_target
+          TARGET_SHA="$(git rev-parse HEAD)"
+        else
+          TARGET_SHA="${PR_HEAD_SHA:-$GITHUB_SHA}"
+          TARGET_REF="${PR_HEAD_REF:-$GITHUB_REF}"
+          echo "TARGET_REF=${TARGET_REF}"
+          echo "TARGET_SHA=${TARGET_SHA}"
+          git fetch --tags --force origin "+${TARGET_SHA}" || \
+            git fetch --tags --force origin
+          git checkout --force "${TARGET_SHA}"
+        fi
         git log -1 --oneline
         echo "target_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
 
@@ -165,7 +196,8 @@ runs:
           # frozen installation takes pinned commit when locked
           # we want to relax on torch-spyre to use floating version
           # and have other dependencies locked
-          uv lock --upgrade-package torch-spyre
+          # TODO: uncomment this once torch-spyre latest is stable
+          # uv lock --upgrade-package torch-spyre
           uv sync --frozen --verbose --refresh $GROUP_FLAGS
         fi
         uv pip show torch
