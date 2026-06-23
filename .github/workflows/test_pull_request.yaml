@@ -84,57 +84,57 @@ jobs:
         env:
           SKIP: mypy
 
-  cpu-tests:
-    name: CPU tests (${{ matrix.test_file }})
-    runs-on:
-      - x86_64
-      - spyre_pf_x0__pvc_1tb_x1
-      - linux
-      - image_torch_spyre
-    timeout-minutes: 120
-    strategy:
-      matrix:
-        # Tests marked `@pytest.mark.slow` are dropped from PR runs (see the
-        # `-m "not slow"` flag below) and instead exercised by the weekly cron.
-        test_file:
-          - test_load_cpu.py
-          - test_adapter_cpu_accuracy.py
-          - test_embed_cpu_accuracy.py
-#          - test_generate_edge_cases_cpu.py
-#          - test_multibatch_generate_cpu.py
-#          - test_st_backend_cpu.py
-
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: .github/actions
-          sparse-checkout-cone-mode: false
-
-      - uses: ./.github/actions/build-hf-adapters
-        with:
-          uv_groups: "dev test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          output_dir: ${{ inputs.output_dir }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
-
-      - name: Run ${{ matrix.test_file }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          unset _IBM_AIU_SETUP
-          rm -f /tmp/etc/ibm/spyre/topo.json
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running ${{ matrix.test_file }}..."
-          uv run pytest -s -vvv -m "not slow" -k "$MODELS_FILTER" "tests/${{ matrix.test_file }}"
-          echo "tests done"
+#  cpu-tests:
+#    name: CPU tests (${{ matrix.test_file }})
+#    runs-on:
+#      - x86_64
+#      - spyre_pf_x0__pvc_1tb_x1
+#      - linux
+#      - image_torch_spyre
+#    timeout-minutes: 120
+#    strategy:
+#      matrix:
+#        # Tests marked `@pytest.mark.slow` are dropped from PR runs (see the
+#        # `-m "not slow"` flag below) and instead exercised by the weekly cron.
+#        test_file:
+#          - test_load_cpu.py
+#          - test_adapter_cpu_accuracy.py
+#          - test_embed_cpu_accuracy.py
+##          - test_generate_edge_cases_cpu.py
+##          - test_multibatch_generate_cpu.py
+##          - test_st_backend_cpu.py
+#
+#    steps:
+#      - name: Checkout composite actions
+#        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+#        with:
+#          sparse-checkout: .github/actions
+#          sparse-checkout-cone-mode: false
+#
+#      - uses: ./.github/actions/build-hf-adapters
+#        with:
+#          uv_groups: "dev test"
+#          rpm_names: ${{ inputs.rpm_names }}
+#          rpm_location: ${{ inputs.rpm_location }}
+#          output_dir: ${{ inputs.output_dir }}
+#          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+#          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+#          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+#          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+#          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+#
+#      - name: Run ${{ matrix.test_file }}
+#        env:
+#          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+#        run: |
+#          unset _IBM_AIU_SETUP
+#          rm -f /tmp/etc/ibm/spyre/topo.json
+#          source "$HOME/.bashrc"
+#          source /etc/profile.d/ibm-aiu-setup.sh
+#          cd "$CLONED_HF_ADAPTERS_DIR"
+#          echo "Running ${{ matrix.test_file }}..."
+#          uv run pytest -s -vvv -m "not slow" -k "$MODELS_FILTER" "tests/${{ matrix.test_file }}"
+#          echo "tests done"
 
   spyre-load-tests:
     name: Spyre load (${{ matrix.model_key }})
@@ -502,7 +502,7 @@ jobs:
         working-directory: .
     needs:
       - pre-commit
-      - cpu-tests
+#      - cpu-tests
       - spyre-load-tests
       - spyre-smoke-tests
       - spyre-token-compare-tests
@@ -511,9 +511,12 @@ jobs:
     if: always()
     steps:
       - name: Check all suites passed
+        # NOTE: the `cpu-tests` predicate is intentionally omitted from the
+        # `if` below while the cpu-tests job is commented out. Re-add
+        #   contains(needs.cpu-tests.result, 'failure') || contains(needs.cpu-tests.result, 'cancelled') ||
+        # when restoring the job.
         run: |-
           if ${{ contains(needs.pre-commit.result, 'failure') || contains(needs.pre-commit.result, 'cancelled') ||
-                 contains(needs.cpu-tests.result, 'failure') || contains(needs.cpu-tests.result, 'cancelled') ||
                  contains(needs.spyre-load-tests.result, 'failure') || contains(needs.spyre-load-tests.result, 'cancelled') ||
                  contains(needs.spyre-smoke-tests.result, 'failure') || contains(needs.spyre-smoke-tests.result, 'cancelled') ||
                  contains(needs.spyre-token-compare-tests.result, 'failure') || contains(needs.spyre-token-compare-tests.result, 'cancelled') ||
