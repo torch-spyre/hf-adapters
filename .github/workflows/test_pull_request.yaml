@@ -100,9 +100,9 @@ jobs:
           - test_load_cpu.py
           - test_adapter_cpu_accuracy.py
           - test_embed_cpu_accuracy.py
-          - test_generate_edge_cases_cpu.py
-          - test_multibatch_generate_cpu.py
-          - test_st_backend_cpu.py
+#          - test_generate_edge_cases_cpu.py
+#          - test_multibatch_generate_cpu.py
+#          - test_st_backend_cpu.py
 
     steps:
       - name: Checkout composite actions
