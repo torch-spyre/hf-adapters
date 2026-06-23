@@ -1,15 +1,12 @@
-name: test_pull_request
+name: test_daily
 
 on:
-  push:
-    branches: [main]
-    tags: ["*"]
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
-  merge_group:
-    types: [checks_requested]
+  schedule:
+    # Runs at 06:00 UTC every day
+    - cron: "0 6 * * *"
   workflow_dispatch:
+    # Manual triggers only — no push/pull_request/merge_group. The PR workflow
+    # (test_pull_request.yaml) gates merges; this one is the scheduled daily.
     inputs:
       torch_spyre_ref:
         description: Branch, tag, or SHA of torch-spyre to check out and test
@@ -130,8 +127,8 @@ jobs:
 #    timeout-minutes: 120
 #    strategy:
 #      matrix:
-#        # Tests marked `@pytest.mark.slow` are dropped from PR runs (see the
-#        # `-m "not slow"` flag below) and instead exercised by the weekly cron.
+#        # Daily includes `@pytest.mark.slow` tests (no `-m` filter below);
+#        # PR runs with `-m "not slow"` to stay fast.
 #        test_file:
 #          - test_load_cpu.py
 #          - test_adapter_cpu_accuracy.py
@@ -171,7 +168,7 @@ jobs:
 #          source /etc/profile.d/ibm-aiu-setup.sh
 #          cd "$CLONED_HF_ADAPTERS_DIR"
 #          echo "Running ${{ matrix.test_file }}..."
-#          uv run pytest -s -vvv -m "not slow" -k "$MODELS_FILTER" "tests/${{ matrix.test_file }}"
+#          uv run pytest -s -vvv -k "$MODELS_FILTER" "tests/${{ matrix.test_file }}"
 #          echo "tests done"
 
   spyre-load-tests:
@@ -244,7 +241,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_load_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_load_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_load_spyre.py -k "${{ matrix.model_key }}" --run-slow
           echo "tests done"
 
   spyre-smoke-tests:
@@ -300,7 +297,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k "${{ matrix.model_key }}" --run-slow
           echo "tests done"
 
   spyre-token-compare-tests:
@@ -355,7 +352,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k "${{ matrix.model_key }}" --run-slow
           echo "tests done"
 
   spyre-embed-compare-tests:
@@ -413,7 +410,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k "${{ matrix.model_key }}" --run-slow
           echo "tests done"
 
   # ===========================================================================
@@ -434,6 +431,7 @@ jobs:
       - spyre-smoke-tests
       - spyre-token-compare-tests
       - spyre-embed-compare-tests
+#      - spyre-block-compare-tests
     if: always()
     steps:
       - name: Check all suites passed

@@ -172,12 +172,6 @@ uv run pytest tests/test_load_spyre.py                            # Spyre load t
 
 ### Spyre Tests (requires Spyre hardware)
 
-**Per-layer block comparison** (random weights, no download):
-
-```bash
-python tests/test_block_cpu_vs_spyre.py all
-python tests/test_block_cpu_vs_spyre.py granite
-```
 
 **E2E smoke test** (real weights, verify non-trivial output):
 

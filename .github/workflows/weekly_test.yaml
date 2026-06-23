@@ -353,7 +353,7 @@ jobs:
         with:
           uv_groups: dev spyre test
 
-      - name: Run test_block_cpu_vs_spyre.py for ${{ matrix.model_key }}
+      - name: Run test_block_cpu_vs_spyre_DEPRECATED.py for ${{ matrix.model_key }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
