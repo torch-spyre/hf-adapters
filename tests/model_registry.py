@@ -30,7 +30,7 @@ CAUSAL_LM_MODELS = {
         "path": "Qwen/Qwen3-0.6B",
         "adapter": "hf_qwen3.py",
     },
-    "granite": {
+    "granite8b": {
         "name": "Granite 3.3 8B",
         "path": "ibm-granite/granite-3.3-8b-instruct",
         "adapter": "hf_granite.py",
@@ -76,12 +76,12 @@ CAUSAL_LM_MODELS = {
         "path": "ministral/Ministral-3b-instruct",
         "adapter": "hf_mistral.py",
     },
-    "olmo": {
+    "olmo1b": {
         "name": "OLMo 1B",
         "path": "allenai/OLMo-1B-hf",
         "adapter": "hf_olmo.py",
     },
-    "olmo2": {
+    "olmo2_1b": {
         "name": "OLMo2 1B",
         "path": "allenai/OLMo-2-0425-1B",
         "adapter": "hf_olmo2.py",
