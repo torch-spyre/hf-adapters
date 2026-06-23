@@ -218,7 +218,7 @@ Once CPU accuracy passes, test on hardware (requires Spyre pod access):
 
 ```bash
 # Per-layer block comparison (random weights, checks for NaN/crash)
-python3 tests/test_block_cpu_vs_spyre.py mymodel
+python3 tests/test_block_cpu_vs_spyre_DEPRECATED.py mymodel
 
 # End-to-end smoke test
 python3 tests/test_e2e_smoke_spyre.py mymodel

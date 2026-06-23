@@ -420,7 +420,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Block-compare uses tests/test_block_cpu_vs_spyre.py, which has its own
+        # Block-compare uses tests/test_block_cpu_vs_spyre_DEPRECATED.py, which has its own
         # architecture-keyed registry (one entry per adapter family, not per
         # checkpoint). Mirrors the PR workflow's block-compare matrix — every
         # key from tests/model_registry.py routed to its architecture key,
@@ -487,7 +487,7 @@ jobs:
           artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
           artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
-      - name: Run test_block_cpu_vs_spyre.py for ${{ matrix.model_key }}
+      - name: Run test_block_cpu_vs_spyre_DEPRECATED.py for ${{ matrix.model_key }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
