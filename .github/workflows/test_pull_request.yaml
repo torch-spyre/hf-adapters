@@ -196,8 +196,6 @@ jobs:
           - granite4
           - smollm3
           - tiny_llama
-          # phi4 — partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md);
-          #        load path itself works, but excluded for parity with the rest of the Spyre matrices.
           # - phi4
           - qwen2
           - ministral
@@ -274,7 +272,6 @@ jobs:
           - granite4
           - smollm3
           - tiny_llama
-          # phi4 — partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md).
           # - phi4
           - qwen2
           - ministral
@@ -476,8 +473,7 @@ jobs:
           # - tiny_llama
           # - falcon3
           # - deepseek-coder
-          # phi4 — uses hf_phi3, which is not in the block-compare registry; also
-          #        partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md).
+          - phi3
           # - phi4
           - qwen2
           # ministral uses hf_mistral — covered by the `mistral` architecture key.

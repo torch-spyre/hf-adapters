@@ -61,11 +61,11 @@ CAUSAL_LM_MODELS = {
         "path": "microsoft/Phi-4-mini-instruct",
         "adapter": "hf_phi3.py",
     },
-    # "phi3": {
-    #     "name": "Phi-3.5 mini",
-    #     "path": "microsoft/Phi-3.5-mini-instruct",
-    #     "adapter": "hf_phi3.py",
-    # },
+    "phi3": {
+        "name": "Phi-3.5 mini",
+        "path": "microsoft/Phi-3.5-mini-instruct",
+        "adapter": "hf_phi3.py",
+    },
     "qwen2": {
         "name": "Qwen2.5 1.5B",
         "path": "Qwen/Qwen2.5-1.5B",
@@ -86,16 +86,16 @@ CAUSAL_LM_MODELS = {
         "path": "allenai/OLMo-2-0425-1B",
         "adapter": "hf_olmo2.py",
     },
-    # "falcon3": {
-    #     "name": "Falcon 3 1B",
-    #     "path": "tiiuae/Falcon3-1B-Base",
-    #     "adapter": "hf_llama.py",
-    # },
-    # "deepseek-coder": {
-    #     "name": "DeepSeek-Coder 1.3B",
-    #     "path": "deepseek-ai/deepseek-coder-1.3b-base",
-    #     "adapter": "hf_llama.py",
-    # },
+    "falcon3": {
+        "name": "Falcon 3 1B",
+        "path": "tiiuae/Falcon3-1B-Base",
+        "adapter": "hf_llama.py",
+    },
+    "deepseek-coder": {
+        "name": "DeepSeek-Coder 1.3B",
+        "path": "deepseek-ai/deepseek-coder-1.3b-base",
+        "adapter": "hf_llama.py",
+    },
     # Ministral 3B is gated — requires HF auth. Tested on Spyre pod only.
     # "ministral": {
     #     "name": "Ministral 3B",
