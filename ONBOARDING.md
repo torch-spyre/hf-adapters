@@ -144,7 +144,7 @@ def block_forward(
     attn_mask,          # [B, 1, S, cache_len] — float16 causal mask
     key_cache,          # [B, num_kv_heads, max_cache_len, head_dim]
     value_cache,        # [B, num_kv_heads, max_cache_len, v_head_dim]
-    is_filling,         # bool — True=overwrite mode, False=expand mode
+    is_filling,         # bool — True=fill mode, False=expand mode
     token_index,        # int — current write position in cache
     cache_position,     # [S] — position indices for cache slice
 ) -> (hidden_states, key_cache, value_cache)

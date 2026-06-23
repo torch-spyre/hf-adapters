@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared helpers for ``test_generate_edge_cases.py`` (CPU pytest) and
+"""Shared helpers for ``test_generate_edge_cases_cpu.py`` (CPU pytest) and
 ``test_generate_edge_cases_spyre.py`` (Spyre script).
 
 Pulls the model/device-agnostic pieces — prompt synthesis, HF reference
@@ -56,14 +56,25 @@ CASES = {
     # --- batch=3: per-row offsets, mixed-length scheduling ---
     "mixed_short": ([5, 12, 30], 16),
     "mixed_cross_block": ([5, 12, 30], BLOCK_SIZE + 5),
-    "mixed_long_short": ([5, 12, 2 * BLOCK_SIZE], 32),
-    "mixed_block_aligned": ([5, BLOCK_SIZE, BLOCK_SIZE - 1], 24),
+    "mixed_long_short": ([5, 12, BLOCK_SIZE], 32),
+    "mixed_block_aligned": ([5, BLOCK_SIZE, BLOCK_SIZE - 1], 16),
     "mixed_with_single_token": ([1, 5, 30], 16),  # single-token row in batch
     # --- batch=2: EOS hit before max_new_tokens (per-sequence finished mask) ---
     # 64 is generous enough that an instruction-tuned model is likely to emit
     # EOS for at least one prompt within the budget. Even when neither does,
     # the per-prompt HF reference comparison still catches any divergence.
-    "eos_within_budget": ([6, 8], 64),
+    "eos_within_budget": ([6, 8], BLOCK_SIZE + 4),
+}
+
+
+# Subset of CASES marked @pytest.mark.slow on the CPU lane: each is covered by
+# a cheaper sibling regime (see issue #35), so on the default lane they are
+# deselected. Run them with `--run-slow`.
+SLOW_CPU_CASE_KEYS = {
+    "short_three_blocks",  # 3rd expansion is the same path as 2nd (covered by short_two_blocks_plus)
+    "short_two_blocks_exact",  # exact-block boundary == same path as +N (covered by short_two_blocks_plus)
+    "long_prompt_long_gen",  # long-prompt covered by long_multi_block; long-gen by short_two_blocks_plus
+    "mixed_cross_block",  # batch=3 cross-block covered by mixed_short + short_cross_block
 }
 
 
@@ -76,13 +87,13 @@ EOS_CASES = {
     "eos_mid_block": ([10], 32),  # within first block, fill arm
     "eos_last_of_block": ([BLOCK_SIZE - 1], BLOCK_SIZE + 8),  # block boundary
     "eos_first_of_second_block": ([BLOCK_SIZE], BLOCK_SIZE + 16),  # expansion arm
-    "eos_deep_in_second_block": ([BLOCK_SIZE + 20], 2 * BLOCK_SIZE),  # mid-block-2
+    "eos_deep_in_second_block": ([BLOCK_SIZE + 20], BLOCK_SIZE + 24),  # mid-block-2
     # batch=3 — per-row finished mask, EOS at different offsets per row
-    "eos_staggered": ([3, BLOCK_SIZE - 1, BLOCK_SIZE + 5], 2 * BLOCK_SIZE),
+    "eos_staggered": ([3, BLOCK_SIZE - 1, BLOCK_SIZE + 5], BLOCK_SIZE + 16),
     # batch=2 — one row finishes very early while the other generates well past
     # a block boundary; verifies the long row keeps producing correct tokens
     # after finished[short_row] = True.
-    "eos_short_finishes_long_continues": ([2, BLOCK_SIZE + 10], 2 * BLOCK_SIZE),
+    "eos_short_finishes_long_continues": ([2, BLOCK_SIZE + 10], BLOCK_SIZE + 16),
     # EOS on the very last allowed step: ``finished.all()`` and the
     # ``i == max_new_tokens - 1`` loop end coincide. max_new_tokens is set to
     # eos_offset + 1 so the EOS token is the last one emitted.
@@ -115,7 +126,9 @@ SPYRE_EOS_CASE_KEYS = [
 # Sampling kwargs used by both the CPU pytest sampling-determinism test and the
 # Spyre script. Kept here so the two stay in sync.
 SAMPLING_KWARGS = dict(do_sample=True, temperature=1.0, top_k=20)
-SAMPLING_MAX_NEW = BLOCK_SIZE + 4  # cross a block boundary under sampling
+SAMPLING_MAX_NEW = (
+    20  # short — sampling reproducibility is RNG-state, not block-expansion
+)
 SAMPLING_TARGETS = [8, 16]
 
 

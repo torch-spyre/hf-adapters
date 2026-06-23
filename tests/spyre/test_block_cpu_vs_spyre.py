@@ -19,15 +19,15 @@ Creates tiny random-weight models (3 layers each, no weight download needed),
 runs each decoder block on CPU (uncompiled) and Spyre (compiled), and compares
 the output hidden states numerically.
 
-Usage (on Spyre pod):
-    python3 test_block_cpu_vs_spyre.py [qwen3|granite|granite4|smollm3|all]
+Usage (on Spyre pod)::
 
-Output: markdown tables with per-layer max/mean abs diff and NaN flags.
+    pytest -s -vvv tests/spyre/test_block_cpu_vs_spyre.py
+    pytest -s -vvv tests/spyre/test_block_cpu_vs_spyre.py -k qwen3
 """
 
-import sys
-import traceback
+import importlib
 
+import pytest
 import torch
 
 from hf_adapters.hf_common import (
@@ -352,6 +352,8 @@ MODEL_REGISTRY = {
     },
 }
 
+BLOCK_COMPARE_KEYS = list(MODEL_REGISTRY.keys())
+
 
 # ---------------------------------------------------------------------------
 # Input creation
@@ -359,18 +361,7 @@ MODEL_REGISTRY = {
 
 
 def make_inputs(config, mode, seed, cache_len=64, device="cpu", head_dim_override=None):
-    """Create deterministic random inputs for a block_forward call.
-
-    Args:
-        config: HF model config
-        mode: "prefill" or "decode"
-        seed: random seed
-        cache_len: KV cache length for decode mode
-        device: target device ("cpu" or "spyre")
-        head_dim_override: if set, use this head_dim (e.g. after padding)
-
-    Returns: dict of tensors on the specified device (fp16)
-    """
+    """Create deterministic random inputs for a block_forward call."""
     torch.manual_seed(seed)
     H = config.hidden_size
     head_dim = head_dim_override or (
@@ -389,20 +380,10 @@ def make_inputs(config, mode, seed, cache_len=64, device="cpu", head_dim_overrid
             mask[:, :, i, i + 1 :] = -torch.inf
         mask = mask.to(device)
         kc = torch.zeros(
-            1,
-            num_kv_heads,
-            max_cache_len,
-            head_dim,
-            dtype=torch.float16,
-            device=device,
+            1, num_kv_heads, max_cache_len, head_dim, dtype=torch.float16, device=device
         )
         vc = torch.zeros(
-            1,
-            num_kv_heads,
-            max_cache_len,
-            head_dim,
-            dtype=torch.float16,
-            device=device,
+            1, num_kv_heads, max_cache_len, head_dim, dtype=torch.float16, device=device
         )
         is_filling = False
         cache_pos = 0
@@ -415,23 +396,13 @@ def make_inputs(config, mode, seed, cache_len=64, device="cpu", head_dim_overrid
         mask[:, :, :, cache_len + L :] = -torch.inf
         mask = mask.to(device)
         kc = torch.zeros(
-            1,
-            num_kv_heads,
-            max_cache_len,
-            head_dim,
-            dtype=torch.float16,
-            device=device,
+            1, num_kv_heads, max_cache_len, head_dim, dtype=torch.float16, device=device
         )
         kc[:, :, :cache_len, :] = torch.randn(
             1, num_kv_heads, cache_len, head_dim, dtype=torch.float16
         ).to(device)
         vc = torch.zeros(
-            1,
-            num_kv_heads,
-            max_cache_len,
-            head_dim,
-            dtype=torch.float16,
-            device=device,
+            1, num_kv_heads, max_cache_len, head_dim, dtype=torch.float16, device=device
         )
         vc[:, :, :cache_len, :] = torch.randn(
             1, num_kv_heads, cache_len, head_dim, dtype=torch.float16
@@ -456,62 +427,14 @@ def make_inputs(config, mode, seed, cache_len=64, device="cpu", head_dim_overrid
 # ---------------------------------------------------------------------------
 
 
-def compare_block(uncompiled_fn, compiled_fn, inputs_cpu):
-    """Run block on CPU (uncompiled) and Spyre (compiled), compare outputs."""
-    # --- CPU ---
-    with torch.no_grad():
-        cpu_h, cpu_kc, cpu_vc = uncompiled_fn(
-            inputs_cpu["hidden_states"],
-            inputs_cpu["selected_freqs"],
-            inputs_cpu["attn_mask"],
-            inputs_cpu["key_cache"],
-            inputs_cpu["value_cache"],
-            inputs_cpu["is_filling"],
-            inputs_cpu["token_index"],
-            inputs_cpu["cache_position"],
-        )
-
-    # --- Spyre ---
-    spyre_inputs = {
-        k: v.to(DEVICE) if isinstance(v, torch.Tensor) else v
-        for k, v in inputs_cpu.items()
-    }
-    with torch.no_grad():
-        spyre_h, spyre_kc, spyre_vc = compiled_fn(
-            spyre_inputs["hidden_states"],
-            spyre_inputs["selected_freqs"],
-            spyre_inputs["attn_mask"],
-            spyre_inputs["key_cache"],
-            spyre_inputs["value_cache"],
-            spyre_inputs["is_filling"],
-            spyre_inputs["token_index"],
-            spyre_inputs["cache_position"],
-        )
-
-    spyre_h_cpu = spyre_h.to("cpu")
-
-    # --- Metrics ---
-    diff = (cpu_h - spyre_h_cpu).abs()
-    return {
-        "max_abs_diff": diff.max().item(),
-        "mean_abs_diff": diff.mean().item(),
-        "cpu_nan": cpu_h.isnan().any().item(),
-        "spyre_nan": spyre_h_cpu.isnan().any().item(),
-        "cpu_shape": list(cpu_h.shape),
-        "spyre_shape": list(spyre_h_cpu.shape),
-    }
-
-
-def test_model(model_key):
+def _run_model_test(model_key):
     """Run per-layer comparison for one model. Returns list of result dicts."""
-    import importlib
-
     from transformers import AutoModelForCausalLM
 
     info = MODEL_REGISTRY[model_key]
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"  {info['name']}: creating tiny model with random weights")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     config = info["config_fn"]()
     print(
@@ -520,13 +443,11 @@ def test_model(model_key):
         f"heads={config.num_attention_heads}/{config.num_key_value_heads}"
     )
 
-    # Create model with random weights
     torch.manual_seed(42)
     model = AutoModelForCausalLM.from_config(config).to(torch.float16)
     model.eval()
     model.requires_grad_(False)
 
-    # Prepare adapter (patches RMSNorm, creates compiled blocks, etc.)
     adapter = importlib.import_module(info["adapter"])
     print("  Preparing adapter ...")
     _untie_embedding_and_lm_head(model)
@@ -547,7 +468,7 @@ def test_model(model_key):
                 config, mode, seed, device="cpu", head_dim_override=padded_hd
             )
             with torch.no_grad():
-                h, kc, vc = uncompiled(
+                h, _, _ = uncompiled(
                     inputs["hidden_states"],
                     inputs["selected_freqs"],
                     inputs["attn_mask"],
@@ -570,11 +491,7 @@ def test_model(model_key):
         for mode in ("prefill", "decode"):
             seed = 42 + layer_idx * 100 + (0 if mode == "prefill" else 1)
             spyre_inputs = make_inputs(
-                config,
-                mode,
-                seed,
-                device=DEVICE,
-                head_dim_override=padded_hd,
+                config, mode, seed, device=DEVICE, head_dim_override=padded_hd
             )
 
             try:
@@ -631,13 +548,8 @@ def test_model(model_key):
     return results
 
 
-# ---------------------------------------------------------------------------
-# Output formatting
-# ---------------------------------------------------------------------------
-
-
-def print_table(all_results):
-    """Print markdown table of all results."""
+def _print_table(rows):
+    """Per-layer markdown table (one row per layer/mode)."""
     print("\n## Per-Layer CPU vs Spyre Block Comparison\n")
     print(
         "| Model | Layer | Mode | Shape | Max Diff | Mean Diff "
@@ -647,7 +559,7 @@ def print_table(all_results):
         "|-------|-------|------|-------|----------|----------- "
         "|---------|-----------|-------|"
     )
-    for r in all_results:
+    for r in rows:
         if r["error"]:
             print(
                 f"| {r['model']} | {r['layer']} | {r['mode']} "
@@ -664,53 +576,31 @@ def print_table(all_results):
             )
 
 
-def print_summary(all_results):
-    """Print pass/fail summary per model."""
-    from collections import defaultdict
-
-    by_model = defaultdict(list)
-    for r in all_results:
-        by_model[r["model"]].append(r)
-
+def _print_summary(rows):
+    """One-line pass/fail summary for the model."""
+    if not rows:
+        return
+    model = rows[0]["model"]
+    n_layers = len(set(r["layer"] for r in rows))
+    n_errors = sum(1 for r in rows if r["error"])
+    valid = [r for r in rows if r["error"] is None]
+    worst = max((r["max_abs_diff"] for r in valid), default=0.0)
+    any_nan = any(r.get("spyre_nan") for r in valid)
     print("\n## Summary\n")
     print("| Model | Layers Tested | Errors | Max Diff (worst) | Any NaN |")
     print("|-------|--------------|--------|------------------|---------|")
-    for model, rows in by_model.items():
-        n_layers = len(set(r["layer"] for r in rows))
-        n_errors = sum(1 for r in rows if r["error"])
-        valid = [r for r in rows if r["error"] is None]
-        worst = max((r["max_abs_diff"] for r in valid), default=0.0)
-        any_nan = any(r.get("spyre_nan") for r in valid)
-        print(
-            f"| {model} | {n_layers} | {n_errors} "
-            f"| {worst:.4f} | {'Yes' if any_nan else 'No'} |"
-        )
+    print(
+        f"| {model} | {n_layers} | {n_errors} "
+        f"| {worst:.4f} | {'Yes' if any_nan else 'No'} |"
+    )
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    which = sys.argv[1:] if len(sys.argv) > 1 else ["all"]
-    if "all" in which:
-        which = list(MODEL_REGISTRY.keys())
-
-    all_results = []
-    for key in which:
-        if key not in MODEL_REGISTRY:
-            print(
-                f"Unknown model: {key}. "
-                f"Options: {list(MODEL_REGISTRY.keys())} or 'all'"
-            )
-            continue
-        try:
-            results = test_model(key)
-            all_results.extend(results)
-        except Exception:
-            print(f"\n!!! {MODEL_REGISTRY[key]['name']} FAILED:")
-            traceback.print_exc()
-
-    if all_results:
-        print_table(all_results)
-        print_summary(all_results)
+@pytest.mark.parametrize("model_key", BLOCK_COMPARE_KEYS, ids=BLOCK_COMPARE_KEYS)
+def test_block_cpu_vs_spyre(model_key):
+    rows = _run_model_test(model_key)
+    _print_table(rows)
+    _print_summary(rows)
+    errors = [r for r in rows if r["error"] is not None]
+    nan_rows = [r for r in rows if r.get("spyre_nan")]
+    assert not errors, f"compile/run errors: {errors}"
+    assert not nan_rows, f"NaN in Spyre output: {nan_rows}"

@@ -11,8 +11,9 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
+from hf_model_catalog import RESOURCES_DIR
 from nicegui import ui
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -30,7 +31,20 @@ def _parse_config_to_module_map() -> Dict[str, str]:
     except (OSError, SyntaxError):
         return {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
+        # Handle annotated assignment (e.g., var: type = value)
+        if isinstance(node, ast.AnnAssign):
+            if (
+                isinstance(node.target, ast.Name)
+                and node.target.id == "CONFIG_TO_ADAPTER_MODULE_MAPPING"
+                and isinstance(node.value, ast.Dict)
+            ):
+                result = {}
+                for k, v in zip(node.value.keys, node.value.values):
+                    if isinstance(k, ast.Name) and isinstance(v, ast.Name):
+                        result[k.id] = v.id
+                return result
+        # Handle regular assignment (e.g., var = value)
+        elif isinstance(node, ast.Assign):
             targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
             if "CONFIG_TO_ADAPTER_MODULE_MAPPING" in targets and isinstance(
                 node.value, ast.Dict
@@ -44,6 +58,9 @@ def _parse_config_to_module_map() -> Dict[str, str]:
 
 
 CONFIG_CLASS_TO_MODULE = _parse_config_to_module_map()
+
+
+_UNSET = object()
 
 
 @dataclass
@@ -66,11 +83,11 @@ class FilterState:
 class ModelDataViewer:
     """Handles loading and filtering of model data."""
 
-    def __init__(self, csv_path: str):
+    def __init__(self, csv_path: str | Path):
         self.csv_path = csv_path
         self.all_data: List[Dict[str, Any]] = []
         self.columns: List[str] = []
-        self.unique_values: Dict[str, Set[str]] = {}
+        self.unique_values: Dict[str, List[str]] = {}
 
         # Use immutable filter state with thread-safe access
         self._filter_state = FilterState()
@@ -101,11 +118,17 @@ class ModelDataViewer:
     def update_filter_state(
         self,
         filters: Optional[Dict[str, List[str]]] = None,
-        params_min: Any = None,
-        params_max: Any = None,
+        params_min: Any = _UNSET,
+        params_max: Any = _UNSET,
         _clear: bool = False,
     ) -> FilterState:
-        """Thread-safe update of filter state. Returns new state."""
+        """Thread-safe update of filter state. Returns new state.
+
+        params_min / params_max use the _UNSET sentinel so that explicitly
+        passing None (e.g. when the user clears the Min/Max number input)
+        actually clears the bound — using None as the "not provided" marker
+        would silently drop clear operations.
+        """
         with self._state_lock:
             if _clear:
                 self._filter_state = FilterState()
@@ -115,10 +138,10 @@ class ModelDataViewer:
                 if filters is not None:
                     new_state.filters = {k: v.copy() for k, v in filters.items()}
 
-                if params_min is not None:
+                if params_min is not _UNSET:
                     new_state.params_min = params_min
 
-                if params_max is not None:
+                if params_max is not _UNSET:
                     new_state.params_max = params_max
 
                 self._filter_state = new_state
@@ -144,14 +167,18 @@ class ModelDataViewer:
         return True
 
     def _extract_unique_values(self):
-        """Extract unique values for each column for filter dropdowns."""
+        """Extract unique values for each column for filter dropdowns.
+
+        Stored as a case-insensitively sorted list so the select dropdowns
+        display options alphabetically.
+        """
         for column in self.columns:
             values = set()
             for row in self.all_data:
                 value = row.get(column, "")
                 if value:  # Only add non-empty values
                     values.add(str(value))
-            self.unique_values[column] = set(sorted(values))
+            self.unique_values[column] = sorted(values, key=str.casefold)
 
     def apply_filters(self) -> List[Dict[str, Any]]:
         """Apply current filters to data. Returns NEW filtered list (immutable)."""
@@ -231,22 +258,68 @@ class ModelDataViewer:
         return dict(sorted(stats.items(), key=lambda x: x[1], reverse=True))
 
 
-CSV_PATH = "resources/top_generative_models.csv"
+@dataclass(frozen=True)
+class ViewMode:
+    """Visual + data configuration for a viewer mode."""
 
-_UNSET = object()
+    key: str
+    label: str
+    icon: str
+    csv_path: Path
+    header_gradient: str
+    accent: str  # tailwind color name, e.g. "blue", "teal"
+    extra_filters: tuple = ()  # extra (field, label) tuples appended to filter panel
+    extra_columns: tuple = ()  # extra column configs appended to table
 
 
-def create_stats_card(stats: Dict[str, Any]):
+GENERATIVE_MODE = ViewMode(
+    key="generative",
+    label="Generative Models",
+    icon="🤗",
+    csv_path=RESOURCES_DIR / "top_generative_models.csv",
+    header_gradient="bg-gradient-to-r from-blue-600 to-purple-600",
+    accent="blue",
+)
+
+EMBEDDING_MODE = ViewMode(
+    key="embedding",
+    label="Embedding Models",
+    icon="🧬",
+    csv_path=RESOURCES_DIR / "top_embedding_models.csv",
+    header_gradient="bg-gradient-to-r from-teal-600 to-emerald-600",
+    accent="teal",
+    extra_filters=(("is_multimodal", "Multimodal"),),
+    extra_columns=(
+        {
+            "name": "is_multimodal",
+            "label": "Multimodal",
+            "field": "is_multimodal",
+            "sortable": True,
+            "align": "center",
+        },
+    ),
+)
+
+MODES: Dict[str, ViewMode] = {
+    GENERATIVE_MODE.key: GENERATIVE_MODE,
+    EMBEDDING_MODE.key: EMBEDDING_MODE,
+}
+
+
+def create_stats_card(stats: Dict[str, Any], mode: ViewMode):
     """Create a statistics card showing coverage info."""
+    accent = mode.accent
     with ui.card().classes("w-full mb-4"):
-        ui.label("📊 Coverage Statistics").classes("text-2xl font-bold mb-2")
+        ui.label(f"📊 {mode.label} — Coverage Statistics").classes(
+            "text-2xl font-bold mb-2"
+        )
 
         with ui.row().classes("w-full gap-4"):
-            # Total models card
-            with ui.card().classes("flex-1 bg-blue-100"):
+            # Total models card — uses the mode accent color
+            with ui.card().classes(f"flex-1 bg-{accent}-100"):
                 ui.label("Total Models").classes("text-sm text-gray-600")
                 ui.label(str(stats["total"])).classes(
-                    "text-3xl font-bold text-blue-600"
+                    f"text-3xl font-bold text-{accent}-600"
                 )
 
             # Supported models card
@@ -294,7 +367,7 @@ def create_model_type_chart(type_stats: Dict[str, int]):
                         ui.label(str(count)).classes("text-sm font-bold")
 
 
-def create_data_table(data: List[Dict[str, Any]], columns: List[str]):
+def create_data_table(data: List[Dict[str, Any]], columns: List[str], mode: ViewMode):
     """Create an interactive data table."""
     if not data:
         ui.label("No data to display").classes("text-gray-500 text-center p-4")
@@ -395,6 +468,7 @@ def create_data_table(data: List[Dict[str, Any]], columns: List[str]):
             "align": "center",
         },
     ]
+    column_configs.extend(mode.extra_columns)
 
     # Format data for table
     rows = []
@@ -411,6 +485,8 @@ def create_data_table(data: List[Dict[str, Any]], columns: List[str]):
                 # Add color coding for supported status
                 formatted_row[col] = "✅" if value.lower() == "true" else "❌"
             elif col == "is_moe":
+                formatted_row[col] = "✅" if value.lower() == "true" else "❌"
+            elif col == "is_multimodal":
                 formatted_row[col] = "✅" if value.lower() == "true" else "❌"
             elif col == "is_gated":
                 formatted_row[col] = "🔒" if value.lower() == "true" else "🆓"
@@ -466,7 +542,9 @@ def create_data_table(data: List[Dict[str, Any]], columns: List[str]):
     )
 
 
-async def refresh_display_async(viewer: ModelDataViewer, content_container) -> None:
+async def refresh_display_async(
+    viewer: ModelDataViewer, content_container, mode: ViewMode
+) -> None:
     """Async refresh with proper state handling."""
     if content_container is None:
         return
@@ -480,7 +558,7 @@ async def refresh_display_async(viewer: ModelDataViewer, content_container) -> N
     with content_container:
         # Statistics
         stats = viewer.get_coverage_stats(filtered_data)
-        create_stats_card(stats)
+        create_stats_card(stats, mode)
 
         # Model type distribution
         # type_stats = viewer.get_model_type_stats(filtered_data)
@@ -488,18 +566,21 @@ async def refresh_display_async(viewer: ModelDataViewer, content_container) -> N
 
         # Data table
         with ui.card().classes("w-full"):
-            ui.label(f"📋 Models Table ({len(filtered_data)} models)").classes(
+            ui.label(f"📋 {mode.label} Table ({len(filtered_data)} models)").classes(
                 "text-xl font-bold mb-2"
             )
-            create_data_table(filtered_data, viewer.columns)
+            create_data_table(filtered_data, viewer.columns, mode)
 
 
-def create_filter_panel_lazy(viewer: ModelDataViewer, get_content_container) -> None:
+def create_filter_panel_lazy(
+    viewer: ModelDataViewer, get_content_container, mode: ViewMode
+) -> None:
     """Create the filter panel with debounced refresh.
 
     Args:
         viewer: The ModelDataViewer instance
         get_content_container: A callable that returns the content container
+        mode: The active ViewMode (controls extra filters and labels)
     """
 
     async def debounced_refresh():
@@ -517,7 +598,7 @@ def create_filter_panel_lazy(viewer: ModelDataViewer, get_content_container) -> 
             await asyncio.sleep(viewer._refresh_delay)
             container = get_content_container()
             if container is not None:
-                await refresh_display_async(viewer, container)
+                await refresh_display_async(viewer, container, mode)
 
         viewer._refresh_task = asyncio.create_task(delayed_refresh())
 
@@ -528,8 +609,8 @@ def create_filter_panel_lazy(viewer: ModelDataViewer, get_content_container) -> 
         asyncio.create_task(debounced_refresh())
 
     def update_params_range(min_b: Any, max_b: Any) -> None:
-        params_min = None
-        params_max = None
+        params_min: Any = _UNSET
+        params_max: Any = _UNSET
 
         if min_b is not _UNSET:
             params_min = float(min_b) * 1e9 if min_b not in (None, "") else None
@@ -543,8 +624,10 @@ def create_filter_panel_lazy(viewer: ModelDataViewer, get_content_container) -> 
         viewer.clear_filters()
         asyncio.create_task(debounced_refresh())
 
-    with ui.card().classes("w-full mb-4"):
-        ui.label("🔍 Filters").classes("text-xl font-bold mb-2")
+    with ui.card().classes(f"w-full mb-4 border-l-4 border-{mode.accent}-500"):
+        ui.label(f"🔍 Filters — {mode.label}").classes(
+            f"text-xl font-bold mb-2 text-{mode.accent}-700"
+        )
         ui.label("Select values to filter (multiple selection allowed)").classes(
             "text-sm text-gray-600 mb-2"
         )
@@ -562,12 +645,20 @@ def create_filter_panel_lazy(viewer: ModelDataViewer, get_content_container) -> 
                 ("is_moe", "MoE"),
                 ("is_gated", "Gated"),
                 ("Year", "Year"),
+                *mode.extra_filters,
             ]
 
             default_filters: Dict[str, List[str]] = {
                 "is_gated": ["False"],
                 "is_moe": ["False"],
             }
+
+            # Accumulate defaults and push them to the viewer's filter state
+            # in one shot. Assigning to `viewer.filters[...]` does NOT work —
+            # the `filters` property returns a copy, so per-field assignments
+            # mutate a throwaway dict and the initial refresh would run with
+            # no filters applied (e.g. MoE=True models would still appear).
+            initial_filters: Dict[str, List[str]] = {}
 
             for field, label in filter_fields:
                 options = list(viewer.unique_values.get(field, []))
@@ -576,15 +667,51 @@ def create_filter_panel_lazy(viewer: ModelDataViewer, get_content_container) -> 
                         v for v in default_filters.get(field, []) if v in options
                     ]
                     if default:
-                        viewer.filters[field] = default
-                    ui.select(
-                        label=label,
-                        options=options,
-                        value=default or None,
-                        multiple=True,
-                        clearable=True,
-                        on_change=lambda e, f=field: update_filter(f, e.value),
-                    ).classes("w-full").props("use-chips")
+                        initial_filters[field] = default
+
+                    # Boolean-only fields (True/False) get a single-select with
+                    # a "no selection means show all" semantics — multi-select
+                    # with both values picked is equivalent to no filter, which
+                    # is confusing.
+                    is_boolean = set(options) <= {"True", "False"}
+
+                    if is_boolean:
+                        ui.select(
+                            label=label,
+                            options=options,
+                            value=(default[0] if default else None),
+                            multiple=False,
+                            clearable=True,
+                            on_change=lambda e, f=field: update_filter(
+                                f, [e.value] if e.value else []
+                            ),
+                        ).classes("w-full")
+                        continue
+
+                    def _on_change(e, f=field, sel=None):
+                        update_filter(f, e.value)
+                        # Clear the typed search text after each selection so the
+                        # input doesn't keep stale fragments like "openb"
+                        # alongside the selected chip "openba". This calls the
+                        # underlying Quasar QSelect.updateInputValue() method.
+                        if sel is not None:
+                            sel.run_method("updateInputValue", "", True)
+
+                    select = (
+                        ui.select(
+                            label=label,
+                            options=options,
+                            value=default or None,
+                            multiple=True,
+                            clearable=True,
+                            with_input=True,
+                        )
+                        .classes("w-full")
+                        .props("use-chips")
+                    )
+                    select.on_value_change(
+                        lambda e, f=field, sel=select: _on_change(e, f, sel)
+                    )
 
             # Numeric range filter on parameters (in billions, B)
             with ui.row().classes("items-center gap-2 w-full"):
@@ -605,6 +732,12 @@ def create_filter_panel_lazy(viewer: ModelDataViewer, get_content_container) -> 
                     format="%.2f",
                     on_change=lambda e: update_params_range(_UNSET, e.value),
                 ).classes("flex-1").props("clearable")
+
+        # Commit accumulated default filter selections to the shared filter
+        # state so the initial render honors them (the per-widget default=
+        # only seeds the UI control's displayed value).
+        if initial_filters:
+            viewer.update_filter_state(filters=initial_filters)
 
         with ui.row().classes("gap-2 mt-2"):
             ui.button("Clear All Filters", on_click=clear_filters).props(
@@ -629,20 +762,60 @@ def adapter_source_page(module_name: str):
 
 
 @ui.page("/")
-def main_page():
-    """Main page of the application."""
+def main_page(mode: str = "generative"):
+    """Main page of the application.
+
+    The `mode` query parameter selects which catalog to display:
+    `/?mode=generative` (default) or `/?mode=embedding`.
+    """
+    view_mode = MODES.get(mode, GENERATIVE_MODE)
+
     # Per-session state: each browser connection gets its own viewer so
     # filters / params range / filtered_data are not shared across users.
-    viewer = ModelDataViewer(CSV_PATH)
+    viewer = ModelDataViewer(view_mode.csv_path)
 
-    # Header
+    # Header — gradient + accent change with the mode for clear visual distinction.
     with ui.header().classes(
-        "items-center justify-between bg-gradient-to-r from-blue-600 to-purple-600"
+        f"items-center justify-between {view_mode.header_gradient}"
     ):
-        ui.label("🤗 HuggingFace Model Viewer").classes("text-2xl font-bold text-white")
-        ui.label("Top Generative Models Analysis").classes(
-            "text-sm text-white opacity-80"
-        )
+        with ui.row().classes("items-center gap-3"):
+            ui.label(f"{view_mode.icon} HuggingFace Model Viewer").classes(
+                "text-2xl font-bold text-white"
+            )
+            ui.label(view_mode.label).classes("text-sm text-white opacity-80")
+
+    # Prominent mode selector — large segmented control below the header.
+    # The active segment is filled with the mode's accent color; the inactive one
+    # is a clearly-clickable outlined button. Sits in its own bar so users can't
+    # miss it.
+    with ui.row().classes(
+        "w-full items-center justify-center gap-3 py-3 bg-gray-100 border-b shadow-sm"
+    ):
+        ui.label("").classes("text-base font-semibold text-gray-700")
+        for m in (GENERATIVE_MODE, EMBEDDING_MODE):
+            is_active = m.key == view_mode.key
+            if is_active:
+                ui.button(
+                    f"{m.icon}  {m.label}",
+                    on_click=lambda _, k=m.key: ui.navigate.to(f"/?mode={k}"),
+                ).classes(
+                    f"bg-{m.accent}-600 text-white font-bold "
+                    f"text-base px-6 py-2 rounded-full shadow-lg "
+                    f"ring-2 ring-{m.accent}-300 ring-offset-2"
+                ).props(
+                    "no-caps unelevated"
+                )
+            else:
+                ui.button(
+                    f"{m.icon}  {m.label}",
+                    on_click=lambda _, k=m.key: ui.navigate.to(f"/?mode={k}"),
+                ).classes(
+                    f"bg-white text-{m.accent}-700 font-semibold "
+                    f"text-base px-6 py-2 rounded-full "
+                    f"border-2 border-{m.accent}-400 hover:bg-{m.accent}-50"
+                ).props(
+                    "no-caps flat"
+                )
 
     # Check if data is loaded
     if not viewer.load_data():
@@ -651,7 +824,7 @@ def main_page():
                 "text-2xl font-bold text-red-600"
             )
             ui.label(f"Expected file: {viewer.csv_path}").classes("text-gray-600")
-            ui.label("Please run fetch_top_generative_models.py first.").classes(
+            ui.label(f"Please populate {view_mode.csv_path.name} first.").classes(
                 "text-gray-600 mt-2"
             )
         return
@@ -662,13 +835,16 @@ def main_page():
         content_ref: List[Any] = [None]
 
         # Filter panel — renders first (at top of page).
-        create_filter_panel_lazy(viewer, lambda: content_ref[0])
+        create_filter_panel_lazy(viewer, lambda: content_ref[0], view_mode)
 
         # Content container (rendered below the filter panel).
-        content_ref[0] = ui.column().classes("w-full")
+        # The accent border reinforces which mode is active.
+        content_ref[0] = ui.column().classes(
+            f"w-full border-l-4 border-{view_mode.accent}-400 pl-2"
+        )
 
         # Initial display
-        asyncio.create_task(refresh_display_async(viewer, content_ref[0]))
+        asyncio.create_task(refresh_display_async(viewer, content_ref[0], view_mode))
 
 
 def main():

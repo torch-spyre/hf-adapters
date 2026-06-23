@@ -1,8 +1,8 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-14-blue)
-![verified](https://img.shields.io/badge/verified_checkpoints-24-green)
-![compatible](https://img.shields.io/badge/compatible_models-60%2B-orange)
+![adapters](https://img.shields.io/badge/adapters-17-blue)
+![verified](https://img.shields.io/badge/verified_checkpoints-31-green)
+![compatible](https://img.shields.io/badge/compatible_models-100%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
 
@@ -14,7 +14,7 @@ from `transformers`.
 
 ## Supported Models
 
-**14 adapters · 24 verified checkpoints · 60+ compatible models**
+**17 adapters · 31 verified checkpoints · 100+ compatible models**
 
 | Adapter | Verified | Also Compatible | Usage |
 |---------|----------|-----------------|-------|
@@ -23,8 +23,10 @@ from `transformers`.
 | hf\_granite.py | Granite 3.3 8B/2B | Granite 3.0–3.2, Granite Code 8B/3B | Generative |
 | hf\_granite\_vision.py | Granite Vision 4.1 4B | — | Generative |
 | hf\_qwen3.py | Qwen3 0.6B, Qwen3-Embedding 0.6B | Qwen3 1.7B, 4B, 8B | Generative + Embedding |
-| hf\_mistral.py | Mistral 7B v0.3, E5-Mistral-7B | Mistral v0.1/v0.2, Instruct variants, Zephyr 7B | Generative + Embedding |
+| hf\_mistral.py | Mistral 7B v0.3, E5-Mistral-7B, Linq-Embed-Mistral, SFR-Embedding-Mistral | Mistral v0.1/v0.2, Instruct variants, Zephyr 7B | Generative + Embedding |
 | hf\_phi3.py | Phi-4 mini | Phi-3 mini 4k/128k, Phi-3 small 8k | Generative |
+| hf\_gemma3.py | Gemma 3 1B, EmbeddingGemma 300M | Gemma 3 4B/12B/27B text | Generative + Embedding |
+| hf\_gemma4.py | Gemma 4 12B (fp16) | — | Generative |
 | hf\_granitemoehybrid.py | Granite 4.0 1B | Granite 4.0 Micro | Generative |
 | hf\_smollm3.py | SmolLM3 3B | — | Generative |
 | hf\_olmo.py | OLMo 1B | OLMo 7B | Generative |
@@ -32,10 +34,30 @@ from `transformers`.
 | hf\_bert.py | BGE-base-en-v1.5, all-MiniLM-L6-v2 | BERT-family encoder models | Embedding |
 | hf\_xlm\_roberta.py | BGE-M3 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes | Embedding |
 | hf\_mpnet.py | all-mpnet-base-v2 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base | Embedding |
+| hf\_modernbert.py | ModernBERT-embed-base, GTE-ModernBERT-base, Granite-Embedding-97m-multilingual-r2 | ModernBERT-base/large, other ModernBERT embed/classifier fine-tunes | Embedding |
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. See [ARCHITECTURE.md](ARCHITECTURE.md#verified-checkpoints)
 for head\_dim details, stick alignment, and Spyre numerical accuracy.
+
+## Installation
+
+```bash
+# Install core deps
+uv sync
+
+# Install core + dev deps
+uv sync --group dev
+
+# Install core + torch-spyre deps
+uv sync --group spyre
+
+# Install core + test deps
+uv sync --group test
+
+# Install everything
+uv sync --group dev --group spyre --group test
+```
 
 ## Quick Start
 
@@ -51,6 +73,8 @@ print(outputs[0])
 ```
 
 The `AutoSpyreModelForCausalLM` class automatically selects the correct adapter module based on the model's config type.
+
+Note that `model.generate()` is a modified version of the stock HF `generate()` method, with a different signature and functionality (See [docs/generate_vs_stock_hf.md](docs/generate_vs_stock_hf.md)).
 
 ## Embedding Models
 
@@ -90,8 +114,11 @@ hf_adapters/
 ├── hf_phi3.py                  Phi-4 / Phi-3 adapter
 ├── hf_olmo.py                  OLMo adapter (OLMo 1B, 7B)
 ├── hf_olmo2.py                 OLMo2 adapter (OLMo 2 1B, 7B)
+├── hf_gemma3.py                Gemma 3 adapter (Gemma 3 text, EmbeddingGemma)
+├── hf_gemma4.py                Gemma 4 adapter (unified text backbone)
 ├── hf_xlm_roberta.py           XLM-RoBERTa encoder adapter (BGE-M3, multilingual-e5)
 ├── hf_mpnet.py                 MPNet encoder adapter (all-mpnet-base-v2 and variants)
+├── hf_modernbert.py            ModernBERT encoder adapter (RoPE, GeGLU, local/global attention)
 ├── st_backend.py               sentence-transformers Spyre backend (all decoder adapters)
 └── __init__.py
 
@@ -128,20 +155,20 @@ Greedy tokens must match at every step. Downloads weights on first run.
 
 ```bash
 # Adapter accuracy tests (causal-LM logits)
-pytest tests/test_adapter_cpu_accuracy.py                          # all causal-LM models
-pytest tests/test_adapter_cpu_accuracy.py -k qwen3                 # one model (manual + auto-loader)
-pytest tests/test_adapter_cpu_accuracy.py -k "qwen3 and manual"    # manual adapter only
+uv run pytest tests/test_adapter_cpu_accuracy.py                  # all causal-LM models
+uv run pytest tests/test_adapter_cpu_accuracy.py -k qwen3         # one model (manual + auto-loader)
+uv run pytest tests/test_adapter_cpu_accuracy.py -k "qwen3 and manual"    # manual adapter only
 
 # Embedding accuracy tests (hidden-states)
-pytest tests/test_embed_cpu_accuracy.py                            # all embedding models
-pytest tests/test_embed_cpu_accuracy.py -k bge_base                # one model
+uv run pytest tests/test_embed_cpu_accuracy.py                    # all embedding models
+uv run pytest tests/test_embed_cpu_accuracy.py -k bge_base        # one model
 
 # Load tests (verify models load without errors)
-pytest tests/test_load_cpu.py                                      # CPU load test
-pytest tests/test_load_spyre.py                                    # Spyre load test (requires hardware)
+uv run pytest tests/test_load_cpu.py                              # CPU load test
+uv run pytest tests/test_load_spyre.py                            # Spyre load test (requires hardware)
 ```
 
-**Note**: Do not run CPU tests with `python tests/test_*.py` — this bypasses pytest's conftest.py setup and will cause import errors. Always use `pytest tests/test_*.py`.
+**Note**: Do not run CPU tests with `python tests/test_*.py` — this bypasses pytest's conftest.py setup and will cause import errors. Always use `pytest` (or `uv run pytest`).
 
 ### Spyre Tests (requires Spyre hardware)
 
@@ -189,7 +216,8 @@ This project uses [pre-commit](https://pre-commit.com/) to enforce code quality 
 ### Setup
 
 ```bash
-pip install -e ".[dev]"     # installs pre-commit, black, ruff, mypy as dev deps
+uv sync --group dev
+
 pre-commit install          # activate hooks in your local clone
 ```
 

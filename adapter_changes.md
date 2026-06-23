@@ -13,7 +13,7 @@ Every adapter applies the following transformations via shared utilities in `hf_
 | **RoPE** | Computed on-the-fly per layer, element-wise sin/cos | Precomputed rotation matrices `[S, 2, 2, D/2]` on CPU, applied via matrix multiplication |
 | **RMSNorm / LayerNorm** | Casts to float32 for numerical stability, then back | Stays in fp16 on Spyre (no dtype conversion allowed); uses float32 on CPU only |
 | **LM head** | Original vocab dimension | Zero-padded to stick-aligned size (multiple of 64 + buffer) |
-| **KV cache** | Dynamic, append-based (`DynamicCache`) | Pre-allocated at full size, overwrite at specific offset via `torch.ops.spyre.overwrite` |
+| **KV cache** | Dynamic, append-based (`DynamicCache`) | Pre-allocated at full size, written at a specific offset via native slice assignment (`cache[:, :, pos:pos+seq_len, :] = k`) |
 | **Layer compilation** | Not compiled for inference | Each decoder layer compiled independently via `torch.compile(dynamic=False)` |
 | **Generation loop** | 1 token per decode iteration | 64-token padded blocks: prefill → expand by 64 → fill 63 tokens → repeat |
 | **Attention masks** | Boolean or simple format | Explicit float16 `[B, 1, L, S]` tensors with `-inf` for masked positions |

@@ -30,7 +30,7 @@ CAUSAL_LM_MODELS = {
         "path": "Qwen/Qwen3-0.6B",
         "adapter": "hf_qwen3.py",
     },
-    "granite": {
+    "granite8b": {
         "name": "Granite 3.3 8B",
         "path": "ibm-granite/granite-3.3-8b-instruct",
         "adapter": "hf_granite.py",
@@ -44,14 +44,13 @@ CAUSAL_LM_MODELS = {
         "name": "Granite 4.0 1B",
         "path": "ibm-granite/granite-4.0-1b-base",
         "adapter": "hf_granitemoehybrid.py",
-        "dtype": "float32",  # fp16 overflows on CPU due to multipliers
     },
     "smollm3": {
         "name": "SmolLM3 3B",
         "path": "HuggingFaceTB/SmolLM3-3B-Base",
         "adapter": "hf_smollm3.py",
     },
-    "llama": {
+    "tiny_llama": {
         "name": "TinyLlama 1.1B",
         "path": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         "adapter": "hf_llama.py",
@@ -61,22 +60,27 @@ CAUSAL_LM_MODELS = {
         "path": "microsoft/Phi-4-mini-instruct",
         "adapter": "hf_phi3.py",
     },
+    "phi3": {
+        "name": "Phi-3.5 mini",
+        "path": "microsoft/Phi-3.5-mini-instruct",
+        "adapter": "hf_phi3.py",
+    },
     "qwen2": {
         "name": "Qwen2.5 1.5B",
         "path": "Qwen/Qwen2.5-1.5B",
         "adapter": "hf_qwen2.py",
     },
-    "mistral": {
-        "name": "Mistral 7B v0.3",
-        "path": "mistralai/Mistral-7B-v0.3",
+    "ministral": {
+        "name": "Ministral 3b instruct",
+        "path": "ministral/Ministral-3b-instruct",
         "adapter": "hf_mistral.py",
     },
-    "olmo": {
+    "olmo1b": {
         "name": "OLMo 1B",
         "path": "allenai/OLMo-1B-hf",
         "adapter": "hf_olmo.py",
     },
-    "olmo2": {
+    "olmo2_1b": {
         "name": "OLMo2 1B",
         "path": "allenai/OLMo-2-0425-1B",
         "adapter": "hf_olmo2.py",
@@ -97,34 +101,62 @@ CAUSAL_LM_MODELS = {
     #     "path": "mistralai/Ministral-3B-Instruct",
     #     "adapter": "hf_mistral.py",
     # },
-    "yi": {
-        "name": "Yi 1.5 6B",
-        "path": "01-ai/Yi-1.5-6B",
-        "adapter": "hf_llama.py",
-    },
+    # "yi_6b": {
+    #     "name": "Yi 1.5 6B",
+    #     "path": "01-ai/Yi-1.5-6B",
+    #     "adapter": "hf_llama.py",
+    # },
     "granite-vision": {
         "name": "Granite Vision 4.1 4B",
         "path": "ibm-granite/granite-vision-4.1-4b",
         "adapter": "hf_granite_vision.py",
         "load_fn": True,
     },
+    "gemma4": {
+        "name": "Gemma 4 12B",
+        "path": "google/gemma-4-12B-it",
+        "adapter": "hf_gemma4.py",
+    },
+    # Gemma 3 is a gated checkpoint — requires HF auth. Tested on Spyre pod only.
+    # "gemma3": {
+    #     "name": "Gemma 3 1B",
+    #     "path": "google/gemma-3-1b-it",
+    #     "adapter": "hf_gemma3.py",
+    # },
 }
 
 
 EMBEDDING_MODELS = {
+    # EmbeddingGemma is a gated checkpoint — requires HF auth. Tested on Spyre pod only.
+    # "embeddinggemma": {
+    #     "name": "EmbeddingGemma 300M",
+    #     "path": "google/embeddinggemma-300m",
+    #     "adapter": "hf_gemma3.py",
+    #     "dtype": "bfloat16",  # bf16-native; fp16 overflows the residual stream
+    # },
     "qwen3_embed": {
         "name": "Qwen3-Embedding 0.6B",
         "path": "Qwen/Qwen3-Embedding-0.6B",
         "adapter": "hf_qwen3.py",
     },
     "qwen2_embed": {
-        "name": "GTE-Qwen2-1.5B",
-        "path": "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+        "name": "Jina-Qwen2-embed-0.5B",
+        "path": "jinaai/jina-code-embeddings-0.5b",
         "adapter": "hf_qwen2.py",
     },
     "e5_mistral": {
         "name": "E5-Mistral-7B",
         "path": "intfloat/e5-mistral-7b-instruct",
+        "adapter": "hf_mistral.py",
+    },
+    "linq_embed_mistral": {
+        "name": "Linq-Embed-Mistral",
+        "path": "Linq-AI-Research/Linq-Embed-Mistral",
+        "adapter": "hf_mistral.py",
+    },
+    "sfr_embedding_mistral": {
+        "name": "SFR-Embedding-Mistral",
+        "path": "Salesforce/SFR-Embedding-Mistral",
         "adapter": "hf_mistral.py",
     },
     "bge_base": {
@@ -147,6 +179,21 @@ EMBEDDING_MODELS = {
         "path": "sentence-transformers/all-mpnet-base-v2",
         "adapter": "hf_mpnet.py",
     },
+    "modernbert": {
+        "name": "ModernBERT-embed-base",
+        "path": "nomic-ai/modernbert-embed-base",
+        "adapter": "hf_modernbert.py",
+    },
+    "gte_modernbert": {
+        "name": "GTE-ModernBERT-base",
+        "path": "Alibaba-NLP/gte-modernbert-base",
+        "adapter": "hf_modernbert.py",
+    },
+    "granite_embed": {
+        "name": "Granite-Embedding-97m-multilingual-r2",
+        "path": "ibm-granite/granite-embedding-97m-multilingual-r2",
+        "adapter": "hf_modernbert.py",
+    },
 }
 
 
@@ -155,7 +202,7 @@ def _get_adapter_module_name(adapter_module):  # type: ignore[no-untyped-def]
     return adapter_module.__name__.split(".")[-1]
 
 
-def _select_representative_models(config_mapping=None):
+def select_representative_models(config_mapping=None):
     """
     Programmatically select one representative model per adapter module.
 

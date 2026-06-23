@@ -41,11 +41,18 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     BertConfig,
+    Gemma3Config,
+    Gemma3TextConfig,
+    Gemma4Config,
+    Gemma4TextConfig,
+    Gemma4UnifiedConfig,
+    Gemma4UnifiedTextConfig,
     Granite4VisionConfig,
     GraniteConfig,
     GraniteMoeHybridConfig,
     LlamaConfig,
     MistralConfig,
+    ModernBertConfig,
     MPNetConfig,
     Olmo2Config,
     OlmoConfig,
@@ -59,11 +66,14 @@ from transformers.configuration_utils import PretrainedConfig
 
 from hf_adapters import (
     hf_bert,
+    hf_gemma3,
+    hf_gemma4,
     hf_granite,
     hf_granite_vision,
     hf_granitemoehybrid,
     hf_llama,
     hf_mistral,
+    hf_modernbert,
     hf_mpnet,
     hf_olmo,
     hf_olmo2,
@@ -73,15 +83,26 @@ from hf_adapters import (
     hf_smollm3,
     hf_xlm_roberta,
 )
-from hf_adapters.hf_common import load_model_common
+from hf_adapters.hf_common import (
+    SpyreNoAdapterError,
+    assert_spyre_dimensions,
+    load_model_common,
+)
 
 CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     BertConfig: hf_bert,
+    Gemma3Config: hf_gemma3,
+    Gemma3TextConfig: hf_gemma3,
+    Gemma4Config: hf_gemma4,
+    Gemma4TextConfig: hf_gemma4,
+    Gemma4UnifiedConfig: hf_gemma4,
+    Gemma4UnifiedTextConfig: hf_gemma4,
     Granite4VisionConfig: hf_granite_vision,
     GraniteConfig: hf_granite,
     GraniteMoeHybridConfig: hf_granitemoehybrid,
     LlamaConfig: hf_llama,
     MistralConfig: hf_mistral,
+    ModernBertConfig: hf_modernbert,
     MPNetConfig: hf_mpnet,
     OlmoConfig: hf_olmo,
     Olmo2Config: hf_olmo2,
@@ -96,10 +117,11 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
 def _resolve_adapter_module(model_name_or_path):
     model_config = AutoConfig.from_pretrained(model_name_or_path)
     if type(model_config) not in CONFIG_TO_ADAPTER_MODULE_MAPPING:
-        raise Exception(
+        raise SpyreNoAdapterError(
             f"Model {model_name_or_path} of type {type(model_config)} "
             "is not supported"
         )
+    assert_spyre_dimensions(model_config, model_name=str(model_name_or_path))
     return CONFIG_TO_ADAPTER_MODULE_MAPPING[type(model_config)]
 
 

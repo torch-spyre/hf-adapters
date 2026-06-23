@@ -33,6 +33,48 @@ DEVICE = "spyre"
 BLOCK_SIZE = 64  # Spyre stick size at fp16 (128 bytes / 2 bytes per element)
 
 
+class SpyreUnsupportedModelError(ValueError):
+    """Architecture is supported, but this config can't run on Spyre."""
+
+
+class SpyreNoAdapterError(ValueError):
+    """No Spyre adapter is registered for this model's architecture."""
+
+
+def assert_spyre_dimensions(config, model_name):
+    """Reject configs whose ``hidden_size``/``intermediate_size`` is stick-misaligned.
+
+    The Spyre compiler lays tensors out in ``BLOCK_SIZE``-element sticks.
+    Matmuls over a dimension that is not a multiple of ``BLOCK_SIZE`` produce
+    stick index expressions it can't lower (e.g. ``floor(d2/320)`` for a 312-wide
+    dim), surfacing as a cryptic ``Unsupported stick expression`` deep in
+    ``torch.compile``. This covers both sub-stick dims (e.g. ``hidden_size=8``)
+    and misaligned ones (e.g. ``hidden_size=312``).
+
+    ``head_dim`` is not checked — adapters auto-pad it to a stick boundary (see
+    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``);
+    ``hidden_size``/``intermediate_size`` can't be padded without changing the
+    model's arithmetic. Real models clear this bar; it fires on tiny test
+    fixtures (e.g. ``trl-internal-testing/tiny-*``, ``cointegrated/rubert-tiny2``).
+    """
+    # text_config holds the dims for multimodal wrappers (Gemma 4, Granite Vision).
+    dim_config = getattr(config, "text_config", None) or config
+    misaligned = [
+        (f, v)
+        for f in ("hidden_size", "intermediate_size")
+        if (v := getattr(dim_config, f, None)) is not None and v % BLOCK_SIZE != 0
+    ]
+    if misaligned:
+        details = ", ".join(f"{f}={v}" for f, v in misaligned)
+        raise SpyreUnsupportedModelError(
+            f"Model {model_name} has Spyre-incompatible dimensions: {details} "
+            f"(not a multiple of one stick, {BLOCK_SIZE}). The Spyre compiler "
+            f"cannot lower matmuls over stick-misaligned dimensions. Use a model "
+            f"whose hidden_size and intermediate_size are both multiples of "
+            f"{BLOCK_SIZE}."
+        )
+
+
 def get_backbone(model):
     """Return the transformer backbone of an HF model.
 
@@ -47,8 +89,14 @@ def get_backbone(model):
     Adapter code reaches into the backbone to access ``embed_tokens``,
     ``layers``, ``norm``, ``rotary_emb``. This accessor resolves the right
     object regardless of how the model was loaded.
+
+    Multimodal causal-LM wrappers (e.g. Gemma 4's
+    ``Gemma4ForConditionalGeneration``) nest the text decoder one level deeper
+    at ``model.model.language_model``; descend into ``.language_model`` when
+    present so the text backbone is returned.
     """
-    return model.model if hasattr(model, "model") else model
+    inner = model.model if hasattr(model, "model") else model
+    return getattr(inner, "language_model", inner)
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +175,48 @@ class PrecomputedRotaryEmbedding(nn.Module):
         return selected.to(DEVICE)
 
 
+def set_rope_dtype(model, dtype: torch.dtype) -> None:
+    """Explicitly set the freq-cache dtype on a model's precomputed RoPE.
+
+    ``model._spyre_rope`` is either a single ``PrecomputedRotaryEmbedding``
+    (most adapters) or a ``dict`` of them keyed by layer type (Gemma 3/4, which
+    use different RoPE per sliding/global layer). This applies ``set_dtype`` to
+    whichever shape is present.
+    """
+    rope = getattr(model, "_spyre_rope", None)
+    if rope is None:
+        return
+    ropes = rope.values() if isinstance(rope, dict) else [rope]
+    for r in ropes:
+        if hasattr(r, "set_dtype"):
+            r.set_dtype(dtype)
+
+
+class InvFreqShim(nn.Module):
+    """Minimal ``original_rope`` stand-in for ``PrecomputedRotaryEmbedding``.
+
+    ``PrecomputedRotaryEmbedding`` reads ``.inv_freq`` and ``.attention_scaling``
+    off its ``original`` module — the layout of stock HF's ``RotaryEmbedding``,
+    which stores a single ``inv_freq`` buffer. Several models instead store one
+    ``<layer_type>_inv_freq`` buffer (and, for Gemma, a matching
+    ``<layer_type>_attention_scaling``) *per* layer type — sliding vs full
+    attention with different theta. To build one ``PrecomputedRotaryEmbedding``
+    per layer type, wrap each per-type ``inv_freq`` (+ scaling) in this shim.
+
+    The ``inv_freq`` length equals ``head_dim / 2`` for that layer type;
+    ``PrecomputedRotaryEmbedding`` derives the rotation-matrix width from it.
+
+    ``attention_scaling`` defaults to ``1.0`` (the "default" RoPE type, e.g.
+    ModernBERT, where no post-scaling is applied); pass the model's per-type
+    scaling for RoPE types that use it.
+    """
+
+    def __init__(self, inv_freq, attention_scaling=1.0):
+        super().__init__()
+        self.register_buffer("inv_freq", inv_freq.clone(), persistent=False)
+        self.attention_scaling = attention_scaling
+
+
 def apply_rope_matmul(x, selected_freqs):
     """Apply RoPE via matmul with [2,2,D/2] rotation matrix. No slicing.
 
@@ -152,7 +242,7 @@ def apply_rope_matmul(x, selected_freqs):
 def kv_cache_update(
     k, v, key_cache, value_cache, is_filling, token_index, cache_position
 ):
-    """Update pre-allocated KV cache via overwrite at cache_position.
+    """Update pre-allocated KV cache via native slice assignment at cache_position.
 
     All args are tensors; is_filling/token_index/cache_position are Python
     scalars that torch.compile specializes on.
@@ -164,23 +254,13 @@ def kv_cache_update(
         k_write = k
         v_write = v
 
-    if key_cache.device.type == "spyre":
-        torch.ops.spyre.overwrite(
-            input=k_write,
-            output=key_cache,
-            dims=[2],
-            offsets=[cache_position],
-        )
-        torch.ops.spyre.overwrite(
-            input=v_write,
-            output=value_cache,
-            dims=[2],
-            offsets=[cache_position],
-        )
-    else:
-        seq_len = k_write.shape[2]
-        key_cache[:, :, cache_position : cache_position + seq_len, :] = k_write
-        value_cache[:, :, cache_position : cache_position + seq_len, :] = v_write
+    # Native slicing assignment, replacing the deprecated torch.ops.spyre.overwrite
+    # cache_position is a Python int the compiler specializes on, so the slice
+    # bound is a compile-time constant on both CPU and Spyre.
+    # NOTE: on Spyre this still compiles one binary per distinct cache_position
+    seq_len = k_write.shape[2]
+    key_cache[:, :, cache_position : cache_position + seq_len, :] = k_write
+    value_cache[:, :, cache_position : cache_position + seq_len, :] = v_write
 
     return key_cache, value_cache
 
@@ -563,6 +643,144 @@ def build_prefill_mask_right_padded(
     return mask
 
 
+def add_sliding_window_band(mask, sliding_window, dtype=torch.float16):
+    """Restrict an additive bidirectional mask to a local ``±sliding_window`` band.
+
+    ModernBERT alternates global (full) attention layers with local
+    (sliding-window) layers. The local layers let token ``i`` attend only to
+    tokens ``j`` with ``|i - j| <= sliding_window`` — matching HF's
+    ``create_bidirectional_sliding_window_mask`` (inclusive on both sides,
+    using ``config.sliding_window`` directly).
+
+    Takes the global additive mask ``[B, 1, L, L]`` (zeros for allowed pairs,
+    ``-inf`` for padding) and returns a new mask with the same padding plus
+    ``-inf`` on every off-band pair. The global padding is preserved by adding,
+    so padded columns stay masked in the local layers too.
+
+    Built on CPU (the band is a static ``[L, L]`` pattern) then left for the
+    caller to move to ``DEVICE`` alongside the global mask.
+    """
+    padded_len = mask.shape[-1]
+    idx = torch.arange(padded_len)
+    off_band = (idx[:, None] - idx[None, :]).abs() > sliding_window  # [L, L]
+    band = torch.zeros((padded_len, padded_len), dtype=dtype)
+    band[off_band] = -torch.inf
+    return mask + band[None, None, :, :]
+
+
+def add_causal_sliding_window_band(mask, query_cache_coords, sliding_window):
+    """Restrict an additive *causal* mask to a backward ``sliding_window`` band.
+
+    Gemma 4's sliding ("local") attention layers are causal AND windowed: a
+    query may attend to a key only when ``0 <= query_pos - key_pos <
+    sliding_window`` (HF's ``create_sliding_window_causal_mask`` uses an
+    exclusive lower bound — a window of ``sliding_window`` keys ending at the
+    query). The global ("full") layers use the plain causal mask unchanged.
+
+    This works in the **KV-cache coordinate system** used by ``generate`` and
+    the test harness, where cache column ``c`` holds the token whose absolute
+    position is ``c - prompt_offset`` and a query row's cache coordinate ``r``
+    has absolute position ``r - prompt_offset``. The ``prompt_offset`` cancels
+    in the difference, so ``query_pos - key_pos == r - c`` — the band is an
+    index distance between the query's cache coordinate and the key column.
+    This is why the caller passes cache coordinates, not absolute positions.
+
+    Unlike ``add_sliding_window_band`` (symmetric ±window, for bidirectional
+    encoders), the band here is one-sided (causal).
+
+    Args:
+        mask: additive causal mask ``[B, 1, Lq, Lk]`` (0 allowed, -inf masked);
+            ``Lk`` is the cache length.
+        query_cache_coords: ``[B, Lq]`` cache coordinate of each query row
+            (column index the row's token occupies / will occupy in the cache).
+        sliding_window: window size (number of keys, exclusive lower bound).
+
+    Returns a new mask with the base padding/causality preserved plus -inf on
+    every key outside ``(q - sliding_window, q]``. Same device/dtype as ``mask``.
+
+    The band is computed on **CPU** (integer comparisons + a ``bool`` mask),
+    then added to ``mask`` **on CPU**, and the combined mask is moved back to
+    ``mask``'s original device. The comparisons must not run on Spyre: its
+    Inductor backend rejects ``int64`` compare-to-constant and ``bool``
+    intermediates. The *add* is also kept off-device because an on-device
+    ``-inf + -inf`` has been observed to produce NaN on Spyre in bf16 (see the
+    note at the return). Mirrors ``add_sliding_window_band``.
+    """
+    lk = mask.shape[-1]
+    k_col = torch.arange(lk)[None, None, :]  # [1, 1, Lk] on CPU
+    q_coord = query_cache_coords.to("cpu")[:, :, None].to(k_col.dtype)  # [B, Lq, 1]
+    delta = q_coord - k_col  # [B, Lq, Lk]
+    out_of_band = (delta < 0) | (delta >= sliding_window)  # CPU bool
+    band = torch.zeros(out_of_band.shape, dtype=mask.dtype)  # CPU float
+    band = band.masked_fill(out_of_band, -torch.inf)
+    # Combine on CPU, then move the result to the input's device. Doing the
+    # add on-device has been observed to NaN on Spyre in bf16 when the band's
+    # -inf lands on an already -inf cell (-inf + -inf): the result poisons the
+    # SDPA softmax, giving all-NaN Gemma 4 logits. fp16 happened not to hit this.
+    # A finite sentinel (e.g. finfo.min) is not a reliable substitute here — it
+    # can overflow once cells are summed. Combining on CPU avoids the issue; the
+    # mask is tiny so the round-trip is cheap.
+    orig_device = mask.device
+    combined = mask.to("cpu") + band[:, None, :, :]
+    return combined.to(orig_device)
+
+
+# ---------------------------------------------------------------------------
+# KV-cache allocation
+# ---------------------------------------------------------------------------
+
+
+def kv_cache_shapes(model):
+    """Resolve the per-layer ``(num_kv_heads, head_dim, v_head_dim)`` KV shapes.
+
+    Most models use one uniform shape across all layers, derived from
+    ``num_key_value_heads`` and ``head_dim`` (with optional ``_spyre_head_dim`` /
+    ``_spyre_v_head_dim`` overrides from head padding). Models whose layers
+    differ — e.g. Gemma 4, where global ("full_attention") layers use a larger
+    ``global_head_dim`` and a different KV-head count than the sliding layers —
+    set ``model._spyre_kv_shapes`` to an explicit per-layer list. When present,
+    that list wins and this returns it verbatim.
+
+    Returns a list of length ``num_hidden_layers`` of
+    ``(num_kv_heads, head_dim, v_head_dim)`` tuples.
+    """
+    explicit = getattr(model, "_spyre_kv_shapes", None)
+    if explicit is not None:
+        return list(explicit)
+
+    num_layers = model.config.num_hidden_layers
+    num_kv_heads = model.config.num_key_value_heads
+    head_dim = (
+        getattr(model, "_spyre_head_dim", None)
+        or getattr(model.config, "head_dim", None)
+        or model.config.hidden_size // model.config.num_attention_heads
+    )
+    v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
+    return [(num_kv_heads, head_dim, v_head_dim) for _ in range(num_layers)]
+
+
+def allocate_kv_caches(model, batch_size, max_cache_len, dtype, device=None):
+    """Allocate zeroed per-layer key/value caches matching the model's shapes.
+
+    Honors ``model._spyre_kv_shapes`` (see ``kv_cache_shapes``) so models with
+    heterogeneous layer shapes get correctly-sized caches per layer. Returns
+    ``(key_caches, value_caches)`` lists. ``device`` defaults to the module
+    ``DEVICE`` resolved at call time (so the conftest CPU patch applies).
+    """
+    if device is None:
+        device = DEVICE
+    shapes = kv_cache_shapes(model)
+    key_caches = [
+        torch.zeros(batch_size, n_kv, max_cache_len, hd, dtype=dtype, device=device)
+        for (n_kv, hd, _vhd) in shapes
+    ]
+    value_caches = [
+        torch.zeros(batch_size, n_kv, max_cache_len, vhd, dtype=dtype, device=device)
+        for (n_kv, _hd, vhd) in shapes
+    ]
+    return key_caches, value_caches
+
+
 # ---------------------------------------------------------------------------
 # Model-agnostic load + generate
 # ---------------------------------------------------------------------------
@@ -650,6 +868,12 @@ def _move_to_spyre_with_layout(model, dtype):
     """Move all parameters and buffers to Spyre with row-major layout for 2D
     matmul weights, except embedding weights which keep the default layout.
     """
+    # Propagate dtype to the precomputed RoPE module(s) so the freq cache
+    # matches the chosen weight dtype (avoids fp16/bf16 mismatch in
+    # apply_rope_matmul when dtype != fp16). Done before the CPU early-return so
+    # both the CPU and Spyre paths get it.
+    set_rope_dtype(model, dtype)
+
     if torch.device(DEVICE).type != "spyre":
         model.to(dtype=dtype)
         return
@@ -664,7 +888,13 @@ def _move_to_spyre_with_layout(model, dtype):
     skip_layout_ptrs = _embedding_param_ids(model)
 
     def _alloc_on_spyre(t: torch.Tensor) -> torch.Tensor:
-        if t.dim() > 1 and t.data_ptr() not in skip_layout_ptrs:
+        # The row-major [1, 0] dim_order describes a 2-D permutation, so it only
+        # applies to 2-D matmul weights. 1-D tensors (norms, biases) and any
+        # higher-rank weight (e.g. the 3-D/4-D Conv2d and position-embedding
+        # tables in a multimodal checkpoint's vision/audio towers) keep the
+        # default layout — forcing [1, 0] on them raises "Incompatible host_size
+        # and dim_order". Embedding tables are gather-only and also skipped.
+        if t.dim() == 2 and t.data_ptr() not in skip_layout_ptrs:
             stl = SpyreTensorLayout(t.shape, t.stride(), dtype, [1, 0])
         else:
             stl = None
@@ -689,13 +919,6 @@ def _move_to_spyre_with_layout(model, dtype):
         owner = model.get_submodule(module_path) if module_path else model
         persistent = attr not in owner._non_persistent_buffers_set
         owner.register_buffer(attr, new, persistent=persistent)
-
-    # Propagate dtype to the precomputed RoPE module so its freq cache
-    # matches the model's weight dtype (avoids fp16/bf16 mismatch in
-    # apply_rope_matmul when dtype != fp16).
-    rope = getattr(model, "_spyre_rope", None)
-    if rope is not None and hasattr(rope, "set_dtype"):
-        rope.set_dtype(dtype)
 
 
 def load_model_common(model_path, prepare_fn, dtype=torch.float16, auto_model_cls=None):
@@ -806,6 +1029,13 @@ def generate(
 ):
     """Model-agnostic generation with padded 64-block decode.
 
+    When attached to a model via ``auto_spyre_model.py`` (which binds
+    ``run_forward_fn`` to the adapter module's ``_run_forward``), the
+    ``run_forward_fn`` parameter drops out of the public signature, so callers
+    invoke it as::
+
+        model.generate(tokenizer, ["Hello!"], max_new_tokens=32, **kwargs)
+
     Sampling and stop parameters follow stock-HF precedence:
     ``explicit kwarg > model.generation_config > HF global default``. Leaving a
     sampling knob at ``None`` (the default for ``do_sample``/``temperature``/
@@ -893,39 +1123,14 @@ def generate(
         offset = prompt_offsets[b].item()
         position_ids[b, offset:] = torch.arange(actual_len)
 
-    # Initialize empty KV caches
-    num_layers = model.config.num_hidden_layers
-    num_kv_heads = model.config.num_key_value_heads
-    head_dim = (
-        getattr(model, "_spyre_head_dim", None)
-        or getattr(model.config, "head_dim", None)
-        or model.config.hidden_size // model.config.num_attention_heads
-    )
-    v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
+    # Initialize empty KV caches. Per-layer shapes come from the model
+    # (``_spyre_kv_shapes``) for heterogeneous architectures like Gemma 4,
+    # otherwise a single uniform shape derived from the config.
     # Match KV cache and mask dtype to the model's weight dtype.
     model_dtype = _model_dtype(model)
-    key_caches = [
-        torch.zeros(
-            batch_size,
-            num_kv_heads,
-            max_cache_len,
-            head_dim,
-            dtype=model_dtype,
-            device=DEVICE,
-        )
-        for _ in range(num_layers)
-    ]
-    value_caches = [
-        torch.zeros(
-            batch_size,
-            num_kv_heads,
-            max_cache_len,
-            v_head_dim,
-            dtype=model_dtype,
-            device=DEVICE,
-        )
-        for _ in range(num_layers)
-    ]
+    key_caches, value_caches = allocate_kv_caches(
+        model, batch_size, max_cache_len, model_dtype
+    )
 
     # Decode state
     result = input_ids.clone()
@@ -1378,6 +1583,9 @@ def encoder_backbone_forward(model, input_ids, attn_mask, position_ids, token_ty
 
 def prepare_rope_and_heads(model):
     cfg = model.config
+    assert_spyre_dimensions(
+        cfg, model_name=getattr(cfg, "name_or_path", "") or "<unknown>"
+    )
     orig_head_dim = (
         getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
     )
@@ -1488,9 +1696,10 @@ def prefill_embed(
     # the SDPA inputs.
     model_dtype = _model_dtype(model)
 
-    # Causal right-padded mask (or bidirectional for models with
-    # ``config.is_causal=False``)
-    is_causal = getattr(model.config, "is_causal", True)
+    # Causal right-padded mask, or bidirectional for some embedders
+    is_causal = getattr(model.config, "is_causal", True) and not getattr(
+        model.config, "use_bidirectional_attention", False
+    )
     mask = build_prefill_mask_right_padded(
         bsz,
         padded_len,
