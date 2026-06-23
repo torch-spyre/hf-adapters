@@ -1,0 +1,58 @@
+# =============================================================================
+# Weekly top-embedding-models report
+#
+# Runs once a week (Saturday 22:00 UTC) and prints the top 10 embedding models
+# (by HF Hub downloads) to the console. No repository writes — the CSV the
+# fetcher would normally drop into `resources/` is redirected to a temporary
+# path and dumped to the job log.
+# =============================================================================
+name: test_weekly
+
+on:
+  schedule:
+    # Saturday 22:00 UTC
+    - cron: "0 22 * * 6"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  print-top-embedding:
+    name: Print top 10 embedding models
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install huggingface_hub tqdm transformers
+
+      - name: Run fetch_top_embedding_models(limit=10) and print result
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          OUT="$(mktemp --suffix=.csv)"
+          PYTHONPATH="utils:${PYTHONPATH:-}" python - <<PY
+          from fetch_top_embedding_models import fetch_top_embedding_models
+          fetch_top_embedding_models(limit=10, output_csv="${OUT}")
+          PY
+          echo "----- generated CSV (${OUT}) -----"
+          cat "$OUT"
+          echo "----- end -----"
