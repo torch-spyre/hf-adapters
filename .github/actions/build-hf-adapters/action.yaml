@@ -196,7 +196,8 @@ runs:
           # frozen installation takes pinned commit when locked
           # we want to relax on torch-spyre to use floating version
           # and have other dependencies locked
-          uv lock --upgrade-package torch-spyre
+          # TODO: uncomment this once torch-spyre latest is stable
+          # uv lock --upgrade-package torch-spyre
           uv sync --frozen --verbose --refresh $GROUP_FLAGS
         fi
         uv pip show torch
