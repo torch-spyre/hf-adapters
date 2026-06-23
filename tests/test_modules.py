@@ -17,22 +17,19 @@ import copy
 
 import pytest
 import torch
-import torch.nn as nn
-from torch.testing._internal.common_utils import run_tests, TestCase
-
-
-from transformers.models.roberta.modeling_roberta import (
-    RobertaSelfAttention,
-    RobertaLayer,
-    RobertaEncoder,
+from torch.testing._internal.common_utils import TestCase, run_tests
+from transformers.models.llama.configuration_llama import LlamaConfig
+from transformers.models.llama.modeling_llama import (
+    LlamaAttention,
+    LlamaDecoderLayer,
+    LlamaModel,
 )
 from transformers.models.roberta.configuration_roberta import RobertaConfig
-from transformers.models.llama.modeling_llama import (
-    LlamaModel,
-    LlamaDecoderLayer,
-    LlamaAttention,
+from transformers.models.roberta.modeling_roberta import (
+    RobertaEncoder,
+    RobertaLayer,
+    RobertaSelfAttention,
 )
-from transformers.models.llama.configuration_llama import LlamaConfig
 
 
 class TestHFModulesOnSpyre(TestCase):
@@ -43,8 +40,8 @@ class TestHFModulesOnSpyre(TestCase):
     progress as Spyre eager-path support improves.
     """
 
-    def __init__(self, method_name="runTest", methodName="runTest"):
-        super().__init__(method_name, methodName)
+    def __init__(self, method_name="runTest", **kwargs):
+        super().__init__(method_name, **kwargs)
         self.rtol = 1e-2
         self.atol = 1e-3
         self.dtype = torch.float16

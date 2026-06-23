@@ -195,7 +195,9 @@ def pytest_collection_modifyitems(config, items):
         spyre_available = False
 
     if not spyre_available:
-        skip_spyre = pytest.mark.skip(reason="torch_spyre not installed or spyre device unavailable")
+        skip_spyre = pytest.mark.skip(
+            reason="torch_spyre not installed or spyre device unavailable"
+        )
         for item in items:
             if "spyre" in item.nodeid or item.get_closest_marker("requires_spyre"):
                 item.add_marker(skip_spyre)

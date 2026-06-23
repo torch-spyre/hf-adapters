@@ -12,16 +12,17 @@ Usage:
     python auto_generate_module_config.py --model_path ibm-granite/granite-3.3-8b-instruct --seq_len 128
 """
 
-import torch
 import argparse
-import yaml
-import json
-from pathlib import Path
 import hashlib
-from typing import Dict, List, Any, Tuple, Set
-from transformers import AutoModel, AutoTokenizer
-from torch.utils._pytree import tree_flatten
+import json
 import logging
+from pathlib import Path
+from typing import Any, Dict, List, Set, Tuple
+
+import torch
+import yaml
+from torch.utils._pytree import tree_flatten
+from transformers import AutoModel, AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
