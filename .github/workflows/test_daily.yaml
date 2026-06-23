@@ -413,6 +413,64 @@ jobs:
           uv run pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k "${{ matrix.model_key }}" --run-slow
           echo "tests done"
 
+  spyre-edge-cases-tests:
+    name: Spyre edge cases (${{ matrix.model_key }})
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - ${{ inputs.runner_label || 'image_torch_spyre' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Same causal-LM matrix as smoke / token-compare. The edge-case suite
+        # under tests/spyre/edge_cases/ uses the same AutoSpyreModelForCausalLM
+        # driver, so multimodal / unsupported entries (granite-vision, gemma4,
+        # phi4) are excluded for the same reasons.
+        model_key:
+          - qwen3
+          - granite8b
+          - granite2b
+          - smollm3
+          - tiny_llama
+          - qwen2
+          - ministral
+          - olmo1b
+          - olmo2_1b
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - name: Run tests/spyre/edge_cases/ for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running tests/spyre/edge_cases/ for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv tests/spyre/edge_cases/ -k "${{ matrix.model_key }}" --run-slow
+          echo "tests done"
+
   # ===========================================================================
   # Required check gate — fans in all matrix jobs so a single branch
   # protection rule ("tests / run spyre unit tests") passes only when every
@@ -431,6 +489,7 @@ jobs:
       - spyre-smoke-tests
       - spyre-token-compare-tests
       - spyre-embed-compare-tests
+      - spyre-edge-cases-tests
 #      - spyre-block-compare-tests
     if: always()
     steps:
@@ -445,7 +504,8 @@ jobs:
                  contains(needs.spyre-load-tests.result, 'failure') || contains(needs.spyre-load-tests.result, 'cancelled') ||
                  contains(needs.spyre-smoke-tests.result, 'failure') || contains(needs.spyre-smoke-tests.result, 'cancelled') ||
                  contains(needs.spyre-token-compare-tests.result, 'failure') || contains(needs.spyre-token-compare-tests.result, 'cancelled') ||
-                 contains(needs.spyre-embed-compare-tests.result, 'failure') || contains(needs.spyre-embed-compare-tests.result, 'cancelled') }}; then
+                 contains(needs.spyre-embed-compare-tests.result, 'failure') || contains(needs.spyre-embed-compare-tests.result, 'cancelled') ||
+                 contains(needs.spyre-edge-cases-tests.result, 'failure') || contains(needs.spyre-edge-cases-tests.result, 'cancelled') }}; then
             echo "One or more test suites failed."
             exit 1
           fi
