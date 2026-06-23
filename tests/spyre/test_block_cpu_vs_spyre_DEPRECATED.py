@@ -21,8 +21,8 @@ the output hidden states numerically.
 
 Usage (on Spyre pod)::
 
-    pytest -s -vvv tests/spyre/test_block_cpu_vs_spyre.py
-    pytest -s -vvv tests/spyre/test_block_cpu_vs_spyre.py -k qwen3
+    pytest -s -vvv tests/spyre/test_block_cpu_vs_spyre_DEPRECATED.py
+    pytest -s -vvv tests/spyre/test_block_cpu_vs_spyre_DEPRECATED.py -k qwen3
 """
 
 import importlib

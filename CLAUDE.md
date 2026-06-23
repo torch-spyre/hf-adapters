@@ -23,7 +23,6 @@ pytest tests/test_load_cpu.py      # CPU load test
 pytest tests/test_load_spyre.py    # Spyre load test (requires hardware)
 
 # Spyre tests (on pod only — requires torch_spyre)
-python3 tests/test_block_cpu_vs_spyre.py all
 python3 tests/test_e2e_smoke_spyre.py qwen3
 python3 tests/test_e2e_token_compare_spyre.py qwen3
 ```
