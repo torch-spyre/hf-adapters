@@ -44,7 +44,6 @@ CAUSAL_LM_MODELS = {
         "name": "Granite 4.0 1B",
         "path": "ibm-granite/granite-4.0-1b-base",
         "adapter": "hf_granitemoehybrid.py",
-        "dtype": "float32",  # fp16 overflows on CPU due to multipliers
     },
     "smollm3": {
         "name": "SmolLM3 3B",

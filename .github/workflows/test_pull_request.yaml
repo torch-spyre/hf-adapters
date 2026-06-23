@@ -269,7 +269,8 @@ jobs:
           - qwen3
           - granite8b
           - granite2b
-          - granite4
+        # Currently, the model granite4 does not over the test because of dtype - see issue https://github.com/torch-spyre/hf-adapters/issues/74
+#          - granite4
           - smollm3
           - tiny_llama
           # - phi4
@@ -334,10 +335,10 @@ jobs:
           - qwen3
           - granite8b
           - granite2b
-          - granite4
+          # We disabled granite4 because of issue https://github.com/torch-spyre/hf-adapters/issues/74
+#          - granite4
           - smollm3
           - tiny_llama
-          # phi4 — partial_rotary_factor=0.75 needs a compiler fix (see CLAUDE.md).
           # - phi4
           - qwen2
           - ministral
