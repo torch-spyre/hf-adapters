@@ -548,9 +548,58 @@ def _run_model_test(model_key):
     return results
 
 
+def _print_table(rows):
+    """Per-layer markdown table (one row per layer/mode)."""
+    print("\n## Per-Layer CPU vs Spyre Block Comparison\n")
+    print(
+        "| Model | Layer | Mode | Shape | Max Diff | Mean Diff "
+        "| CPU NaN | Spyre NaN | Error |"
+    )
+    print(
+        "|-------|-------|------|-------|----------|----------- "
+        "|---------|-----------|-------|"
+    )
+    for r in rows:
+        if r["error"]:
+            print(
+                f"| {r['model']} | {r['layer']} | {r['mode']} "
+                f"| {r['shape']} | — | — | — | — | {r['error']} |"
+            )
+        else:
+            nan_c = "Yes" if r["cpu_nan"] else "No"
+            nan_s = "Yes" if r["spyre_nan"] else "No"
+            print(
+                f"| {r['model']} | {r['layer']} | {r['mode']} "
+                f"| {r['shape']} "
+                f"| {r['max_abs_diff']:.4f} | {r['mean_abs_diff']:.6f} "
+                f"| {nan_c} | {nan_s} | — |"
+            )
+
+
+def _print_summary(rows):
+    """One-line pass/fail summary for the model."""
+    if not rows:
+        return
+    model = rows[0]["model"]
+    n_layers = len(set(r["layer"] for r in rows))
+    n_errors = sum(1 for r in rows if r["error"])
+    valid = [r for r in rows if r["error"] is None]
+    worst = max((r["max_abs_diff"] for r in valid), default=0.0)
+    any_nan = any(r.get("spyre_nan") for r in valid)
+    print("\n## Summary\n")
+    print("| Model | Layers Tested | Errors | Max Diff (worst) | Any NaN |")
+    print("|-------|--------------|--------|------------------|---------|")
+    print(
+        f"| {model} | {n_layers} | {n_errors} "
+        f"| {worst:.4f} | {'Yes' if any_nan else 'No'} |"
+    )
+
+
 @pytest.mark.parametrize("model_key", BLOCK_COMPARE_KEYS, ids=BLOCK_COMPARE_KEYS)
 def test_block_cpu_vs_spyre(model_key):
     rows = _run_model_test(model_key)
+    _print_table(rows)
+    _print_summary(rows)
     errors = [r for r in rows if r["error"] is not None]
     nan_rows = [r for r in rows if r.get("spyre_nan")]
     assert not errors, f"compile/run errors: {errors}"

@@ -227,12 +227,16 @@ def _compare_results(hf_results, adapter_results, tokenizer, model_name):
         match = h_top1 == a_top1
 
         step_label = "prefill" if step == 0 else f"decode-{step}"
+        h_str = tokenizer.decode([hf_r["token"]])
+        a_str = tokenizer.decode([ad_r["token"]])
         rows.append(
             {
                 "model": model_name,
                 "step": step_label,
                 "hf_token": hf_r["token"],
+                "hf_str": h_str,
                 "spyre_token": ad_r["token"],
+                "spyre_str": a_str,
                 "top1_match": match,
                 "max_diff": max_diff,
                 "mean_diff": mean_diff,
@@ -241,6 +245,30 @@ def _compare_results(hf_results, adapter_results, tokenizer, model_name):
             }
         )
     return rows
+
+
+def _print_table(rows):
+    """Markdown comparison table — one line per step."""
+    print("\n## E2E Token Comparison: HF (CPU) vs Adapter (Spyre)\n")
+    print(
+        "| Model | Step | HF Token | Spyre Token | Match "
+        "| Max Diff | Mean Diff | HF NaN | Spyre NaN |"
+    )
+    print(
+        "|-------|------|----------|-------------|-------"
+        "|----------|-----------|--------|-----------|"
+    )
+    for r in rows:
+        match = "OK" if r["top1_match"] else "FAIL"
+        hf_col = f"{r['hf_token']:>5} {r['hf_str']!r}"
+        sp_col = f"{r['spyre_token']:>5} {r['spyre_str']!r}"
+        hn = "Yes" if r["hf_nan"] else "No"
+        sn = "Yes" if r["spyre_nan"] else "No"
+        print(
+            f"| {r['model']} | {r['step']} | {hf_col} | {sp_col} "
+            f"| {match} | {r['max_diff']:.4f} | {r['mean_diff']:.6f} "
+            f"| {hn} | {sn} |"
+        )
 
 
 def _run_model_test(model_key, num_decode=4):
@@ -292,6 +320,7 @@ def _run_model_test(model_key, num_decode=4):
 @pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
 def test_e2e_token_compare_spyre(model_key):
     rows = _run_model_test(model_key)
+    _print_table(rows)
     n_match = sum(1 for r in rows if r["top1_match"])
     print(f"\nTop-1 agreement: {n_match}/{len(rows)} steps")
     mismatches = [r for r in rows if not r["top1_match"]]

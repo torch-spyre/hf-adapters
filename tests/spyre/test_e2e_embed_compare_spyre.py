@@ -179,9 +179,33 @@ def _run_model_test(model_key):
     return _compare_results(hf_hidden, ad_hidden, attention_mask, info["name"])
 
 
+def _print_table(rows):
+    """Markdown comparison table — one line per prompt row."""
+    print("\n## E2E Embedding Comparison: HF (CPU) vs Adapter (Spyre)\n")
+    print(
+        "| Model | Row | Real Len | Mean Cos | Min Cos | Pooled Cos "
+        "| Max Diff | Mean Diff | HF NaN | Spyre NaN | Match |"
+    )
+    print(
+        "|-------|-----|----------|----------|---------|------------"
+        "|----------|-----------|--------|-----------|-------|"
+    )
+    for r in rows:
+        match = "OK" if r["match"] else "FAIL"
+        hn = "Yes" if r["hf_nan"] else "No"
+        sn = "Yes" if r["spyre_nan"] else "No"
+        print(
+            f"| {r['model']} | {r['row']} | {r['n_real']} "
+            f"| {r['mean_cos']:.6f} | {r['min_cos']:.6f} | {r['pooled_cos']:.6f} "
+            f"| {r['max_diff']:.4f} | {r['mean_diff']:.6f} "
+            f"| {hn} | {sn} | {match} |"
+        )
+
+
 @pytest.mark.parametrize("model_key", EMBED_KEYS, ids=EMBED_KEYS)
 def test_e2e_embed_compare_spyre(model_key):
     rows = _run_model_test(model_key)
+    _print_table(rows)
     n_match = sum(1 for r in rows if r["match"])
     print(f"\nPer-row min-cosine >= {COSINE_THRESHOLD}: {n_match}/{len(rows)} rows")
     mismatches = [r for r in rows if not r["match"]]

@@ -100,4 +100,11 @@ def _run_smoke(model_key):
 @pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
 def test_e2e_smoke_spyre(model_key):
     result = _run_smoke(model_key)
+    print("\n## E2E Smoke Test Results\n")
+    print("| Model | Status | Tokens | Generated Text | Load (s) | Gen (s) |")
+    print("|-------|--------|--------|----------------|----------|---------|")
+    print(
+        f"| {result['model']} | {result['status']} | {result['tokens']} "
+        f"| {result['text']!r} | {result['load_s']:.1f} | {result['gen_s']:.1f} |"
+    )
     assert result["status"] == "PASS", result

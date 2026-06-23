@@ -54,6 +54,10 @@ def test_load_causal_lm(model_key):
         getattr(model, "generate", None)
     ), f"{model_key}: AutoSpyreModelForCausalLM did not attach generate()"
     print(f"  [{model_key}] causal-LM load time: {load_s:.1f}s")
+    print("\n## Spyre Load Test Results\n")
+    print("| Key | Kind | Status | Load (s) |")
+    print("|-----|------|--------|----------|")
+    print(f"| {model_key} | causal-LM | PASS | {load_s:.1f} |")
 
 
 @pytest.mark.parametrize("model_key", EMBED_KEYS, ids=EMBED_KEYS)
@@ -69,3 +73,7 @@ def test_load_embedding(model_key):
 
     assert model is not None, f"{model_key}: from_pretrained returned None"
     print(f"  [{model_key}] embedding load time: {load_s:.1f}s")
+    print("\n## Spyre Load Test Results\n")
+    print("| Key | Kind | Status | Load (s) |")
+    print("|-----|------|--------|----------|")
+    print(f"| {model_key} | embedding | PASS | {load_s:.1f} |")
