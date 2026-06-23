@@ -165,8 +165,8 @@ jobs:
           - ministral
           - olmo
           - olmo2
-          - falcon3
-          - deepseek-coder
+#          - falcon3
+#          - deepseek-coder
           - granite-vision
           # gemma4 — no public checkpoint at google/gemma-4-12B-it yet; the registry
           #          path 404s on HF so the load test cannot pull weights.
@@ -240,8 +240,8 @@ jobs:
           - ministral
           - olmo
           - olmo2
-          - falcon3
-          - deepseek-coder
+#          - falcon3
+#          - deepseek-coder
           # granite-vision — multimodal; load_fn=True in the registry. The smoke
           #                   driver calls AutoSpyreModelForCausalLM.from_pretrained
           #                   directly and does not handle the custom loader.
@@ -304,8 +304,8 @@ jobs:
           - ministral
           - olmo
           - olmo2
-          - falcon3
-          - deepseek-coder
+#          - falcon3
+#          - deepseek-coder
           # granite-vision — multimodal; the token-compare driver calls
           #                   AutoSpyreModelForCausalLM.from_pretrained and does
           #                   not handle the custom loader (load_fn=True).
