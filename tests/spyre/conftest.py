@@ -22,7 +22,10 @@ kernels are exercised.
 
 The parent conftest detects a Spyre-targeted invocation via ``sys.argv`` and
 skips its patch block; we then populate ``model_registry.CAUSAL_KEYS`` /
-``EMBED_KEYS`` ourselves using the real ``CONFIG_TO_ADAPTER_MODULE_MAPPING``.
+``EMBED_KEYS`` ourselves with the *full* registries. CI shards one job per
+``model_key`` and uses ``-k <key>`` to select it, so collapsing to one model
+per adapter (as ``select_representative_models`` does for local pytest runs)
+would silently deselect every job whose key wasn't the chosen representative.
 """
 
 import os
@@ -35,10 +38,5 @@ if _TESTS_DIR not in sys.path:
 
 import model_registry  # noqa: E402
 
-from hf_adapters.auto_spyre_model import (  # noqa: E402
-    CONFIG_TO_ADAPTER_MODULE_MAPPING,
-)
-
-model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
-    model_registry.select_representative_models(CONFIG_TO_ADAPTER_MODULE_MAPPING)
-)
+model_registry.CAUSAL_KEYS = list(model_registry.CAUSAL_LM_MODELS.keys())
+model_registry.EMBED_KEYS = list(model_registry.EMBEDDING_MODELS.keys())
