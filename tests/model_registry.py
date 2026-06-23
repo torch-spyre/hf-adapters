@@ -203,7 +203,7 @@ def _get_adapter_module_name(adapter_module):  # type: ignore[no-untyped-def]
     return adapter_module.__name__.split(".")[-1]
 
 
-def _select_representative_models(config_mapping=None):
+def select_representative_models(config_mapping=None):
     """
     Programmatically select one representative model per adapter module.
 

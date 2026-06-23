@@ -45,24 +45,32 @@ from _helpers import (  # noqa: F401  (re-exported for tests via `from conftest 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADAPTERS_DIR = os.path.join(REPO_ROOT, "hf_adapters")
 
-assert "hf_adapters.hf_common" not in sys.modules, (
-    "hf_adapters.hf_common was imported before tests/conftest.py ran; "
-    "the DEVICE='cpu' patch will not apply. Check for plugins or other "
-    "conftests that import hf_adapters at collection time."
+# Spyre-targeted runs (`pytest tests/spyre/...`) need the unpatched hf_adapters
+# with DEVICE="spyre". Detect that here and skip the CPU patching block — the
+# tests/spyre/conftest.py picks up from there with the real module.
+_TARGETS_SPYRE = any(
+    "tests/spyre" in a or a.rstrip("/").endswith("tests/spyre") for a in sys.argv
 )
 
-_common_path = os.path.join(ADAPTERS_DIR, "hf_common.py")
-_common_spec = importlib.util.spec_from_file_location(
-    "hf_adapters.hf_common", _common_path
-)
-_common_mod = importlib.util.module_from_spec(_common_spec)
-sys.modules["hf_adapters.hf_common"] = _common_mod
-_common_spec.loader.exec_module(_common_mod)
-_common_mod.DEVICE = "cpu"
+if not _TARGETS_SPYRE:
+    assert "hf_adapters.hf_common" not in sys.modules, (
+        "hf_adapters.hf_common was imported before tests/conftest.py ran; "
+        "the DEVICE='cpu' patch will not apply. Check for plugins or other "
+        "conftests that import hf_adapters at collection time."
+    )
 
-_pkg = types.ModuleType("hf_adapters")
-_pkg.__path__ = [ADAPTERS_DIR]
-sys.modules["hf_adapters"] = _pkg
+    _common_path = os.path.join(ADAPTERS_DIR, "hf_common.py")
+    _common_spec = importlib.util.spec_from_file_location(
+        "hf_adapters.hf_common", _common_path
+    )
+    _common_mod = importlib.util.module_from_spec(_common_spec)
+    sys.modules["hf_adapters.hf_common"] = _common_mod
+    _common_spec.loader.exec_module(_common_mod)
+    _common_mod.DEVICE = "cpu"
+
+    _pkg = types.ModuleType("hf_adapters")
+    _pkg.__path__ = [ADAPTERS_DIR]
+    sys.modules["hf_adapters"] = _pkg
 
 
 def _load_adapter(filename):
@@ -82,24 +90,25 @@ def _load_adapter(filename):
 # Pre-load every adapter referenced by CONFIG_TO_ADAPTER_MODULE_MAPPING, then
 # auto_spyre_model itself. Doing this here means tests can grab AutoSpyre*
 # off the module without paying the cost on first use.
-_auto_path = os.path.join(ADAPTERS_DIR, "auto_spyre_model.py")
-_auto_spec = importlib.util.spec_from_file_location(
-    "hf_adapters.auto_spyre_model", _auto_path
-)
-_auto_mod = importlib.util.module_from_spec(_auto_spec)
-sys.modules["hf_adapters.auto_spyre_model"] = _auto_mod
-_auto_spec.loader.exec_module(_auto_mod)
-setattr(_pkg, "auto_spyre_model", _auto_mod)
-
-# Now that auto_spyre_model is loaded with patched hf_common, populate the model lists
-# Import model_registry here (after patching) and update its CAUSAL_KEYS/EMBED_KEYS
-import model_registry  # noqa: E402
-
-model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
-    model_registry._select_representative_models(
-        _auto_mod.CONFIG_TO_ADAPTER_MODULE_MAPPING
+if not _TARGETS_SPYRE:
+    _auto_path = os.path.join(ADAPTERS_DIR, "auto_spyre_model.py")
+    _auto_spec = importlib.util.spec_from_file_location(
+        "hf_adapters.auto_spyre_model", _auto_path
     )
-)
+    _auto_mod = importlib.util.module_from_spec(_auto_spec)
+    sys.modules["hf_adapters.auto_spyre_model"] = _auto_mod
+    _auto_spec.loader.exec_module(_auto_mod)
+    setattr(_pkg, "auto_spyre_model", _auto_mod)
+
+    # Now that auto_spyre_model is loaded with patched hf_common, populate the model lists
+    # Import model_registry here (after patching) and update its CAUSAL_KEYS/EMBED_KEYS
+    import model_registry  # noqa: E402
+
+    model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
+        model_registry.select_representative_models(
+            _auto_mod.CONFIG_TO_ADAPTER_MODULE_MAPPING
+        )
+    )
 
 
 def _unwrap_compiled_blocks(model):

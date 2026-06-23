@@ -15,36 +15,36 @@
 """
 E2E smoke test: load HF model on Spyre, generate tokens, verify non-trivial.
 
-Usage (on Spyre pod):
-    python3 test_e2e_smoke_spyre.py [qwen3|granite|granite2b|granite4|smollm3]
-
 Verifies:
   - Model loads and moves to Spyre without error
   - generate() produces non-empty output
   - Generated tokens are not all-zero or all-same
+
+Usage (on Spyre pod)::
+
+    pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py
+    pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k qwen3
 """
 
-import sys
 import time
-import traceback
 
+import pytest
 from _helpers import torch_dtype_for
-from model_registry import CAUSAL_LM_MODELS as MODEL_REGISTRY
+from model_registry import CAUSAL_KEYS, CAUSAL_LM_MODELS
 
 
-def run_smoke(model_key):
-    """Load model, generate 5 tokens, validate output."""
+def _run_smoke(model_key):
+    """Load model, generate 5 tokens, validate output. Returns a result dict."""
     from transformers import AutoTokenizer
 
     from hf_adapters import AutoSpyreModelForCausalLM
 
-    info = MODEL_REGISTRY[model_key]
+    info = CAUSAL_LM_MODELS[model_key]
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"  {info['name']}: loading from {info['path']}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
-    # Load model (downloads weights, prepares, moves to Spyre)
     dtype = torch_dtype_for(info)
     t0 = time.time()
     model = AutoSpyreModelForCausalLM.from_pretrained(info["path"], dtype=dtype)
@@ -55,7 +55,6 @@ def run_smoke(model_key):
     prompt = "The capital of France is"
     print(f"  Prompt: {prompt!r}")
 
-    # Generate
     t0 = time.time()
     outputs = model.generate(
         tokenizer,
@@ -70,13 +69,10 @@ def run_smoke(model_key):
     print(f"  Output: {output_text!r}")
     print(f"  Generate time: {gen_time:.1f}s")
 
-    # Validate
     checks = {
         "non_empty": len(output_text.strip()) > 0,
         "not_all_spaces": output_text.strip() != "",
     }
-
-    # Encode output to check token diversity
     if output_text:
         gen_ids = tokenizer.encode(output_text, add_special_tokens=False)
         checks["has_tokens"] = len(gen_ids) > 0
@@ -90,7 +86,6 @@ def run_smoke(model_key):
         checks["token_ids"] = []
 
     passed = all(v for k, v in checks.items() if k != "token_ids")
-
     return {
         "model": info["name"],
         "status": "PASS" if passed else "FAIL",
@@ -102,37 +97,7 @@ def run_smoke(model_key):
     }
 
 
-if __name__ == "__main__":
-    which = sys.argv[1:] if len(sys.argv) > 1 else ["qwen3"]
-
-    results = []
-    for key in which:
-        if key not in MODEL_REGISTRY:
-            print(f"Unknown: {key}. Options: {list(MODEL_REGISTRY.keys())}")
-            continue
-        try:
-            r = run_smoke(key)
-            results.append(r)
-        except Exception:
-            print(f"\n!!! {MODEL_REGISTRY[key]['name']} FAILED:")
-            traceback.print_exc()
-            results.append(
-                {
-                    "model": MODEL_REGISTRY[key]["name"],
-                    "status": "ERROR",
-                    "tokens": 0,
-                    "text": "",
-                    "load_s": 0,
-                    "gen_s": 0,
-                }
-            )
-
-    # Summary table
-    print("\n## E2E Smoke Test Results\n")
-    print("| Model | Status | Tokens | Generated Text | Load (s) | Gen (s) |")
-    print("|-------|--------|--------|----------------|----------|---------|")
-    for r in results:
-        print(
-            f"| {r['model']} | {r['status']} | {r['tokens']} "
-            f"| {r['text']!r} | {r['load_s']:.1f} | {r['gen_s']:.1f} |"
-        )
+@pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
+def test_e2e_smoke_spyre(model_key):
+    result = _run_smoke(model_key)
+    assert result["status"] == "PASS", result

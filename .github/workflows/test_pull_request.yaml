@@ -212,7 +212,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_load_spyre.py for ${{ matrix.model_key }}..."
-          uv run python3 tests/test_load_spyre.py "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_load_spyre.py -k "${{ matrix.model_key }}"
           echo "tests done"
 
   spyre-smoke-tests:
@@ -276,7 +276,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
-          uv run python3 tests/test_e2e_smoke_spyre.py "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k "${{ matrix.model_key }}"
           echo "tests done"
 
   spyre-token-compare-tests:
@@ -340,7 +340,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run python3 tests/test_e2e_token_compare_spyre.py "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k "${{ matrix.model_key }}"
           echo "tests done"
 
   spyre-embed-compare-tests:
@@ -396,7 +396,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run python3 tests/test_e2e_embed_compare_spyre.py "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k "${{ matrix.model_key }}"
           echo "tests done"
 
   spyre-block-compare-tests:
@@ -486,7 +486,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_block_cpu_vs_spyre.py for ${{ matrix.model_key }}..."
-          uv run python3 tests/test_block_cpu_vs_spyre.py "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_block_cpu_vs_spyre.py -k "${{ matrix.model_key }}"
           echo "tests done"
 
   # ===========================================================================
