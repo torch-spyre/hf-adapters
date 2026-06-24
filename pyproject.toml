@@ -44,6 +44,11 @@ warn_unused_configs = true
 disallow_untyped_defs = false
 files = ["hf_adapters/**/*.py"]
 
+# sympy ships no py.typed marker (PEP 561), so mypy refuses to analyze it.
+[[tool.mypy.overrides]]
+module = "sympy.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Spyre-pod-only tests live under tests/spyre/. They import torch_spyre and

@@ -29,6 +29,7 @@ which models are supported on Spyre.
 | Granite Vision 4.1 4B | granite (text) | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | Gemma 4 12B | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 3 1B | gemma3\_text | 256 | 128 | Yes | Yes | Yes | Yes |
+| Mistral Small 3 24B | mistral3 | 128 | 64 | Yes | Yes | Yes | Yes |
 
 **CPU Accurate** = adapter produces identical greedy tokens to stock HF on CPU.
 **Spyre Compiles** = `torch.compile(block_forward)` succeeds on Spyre.
@@ -92,6 +93,7 @@ pattern, norms, and weight layout.
 | hf\_granite.py | granite | 3 | Granite 3.3 8B/2B Base, Granite 3.2 8B, Granite 3.1 8B/2B, Granite 3.0 8B, Granite Code 8B/3B |
 | hf\_qwen3.py | qwen3 | 2 | Qwen3 1.7B, Qwen3 4B, Qwen3 8B |
 | hf\_mistral.py | mistral | 2 | Mistral 7B v0.1/v0.2, Mistral 7B Instruct v0.1–v0.3, Zephyr 7B |
+| hf\_mistral3.py | mistral3 | 1 | - |
 | hf\_phi3.py | phi3 | 1 | Phi-3 mini 4k/128k, Phi-3 small 8k |
 | hf\_granitemoehybrid.py | granitemoehybrid | 1 | Granite 4.0 Micro |
 | hf\_smollm3.py | smollm3 | 1 | — |
@@ -171,6 +173,7 @@ hf_adapters/
 ├── hf_llama.py            — Llama adapter (Llama 1/2/3, Code Llama, Yi, TinyLlama)
 ├── hf_qwen2.py            — Qwen2 adapter (Qwen 1.5, Qwen 2, Qwen 2.5)
 ├── hf_mistral.py          — Mistral adapter (Mistral 7B v0.2, v0.3)
+├── hf_mistral3.py         — Mistral3 adapter (Mistral 3 24B)
 ├── hf_phi3.py             — Phi-4 mini adapter
 ├── hf_olmo.py             — OLMo adapter (OLMo 1B, 7B)
 ├── hf_olmo2.py            — OLMo2 adapter (OLMo 2 7B)
@@ -233,11 +236,24 @@ is not well supported; element-wise multiply is native.
 
 | Stock HF | Adapter |
 |---|---|
-| Vocab dim as-is from model config | Padded to `ceil(vocab/64)*64 + 64` via `pad_lm_head()` |
+| Vocab dim as-is from model config | Padded by `pad_lm_head()` to a stick-aligned, *smooth* vocab |
 
-**Why:** Spyre requires tensor dimensions aligned to 64-element
-sticks for efficient matmul. The extra +64 avoids prime-number
-multiples that cause poor work distribution.
+**Why:** the LM head is a `batchmatmul X[M,K] @ W[K,N]` (K=hidden,
+N=padded_vocab) whose weight sticks on N: physical layout
+`[N/64 sticks, K, 64]`. Work division splits the stick dim across
+cores; if the stick count `N/64` has a large prime factor, that
+factor is left indivisible on one core, whose per-core span
+`lpf * hidden * 64 * dtype_bytes` then exceeds the **256 MB EAR
+limit** and the bundler aborts (`dxp_standalone --bundle` SIGABRT in
+`sdsc_fused_bmm_transpose_unsqueeze`). `pad_lm_head()` rounds vocab
+up to a stick boundary and adds sticks until the count is smooth
+enough that this span fits — e.g. Qwen2.5-7B `152064 → 2376 = 2³·3³·11`
+(fine), but `151936 → 2374 = 2·1187` would leave residual 1187
+(≈297 MB at hidden 2048) so it bumps to `2375 = 5³·19`. Bumps are
+tiny (most models pad by 0–64 rows); the single-kernel LM head is
+kept (no per-token decode cost). This now covers even the large-vocab
+models that motivated the chunked LM head (Phi-4 200K verified on
+Spyre with a single smooth head) — see below.
 
 #### 4. Decoder Layers: Custom Compiled Blocks
 
@@ -311,7 +327,6 @@ modification:
 | Fused MLP split | No | No | No | Yes | No | No | No | No | Yes | No | No | No | No |
 | NoPE layers | No | No | No | No | Yes | No | No | No | No | No | No | No | No |
 | Partial RoPE | No | No | No | No | No | No | No | No | Yes | No | No | No | Yes (global layers) |
-| Chunked LM head | No | No | No | No | No | No | No | No | Yes | No | No | Yes | Yes |
 | Head-dim padding | 2B only | Yes (64→128) | No | No | No | TinyLlama | No | No | No | No | No | No | No |
 | Custom model loading | No | Yes (safetensor remap) | No | No | No | No | No | No | No | No | No | No | No |
 | Attention scaling | `config.attention_multiplier` | `config.attention_multiplier` | `head_dim**-0.5` | `config.attention_multiplier` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `query_pre_attn_scalar**-0.5` | `1.0` (unscaled) |
@@ -322,9 +337,14 @@ the rotation matrix with identity `[[1,0],[0,1]]` entries so
 `apply_rope_matmul` operates on full `head_dim` without slicing.
 Avoids stickify non-zero offset assertion.
 
-**Chunked LM head** (Phi-4): 200K+ vocab exceeds Spyre per-core
-256 MB EAR limit. 8 smaller `nn.Linear` chunks along vocab dim,
-cat results on CPU.
+**Chunked LM head** (`chunk_lm_head`, currently unused): fallback that
+splits the head into N smaller `nn.Linear` chunks along the vocab dim
+(run separately, cat on CPU) to shrink the per-core span when even a
+smooth-padded single head can't fit the 256 MB EAR limit. No current
+model needs it — every supported vocab (incl. 200K–262K Phi-4 / Gemma,
+verified on Spyre) fits a single smooth-padded head via `pad_lm_head()`
+(see LM Head Weight above), which avoids the per-token dispatch + D2H
+cost of chunking. Kept as the escape hatch for future models.
 
 **Fused weight split** (Phi-4, Granite 4.0): QKV/gate_up_proj split
 into separate linears at prepare time. Avoids stickify non-zero
@@ -366,7 +386,7 @@ biases by default.
 (local, θ=1e4) and full (global, θ=1e6) attention, with full rotary on both
 and a **single** `head_dim` (one KV-cache shape). Beyond a plain RoPE decoder
 it adds: a four-norm "sandwich" layer, per-head Q/K RMSNorm, scaled word
-embedding, a chunked LM head (262K vocab), unit-offset RMSNorm
+embedding, a smooth-padded LM head (262K vocab), unit-offset RMSNorm
 (`x * (1 + weight)`), and attention scaled by `query_pre_attn_scalar ** -0.5`
 (not `head_dim ** -0.5` in general — 27B has `head_dim=128`,
 `query_pre_attn_scalar=168`). `final_logit_softcapping` is `None` on published

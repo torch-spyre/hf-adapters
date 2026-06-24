@@ -181,6 +181,41 @@ def sanitize_arg(
     return str(arg)
 
 
+# Ops whose tensor inputs should use Xavier init when dtype/rank also qualify.
+_XAVIER_OPS = {"torch.matmul", "torch.nn.functional.linear"}
+_XAVIER_DTYPES = {"torch.float16", "torch.float32", "torch.bfloat16"}
+
+
+def _maybe_promote_init_to_xavier(op_name, yaml_inputs):
+    """Flip ``init: rand`` to ``init: xavier`` on every tensor in ``yaml_inputs``
+    when the parent ``op`` is matmul/linear, the tensor dtype is one of
+    float16/float32/bfloat16, and the tensor shape has rank >= 2.
+    Mutates the dicts in place."""
+    if op_name not in _XAVIER_OPS:
+        return
+
+    def _maybe(t):
+        if not isinstance(t, dict):
+            return
+        if t.get("init") != "rand":
+            return
+        if str(t.get("dtype")) not in _XAVIER_DTYPES:
+            return
+        shape = t.get("shape")
+        if shape is None or len(shape) < 2:
+            return
+        t["init"] = "xavier"
+
+    for inp in yaml_inputs or []:
+        if not isinstance(inp, dict):
+            continue
+        if "tensor" in inp:
+            _maybe(inp["tensor"])
+        elif "tensor_list" in inp:
+            for t in inp["tensor_list"] or []:
+                _maybe(t)
+
+
 def format_tensor_details(
     arg, shape, stride, storage_offset, dtype, device, randintlim=1000
 ):
@@ -939,6 +974,8 @@ class TorchOpCollector:
         TorchOpCollector.log_function[TorchOpCollector.log_mthd](
             f"Test case name: {op_name_with_seqno}"
         )
+        _maybe_promote_init_to_xavier(op_name, yaml_inputs)
+        _maybe_promote_init_to_xavier(op_name, yaml_inputs_norm)
         tc_yaml = add_test_case_yaml(
             op_name_with_seqno,
             op_name,

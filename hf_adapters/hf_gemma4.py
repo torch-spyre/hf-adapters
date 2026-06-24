@@ -77,9 +77,9 @@ from hf_adapters.hf_common import (
     PrecomputedRotaryEmbedding,
     add_causal_sliding_window_band,
     apply_rope_matmul,
-    chunk_lm_head,
     get_backbone,
     kv_cache_update,
+    pad_lm_head,
 )
 
 
@@ -93,7 +93,7 @@ def _gemma4_backbone(model):
     ``embed_tokens``, ``norm``, ``rotary_emb``). The shared ``get_backbone``
     descends into ``.language_model`` for exactly this case; this wrapper names
     the intent. The ``lm_head`` stays at the top level (``model.lm_head``),
-    matching where ``chunk_lm_head`` looks.
+    matching where ``pad_lm_head`` looks.
     """
     return get_backbone(model)
 
@@ -352,7 +352,7 @@ def _run_forward(
     token_index,
     cache_position,
 ):
-    """Gemma 4 causal-LM forward: backbone + chunked LM head + logit softcap."""
+    """Gemma 4 causal-LM forward: backbone + LM head + logit softcap."""
     h = _run_backbone_forward(
         model,
         input_ids,
@@ -365,14 +365,7 @@ def _run_forward(
         cache_position,
     )
 
-    # Chunked LM head: 262K vocab exceeds Spyre's per-core EAR limit. Split
-    # into N chunks, run each, cat on CPU.
-    logits_parts = []
-    for lm_chunk, real_sz in zip(
-        model._spyre_lm_head_chunks, model._spyre_lm_chunk_sizes
-    ):
-        logits_parts.append(lm_chunk(h).to("cpu")[..., :real_sz])
-    logits = torch.cat(logits_parts, dim=-1)
+    logits = model.lm_head(h)
 
     cap = _text_config(model).final_logit_softcapping
     if cap is not None:
@@ -460,7 +453,9 @@ def prepare_for_spyre(model):
         kv_shapes.append((n_kv, hd, hd))
     model._spyre_kv_shapes = kv_shapes
 
-    chunk_lm_head(model, num_chunks=8)
+    # LM head: smooth-padded to a stick-aligned vocab whose per-core span fits
+    # the 256 MB EAR limit (see hf_common.pad_lm_head).
+    pad_lm_head(model)
 
     model._spyre_compiled_blocks = [
         _make_compiled_block(

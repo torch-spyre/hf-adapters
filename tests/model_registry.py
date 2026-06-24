@@ -123,6 +123,12 @@ CAUSAL_LM_MODELS = {
     #     "path": "google/gemma-3-1b-it",
     #     "adapter": "hf_gemma3.py",
     # },
+    "mistral3": {
+        "name": "Mistral-Small-3.2-24B-Instruct-2506",
+        "path": "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
+        "adapter": "hf_mistral3.py",
+        "load_fn": True,
+    },
 }
 
 
@@ -193,6 +199,26 @@ EMBEDDING_MODELS = {
         "name": "Granite-Embedding-97m-multilingual-r2",
         "path": "ibm-granite/granite-embedding-97m-multilingual-r2",
         "adapter": "hf_modernbert.py",
+    },
+    "granite_125m": {
+        "name": "Granite-Embedding-125m-English",
+        "path": "ibm-granite/granite-embedding-125m-english",
+        "adapter": "hf_xlm_roberta.py",
+    },
+    "granite_278m": {
+        "name": "Granite-Embedding-278m-Multilingual",
+        "path": "ibm-granite/granite-embedding-278m-multilingual",
+        "adapter": "hf_xlm_roberta.py",
+    },
+    "granite_30m": {
+        "name": "Granite-Embedding-30m-English",
+        "path": "ibm-granite/granite-embedding-30m-english",
+        "adapter": "hf_xlm_roberta.py",
+    },
+    "granite_107m": {
+        "name": "Granite-Embedding-107m-Multilingual",
+        "path": "ibm-granite/granite-embedding-107m-multilingual",
+        "adapter": "hf_xlm_roberta.py",
     },
 }
 

@@ -122,6 +122,13 @@ def _unwrap_compiled_blocks(model):
     model._spyre_compiled_blocks = unwrapped
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "requires_spyre: mark test as requiring the Spyre backend device",
+    )
+
+
 def _set_rope_dtype(model, dtype):
     """Propagate the chosen dtype to the model's precomputed RoPE freq cache.
 
@@ -176,9 +183,27 @@ def pytest_addoption(parser):
 
 
 def pytest_collection_modifyitems(config, items):
-    if config.getoption("--run-slow"):
-        return
-    skip_slow = pytest.mark.skip(reason="slow test; pass --run-slow to run")
-    for item in items:
-        if "slow" in item.keywords:
-            item.add_marker(skip_slow)
+    """Skip spyre tests if torch_spyre is not installed / device unavailable; skip slow tests unless --run-slow."""
+    try:
+        import torch
+        import torch_spyre  # noqa: F401 — side effect: registers "spyre" device
+
+        # Verify the device actually registered
+        _ = torch.device("spyre")
+        spyre_available = True
+    except (ImportError, RuntimeError):
+        spyre_available = False
+
+    if not spyre_available:
+        skip_spyre = pytest.mark.skip(
+            reason="torch_spyre not installed or spyre device unavailable"
+        )
+        for item in items:
+            if "spyre" in item.nodeid or item.get_closest_marker("requires_spyre"):
+                item.add_marker(skip_spyre)
+
+    if not config.getoption("--run-slow"):
+        skip_slow = pytest.mark.skip(reason="slow test; pass --run-slow to run")
+        for item in items:
+            if "slow" in item.keywords:
+                item.add_marker(skip_slow)
