@@ -71,11 +71,11 @@ CAUSAL_LM_MODELS = {
         "path": "deepseek-ai/deepseek-coder-1.3b-base",
         "adapter": "hf_llama.py",
     },
-    # "yi_6b": {
-    #     "name": "Yi 1.5 6B",
-    #     "path": "01-ai/Yi-1.5-6B",
-    #     "adapter": "hf_llama.py",
-    # },
+    "yi_6b": {
+        "name": "Yi 1.5 6B",
+        "path": "01-ai/Yi-1.5-6B",
+        "adapter": "hf_llama.py",
+    },
     # hf_phi3.py
     "phi4": {
         "name": "Phi-4 mini",
@@ -101,16 +101,11 @@ CAUSAL_LM_MODELS = {
     },
     # hf_mistral.py
     "ministral": {
-        "name": "Ministral 3b instruct",
-        "path": "ministral/Ministral-3b-instruct",
+        "name": "Ministral 3B",
+        "path": "mistralai/Ministral-3B-Instruct",
         "adapter": "hf_mistral.py",
+        "is_gated": True,
     },
-    # Ministral 3B is gated — requires HF auth. Tested on Spyre pod only.
-    # "ministral": {
-    #     "name": "Ministral 3B",
-    #     "path": "mistralai/Ministral-3B-Instruct",
-    #     "adapter": "hf_mistral.py",
-    # },
     # hf_olmo.py
     "olmo1b": {
         "name": "OLMo 1B",
@@ -129,6 +124,12 @@ CAUSAL_LM_MODELS = {
         "path": "unsloth/gemma-3-1b-it",
         "adapter": "hf_gemma3.py",
     },
+    "gemma3_google": {
+        "name": "Gemma 3 1B",
+        "path": "google/gemma-3-1b-it",
+        "adapter": "hf_gemma3.py",
+        "is_gated": True,
+    },
     # hf_gemma4
     "gemma4": {
         "name": "Gemma 4 12B",
@@ -140,13 +141,13 @@ CAUSAL_LM_MODELS = {
 
 EMBEDDING_MODELS = {
     # hf_gemma3.py
-    # EmbeddingGemma is a gated checkpoint — requires HF auth. Tested on Spyre pod only.
-    # "embeddinggemma": {
-    #     "name": "EmbeddingGemma 300M",
-    #     "path": "google/embeddinggemma-300m",
-    #     "adapter": "hf_gemma3.py",
-    #     "dtype": "bfloat16",  # bf16-native; fp16 overflows the residual stream
-    # },
+    "embeddinggemma": {
+        "name": "EmbeddingGemma 300M",
+        "path": "google/embeddinggemma-300m",
+        "adapter": "hf_gemma3.py",
+        "dtype": "bfloat16",  # bf16-native; fp16 overflows the residual stream
+        "is_gated": True,
+    },
     # hf_qwen3.py
     "qwen3_embed": {
         "name": "Qwen3-Embedding 0.6B",
@@ -273,6 +274,8 @@ def select_representative_models(config_mapping=None):
 
     # Group causal LM models by adapter
     for key, info in CAUSAL_LM_MODELS.items():
+        if info.get("is_gated", False):
+            continue
         adapter = info["adapter"].replace(".py", "")
         # Only include if adapter is in CONFIG_TO_ADAPTER_MODULE_MAPPING
         if adapter in adapter_modules_in_config:
@@ -282,6 +285,8 @@ def select_representative_models(config_mapping=None):
 
     # Group embedding models by adapter
     for key, info in EMBEDDING_MODELS.items():
+        if info.get("is_gated", False):
+            continue
         adapter = info["adapter"].replace(".py", "")
         # Only include if adapter is in CONFIG_TO_ADAPTER_MODULE_MAPPING
         if adapter in adapter_modules_in_config:
