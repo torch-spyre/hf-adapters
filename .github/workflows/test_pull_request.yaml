@@ -338,7 +338,7 @@ jobs:
         model_key:
           - gemma3_unsloth
           - granite2b
-          # Currently disabled - see https://github.com/torch-spyre/hf-adapters/issues/90
+          # Currently disabled - see https://github.com/torch-spyre/hf-adapters/issues/89
 #          - granite-vision
          # Currently disabled - see https://github.com/torch-spyre/hf-adapters/issues/89
           - granite4
