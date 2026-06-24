@@ -1,4 +1,4 @@
-: test_pull_request
+name: test_pull_request
 
 on:
   push:
