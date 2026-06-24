@@ -28,6 +28,7 @@ from typing import Callable, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from sympy import factorint
 
 DEVICE = "spyre"
 BLOCK_SIZE = 64  # Spyre stick size at fp16 (128 bytes / 2 bytes per element)
@@ -490,8 +491,40 @@ def patch_rmsnorm(rmsnorm_cls):
     rmsnorm_cls.forward = _forward_fp16
 
 
+def _largest_prime_factor(n: int) -> int:
+    """Largest prime factor of ``n`` (n >= 2). Used to bound the lm_head span."""
+    return int(max(factorint(n)))
+
+
+# Spyre per-core EAR (effective address range) limit for one tensor: 256 MB.
+_EAR_LIMIT_BYTES = 256 * 1024 * 1024
+
+
 def pad_lm_head(model):
-    """Pad LM head vocab dim to stick-aligned size (+64 for work division).
+    """Pad the LM head vocab dim up to a stick boundary with a "smooth" stick count.
+
+    The lm_head is a ``batchmatmul`` ``X[M,K] @ W[K,N]`` (K=hidden, N=padded_vocab)
+    whose weight sticks on N: physical dims ``[N/BLOCK_SIZE sticks, K, BLOCK_SIZE]``.
+    Work division splits the stick axis (``N/BLOCK_SIZE``) across cores. When that
+    count has a large prime factor, the per-core residual can't be made small
+    enough and its span overflows the 256 MB per-core EAR limit, aborting the
+    bundler (``dxp_standalone --bundle`` SIGABRT in
+    ``sdsc_fused_bmm_transpose_unsqueeze``).
+
+    So we add sticks until the count is "smooth" enough that the worst-case
+    residual fits: ``largest_prime_factor(sticks) * hidden * BLOCK_SIZE *
+    dtype_bytes <= EAR_LIMIT``. The bound uses the largest prime factor as the
+    smallest extent the splitter can be forced to leave on one core, and the full
+    K (a core reuses the whole K of its N-partition under weight-stationary
+    reuse). This is conservative — the exact split rule is inferred from the error,
+    not read from compiler source — but it reproduces the observed spans and never
+    under-pads. Examples: 152064 -> 2376 = 2**3*3**3*11 fits as-is; 151936 -> 2374
+    = 2*1187 would leave residual 1187 (297 MB at hidden 2048), so bump to
+    2375 = 5**3*19; primes (2377, 1601) are the worst case.
+
+    Smooth counts are dense, so bumps are tiny (0-1 sticks for every current
+    model). Keeps the single-kernel lm_head — no per-token decode cost, unlike
+    ``chunk_lm_head`` (the fallback when even a smooth count can't fit).
 
     No-op when ``model`` has no ``lm_head`` (e.g. backbones loaded via
     ``AutoModel`` for embedding workloads).
@@ -500,7 +533,14 @@ def pad_lm_head(model):
         return
     w = model.lm_head.weight
     vocab = w.shape[0]
-    padded = ((vocab + BLOCK_SIZE - 1) // BLOCK_SIZE * BLOCK_SIZE) + BLOCK_SIZE
+    hidden = w.shape[1]
+    dtype_bytes = w.element_size()
+    # Max residual sticks whose per-core span fits the EAR limit.
+    max_residual = _EAR_LIMIT_BYTES // (hidden * BLOCK_SIZE * dtype_bytes)
+    sticks = (vocab + BLOCK_SIZE - 1) // BLOCK_SIZE
+    while _largest_prime_factor(sticks) > max_residual:
+        sticks += 1
+    padded = sticks * BLOCK_SIZE
     if padded != vocab:
         model.lm_head.weight = nn.Parameter(
             F.pad(w, (0, 0, 0, padded - vocab)), requires_grad=False
@@ -508,11 +548,20 @@ def pad_lm_head(model):
 
 
 def chunk_lm_head(model, num_chunks=8):
-    """Split LM head weight into N chunks along vocab dim.
+    """Split the LM head weight into N stick-padded chunks along the vocab dim.
 
-    Large vocab (200K+) exceeds Spyre's per-core 256 MB EAR limit.
-    We replace the single lm_head with N smaller nn.Linear modules.
-    Each chunk processes vocab_size/N output dims.
+    Fallback for when a single ``pad_lm_head`` head can't fit the 256 MB per-core
+    EAR limit — i.e. no ``num_chunks``-free smooth stick count brings
+    ``largest_prime_factor(sticks) * hidden * BLOCK_SIZE * dtype_bytes`` under the
+    limit (only reachable at very large hidden). Splitting into N independent
+    ``nn.Linear`` heads cuts each chunk's vocab extent by ~N, shrinking the
+    per-core span at the cost of N kernels + N D2H copies + a CPU cat per token.
+
+    Currently **unused**: every supported model (incl. 200K–262K vocab Phi-4 /
+    Gemma) fits a single smooth-padded head, which is cheaper. Kept as the escape
+    hatch for future models that don't. Callers must run the chunks and cat on
+    CPU themselves (see ``model._spyre_lm_head_chunks`` /
+    ``model._spyre_lm_chunk_sizes``).
 
     No-op when ``model`` has no ``lm_head``.
     """

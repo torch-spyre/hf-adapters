@@ -1,0 +1,204 @@
+name: test_daily
+
+on:
+  schedule:
+    # Runs at 06:00 UTC every day
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    # Manual triggers only — no push/pull_request/merge_group. The PR workflow
+    # (test_pull_request.yaml) gates merges; this one is the scheduled daily.
+    inputs:
+      torch_spyre_ref:
+        description: Branch, tag, or SHA of torch-spyre to check out and test
+        required: false
+        type: string
+        default: ""
+      rpm_location:
+        description: The Artifactory location where to download the RPM from
+        required: false
+        type: string
+        default: ""
+      rpm_names:
+        description: A space separated list of RPM names to download and install
+        required: false
+        type: string
+        default: ""
+      ref:
+        description: Branch, tag, or SHA of hf-adapters to check out and test
+        required: false
+        type: string
+        default: ""
+      repository:
+        description: |
+          Full clone URL of the hf-adapters fork to check out (e.g.
+          "https://github.com/myuser/hf-adapters.git"); leave empty for the base repo.
+          Used by the cross-repo Test-With: flow to test a companion fork/branch.
+        required: false
+        type: string
+        default: ""
+      pr_url_hash:
+        description: |
+          Hash of the full URL of the PR that triggered this run.
+          Sent by the internal integration pipeline; unused on push/PR/merge_group.
+        required: false
+        type: string
+        default: ""
+      build_torch_spyre:
+        description: Accepted for dispatch-contract parity with torch-spyre; unused here.
+        required: false
+        type: boolean
+        default: true
+      runner_label:
+        description: |
+          Per-PR ephemeral runner-set IMAGE label to select for runs-on
+          (image_hf_adapters_pr_<component>_<sha12>, e.g.
+          image_hf_adapters_pr_flex_8ddcf3e155e9). The per-PR ephemeral flow passes
+          that PR's set label so jobs land on the per-PR image (the changed RPM is
+          baked in -> no runtime sudo). Empty keeps push/PR/merge_group runs on the
+          standing image_torch_spyre set (today's behaviour).
+        required: false
+        type: string
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+    working-directory: /home/senuser
+
+permissions:
+  contents: read
+  checks: write
+
+env:
+  # The CI env var is very important.
+  # GitHub actions automatically sets CI=true
+  # which causes the pytest inductor tests to fail with AssertionError
+  # due to a mix of fallbacks and decompositions.
+  # Here we set it to an empty string (or we could also unset it).
+  CI: ""
+  CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
+  STORAGE_1_DIR: /storage-1/hf-adapters
+  HF_HOME: /storage-1/hf-adapters/.cache/huggingface
+  # Single source of truth for the set of models exercised by the CPU
+  # test matrix's `-k` filter. PR is the fast smoke — qwen3 (causal LM) and
+  # bge_base (embedding) on CPU; the same bge_base runs on the Spyre
+  # embed-compare matrix below so CPU and hardware embedding coverage stay
+  # aligned. Daily and weekly cover the broader model set.
+  # Invariant: every model_key used in a Spyre matrix below must have its
+  # substring present here so CPU sanity-checks anything that runs on hardware.
+  MODELS_FILTER: "qwen3 or bge_base"
+
+jobs:
+  spyre-edge-cases-tests:
+    name: Spyre edge cases (${{ matrix.model_key }} / ${{ matrix.test_file }})
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - ${{ inputs.runner_label || 'image_torch_spyre' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      # Cap concurrent edge-case cells so the 9 x 19 = 171-cell fan-out
+      # doesn't swamp the shared spyre_pf_x1__pvc_1tb_x1 pool. Surplus cells
+      # queue inside Actions until a slot frees up.
+      max-parallel: 16
+      matrix:
+        # Same causal-LM matrix as smoke / token-compare. The edge-case suite
+        # under tests/spyre/edge_cases/ uses the same AutoSpyreModelForCausalLM
+        # driver, so multimodal / unsupported entries (granite-vision, gemma4,
+        # phi4) are excluded for the same reasons.
+        model_key:
+          - qwen3
+          - granite8b
+          - granite2b
+          - smollm3
+          - tiny_llama
+          - qwen2
+          - ministral
+          - olmo1b
+          - olmo2_1b
+        # One matrix cell per file in tests/spyre/edge_cases/. Each cell runs
+        # in its own pytest process so a crash, hang, or state leak in one
+        # case can't poison the rest, and each case has its own status check.
+        # When adding a new test_*.py under tests/spyre/edge_cases/, append it
+        # here.
+        test_file:
+          - test_eos_first_of_second_block_spyre.py
+          - test_eos_first_token_spyre.py
+          - test_eos_inside_prompt_spyre.py
+          - test_eos_mid_block_spyre.py
+          - test_eos_on_last_step_spyre.py
+          - test_long_multi_block_spyre.py
+          - test_mixed_short_spyre.py
+          - test_mixed_with_single_token_spyre.py
+          - test_no_eos_runs_full_budget_spyre.py
+          - test_no_pad_token_fallback_spyre.py
+          - test_prompt_exactly_block_spyre.py
+          - test_sampling_determinism_spyre.py
+          - test_sampling_top_k_zero_spyre.py
+          - test_short_block_minus_one_spyre.py
+          - test_short_cross_block_spyre.py
+          - test_short_one_token_spyre.py
+          - test_short_two_blocks_plus_spyre.py
+          - test_single_token_prompt_spyre.py
+          - test_zero_new_tokens_spyre.py
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - name: Run tests/spyre/edge_cases/${{ matrix.test_file }} for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running tests/spyre/edge_cases/${{ matrix.test_file }} for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv "tests/spyre/edge_cases/${{ matrix.test_file }}" -k "${{ matrix.model_key }}" --run-slow
+          echo "tests done"
+
+  # ===========================================================================
+  # Required check gate — fans in all matrix jobs so a single branch
+  # protection rule ("tests / run spyre unit tests") passes only when every
+  # suite passes.
+  # ===========================================================================
+  run-spyre-unit-tests:
+    name: run spyre unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    needs:
+      - spyre-edge-cases-tests
+    if: always()
+    steps:
+      - name: Check all suites passed
+        run: |-
+          if ${{ contains(needs.spyre-edge-cases-tests.result, 'failure') || contains(needs.spyre-edge-cases-tests.result, 'cancelled') }}; then
+            echo "One or more test suites failed."
+            exit 1
+          fi
+          echo "All test suites passed."

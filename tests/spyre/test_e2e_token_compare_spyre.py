@@ -18,22 +18,20 @@ E2E token-level comparison: HF stock forward (CPU) vs adapter forward (Spyre).
 For each model, runs prefill + 4 greedy decode steps on both CPU (stock HF)
 and Spyre (adapter), comparing logits and greedy tokens at each step.
 
-NOTE: Spyre currently has known correctness issues. This test is expected
-to show mismatches now but will pass once hardware fixes land (~1 week).
+Usage (on Spyre pod)::
 
-Usage (on Spyre pod):
-    python3 test_e2e_token_compare_spyre.py [qwen3|granite]
+    pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py
+    pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k qwen3
 """
 
 import importlib
 import math
-import sys
-import traceback
 
+import pytest
 import torch
 import torch.nn.functional as F
 from _helpers import torch_dtype_for
-from model_registry import CAUSAL_LM_MODELS as MODEL_REGISTRY
+from model_registry import CAUSAL_KEYS, CAUSAL_LM_MODELS
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
@@ -43,11 +41,6 @@ from hf_adapters.hf_common import (
 )
 
 DEVICE = "spyre"
-
-
-# ---------------------------------------------------------------------------
-# HF reference: stock forward on CPU with DynamicCache
-# ---------------------------------------------------------------------------
 
 
 def hf_greedy_steps(model, input_ids, num_decode=4):
@@ -82,24 +75,20 @@ def hf_greedy_steps(model, input_ids, num_decode=4):
     return results
 
 
-# ---------------------------------------------------------------------------
-# Adapter forward on Spyre
-# ---------------------------------------------------------------------------
-
-
 def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     """Run adapter forward on Spyre for prefill + N decode steps."""
-    from hf_adapters.hf_common import allocate_kv_caches
+    from hf_adapters.hf_common import (
+        allocate_kv_caches,
+        build_expansion_mask,
+        build_prefill_mask,
+    )
 
     batch_size = input_ids.shape[0]
     seq_len = input_ids.shape[1]
 
-    # vocab_size lives on the text config for multimodal-wrapped causal LMs
-    # (e.g. Gemma 4's composite config); fall back to it.
     cfg = model.config
     vocab_size = getattr(cfg, "vocab_size", None) or cfg.text_config.vocab_size
 
-    # Pad to BLOCK_SIZE
     padded_len = math.ceil(seq_len / BLOCK_SIZE) * BLOCK_SIZE
     prompt_offset = padded_len - seq_len
     if prompt_offset > 0:
@@ -115,21 +104,13 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
         padded_len + math.ceil(num_decode / BLOCK_SIZE) * BLOCK_SIZE + BLOCK_SIZE
     )
 
-    # KV caches and masks must match the (post-move) model weight dtype so the
-    # compiled block's SDPA sees a single dtype — fp16 for most models, bf16 for
-    # bf16-native ones like EmbeddingGemma.
     dtype = _model_dtype(model)
 
-    # Per-layer KV-cache shapes (honors model._spyre_kv_shapes for
-    # heterogeneous architectures like Gemma 4; uniform otherwise).
     key_caches, value_caches = allocate_kv_caches(
         model, batch_size, max_cache_len, dtype, device=DEVICE
     )
 
     results = []
-
-    # --- Prefill ---
-    from hf_adapters.hf_common import build_prefill_mask
 
     prefill_mask = build_prefill_mask(
         batch_size, padded_len, max_cache_len, prompt_offset, dtype=dtype
@@ -151,9 +132,6 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     token = logits_cpu.argmax().item()
     results.append({"logits": logits_cpu, "token": token, "step": 0})
 
-    # --- Decode steps (fill + expand, mirroring generate() in hf_common.py) ---
-    from hf_adapters.hf_common import build_expansion_mask
-
     result = padded_ids.clone()
     current_cache_len = padded_len
     tokens_in_block = BLOCK_SIZE - 1
@@ -162,7 +140,6 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
         decode_pos[:, j] = seq_len + j - BLOCK_SIZE
     fill_mask_device = None
 
-    # Place first token (mirrors generate()'s post-prefill token placement)
     if tokens_in_block == BLOCK_SIZE - 1:
         result = F.pad(result, (0, BLOCK_SIZE))
     tokens_in_block = (tokens_in_block + 1) % BLOCK_SIZE
@@ -220,7 +197,6 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
         token = last_logits.argmax().item()
         results.append({"logits": last_logits, "token": token, "step": step})
 
-        # Place token (mirrors generate()'s token placement logic)
         if tokens_in_block == BLOCK_SIZE - 1:
             result = F.pad(result, (0, BLOCK_SIZE))
         tokens_in_block = (tokens_in_block + 1) % BLOCK_SIZE
@@ -230,12 +206,7 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     return results
 
 
-# ---------------------------------------------------------------------------
-# Comparison
-# ---------------------------------------------------------------------------
-
-
-def compare_results(hf_results, adapter_results, tokenizer, model_name):
+def _compare_results(hf_results, adapter_results, tokenizer, model_name):
     """Compare HF vs adapter results, return comparison rows."""
     rows = []
     for hf_r, ad_r in zip(hf_results, adapter_results):
@@ -243,7 +214,6 @@ def compare_results(hf_results, adapter_results, tokenizer, model_name):
         h_logits = hf_r["logits"]
         a_logits = ad_r["logits"]
 
-        # Trim to common vocab
         min_vocab = min(h_logits.shape[0], a_logits.shape[0])
         h = h_logits[:min_vocab]
         a = a_logits[:min_vocab]
@@ -259,7 +229,6 @@ def compare_results(hf_results, adapter_results, tokenizer, model_name):
         step_label = "prefill" if step == 0 else f"decode-{step}"
         h_str = tokenizer.decode([hf_r["token"]])
         a_str = tokenizer.decode([ad_r["token"]])
-
         rows.append(
             {
                 "model": model_name,
@@ -278,22 +247,43 @@ def compare_results(hf_results, adapter_results, tokenizer, model_name):
     return rows
 
 
-def run_model_test(model_key, num_decode=4):
-    """Full comparison for one model."""
+def _print_table(rows):
+    """Markdown comparison table — one line per step."""
+    print("\n## E2E Token Comparison: HF (CPU) vs Adapter (Spyre)\n")
+    print(
+        "| Model | Step | HF Token | Spyre Token | Match "
+        "| Max Diff | Mean Diff | HF NaN | Spyre NaN |"
+    )
+    print(
+        "|-------|------|----------|-------------|-------"
+        "|----------|-----------|--------|-----------|"
+    )
+    for r in rows:
+        match = "OK" if r["top1_match"] else "FAIL"
+        hf_col = f"{r['hf_token']:>5} {r['hf_str']!r}"
+        sp_col = f"{r['spyre_token']:>5} {r['spyre_str']!r}"
+        hn = "Yes" if r["hf_nan"] else "No"
+        sn = "Yes" if r["spyre_nan"] else "No"
+        print(
+            f"| {r['model']} | {r['step']} | {hf_col} | {sp_col} "
+            f"| {match} | {r['max_diff']:.4f} | {r['mean_diff']:.6f} "
+            f"| {hn} | {sn} |"
+        )
+
+
+def _run_model_test(model_key, num_decode=4):
+    """Full comparison for one model. Returns the list of comparison rows."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    info = MODEL_REGISTRY[model_key]
-    # Convert e.g., "hf_qwen3.py" to "hf_adapters.hf_qwen3"
+    info = CAUSAL_LM_MODELS[model_key]
     adapter_module_name = info["adapter"].replace(".py", "")
     adapter = importlib.import_module(f"hf_adapters.{adapter_module_name}")
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"  {info['name']}: {info['path']}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     tokenizer = AutoTokenizer.from_pretrained(info["path"])
-    # fp16 for most models; bf16/fp32 ones (e.g. EmbeddingGemma, Granite 4)
-    # declare ``dtype`` in the registry.
     dtype = torch_dtype_for(info)
     model = AutoModelForCausalLM.from_pretrained(
         info["path"],
@@ -308,11 +298,9 @@ def run_model_test(model_key, num_decode=4):
     input_ids = encoded["input_ids"]
     print(f"  Prompt: {prompt!r} ({input_ids.shape[1]} tokens)")
 
-    # --- HF reference on CPU (BEFORE patching) ---
     print("  Running HF reference on CPU ...")
     hf_results = hf_greedy_steps(model, input_ids, num_decode=num_decode)
 
-    # --- Adapter on Spyre ---
     print("  Preparing adapter ...")
     _untie_embedding_and_lm_head(model)
     adapter.prepare_for_spyre(model)
@@ -326,57 +314,14 @@ def run_model_test(model_key, num_decode=4):
         num_decode=num_decode,
     )
 
-    rows = compare_results(hf_results, adapter_results, tokenizer, info["name"])
-    return rows
+    return _compare_results(hf_results, adapter_results, tokenizer, info["name"])
 
 
-# ---------------------------------------------------------------------------
-# Output
-# ---------------------------------------------------------------------------
-
-
-def print_table(all_rows):
-    """Print markdown comparison table."""
-    print("\n## E2E Token Comparison: HF (CPU) vs Adapter (Spyre)\n")
-    print(
-        "| Model | Step | HF Token | Spyre Token | Match "
-        "| Max Diff | Mean Diff | HF NaN | Spyre NaN |"
-    )
-    print(
-        "|-------|------|----------|-------------|-------"
-        "|----------|-----------|--------|-----------|"
-    )
-    for r in all_rows:
-        match = "OK" if r["top1_match"] else "FAIL"
-        hf_col = f"{r['hf_token']:>5} {r['hf_str']!r}"
-        sp_col = f"{r['spyre_token']:>5} {r['spyre_str']!r}"
-        hn = "Yes" if r["hf_nan"] else "No"
-        sn = "Yes" if r["spyre_nan"] else "No"
-        print(
-            f"| {r['model']} | {r['step']} | {hf_col} | {sp_col} "
-            f"| {match} | {r['max_diff']:.4f} | {r['mean_diff']:.6f} "
-            f"| {hn} | {sn} |"
-        )
-
-
-if __name__ == "__main__":
-    which = sys.argv[1:] if len(sys.argv) > 1 else ["qwen3"]
-
-    all_rows = []
-    for key in which:
-        if key not in MODEL_REGISTRY:
-            print(f"Unknown: {key}. Options: {list(MODEL_REGISTRY.keys())}")
-            continue
-        try:
-            rows = run_model_test(key)
-            all_rows.extend(rows)
-        except Exception:
-            print(f"\n!!! {MODEL_REGISTRY[key]['name']} FAILED:")
-            traceback.print_exc()
-
-    if all_rows:
-        print_table(all_rows)
-        n_match = sum(1 for r in all_rows if r["top1_match"])
-        print(f"\nTop-1 agreement: {n_match}/{len(all_rows)} steps")
-        if n_match < len(all_rows):
-            print("NOTE: Spyre has known correctness issues being fixed.")
+@pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
+def test_e2e_token_compare_spyre(model_key):
+    rows = _run_model_test(model_key)
+    _print_table(rows)
+    n_match = sum(1 for r in rows if r["top1_match"])
+    print(f"\nTop-1 agreement: {n_match}/{len(rows)} steps")
+    mismatches = [r for r in rows if not r["top1_match"]]
+    assert not mismatches, mismatches

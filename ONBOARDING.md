@@ -74,7 +74,7 @@ print(f"head_dim={head_dim}, head_dim/2={head_dim // 2}")
 | Fused QKV | Single `qkv_proj` weight | Split into separate `q_proj`, `k_proj`, `v_proj` at prepare time |
 | Fused MLP | Single `gate_up_proj` weight | Split into separate `gate_proj`, `up_proj` at prepare time |
 | Partial RoPE | `partial_rotary_factor < 1.0` | Use `PartialPrecomputedRotaryEmbedding` (see `hf_phi3.py`) |
-| Large vocab | vocab_size >= 200K | Chunked LM head (see `hf_phi3.py`) |
+| Large vocab | any | `pad_lm_head()` pads to a smooth stick count so the per-core span fits the 256 MB EAR limit — handles 200K–262K vocab in a single head. `chunk_lm_head()` is a fallback only if that can't fit (no current model) |
 | Model multipliers | `embedding_multiplier`, `residual_multiplier`, `logits_scaling` | Preserve in block/forward functions |
 | Non-standard norm | Post-norm, LayerNorm (no weight), Q/K norm | Custom block logic (see `hf_olmo.py`, `hf_olmo2.py`, `hf_qwen3.py`) |
 | Gated model | Requires HF authentication | Use a non-gated alternative for CPU tests (e.g., TinyLlama for `model_type=llama`) |
@@ -217,8 +217,6 @@ globally.
 Once CPU accuracy passes, test on hardware (requires Spyre pod access):
 
 ```bash
-# Per-layer block comparison (random weights, checks for NaN/crash)
-python3 tests/test_block_cpu_vs_spyre.py mymodel
 
 # End-to-end smoke test
 python3 tests/test_e2e_smoke_spyre.py mymodel

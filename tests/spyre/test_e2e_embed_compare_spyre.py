@@ -15,29 +15,21 @@
 """
 E2E embedding accuracy: HF stock forward (CPU) vs adapter forward (Spyre).
 
-Encoder-only counterpart of test_e2e_token_compare_spyre.py. For each
-registered BERT-family model, runs a single prefill on both CPU (stock HF
-AutoModel) and Spyre (adapter via ``prefill_encoder``) over a batch with
-mixed prompt lengths, then compares the last_hidden_state (per-token) and
-the mean-pooled sentence embedding (per-sequence).
+Encoder-only counterpart of test_e2e_token_compare_spyre.py.
 
-Mixed lengths exercise:
-- The right-padded additive bidirectional mask (§2 of the bringup doc).
-- The post-LN clone workaround in ``encoder_backbone_forward``.
-- ``prefill_encoder``'s pad-to-BLOCK_SIZE + crop-back logic.
+Usage (on Spyre pod)::
 
-Usage (on Spyre pod):
-    python3 tests/test_e2e_embed_compare_spyre.py [bge-base|minilm|qwen3_embed]
+    pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py
+    pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k bge_base
 """
 
 import importlib
-import sys
-import traceback
 
+import pytest
 import torch
 import torch.nn.functional as F
 from _helpers import torch_dtype_for
-from model_registry import EMBEDDING_MODELS
+from model_registry import EMBED_KEYS, EMBEDDING_MODELS
 
 from hf_adapters.hf_common import (
     _move_to_spyre_with_layout,
@@ -46,9 +38,6 @@ from hf_adapters.hf_common import (
     prefill_encoder,
 )
 
-# Mixed-length prompts: short / medium / long. Forces a non-trivial padding
-# pattern in the right-padded mask so that a broken bidirectional SDPA path
-# would surface as NaN or per-token cosine drop.
 PROMPTS = [
     "Hi.",
     "The capital of France is Paris.",
@@ -56,18 +45,10 @@ PROMPTS = [
     "and semantic search across large document collections.",
 ]
 
-# Per-token cosine threshold over real (unmasked) positions. Matches the
-# decoder e2e tolerance: fp16 + multi-layer drift, but well above what a
-# broken kernel produces.
 COSINE_THRESHOLD = 0.99
 
 
-# ---------------------------------------------------------------------------
-# HF reference: stock AutoModel.forward on CPU
-# ---------------------------------------------------------------------------
-
-
-def hf_reference_forward(model, input_ids, attention_mask):
+def _hf_reference_forward(model, input_ids, attention_mask):
     """Run stock HF encoder forward on CPU; return last_hidden_state."""
     with torch.no_grad():
         out = model(
@@ -75,15 +56,10 @@ def hf_reference_forward(model, input_ids, attention_mask):
             attention_mask=attention_mask,
             return_dict=True,
         )
-    return out.last_hidden_state  # [B, L, H]
+    return out.last_hidden_state
 
 
-# ---------------------------------------------------------------------------
-# Adapter forward on Spyre
-# ---------------------------------------------------------------------------
-
-
-def adapter_forward(adapter, model, input_ids, attention_mask):
+def _adapter_forward(adapter, model, input_ids, attention_mask):
     """Run adapter prefill on Spyre; return last_hidden_state on CPU."""
     with torch.no_grad():
         if getattr(adapter, "_is_encoder_only", False):
@@ -100,23 +76,17 @@ def adapter_forward(adapter, model, input_ids, attention_mask):
                 input_ids,
                 attention_mask,
             )
-    return h_dev.to("cpu")  # [B, L, H]
-
-
-# ---------------------------------------------------------------------------
-# Comparison
-# ---------------------------------------------------------------------------
+    return h_dev.to("cpu")
 
 
 def _mean_pool(hidden, mask):
-    """Mean-pool hidden states over real tokens (sentence-transformers default)."""
     m = mask.unsqueeze(-1).float()
     summed = (hidden.float() * m).sum(dim=1)
     counts = m.sum(dim=1).clamp(min=1)
-    return summed / counts  # [B, H]
+    return summed / counts
 
 
-def compare_results(hf_hidden, ad_hidden, attention_mask, model_name):
+def _compare_results(hf_hidden, ad_hidden, attention_mask, model_name):
     """Compare per-sequence: per-token cosine, max diff, pooled cosine, NaN."""
     assert hf_hidden.shape == ad_hidden.shape, (
         f"shape mismatch: hf {tuple(hf_hidden.shape)} vs adapter "
@@ -126,12 +96,12 @@ def compare_results(hf_hidden, ad_hidden, attention_mask, model_name):
     h32 = hf_hidden.float()
     a32 = ad_hidden.float()
 
-    per_tok_cos = F.cosine_similarity(h32, a32, dim=-1)  # [B, L]
+    per_tok_cos = F.cosine_similarity(h32, a32, dim=-1)
     abs_diff = (h32 - a32).abs()
 
     pooled_h = _mean_pool(hf_hidden, attention_mask)
     pooled_a = _mean_pool(ad_hidden, attention_mask)
-    pooled_cos = F.cosine_similarity(pooled_h, pooled_a, dim=-1)  # [B]
+    pooled_cos = F.cosine_similarity(pooled_h, pooled_a, dim=-1)
 
     rows = []
     bsz = hf_hidden.shape[0]
@@ -158,23 +128,19 @@ def compare_results(hf_hidden, ad_hidden, attention_mask, model_name):
     return rows
 
 
-def run_model_test(model_key):
+def _run_model_test(model_key):
     """Full comparison for one encoder model."""
     from transformers import AutoModel, AutoTokenizer
 
     info = EMBEDDING_MODELS[model_key]
-    # Convert e.g., "hf_qwen3.py" to "hf_adapters.hf_qwen3"
     adapter_module_name = info["adapter"].replace(".py", "")
-    adapter_module_path = f"hf_adapters.{adapter_module_name}"
-    adapter = importlib.import_module(adapter_module_path)
+    adapter = importlib.import_module(f"hf_adapters.{adapter_module_name}")
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"  {info['name']}: {info['path']}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     tokenizer = AutoTokenizer.from_pretrained(info["path"])
-    # Most embedders run fp16; bf16-native ones (e.g. EmbeddingGemma, which
-    # overflows fp16) declare ``dtype`` in the registry.
     dtype = torch_dtype_for(info)
     model = AutoModel.from_pretrained(
         info["path"],
@@ -199,32 +165,22 @@ def run_model_test(model_key):
         f" (real lengths: {lengths})"
     )
 
-    # --- HF reference on CPU (BEFORE prepare_for_spyre) ---
-    # Encoder adapters do not patch globally today, but we keep the same
-    # ordering discipline as the decoder e2e test.
     print("  Running HF reference on CPU ...")
-    hf_hidden = hf_reference_forward(model, input_ids, attention_mask)
+    hf_hidden = _hf_reference_forward(model, input_ids, attention_mask)
 
-    # --- Adapter on Spyre ---
     print("  Preparing adapter ...")
-    _untie_embedding_and_lm_head(model)  # no-op for encoders, mirrors decoder path
+    _untie_embedding_and_lm_head(model)
     adapter.prepare_for_spyre(model)
     print("  Moving model to Spyre ...")
     _move_to_spyre_with_layout(model, dtype)
     print("  Running adapter on Spyre ...")
-    ad_hidden = adapter_forward(adapter, model, input_ids, attention_mask)
+    ad_hidden = _adapter_forward(adapter, model, input_ids, attention_mask)
 
-    rows = compare_results(hf_hidden, ad_hidden, attention_mask, info["name"])
-    return rows
-
-
-# ---------------------------------------------------------------------------
-# Output
-# ---------------------------------------------------------------------------
+    return _compare_results(hf_hidden, ad_hidden, attention_mask, info["name"])
 
 
-def print_table(all_rows):
-    """Print markdown comparison table."""
+def _print_table(rows):
+    """Markdown comparison table — one line per prompt row."""
     print("\n## E2E Embedding Comparison: HF (CPU) vs Adapter (Spyre)\n")
     print(
         "| Model | Row | Real Len | Mean Cos | Min Cos | Pooled Cos "
@@ -234,7 +190,7 @@ def print_table(all_rows):
         "|-------|-----|----------|----------|---------|------------"
         "|----------|-----------|--------|-----------|-------|"
     )
-    for r in all_rows:
+    for r in rows:
         match = "OK" if r["match"] else "FAIL"
         hn = "Yes" if r["hf_nan"] else "No"
         sn = "Yes" if r["spyre_nan"] else "No"
@@ -246,27 +202,11 @@ def print_table(all_rows):
         )
 
 
-if __name__ == "__main__":
-    which = sys.argv[1:] if len(sys.argv) > 1 else list(EMBEDDING_MODELS.keys())
-
-    all_rows = []
-    for key in which:
-        if key not in EMBEDDING_MODELS:
-            print(f"Unknown: {key}. Options: {list(EMBEDDING_MODELS.keys())}")
-            continue
-        try:
-            rows = run_model_test(key)
-            all_rows.extend(rows)
-        except Exception:
-            print(f"\n!!! {EMBEDDING_MODELS[key]['name']} FAILED:")
-            traceback.print_exc()
-
-    if all_rows:
-        print_table(all_rows)
-        n_match = sum(1 for r in all_rows if r["match"])
-        print(
-            f"\nPer-row min-cosine >= {COSINE_THRESHOLD}: "
-            f"{n_match}/{len(all_rows)} rows"
-        )
-        sys.exit(0 if n_match == len(all_rows) else 1)
-    sys.exit(1)
+@pytest.mark.parametrize("model_key", EMBED_KEYS, ids=EMBED_KEYS)
+def test_e2e_embed_compare_spyre(model_key):
+    rows = _run_model_test(model_key)
+    _print_table(rows)
+    n_match = sum(1 for r in rows if r["match"])
+    print(f"\nPer-row min-cosine >= {COSINE_THRESHOLD}: {n_match}/{len(rows)} rows")
+    mismatches = [r for r in rows if not r["match"]]
+    assert not mismatches, mismatches
