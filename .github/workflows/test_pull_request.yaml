@@ -93,7 +93,7 @@ env:
   # aligned. Daily and weekly cover the broader model set.
   # Invariant: every model_key used in a Spyre matrix below must have its
   # substring present here so CPU sanity-checks anything that runs on hardware.
-  MODELS_FILTER: "qwen3 or bge_base"
+  # MODELS_FILTER: "qwen3 or bge_base"
 
 jobs:
   pre-commit:
