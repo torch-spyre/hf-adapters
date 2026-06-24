@@ -25,11 +25,7 @@ automatically cover them by selecting one representative model per adapter.
 
 # Model registries - shared by all tests
 CAUSAL_LM_MODELS = {
-    "qwen3": {
-        "name": "Qwen3 0.6B",
-        "path": "Qwen/Qwen3-0.6B",
-        "adapter": "hf_qwen3.py",
-    },
+    # hf_granite.py
     "granite8b": {
         "name": "Granite 3.3 8B",
         "path": "ibm-granite/granite-3.3-8b-instruct",
@@ -40,50 +36,30 @@ CAUSAL_LM_MODELS = {
         "path": "ibm-granite/granite-3.3-2b-instruct",
         "adapter": "hf_granite.py",
     },
+    # hf_granitemoehybrid.py
     "granite4": {
         "name": "Granite 4.0 1B",
         "path": "ibm-granite/granite-4.0-1b-base",
         "adapter": "hf_granitemoehybrid.py",
     },
+    # hf_granite_vision.py
+    "granite-vision": {
+        "name": "Granite Vision 4.1 4B",
+        "path": "ibm-granite/granite-vision-4.1-4b",
+        "adapter": "hf_granite_vision.py",
+        "load_fn": True,
+    },
+    # hf_smollm3.py
     "smollm3": {
         "name": "SmolLM3 3B",
         "path": "HuggingFaceTB/SmolLM3-3B-Base",
         "adapter": "hf_smollm3.py",
     },
+    # hf_llama.py
     "tiny_llama": {
         "name": "TinyLlama 1.1B",
         "path": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         "adapter": "hf_llama.py",
-    },
-    "phi4": {
-        "name": "Phi-4 mini",
-        "path": "microsoft/Phi-4-mini-instruct",
-        "adapter": "hf_phi3.py",
-    },
-    "phi3": {
-        "name": "Phi-3.5 mini",
-        "path": "microsoft/Phi-3.5-mini-instruct",
-        "adapter": "hf_phi3.py",
-    },
-    "qwen2": {
-        "name": "Qwen2.5 1.5B",
-        "path": "Qwen/Qwen2.5-1.5B",
-        "adapter": "hf_qwen2.py",
-    },
-    "ministral": {
-        "name": "Ministral 3b instruct",
-        "path": "ministral/Ministral-3b-instruct",
-        "adapter": "hf_mistral.py",
-    },
-    "olmo1b": {
-        "name": "OLMo 1B",
-        "path": "allenai/OLMo-1B-hf",
-        "adapter": "hf_olmo.py",
-    },
-    "olmo2_1b": {
-        "name": "OLMo2 1B",
-        "path": "allenai/OLMo-2-0425-1B",
-        "adapter": "hf_olmo2.py",
     },
     "falcon3": {
         "name": "Falcon 3 1B",
@@ -95,38 +71,76 @@ CAUSAL_LM_MODELS = {
         "path": "deepseek-ai/deepseek-coder-1.3b-base",
         "adapter": "hf_llama.py",
     },
+    # "yi_6b": {
+    #     "name": "Yi 1.5 6B",
+    #     "path": "01-ai/Yi-1.5-6B",
+    #     "adapter": "hf_llama.py",
+    # },
+    # hf_phi3.py
+    "phi4": {
+        "name": "Phi-4 mini",
+        "path": "microsoft/Phi-4-mini-instruct",
+        "adapter": "hf_phi3.py",
+    },
+    "phi3": {
+        "name": "Phi-3.5 mini",
+        "path": "microsoft/Phi-3.5-mini-instruct",
+        "adapter": "hf_phi3.py",
+    },
+    # hf_qwen2.py
+    "qwen2": {
+        "name": "Qwen2.5 1.5B",
+        "path": "Qwen/Qwen2.5-1.5B",
+        "adapter": "hf_qwen2.py",
+    },
+    # hf_qwen3.py
+    "qwen3": {
+        "name": "Qwen3 0.6B",
+        "path": "Qwen/Qwen3-0.6B",
+        "adapter": "hf_qwen3.py",
+    },
+    # hf_mistral.py
+    "ministral": {
+        "name": "Ministral 3b instruct",
+        "path": "ministral/Ministral-3b-instruct",
+        "adapter": "hf_mistral.py",
+    },
     # Ministral 3B is gated — requires HF auth. Tested on Spyre pod only.
     # "ministral": {
     #     "name": "Ministral 3B",
     #     "path": "mistralai/Ministral-3B-Instruct",
     #     "adapter": "hf_mistral.py",
     # },
-    # "yi_6b": {
-    #     "name": "Yi 1.5 6B",
-    #     "path": "01-ai/Yi-1.5-6B",
-    #     "adapter": "hf_llama.py",
-    # },
-    "granite-vision": {
-        "name": "Granite Vision 4.1 4B",
-        "path": "ibm-granite/granite-vision-4.1-4b",
-        "adapter": "hf_granite_vision.py",
-        "load_fn": True,
+    # hf_olmo.py
+    "olmo1b": {
+        "name": "OLMo 1B",
+        "path": "allenai/OLMo-1B-hf",
+        "adapter": "hf_olmo.py",
     },
-    "gemma4": {
-        "name": "Gemma 4 12B",
-        "path": "google/gemma-4-12B-it",
-        "adapter": "hf_gemma4.py",
+    # hf_olmo2.py
+    "olmo2_1b": {
+        "name": "OLMo2 1B",
+        "path": "allenai/OLMo-2-0425-1B",
+        "adapter": "hf_olmo2.py",
     },
+    # hf_gemma3.py
     # Gemma 3 is a gated checkpoint — requires HF auth. Tested on Spyre pod only.
     # "gemma3": {
     #     "name": "Gemma 3 1B",
     #     "path": "google/gemma-3-1b-it",
     #     "adapter": "hf_gemma3.py",
     # },
+    # hf_gemma4
+    "gemma4": {
+        "name": "Gemma 4 12B",
+        "path": "google/gemma-4-12B-it",
+        "adapter": "hf_gemma4.py",
+    },
 }
 
 
 EMBEDDING_MODELS = {
+    # hf_gemma3.py
     # EmbeddingGemma is a gated checkpoint — requires HF auth. Tested on Spyre pod only.
     # "embeddinggemma": {
     #     "name": "EmbeddingGemma 300M",
@@ -134,16 +148,19 @@ EMBEDDING_MODELS = {
     #     "adapter": "hf_gemma3.py",
     #     "dtype": "bfloat16",  # bf16-native; fp16 overflows the residual stream
     # },
+    # hf_qwen3.py
     "qwen3_embed": {
         "name": "Qwen3-Embedding 0.6B",
         "path": "Qwen/Qwen3-Embedding-0.6B",
         "adapter": "hf_qwen3.py",
     },
+    # hf_qwen2.py
     "qwen2_embed": {
         "name": "Jina-Qwen2-embed-0.5B",
         "path": "jinaai/jina-code-embeddings-0.5b",
         "adapter": "hf_qwen2.py",
     },
+    # hf_mistral.py
     "e5_mistral": {
         "name": "E5-Mistral-7B",
         "path": "intfloat/e5-mistral-7b-instruct",
@@ -159,6 +176,7 @@ EMBEDDING_MODELS = {
         "path": "Salesforce/SFR-Embedding-Mistral",
         "adapter": "hf_mistral.py",
     },
+    # hf_bert.py
     "bge_base": {
         "name": "BGE-base-en-v1.5",
         "path": "BAAI/bge-base-en-v1.5",
@@ -169,16 +187,7 @@ EMBEDDING_MODELS = {
         "path": "sentence-transformers/all-MiniLM-L6-v2",
         "adapter": "hf_bert.py",
     },
-    "bge_m3": {
-        "name": "BGE-M3",
-        "path": "BAAI/bge-m3",
-        "adapter": "hf_xlm_roberta.py",
-    },
-    "mpnet": {
-        "name": "all-mpnet-base-v2",
-        "path": "sentence-transformers/all-mpnet-base-v2",
-        "adapter": "hf_mpnet.py",
-    },
+    # hf_modernbert.py
     "modernbert": {
         "name": "ModernBERT-embed-base",
         "path": "nomic-ai/modernbert-embed-base",
@@ -193,6 +202,18 @@ EMBEDDING_MODELS = {
         "name": "Granite-Embedding-97m-multilingual-r2",
         "path": "ibm-granite/granite-embedding-97m-multilingual-r2",
         "adapter": "hf_modernbert.py",
+    },
+    # hf_xlm_roberta.py
+    "bge_m3": {
+        "name": "BGE-M3",
+        "path": "BAAI/bge-m3",
+        "adapter": "hf_xlm_roberta.py",
+    },
+    # hf_mpnet.py
+    "mpnet": {
+        "name": "all-mpnet-base-v2",
+        "path": "sentence-transformers/all-mpnet-base-v2",
+        "adapter": "hf_mpnet.py",
     },
 }
 
