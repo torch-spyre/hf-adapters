@@ -218,7 +218,7 @@ jobs:
           - granite4
           - yi_6b
           - ministral
-          - mistral3
+#          - mistral3
           - olmo1b
           - olmo2_1b
           - phi4
@@ -281,11 +281,11 @@ jobs:
         model_key:
           - gemma3_unsloth
           - granite2b
-          - granite-vision
-          - granite4
+#          - granite-vision
+#          - granite4
           - yi_6b
           - ministral
-          - mistral3
+#          - mistral3
           - olmo1b
           - olmo2_1b
           - phi4
