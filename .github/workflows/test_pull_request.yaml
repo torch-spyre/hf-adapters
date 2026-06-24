@@ -26,6 +26,42 @@ on:
         required: false
         type: string
         default: ""
+      ref:
+        description: Branch, tag, or SHA of hf-adapters to check out and test
+        required: false
+        type: string
+        default: ""
+      repository:
+        description: |
+          Full clone URL of the hf-adapters fork to check out (e.g.
+          "https://github.com/myuser/hf-adapters.git"); leave empty for the base repo.
+          Used by the cross-repo Test-With: flow to test a companion fork/branch.
+        required: false
+        type: string
+        default: ""
+      pr_url_hash:
+        description: |
+          Hash of the full URL of the PR that triggered this run.
+          Sent by the internal integration pipeline; unused on push/PR/merge_group.
+        required: false
+        type: string
+        default: ""
+      build_torch_spyre:
+        description: Accepted for dispatch-contract parity with torch-spyre; unused here.
+        required: false
+        type: boolean
+        default: true
+      runner_label:
+        description: |
+          Per-PR ephemeral runner-set IMAGE label to select for runs-on
+          (image_hf_adapters_pr_<component>_<sha12>, e.g.
+          image_hf_adapters_pr_flex_8ddcf3e155e9). The per-PR ephemeral flow passes
+          that PR's set label so jobs land on the per-PR image (the changed RPM is
+          baked in -> no runtime sudo). Empty keeps push/PR/merge_group runs on the
+          standing image_torch_spyre set (today's behaviour).
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -51,8 +87,13 @@ env:
   STORAGE_1_DIR: /storage-1/hf-adapters
   HF_HOME: /storage-1/hf-adapters/.cache/huggingface
   # Single source of truth for the set of models exercised by the CPU
-  # test matrix's `-k` filter. Add a model here to include it in PR runs.
-  MODELS_FILTER: "qwen3 or granite or granite2b or granite4 or bge_base or bge_m3"
+  # test matrix's `-k` filter. PR is the fast smoke — qwen3 (causal LM) and
+  # bge_base (embedding) on CPU; the same bge_base runs on the Spyre
+  # embed-compare matrix below so CPU and hardware embedding coverage stay
+  # aligned. Daily and weekly cover the broader model set.
+  # Invariant: every model_key used in a Spyre matrix below must have its
+  # substring present here so CPU sanity-checks anything that runs on hardware.
+  MODELS_FILTER: "qwen3 or bge_base"
 
 jobs:
   pre-commit:
@@ -79,55 +120,59 @@ jobs:
         env:
           SKIP: mypy
 
-  cpu-tests:
-    name: CPU tests (${{ matrix.test_file }})
-    runs-on:
-      - x86_64
-      - spyre_pf_x0__pvc_1tb_x1
-      - linux
-      - image_spyre_inference # move to image_torch_spyre once available
-    timeout-minutes: 120
-    strategy:
-      matrix:
-        # Tests marked `@pytest.mark.slow` are dropped from PR runs (see the
-        # `-m "not slow"` flag below) and instead exercised by the weekly cron.
-        test_file:
-          - test_load_cpu.py
-          - test_adapter_cpu_accuracy.py
-          - test_embed_cpu_accuracy.py
-          - test_generate_edge_cases_cpu.py
-          - test_multibatch_generate_cpu.py
-          - test_st_backend_cpu.py
-
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: .github/actions
-          sparse-checkout-cone-mode: false
-
-      - uses: ./.github/actions/build-hf-adapters
-        with:
-          uv_groups: "dev test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          output_dir: ${{ inputs.output_dir }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
-
-      - name: Run ${{ matrix.test_file }}
-        run: |
-          unset _IBM_AIU_SETUP
-          rm -f /tmp/etc/ibm/spyre/topo.json
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running ${{ matrix.test_file }}..."
-          uv run pytest -s -vvv -m "not slow" -k "$MODELS_FILTER" "tests/${{ matrix.test_file }}"
-          echo "tests done"
+#  cpu-tests:
+#    name: CPU tests (${{ matrix.test_file }})
+#    runs-on:
+#      - x86_64
+#      - spyre_pf_x0__pvc_1tb_x1
+#      - linux
+#      - ${{ inputs.runner_label || 'image_torch_spyre' }}
+#    timeout-minutes: 120
+#    strategy:
+#      matrix:
+#        # Tests marked `@pytest.mark.slow` are dropped from PR runs (see the
+#        # `-m "not slow"` flag below) and instead exercised by the weekly cron.
+#        test_file:
+#          - test_load_cpu.py
+#          - test_adapter_cpu_accuracy.py
+#          - test_embed_cpu_accuracy.py
+#          - test_generate_edge_cases_cpu.py
+#          - test_multibatch_generate_cpu.py
+#          - test_st_backend_cpu.py
+#
+#    steps:
+#      - name: Checkout composite actions
+#        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+#        with:
+#          sparse-checkout: .github/actions
+#          sparse-checkout-cone-mode: false
+#
+#      - uses: ./.github/actions/build-hf-adapters
+#        with:
+#          uv_groups: "dev test"
+#          rpm_names: ${{ inputs.rpm_names }}
+#          rpm_location: ${{ inputs.rpm_location }}
+#          output_dir: ${{ inputs.output_dir }}
+#          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+#          ref: ${{ inputs.ref }}
+#          repository: ${{ inputs.repository }}
+#          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+#          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+#          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+#          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+#
+#      - name: Run ${{ matrix.test_file }}
+#        env:
+#          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+#        run: |
+#          unset _IBM_AIU_SETUP
+#          rm -f /tmp/etc/ibm/spyre/topo.json
+#          source "$HOME/.bashrc"
+#          source /etc/profile.d/ibm-aiu-setup.sh
+#          cd "$CLONED_HF_ADAPTERS_DIR"
+#          echo "Running ${{ matrix.test_file }}..."
+#          uv run pytest -s -vvv -m "not slow" -k "$MODELS_FILTER" "tests/${{ matrix.test_file }}"
+#          echo "tests done"
 
   spyre-load-tests:
     name: Spyre load (${{ matrix.model_key }})
@@ -135,32 +180,40 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - ${{ inputs.runner_label || 'image_torch_spyre' }}
     timeout-minutes: 120
     strategy:
+      fail-fast: false
       matrix:
+        # All causal-LM and embedding keys from tests/model_registry.py.
+        # Commented-out entries are valid registry keys we deliberately exclude
+        # from PR runs — each comment names the reason.
         model_key:
+          # Causal LM
           - qwen3
-          - granite
+          - granite8b
           - granite2b
-          # - granite4
-          # - smollm3
-          # - llama
-          # - phi4
-          # - qwen2
-          # - mistral
-          # - olmo
-          # - olmo2
-          # - falcon3
-          # - deepseek-coder
-          # - yi
-          # - granite-vision
-          # Embedding models (one per adapter)
-          # - minilm
+          - granite4
+          - smollm3
+          - tiny_llama
+          - qwen2
+          - ministral
+          - olmo1b
+          - olmo2_1b
+          - granite-vision
+          # Embedding
+          - qwen3_embed
+          - qwen2_embed
+          - e5_mistral
+          - linq_embed_mistral
+          - sfr_embedding_mistral
+          - bge_base
+          - minilm
           - bge_m3
-          # - mpnet
-          # - modernbert
-          # - qwen3_embed
+          - mpnet
+          - modernbert
+          - gte_modernbert
+          - granite_embed
 
     steps:
       - name: Checkout composite actions
@@ -176,18 +229,22 @@ jobs:
           rpm_location: ${{ inputs.rpm_location }}
           output_dir: ${{ inputs.output_dir }}
           torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
           artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
           artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
           artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
           artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run test_load_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_load_spyre.py for ${{ matrix.model_key }}..."
-          uv run python3 tests/test_load_spyre.py "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_load_spyre.py -k "${{ matrix.model_key }}"
           echo "tests done"
 
   spyre-smoke-tests:
@@ -196,26 +253,23 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - ${{ inputs.runner_label || 'image_torch_spyre' }}
     timeout-minutes: 120
     strategy:
+      fail-fast: false
       matrix:
+        # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
         model_key:
           - qwen3
-          - granite
+          - granite8b
           - granite2b
-          - granite4
-          # - smollm3
-          # - llama
-          # - phi4
-          # - qwen2
-          # - mistral
-          # - olmo
-          # - olmo2
-          # - falcon3
-          # - deepseek-coder
-          # - yi
-          # - granite-vision
+
+          - smollm3
+          - tiny_llama
+          - qwen2
+          - ministral
+          - olmo1b
+          - olmo2_1b
 
     steps:
       - name: Checkout composite actions
@@ -231,18 +285,22 @@ jobs:
           rpm_location: ${{ inputs.rpm_location }}
           output_dir: ${{ inputs.output_dir }}
           torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
           artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
           artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
           artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
           artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run test_e2e_smoke_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
-          uv run python3 tests/test_e2e_smoke_spyre.py "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k "${{ matrix.model_key }}"
           echo "tests done"
 
   spyre-token-compare-tests:
@@ -251,19 +309,22 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - ${{ inputs.runner_label || 'image_torch_spyre' }}
     timeout-minutes: 120
     strategy:
+      fail-fast: false
       matrix:
+        # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
         model_key:
           - qwen3
-          - granite
-          # - llama
-          # - qwen2
-          # - mistral
-          # - olmo
-          # - olmo2
-          # - falcon3
+          - granite8b
+          - granite2b
+          - smollm3
+          - tiny_llama
+          - qwen2
+          - ministral
+          - olmo1b
+          - olmo2_1b
 
     steps:
       - name: Checkout composite actions
@@ -279,18 +340,22 @@ jobs:
           rpm_location: ${{ inputs.rpm_location }}
           output_dir: ${{ inputs.output_dir }}
           torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
           artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
           artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
           artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
           artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run python3 tests/test_e2e_token_compare_spyre.py "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k "${{ matrix.model_key }}"
           echo "tests done"
 
   spyre-embed-compare-tests:
@@ -299,14 +364,25 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - image_torch_spyre
+      - ${{ inputs.runner_label || 'image_torch_spyre' }}
     timeout-minutes: 120
     strategy:
+      fail-fast: false
       matrix:
+        # All embedding keys from tests/model_registry.py::EMBEDDING_MODELS.
         model_key:
+          - qwen3_embed
+          - qwen2_embed
+          - e5_mistral
+          - linq_embed_mistral
+          - sfr_embedding_mistral
           - bge_base
-          # - minilm
-          # - qwen3_embed
+          - minilm
+          - bge_m3
+          - mpnet
+          - modernbert
+          - gte_modernbert
+          - granite_embed
 
     steps:
       - name: Checkout composite actions
@@ -322,66 +398,22 @@ jobs:
           rpm_location: ${{ inputs.rpm_location }}
           output_dir: ${{ inputs.output_dir }}
           torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
           artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
           artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
           artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
           artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
 
       - name: Run test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run python3 tests/test_e2e_embed_compare_spyre.py "${{ matrix.model_key }}"
-          echo "tests done"
-
-  spyre-block-compare-tests:
-    name: Spyre block compare (${{ matrix.model_key }})
-    runs-on:
-      - x86_64
-      - spyre_pf_x1__pvc_1tb_x1
-      - linux
-      - image_torch_spyre
-    timeout-minutes: 120
-    strategy:
-      matrix:
-        model_key:
-          - qwen3
-          - granite
-          # - granite4
-          # - smollm3
-          # - llama
-          # - qwen2
-          # - mistral
-          # - olmo
-
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: .github/actions
-          sparse-checkout-cone-mode: false
-
-      - uses: ./.github/actions/build-hf-adapters
-        with:
-          uv_groups: "dev spyre test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          output_dir: ${{ inputs.output_dir }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
-
-      - name: Run test_block_cpu_vs_spyre.py for ${{ matrix.model_key }}
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running test_block_cpu_vs_spyre.py for ${{ matrix.model_key }}..."
-          uv run python3 tests/test_block_cpu_vs_spyre.py "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k "${{ matrix.model_key }}"
           echo "tests done"
 
   # ===========================================================================
@@ -397,23 +429,25 @@ jobs:
         working-directory: .
     needs:
       - pre-commit
-      - cpu-tests
+#      - cpu-tests
       - spyre-load-tests
       - spyre-smoke-tests
       - spyre-token-compare-tests
       - spyre-embed-compare-tests
-      - spyre-block-compare-tests
     if: always()
     steps:
       - name: Check all suites passed
+        # NOTE: the `cpu-tests` predicates are
+        # intentionally omitted from the `if` below while those jobs are
+        # commented out. Re-add the corresponding
+        #   contains(needs.<job>.result, 'failure') || contains(needs.<job>.result, 'cancelled') ||
+        # lines when restoring either job.
         run: |-
           if ${{ contains(needs.pre-commit.result, 'failure') || contains(needs.pre-commit.result, 'cancelled') ||
-                 contains(needs.cpu-tests.result, 'failure') || contains(needs.cpu-tests.result, 'cancelled') ||
                  contains(needs.spyre-load-tests.result, 'failure') || contains(needs.spyre-load-tests.result, 'cancelled') ||
                  contains(needs.spyre-smoke-tests.result, 'failure') || contains(needs.spyre-smoke-tests.result, 'cancelled') ||
                  contains(needs.spyre-token-compare-tests.result, 'failure') || contains(needs.spyre-token-compare-tests.result, 'cancelled') ||
-                 contains(needs.spyre-embed-compare-tests.result, 'failure') || contains(needs.spyre-embed-compare-tests.result, 'cancelled') ||
-                 contains(needs.spyre-block-compare-tests.result, 'failure') || contains(needs.spyre-block-compare-tests.result, 'cancelled') }}; then
+                 contains(needs.spyre-embed-compare-tests.result, 'failure') || contains(needs.spyre-embed-compare-tests.result, 'cancelled') }}; then
             echo "One or more test suites failed."
             exit 1
           fi

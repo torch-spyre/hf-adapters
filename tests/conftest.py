@@ -45,24 +45,32 @@ from _helpers import (  # noqa: F401  (re-exported for tests via `from conftest 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADAPTERS_DIR = os.path.join(REPO_ROOT, "hf_adapters")
 
-assert "hf_adapters.hf_common" not in sys.modules, (
-    "hf_adapters.hf_common was imported before tests/conftest.py ran; "
-    "the DEVICE='cpu' patch will not apply. Check for plugins or other "
-    "conftests that import hf_adapters at collection time."
+# Spyre-targeted runs (`pytest tests/spyre/...`) need the unpatched hf_adapters
+# with DEVICE="spyre". Detect that here and skip the CPU patching block — the
+# tests/spyre/conftest.py picks up from there with the real module.
+_TARGETS_SPYRE = any(
+    "tests/spyre" in a or a.rstrip("/").endswith("tests/spyre") for a in sys.argv
 )
 
-_common_path = os.path.join(ADAPTERS_DIR, "hf_common.py")
-_common_spec = importlib.util.spec_from_file_location(
-    "hf_adapters.hf_common", _common_path
-)
-_common_mod = importlib.util.module_from_spec(_common_spec)
-sys.modules["hf_adapters.hf_common"] = _common_mod
-_common_spec.loader.exec_module(_common_mod)
-_common_mod.DEVICE = "cpu"
+if not _TARGETS_SPYRE:
+    assert "hf_adapters.hf_common" not in sys.modules, (
+        "hf_adapters.hf_common was imported before tests/conftest.py ran; "
+        "the DEVICE='cpu' patch will not apply. Check for plugins or other "
+        "conftests that import hf_adapters at collection time."
+    )
 
-_pkg = types.ModuleType("hf_adapters")
-_pkg.__path__ = [ADAPTERS_DIR]
-sys.modules["hf_adapters"] = _pkg
+    _common_path = os.path.join(ADAPTERS_DIR, "hf_common.py")
+    _common_spec = importlib.util.spec_from_file_location(
+        "hf_adapters.hf_common", _common_path
+    )
+    _common_mod = importlib.util.module_from_spec(_common_spec)
+    sys.modules["hf_adapters.hf_common"] = _common_mod
+    _common_spec.loader.exec_module(_common_mod)
+    _common_mod.DEVICE = "cpu"
+
+    _pkg = types.ModuleType("hf_adapters")
+    _pkg.__path__ = [ADAPTERS_DIR]
+    sys.modules["hf_adapters"] = _pkg
 
 
 def _load_adapter(filename):
@@ -82,24 +90,25 @@ def _load_adapter(filename):
 # Pre-load every adapter referenced by CONFIG_TO_ADAPTER_MODULE_MAPPING, then
 # auto_spyre_model itself. Doing this here means tests can grab AutoSpyre*
 # off the module without paying the cost on first use.
-_auto_path = os.path.join(ADAPTERS_DIR, "auto_spyre_model.py")
-_auto_spec = importlib.util.spec_from_file_location(
-    "hf_adapters.auto_spyre_model", _auto_path
-)
-_auto_mod = importlib.util.module_from_spec(_auto_spec)
-sys.modules["hf_adapters.auto_spyre_model"] = _auto_mod
-_auto_spec.loader.exec_module(_auto_mod)
-setattr(_pkg, "auto_spyre_model", _auto_mod)
-
-# Now that auto_spyre_model is loaded with patched hf_common, populate the model lists
-# Import model_registry here (after patching) and update its CAUSAL_KEYS/EMBED_KEYS
-import model_registry  # noqa: E402
-
-model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
-    model_registry._select_representative_models(
-        _auto_mod.CONFIG_TO_ADAPTER_MODULE_MAPPING
+if not _TARGETS_SPYRE:
+    _auto_path = os.path.join(ADAPTERS_DIR, "auto_spyre_model.py")
+    _auto_spec = importlib.util.spec_from_file_location(
+        "hf_adapters.auto_spyre_model", _auto_path
     )
-)
+    _auto_mod = importlib.util.module_from_spec(_auto_spec)
+    sys.modules["hf_adapters.auto_spyre_model"] = _auto_mod
+    _auto_spec.loader.exec_module(_auto_mod)
+    setattr(_pkg, "auto_spyre_model", _auto_mod)
+
+    # Now that auto_spyre_model is loaded with patched hf_common, populate the model lists
+    # Import model_registry here (after patching) and update its CAUSAL_KEYS/EMBED_KEYS
+    import model_registry  # noqa: E402
+
+    model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
+        model_registry.select_representative_models(
+            _auto_mod.CONFIG_TO_ADAPTER_MODULE_MAPPING
+        )
+    )
 
 
 def _unwrap_compiled_blocks(model):
@@ -111,6 +120,26 @@ def _unwrap_compiled_blocks(model):
         orig = getattr(cb, "_orig_mod", getattr(cb, "_torchdynamo_orig_callable", None))
         unwrapped.append(orig if orig is not None else cb)
     model._spyre_compiled_blocks = unwrapped
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "requires_spyre: mark test as requiring the Spyre backend device",
+    )
+
+
+def _set_rope_dtype(model, dtype):
+    """Propagate the chosen dtype to the model's precomputed RoPE freq cache.
+
+    The manual CPU-test paths load via ``AutoModel`` + ``prepare_for_spyre``
+    directly, bypassing ``load_model_common`` / ``_move_to_spyre_with_layout``
+    (where the production paths make this explicit ``set_dtype`` call). Mirror
+    it here so a non-fp16 model (e.g. bf16 EmbeddingGemma) gets a matching freq
+    cache instead of the fp16 default — otherwise ``apply_rope_matmul`` promotes
+    the query to fp32 and SDPA rejects the mismatched key/value dtype.
+    """
+    sys.modules["hf_adapters.hf_common"].set_rope_dtype(model, dtype)
 
 
 @pytest.fixture(scope="session")
@@ -133,6 +162,11 @@ def unwrap_compiled_blocks():
     return _unwrap_compiled_blocks
 
 
+@pytest.fixture
+def set_rope_dtype():
+    return _set_rope_dtype
+
+
 @pytest.fixture(autouse=True)
 def _gc_after_test():
     yield
@@ -149,9 +183,27 @@ def pytest_addoption(parser):
 
 
 def pytest_collection_modifyitems(config, items):
-    if config.getoption("--run-slow"):
-        return
-    skip_slow = pytest.mark.skip(reason="slow test; pass --run-slow to run")
-    for item in items:
-        if "slow" in item.keywords:
-            item.add_marker(skip_slow)
+    """Skip spyre tests if torch_spyre is not installed / device unavailable; skip slow tests unless --run-slow."""
+    try:
+        import torch
+        import torch_spyre  # noqa: F401 — side effect: registers "spyre" device
+
+        # Verify the device actually registered
+        _ = torch.device("spyre")
+        spyre_available = True
+    except (ImportError, RuntimeError):
+        spyre_available = False
+
+    if not spyre_available:
+        skip_spyre = pytest.mark.skip(
+            reason="torch_spyre not installed or spyre device unavailable"
+        )
+        for item in items:
+            if "spyre" in item.nodeid or item.get_closest_marker("requires_spyre"):
+                item.add_marker(skip_spyre)
+
+    if not config.getoption("--run-slow"):
+        skip_slow = pytest.mark.skip(reason="slow test; pass --run-slow to run")
+        for item in items:
+            if "slow" in item.keywords:
+                item.add_marker(skip_slow)

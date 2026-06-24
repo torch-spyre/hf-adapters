@@ -55,26 +55,12 @@ import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
+    InvFreqShim,
     PrecomputedRotaryEmbedding,
     add_sliding_window_band,
     apply_rope_matmul,
     get_backbone,
 )
-
-
-class _InvFreqShim(nn.Module):
-    """Minimal ``original_rope`` stand-in for ``PrecomputedRotaryEmbedding``.
-
-    ``PrecomputedRotaryEmbedding`` reads ``.inv_freq`` and ``.attention_scaling``
-    off its ``original`` module. ModernBERT's ``ModernBertRotaryEmbedding``
-    instead stores one ``<layer_type>_inv_freq`` buffer per layer type, so we
-    wrap the relevant buffer in this shim (scaling is 1.0 for "default" RoPE).
-    """
-
-    def __init__(self, inv_freq):
-        super().__init__()
-        self.register_buffer("inv_freq", inv_freq.clone(), persistent=False)
-        self.attention_scaling = 1.0
 
 
 def _split_and_pad_qkv(attn, hidden_size, num_heads, orig_head_dim, padded_head_dim):
@@ -306,7 +292,7 @@ def prepare_for_spyre(model):
     for layer_type in set(cfg.layer_types):
         inv_freq = getattr(rope, f"{layer_type}_inv_freq")
         model._spyre_rope[layer_type] = PrecomputedRotaryEmbedding(
-            _InvFreqShim(inv_freq),
+            InvFreqShim(inv_freq),
             padded_head_dim=padded_head_dim,
         )
 

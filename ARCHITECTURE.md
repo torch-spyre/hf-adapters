@@ -20,16 +20,21 @@ which models are supported on Spyre.
 | Qwen2.5 1.5B | qwen2 | 128 | 64 | Yes | Yes | Yes | Yes |
 | Mistral 7B v0.3 | mistral | 128 | 64 | Yes | Yes | Yes | Yes |
 | Phi-4 mini | phi3 | 128 | 64 | Yes | Yes | Yes | Yes |
+| Phi-3.5 mini | phi3 | 96→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | OLMo 1B | olmo | 128 | 64 | Yes | Yes | Yes | Yes |
 | OLMo2 1B | olmo2 | 128 | 64 | Yes | Yes | Yes | Yes |
 | Falcon 3 1B | llama | 256 | 128 | Yes | Yes | Yes | Yes |
 | DeepSeek-Coder 1.3B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | Yi 1.5 6B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite Vision 4.1 4B | granite (text) | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
+| Gemma 4 12B | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
+| Gemma 3 1B | gemma3\_text | 256 | 128 | Yes | Yes | Yes | Yes |
 
 **CPU Accurate** = adapter produces identical greedy tokens to stock HF on CPU.
 **Spyre Compiles** = `torch.compile(block_forward)` succeeds on Spyre.
 **Spyre Runs** = block produces output (no crash/NaN).
+
+Unless a row notes otherwise (e.g. `(bf16)`), **verified means verified in fp16** — this holds even for bf16-native checkpoints. A bf16-native model that is only verified in fp16 may behave differently in bf16 on Spyre (and vice versa); the dtype actually tested is what the table certifies.
 
 ### Embedding
 
@@ -39,9 +44,9 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 |-------|-----------|---------|--------------|-------------|---------------|-----------|
 | Qwen3-Embedding 0.6B | qwen3 | 128 | Yes | Yes | Yes | Yes |
 | GTE-Qwen2-1.5B | qwen2 | 128 | Yes | Yes | Yes | Yes (accuracy diverges from CPU) |
-| E5-Mistral-7B | mistral | 128 | Yes | Yes | Yes | Yes (accuracy diverges from CPU) |
-| Linq-Embed-Mistral | mistral | 128 | Yes | Yes | Yes | Yes (accuracy diverges from CPU) |
-| SFR-Embedding-Mistral | mistral | 128 | Yes | Yes | Yes | Yes (accuracy diverges from CPU) |
+| E5-Mistral-7B | mistral | 128 | Yes | Yes | Yes | Yes |
+| Linq-Embed-Mistral | mistral | 128 | Yes | Yes | Yes | Yes |
+| SFR-Embedding-Mistral | mistral | 128 | Yes | Yes | Yes | Yes |
 | BGE-base-en-v1.5 | bert | 64 | Yes | Yes | Yes | Yes |
 | all-MiniLM-L6-v2 | bert | 32→64 | Yes (padded) | Yes | Yes | Yes |
 | BGE-M3 | xlm-roberta | 64 | Yes | Yes | Yes | Yes |
@@ -49,9 +54,10 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 | ModernBERT-embed-base | modernbert | 64→128 | Yes (padded) | Yes | Yes | Yes |
 | GTE-ModernBERT-base | modernbert | 64→128 | Yes (padded) | Yes | Yes | Yes |
 | Granite-Embedding-97m-multilingual-r2 | modernbert | 32→128 | Yes (padded) | Yes | Yes | Yes |
+| EmbeddingGemma 300M | gemma3\_text | 256 | Yes | Yes | Yes | Yes (bf16) |
 
-**CPU Accurate** = adapter hidden-states have cosine similarity ≥ 0.9999 vs stock HF on CPU.
-**Spyre Compiles / Spyre Runs** = via `test_e2e_embed_compare_spyre.py`. GTE-Qwen2 and the Mistral-backbone embedding models (E5-Mistral, Linq-Embed-Mistral, SFR-Embedding-Mistral) compile and execute end-to-end on Spyre but their pooled embeddings drift from the CPU reference; the Qwen3/BERT/XLM-RoBERTa/MPNet/ModernBERT encoder paths match within fp16 noise.
+**CPU Accurate** = adapter hidden-states have cosine similarity ≥ 0.999 vs stock HF on CPU (the bound accommodates the bf16-native EmbeddingGemma; fp16 models clear it with wide margin).
+**Spyre Compiles / Spyre Runs** = via `test_e2e_embed_compare_spyre.py`. GTE-Qwen2 compiles and executes end-to-end on Spyre but its pooled embeddings drift from the CPU reference; the Qwen3/Mistral/BERT/XLM-RoBERTa/MPNet/ModernBERT encoder paths match within fp16 noise. EmbeddingGemma runs in **bf16** (fp16 overflows its residual stream) and matches the bf16 CPU reference within bf16 noise (per-token cosine ≥ 0.999; pooled ≥ 0.99).
 
 ### Spyre Numerical Accuracy (torch-spyre @ 7c6ef99)
 
@@ -89,6 +95,8 @@ pattern, norms, and weight layout.
 | hf\_phi3.py | phi3 | 1 | Phi-3 mini 4k/128k, Phi-3 small 8k |
 | hf\_granitemoehybrid.py | granitemoehybrid | 1 | Granite 4.0 Micro |
 | hf\_smollm3.py | smollm3 | 1 | — |
+| hf\_gemma4.py | gemma4\_unified / gemma4 (dense) | 1 | Gemma 4 31B (dense). Not E2B/E4B (PLE) or 26B-A4B (MoE). |
+| hf\_gemma3.py | gemma3\_text / gemma3 (dense) | 2 | Gemma 3 4B/12B/27B (text decoder of the multimodal checkpoints); EmbeddingGemma (bidirectional embedder). Not Gemma 3n (PLE). |
 | hf\_olmo.py | olmo | 1 | OLMo 7B |
 | hf\_olmo2.py | olmo2 | 1 | OLMo 2 7B |
 | hf\_granite\_vision.py | granite (text) | 1 | — |
@@ -102,7 +110,6 @@ pattern, norms, and weight layout.
 to work without code changes. Size constraints apply (must fit in
 Spyre memory). Gated models require HF token access.
 
-**Variant count: 15 adapters → 27 verified checkpoints, ~60+ compatible variants.**
 
 ## Public API
 
@@ -226,11 +233,24 @@ is not well supported; element-wise multiply is native.
 
 | Stock HF | Adapter |
 |---|---|
-| Vocab dim as-is from model config | Padded to `ceil(vocab/64)*64 + 64` via `pad_lm_head()` |
+| Vocab dim as-is from model config | Padded by `pad_lm_head()` to a stick-aligned, *smooth* vocab |
 
-**Why:** Spyre requires tensor dimensions aligned to 64-element
-sticks for efficient matmul. The extra +64 avoids prime-number
-multiples that cause poor work distribution.
+**Why:** the LM head is a `batchmatmul X[M,K] @ W[K,N]` (K=hidden,
+N=padded_vocab) whose weight sticks on N: physical layout
+`[N/64 sticks, K, 64]`. Work division splits the stick dim across
+cores; if the stick count `N/64` has a large prime factor, that
+factor is left indivisible on one core, whose per-core span
+`lpf * hidden * 64 * dtype_bytes` then exceeds the **256 MB EAR
+limit** and the bundler aborts (`dxp_standalone --bundle` SIGABRT in
+`sdsc_fused_bmm_transpose_unsqueeze`). `pad_lm_head()` rounds vocab
+up to a stick boundary and adds sticks until the count is smooth
+enough that this span fits — e.g. Qwen2.5-7B `152064 → 2376 = 2³·3³·11`
+(fine), but `151936 → 2374 = 2·1187` would leave residual 1187
+(≈297 MB at hidden 2048) so it bumps to `2375 = 5³·19`. Bumps are
+tiny (most models pad by 0–64 rows); the single-kernel LM head is
+kept (no per-token decode cost). This now covers even the large-vocab
+models that motivated the chunked LM head (Phi-4 200K verified on
+Spyre with a single smooth head) — see below.
 
 #### 4. Decoder Layers: Custom Compiled Blocks
 
@@ -294,30 +314,34 @@ modification:
 
 ### Model-Specific Adaptations
 
-| Feature | Granite 3.3 | Granite Vision 4.1 | Qwen3 | Granite 4.0 | SmolLM3 | Llama | Qwen2 | Mistral | Phi-4 mini | OLMo | OLMo2 |
-|---------|------------|-------------------|-------|-------------|---------|-------|-------|---------|-----------|------|-------|
-| Embedding multiplier | Yes | Yes | No | Yes | No | No | No | No | No | No | No |
-| Residual multiplier | Yes | Yes | No | Yes | No | No | No | No | No | No | No |
-| Logits scaling | Yes | Yes | No | Yes | No | No | No | No | No | No | No |
-| Q/K RMSNorm | No | No | Yes (per-head) | No | No | No | No | No | No | No | Yes (flattened) |
-| Fused QKV split | No | No | No | No | No | No | No | No | Yes | No | No |
-| Fused MLP split | No | No | No | Yes | No | No | No | No | Yes | No | No |
-| NoPE layers | No | No | No | No | Yes | No | No | No | No | No | No |
-| Partial RoPE | No | No | No | No | No | No | No | No | Yes | No | No |
-| Chunked LM head | No | No | No | No | No | No | No | No | Yes | No | No |
-| Head-dim padding | 2B only | Yes (64→128) | No | No | No | TinyLlama | No | No | No | No | No |
-| Custom model loading | No | Yes (safetensor remap) | No | No | No | No | No | No | No | No | No |
-| Attention scaling | `config.attention_multiplier` | `config.attention_multiplier` | `head_dim**-0.5` | `config.attention_multiplier` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` |
-| Norm type | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | LayerNorm (pre, no weight) | RMSNorm (post) |
+| Feature | Granite 3.3 | Granite Vision 4.1 | Qwen3 | Granite 4.0 | SmolLM3 | Llama | Qwen2 | Mistral | Phi-4 mini | OLMo | OLMo2 | Gemma 3 | Gemma 4 |
+|---------|------------|-------------------|-------|-------------|---------|-------|-------|---------|-----------|------|-------|---------|---------|
+| Embedding multiplier | Yes | Yes | No | Yes | No | No | No | No | No | No | No | Yes | Yes |
+| Residual multiplier | Yes | Yes | No | Yes | No | No | No | No | No | No | No | No | No |
+| Logits scaling | Yes | Yes | No | Yes | No | No | No | No | No | No | No | No | No |
+| Q/K RMSNorm | No | No | Yes (per-head) | No | No | No | No | No | No | No | Yes (flattened) | Yes (per-head Q/K) | Yes (per-head Q/K/V) |
+| Fused QKV split | No | No | No | No | No | No | No | No | Yes | No | No | No | No |
+| Fused MLP split | No | No | No | Yes | No | No | No | No | Yes | No | No | No | No |
+| NoPE layers | No | No | No | No | Yes | No | No | No | No | No | No | No | No |
+| Partial RoPE | No | No | No | No | No | No | No | No | Yes | No | No | No | Yes (global layers) |
+| Head-dim padding | 2B only | Yes (64→128) | No | No | No | TinyLlama | No | No | No | No | No | No | No |
+| Custom model loading | No | Yes (safetensor remap) | No | No | No | No | No | No | No | No | No | No | No |
+| Attention scaling | `config.attention_multiplier` | `config.attention_multiplier` | `head_dim**-0.5` | `config.attention_multiplier` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `query_pre_attn_scalar**-0.5` | `1.0` (unscaled) |
+| Norm type | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | LayerNorm (pre, no weight) | RMSNorm (post) | RMSNorm (sandwich) | RMSNorm (sandwich) |
 
 **Partial RoPE** (Phi-4): `PartialPrecomputedRotaryEmbedding` pads
 the rotation matrix with identity `[[1,0],[0,1]]` entries so
 `apply_rope_matmul` operates on full `head_dim` without slicing.
 Avoids stickify non-zero offset assertion.
 
-**Chunked LM head** (Phi-4): 200K+ vocab exceeds Spyre per-core
-256 MB EAR limit. 8 smaller `nn.Linear` chunks along vocab dim,
-cat results on CPU.
+**Chunked LM head** (`chunk_lm_head`, currently unused): fallback that
+splits the head into N smaller `nn.Linear` chunks along the vocab dim
+(run separately, cat on CPU) to shrink the per-core span when even a
+smooth-padded single head can't fit the 256 MB EAR limit. No current
+model needs it — every supported vocab (incl. 200K–262K Phi-4 / Gemma,
+verified on Spyre) fits a single smooth-padded head via `pad_lm_head()`
+(see LM Head Weight above), which avoids the per-token dispatch + D2H
+cost of chunking. Kept as the escape hatch for future models.
 
 **Fused weight split** (Phi-4, Granite 4.0): QKV/gate_up_proj split
 into separate linears at prepare time. Avoids stickify non-zero
@@ -354,6 +378,37 @@ into padded q/k/v (head_dim 64→128, like all-MiniLM); MLP is GeGLU
 (`Wo(act(input) * gate)` from a single `Wi`). Layer 0's `attn_norm` is
 `Identity` (the embedding LayerNorm already normalized the input). No
 biases by default.
+
+**Sliding/global attention** (Gemma 3): `hf_gemma3.py` alternates sliding
+(local, θ=1e4) and full (global, θ=1e6) attention, with full rotary on both
+and a **single** `head_dim` (one KV-cache shape). Beyond a plain RoPE decoder
+it adds: a four-norm "sandwich" layer, per-head Q/K RMSNorm, scaled word
+embedding, a smooth-padded LM head (262K vocab), unit-offset RMSNorm
+(`x * (1 + weight)`), and attention scaled by `query_pre_attn_scalar ** -0.5`
+(not `head_dim ** -0.5` in general — 27B has `head_dim=128`,
+`query_pre_attn_scalar=168`). `final_logit_softcapping` is `None` on published
+Gemma 3 but applied if present. The Gemma 3n on-device variant is a separate
+model type and not supported.
+
+The same adapter serves **EmbeddingGemma**, a bidirectional embedder
+(`use_bidirectional_attention=True`): the base mask becomes bidirectional (read
+in `prefill_embed`) and the sliding layers use a symmetric `±window` band
+(`_add_bidirectional_sliding_window_band`) instead of the causal one. It is
+bf16-native — fp16 overflows the residual stream (stock HF NaNs in fp16 too) —
+so its RoPE freq cache is matched to bf16 via the explicit `set_rope_dtype`
+propagation, which handles Gemma's per-layer-type dict of RoPE modules.
+
+**Dual head_dim + proportional RoPE** (Gemma 4): `hf_gemma4.py` is Gemma 3
+plus its hardest features, targeting the **dense** decoders (12B / 31B). The
+sliding and global layers use a different `head_dim` each — sliding keeps full
+rotary over `head_dim`, global uses *proportional* RoPE
+(`partial_rotary_factor=0.25`, θ=1e6) over `global_head_dim` (the NoPE tail is
+zero frequencies, so the identity-rotation path applies). The two head_dims
+give two KV-cache shapes per model (`model._spyre_kv_shapes`). It further adds
+per-head V-norm (Q/K/V RMSNorm), a per-layer scalar, K==V projection sharing
+on global layers, unscaled attention (`scale=1.0`), and final-logit
+softcapping. PLE-based (E2B/E4B) and MoE (26B-A4B) variants are **not**
+supported — `prepare_for_spyre` asserts those features are absent.
 
 ## Adding a New Model
 
