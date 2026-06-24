@@ -124,12 +124,11 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_olmo2.py",
     },
     # hf_gemma3.py
-    # Gemma 3 is a gated checkpoint — requires HF auth. Tested on Spyre pod only.
-    # "gemma3": {
-    #     "name": "Gemma 3 1B",
-    #     "path": "google/gemma-3-1b-it",
-    #     "adapter": "hf_gemma3.py",
-    # },
+    "gemma3": {
+        "name": "Gemma 3 1B",
+        "path": "unsloth/gemma-3-1b-it",
+        "adapter": "hf_gemma3.py",
+    },
     # hf_gemma4
     "gemma4": {
         "name": "Gemma 4 12B",
