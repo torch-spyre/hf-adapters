@@ -123,6 +123,12 @@ CAUSAL_LM_MODELS = {
     #     "path": "google/gemma-3-1b-it",
     #     "adapter": "hf_gemma3.py",
     # },
+    "mistral3": {
+        "name": "Mistral-Small-3.2-24B-Instruct-2506",
+        "path": "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
+        "adapter": "hf_mistral3.py",
+        "load_fn": True,
+    },
 }
 
 

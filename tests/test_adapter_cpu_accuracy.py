@@ -161,7 +161,8 @@ def test_manual_path(model_key, load_adapter, unwrap_compiled_blocks, set_rope_d
     adapter_mod = load_adapter(info["adapter"])
     torch_dtype = torch_dtype_for(info)
 
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    tokenizer_path = info.get("tokenizer_path", info["path"])
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     input_ids = tokenizer(PROMPT, return_tensors="pt")["input_ids"]
 
     # Phase 1: HF reference
