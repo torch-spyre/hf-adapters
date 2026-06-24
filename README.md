@@ -14,7 +14,7 @@ from `transformers`.
 
 ## Supported Models
 
-**17 adapters · 31 verified checkpoints · 100+ compatible models**
+**18 adapters · 32 verified checkpoints · 100+ compatible models**
 
 | Adapter | Verified | Also Compatible | Usage |
 |---------|----------|-----------------|-------|
@@ -24,6 +24,7 @@ from `transformers`.
 | hf\_granite\_vision.py | Granite Vision 4.1 4B | — | Generative |
 | hf\_qwen3.py | Qwen3 0.6B, Qwen3-Embedding 0.6B | Qwen3 1.7B, 4B, 8B | Generative + Embedding |
 | hf\_mistral.py | Mistral 7B v0.3, E5-Mistral-7B, Linq-Embed-Mistral, SFR-Embedding-Mistral | Mistral v0.1/v0.2, Instruct variants, Zephyr 7B | Generative + Embedding |
+| hf\_mistral3.py | Mistral Small 3 24B | - | Generative |
 | hf\_phi3.py | Phi-4 mini | Phi-3 mini 4k/128k, Phi-3 small 8k | Generative |
 | hf\_gemma3.py | Gemma 3 1B, EmbeddingGemma 300M | Gemma 3 4B/12B/27B text | Generative + Embedding |
 | hf\_gemma4.py | Gemma 4 12B (fp16) | — | Generative |
@@ -111,6 +112,7 @@ hf_adapters/
 ├── hf_llama.py                 Llama adapter (Llama 1/2/3, Code Llama, Yi, Falcon 3)
 ├── hf_qwen2.py                 Qwen2 adapter (Qwen2, Qwen2.5, Coder, Math)
 ├── hf_mistral.py               Mistral adapter (Mistral 7B v0.1–v0.3)
+├── hf_mistral3.py              Mistral3 adapter (Mistral 3 24B)
 ├── hf_phi3.py                  Phi-4 / Phi-3 adapter
 ├── hf_olmo.py                  OLMo adapter (OLMo 1B, 7B)
 ├── hf_olmo2.py                 OLMo2 adapter (OLMo 2 1B, 7B)
