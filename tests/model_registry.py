@@ -105,13 +105,6 @@ CAUSAL_LM_MODELS = {
         "path": "ministral/Ministral-3B-Instruct",
         "adapter": "hf_mistral.py",
     },
-    # Ministral 3B is gated — requires HF auth. Tested on Spyre pod only.
-    "mistral_ai_ministral": {
-        "name": "Ministral 3B",
-        "path": "mistralai/Ministral-3B-Instruct",
-        "adapter": "hf_mistral.py",
-        "is_gated": True,
-    },
     # hf_olmo.py
     "olmo1b": {
         "name": "OLMo 1B",
