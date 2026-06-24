@@ -43,16 +43,33 @@ jobs:
           pip install -e .
           pip install huggingface_hub tqdm transformers
 
-      - name: Run fetch_top_embedding_models(limit=10) and print result
+#      - name: Run fetch_top_embedding_models(limit=10) and print result
+#        env:
+#          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+#        run: |
+#          set -euo pipefail
+#          OUT="$(mktemp --suffix=.csv)"
+#          PYTHONPATH="utils:${PYTHONPATH:-}" python - <<PY
+#          from fetch_top_embedding_models import fetch_top_embedding_models
+#          fetch_top_embedding_models(limit=10, output_csv="${OUT}")
+#          PY
+#          echo "----- generated CSV (${OUT}) -----"
+#          cat "$OUT"
+#          echo "----- end -----"
+
+      - name: Fetch top 10 generative + embedding models for GHA matrices
+        id: fetch-top-models
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/utils
         run: |
           set -euo pipefail
-          OUT="$(mktemp --suffix=.csv)"
-          PYTHONPATH="utils:${PYTHONPATH:-}" python - <<PY
-          from fetch_top_embedding_models import fetch_top_embedding_models
-          fetch_top_embedding_models(limit=10, output_csv="${OUT}")
-          PY
-          echo "----- generated CSV (${OUT}) -----"
-          cat "$OUT"
-          echo "----- end -----"
+          python .github/scripts/fetch_top_models.py --limit 10
+
+      - name: Print fetched matrices
+        run: |
+          set -euo pipefail
+          echo "----- generative_matrix -----"
+          echo '${{ steps.fetch-top-models.outputs.generative_matrix }}' | python -m json.tool
+          echo "----- embedding_matrix -----"
+          echo '${{ steps.fetch-top-models.outputs.embedding_matrix }}' | python -m json.tool
