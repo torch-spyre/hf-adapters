@@ -213,7 +213,7 @@ jobs:
         model_key:
           # Causal LM
           - qwen3
-          - gemma3
+          - gemma3_unsloth
           - granite8b
           - granite2b
           - granite4
@@ -286,7 +286,7 @@ jobs:
           - qwen3
           - granite8b
           - granite2b
-          - gemma3
+          - gemma3_unsloth
 
           - smollm3
           - tiny_llama
@@ -341,7 +341,7 @@ jobs:
         # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
         model_key:
           - qwen3
-          - gemma3
+          - gemma3_unsloth
           - granite8b
           - granite2b
           - smollm3
