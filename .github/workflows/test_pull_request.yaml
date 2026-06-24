@@ -139,7 +139,7 @@ jobs:
         run: |
           echo "Checking that all adapter files are registered in model_registry.py..."
           python -m pip install --quiet pytest
-          python -m pytest -v tests/test_adapter_coverage.py
+          python -m pytest -v --noconftest tests/test_adapter_coverage.py
           echo "Adapter coverage check passed."
 
 #  cpu-tests:
@@ -213,6 +213,7 @@ jobs:
         model_key:
           # Causal LM
           - qwen3
+          - gemma3
           - granite8b
           - granite2b
           - granite4
@@ -285,6 +286,7 @@ jobs:
           - qwen3
           - granite8b
           - granite2b
+          - gemma3
 
           - smollm3
           - tiny_llama
@@ -339,6 +341,7 @@ jobs:
         # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
         model_key:
           - qwen3
+          - gemma3
           - granite8b
           - granite2b
           - smollm3
