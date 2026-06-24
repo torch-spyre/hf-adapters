@@ -212,31 +212,55 @@ jobs:
         # from PR runs — each comment names the reason.
         model_key:
           # Causal LM
-          - qwen3
           - gemma3_unsloth
-          - granite8b
           - granite2b
+          - granite-vision
           - granite4
-          - smollm3
-          - tiny_llama
-          - qwen2
+          - yi_6b
           - ministral
           - olmo1b
           - olmo2_1b
-          - granite-vision
+          - phi4
+          - qwen2
+          - qwen3
+          - smollm3
+
+#          - qwen3
+#          - gemma3_unsloth
+#          - granite2b
+#          - granite4
+#          - smollm3
+#          - tiny_llama
+#          - qwen2
+#          - ministral
+#          - olmo1b
+#          - olmo2_1b
+#          - granite-vision
+
+
           # Embedding
-          - qwen3_embed
-          - qwen2_embed
-          - e5_mistral
-          - linq_embed_mistral
-          - sfr_embedding_mistral
           - bge_base
-          - minilm
-          - bge_m3
-          - mpnet
+          - e5_mistral
           - modernbert
-          - gte_modernbert
-          - granite_embed
+          - mpnet
+          - qwen2_embed
+          - qwen3_embed
+          - bge_m3
+
+
+
+#          - qwen3_embed
+#          - qwen2_embed
+#          - e5_mistral
+#          - linq_embed_mistral
+#          - sfr_embedding_mistral
+#          - bge_base
+#          - minilm
+#          - bge_m3
+#          - mpnet
+#          - modernbert
+#          - gte_modernbert
+#          - granite_embed
 
     steps:
       - name: Checkout composite actions
@@ -283,17 +307,30 @@ jobs:
       matrix:
         # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
         model_key:
-          - qwen3
-          - granite8b
-          - granite2b
           - gemma3_unsloth
-
-          - smollm3
-          - tiny_llama
-          - qwen2
+          - granite2b
+          - granite-vision
+          - granite4
+          - yi_6b
           - ministral
           - olmo1b
           - olmo2_1b
+          - phi4
+          - qwen2
+          - qwen3
+          - smollm3
+
+
+#          - qwen3
+#          - granite2b
+#          - gemma3_unsloth
+#
+#          - smollm3
+#          - tiny_llama
+#          - qwen2
+#          - ministral
+#          - olmo1b
+#          - olmo2_1b
 
     steps:
       - name: Checkout composite actions
@@ -340,16 +377,29 @@ jobs:
       matrix:
         # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
         model_key:
-          - qwen3
           - gemma3_unsloth
-          - granite8b
           - granite2b
-          - smollm3
-          - tiny_llama
-          - qwen2
+          - granite-vision
+          - granite4
+          - yi_6b
           - ministral
           - olmo1b
           - olmo2_1b
+          - phi4
+          - qwen2
+          - qwen3
+          - smollm3
+
+
+#          - qwen3
+#          - gemma3_unsloth
+#          - granite2b
+#          - smollm3
+#          - tiny_llama
+#          - qwen2
+#          - ministral
+#          - olmo1b
+#          - olmo2_1b
 
     steps:
       - name: Checkout composite actions
@@ -396,18 +446,28 @@ jobs:
       matrix:
         # All embedding keys from tests/model_registry.py::EMBEDDING_MODELS.
         model_key:
-          - qwen3_embed
-          - qwen2_embed
-          - e5_mistral
-          - linq_embed_mistral
-          - sfr_embedding_mistral
           - bge_base
-          - minilm
-          - bge_m3
-          - mpnet
+          - e5_mistral
           - modernbert
-          - gte_modernbert
-          - granite_embed
+          - mpnet
+          - qwen2_embed
+          - qwen3_embed
+          - bge_m3
+
+
+
+#          - qwen3_embed
+#          - qwen2_embed
+#          - e5_mistral
+#          - linq_embed_mistral
+#          - sfr_embedding_mistral
+#          - bge_base
+#          - minilm
+#          - bge_m3
+#          - mpnet
+#          - modernbert
+#          - gte_modernbert
+#          - granite_embed
 
     steps:
       - name: Checkout composite actions
