@@ -107,10 +107,10 @@ CAUSAL_LM_MODELS = {
     },
     # hf_mistral3.py
     "mistral3": {
-       "name": "Mistral-Small-3.2-24B-Instruct-2506",
-       "path": "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
-       "adapter": "hf_mistral3.py",
-       "load_fn": True,
+        "name": "Mistral-Small-3.2-24B-Instruct-2506",
+        "path": "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
+        "adapter": "hf_mistral3.py",
+        "load_fn": True,
     },
     # hf_olmo.py
     "olmo1b": {
@@ -143,7 +143,6 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_gemma4.py",
         "is_gated": True,
     },
-
 }
 
 
