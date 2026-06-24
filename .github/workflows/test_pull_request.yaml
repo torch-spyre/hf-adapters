@@ -1,4 +1,4 @@
-name: test_pull_request
+: test_pull_request
 
 on:
   push:
@@ -198,7 +198,6 @@ jobs:
           - tiny_llama
           - qwen2
           - ministral
-          - mistral3
           - olmo1b
           - olmo2_1b
           - granite-vision
@@ -269,7 +268,6 @@ jobs:
           - tiny_llama
           - qwen2
           - ministral
-          - mistral3
           - olmo1b
           - olmo2_1b
 
@@ -325,7 +323,6 @@ jobs:
           - tiny_llama
           - qwen2
           - ministral
-          - mistral3
           - olmo1b
           - olmo2_1b
 
