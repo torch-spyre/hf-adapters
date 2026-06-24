@@ -119,7 +119,7 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_olmo2.py",
     },
     # hf_gemma3.py
-    "gemma3": {
+    "gemma3_unsloth": {
         "name": "Gemma 3 1B",
         "path": "unsloth/gemma-3-1b-it",
         "adapter": "hf_gemma3.py",
@@ -131,10 +131,11 @@ CAUSAL_LM_MODELS = {
         "is_gated": True,
     },
     # hf_gemma4
-    "gemma4": {
+    "gemma4_google": {
         "name": "Gemma 4 12B",
         "path": "google/gemma-4-12B-it",
         "adapter": "hf_gemma4.py",
+        "is_gated": True,
     },
 }
 
