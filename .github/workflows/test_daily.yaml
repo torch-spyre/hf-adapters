@@ -5,8 +5,6 @@ on:
     # Runs at 06:00 UTC every day
     - cron: "0 6 * * *"
   workflow_dispatch:
-    # Manual triggers only — no push/pull_request/merge_group. The PR workflow
-    # (test_pull_request.yaml) gates merges; this one is the scheduled daily.
     inputs:
       torch_spyre_ref:
         description: Branch, tag, or SHA of torch-spyre to check out and test
@@ -83,18 +81,79 @@ env:
   CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
   STORAGE_1_DIR: /storage-1/hf-adapters
   HF_HOME: /storage-1/hf-adapters/.cache/huggingface
-  # Single source of truth for the set of models exercised by the CPU
-  # test matrix's `-k` filter. PR is the fast smoke — qwen3 (causal LM) and
-  # bge_base (embedding) on CPU; the same bge_base runs on the Spyre
-  # embed-compare matrix below so CPU and hardware embedding coverage stay
-  # aligned. Daily and weekly cover the broader model set.
-  # Invariant: every model_key used in a Spyre matrix below must have its
-  # substring present here so CPU sanity-checks anything that runs on hardware.
-  MODELS_FILTER: "qwen3 or bge_base"
 
 jobs:
+  pre-commit:
+    name: pre-commit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run pre-commit
+        uses: pre-commit/action@v3.0.1
+        with:
+          # Skip the local mypy hook — it requires the project venv with
+          # torch/transformers installed, which we don't set up in this lint job.
+          extra_args: --all-files --hook-stage commit --show-diff-on-failure
+        env:
+          SKIP: mypy
+
+  # ===========================================================================
+  # Dynamic matrix generation
+  #
+  # This job generates test matrices dynamically from tests/model_registry.py
+  # using the select_representative_models() function. This ensures that:
+  # 1. The CI automatically tests new adapters added to CONFIG_TO_ADAPTER_MODULE_MAPPING
+  # 2. We maintain a single source of truth for model selection
+  # 3. Manual exclusions can be specified below (e.g., for temporarily broken models)
+  #
+  # To exclude models from all test matrices, add them to the --exclude list below.
+  # ===========================================================================
+  generate-matrix:
+    name: Generate test matrices
+    runs-on: ubuntu-latest
+    outputs:
+      causal_matrix: ${{ steps.generate.outputs.causal_matrix }}
+      embed_matrix: ${{ steps.generate.outputs.embed_matrix }}
+      combined_matrix: ${{ steps.generate.outputs.combined_matrix }}
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install transformers torch
+
+      - name: Generate matrices
+        id: generate
+        run: |
+          # Manually exclude models here by adding them to --exclude
+          # Example: python .github/scripts/generate_test_matrix.py --exclude granite-vision phi4
+
+          # We exclude these models - See https://github.com/torch-spyre/hf-adapters/issues/89
+          python .github/scripts/generate_test_matrix.py --exclude granite-vision granite4 mistral3 falcon3
+
   spyre-edge-cases-tests:
-    name: Spyre edge cases (${{ matrix.model_key }} / ${{ matrix.test_file }})
+    name: Spyre load (${{ matrix.model_key }})
+    needs: [generate-matrix]
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -103,30 +162,11 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      # Cap concurrent edge-case cells so the 9 x 19 = 171-cell fan-out
-      # doesn't swamp the shared spyre_pf_x1__pvc_1tb_x1 pool. Surplus cells
-      # queue inside Actions until a slot frees up.
-      max-parallel: 16
       matrix:
-        # Same causal-LM matrix as smoke / token-compare. The edge-case suite
-        # under tests/spyre/edge_cases/ uses the same AutoSpyreModelForCausalLM
-        # driver, so multimodal / unsupported entries (granite-vision, gemma4,
-        # phi4) are excluded for the same reasons.
-        model_key:
-          - qwen3
-          - granite8b
-          - granite2b
-          - smollm3
-          - tiny_llama
-          - qwen2
-          - ministral
-          - olmo1b
-          - olmo2_1b
-        # One matrix cell per file in tests/spyre/edge_cases/. Each cell runs
-        # in its own pytest process so a crash, hang, or state leak in one
-        # case can't poison the rest, and each case has its own status check.
-        # When adding a new test_*.py under tests/spyre/edge_cases/, append it
-        # here.
+        # Dynamic matrix: all causal-LM and embedding models from tests/model_registry.py
+        # Generated by select_representative_models() - one model per adapter
+        # To exclude models, add them to the --exclude list in the generate-matrix job
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.combined_matrix) }}
         test_file:
           - test_eos_first_of_second_block_spyre.py
           - test_eos_first_token_spyre.py
@@ -179,26 +219,3 @@ jobs:
           echo "Running tests/spyre/edge_cases/${{ matrix.test_file }} for ${{ matrix.model_key }}..."
           uv run pytest -s -vvv "tests/spyre/edge_cases/${{ matrix.test_file }}" -k "${{ matrix.model_key }}" --run-slow
           echo "tests done"
-
-  # ===========================================================================
-  # Required check gate — fans in all matrix jobs so a single branch
-  # protection rule ("tests / run spyre unit tests") passes only when every
-  # suite passes.
-  # ===========================================================================
-  run-spyre-unit-tests:
-    name: run spyre unit tests
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
-    needs:
-      - spyre-edge-cases-tests
-    if: always()
-    steps:
-      - name: Check all suites passed
-        run: |-
-          if ${{ contains(needs.spyre-edge-cases-tests.result, 'failure') || contains(needs.spyre-edge-cases-tests.result, 'cancelled') }}; then
-            echo "One or more test suites failed."
-            exit 1
-          fi
-          echo "All test suites passed."
