@@ -12,7 +12,7 @@ Every adapter applies the following transformations via shared utilities in `hf_
 |--------|------------------|---------------|
 | **RoPE** | Computed on-the-fly per layer, element-wise sin/cos | Precomputed rotation matrices `[S, 2, 2, D/2]` on CPU, applied via matrix multiplication |
 | **RMSNorm / LayerNorm** | Casts to float32 for numerical stability, then back | Stays in fp16 on Spyre (no dtype conversion allowed); uses float32 on CPU only |
-| **LM head** | Original vocab dimension | Zero-padded to stick-aligned size (multiple of 64 + buffer) |
+| **LM head** | Original vocab dimension | Zero-padded to a stick-aligned, "smooth" vocab whose stick count has no large prime factor, so the per-core matmul span fits Spyre's 256 MB EAR limit (`pad_lm_head`) |
 | **KV cache** | Dynamic, append-based (`DynamicCache`) | Pre-allocated at full size, written at a specific offset via native slice assignment (`cache[:, :, pos:pos+seq_len, :] = k`) |
 | **Layer compilation** | Not compiled for inference | Each decoder layer compiled independently via `torch.compile(dynamic=False)` |
 | **Generation loop** | 1 token per decode iteration | 64-token padded blocks: prefill → expand by 64 → fill 63 tokens → repeat |
@@ -122,7 +122,7 @@ Every adapter applies the following transformations via shared utilities in `hf_
 | **Fused gate\_up splitting** | Splits combined `gate_up_proj` into separate `gate_proj` and `up_proj` at prepare time |
 | **Partial RoPE** | Only rotates `partial_rotary_factor` of head\_dim (e.g., 0.75). Pads rotation matrix with identity entries so non-rotated dimensions pass through unchanged |
 | **RoPE dimension permutation** | HF pairs `(j, j+rope_dim//2)` but Spyre's `apply_rope_matmul` pairs `(j, j+head_dim//2)`. Builds and applies permutation to Q/K weights at prepare time |
-| **Chunked LM head** | Vocab > 200K exceeds Spyre's 256 MB EAR limit. Splits lm\_head into 8 chunks; each runs on Spyre, result moved to CPU, concatenated |
+| **Chunked LM head** | Fallback (`chunk_lm_head`, currently unused) for when even a smooth-padded single head can't fit the 256 MB EAR limit: splits lm\_head into N chunks run separately on Spyre and concatenated on CPU. Not needed by any current model — smooth `pad_lm_head` handles 200K–262K vocab in one head |
 
 **Shared with Granite 4.0:** The concept of fused weight splitting is shared, though the specific weights differ (QKV + gate\_up vs. input\_linear).
 
@@ -185,7 +185,6 @@ Every adapter applies the following transformations via shared utilities in `hf_
 | Per-head Q/K norm | — | — | — | ✓ | — | — | — | — | — | — | ✓ |
 | Fused weight splitting | — | — | — | — | — | — | ✓ (MLP) | ✓ (QKV+MLP) | — | — | — |
 | Partial RoPE | — | — | — | — | — | — | — | ✓ | — | — | — |
-| Chunked LM head | — | — | — | — | — | — | — | ✓ | — | — | — |
 | Conditional RoPE (NoPE) | — | — | — | — | — | — | — | — | ✓ | — | — |
 | Post-norm architecture | — | — | — | — | — | — | — | — | — | — | ✓ |
 | Weight-free LayerNorm | — | — | — | — | — | — | — | — | — | ✓ | — |

@@ -15,6 +15,6 @@ Stack) `eager_spyre` compilation path.
 | Weight loading | FMS serialization | HF `from_pretrained` then `.to("spyre")` |
 | Partial RoPE | Not supported | Identity-padded rotation matrices (`PartialPrecomputedRotaryEmbedding`) |
 | Fused weights | N/A | Split at prepare time (QKV, gate+up) |
-| Large vocab | N/A | Chunked LM head (8 chunks) |
+| Large vocab | N/A | `pad_lm_head()` pads to a smooth stick count (single head fits the 256 MB EAR limit; `chunk_lm_head` is an unused fallback) |
 | Sub-stick head_dim | Not supported | `pad_attention_heads()` zero-pads Q/K/V/O and RoPE freqs |
 | Maintenance | Requires FMS fork | No fork; runtime monkey-patches on stock HF |
