@@ -93,7 +93,7 @@ env:
   # aligned. Daily and weekly cover the broader model set.
   # Invariant: every model_key used in a Spyre matrix below must have its
   # substring present here so CPU sanity-checks anything that runs on hardware.
-  MODELS_FILTER: "qwen3 or bge_base"
+  # MODELS_FILTER: "qwen3 or bge_base"
 
 jobs:
   pre-commit:
@@ -163,6 +163,28 @@ jobs:
 
           # We exclude these models - See https://github.com/torch-spyre/hf-adapters/issues/89
           python .github/scripts/generate_test_matrix.py --exclude granite-vision granite4 mistral3 falcon3
+
+  adapter-coverage:
+    name: adapter coverage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run adapter coverage test
+        run: |
+          echo "Checking that all adapter files are registered in model_registry.py..."
+          python -m pip install --quiet pytest
+          python -m pytest -v --noconftest tests/test_adapter_coverage.py
+          echo "Adapter coverage check passed."
 
 #  cpu-tests:
 #    name: CPU tests (${{ matrix.test_file }})
@@ -425,6 +447,7 @@ jobs:
     needs:
       - pre-commit
       - generate-matrix
+      - adapter-coverage
 #      - cpu-tests
       - spyre-load-tests
       - spyre-smoke-tests
@@ -441,6 +464,7 @@ jobs:
         run: |-
           if ${{ contains(needs.pre-commit.result, 'failure') || contains(needs.pre-commit.result, 'cancelled') ||
                  contains(needs.generate-matrix.result, 'failure') || contains(needs.generate-matrix.result, 'cancelled') ||
+                 contains(needs.adapter-coverage.result, 'failure') || contains(needs.adapter-coverage.result, 'cancelled') ||
                  contains(needs.spyre-load-tests.result, 'failure') || contains(needs.spyre-load-tests.result, 'cancelled') ||
                  contains(needs.spyre-smoke-tests.result, 'failure') || contains(needs.spyre-smoke-tests.result, 'cancelled') ||
                  contains(needs.spyre-token-compare-tests.result, 'failure') || contains(needs.spyre-token-compare-tests.result, 'cancelled') ||
