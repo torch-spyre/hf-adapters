@@ -341,7 +341,7 @@ jobs:
           # Currently disabled - see https://github.com/torch-spyre/hf-adapters/issues/89
 #          - granite-vision
          # Currently disabled - see https://github.com/torch-spyre/hf-adapters/issues/89
-          - granite4
+          # - granite4
           - yi_6b
           - ministral
           # Currently disabled - see https://github.com/torch-spyre/hf-adapters/issues/89
