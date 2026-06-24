@@ -162,7 +162,7 @@ jobs:
           # Example: python .github/scripts/generate_test_matrix.py --exclude granite-vision phi4
 
           # We exclude these models - See https://github.com/torch-spyre/hf-adapters/issues/89
-          python .github/scripts/generate_test_matrix.py --exclude granite-vision granite4 mistral3
+          python .github/scripts/generate_test_matrix.py --exclude granite-vision granite4 mistral3 falcon3
 
 #  cpu-tests:
 #    name: CPU tests (${{ matrix.test_file }})
