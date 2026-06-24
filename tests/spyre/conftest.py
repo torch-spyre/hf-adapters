@@ -38,5 +38,6 @@ if _TESTS_DIR not in sys.path:
 
 import model_registry  # noqa: E402
 
-model_registry.CAUSAL_KEYS = list(model_registry.CAUSAL_LM_MODELS.keys())
-model_registry.EMBED_KEYS = list(model_registry.EMBEDDING_MODELS.keys())
+model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
+    model_registry.select_representative_models()
+)
