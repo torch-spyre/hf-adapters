@@ -198,6 +198,7 @@ jobs:
           - tiny_llama
           - qwen2
           - ministral
+          - mistral3
           - olmo1b
           - olmo2_1b
           - granite-vision
@@ -268,6 +269,7 @@ jobs:
           - tiny_llama
           - qwen2
           - ministral
+          - mistral3
           - olmo1b
           - olmo2_1b
 
@@ -323,6 +325,7 @@ jobs:
           - tiny_llama
           - qwen2
           - ministral
+          - mistral3
           - olmo1b
           - olmo2_1b
 

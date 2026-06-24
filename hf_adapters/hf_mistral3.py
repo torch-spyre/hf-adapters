@@ -38,48 +38,14 @@ import torch
 
 from hf_adapters.hf_common import (
     DEVICE,
-    chunk_lm_head,
+    pad_lm_head,
     prepare_standard_gqa,
     standard_gqa_backbone_forward,
+    standard_gqa_forward,
 )
 
-# _run_forward = standard_gqa_forward
+_run_forward = standard_gqa_forward
 _run_backbone_forward = standard_gqa_backbone_forward
-
-
-def _run_forward(
-    model,
-    input_ids,
-    position_ids,
-    attn_mask,
-    key_caches,
-    value_caches,
-    is_filling,
-    token_index,
-    cache_position,
-):
-    """Mistral Small causal-LM forward: backbone + chunked LM head."""
-    h = _run_backbone_forward(
-        model,
-        input_ids,
-        position_ids,
-        attn_mask,
-        key_caches,
-        value_caches,
-        is_filling,
-        token_index,
-        cache_position,
-    )
-
-    # Chunked LM head: large vocab (131K+) exceeds Spyre's per-core 256MB limit.
-    # Split into N chunks, run each on Spyre, cat on CPU.
-    logits_parts = []
-    for lm_chunk, real_sz in zip(
-        model._spyre_lm_head_chunks, model._spyre_lm_chunk_sizes
-    ):
-        logits_parts.append(lm_chunk(h).to("cpu")[..., :real_sz])
-    logits = torch.cat(logits_parts, dim=-1)
-    return logits
 
 
 def load_hf_model(model_path, dtype):
@@ -169,6 +135,6 @@ def prepare_for_spyre(model):
 
     prepare_standard_gqa(model, MistralRMSNorm)
 
-    # Mistral Small has a large vocab (131K+) that exceeds Spyre's 256MB per-core
-    # limit when the LM head is not chunked. Split it into 8 chunks.
-    chunk_lm_head(model, num_chunks=8)
+    # Mistral Small has a large vocab (131K+). Pad the LM head to a smooth stick
+    # boundary to fit within Spyre's 256MB per-core limit.
+    pad_lm_head(model)
