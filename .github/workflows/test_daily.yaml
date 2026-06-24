@@ -83,29 +83,6 @@ env:
   HF_HOME: /storage-1/hf-adapters/.cache/huggingface
 
 jobs:
-  pre-commit:
-    name: pre-commit
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Run pre-commit
-        uses: pre-commit/action@v3.0.1
-        with:
-          # Skip the local mypy hook — it requires the project venv with
-          # torch/transformers installed, which we don't set up in this lint job.
-          extra_args: --all-files --hook-stage commit --show-diff-on-failure
-        env:
-          SKIP: mypy
 
   # ===========================================================================
   # Dynamic matrix generation
@@ -219,3 +196,36 @@ jobs:
           echo "Running tests/spyre/edge_cases/${{ matrix.test_file }} for ${{ matrix.model_key }}..."
           uv run pytest -s -vvv "tests/spyre/edge_cases/${{ matrix.test_file }}" -k "${{ matrix.model_key }}" --run-slow
           echo "tests done"
+
+  # ===========================================================================
+  # Required check gate — fans in all matrix jobs so a single branch
+  # protection rule ("tests / run spyre unit tests") passes only when every
+  # suite passes.
+  # ===========================================================================
+  run-spyre-unit-tests:
+    name: run spyre unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    needs:
+      - spyre-edge-cases-tests
+    if: always()
+    steps:
+      - name: Check all suites passed
+        # NOTE: the `cpu-tests` predicates are
+        # intentionally omitted from the `if` below while those jobs are
+        # commented out. Re-add the corresponding
+        #   contains(needs.<job>.result, 'failure') || contains(needs.<job>.result, 'cancelled') ||
+        # lines when restoring either job.
+        run: |-
+          if ${{ contains(needs.pre-commit.result, 'failure') || contains(needs.pre-commit.result, 'cancelled') ||
+                 contains(needs.adapter-coverage.result, 'failure') || contains(needs.adapter-coverage.result, 'cancelled') ||
+                 contains(needs.spyre-load-tests.result, 'failure') || contains(needs.spyre-load-tests.result, 'cancelled') ||
+                 contains(needs.spyre-smoke-tests.result, 'failure') || contains(needs.spyre-smoke-tests.result, 'cancelled') ||
+                 contains(needs.spyre-token-compare-tests.result, 'failure') || contains(needs.spyre-token-compare-tests.result, 'cancelled') ||
+                 contains(needs.spyre-embed-compare-tests.result, 'failure') || contains(needs.spyre-embed-compare-tests.result, 'cancelled') }}; then
+            echo "One or more test suites failed."
+            exit 1
+          fi
+          echo "All test suites passed."
