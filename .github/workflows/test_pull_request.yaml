@@ -225,19 +225,6 @@ jobs:
           - qwen3
           - smollm3
 
-#          - qwen3
-#          - gemma3_unsloth
-#          - granite2b
-#          - granite4
-#          - smollm3
-#          - tiny_llama
-#          - qwen2
-#          - ministral
-#          - olmo1b
-#          - olmo2_1b
-#          - granite-vision
-
-
           # Embedding
           - bge_base
           - e5_mistral
@@ -246,21 +233,6 @@ jobs:
           - qwen2_embed
           - qwen3_embed
           - bge_m3
-
-
-
-#          - qwen3_embed
-#          - qwen2_embed
-#          - e5_mistral
-#          - linq_embed_mistral
-#          - sfr_embedding_mistral
-#          - bge_base
-#          - minilm
-#          - bge_m3
-#          - mpnet
-#          - modernbert
-#          - gte_modernbert
-#          - granite_embed
 
     steps:
       - name: Checkout composite actions
@@ -305,7 +277,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
         model_key:
           - gemma3_unsloth
           - granite2b
@@ -319,19 +290,6 @@ jobs:
           - qwen2
           - qwen3
           - smollm3
-
-
-#          - qwen3
-#          - granite2b
-#          - gemma3_unsloth
-#
-#          - smollm3
-#          - tiny_llama
-#          - qwen2
-#          - ministral
-#          - olmo1b
-#          - olmo2_1b
-
     steps:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -375,11 +333,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # All causal-LM keys from tests/model_registry.py::CAUSAL_LM_MODELS.
         model_key:
           - gemma3_unsloth
           - granite2b
-          - granite-vision
+          # Currently disabled - see https://github.com/torch-spyre/hf-adapters/issues/90
+#          - granite-vision
+         # Currently disabled - see https://github.com/torch-spyre/hf-adapters/issues/89
           - granite4
           - yi_6b
           - ministral
@@ -389,18 +348,6 @@ jobs:
           - qwen2
           - qwen3
           - smollm3
-
-
-#          - qwen3
-#          - gemma3_unsloth
-#          - granite2b
-#          - smollm3
-#          - tiny_llama
-#          - qwen2
-#          - ministral
-#          - olmo1b
-#          - olmo2_1b
-
     steps:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -444,7 +391,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # All embedding keys from tests/model_registry.py::EMBEDDING_MODELS.
         model_key:
           - bge_base
           - e5_mistral
@@ -453,22 +399,6 @@ jobs:
           - qwen2_embed
           - qwen3_embed
           - bge_m3
-
-
-
-#          - qwen3_embed
-#          - qwen2_embed
-#          - e5_mistral
-#          - linq_embed_mistral
-#          - sfr_embedding_mistral
-#          - bge_base
-#          - minilm
-#          - bge_m3
-#          - mpnet
-#          - modernbert
-#          - gte_modernbert
-#          - granite_embed
-
     steps:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
