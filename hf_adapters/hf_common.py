@@ -209,6 +209,50 @@ def set_rope_dtype(model, dtype: torch.dtype) -> None:
             r.set_dtype(dtype)
 
 
+def _rope_cache_len(model) -> int:
+    """Length to pre-build the RoPE rotation cache to (>= any decode position).
+
+    Prefer the model's declared context window; fall back to the
+    ``PrecomputedRotaryEmbedding`` default (2048) when no config value is found.
+    """
+    cfg = model.config
+    candidates = []
+    # Multimodal configs keep the text context window on a nested text_config.
+    for obj in (cfg, getattr(cfg, "text_config", None)):
+        if obj is None:
+            continue
+        for attr in ("max_position_embeddings", "n_positions", "max_seq_len"):
+            v = getattr(obj, attr, None)
+            if isinstance(v, int) and v > 0:
+                candidates.append(v)
+    return max(candidates) if candidates else 2048
+
+
+def prebuild_rope_cache(model) -> None:
+    """Build the precomputed RoPE rotation cache on CPU, before moving to Spyre.
+
+    ``PrecomputedRotaryEmbedding`` builds its rotation-matrix cache lazily on the
+    first ``forward``. On Spyre that first call happens *during* a compiled
+    device forward, where the cache-construction ops (``arange``/``outer``/
+    ``cos``/``sin``/``cat``) get pulled into the graph and silently corrupt the
+    result — small GPT-NeoX/Pythia models produce wrong logits from the first
+    token. Building the cache here, while still on CPU, keeps those ops out of
+    the device graph; ``forward``'s ``_extend_cache`` then early-returns on Spyre
+    and only indexes + transfers the prebuilt cache.
+
+    Pre-extends to the model's full context length so ``forward`` never triggers
+    an on-device rebuild mid-generation (which would re-introduce the bug).
+    """
+    rope = getattr(model, "_spyre_rope", None)
+    if rope is None:
+        return
+    target_len = _rope_cache_len(model)
+    ropes = rope.values() if isinstance(rope, dict) else [rope]
+    for r in ropes:
+        if hasattr(r, "_extend_cache"):
+            r._extend_cache(target_len)
+
+
 class InvFreqShim(nn.Module):
     """Minimal ``original_rope`` stand-in for ``PrecomputedRotaryEmbedding``.
 
@@ -1077,6 +1121,11 @@ def _move_to_spyre_with_layout(model, dtype):
     # apply_rope_matmul when dtype != fp16). Done before the CPU early-return so
     # both the CPU and Spyre paths get it.
     set_rope_dtype(model, dtype)
+
+    # Build the RoPE rotation cache on CPU now, before any device move. If left
+    # to its lazy first-forward build, the construction ops run inside the Spyre
+    # graph and corrupt the result (see prebuild_rope_cache). Harmless on CPU.
+    prebuild_rope_cache(model)
 
     if torch.device(DEVICE).type != "spyre":
         model.to(dtype=dtype)
