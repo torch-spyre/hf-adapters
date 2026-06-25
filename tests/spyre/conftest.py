@@ -21,8 +21,8 @@ the CPU accuracy tests can run on a laptop), this conftest leaves the real
 kernels are exercised.
 
 The parent conftest detects a Spyre-targeted invocation via ``sys.argv`` and
-skips its patch block; we then populate ``model_registry.CAUSAL_KEYS`` /
-``EMBED_KEYS`` ourselves by calling ``select_representative_models()``, which
+skips its patch block; we then populate ``model_registry.CAUSAL_PATHS`` /
+``EMBED_PATHS`` ourselves by calling ``select_representative_models()``, which
 collapses the registries to one representative model per adapter module. The
 CI matrix in ``.github/workflows/test_pull_request.yaml`` must list only keys
 that survive this selection — any matrix entry whose key isn't a chosen
@@ -40,6 +40,6 @@ if _TESTS_DIR not in sys.path:
 
 import model_registry  # noqa: E402
 
-model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
+model_registry.CAUSAL_PATHS, model_registry.EMBED_PATHS = (
     model_registry.select_representative_models()
 )

@@ -23,6 +23,29 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM
 
 
+def resolve_adapter(model_path):
+    """Return (adapter_module, adapter_module_name) for a checkpoint.
+
+    Uses the same config -> adapter mapping as auto_spyre_model. Raises if the
+    config can't be loaded or isn't mapped.
+    """
+    from transformers import AutoConfig
+
+    from hf_adapters.auto_spyre_model import CONFIG_TO_ADAPTER_MODULE_MAPPING
+    from hf_adapters.hf_common import assert_spyre_dimensions
+
+    config = AutoConfig.from_pretrained(model_path)
+    module = CONFIG_TO_ADAPTER_MODULE_MAPPING.get(type(config))
+    if module is None:
+        raise RuntimeError(f"config {type(config).__name__} not in adapter mapping")
+    # Pre-screen stick-(mis)aligned dimensions so unrunnable tiny fixtures are
+    # recorded as a clean SpyreUnsupportedModelError instead of a deep
+    # InductorError surfaced from the compiler. Mirrors auto_spyre_model.
+    assert_spyre_dimensions(config, model_name=str(model_path))
+    name = module.__name__.split(".")[-1]
+    return module, name
+
+
 def torch_dtype_for(info):
     """Map a registry entry's ``dtype`` field to a torch dtype.
 

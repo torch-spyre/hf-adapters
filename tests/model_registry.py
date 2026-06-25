@@ -324,7 +324,7 @@ def _parse_size(size_str):
 
 def select_representative_models(config_mapping=None):
     """
-    Programmatically select one representative model per adapter module.
+    Programmatically select one representative model path per adapter module.
 
     Analyzes CONFIG_TO_ADAPTER_MODULE_MAPPING and selects one model per adapter
     from the registries above. Prefers smaller models for faster test execution.
@@ -334,7 +334,7 @@ def select_representative_models(config_mapping=None):
                        If None, will be imported from hf_adapters.auto_spyre_model.
 
     Returns:
-        tuple: (causal_keys, embed_keys) where each is a list of model keys
+        tuple: (causal_paths, embed_paths) where each is a list of model keys
     """
     # Import here to avoid issues with conftest.py patching
     if config_mapping is None:
@@ -373,9 +373,9 @@ def select_representative_models(config_mapping=None):
                 adapter_to_embed_keys[adapter] = []
             adapter_to_embed_keys[adapter].append(key)
 
-    # Select one representative per adapter for causal LM
+    # Select one representative *path* per adapter for causal LM
     # Prefer smaller models (by size field) for faster tests
-    causal_keys = []
+    causal_paths = []
     for adapter in sorted(adapter_modules_in_config):
         if adapter in adapter_to_causal_keys:
             keys = adapter_to_causal_keys[adapter]
@@ -387,11 +387,11 @@ def select_representative_models(config_mapping=None):
                     k,  # Then by key name for consistency
                 ),
             )
-            causal_keys.append(sorted_keys[0])
+            causal_paths.append(sorted_keys[0]["path"])
 
     # Select one representative per adapter for embeddings
     # Prefer smaller models (by size field) for faster tests
-    embed_keys = []
+    embed_paths = []
     for adapter in sorted(adapter_modules_in_config):
         if adapter in adapter_to_embed_keys:
             keys = adapter_to_embed_keys[adapter]
@@ -403,14 +403,14 @@ def select_representative_models(config_mapping=None):
                     k,  # Then by key name for consistency
                 ),
             )
-            embed_keys.append(sorted_keys[0])
+            embed_paths.append(sorted_keys[0]["path"])
 
-    return causal_keys, embed_keys
+    return causal_paths, embed_paths
 
 
 # Defer initialization until after conftest.py has patched hf_adapters
 # These will be populated by conftest.py after it sets up the patched modules
-CAUSAL_KEYS = []
-EMBED_KEYS = []
+CAUSAL_PATHS = []
+EMBED_PATHS = []
 
 # Made with Bob

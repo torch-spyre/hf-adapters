@@ -101,10 +101,10 @@ if not _TARGETS_SPYRE:
     setattr(_pkg, "auto_spyre_model", _auto_mod)
 
     # Now that auto_spyre_model is loaded with patched hf_common, populate the model lists
-    # Import model_registry here (after patching) and update its CAUSAL_KEYS/EMBED_KEYS
+    # Import model_registry here (after patching) and update its CAUSAL_PATHS/EMBED_PATHS
     import model_registry  # noqa: E402
 
-    model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
+    model_registry.CAUSAL_PATHS, model_registry.EMBED_PATHS = (
         model_registry.select_representative_models(
             _auto_mod.CONFIG_TO_ADAPTER_MODULE_MAPPING
         )
