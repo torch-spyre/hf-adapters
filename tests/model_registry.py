@@ -30,18 +30,21 @@ CAUSAL_LM_MODELS = {
         "name": "GPT-2 124M",
         "path": "gpt2",
         "adapter": "hf_gpt2.py",
+        "size": "0.1b",
     },
     # hf_gpt_neo.py
     "gpt_neo": {
         "name": "GPT-Neo 125M",
         "path": "EleutherAI/gpt-neo-125m",
         "adapter": "hf_gpt_neo.py",
+        "size": "0.1b",
     },
     # hf_gpt_neox.py
     "pythia_410m": {
         "name": "Pythia 410M",
         "path": "EleutherAI/pythia-410m",
         "adapter": "hf_gpt_neox.py",
+        "size": "0.4b",
     },
     # hf_granite.py
     "granite8b": {
