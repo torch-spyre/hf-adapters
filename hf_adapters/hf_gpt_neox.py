@@ -281,10 +281,8 @@ def prepare_for_spyre(model):
     rope_perm = rope_dim_permutation(hd, rope_dim) if rope_dim != hd else None
 
     # Build PrecomputedRotaryEmbedding with identity padding for non-rotated dims.
-    # Pass orig_head_dim so the zero-padded lanes carry real rotations instead of
-    # identity (output-neutral; avoids a Spyre mis-lowering for small Pythia).
     model._spyre_rope = PrecomputedRotaryEmbedding(
-        bb.rotary_emb, padded_head_dim=work_hd, orig_head_dim=hd
+        bb.rotary_emb, padded_head_dim=work_hd
     )
 
     # GPT-NeoX names its output projection ``embed_out`` (not ``lm_head``);
