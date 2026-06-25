@@ -303,22 +303,20 @@ jobs:
       run:
         working-directory: .
     needs:
-      - spyre-edge-cases-tests
+      - pre-commit
+      - generate-matrix
+      - spyre-edge-cases-eos-tests
+      - spyre-edge-cases-block-tests
+      - spyre-edge-cases-misc-tests
     if: always()
     steps:
       - name: Check all suites passed
-        # NOTE: the `cpu-tests` predicates are
-        # intentionally omitted from the `if` below while those jobs are
-        # commented out. Re-add the corresponding
-        #   contains(needs.<job>.result, 'failure') || contains(needs.<job>.result, 'cancelled') ||
-        # lines when restoring either job.
         run: |-
           if ${{ contains(needs.pre-commit.result, 'failure') || contains(needs.pre-commit.result, 'cancelled') ||
-                 contains(needs.adapter-coverage.result, 'failure') || contains(needs.adapter-coverage.result, 'cancelled') ||
-                 contains(needs.spyre-load-tests.result, 'failure') || contains(needs.spyre-load-tests.result, 'cancelled') ||
-                 contains(needs.spyre-smoke-tests.result, 'failure') || contains(needs.spyre-smoke-tests.result, 'cancelled') ||
-                 contains(needs.spyre-token-compare-tests.result, 'failure') || contains(needs.spyre-token-compare-tests.result, 'cancelled') ||
-                 contains(needs.spyre-embed-compare-tests.result, 'failure') || contains(needs.spyre-embed-compare-tests.result, 'cancelled') }}; then
+                 contains(needs.generate-matrix.result, 'failure') || contains(needs.generate-matrix.result, 'cancelled') ||
+                 contains(needs.spyre-edge-cases-eos-tests.result, 'failure') || contains(needs.spyre-edge-cases-eos-tests.result, 'cancelled') ||
+                 contains(needs.spyre-edge-cases-block-tests.result, 'failure') || contains(needs.spyre-edge-cases-block-tests.result, 'cancelled') ||
+                 contains(needs.spyre-edge-cases-misc-tests.result, 'failure') || contains(needs.spyre-edge-cases-misc-tests.result, 'cancelled') }}; then
             echo "One or more test suites failed."
             exit 1
           fi
