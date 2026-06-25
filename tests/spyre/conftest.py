@@ -22,10 +22,12 @@ kernels are exercised.
 
 The parent conftest detects a Spyre-targeted invocation via ``sys.argv`` and
 skips its patch block; we then populate ``model_registry.CAUSAL_KEYS`` /
-``EMBED_KEYS`` ourselves with the *full* registries. CI shards one job per
-``model_key`` and uses ``-k <key>`` to select it, so collapsing to one model
-per adapter (as ``select_representative_models`` does for local pytest runs)
-would silently deselect every job whose key wasn't the chosen representative.
+``EMBED_KEYS`` ourselves by calling ``select_representative_models()``, which
+collapses the registries to one representative model per adapter module. The
+CI matrix in ``.github/workflows/test_pull_request.yaml`` must list only keys
+that survive this selection — any matrix entry whose key isn't a chosen
+representative will collect 0 tests (all parametrized items deselected by
+``-k <key>``).
 """
 
 import os
@@ -38,5 +40,6 @@ if _TESTS_DIR not in sys.path:
 
 import model_registry  # noqa: E402
 
-model_registry.CAUSAL_KEYS = list(model_registry.CAUSAL_LM_MODELS.keys())
-model_registry.EMBED_KEYS = list(model_registry.EMBEDDING_MODELS.keys())
+model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
+    model_registry.select_representative_models()
+)
