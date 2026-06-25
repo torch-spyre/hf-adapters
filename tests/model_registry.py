@@ -25,17 +25,20 @@ automatically cover them by selecting one representative model per adapter.
 
 # Model registries - shared by all tests
 CAUSAL_LM_MODELS = {
+    # hf_gpt2.py
     "gpt2": {
         "name": "GPT-2 124M",
         "path": "gpt2",
         "adapter": "hf_gpt2.py",
     },
+    # hf_gpt_neo.py
     "gpt_neo": {
         "name": "GPT-Neo 125M",
         "path": "EleutherAI/gpt-neo-125m",
         "adapter": "hf_gpt_neo.py",
     },
-    "gpt_neox": {
+    # hf_gpt_neox.py
+    "pythia_70m": {
         "name": "Pythia 70M",
         "path": "EleutherAI/pythia-70m",
         "adapter": "hf_gpt_neox.py",
