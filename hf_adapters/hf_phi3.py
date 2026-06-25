@@ -239,8 +239,11 @@ def prepare_for_spyre(model):
 
     # RoPE with identity padding: pads the rotation matrix to work_hd//2 so the
     # zero-padded Q/K dims (partial rotary and/or stick padding) pass through.
+    # orig_head_dim fills the zero-padded lanes with real rotations instead of
+    # identity (output-neutral). A no-op for Phi-3.5-mini (its zero region is
+    # small), but kept consistent with the gpt_neox padded path.
     model._spyre_rope = PrecomputedRotaryEmbedding(
-        get_backbone(model).rotary_emb, padded_head_dim=work_hd
+        get_backbone(model).rotary_emb, padded_head_dim=work_hd, orig_head_dim=hd
     )
     patch_rmsnorm(Phi3RMSNorm)
 

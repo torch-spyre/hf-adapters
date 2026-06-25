@@ -132,12 +132,39 @@ class PrecomputedRotaryEmbedding(nn.Module):
     the rotation matrix is padded with identity entries so that
     ``apply_rope_matmul`` on the full padded head_dim passes through
     non-rotated dimensions unchanged.
+
+    Pass ``orig_head_dim`` (the unpadded head_dim) to work around a Spyre
+    issue: a rotation cache with only a few real rotations followed by a
+    large block of identity entries is mis-lowered, producing wrong logits
+    (small Pythia models go from matching CPU to completely diverging).
+
+    The padded cache has three regions, indexed by lane in the
+    ``[2, padded_half]`` layout that ``apply_rope_matmul`` works on:
+
+      * ``[0 : rope_half]`` — the real rotations.
+      * ``[rope_half : orig_half]`` — identity, multiplying the non-rotated
+        (pass-through) q/k dimensions of partial RoPE. These carry real data.
+      * ``[orig_half : padded_half]`` — identity, multiplying the q/k
+        dimensions that head-dim padding zeroed. These carry only zeros.
+
+    When ``orig_head_dim`` is given, the last region is filled with real
+    (synthetic) rotations instead of identity. Because those lanes only ever
+    multiply zeros, the model output is unchanged — but Spyre now sees a
+    longer run of real rotations, which avoids the mis-lowering. The
+    pass-through region is left as identity, since rotating real data there
+    would not be exactly neutral.
     """
 
-    def __init__(self, original_rope: nn.Module, padded_head_dim: Optional[int] = None):
+    def __init__(
+        self,
+        original_rope: nn.Module,
+        padded_head_dim: Optional[int] = None,
+        orig_head_dim: Optional[int] = None,
+    ):
         super().__init__()
         self.original = original_rope
         self.padded_head_dim = padded_head_dim
+        self.orig_head_dim = orig_head_dim
         self._freq_cache: Optional[torch.Tensor] = None
         self._cached_len = 0
         self._freq_dtype: torch.dtype = torch.float16
@@ -180,6 +207,27 @@ class PrecomputedRotaryEmbedding(nn.Module):
                 ident[:, 0, 0, :] = 1.0
                 ident[:, 1, 1, :] = 1.0
                 rot = torch.cat([rot, ident], dim=-1)
+
+                # Fill the zero-multiplied padding lanes [orig_half:padded_half]
+                # with real rotations instead of identity. They only multiply
+                # q/k dims that head-dim padding zeroed, so the output does not
+                # change — but a longer run of real rotations avoids a Spyre
+                # mis-lowering (see the class docstring). The pass-through lanes
+                # [rope_half:orig_half], which multiply real data, stay identity.
+                if self.orig_head_dim is not None:
+                    orig_half = self.orig_head_dim // 2
+                    n = padded_half - orig_half
+                    if n > 0:
+                        # Arbitrary distinct nonzero angles, so no lane is
+                        # accidentally identity (the values don't matter — these
+                        # rotations only ever multiply zeros).
+                        ang = torch.linspace(0.3, 1.2, n, dtype=torch.float32)
+                        c = torch.cos(ang)
+                        sn = torch.sin(ang)
+                        rot[:, 0, 0, orig_half:padded_half] = c
+                        rot[:, 0, 1, orig_half:padded_half] = -sn
+                        rot[:, 1, 0, orig_half:padded_half] = sn
+                        rot[:, 1, 1, orig_half:padded_half] = c
 
         self._freq_cache = rot.contiguous().to(self._freq_dtype)
         self._cached_len = target_len
