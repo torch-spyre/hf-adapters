@@ -38,9 +38,9 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_gpt_neo.py",
     },
     # hf_gpt_neox.py
-    "pythia_70m": {
-        "name": "Pythia 70M",
-        "path": "EleutherAI/pythia-70m",
+    "pythia_410m": {
+        "name": "Pythia 410M",
+        "path": "EleutherAI/pythia-410m",
         "adapter": "hf_gpt_neox.py",
     },
     # hf_granite.py
