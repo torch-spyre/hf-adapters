@@ -303,7 +303,6 @@ jobs:
       run:
         working-directory: .
     needs:
-      - pre-commit
       - generate-matrix
       - spyre-edge-cases-eos-tests
       - spyre-edge-cases-block-tests
@@ -312,8 +311,7 @@ jobs:
     steps:
       - name: Check all suites passed
         run: |-
-          if ${{ contains(needs.pre-commit.result, 'failure') || contains(needs.pre-commit.result, 'cancelled') ||
-                 contains(needs.generate-matrix.result, 'failure') || contains(needs.generate-matrix.result, 'cancelled') ||
+          if ${{ contains(needs.generate-matrix.result, 'failure') || contains(needs.generate-matrix.result, 'cancelled') ||
                  contains(needs.spyre-edge-cases-eos-tests.result, 'failure') || contains(needs.spyre-edge-cases-eos-tests.result, 'cancelled') ||
                  contains(needs.spyre-edge-cases-block-tests.result, 'failure') || contains(needs.spyre-edge-cases-block-tests.result, 'cancelled') ||
                  contains(needs.spyre-edge-cases-misc-tests.result, 'failure') || contains(needs.spyre-edge-cases-misc-tests.result, 'cancelled') }}; then
