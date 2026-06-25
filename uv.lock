@@ -626,7 +626,7 @@ models-ops = [
     { name = "regex" },
 ]
 oot = [{ name = "oot-framework", git = "https://github.com/anubhavjana/torch-spyre-anu-forked?subdirectory=tests%2Foot_framework&rev=refactor_oot_framework_into_torch_spyre_package" }]
-spyre = [{ name = "torch-spyre", git = "https://github.com/torch-spyre/torch-spyre?rev=main" }]
+spyre = [{ name = "torch-spyre", git = "ssh://git@github.com/torch-spyre/torch-spyre.git?rev=main" }]
 test = [{ name = "pytest" }]
 
 [[package]]
@@ -3013,7 +3013,7 @@ wheels = [
 [[package]]
 name = "torch-spyre"
 version = "0.0.1"
-source = { git = "https://github.com/torch-spyre/torch-spyre?rev=main#3a1d9d9880a8068eeda6fe83afbad906b8f5eafc" }
+source = { git = "ssh://git@github.com/torch-spyre/torch-spyre.git?rev=main#7d0d9591909250cff1ad241821eadc44ec043173" }
 dependencies = [
     { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },

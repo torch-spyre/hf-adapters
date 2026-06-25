@@ -62,7 +62,7 @@ markers = [
 ]
 
 [tool.uv.sources]
-torch-spyre = { git = "https://github.com/torch-spyre/torch-spyre", rev = "main" }
+torch-spyre = { git = "ssh://git@github.com/torch-spyre/torch-spyre.git", rev = "main" }
 oot-framework = { git = "https://github.com/anubhavjana/torch-spyre-anu-forked", subdirectory = "tests/oot_framework", rev = "refactor_oot_framework_into_torch_spyre_package" }
 
 [dependency-groups]
