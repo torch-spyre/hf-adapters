@@ -95,8 +95,24 @@ def get_backbone(model):
     ``Gemma4ForConditionalGeneration``) nest the text decoder one level deeper
     at ``model.model.language_model``; descend into ``.language_model`` when
     present so the text backbone is returned.
+
+    GPT-2-family wrappers (``GPT2LMHeadModel``) keep the backbone at
+    ``model.transformer`` rather than ``model.model``; fall back to it when
+    ``.model`` is absent. The bare ``GPT2Model`` (``AutoModel``) has neither, so
+    it is returned as-is — it already is the backbone.
+
+    GPT-NeoX wrappers (``GPTNeoXForCausalLM``) keep the backbone at
+    ``model.gpt_neox`` (with ``embed_in``/``layers``/``final_layer_norm``);
+    fall back to it as well. The bare ``GPTNeoXModel`` is returned as-is.
     """
-    inner = model.model if hasattr(model, "model") else model
+    if hasattr(model, "model"):
+        inner = model.model
+    elif hasattr(model, "transformer"):
+        inner = model.transformer
+    elif hasattr(model, "gpt_neox"):
+        inner = model.gpt_neox
+    else:
+        inner = model
     return getattr(inner, "language_model", inner)
 
 
@@ -191,6 +207,50 @@ def set_rope_dtype(model, dtype: torch.dtype) -> None:
     for r in ropes:
         if hasattr(r, "set_dtype"):
             r.set_dtype(dtype)
+
+
+def _rope_cache_len(model) -> int:
+    """Length to pre-build the RoPE rotation cache to (>= any decode position).
+
+    Prefer the model's declared context window; fall back to the
+    ``PrecomputedRotaryEmbedding`` default (2048) when no config value is found.
+    """
+    cfg = model.config
+    candidates = []
+    # Multimodal configs keep the text context window on a nested text_config.
+    for obj in (cfg, getattr(cfg, "text_config", None)):
+        if obj is None:
+            continue
+        for attr in ("max_position_embeddings", "n_positions", "max_seq_len"):
+            v = getattr(obj, attr, None)
+            if isinstance(v, int) and v > 0:
+                candidates.append(v)
+    return max(candidates) if candidates else 2048
+
+
+def prebuild_rope_cache(model) -> None:
+    """Build the precomputed RoPE rotation cache on CPU, before moving to Spyre.
+
+    ``PrecomputedRotaryEmbedding`` builds its rotation-matrix cache lazily on the
+    first ``forward``. On Spyre that first call happens *during* a compiled
+    device forward, where the cache-construction ops (``arange``/``outer``/
+    ``cos``/``sin``/``cat``) get pulled into the graph and silently corrupt the
+    result — small GPT-NeoX/Pythia models produce wrong logits from the first
+    token. Building the cache here, while still on CPU, keeps those ops out of
+    the device graph; ``forward``'s ``_extend_cache`` then early-returns on Spyre
+    and only indexes + transfers the prebuilt cache.
+
+    Pre-extends to the model's full context length so ``forward`` never triggers
+    an on-device rebuild mid-generation (which would re-introduce the bug).
+    """
+    rope = getattr(model, "_spyre_rope", None)
+    if rope is None:
+        return
+    target_len = _rope_cache_len(model)
+    ropes = rope.values() if isinstance(rope, dict) else [rope]
+    for r in ropes:
+        if hasattr(r, "_extend_cache"):
+            r._extend_cache(target_len)
 
 
 class InvFreqShim(nn.Module):
@@ -313,6 +373,92 @@ def _pad_proj_input_simple(proj, n_heads, orig_head_dim, padded_head_dim):
     new_proj.weight = nn.Parameter(new_w, requires_grad=False)
     if proj.bias is not None:
         new_proj.bias = nn.Parameter(proj.bias.clone(), requires_grad=False)
+    return new_proj
+
+
+# ---------------------------------------------------------------------------
+# Partial-RoPE alignment for split Q/K projections
+#
+# Shared by adapters whose model rotates only the first ``rope_dim`` dims of
+# each head (partial RoPE) and/or needs the head padded to a Spyre stick.
+# HF's ``rotate_half`` pairs (j, j + rope_dim//2) within the first ``rope_dim``
+# dims; ``apply_rope_matmul`` pairs (j, j + head_dim//2) across the full head.
+# These helpers reorder/pad the split projection weights (and biases, when
+# present) so the two pairings agree. Used by hf_phi3 (bias-free) and
+# hf_gpt_neox (bias-carrying); the bias branches no-op when ``proj.bias`` is None.
+# ---------------------------------------------------------------------------
+
+
+def rope_dim_permutation(head_dim, rope_dim):
+    """Build index permutation aligning partial-RoPE pairing with apply_rope_matmul.
+
+    HF rotate_half pairs (j, j+rope_dim//2) within the first rope_dim dims.
+    apply_rope_matmul pairs (j, j+head_dim//2) across full head_dim.
+    This reorders head_dim so both pairings agree.
+    """
+    rope_half = rope_dim // 2
+    pass_half = (head_dim - rope_dim) // 2
+    return torch.cat(
+        [
+            torch.arange(0, rope_half),
+            torch.arange(rope_dim, rope_dim + pass_half),
+            torch.arange(rope_half, rope_dim),
+            torch.arange(rope_dim + pass_half, head_dim),
+        ]
+    )
+
+
+def permute_proj_for_rope(proj, num_heads, head_dim, perm):
+    """Permute a split Q/K projection's output dims within each head for RoPE.
+
+    Permutes the weight, and the bias when present (e.g. GPT-NeoX carries an
+    ``attention_bias`` on QKV; the bias must follow the same output-dim
+    reordering as the weight or the rotary dims pick up the wrong offsets).
+    Bias-free projections (Phi-3) skip the bias branch.
+    """
+    w = proj.weight.data.view(num_heads, head_dim, -1)
+    proj.weight.data = w[:, perm, :].contiguous().view(num_heads * head_dim, -1)
+    if proj.bias is not None:
+        b = proj.bias.data.view(num_heads, head_dim)
+        proj.bias.data = b[:, perm].contiguous().view(num_heads * head_dim)
+
+
+def pad_qk_proj_for_rope(proj, n_heads, orig_head_dim, padded_head_dim):
+    """Interleave-pad a split Q/K projection from orig_head_dim to padded_head_dim.
+
+    Each head's data is placed so that ``apply_rope_matmul``'s
+    ``[2, padded_head_dim//2]`` reshape sees the first rotary half in
+    ``[0:orig_half]`` and the second in ``[padded_half:padded_half+orig_half]``;
+    the gaps are zero and RoPE's identity-padding leaves them untouched. Zero
+    dims contribute nothing to Q·K^T, so the result is numerically identical to
+    the unpadded head. The bias (when present) is padded the same way.
+    """
+    orig_half = orig_head_dim // 2
+    padded_half = padded_head_dim // 2
+    w = proj.weight.data
+    has_bias = proj.bias is not None
+    hidden = w.shape[1]
+    new_w = torch.zeros(n_heads * padded_head_dim, hidden, dtype=w.dtype)
+    for h in range(n_heads):
+        s = h * orig_head_dim
+        d = h * padded_head_dim
+        new_w[d : d + orig_half, :] = w[s : s + orig_half, :]
+        new_w[d + padded_half : d + padded_half + orig_half, :] = w[
+            s + orig_half : s + orig_head_dim, :
+        ]
+    new_proj = nn.Linear(hidden, n_heads * padded_head_dim, bias=has_bias)
+    new_proj.weight = nn.Parameter(new_w, requires_grad=False)
+    if has_bias:
+        b = proj.bias.data
+        new_b = torch.zeros(n_heads * padded_head_dim, dtype=b.dtype)
+        for h in range(n_heads):
+            s = h * orig_head_dim
+            d = h * padded_head_dim
+            new_b[d : d + orig_half] = b[s : s + orig_half]
+            new_b[d + padded_half : d + padded_half + orig_half] = b[
+                s + orig_half : s + orig_head_dim
+            ]
+        new_proj.bias = nn.Parameter(new_b, requires_grad=False)
     return new_proj
 
 
@@ -491,6 +637,36 @@ def patch_rmsnorm(rmsnorm_cls):
     rmsnorm_cls.forward = _forward_fp16
 
 
+_GELU_TANH_COEFF = math.sqrt(2.0 / math.pi)
+
+
+def patch_new_gelu(gelu_cls):
+    """Patch a tanh-approximation GELU class to avoid ``torch.pow`` on Spyre.
+
+    The ``gelu_new`` / ``NewGELUActivation`` form
+    ``0.5 x (1 + tanh(sqrt(2/pi) (x + 0.044715 x**3)))`` computes the ``x**3``
+    term with ``torch.pow(x, 3.0)``, which the Spyre Inductor backend cannot
+    lower (same class of issue as RMSNorm's ``pow(2)``). The Spyre path uses
+    element-wise ``x * x * x`` instead; the CPU path keeps the original
+    ``torch.pow`` form so adapter outputs stay bit-identical to stock HF on CPU.
+
+    Shared by the learned-absolute-position decoders that use this activation
+    (``hf_gpt2``, ``hf_gpt_neo``). ``tanh`` itself lowers fine on Spyre.
+
+    Args:
+        gelu_cls: the activation class to patch (e.g. ``NewGELUActivation``).
+    """
+
+    def _forward(self, input):
+        if input.device.type == "spyre":
+            inner = _GELU_TANH_COEFF * (input + 0.044715 * (input * input * input))
+        else:
+            inner = _GELU_TANH_COEFF * (input + 0.044715 * torch.pow(input, 3.0))
+        return 0.5 * input * (1.0 + torch.tanh(inner))
+
+    gelu_cls.forward = _forward
+
+
 def _largest_prime_factor(n: int) -> int:
     """Largest prime factor of ``n`` (n >= 2). Used to bound the lm_head span."""
     return int(max(factorint(n)))
@@ -498,6 +674,15 @@ def _largest_prime_factor(n: int) -> int:
 
 # Spyre per-core EAR (effective address range) limit for one tensor: 256 MB.
 _EAR_LIMIT_BYTES = 256 * 1024 * 1024
+
+
+def _get_lm_head(model):
+    """Return the model's output-projection (LM head) module, or ``None``."""
+    for name in ("lm_head", "embed_out"):
+        head = getattr(model, name, None)
+        if head is not None and hasattr(head, "weight"):
+            return head
+    return None
 
 
 def pad_lm_head(model):
@@ -529,9 +714,10 @@ def pad_lm_head(model):
     No-op when ``model`` has no ``lm_head`` (e.g. backbones loaded via
     ``AutoModel`` for embedding workloads).
     """
-    if not hasattr(model, "lm_head"):
+    head = _get_lm_head(model)
+    if head is None:
         return
-    w = model.lm_head.weight
+    w = head.weight
     vocab = w.shape[0]
     hidden = w.shape[1]
     dtype_bytes = w.element_size()
@@ -542,7 +728,7 @@ def pad_lm_head(model):
         sticks += 1
     padded = sticks * BLOCK_SIZE
     if padded != vocab:
-        model.lm_head.weight = nn.Parameter(
+        head.weight = nn.Parameter(
             F.pad(w, (0, 0, 0, padded - vocab)), requires_grad=False
         )
 
@@ -863,14 +1049,18 @@ def _embedding_param_ids(model):
     Covers:
     - Decoder-style backbones: ``backbone.embed_tokens``.
     - BERT-style backbones: ``backbone.embeddings.{word,position,token_type}_embeddings``.
+    - GPT-2-style backbones: ``backbone.{wte,wpe}`` (token + learned-position
+      tables — both gathered, never matmul'd).
+    - GPT-NeoX backbones: ``backbone.embed_in`` (token gather table).
     """
     ids = set()
     backbone = get_backbone(model)
 
-    # Decoder-style: single embed_tokens
-    embed = getattr(backbone, "embed_tokens", None)
-    if embed is not None and hasattr(embed, "weight"):
-        ids.add(embed.weight.data_ptr())
+    # Decoder-style: single embed_tokens; GPT-NeoX: embed_in
+    for name in ("embed_tokens", "embed_in"):
+        embed = getattr(backbone, name, None)
+        if embed is not None and hasattr(embed, "weight"):
+            ids.add(embed.weight.data_ptr())
 
     # Encoder-style: embeddings submodule with multiple gather tables
     embeddings = getattr(backbone, "embeddings", None)
@@ -880,23 +1070,32 @@ def _embedding_param_ids(model):
             if sub is not None and hasattr(sub, "weight") and sub.weight.dim() == 2:
                 ids.add(sub.weight.data_ptr())
 
+    # GPT-2-style: word (wte) + learned-position (wpe) gather tables
+    for name in ("wte", "wpe"):
+        sub = getattr(backbone, name, None)
+        if sub is not None and hasattr(sub, "weight") and sub.weight.dim() == 2:
+            ids.add(sub.weight.data_ptr())
+
     return ids
 
 
 def _untie_embedding_and_lm_head(model):
-    """If ``embed_tokens.weight`` and ``lm_head.weight`` share storage, clone the
-    LM head's weight so each can take a different Spyre layout.
+    """If the token-embedding weight and the LM head weight share storage, clone
+    the LM head's weight so each can take a different Spyre layout.
     """
-    if not hasattr(model, "lm_head"):
+    head = _get_lm_head(model)
+    if head is None:
         return
     backbone = get_backbone(model)
-    embed = getattr(backbone, "embed_tokens", None)
+    embed = (
+        getattr(backbone, "embed_tokens", None)
+        or getattr(backbone, "wte", None)
+        or getattr(backbone, "embed_in", None)
+    )
     if embed is None:
         return
-    if embed.weight.data_ptr() == model.lm_head.weight.data_ptr():
-        model.lm_head.weight = nn.Parameter(
-            model.lm_head.weight.detach().clone(), requires_grad=False
-        )
+    if embed.weight.data_ptr() == head.weight.data_ptr():
+        head.weight = nn.Parameter(head.weight.detach().clone(), requires_grad=False)
         if hasattr(model, "config"):
             model.config.tie_word_embeddings = False
 
@@ -922,6 +1121,11 @@ def _move_to_spyre_with_layout(model, dtype):
     # apply_rope_matmul when dtype != fp16). Done before the CPU early-return so
     # both the CPU and Spyre paths get it.
     set_rope_dtype(model, dtype)
+
+    # Build the RoPE rotation cache on CPU now, before any device move. If left
+    # to its lazy first-forward build, the construction ops run inside the Spyre
+    # graph and corrupt the result (see prebuild_rope_cache). Harmless on CPU.
+    prebuild_rope_cache(model)
 
     if torch.device(DEVICE).type != "spyre":
         model.to(dtype=dtype)
@@ -1412,6 +1616,109 @@ def make_standard_gqa_block(layer):
         h = post_attn_ln(h)
         h = mlp(h)
         h = residual + h
+
+        return h, key_cache, value_cache
+
+    return torch.compile(block_forward, dynamic=False)
+
+
+def make_decoder_block(
+    *,
+    q_proj,
+    k_proj,
+    v_proj,
+    o_proj,
+    attn_ln,
+    ffn_in,
+    act,
+    ffn_out,
+    ffn_ln,
+    num_heads,
+    head_dim,
+    scale,
+    pre_ln=True,
+):
+    """Compiled causal-decoder block for non-RoPE (learned-abs-pos) models.
+
+    Shared by the non-RoPE decoder family — ``hf_gpt2`` today, OPT/BLOOM/MPT to
+    come. These all have the standard-GQA block *shape* (pre/post-LN, KV cache,
+    causal SDPA, residual + FFN tail) but differ from ``make_standard_gqa_block``
+    in three ways, and from each other only in *where* their modules live — so,
+    like ``make_encoder_block``, adapters resolve their own module layout and
+    pass it in by keyword.
+
+    Differences from ``make_standard_gqa_block``:
+      - **no RoPE** — positions are learned absolute (added to the token
+        embeddings in the backbone), so ``selected_freqs`` is accepted for
+        signature parity with the generate/test harness and ignored;
+      - **MHA** — kv heads == attention heads, so no ``enable_gqa=True``;
+      - **explicit ``scale``** and a configurable ``pre_ln`` LN placement
+        (``True`` = norm before each sublayer, as in GPT-2 / BLOOM / OPT≥1.3B;
+        ``False`` = norm after, as in OPT-350m).
+
+    Block signature matches the decoder harness::
+
+        block_forward(hidden_states, selected_freqs, attn_mask,
+                      key_cache, value_cache, is_filling, token_index,
+                      cache_position) -> (h, key_cache, value_cache)
+
+    Dropout is skipped — these adapters are eval-only. ``act`` is the (possibly
+    patched) activation module; the FFN is passed decomposed as
+    ``ffn_out(act(ffn_in(x)))`` rather than as a single module, since some
+    models (OPT) have no wrapping MLP module.
+    """
+
+    def block_forward(
+        hidden_states,
+        selected_freqs,  # unused — non-RoPE; kept for signature parity
+        attn_mask,
+        key_cache,
+        value_cache,
+        is_filling,
+        token_index,
+        cache_position,
+    ):
+        # --- attention sublayer ---
+        residual = hidden_states
+        h = attn_ln(hidden_states) if pre_ln else hidden_states
+
+        bsz, seq_len, _ = h.shape
+        q = q_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+        k = k_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+        v = v_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+
+        key_cache, value_cache = kv_cache_update(
+            k,
+            v,
+            key_cache,
+            value_cache,
+            is_filling,
+            token_index,
+            cache_position,
+        )
+
+        attn_out = F.scaled_dot_product_attention(
+            q,
+            key_cache,
+            value_cache,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            scale=scale,
+        )
+        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
+        attn_out = o_proj(attn_out)
+
+        h = residual + attn_out
+        if not pre_ln:
+            h = attn_ln(h)
+
+        # --- FFN sublayer ---
+        residual = h
+        f = ffn_ln(h) if pre_ln else h
+        f = ffn_out(act(ffn_in(f)))
+        h = residual + f
+        if not pre_ln:
+            h = ffn_ln(h)
 
         return h, key_cache, value_cache
 
