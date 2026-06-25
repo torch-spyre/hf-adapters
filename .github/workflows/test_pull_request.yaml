@@ -482,7 +482,8 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          _run_test=$(uv run python3 -c \
+          source .venv/bin/activate
+          _run_test=$(python3 -c \
             "import oot_framework, os; print(os.path.join(os.path.dirname(oot_framework.__file__), 'run_test.sh'))")
           echo "Using oot-framework runner: $_run_test"
           bash "$_run_test" \
