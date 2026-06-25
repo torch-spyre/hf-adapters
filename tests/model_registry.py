@@ -30,7 +30,7 @@ CAUSAL_LM_MODELS = {
         "name": "Granite 3.3 8B",
         "path": "ibm-granite/granite-3.3-8b-instruct",
         "adapter": "hf_granite.py",
-        "size": "2b",
+        "size": "8b",
     },
     "granite2b": {
         "name": "Granite 3.3 2B",
@@ -65,7 +65,7 @@ CAUSAL_LM_MODELS = {
         "name": "TinyLlama 1.1B",
         "path": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         "adapter": "hf_llama.py",
-        "size": "1.1b",
+        "size": "1b",
     },
     "falcon3": {
         "name": "Falcon 3 1B",
@@ -77,7 +77,7 @@ CAUSAL_LM_MODELS = {
         "name": "DeepSeek-Coder 1.3B",
         "path": "deepseek-ai/deepseek-coder-1.3b-base",
         "adapter": "hf_llama.py",
-        "size": "3b",
+        "size": "1.3b",
     },
     "yi_6b": {
         "name": "Yi 1.5 6B",
