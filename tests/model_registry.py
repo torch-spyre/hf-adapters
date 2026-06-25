@@ -387,7 +387,7 @@ def select_representative_models(config_mapping=None):
                     k,  # Then by key name for consistency
                 ),
             )
-            causal_paths.append(sorted_keys[0]["path"])
+            causal_paths.append(CAUSAL_LM_MODELS[sorted_keys[0]]["path"])
 
     # Select one representative per adapter for embeddings
     # Prefer smaller models (by size field) for faster tests
@@ -403,7 +403,7 @@ def select_representative_models(config_mapping=None):
                     k,  # Then by key name for consistency
                 ),
             )
-            embed_paths.append(sorted_keys[0]["path"])
+            embed_paths.append(EMBEDDING_MODELS[sorted_keys[0]]["path"])
 
     return causal_paths, embed_paths
 
