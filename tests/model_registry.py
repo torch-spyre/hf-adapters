@@ -25,7 +25,7 @@ automatically cover them by selecting one representative model per adapter.
 
 # Model registries - shared by all tests
 CAUSAL_LM_MODELS = {
-   "gpt2": {
+    "gpt2": {
         "name": "GPT-2 124M",
         "path": "gpt2",
         "adapter": "hf_gpt2.py",
