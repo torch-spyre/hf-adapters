@@ -46,66 +46,19 @@ from hf_adapters.hf_common import (
     get_backbone,
     kv_cache_update,
     pad_lm_head,
+    pad_qk_proj_for_rope,
     patch_rmsnorm,
+    permute_proj_for_rope,
+    rope_dim_permutation,
     split_fused_linear,
 )
 
 # ---------------------------------------------------------------------------
 # Weight splitting
+#
+# Partial-RoPE alignment (rope_dim_permutation / permute_proj_for_rope /
+# pad_qk_proj_for_rope) is shared with hf_gpt_neox and lives in hf_common.
 # ---------------------------------------------------------------------------
-
-
-def _rope_dim_permutation(head_dim, rope_dim):
-    """Build index permutation aligning partial-RoPE pairing with apply_rope_matmul.
-
-    HF rotate_half pairs (j, j+rope_dim//2) within the first rope_dim dims.
-    apply_rope_matmul pairs (j, j+head_dim//2) across full head_dim.
-    This reorders head_dim so both pairings agree.
-    """
-    rope_half = rope_dim // 2
-    pass_half = (head_dim - rope_dim) // 2
-    return torch.cat(
-        [
-            torch.arange(0, rope_half),
-            torch.arange(rope_dim, rope_dim + pass_half),
-            torch.arange(rope_half, rope_dim),
-            torch.arange(rope_dim + pass_half, head_dim),
-        ]
-    )
-
-
-def _permute_proj_for_rope(proj, num_heads, head_dim, perm):
-    """Permute Q or K projection output dims within each head for RoPE alignment."""
-    w = proj.weight.data.view(num_heads, head_dim, -1)
-    proj.weight.data = w[:, perm, :].contiguous().view(num_heads * head_dim, -1)
-
-
-def _pad_qk_proj_for_rope(proj, n_heads, orig_head_dim, padded_head_dim):
-    """Interleave-pad a split Q/K projection from orig_head_dim to padded_head_dim.
-
-    Mirrors ``hf_common.pad_attention_heads._pad_qk_rope`` but operates on an
-    already-split ``nn.Linear``. Each head's data is placed so that
-    ``apply_rope_matmul``'s ``[2, padded_head_dim//2]`` reshape sees the first
-    rotary half in ``[0:orig_half]`` and the second in
-    ``[padded_half:padded_half+orig_half]``; the gaps are zero and the RoPE
-    identity-padding leaves them untouched. Zero dims contribute nothing to
-    Q·K^T, so the result is numerically identical to the unpadded head.
-    """
-    orig_half = orig_head_dim // 2
-    padded_half = padded_head_dim // 2
-    w = proj.weight.data
-    hidden = w.shape[1]
-    new_w = torch.zeros(n_heads * padded_head_dim, hidden, dtype=w.dtype)
-    for h in range(n_heads):
-        s = h * orig_head_dim
-        d = h * padded_head_dim
-        new_w[d : d + orig_half, :] = w[s : s + orig_half, :]
-        new_w[d + padded_half : d + padded_half + orig_half, :] = w[
-            s + orig_half : s + orig_head_dim, :
-        ]
-    new_proj = nn.Linear(hidden, n_heads * padded_head_dim, bias=False)
-    new_proj.weight = nn.Parameter(new_w, requires_grad=False)
-    return new_proj
 
 
 def _split_fused_qkv(attn, num_q, num_kv, head_dim):
@@ -304,7 +257,7 @@ def prepare_for_spyre(model):
     # Computed on the original head_dim; stick padding (below) happens after.
     prf = getattr(cfg, "partial_rotary_factor", 1.0)
     rope_dim = int(prf * hd)
-    rope_perm = _rope_dim_permutation(hd, rope_dim) if rope_dim != hd else None
+    rope_perm = rope_dim_permutation(hd, rope_dim) if rope_dim != hd else None
 
     # Split fused weights, register as submodules
     model._spyre_q_projs = nn.ModuleList()
@@ -316,12 +269,12 @@ def prepare_for_spyre(model):
     for layer in get_backbone(model).layers:
         q, k, v = _split_fused_qkv(layer.self_attn, num_q, num_kv, hd)
         if rope_perm is not None:
-            _permute_proj_for_rope(q, num_q, hd, rope_perm)
-            _permute_proj_for_rope(k, num_kv, hd, rope_perm)
+            permute_proj_for_rope(q, num_q, hd, rope_perm)
+            permute_proj_for_rope(k, num_kv, hd, rope_perm)
         if padded_head_dim is not None:
             # Interleave-pad Q/K (RoPE layout), end-pad V, input-pad O.
-            q = _pad_qk_proj_for_rope(q, num_q, hd, padded_head_dim)
-            k = _pad_qk_proj_for_rope(k, num_kv, hd, padded_head_dim)
+            q = pad_qk_proj_for_rope(q, num_q, hd, padded_head_dim)
+            k = pad_qk_proj_for_rope(k, num_kv, hd, padded_head_dim)
             v = _pad_proj_output_simple(v, num_kv, hd, padded_head_dim)
             layer.self_attn.o_proj = _pad_proj_input_simple(
                 layer.self_attn.o_proj, num_q, hd, padded_head_dim
