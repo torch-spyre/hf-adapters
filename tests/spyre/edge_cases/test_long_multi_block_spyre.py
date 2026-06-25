@@ -16,11 +16,11 @@
 
 import pytest
 from _shared import run_greedy_case
-from model_registry import CAUSAL_KEYS
+from model_registry import CAUSAL_PATHS
 
 
-@pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_long_multi_block_spyre(model_key):
-    ok, detail = run_greedy_case(model_key, "long_multi_block")
+def test_long_multi_block_spyre(model_path):
+    ok, detail = run_greedy_case(model_path, "long_multi_block")
     assert ok, detail

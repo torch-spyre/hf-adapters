@@ -22,58 +22,48 @@ error. Causal-LM entries also check that a ``generate`` method is attached.
 Usage (on Spyre pod)::
 
     pytest -s -vvv tests/spyre/test_load_spyre.py
-    pytest -s -vvv tests/spyre/test_load_spyre.py -k qwen3
+    pytest -s -vvv "tests/spyre/test_load_spyre.py::test_load_causal_lm[Qwen/Qwen3-0.6B]"
 """
 
 import time
 
 import pytest
 import torch
-from model_registry import (
-    CAUSAL_KEYS,
-    CAUSAL_LM_MODELS,
-    EMBED_KEYS,
-    EMBEDDING_MODELS,
-)
+from model_registry import CAUSAL_PATHS, EMBED_PATHS
 
 
-@pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
-def test_load_causal_lm(model_key):
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+def test_load_causal_lm(model_path):
     from hf_adapters import AutoSpyreModelForCausalLM
 
-    info = CAUSAL_LM_MODELS[model_key]
-    path = info["path"]
-    dtype = torch.float32 if model_key == "granite4" else torch.float16
+    dtype = torch.float16
 
     t0 = time.time()
-    model = AutoSpyreModelForCausalLM.from_pretrained(path, dtype=dtype)
+    model = AutoSpyreModelForCausalLM.from_pretrained(model_path, dtype=dtype)
     load_s = time.time() - t0
 
-    assert model is not None, f"{model_key}: from_pretrained returned None"
+    assert model is not None, f"{model_path}: from_pretrained returned None"
     assert callable(
         getattr(model, "generate", None)
-    ), f"{model_key}: AutoSpyreModelForCausalLM did not attach generate()"
-    print(f"  [{model_key}] causal-LM load time: {load_s:.1f}s")
+    ), f"{model_path}: AutoSpyreModelForCausalLM did not attach generate()"
+    print(f"  [{model_path}] causal-LM load time: {load_s:.1f}s")
     print("\n## Spyre Load Test Results\n")
-    print("| Key | Kind | Status | Load (s) |")
-    print("|-----|------|--------|----------|")
-    print(f"| {model_key} | causal-LM | PASS | {load_s:.1f} |")
+    print("| Path | Kind | Status | Load (s) |")
+    print("|------|------|--------|----------|")
+    print(f"| {model_path} | causal-LM | PASS | {load_s:.1f} |")
 
 
-@pytest.mark.parametrize("model_key", EMBED_KEYS, ids=EMBED_KEYS)
-def test_load_embedding(model_key):
+@pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
+def test_load_embedding(model_path):
     from hf_adapters import AutoSpyreModel
 
-    info = EMBEDDING_MODELS[model_key]
-    path = info["path"]
-
     t0 = time.time()
-    model = AutoSpyreModel.from_pretrained(path, dtype=torch.float16)
+    model = AutoSpyreModel.from_pretrained(model_path, dtype=torch.float16)
     load_s = time.time() - t0
 
-    assert model is not None, f"{model_key}: from_pretrained returned None"
-    print(f"  [{model_key}] embedding load time: {load_s:.1f}s")
+    assert model is not None, f"{model_path}: from_pretrained returned None"
+    print(f"  [{model_path}] embedding load time: {load_s:.1f}s")
     print("\n## Spyre Load Test Results\n")
-    print("| Key | Kind | Status | Load (s) |")
-    print("|-----|------|--------|----------|")
-    print(f"| {model_key} | embedding | PASS | {load_s:.1f} |")
+    print("| Path | Kind | Status | Load (s) |")
+    print("|------|------|--------|----------|")
+    print(f"| {model_path} | embedding | PASS | {load_s:.1f} |")

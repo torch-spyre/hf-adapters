@@ -23,35 +23,33 @@ Verifies:
 Usage (on Spyre pod)::
 
     pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py
-    pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k qwen3
+    pytest -s -vvv "tests/spyre/test_e2e_smoke_spyre.py::test_e2e_smoke_spyre[Qwen/Qwen3-0.6B]"
 """
 
 import time
 
 import pytest
-from _helpers import torch_dtype_for
-from model_registry import CAUSAL_KEYS, CAUSAL_LM_MODELS
+import torch
+from model_registry import CAUSAL_PATHS
 
 
-def _run_smoke(model_key):
+def _run_smoke(model_path):
     """Load model, generate 5 tokens, validate output. Returns a result dict."""
     from transformers import AutoTokenizer
 
     from hf_adapters import AutoSpyreModelForCausalLM
 
-    info = CAUSAL_LM_MODELS[model_key]
-
     print(f"\n{'=' * 70}")
-    print(f"  {info['name']}: loading from {info['path']}")
+    print(f"  loading from {model_path}")
     print(f"{'=' * 70}")
 
-    dtype = torch_dtype_for(info)
+    dtype = torch.float16
     t0 = time.time()
-    model = AutoSpyreModelForCausalLM.from_pretrained(info["path"], dtype=dtype)
+    model = AutoSpyreModelForCausalLM.from_pretrained(model_path, dtype=dtype)
     load_time = time.time() - t0
     print(f"  Load time: {load_time:.1f}s")
 
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     prompt = "The capital of France is"
     print(f"  Prompt: {prompt!r}")
 
@@ -87,7 +85,7 @@ def _run_smoke(model_key):
 
     passed = all(v for k, v in checks.items() if k != "token_ids")
     return {
-        "model": info["name"],
+        "model": model_path,
         "status": "PASS" if passed else "FAIL",
         "tokens": len(checks.get("token_ids", [])),
         "text": output_text[:50],
@@ -97,9 +95,9 @@ def _run_smoke(model_key):
     }
 
 
-@pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
-def test_e2e_smoke_spyre(model_key):
-    result = _run_smoke(model_key)
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+def test_e2e_smoke_spyre(model_path):
+    result = _run_smoke(model_path)
     print("\n## E2E Smoke Test Results\n")
     print("| Model | Status | Tokens | Generated Text | Load (s) | Gen (s) |")
     print("|-------|--------|--------|----------------|----------|---------|")

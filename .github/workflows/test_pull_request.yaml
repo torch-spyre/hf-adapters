@@ -286,7 +286,9 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_load_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_load_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv \
+            "tests/spyre/test_load_spyre.py::test_load_causal_lm[${{ matrix.model_key }}]" \
+            "tests/spyre/test_load_spyre.py::test_load_embedding[${{ matrix.model_key }}]"
           echo "tests done"
 
   spyre-smoke-tests:
@@ -334,7 +336,8 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv \
+            "tests/spyre/test_e2e_smoke_spyre.py::test_e2e_smoke_spyre[${{ matrix.model_key }}]"
           echo "tests done"
 
   spyre-token-compare-tests:
@@ -382,7 +385,8 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv \
+            "tests/spyre/test_e2e_token_compare_spyre.py::test_e2e_token_compare_spyre[${{ matrix.model_key }}]"
           echo "tests done"
 
   spyre-embed-compare-tests:
@@ -430,7 +434,8 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv \
+            "tests/spyre/test_e2e_embed_compare_spyre.py::test_e2e_embed_compare_spyre[${{ matrix.model_key }}]"
           echo "tests done"
 
   # ===========================================================================

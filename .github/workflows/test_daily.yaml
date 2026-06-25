@@ -180,8 +180,11 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running tests/spyre/edge_cases/${{ matrix.test_file }} for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv "tests/spyre/edge_cases/${{ matrix.test_file }}" -k "${{ matrix.model_key }}" --run-slow
+          test_file="${{ matrix.test_file }}"
+          test_name="${test_file%.py}"
+          echo "Running tests/spyre/edge_cases/${test_file} for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv --run-slow \
+            "tests/spyre/edge_cases/${test_file}::${test_name}[${{ matrix.model_key }}]"
           echo "tests done"
 
   spyre-edge-cases-block-tests:
@@ -234,8 +237,11 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running tests/spyre/edge_cases/${{ matrix.test_file }} for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv "tests/spyre/edge_cases/${{ matrix.test_file }}" -k "${{ matrix.model_key }}" --run-slow
+          test_file="${{ matrix.test_file }}"
+          test_name="${test_file%.py}"
+          echo "Running tests/spyre/edge_cases/${test_file} for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv --run-slow \
+            "tests/spyre/edge_cases/${test_file}::${test_name}[${{ matrix.model_key }}]"
           echo "tests done"
 
   spyre-edge-cases-misc-tests:
@@ -287,8 +293,11 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running tests/spyre/edge_cases/${{ matrix.test_file }} for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv "tests/spyre/edge_cases/${{ matrix.test_file }}" -k "${{ matrix.model_key }}" --run-slow
+          test_file="${{ matrix.test_file }}"
+          test_name="${test_file%.py}"
+          echo "Running tests/spyre/edge_cases/${test_file} for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv --run-slow \
+            "tests/spyre/edge_cases/${test_file}::${test_name}[${{ matrix.model_key }}]"
           echo "tests done"
 
   # ===========================================================================

@@ -16,11 +16,11 @@
 
 import pytest
 from _shared import run_no_pad
-from model_registry import CAUSAL_KEYS
+from model_registry import CAUSAL_PATHS
 
 
-@pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_no_pad_token_fallback_spyre(model_key):
-    ok, detail = run_no_pad(model_key)
+def test_no_pad_token_fallback_spyre(model_path):
+    ok, detail = run_no_pad(model_path)
     assert ok, detail

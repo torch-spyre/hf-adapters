@@ -16,11 +16,11 @@
 
 import pytest
 from _shared import run_eos_case
-from model_registry import CAUSAL_KEYS
+from model_registry import CAUSAL_PATHS
 
 
-@pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_eos_on_last_step_spyre(model_key):
-    ok, detail = run_eos_case(model_key, "eos_on_last_step")
+def test_eos_on_last_step_spyre(model_path):
+    ok, detail = run_eos_case(model_path, "eos_on_last_step")
     assert ok, detail

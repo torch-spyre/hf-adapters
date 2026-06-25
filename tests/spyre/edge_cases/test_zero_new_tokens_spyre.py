@@ -16,11 +16,11 @@
 
 import pytest
 from _shared import run_zero_new_tokens
-from model_registry import CAUSAL_KEYS
+from model_registry import CAUSAL_PATHS
 
 
-@pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_zero_new_tokens_spyre(model_key):
-    ok, detail = run_zero_new_tokens(model_key)
+def test_zero_new_tokens_spyre(model_path):
+    ok, detail = run_zero_new_tokens(model_path)
     assert ok, detail

@@ -21,17 +21,16 @@ and Spyre (adapter), comparing logits and greedy tokens at each step.
 Usage (on Spyre pod)::
 
     pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py
-    pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k qwen3
+    pytest -s -vvv "tests/spyre/test_e2e_token_compare_spyre.py::test_e2e_token_compare_spyre[Qwen/Qwen3-0.6B]"
 """
 
-import importlib
 import math
 
 import pytest
 import torch
 import torch.nn.functional as F
-from _helpers import torch_dtype_for
-from model_registry import CAUSAL_KEYS, CAUSAL_LM_MODELS
+from _helpers import resolve_adapter
+from model_registry import CAUSAL_PATHS
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
@@ -271,22 +270,20 @@ def _print_table(rows):
         )
 
 
-def _run_model_test(model_key, num_decode=4):
+def _run_model_test(model_path, num_decode=4):
     """Full comparison for one model. Returns the list of comparison rows."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    info = CAUSAL_LM_MODELS[model_key]
-    adapter_module_name = info["adapter"].replace(".py", "")
-    adapter = importlib.import_module(f"hf_adapters.{adapter_module_name}")
+    adapter, _ = resolve_adapter(model_path)
 
     print(f"\n{'=' * 70}")
-    print(f"  {info['name']}: {info['path']}")
+    print(f"  {model_path}")
     print(f"{'=' * 70}")
 
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
-    dtype = torch_dtype_for(info)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    dtype = torch.float16
     model = AutoModelForCausalLM.from_pretrained(
-        info["path"],
+        model_path,
         torch_dtype=dtype,
         device_map="cpu",
     )
@@ -314,12 +311,12 @@ def _run_model_test(model_key, num_decode=4):
         num_decode=num_decode,
     )
 
-    return _compare_results(hf_results, adapter_results, tokenizer, info["name"])
+    return _compare_results(hf_results, adapter_results, tokenizer, model_path)
 
 
-@pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
-def test_e2e_token_compare_spyre(model_key):
-    rows = _run_model_test(model_key)
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+def test_e2e_token_compare_spyre(model_path):
+    rows = _run_model_test(model_path)
     _print_table(rows)
     n_match = sum(1 for r in rows if r["top1_match"])
     print(f"\nTop-1 agreement: {n_match}/{len(rows)} steps")
