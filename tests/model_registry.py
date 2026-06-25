@@ -376,6 +376,7 @@ def select_representative_models(config_mapping=None):
     # Select one representative *path* per adapter for causal LM
     # Prefer smaller models (by size field) for faster tests
     causal_paths = []
+
     for adapter in sorted(adapter_modules_in_config):
         if adapter in adapter_to_causal_keys:
             keys = adapter_to_causal_keys[adapter]
@@ -392,6 +393,7 @@ def select_representative_models(config_mapping=None):
     # Select one representative per adapter for embeddings
     # Prefer smaller models (by size field) for faster tests
     embed_paths = []
+
     for adapter in sorted(adapter_modules_in_config):
         if adapter in adapter_to_embed_keys:
             keys = adapter_to_embed_keys[adapter]

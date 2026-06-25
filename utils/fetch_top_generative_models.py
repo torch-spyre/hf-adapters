@@ -4,7 +4,12 @@ import os
 import sys
 from pathlib import Path
 
-from hf_model_catalog import EXPAND_FIELDS, RESOURCES_DIR, build_catalog
+from hf_model_catalog import (
+    EXPAND_FIELDS,
+    RESOURCES_DIR,
+    build_catalog,
+    is_baseline_keep,
+)
 from huggingface_hub import HfApi
 from huggingface_hub.hf_api import ModelInfo
 
@@ -17,18 +22,14 @@ def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
         api.list_models(
             pipeline_tag="text-generation",
             sort="downloads",
-            limit=int(limit * 1.5),
+            limit=int(limit * 2),
             expand=EXPAND_FIELDS,
         )
     )
 
 
 def _keep(model: ModelInfo) -> bool:
-    return (
-        bool(model.config)
-        and model.library_name not in ("gguf", "mlx")
-        and "onnx" not in model.id.lower()
-    )
+    return is_baseline_keep(model)
 
 
 def fetch_top_generative_models(
