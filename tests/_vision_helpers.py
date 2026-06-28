@@ -137,3 +137,25 @@ def stock_vlm_generate(model_path, processor, batch, dtype, max_new_tokens):
     text = processor.tokenizer.decode(gen[0, prompt_len:], skip_special_tokens=True)
     del ref_model
     return text
+
+
+def stock_vlm_first_token_logits(model_path, batch, dtype):
+    """Reference first-token (prefill) logits from stock HF, ``[vocab]`` fp32.
+
+    A single forward of the stock ``AutoModelForImageTextToText`` over the
+    (image + prompt) batch; returns the last-position logits — the distribution
+    the model would greedily sample the first generated token from. Used by the
+    Spyre e2e test to compare the adapter's prefill against stock at the one
+    point that is free of greedy-fork amplification (see the test docstring).
+    """
+    import torch
+    from transformers import AutoModelForImageTextToText
+
+    ref_model = AutoModelForImageTextToText.from_pretrained(
+        model_path, dtype=dtype, device_map="cpu"
+    ).eval()
+    with torch.no_grad():
+        out = ref_model(**batch, use_cache=False)
+    logits = out.logits[0, -1, :].float().clone()
+    del ref_model
+    return logits
