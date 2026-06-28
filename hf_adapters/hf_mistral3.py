@@ -53,6 +53,10 @@ from hf_adapters.hf_common import (
     get_backbone,
     prepare_standard_gqa,
 )
+from hf_adapters.hf_mistral import (
+    _run_backbone_forward,  # noqa: F401  re-exported as adapter module API
+    _run_forward,  # noqa: F401  re-exported as adapter module API
+)
 
 
 def _load_hf_model_mistral_small(model_path, dtype):
