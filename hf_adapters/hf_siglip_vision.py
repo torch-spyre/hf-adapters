@@ -150,6 +150,20 @@ def _pad_vision_heads(layers, num_heads, orig_head_dim, padded_head_dim):
         )
 
 
+def _pad_vision_mlp(layers, orig_inter, padded_inter):
+    """Zero-pad each SigLIP MLP's intermediate dim to a stick boundary.
+
+    SigLIP's ``intermediate_size`` (e.g. 4304 for Granite-Vision-4.1) is not a
+    multiple of ``BLOCK_SIZE``. The Spyre compiler lays matmul operands out in
+    64-element sticks and cannot identify/pad the contraction (K) dim of an
+    fc2 matmul over a stick-misaligned intermediate.
+    """
+    for layer in layers:
+        mlp = layer.mlp
+        mlp.fc1 = _pad_proj_output_simple(mlp.fc1, 1, orig_inter, padded_inter)
+        mlp.fc2 = _pad_proj_input_simple(mlp.fc2, 1, orig_inter, padded_inter)
+
+
 def _make_patch_embed(inner):
     """Build a CPU callable: pixel_values [B,C,H,W] -> patch_embeds [B,P,hidden].
 
@@ -207,6 +221,14 @@ def prepare_for_spyre(model):
     if padded_head_dim > orig_head_dim:
         _pad_vision_heads(layers, num_heads, orig_head_dim, padded_head_dim)
     head_dim = padded_head_dim
+
+    # SigLIP's intermediate_size (e.g. 4304) is often not stick-aligned; the
+    # Spyre compiler can't lower the fc2 matmul over a misaligned K dim. Zero-pad
+    # the FFN intermediate to a stick boundary (bit-exact — see _pad_vision_mlp).
+    orig_inter = cfg.intermediate_size
+    padded_inter = ((orig_inter + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
+    if padded_inter > orig_inter:
+        _pad_vision_mlp(layers, orig_inter, padded_inter)
 
     # SigLIP MLP activation is gelu_pytorch_tanh (GELUTanh). Patch every layer's
     # activation module class once (they share the class).
