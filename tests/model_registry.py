@@ -154,7 +154,7 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_mistral3.py",
         "load_fn": True,
         "dtype": "bfloat16",
-        "size": "14b",        
+        "size": "14b",
     },
     # hf_olmo.py
     "olmo1b": {

@@ -53,10 +53,6 @@ from hf_adapters.hf_common import (
     get_backbone,
     prepare_standard_gqa,
 )
-from hf_adapters.hf_mistral import (
-    _run_backbone_forward,
-    _run_forward,
-)
 
 
 def _load_hf_model_mistral_small(model_path, dtype):
@@ -82,7 +78,9 @@ def _load_hf_model_mistral_small(model_path, dtype):
         if key.startswith("language_model.model."):
             shard_keys[shard][key.replace("language_model.model.", "model.", 1)] = key
         elif key.startswith("language_model.lm_head."):
-            shard_keys[shard][key.replace("language_model.lm_head.", "lm_head.", 1)] = key
+            shard_keys[shard][
+                key.replace("language_model.lm_head.", "lm_head.", 1)
+            ] = key
         elif key == "lm_head.weight":
             shard_keys[shard][key] = key
 
