@@ -12,7 +12,6 @@ Run directly to perform the fetch step::
 import argparse
 import subprocess
 import sys
-import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -224,22 +223,22 @@ def main(argv: list[str] | None = None) -> None:
                 rec.setdefault("adapter_added", None)
                 print(f"    runs=False error={rec['error']}")
 
-            # record(rec)
+            record(rec)
 
             # Cache cleanup: weights absent at start -> delete downloaded weights.
-    #         if not had_weights:
-    #             freed = delete_repo_weights(model_id)
-    #             total_freed += freed
-    #             if freed:
-    #                 print(
-    #                     f"    freed {human_bytes(freed)} "
-    #                     f"(total {human_bytes(total_freed)})"
-    #                 )
-    # except KeyboardInterrupt:
-    #     print("\nInterrupted — results so far are saved; rerun to resume.")
-    # finally:
-    #     fout.close()
+            if not had_weights:
+                freed = delete_repo_weights(model_id)
+                total_freed += freed
+                if freed:
+                    print(
+                        f"    freed {human_bytes(freed)} "
+                        f"(total {human_bytes(total_freed)})"
+                    )
+    except KeyboardInterrupt:
+        print("\nInterrupted — results so far are saved; rerun to resume.")
+    finally:
+        fout.close()
 
-#
-# if __name__ == "__main__":
-#     main()
+
+if __name__ == "__main__":
+    main()
