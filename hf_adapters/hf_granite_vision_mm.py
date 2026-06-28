@@ -330,10 +330,14 @@ def _prefill_forward(
     """
     model_dtype = _model_dtype(model)
     # _embed_text returns embeds on the embedding table's device (Spyre after
-    # the layout move); the vision mask must match for the on-device masked_fill.
+    # the layout move). Zero the <image> slots by multiplying with a keep factor
+    # (0 at image positions, 1 elsewhere): masked_fill_ does not lower on the
+    # Spyre eager backend, but elementwise mul does. The keep factor is built on
+    # CPU (the bool/not op also doesn't lower) then moved to the embeds' device.
     inputs_embeds = _embed_text(model, padded_ids)
-    vision_mask = _vision_mask(model, padded_ids).to(inputs_embeds.device)
-    inputs_embeds = inputs_embeds.masked_fill(vision_mask, 0.0)
+    vision_mask = _vision_mask(model, padded_ids)
+    keep = (~vision_mask).to(model_dtype).to(inputs_embeds.device)
+    inputs_embeds = inputs_embeds * keep
     deepstack = _deepstack_features(model, pixel_values, image_sizes)
     prefill_mask = build_prefill_mask(
         padded_ids.shape[0],
