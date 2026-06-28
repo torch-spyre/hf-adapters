@@ -234,28 +234,37 @@ def _vision_mask(model, input_ids):
     return (input_ids == model.config.image_token_id).unsqueeze(-1)
 
 
-def _inject_deepstack(hidden_states, features, vision_mask):
+def _inject_deepstack(hidden_states, features, vision_mask_cpu):
     """Add ``features`` into image-token positions (stock deepstack injection).
 
-    ``hidden_states.masked_scatter(mask, (hidden_states[mask] + features))`` —
-    the image-token slots (zeroed at embed time) accumulate each mapped layer's
-    projected features.
+    Stock does ``h.masked_scatter(mask, h[mask] + features)``. On Spyre the
+    image-token slots are zeroed at embed time, so the injection is just
+    ``h + additive`` where ``additive`` is ``features`` scattered into the
+    image-token positions and zero elsewhere. We build that additive tensor on
+    **CPU** (the mask is a fixed, statically-known CPU bool tensor) and move it to
+    the device for a plain elementwise add — the on-device boolean reduction
+    (``mask.sum()``), boolean indexing, and ``masked_scatter`` all fail to lower
+    on Spyre. Bit-identical to the stock masked_scatter given the zeroed slots.
 
     Asserts the image-token count matches the feature count first (mirrors stock
     ``get_placeholder_mask``'s ``torch_compilable_check``): a token/feature
     mismatch — e.g. image-token expansion misaligned with the tiling — would
     otherwise corrupt the scatter silently.
     """
-    flat_mask = vision_mask.squeeze(-1)
-    features = features.to(hidden_states.device, hidden_states.dtype)
+    flat_mask = vision_mask_cpu.squeeze(-1)  # [B, L] bool, on CPU
+    hidden = hidden_states.shape[-1]
+    features = features.to("cpu", hidden_states.dtype)
     n_image_tokens = int(flat_mask.sum())
-    if n_image_tokens * hidden_states.shape[-1] != features.numel():
+    if n_image_tokens * hidden != features.numel():
         raise ValueError(
             f"image tokens and features do not match: tokens {n_image_tokens}, "
             f"features {tuple(features.shape)}"
         )
-    updated = hidden_states[flat_mask] + features
-    return hidden_states.masked_scatter(vision_mask, updated.view(-1))
+    additive = torch.zeros(
+        flat_mask.shape[0], flat_mask.shape[1], hidden, dtype=hidden_states.dtype
+    )
+    additive[flat_mask] = features.view(n_image_tokens, hidden)
+    return hidden_states + additive.to(hidden_states.device)
 
 
 def _run_text_backbone(
@@ -273,10 +282,12 @@ def _run_text_backbone(
 ):
     """Granite text backbone over precomputed ``inputs_embeds`` (already scaled).
 
-    ``deepstack`` (``{layer_idx: features}``) + ``vision_mask`` (``[B, L, 1]``)
-    are the multimodal injections: before each mapped layer, the projected
-    vision features are summed into the image-token positions (which were zeroed
-    at embed time). Used at prefill only — decode steps pass ``deepstack=None``.
+    ``deepstack`` (``{layer_idx: features}``) + ``vision_mask`` (``[B, L, 1]``
+    bool, kept on **CPU**) are the multimodal injections: before each mapped
+    layer, the projected vision features are summed into the image-token
+    positions (which were zeroed at embed time). The injection's scatter runs on
+    CPU (see ``_inject_deepstack``). Used at prefill only — decode steps pass
+    ``deepstack=None``.
     """
     backbone = get_backbone(model)
     h = inputs_embeds
@@ -372,7 +383,7 @@ def _prefill_forward(
         token_index=0,
         cache_position=0,
         deepstack=deepstack,
-        vision_mask=vision_mask.to(DEVICE),
+        vision_mask=vision_mask,  # kept on CPU: _inject_deepstack scatters on CPU
     )
 
 
