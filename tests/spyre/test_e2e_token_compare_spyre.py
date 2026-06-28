@@ -285,13 +285,22 @@ def _run_model_test(model_key, num_decode=4):
 
     tokenizer = AutoTokenizer.from_pretrained(info["path"])
     dtype = torch_dtype_for(info)
-    model = AutoModelForCausalLM.from_pretrained(
-        info["path"],
-        torch_dtype=dtype,
-        device_map="cpu",
-    )
+
+    # Models with load_fn=True use a custom loader (e.g. FP8-quantized
+    # checkpoints where AutoModelForCausalLM would fail or return wrong dtypes).
+    if info.get("load_fn"):
+        model = adapter.load_hf_model(info["path"], dtype)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            info["path"],
+            torch_dtype=dtype,
+            device_map="cpu",
+        )
     model.eval()
     model.requires_grad_(False)
+    # Use the model's actual dtype (may differ from requested when FP8
+    # dequantization forces bf16 regardless of the dtype argument).
+    actual_dtype = next(model.parameters()).dtype
 
     prompt = "The capital of France is"
     encoded = tokenizer(prompt, return_tensors="pt")
@@ -305,7 +314,7 @@ def _run_model_test(model_key, num_decode=4):
     _untie_embedding_and_lm_head(model)
     adapter.prepare_for_spyre(model)
     print("  Moving model to Spyre ...")
-    _move_to_spyre_with_layout(model, dtype)
+    _move_to_spyre_with_layout(model, actual_dtype)
     print("  Running adapter on Spyre ...")
     adapter_results = adapter_greedy_steps(
         adapter._run_forward,
