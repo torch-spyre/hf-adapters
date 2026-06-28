@@ -1,0 +1,107 @@
+name: integration-tests
+
+# ---------------------------------------------------------------------------
+# STUB integration-tests entrypoint for the Spyre-Next integration pipeline.
+#
+# The pipeline (spyre-frameworks: integration-tests/Jenkinsfile.integration-test-from-rpms)
+# dispatches a per-PR/commit run here via workflow_dispatch, on per-PR ephemeral
+# ARC runners, to test this repo against a given torch-spyre ref + RPM/image set.
+#
+# Today the pipeline targets test_pull_request.yaml via dispatch_map.json. This
+# workflow is the FORWARD target: a single, selectable entrypoint that runs
+#     make test TEST_TYPE=<level>
+# so test scope is one uniform knob across the product repos (see issue #106 and
+# torch-spyre#2923 / spyre-inference#316). Until the Makefile `test` target +
+# selection mapping land, this is a STUB: the test step is a placeholder that
+# echoes what it WOULD run and succeeds, so the pipeline can begin dispatching
+# here. dispatch_map.json keeps driving the real tests until this is wired + merged.
+# ---------------------------------------------------------------------------
+on:
+  workflow_dispatch:
+    inputs:
+      # ---- test selection (the new uniform knob) ----
+      test_type:
+        description: 'Test level/scope to run: smoke | core | full | suite_<group>. Maps to `make test TEST_TYPE=<value>` (see issue #106). Empty = full.'
+        required: false
+        type: string
+        default: ''
+
+      # ---- inputs the integration pipeline already sends (dispatch_map.json) ----
+      torch_spyre_ref:
+        description: Branch/tag/SHA of torch-spyre to build/install under test
+        required: false
+        type: string
+        default: ''
+      rpm_location:
+        description: Artifactory location for RPM download
+        required: false
+        type: string
+        default: ''
+      rpm_names:
+        description: Space-separated list of RPM names to download and install
+        required: false
+        type: string
+        default: ''
+      ref:
+        description: Branch, tag, or SHA of hf-adapters to check out and test
+        required: false
+        type: string
+        default: ''
+      repository:
+        description: Full clone URL of an hf-adapters fork; empty for the base repo
+        required: false
+        type: string
+        default: ''
+      pr_url_hash:
+        description: |
+          Hash of the triggering PR URL. Keys the concurrency group so a newer
+          commit on the same PR cancels the in-flight run. Empty for non-PR.
+        required: false
+        type: string
+        default: ''
+      build_torch_spyre:
+        description: Whether to re-build torch-spyre after installing the RPM
+        required: false
+        type: boolean
+        default: true
+      runner_label:
+        description: |
+          Per-PR ephemeral runner-set IMAGE label
+          (image_hf_adapters_pr_<component>_<sha12>). Empty = standing set.
+        required: false
+        type: string
+        default: ''
+
+# Per-PR concurrency: a newer commit on the same PR cancels the stale run; distinct
+# PRs run in parallel. Mirrors torch-spyre's integration-tests.yaml.
+concurrency:
+  group: ${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' && inputs.pr_url_hash != '' && inputs.pr_url_hash) || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  integration-tests:
+    name: Integration tests (TEST_TYPE=${{ inputs.test_type || 'full' }})
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        run: |
+          echo "=== hf-adapters integration-tests (STUB) ==="
+          echo "test_type        : ${{ inputs.test_type || 'full' }}"
+          echo "torch_spyre_ref  : ${{ inputs.torch_spyre_ref }}"
+          echo "ref / repository : ${{ inputs.ref }} / ${{ inputs.repository }}"
+          echo "rpm_location     : ${{ inputs.rpm_location }}"
+          echo "rpm_names        : ${{ inputs.rpm_names }}"
+          echo "pr_url_hash      : ${{ inputs.pr_url_hash }}"
+          echo "runner_label     : ${{ inputs.runner_label }}"
+
+      # STUB: the real step is `make test TEST_TYPE=<level>` on the per-PR ephemeral
+      # runner once the Makefile `test` target + selection mapping land (issue #106).
+      - name: Run integration tests (stub)
+        run: |
+          TT="${{ inputs.test_type || 'full' }}"
+          echo "STUB: would run -> make test TEST_TYPE=${TT}"
+          echo "(real test execution wired via issue #106; dispatch_map.json drives the live tests until then)"
