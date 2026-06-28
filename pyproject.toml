@@ -63,9 +63,11 @@ markers = [
 
 [tool.uv.sources]
 torch-spyre = { git = "https://github.com/torch-spyre/torch-spyre", rev = "main" }
+oot-framework = { git = "https://github.com/torch-spyre/torch-spyre", subdirectory = "tests/oot_framework", rev = "main" }
 
 [dependency-groups]
 spyre = ["torch-spyre"]
+oot = ["oot-framework"]
 dev = [
     "pre-commit>=3.5.0",
     "black>=26.3.1",

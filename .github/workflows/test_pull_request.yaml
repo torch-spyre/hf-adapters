@@ -438,6 +438,63 @@ jobs:
             "tests/spyre/test_e2e_embed_compare_spyre.py::test_e2e_embed_compare_spyre[${{ matrix.model_key }}]"
           echo "tests done"
 
+  spyre-model-module-tests:
+    name: Spyre model-module tests (${{ matrix.config }})
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - ${{ inputs.runner_label || 'image_torch_spyre' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - granite_4_1_8b_spyre.yaml
+          - granite_3_3_8b_instruct_spyre.yaml
+          - Ministral-3-14B-Instruct-2512.yaml
+          - Mistral-Small-3.2-24B-Instruct-2506.yaml
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test oot"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - name: Run module tests for ${{ matrix.config }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # TORCH_DEVICE_ROOT must point to the hf-adapters repo root so that
+          # ${TORCH_DEVICE_ROOT}/tests/test_modules_custom.py in the YAML configs
+          # resolves to hf-adapters/tests/test_modules_custom.py (not torch-spyre).
+          TORCH_DEVICE_ROOT: ${{ env.CLONED_HF_ADAPTERS_DIR }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          source .venv/bin/activate
+          _run_test=$(python3 -c \
+            "import oot_framework, os; print(os.path.join(os.path.dirname(oot_framework.__file__), 'run_test.sh'))")
+          echo "Using oot-framework runner: $_run_test"
+          bash "$_run_test" \
+            "tests/configs/module_tests/${{ matrix.config }}" \
+            -v
+
   # ===========================================================================
   # Required check gate — fans in all matrix jobs so a single branch
   # protection rule ("tests / run spyre unit tests") passes only when every
@@ -458,6 +515,7 @@ jobs:
       - spyre-smoke-tests
       - spyre-token-compare-tests
       - spyre-embed-compare-tests
+      - spyre-model-module-tests #updated to run model centric HF module tests
     if: always()
     steps:
       - name: Check all suites passed
@@ -473,7 +531,8 @@ jobs:
                  contains(needs.spyre-load-tests.result, 'failure') || contains(needs.spyre-load-tests.result, 'cancelled') ||
                  contains(needs.spyre-smoke-tests.result, 'failure') || contains(needs.spyre-smoke-tests.result, 'cancelled') ||
                  contains(needs.spyre-token-compare-tests.result, 'failure') || contains(needs.spyre-token-compare-tests.result, 'cancelled') ||
-                 contains(needs.spyre-embed-compare-tests.result, 'failure') || contains(needs.spyre-embed-compare-tests.result, 'cancelled') }}; then
+                 contains(needs.spyre-embed-compare-tests.result, 'failure') || contains(needs.spyre-embed-compare-tests.result, 'cancelled') ||
+                 contains(needs.spyre-model-module-tests.result, 'failure') || contains(needs.spyre-model-module-tests.result, 'cancelled') }}; then
             echo "One or more test suites failed."
             exit 1
           fi
