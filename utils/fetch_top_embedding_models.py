@@ -23,7 +23,13 @@ import os
 import sys
 from pathlib import Path
 
-from hf_model_catalog import EXPAND_FIELDS, RESOURCES_DIR, build_catalog, tags
+from hf_model_catalog import (
+    EXPAND_FIELDS,
+    RESOURCES_DIR,
+    build_catalog,
+    is_baseline_keep,
+    tags,
+)
 from huggingface_hub import HfApi
 from huggingface_hub.hf_api import ModelInfo
 
@@ -126,11 +132,7 @@ def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
 
 
 def _keep(model: ModelInfo) -> bool:
-    if not model.config:
-        return False
-    if model.library_name in ("gguf", "mlx"):
-        return False
-    if "onnx" in model.id.lower():
+    if not is_baseline_keep(model):
         return False
     if not _has_embedding_signal(model):
         return False
