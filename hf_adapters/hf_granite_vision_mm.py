@@ -1,0 +1,620 @@
+# Copyright 2025 The Torch-Spyre Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+Combined (two-tower) HuggingFace adapter for Granite Vision 4.1 on Spyre.
+
+Where ``hf_granite_vision`` extracts only the text backbone (text-only causal
+LM, used by ``AutoSpyreModelForCausalLM``), this module loads BOTH towers from
+the one multimodal checkpoint via ``AutoModelForImageTextToText`` and runs the
+full image→text pipeline. It is the adapter behind
+``AutoSpyreModelForImageTextToText``.
+
+    pixel_values ──► SigLIP vision tower            (hf_siglip_vision, Spyre)
+                       │  output_hidden_states
+                       ▼
+                     layerwise + spatial projectors  (stock modules, CPU)
+                       │  pack_image_features
+                       ▼
+                     deepstack_features dict {text_layer: features}
+                       │
+    input_ids ──► text embeddings ──► zero <image> slots
+                       │
+                       ▼
+                     Granite text decoder            (hf_granite blocks, Spyre)
+                       │  + deepstack injection at mapped layers
+                       ▼
+                     logits
+
+This reproduces granite-vision-4.1's native **deepstack + spatial** injection:
+``get_image_features`` projects several vision layers, and each projected set is
+*summed into* the image-token positions before a specific decoder layer
+(``deepstack_layer_map`` + ``spatial_target_layers``; image-token embedding
+slots are zeroed first). The decoder layer forward itself is unchanged Granite,
+so the injection is a per-layer ``masked_scatter`` between compiled blocks.
+
+The vision tower is prepared by ``hf_siglip_vision``; the text decoder reuses
+``hf_granite``'s compiled block. Both live under the one loaded VLM, so a single
+``load_model`` / ``prepare_for_spyre`` covers them. Exposes ``prefill_logits``
+(first-token forward) and ``generate`` (full autoregressive decode — image
+features injected at prefill; decode steps are pure text).
+
+Verified on CPU to match stock full-deepstack ``model.forward`` (first-token
+logits cosine ≥ 0.999, argmax match) and stock ``model.generate`` (token-exact).
+"""
+
+import math
+
+import torch
+
+from hf_adapters import hf_siglip_vision
+from hf_adapters.hf_common import (
+    BLOCK_SIZE,
+    DEVICE,
+    _model_dtype,
+    _resolve_generation_params,
+    allocate_kv_caches,
+    build_expansion_mask,
+    build_prefill_mask,
+    get_backbone,
+    pad_lm_head,
+    patch_rmsnorm,
+    prepare_rope_and_heads,
+)
+from hf_adapters.hf_granite import _make_compiled_block
+
+
+def load_hf_model(model_path, dtype=torch.float16):
+    """Load the full Granite Vision VLM (both towers) as stock HF, on CPU."""
+    from transformers import AutoModelForImageTextToText
+
+    model = AutoModelForImageTextToText.from_pretrained(
+        model_path, dtype=dtype, device_map="cpu"
+    )
+    model.eval()
+    model.requires_grad_(False)
+    return model
+
+
+def prepare_for_spyre(model):
+    """Prepare BOTH towers of a loaded Granite Vision VLM in-place.
+
+    Vision tower → ``hf_siglip_vision.prepare_for_spyre`` (compiled pre-LN
+    blocks, head padding, CPU patch-embed). Text decoder → Granite RoPE/head
+    prep + compiled Granite blocks + padded LM head, mirroring
+    ``hf_granite.prepare_for_spyre`` but against the VLM's nested text backbone.
+    """
+    from transformers.models.granite4_vision.modeling_granite4_vision import (
+        Granite4VisionTextRMSNorm,
+    )
+
+    # The text-decoder dims live in ``config.text_config``; mirror the ones the
+    # shared Granite/RoPE/KV helpers read off ``model.config`` onto the top-level
+    # config (same pattern as hf_mistral3). embedding_multiplier / residual /
+    # logits_scaling stay on the text backbone / text_config where they're read.
+    cfg = model.config
+    text_cfg = cfg.text_config
+    for name in (
+        "hidden_size",
+        "intermediate_size",
+        "num_hidden_layers",
+        "num_attention_heads",
+        "num_key_value_heads",
+        "head_dim",
+        "rope_theta",
+        "max_position_embeddings",
+        "vocab_size",
+    ):
+        if hasattr(text_cfg, name) and not hasattr(cfg, name):
+            setattr(cfg, name, getattr(text_cfg, name))
+
+    # --- Vision tower (resolves model.model.vision_tower) ---
+    hf_siglip_vision.prepare_for_spyre(model)
+
+    # --- Text decoder (model.model.language_model via get_backbone) ---
+    prepare_rope_and_heads(model)
+    patch_rmsnorm(Granite4VisionTextRMSNorm)
+    pad_lm_head(model)
+    backbone = get_backbone(model)
+    model._spyre_text_blocks = [
+        _make_compiled_block(layer) for layer in backbone.layers
+    ]
+
+
+def _embed_text(model, input_ids):
+    """Token embeddings * embedding_multiplier (Granite scales its embeddings)."""
+    backbone = get_backbone(model)
+    h = backbone.embed_tokens(input_ids)
+    return h * backbone.embedding_multiplier
+
+
+def _deepstack_features(model, pixel_values, image_sizes):
+    """Run the Spyre vision tower once, build ALL deepstack + spatial features.
+
+    Reproduces stock ``Granite4VisionModel.get_image_features``, but the vision
+    tower is the Spyre-prepared SigLIP adapter (so we can't call stock
+    ``get_image_features``, whose attention path assumes unpadded heads). We run
+    the tower once with ``output_hidden_states=True`` and then apply the
+    checkpoint's own projectors + ``pack_image_features`` on CPU per the
+    ``deepstack_layer_map`` (layerwise projectors) and ``spatial_target_layers``
+    (spatial projectors from ``spatial_vision_layer``).
+
+    Returns ``{text_layer_idx: features[num_image_tokens, hidden]}`` — one entry
+    per injection point (8 for granite-vision-4.1: 4 deepstack + 4 spatial).
+    """
+    cfg = model.config
+    inner = model.model  # Granite4VisionModel
+    from transformers.models.granite4_vision.modeling_granite4_vision import (
+        image_size_to_num_patches,
+    )
+
+    # anyrES: pixel_values [B, T, C, H, W] -> [B*T, C, H, W]
+    if pixel_values.dim() == 5:
+        pixel_values = pixel_values.flatten(0, 1)
+
+    _, hidden_states = hf_siglip_vision.prefill_vision_tower(
+        model, pixel_values, output_hidden_states=True
+    )
+    dtype = _model_dtype(model)
+    image_num_patches = [
+        image_size_to_num_patches(
+            image_size=imsize,
+            grid_pinpoints=cfg.image_grid_pinpoints,
+            patch_size=cfg.vision_config.image_size,
+        )
+        for imsize in image_sizes
+    ]
+    select_default = cfg.vision_feature_select_strategy == "default"
+
+    def _project_and_pack(selected_layer_feature, projector):
+        feat = selected_layer_feature.to("cpu")
+        if select_default:
+            feat = feat[:, 1:]
+        projected = projector(feat.to(dtype))
+        projected = torch.split(projected, image_num_patches, dim=0)
+        packed, _ = inner.pack_image_features(
+            projected,
+            image_sizes,
+            vision_feature_select_strategy=cfg.vision_feature_select_strategy,
+            image_newline=inner.image_newline,
+        )
+        if isinstance(packed, (list, tuple)):
+            packed = torch.cat(list(packed), dim=0)
+        return packed
+
+    deepstack = {}
+    # Deepstack: each vision layer -> its own projector -> a distinct text layer.
+    for proj_idx, (vision_layer, llm_layer) in enumerate(cfg.deepstack_layer_map):
+        deepstack[llm_layer] = _project_and_pack(
+            hidden_states[vision_layer], inner.layerwise_projectors[proj_idx]
+        )
+    # Spatial: 4 offset groups from a single vision layer -> 4 text layers.
+    spatial_feature = hidden_states[cfg.spatial_vision_layer]
+    for group_idx, llm_layer in enumerate(cfg.spatial_target_layers):
+        deepstack[llm_layer] = _project_and_pack(
+            spatial_feature, inner.spatial_projectors[group_idx]
+        )
+    return deepstack
+
+
+def _vision_mask(model, input_ids):
+    """``[B, L, 1]`` bool mask, True at ``image_token_id`` positions."""
+    return (input_ids == model.config.image_token_id).unsqueeze(-1)
+
+
+def _inject_deepstack(hidden_states, features, vision_mask):
+    """Add ``features`` into image-token positions (stock deepstack injection).
+
+    ``hidden_states.masked_scatter(mask, (hidden_states[mask] + features))`` —
+    the image-token slots (zeroed at embed time) accumulate each mapped layer's
+    projected features.
+
+    Asserts the image-token count matches the feature count first (mirrors stock
+    ``get_placeholder_mask``'s ``torch_compilable_check``): a token/feature
+    mismatch — e.g. image-token expansion misaligned with the tiling — would
+    otherwise corrupt the scatter silently.
+    """
+    flat_mask = vision_mask.squeeze(-1)
+    features = features.to(hidden_states.device, hidden_states.dtype)
+    n_image_tokens = int(flat_mask.sum())
+    if n_image_tokens * hidden_states.shape[-1] != features.numel():
+        raise ValueError(
+            f"image tokens and features do not match: tokens {n_image_tokens}, "
+            f"features {tuple(features.shape)}"
+        )
+    updated = hidden_states[flat_mask] + features
+    return hidden_states.masked_scatter(vision_mask, updated.view(-1))
+
+
+def _run_text_backbone(
+    model,
+    inputs_embeds,
+    position_ids,
+    attn_mask,
+    key_caches,
+    value_caches,
+    is_filling,
+    token_index,
+    cache_position,
+    deepstack=None,
+    vision_mask=None,
+):
+    """Granite text backbone over precomputed ``inputs_embeds`` (already scaled).
+
+    ``deepstack`` (``{layer_idx: features}``) + ``vision_mask`` (``[B, L, 1]``)
+    are the multimodal injections: before each mapped layer, the projected
+    vision features are summed into the image-token positions (which were zeroed
+    at embed time). Used at prefill only — decode steps pass ``deepstack=None``.
+    """
+    backbone = get_backbone(model)
+    h = inputs_embeds
+    selected_freqs = model._spyre_rope(h, position_ids)
+    for i, compiled_block in enumerate(model._spyre_text_blocks):
+        if deepstack is not None and i in deepstack:
+            h = _inject_deepstack(h, deepstack[i], vision_mask)
+        h, key_caches[i], value_caches[i] = compiled_block(
+            h,
+            selected_freqs,
+            attn_mask,
+            key_caches[i],
+            value_caches[i],
+            is_filling,
+            token_index,
+            cache_position,
+        )
+    return backbone.norm(h)
+
+
+def _pad_and_position(input_ids, actual_lengths):
+    """Left block-pad ``input_ids`` to a BLOCK_SIZE multiple and build positions.
+
+    Returns ``(padded_ids, padded_len, prompt_offsets, position_ids)``. Real
+    tokens are right-aligned: each row's positions ``0..actual_len-1`` sit at
+    padded indices ``prompt_offsets[b]..padded_len-1`` (the decode loop's
+    convention). Shared by ``prefill_logits`` and ``generate``'s prefill arm.
+    """
+    batch_size, prompt_length = input_ids.shape
+    padded_len = math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
+    block_pad = padded_len - prompt_length
+    if block_pad > 0:
+        pad = input_ids.new_zeros((batch_size, block_pad))
+        input_ids = torch.cat([pad, input_ids], dim=1)
+
+    prompt_offsets = padded_len - actual_lengths  # [B]
+    position_ids = torch.zeros((batch_size, padded_len), dtype=torch.long)
+    for b in range(batch_size):
+        n = actual_lengths[b].item()
+        position_ids[b, prompt_offsets[b].item() :] = torch.arange(n)
+    return input_ids, padded_len, prompt_offsets, position_ids
+
+
+def _prefill_forward(
+    model,
+    padded_ids,
+    padded_len,
+    prompt_offsets,
+    position_ids,
+    pixel_values,
+    image_sizes,
+    key_caches,
+    value_caches,
+    max_cache_len,
+):
+    """The shared multimodal prefill: padded ids + image → first-step logits.
+
+    Builds scaled text embeddings, zeroes the ``<image>`` slots, builds the
+    deepstack/spatial features, and runs the Granite decoder once with injection
+    at the mapped layers (writing into the supplied KV caches). Returns
+    full-sequence logits ``[B, padded_len, padded_vocab]``. The vision mask is
+    built on the *padded* ids so it aligns with the embeddings.
+
+    KV caches are passed in (not allocated here) so ``generate`` can size them
+    for the whole decode while ``prefill_logits`` sizes them for one forward.
+    """
+    model_dtype = _model_dtype(model)
+    inputs_embeds = _embed_text(model, padded_ids)
+    vision_mask = _vision_mask(model, padded_ids)
+    inputs_embeds = inputs_embeds.masked_fill(vision_mask, 0.0)
+    deepstack = _deepstack_features(model, pixel_values, image_sizes)
+    prefill_mask = build_prefill_mask(
+        padded_ids.shape[0],
+        padded_len,
+        max_cache_len,
+        prompt_offsets,
+        dtype=model_dtype,
+    )
+    return _logits_from_embeds(
+        model,
+        inputs_embeds.to(DEVICE),
+        position_ids.to(DEVICE),
+        prefill_mask.to(DEVICE),
+        key_caches,
+        value_caches,
+        is_filling=False,
+        token_index=0,
+        cache_position=0,
+        deepstack=deepstack,
+        vision_mask=vision_mask.to(DEVICE),
+    )
+
+
+def prefill_logits(model, input_ids, attention_mask, pixel_values, image_sizes):
+    """One-shot prefill of the (text + deepstack-injected image) sequence → logits.
+
+    Left-pads to a BLOCK_SIZE multiple (same convention as ``generate``'s
+    prefill arm), zeroes image-token embedding slots, runs the Granite decoder
+    once with deepstack/spatial injection at the mapped layers, and returns
+    full-sequence logits ``[B, L, padded_vocab]`` (callers take
+    ``[:, -1, :true_vocab]`` for the first token).
+    """
+    actual_lengths = attention_mask.sum(dim=1)
+    padded_ids, padded_len, prompt_offsets, position_ids = _pad_and_position(
+        input_ids, actual_lengths
+    )
+    key_caches, value_caches = allocate_kv_caches(
+        model, padded_ids.shape[0], padded_len, _model_dtype(model)
+    )
+    logits = _prefill_forward(
+        model,
+        padded_ids,
+        padded_len,
+        prompt_offsets,
+        position_ids,
+        pixel_values,
+        image_sizes,
+        key_caches,
+        value_caches,
+        max_cache_len=padded_len,
+    )
+    return logits, padded_len, input_ids.shape[1]
+
+
+def _logits_from_embeds(
+    model,
+    inputs_embeds,
+    position_ids,
+    attn_mask,
+    key_caches,
+    value_caches,
+    is_filling,
+    token_index,
+    cache_position,
+    deepstack=None,
+    vision_mask=None,
+):
+    """Run text backbone over embeds + LM head / logits scaling -> logits."""
+    h = _run_text_backbone(
+        model,
+        inputs_embeds,
+        position_ids,
+        attn_mask,
+        key_caches,
+        value_caches,
+        is_filling,
+        token_index,
+        cache_position,
+        deepstack=deepstack,
+        vision_mask=vision_mask,
+    )
+    return model.lm_head(h) / model.config.text_config.logits_scaling
+
+
+def generate(
+    model,
+    processor,
+    input_ids,
+    attention_mask,
+    pixel_values,
+    image_sizes,
+    max_new_tokens,
+    do_sample=None,
+    temperature=None,
+    top_k=None,
+    top_p=None,
+):
+    """Autoregressive image→text generation on Spyre (greedy / top-k/p sampling).
+
+    Mirrors ``hf_common.generate``'s 64-block padded decode, but the model is
+    driven by **embeddings** rather than token ids so the prefill step can carry
+    the deepstack image injection:
+
+    - **Prefill** (step 0): build text embeddings, zero the ``<image>`` slots,
+      build the deepstack/spatial features, and run the Granite decoder once with
+      injection at the mapped layers.
+    - **Decode** (steps ≥1): each newly generated token id is embedded with the
+      same ``embedding_multiplier`` and fed back — pure text, no image.
+
+    Inputs come pre-tokenized from the checkpoint's ``AutoProcessor`` (which
+    handles the chat template + image-token expansion), so this takes
+    ``input_ids``/``pixel_values`` directly instead of raw prompt strings.
+    Assumes **left-padded** input (set ``processor.tokenizer.padding_side =
+    'left'``), matching the decode loop's right-aligned prompt convention.
+
+    Returns a list of decoded strings (one per batch row), EOS-trimmed.
+    """
+    tokenizer = processor.tokenizer
+    params = _resolve_generation_params(
+        model,
+        tokenizer,
+        {
+            "do_sample": do_sample,
+            "temperature": temperature,
+            "top_k": top_k,
+            "top_p": top_p,
+        },
+    )
+    do_sample = params["do_sample"]
+    temperature = params["temperature"]
+    top_k = params["top_k"]
+    top_p = params["top_p"]
+    eos_ids = params["eos_ids"]
+
+    backbone = get_backbone(model)
+    emb_mult = backbone.embedding_multiplier
+    model_dtype = _model_dtype(model)
+
+    batch_size, prompt_length = input_ids.shape
+    actual_prompt_lengths = attention_mask.sum(dim=1)  # [B]
+
+    max_cache_len = (
+        math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
+        + math.ceil(max_new_tokens / BLOCK_SIZE) * BLOCK_SIZE
+    )
+    input_ids, padded_len, prompt_offsets, position_ids = _pad_and_position(
+        input_ids, actual_prompt_lengths
+    )
+
+    key_caches, value_caches = allocate_kv_caches(
+        model, batch_size, max_cache_len, model_dtype
+    )
+
+    result = input_ids.clone()
+    current_cache_len = padded_len
+    tokens_in_block = BLOCK_SIZE - 1
+    decode_pos = None
+    fill_mask_device = None
+    finished = torch.zeros(batch_size, dtype=torch.bool)
+    num_generated = torch.zeros(batch_size, dtype=torch.long)
+
+    def embed_ids(ids):
+        """Token ids -> scaled embeddings (decode steps; pure text)."""
+        return backbone.embed_tokens(ids) * emb_mult
+
+    for i in range(max_new_tokens):
+        if i == 0:
+            # --- PREFILL: text embeds with image slots zeroed, deepstack
+            # injection at the mapped decoder layers (shared with prefill_logits) ---
+            logits = _prefill_forward(
+                model,
+                input_ids,
+                padded_len,
+                prompt_offsets,
+                position_ids,
+                pixel_values,
+                image_sizes,
+                key_caches,
+                value_caches,
+                max_cache_len,
+            )
+            next_logits = logits.to("cpu")[:, -1, :]
+            current_cache_len = padded_len
+            decode_pos = torch.zeros((batch_size, BLOCK_SIZE), dtype=torch.long)
+            for b in range(batch_size):
+                actual_len = actual_prompt_lengths[b].item()
+                for j in range(BLOCK_SIZE):
+                    decode_pos[b, j] = actual_len + j - BLOCK_SIZE
+        else:
+            is_filling = tokens_in_block > 0
+            next_input = result[:, -BLOCK_SIZE:].to(DEVICE)
+            next_embeds = embed_ids(next_input)
+            if is_filling:
+                fill_pos = current_cache_len - BLOCK_SIZE + tokens_in_block
+                logits = _logits_from_embeds(
+                    model,
+                    next_embeds,
+                    decode_pos.to(DEVICE),
+                    fill_mask_device,
+                    key_caches,
+                    value_caches,
+                    is_filling=True,
+                    token_index=tokens_in_block,
+                    cache_position=fill_pos,
+                )
+                grab_idx = BLOCK_SIZE - tokens_in_block
+                next_logits = logits.to("cpu")[:, -grab_idx, :]
+            else:
+                current_cache_len += BLOCK_SIZE
+                decode_pos = decode_pos + BLOCK_SIZE
+                exp_mask = build_expansion_mask(
+                    batch_size,
+                    BLOCK_SIZE,
+                    max_cache_len,
+                    current_cache_len,
+                    prompt_offsets,
+                    dtype=model_dtype,
+                )
+                logits = _logits_from_embeds(
+                    model,
+                    next_embeds,
+                    decode_pos.to(DEVICE),
+                    exp_mask.to(DEVICE),
+                    key_caches,
+                    value_caches,
+                    is_filling=False,
+                    token_index=0,
+                    cache_position=current_cache_len - BLOCK_SIZE,
+                )
+                next_logits = logits.to("cpu")[:, -BLOCK_SIZE, :]
+                fill_mask_device = exp_mask.to(DEVICE)
+
+        # Token selection (CPU) — mirrors hf_common.generate.
+        if do_sample:
+            scaled = next_logits / temperature
+            if top_k and top_k > 0:
+                v, _ = torch.topk(scaled, min(top_k, scaled.size(-1)), dim=-1)
+                scaled[scaled < v[:, -1:]] = -torch.inf
+            if top_p is not None and top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(scaled, descending=False)
+                cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
+                sorted_indices_to_remove = cumulative_probs <= (1 - top_p)
+                sorted_indices_to_remove[..., -1:] = 0
+                indices_to_remove = sorted_indices_to_remove.scatter(
+                    1, sorted_indices, sorted_indices_to_remove
+                )
+                scaled = scaled.masked_fill(indices_to_remove, -torch.inf)
+            probs = torch.nn.functional.softmax(scaled, dim=-1)
+            next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
+        else:
+            next_tokens = torch.argmax(next_logits, dim=-1)
+
+        tokens_in_block = (tokens_in_block + 1) % BLOCK_SIZE
+        if tokens_in_block == 0:
+            result = torch.nn.functional.pad(result, (0, BLOCK_SIZE))
+        grab_idx = (BLOCK_SIZE - tokens_in_block) if tokens_in_block > 0 else BLOCK_SIZE
+        result[:, -grab_idx] = next_tokens
+        if eos_ids is not None:
+            finished |= torch.isin(next_tokens, eos_ids)
+        num_generated += (~finished).long()
+        if finished.all():
+            break
+
+    # Decode generated tokens per sequence (same block-walk as hf_common.generate).
+    results = []
+    for b in range(batch_size):
+        gen_ids_list = []
+        block_start = padded_len
+        remaining = num_generated[b].item()
+        while remaining > 0:
+            take = min(remaining, BLOCK_SIZE)
+            for j in range(take):
+                gen_ids_list.append(result[b, block_start + j].item())
+            remaining -= take
+            block_start += BLOCK_SIZE
+        gen_ids = torch.tensor(gen_ids_list)
+        if eos_ids is not None:
+            eos_pos = torch.isin(gen_ids, eos_ids).nonzero(as_tuple=True)[0]
+            if len(eos_pos) > 0:
+                gen_ids = gen_ids[: eos_pos[0].item()]
+        results.append(tokenizer.decode(gen_ids, skip_special_tokens=True))
+    return results
+
+
+def load_model(model_path, dtype=torch.float16):
+    """Load Granite Vision (both towers) and prepare it for Spyre."""
+    model = load_hf_model(model_path, dtype)
+    prepare_for_spyre(model)
+    print("Moving Granite Vision (both towers) to Spyre ...")
+    torch.nn.Module.to(model, DEVICE)
+    print("Model ready.")
+    return model

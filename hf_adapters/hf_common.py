@@ -1891,6 +1891,76 @@ def make_encoder_block(
     return torch.compile(block_forward, dynamic=False)
 
 
+def make_vision_encoder_block(
+    *,
+    q_proj,
+    k_proj,
+    v_proj,
+    o_proj,
+    layer_norm1,
+    layer_norm2,
+    ffn_in,
+    act,
+    ffn_out,
+    num_heads,
+    head_dim,
+    scale,
+):
+    """Compile a **pre-LN** bidirectional vision-transformer block (SigLIP/CLIP).
+
+    Counterpart of ``make_encoder_block`` (which is post-LN, BERT-style). A
+    SigLIP/CLIP encoder layer normalizes *before* each sub-block and adds the
+    residual *after*:
+
+        h = h + o_proj(SDPA(qkv(layer_norm1(h))))
+        h = h + ffn_out(act(ffn_in(layer_norm2(h))))
+
+    There is no attention mask and no KV cache — every patch attends to every
+    patch (full bidirectional attention over a fixed-length patch sequence).
+
+    Args:
+        q_proj/k_proj/v_proj/o_proj: per-head attention projections
+            (``self_attn.{q,k,v,out}_proj``). Already head-padded if needed.
+        layer_norm1: pre-attention LayerNorm. layer_norm2: pre-MLP LayerNorm.
+        ffn_in/act/ffn_out: MLP (``fc1`` → activation → ``fc2``).
+        num_heads: attention head count. head_dim: per-head dim (post-padding).
+        scale: SDPA scale (``1/sqrt(orig_head_dim)`` — pass the *original* dim
+            when heads were zero-padded so padded entries don't change the
+            softmax temperature).
+    """
+
+    def block_forward(hidden_states):
+        bsz, seq_len, _ = hidden_states.shape
+
+        residual = hidden_states
+        h = layer_norm1(hidden_states)
+        q = q_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+        k = k_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+        v = v_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+
+        attn_out = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=False,
+            scale=scale,
+        )
+        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
+        attn_out = o_proj(attn_out)
+        hidden_states = residual + attn_out
+
+        residual = hidden_states
+        h = layer_norm2(hidden_states)
+        h = ffn_out(act(ffn_in(h)))
+        hidden_states = residual + h
+
+        return hidden_states
+
+    return torch.compile(block_forward, dynamic=False)
+
+
 def encoder_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_ids):
     """Encoder backbone forward: embedding table + LN + compiled encoder blocks.
 
@@ -2190,3 +2260,86 @@ def prefill_encoder(
     # Crop the block-pad back off
     h = h[:, :seq_len, :]
     return h, attention_mask
+
+
+# ---------------------------------------------------------------------------
+# Vision-encoder prefill driver
+# ---------------------------------------------------------------------------
+
+
+def vision_backbone_forward(model, patch_embeds, output_hidden_states=False):
+    """Vision-tower backbone forward: compiled pre-LN blocks + post-LN.
+
+    The patch embedding (Conv2d + position-embedding add) is done *before* this
+    call by ``prefill_vision`` — it produces ``patch_embeds`` ``[B, P, H]``,
+    which this function feeds through the compiled encoder blocks and the
+    tower's final LayerNorm.
+
+    Mirrors ``encoder_backbone_forward``'s Spyre layout workaround: a pre-LN /
+    LayerNorm-terminated block can leave a Spyre tensor in a layout the next
+    block's matmul mis-reads, so we ``.clone()`` between on-device blocks to
+    force a canonical-layout copy.
+
+    Args:
+        model: prepared vision tower; must have ``model._spyre_compiled_blocks``
+            and ``model._spyre_post_layernorm`` set by ``prepare_for_spyre``.
+        patch_embeds: ``[B, P, H]`` patch sequence (already on DEVICE).
+        output_hidden_states: when True, also return the per-layer hidden states
+            (HF convention: ``[patch_embeds, out_layer0, ..., out_layerN-1]`` —
+            N+1 entries, NOT post-LN'd). VLMs select an intermediate layer
+            (e.g. ``vision_feature_layer=-2``) from this tuple.
+
+    Returns:
+        ``last_hidden_state`` ``[B, P, H]`` (post-LN), or
+        ``(last_hidden_state, hidden_states_tuple)`` when ``output_hidden_states``.
+    """
+    h = patch_embeds
+    h = h.clone() if h.device.type == "spyre" else h
+    hidden_states = [h] if output_hidden_states else None
+    for compiled_block in model._spyre_compiled_blocks:
+        h = compiled_block(h)
+        if h.device.type == "spyre":
+            h = h.clone()
+        if output_hidden_states:
+            hidden_states.append(h)
+    h = model._spyre_post_layernorm(h)
+    if h.device.type == "spyre":
+        h = h.clone()
+    if output_hidden_states:
+        return h, tuple(hidden_states)
+    return h
+
+
+def prefill_vision(
+    run_vision_forward_fn: Callable, model, pixel_values, output_hidden_states=False
+):
+    """One-shot vision-tower prefill: pixels -> patch-sequence hidden states.
+
+    The vision tower has no padding, no attention mask, and a fixed patch count
+    (``(image_size / patch_size) ** 2``), so this is simpler than
+    ``prefill_encoder``: the patch sequence is already a clean BLOCK_SIZE
+    multiple (e.g. SigLIP 384/16 → 24² = 576 = 9·64) and every patch is real.
+
+    The patch embedding (Conv2d) runs on CPU and the result is moved to DEVICE
+    — Conv2d is a tiny fraction of tower FLOPs and ``nn.Conv2d`` is not assumed
+    to lower on Spyre (see docs/siglip_vision_spyre_findings.md). The position
+    embedding (``nn.Embedding``) is added on CPU for the same reason; both match
+    the embedding-lookup CPU-fallback pattern used by the decoder adapters.
+
+    Args:
+        run_vision_forward_fn: ``fn(model, patch_embeds) -> [B, P, H]`` — pass
+            the adapter's ``_run_backbone_forward`` (``vision_backbone_forward``).
+        model: prepared vision tower. Must expose ``model._spyre_patch_embed``
+            (callable pixels -> ``[B, P, H]`` on CPU, set by ``prepare_for_spyre``).
+        pixel_values: ``[B, C, image_size, image_size]`` (e.g. ``[B, 3, 384, 384]``).
+            A multi-tile ``[B, T, C, H, W]`` input must be flattened to
+            ``[B*T, C, H, W]`` by the caller.
+
+    Returns:
+        ``last_hidden_state`` ``[B, P, H]``, or
+        ``(last_hidden_state, hidden_states_tuple)`` when ``output_hidden_states``.
+    """
+    patch_embeds = model._spyre_patch_embed(pixel_values)  # CPU, [B, P, H]
+    return run_vision_forward_fn(
+        model, patch_embeds.to(DEVICE), output_hidden_states=output_hidden_states
+    )
