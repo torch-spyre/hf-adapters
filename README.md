@@ -76,6 +76,46 @@ embeddings = model.encode(["hello world", "how are you"])
 
 The `st_backend` module automatically patches `sentence-transformers` to apply the relevant Spyre adapter when loading the model. All standard SentenceTransformer methods (`encode()`, `similarity()`, etc.) work unchanged.
 
+## Multimodal Models (image → text)
+
+For vision-language models, use `AutoSpyreModelForImageTextToText`. It loads the
+full VLM via `AutoModelForImageTextToText`, prepares **both** towers (vision +
+text decoder) for Spyre, and exposes a multimodal `generate`:
+
+```python
+from hf_adapters import AutoSpyreModelForImageTextToText
+from transformers import AutoProcessor
+from PIL import Image
+
+model = AutoSpyreModelForImageTextToText.from_pretrained("ibm-granite/granite-vision-4.1-4b")
+processor = AutoProcessor.from_pretrained("ibm-granite/granite-vision-4.1-4b")
+processor.tokenizer.padding_side = "left"  # matches the decode loop's right-aligned prompts
+
+# Build the batch the official way — the chat template tokenizes and expands the
+# image tokens in one call (the two-step text/images path mis-tiles anyres images).
+image = Image.open("cat.jpg").convert("RGB")
+conv = [{"role": "user", "content": [
+    {"type": "image", "image": image},
+    {"type": "text", "text": "Briefly describe this image."},
+]}]
+batch = processor.apply_chat_template(
+    conv, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt"
+)
+
+texts = model.generate(
+    processor,
+    batch["input_ids"], batch["attention_mask"],
+    batch["pixel_values"], batch["image_sizes"],
+    max_new_tokens=64,
+)
+print(texts[0])
+```
+
+A multimodal checkpoint's config is registered under both auto classes:
+`AutoSpyreModelForCausalLM` selects the text-only adapter (vision tower
+discarded), while `AutoSpyreModelForImageTextToText` selects the combined
+two-tower adapter.
+
 ## Repo Structure
 
 ```
