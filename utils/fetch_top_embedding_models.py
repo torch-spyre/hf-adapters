@@ -33,6 +33,8 @@ from hf_model_catalog import (
 from huggingface_hub import HfApi
 from huggingface_hub.hf_api import ModelInfo
 
+from utils.hf_model_catalog import is_moe
+
 # Pipeline tags that embedding models are filed under. They are mutually
 # exclusive (one primary tag per model), so we query both and union.
 EMBEDDING_PIPELINE_TAGS: tuple[str, ...] = ("feature-extraction", "sentence-similarity")
@@ -137,6 +139,10 @@ def _keep(model: ModelInfo) -> bool:
     if not _has_embedding_signal(model):
         return False
     if _is_reranker(model):
+        return False
+    if is_moe(model):
+        return False
+    if model.gated:
         return False
     return True
 

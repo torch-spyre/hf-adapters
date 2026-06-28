@@ -251,8 +251,8 @@ def build_catalog(
         "parameters (str)",
         "parameters",
         "library",
-        "is_gated",
-        "is_moe",
+        # "is_gated",
+        # "is_moe",
     ]
     extra_head: list[str] = [h for h, _ in extra_columns]
     tail_head: list[str] = ["is_custom_code", "config_class", "is_supported", "Year"]
@@ -286,8 +286,8 @@ def build_catalog(
                     param_str,
                     param_int,
                     m.library_name,
-                    bool(m.gated),
-                    is_moe(m),
+                    # bool(m.gated),
+                    # is_moe(m),
                     *extra_vals,
                     is_custom_code(m),
                     config_class,

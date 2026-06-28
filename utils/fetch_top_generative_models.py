@@ -9,6 +9,7 @@ from hf_model_catalog import (
     RESOURCES_DIR,
     build_catalog,
     is_baseline_keep,
+    is_moe,
 )
 from huggingface_hub import HfApi
 from huggingface_hub.hf_api import ModelInfo
@@ -29,7 +30,13 @@ def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
 
 
 def _keep(model: ModelInfo) -> bool:
-    return is_baseline_keep(model)
+    if not is_baseline_keep(model):
+        return False
+    if is_moe(model):
+        return False
+    if model.gated:
+        return False
+    return True
 
 
 def fetch_top_generative_models(
