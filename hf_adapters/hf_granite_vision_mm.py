@@ -133,9 +133,15 @@ def prepare_for_spyre(model):
 
 
 def _embed_text(model, input_ids):
-    """Token embeddings * embedding_multiplier (Granite scales its embeddings)."""
+    """Token embeddings * embedding_multiplier (Granite scales its embeddings).
+
+    The gather runs on ``embed_tokens``' device — after ``_move_to_spyre_with_layout``
+    the table lives on Spyre, so ``input_ids`` is moved to match (mirrors the
+    decode-step ``embed_ids``). Returns embeddings on the embedding's device.
+    """
     backbone = get_backbone(model)
-    h = backbone.embed_tokens(input_ids)
+    ids = input_ids.to(backbone.embed_tokens.weight.device)
+    h = backbone.embed_tokens(ids)
     return h * backbone.embedding_multiplier
 
 
@@ -323,8 +329,10 @@ def _prefill_forward(
     for the whole decode while ``prefill_logits`` sizes them for one forward.
     """
     model_dtype = _model_dtype(model)
+    # _embed_text returns embeds on the embedding table's device (Spyre after
+    # the layout move); the vision mask must match for the on-device masked_fill.
     inputs_embeds = _embed_text(model, padded_ids)
-    vision_mask = _vision_mask(model, padded_ids)
+    vision_mask = _vision_mask(model, padded_ids).to(inputs_embeds.device)
     inputs_embeds = inputs_embeds.masked_fill(vision_mask, 0.0)
     deepstack = _deepstack_features(model, pixel_values, image_sizes)
     prefill_mask = build_prefill_mask(
