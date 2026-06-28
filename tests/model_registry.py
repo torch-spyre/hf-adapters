@@ -23,6 +23,7 @@ When new adapters are added to CONFIG_TO_ADAPTER_MODULE_MAPPING, tests will
 automatically cover them by selecting one representative model per adapter.
 """
 
+# granite-vision granite4 mistral3 falcon3
 # Model registries - shared by all tests
 CAUSAL_LM_MODELS = {
     # hf_gpt2.py
