@@ -2321,10 +2321,10 @@ def prefill_vision(
     multiple (e.g. SigLIP 384/16 → 24² = 576 = 9·64) and every patch is real.
 
     The patch embedding (Conv2d) runs on CPU and the result is moved to DEVICE
-    — Conv2d is a tiny fraction of tower FLOPs and ``nn.Conv2d`` is not assumed
-    to lower on Spyre (see docs/siglip_vision_spyre_findings.md). The position
-    embedding (``nn.Embedding``) is added on CPU for the same reason; both match
-    the embedding-lookup CPU-fallback pattern used by the decoder adapters.
+    — Conv2d is a tiny fraction of tower FLOPs and ``nn.Conv2d`` does not
+    currently lower on Spyre. The position embedding (``nn.Embedding``) is
+    added on CPU for the same reason; both match the embedding-lookup
+    CPU-fallback pattern used by the decoder adapters.
 
     Args:
         run_vision_forward_fn: ``fn(model, patch_embeds) -> [B, P, H]`` — pass
