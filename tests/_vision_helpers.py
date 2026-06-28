@@ -139,14 +139,20 @@ def stock_vlm_generate(model_path, processor, batch, dtype, max_new_tokens):
     return text
 
 
-def stock_vlm_first_token_logits(model_path, batch, dtype):
-    """Reference first-token (prefill) logits from stock HF, ``[vocab]`` fp32.
+def stock_vlm_greedy_steps(model_path, batch, dtype, num_steps):
+    """Stock HF per-step greedy logits + token ids over prefill + decode.
 
-    A single forward of the stock ``AutoModelForImageTextToText`` over the
-    (image + prompt) batch; returns the last-position logits — the distribution
-    the model would greedily sample the first generated token from. Used by the
-    Spyre e2e test to compare the adapter's prefill against stock at the one
-    point that is free of greedy-fork amplification (see the test docstring).
+    Runs ``AutoModelForImageTextToText.generate`` greedily for ``num_steps``
+    tokens with ``output_logits=True`` and returns ``(logits, token_ids)``:
+
+    - ``logits``: list of ``num_steps`` fp32 ``[vocab]`` tensors — the
+      distribution stock greedily picked each generated token from (step 0 =
+      prefill / first token, step k = after k generated tokens).
+    - ``token_ids``: the ``num_steps`` greedily chosen ids (``logits[i].argmax()``).
+
+    The Spyre e2e test uses ``token_ids`` as the teacher-forcing sequence and
+    ``logits`` as the per-step top-1 reference, so the adapter is compared on the
+    *same* prefix at every step (no greedy-fork amplification).
     """
     import torch
     from transformers import AutoModelForImageTextToText
@@ -155,7 +161,16 @@ def stock_vlm_first_token_logits(model_path, batch, dtype):
         model_path, dtype=dtype, device_map="cpu"
     ).eval()
     with torch.no_grad():
-        out = ref_model(**batch, use_cache=False)
-    logits = out.logits[0, -1, :].float().clone()
+        gen = ref_model.generate(
+            **batch,
+            max_new_tokens=num_steps,
+            do_sample=False,
+            use_cache=True,
+            output_logits=True,
+            return_dict_in_generate=True,
+        )
+    logits = [step[0].float().clone() for step in gen.logits]
+    prompt_len = batch["input_ids"].shape[1]
+    token_ids = gen.sequences[0, prompt_len : prompt_len + num_steps].tolist()
     del ref_model
-    return logits
+    return logits, token_ids
