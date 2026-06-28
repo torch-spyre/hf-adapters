@@ -18,13 +18,16 @@ pytest tests/test_adapter_cpu_accuracy.py -k qwen3   # one model (selects both p
 pytest tests/test_adapter_cpu_accuracy.py -k "qwen3 and manual"  # one path
 pytest tests/test_embed_cpu_accuracy.py
 
-# Load tests (verify models load without errors)
+# Load test (verify models load without errors)
 pytest tests/test_load_cpu.py      # CPU load test
-pytest tests/test_load_spyre.py    # Spyre load test (requires hardware)
 
-# Spyre tests (on pod only — requires torch_spyre)
-python3 tests/test_e2e_smoke_spyre.py qwen3
-python3 tests/test_e2e_token_compare_spyre.py qwen3
+# Spyre tests (on pod only — requires torch_spyre). Pytest-parametrized off the
+# model registry; select one model with -k <key>, or run the file for all.
+pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k qwen3
+pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k qwen3
+pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k bge_base  # Text embedder
+pytest -s -vvv tests/spyre/test_vlm_e2e_spyre.py -k granite_vision_mm   # multimodal VLM
+pytest -s -vvv tests/spyre/test_load_spyre.py    # Spyre load test
 ```
 
 ## Spyre Pod
@@ -50,10 +53,9 @@ Import shared utilities from `hf_common.py`: `PrecomputedRotaryEmbedding`, `appl
 
 - [ ] Adapter file in `hf_adapters/`
 - [ ] CPU accuracy test passes (identical greedy tokens vs stock HF)
-- [ ] Per-layer block comparison on Spyre (compiles, no NaN)
-- [ ] Added to model compatibility matrix in `ARCHITECTURE.md`
-- [ ] Registry entries in all test files
-- [ ] At least one model size tested end-to-end on Spyre
+- [ ] Registry entry in `tests/model_registry.py`
+- [ ] Compiles + runs end-to-end on Spyre (`tests/spyre/test_e2e_*_spyre.py`, no crash/NaN)
+- [ ] Added to the Verified Checkpoints + Model Family Coverage tables in `ARCHITECTURE.md` (the single source of truth; bump the README badge counts)
 
 ## Critical Rules
 
