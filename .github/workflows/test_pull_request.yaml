@@ -64,7 +64,7 @@ on:
         default: ""
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.pull_request.html_url) || (github.event_name == 'workflow_dispatch' && inputs.pr_url_hash != '' && inputs.pr_url_hash) || github.ref }}
   cancel-in-progress: true
 
 defaults:
