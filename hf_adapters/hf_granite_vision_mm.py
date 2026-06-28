@@ -173,6 +173,21 @@ def _deepstack_features(model, pixel_values, image_sizes):
         model, pixel_values, output_hidden_states=True
     )
     dtype = _model_dtype(model)
+
+    # The deepstack/spatial projectors (Blip2 QFormers) and the image_newline
+    # parameter are stock CPU modules: _project_and_pack / pack_image_features run
+    # them on CPU (vision features are moved to CPU first). _move_to_spyre_with_layout
+    # blanket-moves every param to Spyre, so re-pin these to CPU before use — the
+    # same CPU-fallback contract as the patch-embed conv (idempotent; .to(cpu) on an
+    # already-CPU module is a no-op).
+    inner.layerwise_projectors.to("cpu")
+    inner.spatial_projectors.to("cpu")
+    if getattr(inner, "image_newline", None) is not None:
+        # image_newline is a bare nn.Parameter; a Spyre tensor can't be re-homed
+        # via .data set_data (incompatible tensor type), so replace the Parameter.
+        inner.image_newline = torch.nn.Parameter(
+            inner.image_newline.detach().to("cpu"), requires_grad=False
+        )
     image_num_patches = [
         image_size_to_num_patches(
             image_size=imsize,
