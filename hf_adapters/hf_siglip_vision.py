@@ -57,6 +57,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
@@ -156,14 +157,29 @@ def _make_patch_embed(inner):
     ``prefill_vision`` moves the result to Spyre. We don't reuse
     ``embeddings.forward`` directly because it may guard on dtype/interpolation
     flags; the patch path is small and fixed, so we inline it.
+
+    The Conv2d weight/bias and position table are captured as CPU copies here, at
+    prepare time, so this closure keeps running on CPU after
+    ``_move_to_spyre_with_layout`` relocates the module's own params to Spyre
+    (``nn.Conv2d`` is not assumed to lower on Spyre — see
+    docs/siglip_vision_spyre_findings.md). ``_embedding_param_ids`` cannot exclude
+    these because the conv weight is 4-D / the position table is reached via a
+    tower-specific path, so we snapshot rather than skip-the-move.
     """
     emb = inner.embeddings
+    weight = emb.patch_embedding.weight.detach().cpu()
+    bias = emb.patch_embedding.bias
+    bias = bias.detach().cpu() if bias is not None else None
+    stride = emb.patch_embedding.stride
+    padding = emb.patch_embedding.padding
+    pos_embed = emb.position_embedding.weight.detach().cpu()
+    pos_ids = emb.position_ids.detach().cpu()
 
     def patch_embed(pixel_values):
-        pv = pixel_values.to(emb.patch_embedding.weight.dtype).cpu()
-        patches = emb.patch_embedding(pv)  # [B, hidden, gh, gw]
+        pv = pixel_values.to(weight.dtype).cpu()
+        patches = F.conv2d(pv, weight, bias, stride=stride, padding=padding)
         patches = patches.flatten(2).transpose(1, 2)  # [B, P, hidden]
-        patches = patches + emb.position_embedding(emb.position_ids)
+        patches = patches + pos_embed[pos_ids]
         return patches
 
     return patch_embed
