@@ -22,7 +22,6 @@ Usage (on Spyre pod)::
     pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py
     pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k bge_base
 """
-
 import pytest
 import torch
 import torch.nn.functional as F
@@ -199,11 +198,22 @@ def _print_table(rows):
         )
 
 
+def embed_compare_spyre(model_path: str) -> tuple[list[dict], list[dict]]:
+    """Run the full HF-CPU vs Spyre embedding comparison for one model.
+
+    Returns:
+        (mismatches, rows) where mismatches is the subset of rows whose
+        min per-token cosine is below COSINE_THRESHOLD, and rows is the
+        full per-prompt result list.
+    """
+    rows = _run_model_test(model_path)
+    mismatches = [r for r in rows if not r["match"]]
+    return mismatches, rows
+
 @pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
 def test_e2e_embed_compare_spyre(model_path):
-    rows = _run_model_test(model_path)
+    mismatches, rows = embed_compare_spyre(model_path)
     _print_table(rows)
     n_match = sum(1 for r in rows if r["match"])
     print(f"\nPer-row min-cosine >= {COSINE_THRESHOLD}: {n_match}/{len(rows)} rows")
-    mismatches = [r for r in rows if not r["match"]]
     assert not mismatches, mismatches

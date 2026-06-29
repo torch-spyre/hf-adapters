@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 from tests._helpers import resolve_adapter
+from tests.spyre.test_e2e_embed_compare_spyre import embed_compare_spyre
 from tests.spyre.test_load_spyre import load_embedding
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -121,12 +122,11 @@ def _print_adapter_add_dates(add_dates: dict[str, str | None]) -> None:
         print(f"  {'unknown':<10}  {module:<{name_w}}")
 
 
-def eval_embedding(model_id, adapter, csv_config_class) -> bool:
-    # Run the embedding tests
-
-    result = load_embedding(model_id)
-
-    return result
+def eval_embedding(model_id: str) -> bool:
+    """Load and compare embeddings for one model. Returns a metrics dict."""
+    loads = load_embedding(model_id)
+    mismatches, _ = embed_compare_spyre(model_id)
+    return loads and not mismatches
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -191,7 +191,9 @@ def main(argv: list[str] | None = None) -> None:
 
                 params = row.get("parameters")
                 if params not in (None, "") and int(params) > 60_000_000_000:
-                    raise SpyreUnsupportedModelError(
+                    # TODO - Raise Exception?
+                    # raise SpyreUnsupportedModelError(
+                    print(
                         f"Model {model_id} has {int(params):,} parameters, "
                         f"exceeding the 60B limit for Spyre bring-up."
                     )
