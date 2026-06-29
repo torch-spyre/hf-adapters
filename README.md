@@ -1,7 +1,7 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-17-blue)
-![verified](https://img.shields.io/badge/verified_checkpoints-31-green)
+![adapters](https://img.shields.io/badge/adapters-21-blue)
+![verified](https://img.shields.io/badge/verified_checkpoints-35-green)
 ![compatible](https://img.shields.io/badge/compatible_models-100%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -14,7 +14,7 @@ from `transformers`.
 
 ## Supported Models
 
-**18 adapters · 32 verified checkpoints · 100+ compatible models**
+**21 adapters · 35 verified checkpoints · 100+ compatible models**
 
 | Adapter | Verified | Also Compatible | Usage |
 |---------|----------|-----------------|-------|
@@ -36,6 +36,9 @@ from `transformers`.
 | hf\_xlm\_roberta.py | BGE-M3 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes | Embedding |
 | hf\_mpnet.py | all-mpnet-base-v2 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base | Embedding |
 | hf\_modernbert.py | ModernBERT-embed-base, GTE-ModernBERT-base, Granite-Embedding-97m-multilingual-r2 | ModernBERT-base/large, other ModernBERT embed/classifier fine-tunes | Embedding |
+| hf\_gpt2.py | openai-community/gpt2 | GPT-2 (124M/medium/large/xl), DistilGPT-2, Cerebras-GPT, other GPT-2 fine-tunes | Generative |
+| hf\_gpt\_neo.py | EleutherAI/gpt-neo-125m | EleutherAI GPT-Neo (125M/1.3B/2.7B), GPT-J-style fine-tunes | Generative |
+| hf\_gpt\_neox.py | EleutherAI/pythia-410m | EleutherAI GPT-NeoX-20B, Pythia series (70M–12B) | Generative |
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. See [ARCHITECTURE.md](ARCHITECTURE.md#verified-checkpoints)
@@ -118,6 +121,9 @@ hf_adapters/
 ├── hf_olmo2.py                 OLMo2 adapter (OLMo 2 1B, 7B)
 ├── hf_gemma3.py                Gemma 3 adapter (Gemma 3 text, EmbeddingGemma)
 ├── hf_gemma4.py                Gemma 4 adapter (unified text backbone)
+├── hf_gpt2.py                  GPT-2 adapter (GPT-2, DistilGPT-2, Cerebras-GPT)
+├── hf_gpt_neo.py               GPT-Neo adapter (GPT-Neo 125M–2.7B, GPT-J fine-tunes)
+├── hf_gpt_neox.py              GPT-NeoX adapter (GPT-NeoX-20B, Pythia 70M–12B)
 ├── hf_xlm_roberta.py           XLM-RoBERTa encoder adapter (BGE-M3, multilingual-e5)
 ├── hf_mpnet.py                 MPNet encoder adapter (all-mpnet-base-v2 and variants)
 ├── hf_modernbert.py            ModernBERT encoder adapter (RoPE, GeGLU, local/global attention)
