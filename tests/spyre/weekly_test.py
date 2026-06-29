@@ -12,20 +12,23 @@ Run directly to perform the fetch step::
 import argparse
 import subprocess
 import sys
+import traceback
 from datetime import datetime
 from pathlib import Path
 
-from tests._helpers import resolve_adapter
-from tests.spyre.test_e2e_embed_compare_spyre import embed_compare_spyre
-from tests.spyre.test_load_spyre import load_embedding
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+_SPYRE_TESTS_DIR = _REPO_ROOT / "tests" / "spyre"
+_TESTS_DIR = _REPO_ROOT / "tests"
 _UTILS_DIR = _REPO_ROOT / "utils"
-for _p in (_UTILS_DIR, _REPO_ROOT):
+for _p in (_SPYRE_TESTS_DIR, _TESTS_DIR, _UTILS_DIR, _REPO_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
 from fetch_top_embedding_models import fetch_top_embedding_models  # noqa: E402
+
+from tests._helpers import resolve_adapter  # noqa: E402
+from tests.spyre.test_e2e_embed_compare_spyre import embed_compare_spyre  # noqa: E402
+from tests.spyre.test_load_spyre import load_embedding  # noqa: E402
 
 # Weight-file suffixes. A repo with at least one of these cached "has weights";
 # a repo with only config/tokenizer files does not, so its later-downloaded
@@ -187,7 +190,6 @@ def main(argv: list[str] | None = None) -> None:
 
                 # Reject models too large to bring up on Spyre. Recorded as a
                 # clean SpyreUnsupportedModelError, same as stick-misaligned dims.
-                from hf_adapters.hf_common import SpyreUnsupportedModelError
 
                 params = row.get("parameters")
                 if params not in (None, "") and int(params) > 60_000_000_000:
@@ -203,7 +205,7 @@ def main(argv: list[str] | None = None) -> None:
                 #         model_id, adapter, csv_config_class, args.num_decode
                 #     )
                 # else:
-                metrics = eval_embedding(model_id, adapter, csv_config_class)
+                metrics = eval_embedding(model_id)
 
                 rec["runs"] = True
                 rec["error"] = None
@@ -225,21 +227,21 @@ def main(argv: list[str] | None = None) -> None:
                 rec.setdefault("adapter_added", None)
                 print(f"    runs=False error={rec['error']}")
 
-            record(rec)
+            # record(rec)
 
             # Cache cleanup: weights absent at start -> delete downloaded weights.
-            if not had_weights:
-                freed = delete_repo_weights(model_id)
-                total_freed += freed
-                if freed:
-                    print(
-                        f"    freed {human_bytes(freed)} "
-                        f"(total {human_bytes(total_freed)})"
-                    )
+            # if not had_weights:
+            #     freed = delete_repo_weights(model_id)
+            #     total_freed += freed
+            #     if freed:
+            #         print(
+            #             f"    freed {human_bytes(freed)} "
+            #             f"(total {human_bytes(total_freed)})"
+            #         )
     except KeyboardInterrupt:
         print("\nInterrupted — results so far are saved; rerun to resume.")
-    finally:
-        fout.close()
+    # finally:
+    #     fout.close()
 
 
 if __name__ == "__main__":

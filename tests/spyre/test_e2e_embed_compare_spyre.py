@@ -22,6 +22,7 @@ Usage (on Spyre pod)::
     pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py
     pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k bge_base
 """
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -209,6 +210,7 @@ def embed_compare_spyre(model_path: str) -> tuple[list[dict], list[dict]]:
     rows = _run_model_test(model_path)
     mismatches = [r for r in rows if not r["match"]]
     return mismatches, rows
+
 
 @pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
 def test_e2e_embed_compare_spyre(model_path):
