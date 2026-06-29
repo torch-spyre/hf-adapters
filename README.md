@@ -241,6 +241,10 @@ Hooks run automatically on `git commit`. To run manually against all files:
 pre-commit run --all-files
 ```
 
+### Adding a New Adapter
+
+_TODO: step-by-step guide for contributing a new adapter._
+
 ## License
 
 Apache 2.0
