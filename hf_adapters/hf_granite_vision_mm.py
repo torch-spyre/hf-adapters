@@ -99,26 +99,6 @@ def prepare_for_spyre(model):
         Granite4VisionTextRMSNorm,
     )
 
-    # The text-decoder dims live in ``config.text_config``; mirror the ones the
-    # shared Granite/RoPE/KV helpers read off ``model.config`` onto the top-level
-    # config (same pattern as hf_mistral3). embedding_multiplier / residual /
-    # logits_scaling stay on the text backbone / text_config where they're read.
-    cfg = model.config
-    text_cfg = cfg.text_config
-    for name in (
-        "hidden_size",
-        "intermediate_size",
-        "num_hidden_layers",
-        "num_attention_heads",
-        "num_key_value_heads",
-        "head_dim",
-        "rope_theta",
-        "max_position_embeddings",
-        "vocab_size",
-    ):
-        if hasattr(text_cfg, name) and not hasattr(cfg, name):
-            setattr(cfg, name, getattr(text_cfg, name))
-
     # --- Vision tower (resolves model.model.vision_tower) ---
     hf_siglip_vision.prepare_for_spyre(model)
 

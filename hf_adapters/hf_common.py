@@ -58,8 +58,7 @@ def assert_spyre_dimensions(config, model_name):
     model's arithmetic. Real models clear this bar; it fires on tiny test
     fixtures (e.g. ``trl-internal-testing/tiny-*``, ``cointegrated/rubert-tiny2``).
     """
-    # text_config holds the dims for multimodal wrappers (Gemma 4, Granite Vision).
-    dim_config = getattr(config, "text_config", None) or config
+    dim_config = text_config(config)
     misaligned = [
         (f, v)
         for f in ("hidden_size", "intermediate_size")
@@ -114,6 +113,18 @@ def get_backbone(model):
     else:
         inner = model
     return getattr(inner, "language_model", inner)
+
+
+def text_config(config):
+    """Return the config carrying the text-decoder dims (``hidden_size``,
+    ``head_dim``, ``num_hidden_layers``, ...).
+
+    The config-level companion of ``get_backbone``: text-only configs expose
+    these directly, while multimodal wrappers (Gemma 3/4, Granite Vision,
+    Mistral3) nest them on a ``text_config`` sub-config. Returns whichever holds
+    them, so the shared RoPE/KV/head helpers read dims.
+    """
+    return getattr(config, "text_config", None) or config
 
 
 # ---------------------------------------------------------------------------
@@ -216,11 +227,13 @@ def _rope_cache_len(model) -> int:
     ``PrecomputedRotaryEmbedding`` default (2048) when no config value is found.
     """
     cfg = model.config
+    # Multimodal configs keep the text context window on a nested text_config;
+    # check both (the outer config may carry a larger window than the text sub-config).
+    objs = [cfg]
+    if (inner := text_config(cfg)) is not cfg:
+        objs.append(inner)
     candidates = []
-    # Multimodal configs keep the text context window on a nested text_config.
-    for obj in (cfg, getattr(cfg, "text_config", None)):
-        if obj is None:
-            continue
+    for obj in objs:
         for attr in ("max_position_embeddings", "n_positions", "max_seq_len"):
             v = getattr(obj, attr, None)
             if isinstance(v, int) and v > 0:
@@ -983,12 +996,13 @@ def kv_cache_shapes(model):
     if explicit is not None:
         return list(explicit)
 
-    num_layers = model.config.num_hidden_layers
-    num_kv_heads = model.config.num_key_value_heads
+    cfg = text_config(model.config)
+    num_layers = cfg.num_hidden_layers
+    num_kv_heads = cfg.num_key_value_heads
     head_dim = (
         getattr(model, "_spyre_head_dim", None)
-        or getattr(model.config, "head_dim", None)
-        or model.config.hidden_size // model.config.num_attention_heads
+        or getattr(cfg, "head_dim", None)
+        or cfg.hidden_size // cfg.num_attention_heads
     )
     v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
     return [(num_kv_heads, head_dim, v_head_dim) for _ in range(num_layers)]
@@ -2008,7 +2022,7 @@ def encoder_backbone_forward(model, input_ids, attn_mask, position_ids, token_ty
 
 
 def prepare_rope_and_heads(model):
-    cfg = model.config
+    cfg = text_config(model.config)
     assert_spyre_dimensions(
         cfg, model_name=getattr(cfg, "name_or_path", "") or "<unknown>"
     )
@@ -2135,12 +2149,13 @@ def prefill_embed(
     )
 
     # Throwaway KV caches sized to padded_len (no decode budget)
-    num_layers = model.config.num_hidden_layers
-    num_kv_heads = model.config.num_key_value_heads
+    cfg = text_config(model.config)
+    num_layers = cfg.num_hidden_layers
+    num_kv_heads = cfg.num_key_value_heads
     head_dim = (
         getattr(model, "_spyre_head_dim", None)
-        or getattr(model.config, "head_dim", None)
-        or model.config.hidden_size // model.config.num_attention_heads
+        or getattr(cfg, "head_dim", None)
+        or cfg.hidden_size // cfg.num_attention_heads
     )
     v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
     key_caches = [
