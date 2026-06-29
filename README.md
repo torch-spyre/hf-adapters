@@ -1,7 +1,7 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-17-blue)
-![verified](https://img.shields.io/badge/verified_checkpoints-31-green)
+![adapters](https://img.shields.io/badge/adapters-21-blue)
+![verified](https://img.shields.io/badge/verified_checkpoints-35-green)
 ![compatible](https://img.shields.io/badge/compatible_models-100%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -14,7 +14,7 @@ from `transformers`.
 
 ## Supported Models
 
-**18 adapters · 32 verified checkpoints · 100+ compatible models**
+**21 adapters · 35 verified checkpoints · 100+ compatible models**
 
 | Adapter | Verified | Also Compatible | Usage |
 |---------|----------|-----------------|-------|
@@ -36,6 +36,9 @@ from `transformers`.
 | hf\_xlm\_roberta.py | BGE-M3 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes | Embedding |
 | hf\_mpnet.py | all-mpnet-base-v2 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base | Embedding |
 | hf\_modernbert.py | ModernBERT-embed-base, GTE-ModernBERT-base, Granite-Embedding-97m-multilingual-r2 | ModernBERT-base/large, other ModernBERT embed/classifier fine-tunes | Embedding |
+| hf\_gpt2.py | openai-community/gpt2 | GPT-2 (124M/medium/large/xl), DistilGPT-2, Cerebras-GPT, other GPT-2 fine-tunes | Generative |
+| hf\_gpt\_neo.py | EleutherAI/gpt-neo-125m | EleutherAI GPT-Neo (125M/1.3B/2.7B), GPT-J-style fine-tunes | Generative |
+| hf\_gpt\_neox.py | EleutherAI/pythia-410m | EleutherAI GPT-NeoX-20B, Pythia series (70M–12B) | Generative |
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. See [ARCHITECTURE.md](ARCHITECTURE.md#verified-checkpoints)
@@ -118,6 +121,9 @@ hf_adapters/
 ├── hf_olmo2.py                 OLMo2 adapter (OLMo 2 1B, 7B)
 ├── hf_gemma3.py                Gemma 3 adapter (Gemma 3 text, EmbeddingGemma)
 ├── hf_gemma4.py                Gemma 4 adapter (unified text backbone)
+├── hf_gpt2.py                  GPT-2 adapter (GPT-2, DistilGPT-2, Cerebras-GPT)
+├── hf_gpt_neo.py               GPT-Neo adapter (GPT-Neo 125M–2.7B, GPT-J fine-tunes)
+├── hf_gpt_neox.py              GPT-NeoX adapter (GPT-NeoX-20B, Pythia 70M–12B)
 ├── hf_xlm_roberta.py           XLM-RoBERTa encoder adapter (BGE-M3, multilingual-e5)
 ├── hf_mpnet.py                 MPNet encoder adapter (all-mpnet-base-v2 and variants)
 ├── hf_modernbert.py            ModernBERT encoder adapter (RoPE, GeGLU, local/global attention)
@@ -125,17 +131,27 @@ hf_adapters/
 └── __init__.py
 
 tests/
-├── test_adapter_cpu_accuracy.py       CPU: adapter vs stock HF (causal-LM)
+├── model_registry.py                  Model registry: representative model selection for CI matrices
+├── test_adapter_cpu_accuracy.py       CPU: adapter vs stock HF (causal-LM logits)
 ├── test_embed_cpu_accuracy.py         CPU: embedding hidden-states vs stock HF
-├── test_block_cpu_vs_spyre.py         Per-layer CPU vs Spyre comparison
-├── test_e2e_smoke_spyre.py            E2E: load + generate on Spyre
-├── test_e2e_token_compare_spyre.py    E2E: HF CPU vs adapter Spyre tokens
-└── test_e2e_embed_compare_spyre.py    E2E: HF CPU vs adapter Spyre embeddings
+├── test_generate_edge_cases_cpu.py    CPU: generation edge cases (EOS, padding, sampling)
+├── test_load_cpu.py                   CPU: verify all registered adapters load without errors
+├── test_modules.py                    CPU: per-module forward correctness
+├── test_modules_custom.py             CPU: per-module forward with custom configs
+├── test_multibatch_generate_cpu.py    CPU: multi-batch generation correctness
+├── test_st_backend_cpu.py             CPU: sentence-transformers Spyre backend
+├── test_adapter_coverage.py           Verify every adapter file is registered in auto_spyre_model.py
+└── spyre/
+    ├── test_load_spyre.py             Spyre: verify all adapters load on hardware
+    ├── test_e2e_smoke_spyre.py        Spyre: E2E load + generate (non-trivial output)
+    ├── test_e2e_token_compare_spyre.py  Spyre: HF CPU vs adapter Spyre greedy tokens
+    ├── test_e2e_embed_compare_spyre.py  Spyre: HF CPU vs adapter Spyre hidden-states cosine
+    └── edge_cases/                    Spyre: generation edge-case suite (EOS, blocks, sampling)
 ```
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+
 - PyTorch 2.x
 - `transformers`
 - `sentencepiece`
@@ -224,6 +240,30 @@ Hooks run automatically on `git commit`. To run manually against all files:
 ```bash
 pre-commit run --all-files
 ```
+
+### Adding a New Adapter
+
+Copy [hf\_granite.py](hf_adapters/hf_granite.py) as the template.
+
+Every adapter defines four functions:
+
+- `_make_compiled_block(layer)` — compiled per-layer forward
+- `_run_forward(model, ...)` — embed → RoPE → blocks → norm → lm_head
+- `prepare_for_spyre(model)` — patch RMSNorm, precompute RoPE, pad LM head, compile
+- `load_model` / `generate` — thin wrappers
+
+Import shared utilities from [hf\_common.py](hf_adapters/hf_common.py): `PrecomputedRotaryEmbedding`, `apply_rope_matmul`, `kv_cache_update`, `patch_rmsnorm`, `pad_lm_head`, `pad_attention_heads`, `load_model_common`, `generate`.
+
+**Register the adapter.** Add an entry in [auto\_spyre\_model.py](hf_adapters/auto_spyre_model.py) (maps `model_type` → adapter module) and in [tests/model\_registry.py](tests/model_registry.py) — `CAUSAL_LM_MODELS` for generative adapters, `EMBEDDING_MODELS` for embedding adapters (representative checkpoint for CI).
+
+**Definition of Done.**
+
+- Adapter file in `hf_adapters/`
+- Registered in [auto\_spyre\_model.py](hf_adapters/auto_spyre_model.py) and [tests/model\_registry.py](tests/model_registry.py) (`CAUSAL_LM_MODELS` or `EMBEDDING_MODELS` — pick the right one)
+- Entry added to the model table in [ARCHITECTURE.md](ARCHITECTURE.md) and to the Supported Models table above
+- Spyre tests pass (excluding `tests/spyre/edge_cases/`):
+  - Generative: `test_load_spyre.py`, `test_e2e_smoke_spyre.py`, `test_e2e_token_compare_spyre.py`
+  - Embedding: `test_load_spyre.py`, `test_e2e_embed_compare_spyre.py`
 
 ## License
 
