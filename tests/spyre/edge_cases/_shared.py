@@ -61,7 +61,8 @@ def _load_spyre_model(model_path):
 
     print(f"  Loading {model_path} on Spyre ...")
     t0 = time.time()
-    model = AutoSpyreModelForCausalLM.from_pretrained(model_path)
+    ref_dtype = torch_dtype_for_model_path(model_path=model_path)
+    model = AutoSpyreModelForCausalLM.from_pretrained(model_path, dtype=ref_dtype)
     print(f"  Spyre load+prepare: {time.time() - t0:.1f}s")
     return model
 
