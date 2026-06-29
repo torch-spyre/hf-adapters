@@ -31,8 +31,8 @@ def generate_matrices(exclude_models=None):
     Generate test matrices from the model registry.
 
     Args:
-        exclude_models: List of registry keys (or paths) to exclude from all
-            matrices. Keys are resolved to paths before filtering.
+        exclude_models: List of paths to exclude from all
+            matrices.
 
     Returns:
         dict: Dictionary with 'causal', 'embed', and 'combined' matrix lists
