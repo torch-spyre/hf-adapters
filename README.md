@@ -131,12 +131,22 @@ hf_adapters/
 └── __init__.py
 
 tests/
-├── test_adapter_cpu_accuracy.py       CPU: adapter vs stock HF (causal-LM)
+├── model_registry.py                  Model registry: representative model selection for CI matrices
+├── test_adapter_cpu_accuracy.py       CPU: adapter vs stock HF (causal-LM logits)
 ├── test_embed_cpu_accuracy.py         CPU: embedding hidden-states vs stock HF
-├── test_block_cpu_vs_spyre.py         Per-layer CPU vs Spyre comparison
-├── test_e2e_smoke_spyre.py            E2E: load + generate on Spyre
-├── test_e2e_token_compare_spyre.py    E2E: HF CPU vs adapter Spyre tokens
-└── test_e2e_embed_compare_spyre.py    E2E: HF CPU vs adapter Spyre embeddings
+├── test_generate_edge_cases_cpu.py    CPU: generation edge cases (EOS, padding, sampling)
+├── test_load_cpu.py                   CPU: verify all registered adapters load without errors
+├── test_modules.py                    CPU: per-module forward correctness
+├── test_modules_custom.py             CPU: per-module forward with custom configs
+├── test_multibatch_generate_cpu.py    CPU: multi-batch generation correctness
+├── test_st_backend_cpu.py             CPU: sentence-transformers Spyre backend
+├── test_adapter_coverage.py           Verify every adapter file is registered in auto_spyre_model.py
+└── spyre/
+    ├── test_load_spyre.py             Spyre: verify all adapters load on hardware
+    ├── test_e2e_smoke_spyre.py        Spyre: E2E load + generate (non-trivial output)
+    ├── test_e2e_token_compare_spyre.py  Spyre: HF CPU vs adapter Spyre greedy tokens
+    ├── test_e2e_embed_compare_spyre.py  Spyre: HF CPU vs adapter Spyre hidden-states cosine
+    └── edge_cases/                    Spyre: generation edge-case suite (EOS, blocks, sampling)
 ```
 
 ## Requirements
