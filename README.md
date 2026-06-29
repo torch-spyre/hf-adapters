@@ -243,7 +243,7 @@ pre-commit run --all-files
 
 ### Adding a New Adapter
 
-_TODO: step-by-step guide for contributing a new adapter._
+Copy [hf\_granite.py](hf_adapters/hf_granite.py) as the template.
 
 ## License
 
