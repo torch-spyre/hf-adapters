@@ -28,7 +28,6 @@ Usage (on Spyre pod)::
 import time
 
 import pytest
-import torch
 from model_registry import CAUSAL_PATHS, EMBED_PATHS
 
 from tests._helpers import torch_dtype_for_model_path
@@ -60,7 +59,9 @@ def test_load_embedding(model_path):
     from hf_adapters import AutoSpyreModel
 
     t0 = time.time()
-    model = AutoSpyreModel.from_pretrained(model_path, dtype=torch.float16)
+    model = AutoSpyreModel.from_pretrained(
+        model_path, dtype=torch_dtype_for_model_path(model_path)
+    )
     load_s = time.time() - t0
 
     assert model is not None, f"{model_path}: from_pretrained returned None"
