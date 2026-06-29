@@ -22,6 +22,11 @@ pytest tests/test_embed_cpu_accuracy.py
 pytest tests/test_load_cpu.py      # CPU load test
 pytest tests/test_load_spyre.py    # Spyre load test (requires hardware)
 
+# Module config tests (on pod — uses OOT framework, requires torch_spyre + oot_framework)
+# First time: uv sync --group oot
+bash run_module_tests.sh tests/configs/module_tests/granite_3_3_8b_instruct_spyre.yaml -v
+bash run_module_tests.sh tests/configs/module_tests/  # run all configs
+
 # Spyre tests (on pod only — requires torch_spyre)
 python3 tests/test_e2e_smoke_spyre.py qwen3
 python3 tests/test_e2e_token_compare_spyre.py qwen3
