@@ -148,6 +148,14 @@ CAUSAL_LM_MODELS = {
         "load_fn": True,
         "size": "24b",
     },
+    "ministral3": {
+        "name": "Ministral-3-14B-Instruct-2512",
+        "path": "mistralai/Ministral-3-14B-Instruct-2512",
+        "adapter": "hf_mistral3.py",
+        "load_fn": True,
+        "dtype": "bfloat16",
+        "size": "14b",
+    },
     # hf_olmo.py
     "olmo1b": {
         "name": "OLMo 1B",
@@ -299,6 +307,26 @@ EMBEDDING_MODELS = {
         "path": "sentence-transformers/all-mpnet-base-v2",
         "adapter": "hf_mpnet.py",
         "size": "0.1b",
+    },
+}
+
+
+# Vision models. ``kind="tower"`` adapters are encoder-only; ``kind="vlm"`` adapters
+# are full multimodal models with a causal text decoder, RoPE, KV caches, and ``generate``.
+VISION_MODELS = {
+    # hf_siglip_vision.py — SigLIP vision tower of Granite Vision 4.1
+    "granite_vision_siglip": {
+        "name": "Granite Vision 4.1 4B (SigLIP tower)",
+        "path": "ibm-granite/granite-vision-4.1-4b",
+        "adapter": "hf_siglip_vision.py",
+        "kind": "tower",  # bare vision tower: pixel_values -> patch hidden states
+    },
+    # hf_granite_vision_mm.py — combined two-tower (vision + text) forward
+    "granite_vision_mm": {
+        "name": "Granite Vision 4.1 4B (both towers)",
+        "path": "ibm-granite/granite-vision-4.1-4b",
+        "adapter": "hf_granite_vision_mm.py",
+        "kind": "vlm",  # multimodal: image + text -> generated text
     },
 }
 

@@ -38,7 +38,10 @@ from hf_adapters.hf_common import (
     _move_to_spyre_with_layout,
     _untie_embedding_and_lm_head,
 )
-from tests._helpers import torch_dtype_for_model_path
+from tests._helpers import (
+    _LOAD_FN_OVERRIDES,
+    torch_dtype_for_model_path,
+)
 
 DEVICE = "spyre"
 
@@ -283,13 +286,20 @@ def _run_model_test(model_path, num_decode=4):
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     dtype = torch_dtype_for_model_path(model_path)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype=dtype,
-        device_map="cpu",
-    )
+
+    if model_path in _LOAD_FN_OVERRIDES:
+        model = adapter.load_hf_model(model_path, dtype)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=dtype,
+            device_map="cpu",
+        )
     model.eval()
     model.requires_grad_(False)
+    # Use the model's actual dtype (may differ from requested when FP8
+    # dequantization forces bf16 regardless of the dtype argument).
+    actual_dtype = next(model.parameters()).dtype
 
     prompt = "The capital of France is"
     encoded = tokenizer(prompt, return_tensors="pt")
@@ -303,7 +313,7 @@ def _run_model_test(model_path, num_decode=4):
     _untie_embedding_and_lm_head(model)
     adapter.prepare_for_spyre(model)
     print("  Moving model to Spyre ...")
-    _move_to_spyre_with_layout(model, dtype)
+    _move_to_spyre_with_layout(model, actual_dtype)
     print("  Running adapter on Spyre ...")
     adapter_results = adapter_greedy_steps(
         adapter._run_forward,

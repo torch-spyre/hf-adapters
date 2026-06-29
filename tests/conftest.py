@@ -112,14 +112,23 @@ if not _TARGETS_SPYRE:
 
 
 def _unwrap_compiled_blocks(model):
-    """Replace torch.compile-wrapped blocks with their CPU-runnable originals."""
-    if not hasattr(model, "_spyre_compiled_blocks"):
-        return
-    unwrapped = []
-    for cb in model._spyre_compiled_blocks:
-        orig = getattr(cb, "_orig_mod", getattr(cb, "_torchdynamo_orig_callable", None))
-        unwrapped.append(orig if orig is not None else cb)
-    model._spyre_compiled_blocks = unwrapped
+    """Replace torch.compile-wrapped blocks with their CPU-runnable originals.
+
+    Covers every block list an adapter may attach: ``_spyre_compiled_blocks``
+    (the common case) plus ``_spyre_text_blocks`` for two-tower VLMs like Granite
+    Vision, whose text decoder is compiled separately from the vision tower.
+    """
+    for attr in ("_spyre_compiled_blocks", "_spyre_text_blocks"):
+        blocks = getattr(model, attr, None)
+        if blocks is None:
+            continue
+        unwrapped = []
+        for cb in blocks:
+            orig = getattr(
+                cb, "_orig_mod", getattr(cb, "_torchdynamo_orig_callable", None)
+            )
+            unwrapped.append(orig if orig is not None else cb)
+        setattr(model, attr, unwrapped)
 
 
 def pytest_configure(config):
