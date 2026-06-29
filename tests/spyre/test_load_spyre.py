@@ -31,12 +31,14 @@ import pytest
 import torch
 from model_registry import CAUSAL_PATHS, EMBED_PATHS
 
+from tests._helpers import torch_dtype_for_model_path
+
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 def test_load_causal_lm(model_path):
     from hf_adapters import AutoSpyreModelForCausalLM
 
-    dtype = torch.float16
+    dtype = torch_dtype_for_model_path(model_path)
 
     t0 = time.time()
     model = AutoSpyreModelForCausalLM.from_pretrained(model_path, dtype=dtype)

@@ -38,6 +38,7 @@ from hf_adapters.hf_common import (
     _move_to_spyre_with_layout,
     _untie_embedding_and_lm_head,
 )
+from tests._helpers import torch_dtype_for_model_path
 
 DEVICE = "spyre"
 
@@ -281,7 +282,7 @@ def _run_model_test(model_path, num_decode=4):
     print(f"{'=' * 70}")
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    dtype = torch.float16
+    dtype = torch_dtype_for_model_path(model_path)
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         torch_dtype=dtype,

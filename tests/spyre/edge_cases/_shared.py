@@ -43,10 +43,13 @@ from _generate_edge_case_helpers import (
 )
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from tests._helpers import torch_dtype_for_model_path
+
 
 def _load_ref_model(model_path):
+    ref_dtype = torch_dtype_for_model_path(model_path=model_path)
     ref_model = AutoModelForCausalLM.from_pretrained(
-        model_path, torch_dtype=torch.float16, device_map="cpu"
+        model_path, torch_dtype=ref_dtype, device_map="cpu"
     )
     ref_model.eval()
     ref_model.requires_grad_(False)
