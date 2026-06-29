@@ -314,7 +314,10 @@ def _run_model_test(model_key, num_decode=4):
     _untie_embedding_and_lm_head(model)
     adapter.prepare_for_spyre(model)
     print("  Moving model to Spyre ...")
-    _move_to_spyre_with_layout(model, actual_dtype)
+    # Use bfloat16 on Spyre when the registry requests it; otherwise float16.
+    # (Spyre does not support float32, so float32 registry entries still use float16.)
+    spyre_dtype = torch.bfloat16 if info.get("dtype") == "bfloat16" else torch.float16
+    _move_to_spyre_with_layout(model, spyre_dtype)
     print("  Running adapter on Spyre ...")
     adapter_results = adapter_greedy_steps(
         adapter._run_forward,
