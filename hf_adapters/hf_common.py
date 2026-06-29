@@ -1281,6 +1281,81 @@ def _resolve_generation_params(model, tokenizer, overrides):
     }
 
 
+def pad_and_position(input_ids, actual_lengths):
+    """Left block-pad ``input_ids`` to a BLOCK_SIZE multiple and build positions.
+
+    Returns ``(padded_ids, padded_len, prompt_offsets, position_ids)``. Real
+    tokens are right-aligned: each row's positions ``0..actual_len-1`` sit at
+    padded indices ``prompt_offsets[b]..padded_len-1`` (the decode loop's
+    convention). Shared by ``generate`` and the VLM adapters' prefill arms.
+    """
+    batch_size, prompt_length = input_ids.shape
+    padded_len = math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
+    block_pad = padded_len - prompt_length
+    if block_pad > 0:
+        pad = input_ids.new_zeros((batch_size, block_pad))
+        input_ids = torch.cat([pad, input_ids], dim=1)
+
+    prompt_offsets = padded_len - actual_lengths  # [B]
+    position_ids = torch.zeros((batch_size, padded_len), dtype=torch.long)
+    for b in range(batch_size):
+        n = actual_lengths[b].item()
+        position_ids[b, prompt_offsets[b].item() :] = torch.arange(n)
+    return input_ids, padded_len, prompt_offsets, position_ids
+
+
+def select_next_token(next_logits, do_sample, temperature, top_k, top_p):
+    """CPU token selection: greedy argmax, or temperature/top-k/top-p sampling.
+
+    The top-p path mirrors HF's ``TopPLogitsWarper.__call__``.
+    """
+    if not do_sample:
+        return torch.argmax(next_logits, dim=-1)  # [B]
+    scaled = next_logits / temperature
+    if top_k and top_k > 0:
+        v, _ = torch.topk(scaled, min(top_k, scaled.size(-1)), dim=-1)
+        scaled[scaled < v[:, -1:]] = -torch.inf
+    if top_p is not None and top_p < 1.0:
+        sorted_logits, sorted_indices = torch.sort(scaled, descending=False)
+        cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
+        sorted_indices_to_remove = cumulative_probs <= (1 - top_p)
+        sorted_indices_to_remove[..., -1:] = 0  # keep at least one token
+        indices_to_remove = sorted_indices_to_remove.scatter(
+            1, sorted_indices, sorted_indices_to_remove
+        )
+        scaled = scaled.masked_fill(indices_to_remove, -torch.inf)
+    probs = F.softmax(scaled, dim=-1)
+    return torch.multinomial(probs, num_samples=1).squeeze(-1)  # [B]
+
+
+def decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer):
+    """Per-sequence block-walk over generated slots → EOS-trimmed decoded strings.
+
+    Generated tokens are contiguous within each BLOCK_SIZE block but blocks may
+    be separated by unused slots; all sequences share the same block layout
+    starting at ``padded_len``. Walks each sequence using its own
+    ``num_generated`` count, trims at the first EOS, and decodes.
+    """
+    results = []
+    for b in range(result.shape[0]):
+        gen_ids_list = []
+        block_start = padded_len
+        remaining = num_generated[b].item()
+        while remaining > 0:
+            take = min(remaining, BLOCK_SIZE)
+            for j in range(take):
+                gen_ids_list.append(result[b, block_start + j].item())
+            remaining -= take
+            block_start += BLOCK_SIZE
+        gen_ids = torch.tensor(gen_ids_list)
+        if eos_ids is not None:
+            eos_pos = torch.isin(gen_ids, eos_ids).nonzero(as_tuple=True)[0]
+            if len(eos_pos) > 0:
+                gen_ids = gen_ids[: eos_pos[0].item()]
+        results.append(tokenizer.decode(gen_ids, skip_special_tokens=True))
+    return results
+
+
 def generate(
     run_forward_fn: Callable,
     model,
@@ -1370,25 +1445,15 @@ def generate(
     # Per-sequence actual prompt length (excluding tokenizer left-padding)
     actual_prompt_lengths = attention_mask.sum(dim=1)  # [B]
 
-    # Pad further to BLOCK_SIZE multiple (uniform left-pad for all sequences)
-    padded_len = math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
-    block_pad_offset = padded_len - prompt_length
-    max_cache_len = padded_len + math.ceil(max_new_tokens / BLOCK_SIZE) * BLOCK_SIZE
-    if block_pad_offset > 0:
-        pad = input_ids.new_zeros((batch_size, block_pad_offset))
-        input_ids = torch.cat([pad, input_ids], dim=1)
-
-    # Per-sequence total left-padding (tokenizer pad + block-alignment pad)
-    prompt_offsets = padded_len - actual_prompt_lengths  # [B]
-
-    # Position IDs: real tokens at the END of the padded sequence.
-    # Each sequence's real tokens span positions 0..actual_len-1, placed at
-    # padded indices prompt_offsets[b]..padded_len-1.
-    position_ids = torch.zeros((batch_size, padded_len), dtype=torch.long)
-    for b in range(batch_size):
-        actual_len = actual_prompt_lengths[b].item()
-        offset = prompt_offsets[b].item()
-        position_ids[b, offset:] = torch.arange(actual_len)
+    # Block-pad to a BLOCK_SIZE multiple; real tokens right-aligned (positions
+    # 0..actual_len-1 at padded indices prompt_offsets[b]..padded_len-1).
+    max_cache_len = (
+        math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
+        + math.ceil(max_new_tokens / BLOCK_SIZE) * BLOCK_SIZE
+    )
+    input_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
+        input_ids, actual_prompt_lengths
+    )
 
     # Initialize empty KV caches. Per-layer shapes come from the model
     # (``_spyre_kv_shapes``) for heterogeneous architectures like Gemma 4,
@@ -1494,25 +1559,9 @@ def generate(
                 fill_mask_device = exp_mask.to(DEVICE)
 
         # Token selection (CPU)
-        if do_sample:
-            scaled = next_logits / temperature
-            if top_k and top_k > 0:
-                v, _ = torch.topk(scaled, min(top_k, scaled.size(-1)), dim=-1)
-                scaled[scaled < v[:, -1:]] = -torch.inf
-            if top_p is not None and top_p < 1.0:
-                # Nucleus filter, mirroring HF's TopPLogitsWarper.__call__
-                sorted_logits, sorted_indices = torch.sort(scaled, descending=False)
-                cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
-                sorted_indices_to_remove = cumulative_probs <= (1 - top_p)
-                sorted_indices_to_remove[..., -1:] = 0  # keep at least one token
-                indices_to_remove = sorted_indices_to_remove.scatter(
-                    1, sorted_indices, sorted_indices_to_remove
-                )
-                scaled = scaled.masked_fill(indices_to_remove, -torch.inf)
-            probs = F.softmax(scaled, dim=-1)
-            next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [B]
-        else:
-            next_tokens = torch.argmax(next_logits, dim=-1)  # [B]
+        next_tokens = select_next_token(
+            next_logits, do_sample, temperature, top_k, top_p
+        )
 
         if timing:
             times_list.append(time.time() - t0)
@@ -1539,30 +1588,7 @@ def generate(
             print(f"Avg next-token latency: {avg*1000:.3f} ms")
         print("Per-token: " + ", ".join(f"{t*1000:.1f}" for t in times_list) + " ms")
 
-    # Decode text — walk the block structure per sequence using each
-    # sequence's own num_generated count. Within a sequence, generated
-    # tokens are contiguous within each BLOCK_SIZE block but blocks may
-    # be separated by unused slots; all sequences share the same block
-    # layout starting at padded_len.
-    results = []
-    for b in range(batch_size):
-        gen_ids_list = []
-        block_start = padded_len
-        remaining = num_generated[b].item()
-        while remaining > 0:
-            take = min(remaining, BLOCK_SIZE)
-            for j in range(take):  # type: ignore[arg-type]
-                gen_ids_list.append(result[b, block_start + j].item())
-            remaining -= take
-            block_start += BLOCK_SIZE
-        gen_ids = torch.tensor(gen_ids_list)
-        if eos_ids is not None:
-            eos_pos = torch.isin(gen_ids, eos_ids).nonzero(as_tuple=True)[0]
-            if len(eos_pos) > 0:
-                gen_ids = gen_ids[: eos_pos[0].item()]  # type: ignore[misc]
-        results.append(tokenizer.decode(gen_ids, skip_special_tokens=True))
-
-    return results
+    return decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer)
 
 
 # ---------------------------------------------------------------------------

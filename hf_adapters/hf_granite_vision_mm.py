@@ -67,10 +67,13 @@ from hf_adapters.hf_common import (
     allocate_kv_caches,
     build_expansion_mask,
     build_prefill_mask,
+    decode_block_walk,
     get_backbone,
+    pad_and_position,
     pad_lm_head,
     patch_rmsnorm,
     prepare_rope_and_heads,
+    select_next_token,
 )
 from hf_adapters.hf_granite import _make_compiled_block
 
@@ -288,29 +291,6 @@ def _run_text_backbone(
     return backbone.norm(h)
 
 
-def _pad_and_position(input_ids, actual_lengths):
-    """Left block-pad ``input_ids`` to a BLOCK_SIZE multiple and build positions.
-
-    Returns ``(padded_ids, padded_len, prompt_offsets, position_ids)``. Real
-    tokens are right-aligned: each row's positions ``0..actual_len-1`` sit at
-    padded indices ``prompt_offsets[b]..padded_len-1`` (the decode loop's
-    convention). Shared by ``prefill_logits`` and ``generate``'s prefill arm.
-    """
-    batch_size, prompt_length = input_ids.shape
-    padded_len = math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
-    block_pad = padded_len - prompt_length
-    if block_pad > 0:
-        pad = input_ids.new_zeros((batch_size, block_pad))
-        input_ids = torch.cat([pad, input_ids], dim=1)
-
-    prompt_offsets = padded_len - actual_lengths  # [B]
-    position_ids = torch.zeros((batch_size, padded_len), dtype=torch.long)
-    for b in range(batch_size):
-        n = actual_lengths[b].item()
-        position_ids[b, prompt_offsets[b].item() :] = torch.arange(n)
-    return input_ids, padded_len, prompt_offsets, position_ids
-
-
 def _prefill_forward(
     model,
     padded_ids,
@@ -377,7 +357,7 @@ def prefill_logits(model, input_ids, attention_mask, pixel_values, image_sizes):
     ``[:, -1, :true_vocab]`` for the first token).
     """
     actual_lengths = attention_mask.sum(dim=1)
-    padded_ids, padded_len, prompt_offsets, position_ids = _pad_and_position(
+    padded_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
         input_ids, actual_lengths
     )
     key_caches, value_caches = allocate_kv_caches(
@@ -489,7 +469,7 @@ def generate(
         math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
         + math.ceil(max_new_tokens / BLOCK_SIZE) * BLOCK_SIZE
     )
-    input_ids, padded_len, prompt_offsets, position_ids = _pad_and_position(
+    input_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
         input_ids, actual_prompt_lengths
     )
 
@@ -577,24 +557,9 @@ def generate(
                 fill_mask_device = exp_mask.to(DEVICE)
 
         # Token selection (CPU) — mirrors hf_common.generate.
-        if do_sample:
-            scaled = next_logits / temperature
-            if top_k and top_k > 0:
-                v, _ = torch.topk(scaled, min(top_k, scaled.size(-1)), dim=-1)
-                scaled[scaled < v[:, -1:]] = -torch.inf
-            if top_p is not None and top_p < 1.0:
-                sorted_logits, sorted_indices = torch.sort(scaled, descending=False)
-                cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
-                sorted_indices_to_remove = cumulative_probs <= (1 - top_p)
-                sorted_indices_to_remove[..., -1:] = 0
-                indices_to_remove = sorted_indices_to_remove.scatter(
-                    1, sorted_indices, sorted_indices_to_remove
-                )
-                scaled = scaled.masked_fill(indices_to_remove, -torch.inf)
-            probs = torch.nn.functional.softmax(scaled, dim=-1)
-            next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)
-        else:
-            next_tokens = torch.argmax(next_logits, dim=-1)
+        next_tokens = select_next_token(
+            next_logits, do_sample, temperature, top_k, top_p
+        )
 
         tokens_in_block = (tokens_in_block + 1) % BLOCK_SIZE
         if tokens_in_block == 0:
@@ -608,24 +573,7 @@ def generate(
             break
 
     # Decode generated tokens per sequence (same block-walk as hf_common.generate).
-    results = []
-    for b in range(batch_size):
-        gen_ids_list = []
-        block_start = padded_len
-        remaining = num_generated[b].item()
-        while remaining > 0:
-            take = min(remaining, BLOCK_SIZE)
-            for j in range(take):
-                gen_ids_list.append(result[b, block_start + j].item())
-            remaining -= take
-            block_start += BLOCK_SIZE
-        gen_ids = torch.tensor(gen_ids_list)
-        if eos_ids is not None:
-            eos_pos = torch.isin(gen_ids, eos_ids).nonzero(as_tuple=True)[0]
-            if len(eos_pos) > 0:
-                gen_ids = gen_ids[: eos_pos[0].item()]
-        results.append(tokenizer.decode(gen_ids, skip_special_tokens=True))
-    return results
+    return decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer)
 
 
 def load_model(model_path, dtype=torch.float16):
