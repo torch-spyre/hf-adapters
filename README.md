@@ -245,6 +245,13 @@ pre-commit run --all-files
 
 Copy [hf\_granite.py](hf_adapters/hf_granite.py) as the template.
 
+Every adapter defines four functions:
+
+- `_make_compiled_block(layer)` — compiled per-layer forward
+- `_run_forward(model, ...)` — embed → RoPE → blocks → norm → lm_head
+- `prepare_for_spyre(model)` — patch RMSNorm, precompute RoPE, pad LM head, compile
+- `load_model` / `generate` — thin wrappers
+
 ## License
 
 Apache 2.0
