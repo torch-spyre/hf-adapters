@@ -243,5 +243,5 @@ uv.lock
 config.local.*
 
 .claude/commands/
-
+.bob/
 # Made with Bob
