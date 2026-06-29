@@ -252,6 +252,19 @@ Every adapter defines four functions:
 - `prepare_for_spyre(model)` — patch RMSNorm, precompute RoPE, pad LM head, compile
 - `load_model` / `generate` — thin wrappers
 
+Import shared utilities from [hf\_common.py](hf_adapters/hf_common.py): `PrecomputedRotaryEmbedding`, `apply_rope_matmul`, `kv_cache_update`, `patch_rmsnorm`, `pad_lm_head`, `pad_attention_heads`, `load_model_common`, `generate`.
+
+**Register the adapter.** Add an entry in [auto\_spyre\_model.py](hf_adapters/auto_spyre_model.py) (maps `model_type` → adapter module) and in [tests/model\_registry.py](tests/model_registry.py) — `CAUSAL_LM_MODELS` for generative adapters, `EMBEDDING_MODELS` for embedding adapters (representative checkpoint for CI).
+
+**Definition of Done.**
+
+- Adapter file in `hf_adapters/`
+- Registered in [auto\_spyre\_model.py](hf_adapters/auto_spyre_model.py) and [tests/model\_registry.py](tests/model_registry.py) (`CAUSAL_LM_MODELS` or `EMBEDDING_MODELS` — pick the right one)
+- Entry added to the model table in [ARCHITECTURE.md](ARCHITECTURE.md) and to the Supported Models table above
+- Spyre tests pass (excluding `tests/spyre/edge_cases/`):
+  - Generative: `test_load_spyre.py`, `test_e2e_smoke_spyre.py`, `test_e2e_token_compare_spyre.py`
+  - Embedding: `test_load_spyre.py`, `test_e2e_embed_compare_spyre.py`
+
 ## License
 
 Apache 2.0

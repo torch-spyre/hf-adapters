@@ -10,14 +10,6 @@ HF Adapters for Spyre — runtime monkey-patches that make stock HuggingFace Tra
 # Install (editable)
 pip install -e .
 
-# CPU accuracy tests (causal-LM logits + embedding hidden-states)
-# IMPORTANT: Always use pytest from repo root, never `python tests/test_*.py`
-# conftest.py patches hf_adapters modules at collection time for CPU testing
-pytest tests/test_adapter_cpu_accuracy.py
-pytest tests/test_adapter_cpu_accuracy.py -k qwen3   # one model (selects both paths)
-pytest tests/test_adapter_cpu_accuracy.py -k "qwen3 and manual"  # one path
-pytest tests/test_embed_cpu_accuracy.py
-
 # Load tests (verify models load without errors)
 pytest tests/test_load_cpu.py      # CPU load test
 pytest tests/test_load_spyre.py    # Spyre load test (requires hardware)
@@ -49,7 +41,6 @@ Import shared utilities from `hf_common.py`: `PrecomputedRotaryEmbedding`, `appl
 ### Definition of Done (per adapter)
 
 - [ ] Adapter file in `hf_adapters/`
-- [ ] CPU accuracy test passes (identical greedy tokens vs stock HF)
 - [ ] Per-layer block comparison on Spyre (compiles, no NaN)
 - [ ] Added to model compatibility matrix in `ARCHITECTURE.md`
 - [ ] Registry entries in all test files
