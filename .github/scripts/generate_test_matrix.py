@@ -22,29 +22,8 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from tests.model_registry import (  # noqa: E402
-    CAUSAL_LM_MODELS,
-    EMBEDDING_MODELS,
     select_representative_models,
 )
-
-
-def _resolve_exclude_paths(exclude_models):
-    """
-    Resolve --exclude tokens (registry keys) to HF model paths.
-
-    select_representative_models() now returns HF paths, so we must compare
-    against paths rather than keys. Unknown tokens are passed through verbatim
-    so callers that already use paths still work.
-    """
-    paths = set()
-    for token in exclude_models or []:
-        if token in CAUSAL_LM_MODELS:
-            paths.add(CAUSAL_LM_MODELS[token]["path"])
-        elif token in EMBEDDING_MODELS:
-            paths.add(EMBEDDING_MODELS[token]["path"])
-        else:
-            paths.add(token)
-    return paths
 
 
 def generate_matrices(exclude_models=None):
@@ -52,20 +31,19 @@ def generate_matrices(exclude_models=None):
     Generate test matrices from the model registry.
 
     Args:
-        exclude_models: List of registry keys (or paths) to exclude from all
-            matrices. Keys are resolved to paths before filtering.
+        exclude_models: List of paths to exclude from all
+            matrices.
 
     Returns:
         dict: Dictionary with 'causal', 'embed', and 'combined' matrix lists
     """
-    exclude_paths = _resolve_exclude_paths(exclude_models)
 
     # Get representative model paths (one per adapter)
     causal_paths, embed_paths = select_representative_models()
 
     # Apply exclusions
-    causal_paths = [p for p in causal_paths if p not in exclude_paths]
-    embed_paths = [p for p in embed_paths if p not in exclude_paths]
+    causal_paths = [p for p in causal_paths if p not in exclude_models]
+    embed_paths = [p for p in embed_paths if p not in exclude_models]
 
     # Combine for jobs that test both types
     combined_paths = causal_paths + embed_paths

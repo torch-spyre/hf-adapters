@@ -29,8 +29,9 @@ Usage (on Spyre pod)::
 import time
 
 import pytest
-import torch
 from model_registry import CAUSAL_PATHS
+
+from tests._helpers import torch_dtype_for_model_path
 
 
 def _run_smoke(model_path):
@@ -43,7 +44,7 @@ def _run_smoke(model_path):
     print(f"  loading from {model_path}")
     print(f"{'=' * 70}")
 
-    dtype = torch.float16
+    dtype = torch_dtype_for_model_path(model_path)
     t0 = time.time()
     model = AutoSpyreModelForCausalLM.from_pretrained(model_path, dtype=dtype)
     load_time = time.time() - t0

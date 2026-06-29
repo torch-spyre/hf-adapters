@@ -20,7 +20,14 @@ exactly what it needs. Re-exported through ``conftest.py`` for convenience.
 
 import torch
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM
+
+# dtype overrides keyed by config_class name, for the known cases where fp16 is wrong
+_DTYPE_OVERRIDES = {
+    "GraniteMoeHybridConfig": torch.float32,  # fp16 overflows on CPU (multipliers)
+    "Gemma3Config": torch.bfloat16,  # bf16-native; fp16 overflows residual stream
+    "Gemma3TextConfig": torch.bfloat16,
+}
 
 
 def resolve_adapter(model_path):
@@ -57,6 +64,11 @@ def torch_dtype_for(info):
         "float32": torch.float32,
         "bfloat16": torch.bfloat16,
     }.get(info.get("dtype"), torch.float16)
+
+
+def torch_dtype_for_model_path(model_path):
+    config_class = type(AutoConfig.from_pretrained(model_path))
+    return _DTYPE_OVERRIDES.get(config_class.__name__, torch.float16)
 
 
 def load_hf_causal_lm(info, torch_dtype, adapter_mod=None):

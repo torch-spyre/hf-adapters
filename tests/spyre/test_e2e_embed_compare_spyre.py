@@ -35,6 +35,7 @@ from hf_adapters.hf_common import (
     prefill_embed,
     prefill_encoder,
 )
+from tests._helpers import torch_dtype_for_model_path
 
 PROMPTS = [
     "Hi.",
@@ -137,8 +138,7 @@ def _run_model_test(model_path):
     print(f"{'=' * 70}")
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    # dtype = torch_dtype_for(info)
-    dtype = torch.float16
+    dtype = torch_dtype_for_model_path(model_path)
     model = AutoModel.from_pretrained(
         model_path,
         torch_dtype=dtype,

@@ -28,15 +28,16 @@ Usage (on Spyre pod)::
 import time
 
 import pytest
-import torch
 from model_registry import CAUSAL_PATHS, EMBED_PATHS
+
+from tests._helpers import torch_dtype_for_model_path
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 def test_load_causal_lm(model_path):
     from hf_adapters import AutoSpyreModelForCausalLM
 
-    dtype = torch.float16
+    dtype = torch_dtype_for_model_path(model_path)
 
     t0 = time.time()
     model = AutoSpyreModelForCausalLM.from_pretrained(model_path, dtype=dtype)
@@ -53,24 +54,17 @@ def test_load_causal_lm(model_path):
     print(f"| {model_path} | causal-LM | PASS | {load_s:.1f} |")
 
 
-def load_embedding(model_path: str) -> bool:
-    """Try to load an embedding model onto Spyre. Returns True on success, False otherwise."""
-    from hf_adapters import AutoSpyreModel
-
-    try:
-        model = AutoSpyreModel.from_pretrained(model_path, dtype=torch.float16)
-        return model is not None
-    except Exception:
-        return False
-
-
 @pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
 def test_load_embedding(model_path):
+    from hf_adapters import AutoSpyreModel
+
     t0 = time.time()
-    result = load_embedding(model_path)
+    model = AutoSpyreModel.from_pretrained(
+        model_path, dtype=torch_dtype_for_model_path(model_path)
+    )
     load_s = time.time() - t0
 
-    assert result, f"{model_path}: from_pretrained returned None"
+    assert model is not None, f"{model_path}: from_pretrained returned None"
     print(f"  [{model_path}] embedding load time: {load_s:.1f}s")
     print("\n## Spyre Load Test Results\n")
     print("| Path | Kind | Status | Load (s) |")
