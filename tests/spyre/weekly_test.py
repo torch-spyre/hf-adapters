@@ -125,11 +125,15 @@ def _print_adapter_add_dates(add_dates: dict[str, str | None]) -> None:
         print(f"  {'unknown':<10}  {module:<{name_w}}")
 
 
-def eval_embedding(model_id: str) -> bool:
+def eval_embedding(model_id: str) -> dict:
     """Load and compare embeddings for one model. Returns a metrics dict."""
     loads = load_embedding(model_id)
     mismatches, _ = embed_compare_spyre(model_id)
-    return loads and not mismatches
+    return {
+        "correct": loads and not mismatches,
+        "load": loads,
+        "compare_spyre": not mismatches,
+    }
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -210,10 +214,7 @@ def main(argv: list[str] | None = None) -> None:
                 rec["runs"] = True
                 rec["error"] = None
                 rec.update(metrics)
-                print(
-                    f"    runs=True correct={rec.get('correct')} "
-                    f"spyre_nan={rec.get('spyre_nan')}"
-                )
+                print(f"    runs=True correct={rec.get('correct')} ")
             except KeyboardInterrupt:
                 raise
             except Exception as e:
