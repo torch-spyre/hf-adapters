@@ -24,28 +24,6 @@ fully deterministic across runs.
 
 import torch
 
-
-def make_pixel_values(num_channels, image_size, batch=1, seed=0):
-    """Deterministic ``pixel_values`` ``[batch, num_channels, image_size, image_size]``.
-
-    Float32 in roughly the normalized pixel range a processor would emit. The
-    exact distribution is irrelevant — accuracy is measured as adapter-vs-stock
-    agreement on the *same* input, so any fixed tensor works as long as it is
-    reproducible.
-    """
-    g = torch.Generator().manual_seed(seed)
-    return torch.randn(
-        batch, num_channels, image_size, image_size, generator=g, dtype=torch.float32
-    )
-
-
-def pixel_values_for_config(vision_config, batch=1, seed=0):
-    """Build ``pixel_values`` matching a vision config's channels/resolution."""
-    return make_pixel_values(
-        vision_config.num_channels, vision_config.image_size, batch=batch, seed=seed
-    )
-
-
 # ── VLM (image→text) end-to-end helpers ──────────────────────────────────────
 #
 # These drive a full multimodal adapter (both towers) the way an application
@@ -120,7 +98,6 @@ def stock_vlm_generate(model_path, processor, batch, dtype, max_new_tokens):
     Loaded via stock HF directly so the reference stays independent of the code
     under test. Returns the decoded **new** text (prompt tokens sliced off).
     """
-    import torch
     from transformers import AutoModelForImageTextToText
 
     ref_model = AutoModelForImageTextToText.from_pretrained(
@@ -154,7 +131,6 @@ def stock_vlm_greedy_steps(model_path, batch, dtype, num_steps):
     ``logits`` as the per-step top-1 reference, so the adapter is compared on the
     *same* prefix at every step (no greedy-fork amplification).
     """
-    import torch
     from transformers import AutoModelForImageTextToText
 
     ref_model = AutoModelForImageTextToText.from_pretrained(
