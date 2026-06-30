@@ -35,7 +35,7 @@ import gc
 
 import pytest
 import torch
-from _helpers import torch_dtype_for
+from _helpers import load_hf_vlm, torch_dtype_for
 from _vision_helpers import build_vlm_batch, stock_vlm_generate
 from model_registry import VISION_MODELS
 
@@ -76,7 +76,7 @@ def test_vlm_generate(model_key, load_adapter, unwrap_compiled_blocks):
     batch["pixel_values"] = batch["pixel_values"].to(dtype)
 
     # --- Adapter generate (greedy) ---
-    model = adapter.load_hf_model(info["path"], dtype)
+    model = load_hf_vlm(info, dtype, adapter_mod=adapter)
     adapter.prepare_for_spyre(model)
     unwrap_compiled_blocks(model)
     with torch.no_grad():
