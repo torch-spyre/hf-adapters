@@ -17,11 +17,11 @@ import json
 import sys
 from pathlib import Path
 
-import tests.model_registry
-
 # Add the project root to the Python path so we can import from tests/
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
+
+import tests.model_registry  # noqa: E402
 
 
 def generate_matrices(exclude_models=None):
