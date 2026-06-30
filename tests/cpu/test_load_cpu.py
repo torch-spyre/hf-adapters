@@ -27,9 +27,9 @@ DEVICE='cpu' patching of ``hf_common`` happens once in ``tests/conftest.py``.
 import gc
 
 import pytest
-from model_registry import CAUSAL_PATHS, EMBED_PATHS
 
 from tests.conftest import torch_dtype_for_model_path
+from tests.model_registry import CAUSAL_PATHS, EMBED_PATHS
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)

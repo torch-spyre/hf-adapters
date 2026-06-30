@@ -33,10 +33,15 @@ counterpart too) live in ``_generate_edge_case_helpers.py``.
 """
 
 import gc
+import types
 
 import pytest
 import torch
-from _generate_edge_case_helpers import (
+from model_registry import CAUSAL_PATHS
+from transformers import AutoTokenizer
+
+from hf_adapters.auto_spyre_model import resolve_adapter_module
+from tests._generate_edge_case_helpers import (
     BLOCK_SIZE,
     CASES,
     EOS_CASES,
@@ -51,41 +56,39 @@ from _generate_edge_case_helpers import (
     make_prompts,
     pick_forced_eos_id,
 )
-from model_registry import CAUSAL_LM_MODELS as MODELS
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from tests.conftest import load_hf_causal_lm, torch_dtype_for_model_path
 
 # All tests in this file are marked `slow` and dropped from PR runs except
 # `test_generate_zero_new_tokens`, which is the lightest case and acts as the
 # PR-eligible smoke test for this module. The full suite runs in the weekly cron.
+
+# Hard-coded path for the single-model focused tests (determinism, sampling,
+# forced EOS, etc.). Qwen3 0.6B is the smallest causal-LM in the registry.
+QWEN3_PATH: str = "Qwen/Qwen3-0.6B"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _torch_dtype(info):
-    return torch.float32 if info.get("dtype") == "float32" else torch.float16
-
-
 def _run_adapter_generate(
-    info,
-    adapter_mod,
-    hf_common_mod,
+    model_path: str,
+    adapter_mod: types.ModuleType,
+    hf_common_mod: types.ModuleType,
     unwrap_fn,
     tokenizer,
-    prompts,
-    max_new_tokens,
+    prompts: list[str],
+    max_new_tokens: int,
     **gen_kwargs,
-):
+) -> list[str]:
     """Load the adapter model, run batched generate, return decoded outputs.
 
     Extra ``gen_kwargs`` are forwarded to ``hf_common.generate`` (e.g.
     ``do_sample``, ``temperature``, ``top_k``).
     """
-    torch_dtype = _torch_dtype(info)
-    model = AutoModelForCausalLM.from_pretrained(
-        info["path"], torch_dtype=torch_dtype, device_map="cpu"
-    )
+    torch_dtype = torch_dtype_for_model_path(model_path)
+    model = load_hf_causal_lm(model_path, torch_dtype, adapter_mod=adapter_mod)
     model.eval()
     model.requires_grad_(False)
     adapter_mod.prepare_for_spyre(model)
@@ -104,12 +107,12 @@ def _run_adapter_generate(
     return outputs
 
 
-def _load_prepared_model(info, adapter_mod, unwrap_fn):
+def _load_prepared_model(
+    model_path: str, adapter_mod: types.ModuleType, unwrap_fn
+) -> torch.nn.Module:
     """Load + prepare an adapter model once. Caller is responsible for ``del`` + gc."""
-    torch_dtype = _torch_dtype(info)
-    model = AutoModelForCausalLM.from_pretrained(
-        info["path"], torch_dtype=torch_dtype, device_map="cpu"
-    )
+    torch_dtype = torch_dtype_for_model_path(model_path)
+    model = load_hf_causal_lm(model_path, torch_dtype, adapter_mod=adapter_mod)
     model.eval()
     model.requires_grad_(False)
     adapter_mod.prepare_for_spyre(model)
@@ -118,8 +121,14 @@ def _load_prepared_model(info, adapter_mod, unwrap_fn):
 
 
 def _generate_only(
-    model, hf_common_mod, adapter_mod, tokenizer, prompts, max_new_tokens, **gen_kwargs
-):
+    model: torch.nn.Module,
+    hf_common_mod: types.ModuleType,
+    adapter_mod: types.ModuleType,
+    tokenizer,
+    prompts: list[str],
+    max_new_tokens: int,
+    **gen_kwargs,
+) -> list[str]:
     """Run adapter generate against an already-prepared model (no reload)."""
     gen_kwargs.setdefault("do_sample", False)
     return hf_common_mod.generate(
@@ -140,14 +149,18 @@ def _generate_only(
 _HF_REF_CACHE: dict = {}
 
 
-def _hf_reference_cached(info, tokenizer, prompts, max_new_tokens):
-    key = (info["path"], tuple(prompts), max_new_tokens)
+def _hf_reference_cached(
+    model_path: str,
+    adapter_mod: types.ModuleType,
+    tokenizer,
+    prompts: list[str],
+    max_new_tokens: int,
+) -> list[str]:
+    key = (model_path, tuple(prompts), max_new_tokens)
     if key in _HF_REF_CACHE:
         return _HF_REF_CACHE[key]
-    torch_dtype = _torch_dtype(info)
-    ref_model = AutoModelForCausalLM.from_pretrained(
-        info["path"], torch_dtype=torch_dtype, device_map="cpu"
-    )
+    torch_dtype = torch_dtype_for_model_path(model_path)
+    ref_model = load_hf_causal_lm(model_path, torch_dtype, adapter_mod=adapter_mod)
     ref_model.eval()
     ref_model.requires_grad_(False)
     outputs = hf_reference_outputs(ref_model, tokenizer, prompts, max_new_tokens)
@@ -163,23 +176,24 @@ def _hf_reference_cached(info, tokenizer, prompts, max_new_tokens):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("model_key", list(MODELS.keys()), ids=list(MODELS.keys()))
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.parametrize("case_id", list(CASES.keys()), ids=list(CASES.keys()))
 def test_generate_edge_case(
-    model_key, case_id, load_adapter, unwrap_compiled_blocks, hf_common_mod
-):
-    info = MODELS[model_key]
+    model_path: str, case_id: str, unwrap_compiled_blocks, hf_common_mod
+) -> None:
     targets, max_new_tokens = CASES[case_id]
 
-    adapter_mod = load_adapter(info["adapter"])
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    adapter_mod = resolve_adapter_module(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     prompts = make_prompts(tokenizer, targets)
 
     # HF reference (cached across tests; deterministic do_sample=False)
-    hf_outputs = _hf_reference_cached(info, tokenizer, prompts, max_new_tokens)
+    hf_outputs = _hf_reference_cached(
+        model_path, adapter_mod, tokenizer, prompts, max_new_tokens
+    )
 
     adapter_outputs = _run_adapter_generate(
-        info,
+        model_path,
         adapter_mod,
         hf_common_mod,
         unwrap_compiled_blocks,
@@ -207,17 +221,16 @@ def test_generate_edge_case(
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
+@pytest.mark.parametrize("model_path", [QWEN3_PATH], ids=[QWEN3_PATH])
 def test_generate_is_deterministic(
-    model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod
-):
-    info = MODELS[model_key]
-    adapter_mod = load_adapter(info["adapter"])
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    model_path: str, unwrap_compiled_blocks, hf_common_mod
+) -> None:
+    adapter_mod = resolve_adapter_module(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     prompts = make_prompts(tokenizer, [5, 12, 30])
     max_new_tokens = 8  # determinism is RNG-state, not block-expansion
 
-    model = _load_prepared_model(info, adapter_mod, unwrap_compiled_blocks)
+    model = _load_prepared_model(model_path, adapter_mod, unwrap_compiled_blocks)
     try:
         out1 = _generate_only(
             model, hf_common_mod, adapter_mod, tokenizer, prompts, max_new_tokens
@@ -250,24 +263,21 @@ def test_generate_is_deterministic(
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
+@pytest.mark.parametrize("model_path", [QWEN3_PATH], ids=[QWEN3_PATH])
 @pytest.mark.parametrize("case_id", list(EOS_CASES.keys()), ids=list(EOS_CASES.keys()))
 def test_generate_forced_eos(
-    model_key, case_id, load_adapter, unwrap_compiled_blocks, hf_common_mod
-):
-    info = MODELS[model_key]
+    model_path: str, case_id: str, unwrap_compiled_blocks, hf_common_mod
+) -> None:
     eos_offsets, max_new_tokens = EOS_CASES[case_id]
     batch_size = len(eos_offsets)
 
-    adapter_mod = load_adapter(info["adapter"])
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    adapter_mod = resolve_adapter_module(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     prompts = make_prompts(tokenizer, [5] * batch_size)
 
     # Step 1: capture each prompt's natural greedy continuation.
-    torch_dtype = _torch_dtype(info)
-    ref_model = AutoModelForCausalLM.from_pretrained(
-        info["path"], torch_dtype=torch_dtype, device_map="cpu"
-    )
+    torch_dtype = torch_dtype_for_model_path(model_path)
+    ref_model = load_hf_causal_lm(model_path, torch_dtype, adapter_mod=adapter_mod)
     ref_model.eval()
     ref_model.requires_grad_(False)
     per_prompt_ids = [
@@ -289,7 +299,7 @@ def test_generate_forced_eos(
     # Step 2: run the adapter, forcing the stop token via the eos_token_id
     # kwarg (highest-precedence source in generate()'s HF-style resolution).
     adapter_outputs = _run_adapter_generate(
-        info,
+        model_path,
         adapter_mod,
         hf_common_mod,
         unwrap_compiled_blocks,
@@ -314,17 +324,16 @@ def test_generate_forced_eos(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
+@pytest.mark.parametrize("model_path", [QWEN3_PATH], ids=[QWEN3_PATH])
 def test_generate_zero_new_tokens(
-    model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod
-):
-    info = MODELS[model_key]
-    adapter_mod = load_adapter(info["adapter"])
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    model_path: str, unwrap_compiled_blocks, hf_common_mod
+) -> None:
+    adapter_mod = resolve_adapter_module(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     prompts = make_prompts(tokenizer, [5, 12])
 
     outputs = _run_adapter_generate(
-        info,
+        model_path,
         adapter_mod,
         hf_common_mod,
         unwrap_compiled_blocks,
@@ -344,19 +353,18 @@ def test_generate_zero_new_tokens(
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
+@pytest.mark.parametrize("model_path", [QWEN3_PATH], ids=[QWEN3_PATH])
 def test_generate_sampling_determinism(
-    model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod
-):
-    info = MODELS[model_key]
-    adapter_mod = load_adapter(info["adapter"])
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    model_path: str, unwrap_compiled_blocks, hf_common_mod
+) -> None:
+    adapter_mod = resolve_adapter_module(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     prompts = make_prompts(tokenizer, SAMPLING_TARGETS)
     max_new_tokens = SAMPLING_MAX_NEW
 
     sampling = SAMPLING_KWARGS
 
-    model = _load_prepared_model(info, adapter_mod, unwrap_compiled_blocks)
+    model = _load_prepared_model(model_path, adapter_mod, unwrap_compiled_blocks)
     try:
         torch.manual_seed(1234)
         out_a1 = _generate_only(
@@ -414,24 +422,21 @@ def test_generate_sampling_determinism(
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
+@pytest.mark.parametrize("model_path", [QWEN3_PATH], ids=[QWEN3_PATH])
 def test_generate_no_eos_runs_full_budget(
-    model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod
-):
-    info = MODELS[model_key]
-    adapter_mod = load_adapter(info["adapter"])
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    model_path: str, unwrap_compiled_blocks, hf_common_mod
+) -> None:
+    adapter_mod = resolve_adapter_module(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     prompts = make_prompts(tokenizer, [5, 12])
     max_new_tokens = BLOCK_SIZE + 7  # cross a block boundary
 
     # HF reference with eos_token_id=None so HF also runs the full budget.
-    torch_dtype = _torch_dtype(info)
-    ref_model = AutoModelForCausalLM.from_pretrained(
-        info["path"], torch_dtype=torch_dtype, device_map="cpu"
-    )
+    torch_dtype = torch_dtype_for_model_path(model_path)
+    ref_model = load_hf_causal_lm(model_path, torch_dtype, adapter_mod=adapter_mod)
     ref_model.eval()
     ref_model.requires_grad_(False)
-    hf_outputs = []
+    hf_outputs: list[str] = []
     for prompt in prompts:
         encoded = tokenizer(prompt, return_tensors="pt")
         with torch.no_grad():
@@ -454,7 +459,7 @@ def test_generate_no_eos_runs_full_budget(
 
     # eos_token_id=None disables EOS stopping, same as the HF reference above.
     adapter_outputs = _run_adapter_generate(
-        info,
+        model_path,
         adapter_mod,
         hf_common_mod,
         unwrap_compiled_blocks,
@@ -477,21 +482,22 @@ def test_generate_no_eos_runs_full_budget(
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
+@pytest.mark.parametrize("model_path", [QWEN3_PATH], ids=[QWEN3_PATH])
 def test_generate_no_pad_token_fallback(
-    model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod
-):
-    info = MODELS[model_key]
-    adapter_mod = load_adapter(info["adapter"])
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    model_path: str, unwrap_compiled_blocks, hf_common_mod
+) -> None:
+    adapter_mod = resolve_adapter_module(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     prompts = make_prompts(tokenizer, [5, 12])  # mixed lengths -> left-padding
     max_new_tokens = 16
 
-    hf_outputs = _hf_reference_cached(info, tokenizer, prompts, max_new_tokens)
+    hf_outputs = _hf_reference_cached(
+        model_path, adapter_mod, tokenizer, prompts, max_new_tokens
+    )
 
     wrapped = NoPadTokenizer(tokenizer)
     adapter_outputs = _run_adapter_generate(
-        info,
+        model_path,
         adapter_mod,
         hf_common_mod,
         unwrap_compiled_blocks,
@@ -512,19 +518,18 @@ def test_generate_no_pad_token_fallback(
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
+@pytest.mark.parametrize("model_path", [QWEN3_PATH], ids=[QWEN3_PATH])
 def test_generate_sampling_top_k_zero(
-    model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod
-):
-    info = MODELS[model_key]
-    adapter_mod = load_adapter(info["adapter"])
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    model_path: str, unwrap_compiled_blocks, hf_common_mod
+) -> None:
+    adapter_mod = resolve_adapter_module(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     prompts = make_prompts(tokenizer, SAMPLING_TARGETS)
     max_new_tokens = SAMPLING_MAX_NEW
 
     sampling = dict(do_sample=True, temperature=1.0, top_k=0)
 
-    model = _load_prepared_model(info, adapter_mod, unwrap_compiled_blocks)
+    model = _load_prepared_model(model_path, adapter_mod, unwrap_compiled_blocks)
     try:
         torch.manual_seed(2024)
         out1 = _generate_only(
@@ -568,23 +573,24 @@ def test_generate_sampling_top_k_zero(
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("model_key", ["qwen3"], ids=["qwen3"])
+@pytest.mark.parametrize("model_path", [QWEN3_PATH], ids=[QWEN3_PATH])
 def test_generate_eos_inside_prompt(
-    model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod
-):
-    info = MODELS[model_key]
-    adapter_mod = load_adapter(info["adapter"])
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    model_path: str, unwrap_compiled_blocks, hf_common_mod
+) -> None:
+    adapter_mod = resolve_adapter_module(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     eos_id = tokenizer.eos_token_id
     if eos_id is None:
         pytest.skip("tokenizer has no eos_token_id; case not applicable")
     prompts = [make_prompt_with_eos_inside(tokenizer, eos_id, target_tokens=12)]
     max_new_tokens = BLOCK_SIZE + 8  # cross a block boundary
 
-    hf_outputs = _hf_reference_cached(info, tokenizer, prompts, max_new_tokens)
+    hf_outputs = _hf_reference_cached(
+        model_path, adapter_mod, tokenizer, prompts, max_new_tokens
+    )
 
     adapter_outputs = _run_adapter_generate(
-        info,
+        model_path,
         adapter_mod,
         hf_common_mod,
         unwrap_compiled_blocks,

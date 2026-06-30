@@ -183,16 +183,16 @@ def load_adapter() -> types.ModuleType:
 
 
 @pytest.fixture
-def unwrap_compiled_blocks() -> None:
+def unwrap_compiled_blocks():
     return _unwrap_compiled_blocks
 
 
 @pytest.fixture
-def set_rope_dtype() -> None:
+def set_rope_dtype():
     return _set_rope_dtype
 
 
 @pytest.fixture(autouse=True)
-def _gc_after_test() -> None:
+def _gc_after_test():
     yield
     gc.collect()
