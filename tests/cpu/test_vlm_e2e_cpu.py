@@ -36,8 +36,9 @@ import gc
 import pytest
 import torch
 from _vision_helpers import build_vlm_batch, stock_vlm_generate
-from conftest import load_hf_vlm, torch_dtype_for
 from model_registry import VISION_MODELS
+
+from tests.conftest import load_hf_vlm, torch_dtype_for
 
 MAX_NEW_TOKENS = 16
 PROMPT = "Briefly describe this image."
