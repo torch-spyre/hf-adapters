@@ -29,6 +29,12 @@ _DTYPE_OVERRIDES = {
     "Gemma3TextConfig": torch.bfloat16,
 }
 
+_LOAD_FN_OVERRIDES = {
+    "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
+    "mistralai/Ministral-3-14B-Instruct-2512",
+    "ibm-granite/granite-vision-4.1-4b",
+}
+
 
 def resolve_adapter(model_path):
     """Return (adapter_module, adapter_module_name) for a checkpoint.
