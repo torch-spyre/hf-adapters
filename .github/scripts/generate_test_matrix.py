@@ -17,7 +17,7 @@ import json
 import sys
 from pathlib import Path
 
-import model_registry
+import tests.model_registry
 
 # Add the project root to the Python path so we can import from tests/
 project_root = Path(__file__).parent.parent.parent
@@ -37,8 +37,12 @@ def generate_matrices(exclude_models=None):
     exclude_models = set(exclude_models or [])
 
     # Apply exclusions
-    causal_paths = [k for k in model_registry.CAUSAL_PATHS if k not in exclude_models]
-    embed_paths = [k for k in model_registry.EMBED_PATHS if k not in exclude_models]
+    causal_paths = [
+        k for k in tests.model_registry.CAUSAL_PATHS if k not in exclude_models
+    ]
+    embed_paths = [
+        k for k in tests.model_registry.EMBED_PATHS if k not in exclude_models
+    ]
 
     # Combine for jobs that test both types
     combined_paths = causal_paths + embed_paths
