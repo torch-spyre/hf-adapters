@@ -105,10 +105,10 @@ NON_NATIVE_ID_SUBSTRINGS: tuple[str, ...] = ("onnx", "gguf", "mlx")
 
 
 def is_baseline_keep(model: ModelInfo) -> bool:
-    """Shared inclusion gate: drop config-less, GGUF/MLX, and ONNX/GGUF/MLX id checkpoints."""
+    """Shared inclusion gate: drop config-less, and ONNX/GGUF/MLX id checkpoints."""
     if not model.config:
         return False
-    if model.library_name in ("gguf", "mlx"):
+    if model.library_name in NON_NATIVE_ID_SUBSTRINGS:
         return False
     model_id_lower: str = model.id.lower()
     if any(sub in model_id_lower for sub in NON_NATIVE_ID_SUBSTRINGS):
