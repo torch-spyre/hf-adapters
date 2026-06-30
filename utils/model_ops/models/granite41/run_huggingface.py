@@ -25,7 +25,10 @@ def main():
 
     model_path = "ibm-granite/granite-4.1-8b"
     chat = [
-        { "role": "user", "content": "Please list one IBM Research laboratory located in the United States. You should only output its name and location." },
+        {
+            "role": "user",
+            "content": "Please list one IBM Research laboratory located in the United States. You should only output its name and location.",
+        },
     ]
 
     device = "cuda"
@@ -33,7 +36,9 @@ def main():
         model_path, device_map="auto", dtype=torch.bfloat16
     )
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    chat = tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
+    chat = tokenizer.apply_chat_template(
+        chat, tokenize=False, add_generation_prompt=True
+    )
     encoded_input = tokenizer(chat, return_tensors="pt").to(device)
 
     past_key_values = StaticCache(config=model.config, max_cache_len=2048)
