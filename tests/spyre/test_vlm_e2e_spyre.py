@@ -76,6 +76,7 @@ from hf_adapters.hf_common import (
     _move_to_spyre_with_layout,
     allocate_kv_caches,
     build_expansion_mask,
+    pad_and_position,
 )
 
 MAX_NEW_TOKENS = 16
@@ -137,7 +138,7 @@ def _adapter_teacher_forced_steps(adapter, model, batch, forced_tokens):
         math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
         + math.ceil((n_steps + 1) / BLOCK_SIZE) * BLOCK_SIZE
     )
-    padded_ids, padded_len, prompt_offsets, position_ids = adapter._pad_and_position(
+    padded_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
         input_ids, actual_prompt_lengths
     )
     key_caches, value_caches = allocate_kv_caches(
