@@ -21,6 +21,14 @@ pytest tests/test_embed_cpu_accuracy.py
 # Load test (verify models load without errors)
 pytest tests/test_load_cpu.py      # CPU load test
 
+# Module config tests (on pod — uses OOT framework, requires torch_spyre + oot_framework)
+# First time: uv sync --group oot
+bash tests/run_oot_module_configs.sh tests/configs/module_tests/granite_3_3_8b_instruct_spyre.yaml -v
+bash tests/run_oot_module_configs.sh tests/configs/module_tests/  # run all configs
+
+# Spyre tests (on pod only — requires torch_spyre)
+python3 tests/test_e2e_smoke_spyre.py qwen3
+python3 tests/test_e2e_token_compare_spyre.py qwen3
 # Spyre tests (on pod only — requires torch_spyre). Pytest-parametrized off the
 # model registry; select one model with -k <key>, or run the file for all.
 pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k qwen3
