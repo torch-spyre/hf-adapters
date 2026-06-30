@@ -25,6 +25,7 @@ ordering discipline from the previous one-process driver.
 """
 
 import gc
+import importlib
 import time
 
 import torch
@@ -41,15 +42,21 @@ from _generate_edge_case_helpers import (
     make_prompt_with_eos_inside,
     make_prompts,
 )
+from _helpers import load_hf_causal_lm
 from model_registry import CAUSAL_LM_MODELS
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 
-def _load_ref_model(info):
+def _load_adapter(info):
+    """Import the adapter module for the given registry entry."""
+    adapter_module_name = info["adapter"].replace(".py", "")
+    return importlib.import_module(f"hf_adapters.{adapter_module_name}")
+
+
+def _load_ref_model(info, adapter_mod=None):
+    """Load the HF reference model, using the adapter's custom loader when load_fn=True."""
     ref_dtype = torch.float32 if info.get("dtype") == "float32" else torch.float16
-    ref_model = AutoModelForCausalLM.from_pretrained(
-        info["path"], torch_dtype=ref_dtype, device_map="cpu"
-    )
+    ref_model = load_hf_causal_lm(info, ref_dtype, adapter_mod=adapter_mod)
     ref_model.eval()
     ref_model.requires_grad_(False)
     return ref_model
@@ -68,7 +75,8 @@ def _load_spyre_model(info):
 def _setup(model_key, need_ref):
     info = CAUSAL_LM_MODELS[model_key]
     tokenizer = AutoTokenizer.from_pretrained(info["path"])
-    ref_model = _load_ref_model(info) if need_ref else None
+    adapter_mod = _load_adapter(info) if need_ref and info.get("load_fn") else None
+    ref_model = _load_ref_model(info, adapter_mod=adapter_mod) if need_ref else None
     spyre_model = _load_spyre_model(info)
     return info, tokenizer, ref_model, spyre_model
 
