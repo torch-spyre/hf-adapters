@@ -27,13 +27,14 @@ Usage (on Spyre pod)::
 """
 
 import time
+from typing import Any
 
 import pytest
 from _helpers import torch_dtype_for
 from model_registry import CAUSAL_KEYS, CAUSAL_LM_MODELS
 
 
-def _run_smoke(model_key):
+def _run_smoke(model_key: str) -> dict[str, Any]:
     """Load model, generate 5 tokens, validate output. Returns a result dict."""
     from transformers import AutoTokenizer
 
@@ -98,7 +99,7 @@ def _run_smoke(model_key):
 
 
 @pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
-def test_e2e_smoke_spyre(model_key):
+def test_e2e_smoke_spyre(model_key: str) -> None:
     result = _run_smoke(model_key)
     print("\n## E2E Smoke Test Results\n")
     print("| Model | Status | Tokens | Generated Text | Load (s) | Gen (s) |")

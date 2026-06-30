@@ -48,10 +48,10 @@ import json
 from collections import defaultdict
 
 from hf_adapters.hf_common import (
-    _move_to_spyre_with_layout,
-    _untie_embedding_and_lm_head,
     get_backbone,
+    move_to_spyre_with_layout,
     prepare_standard_gqa,
+    untie_embedding_and_lm_head,
 )
 from hf_adapters.hf_mistral import (
     _run_backbone_forward,  # noqa: F401  re-exported as adapter module API
@@ -163,10 +163,10 @@ def load_model(model_path, dtype):
     # dtype for _move_to_spyre_with_layout so every parameter is cast
     # consistently and no bf16/fp16 mismatch arises.
     actual_dtype = next(model.parameters()).dtype
-    _untie_embedding_and_lm_head(model)
+    untie_embedding_and_lm_head(model)
     prepare_for_spyre(model)
     print("Moving model to Spyre ...")
-    _move_to_spyre_with_layout(model, actual_dtype)
+    move_to_spyre_with_layout(model, actual_dtype)
     print("Model ready.")
     return model
 

@@ -38,7 +38,7 @@ from model_registry import (
 
 
 @pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
-def test_load_causal_lm(model_key):
+def test_load_causal_lm(model_key: str) -> None:
     from hf_adapters import AutoSpyreModelForCausalLM
 
     info = CAUSAL_LM_MODELS[model_key]
@@ -61,7 +61,7 @@ def test_load_causal_lm(model_key):
 
 
 @pytest.mark.parametrize("model_key", EMBED_KEYS, ids=EMBED_KEYS)
-def test_load_embedding(model_key):
+def test_load_embedding(model_key: str) -> None:
     from hf_adapters import AutoSpyreModel
 
     info = EMBEDDING_MODELS[model_key]

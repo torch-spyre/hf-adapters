@@ -1093,7 +1093,7 @@ def _embedding_param_ids(model):
     return ids
 
 
-def _untie_embedding_and_lm_head(model):
+def untie_embedding_and_lm_head(model):
     """If the token-embedding weight and the LM head weight share storage, clone
     the LM head's weight so each can take a different Spyre layout.
     """
@@ -1126,7 +1126,7 @@ def _model_dtype(model: nn.Module) -> torch.dtype:
     return torch.float16
 
 
-def _move_to_spyre_with_layout(model, dtype):
+def move_to_spyre_with_layout(model, dtype):
     """Move all parameters and buffers to Spyre with row-major layout for 2D
     matmul weights, except embedding weights which keep the default layout.
     """
@@ -1212,10 +1212,10 @@ def load_model_common(model_path, prepare_fn, dtype=torch.float16, auto_model_cl
     )
     model.eval()
     model.requires_grad_(False)
-    _untie_embedding_and_lm_head(model)
+    untie_embedding_and_lm_head(model)
     prepare_fn(model)
     print("Moving model to Spyre ...")
-    _move_to_spyre_with_layout(model, dtype)
+    move_to_spyre_with_layout(model, dtype)
     print("Model ready.")
     return model
 
