@@ -27,7 +27,6 @@ ordering discipline from the previous one-process driver.
 from __future__ import annotations
 
 import gc
-import importlib
 import time
 import types
 
@@ -50,21 +49,13 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     PreTrainedModel,
-    PreTrainedTokenizerBase,
 )
 
 from hf_adapters import AutoSpyreModelForCausalLM
+from hf_adapters.auto_spyre_model import resolve_adapter_module
 from tests.conftest import load_hf_causal_lm, torch_dtype_for_model_path
 
 
-# REFACTOR_BENJ : Redundant?
-def _load_adapter(info: dict) -> types.ModuleType:
-    """Import the adapter module for the given registry entry."""
-    adapter_module_name = info["adapter"].replace(".py", "")
-    return importlib.import_module(f"hf_adapters.{adapter_module_name}")
-
-
-# REFACTOR_BENJ : Revisit
 def _load_ref_model(
     model_path: str,
     adapter_mod: types.ModuleType | None = None,
@@ -92,16 +83,11 @@ def _load_spyre_model(model_path: str) -> Module:
 def _setup(
     model_path: str,
     need_ref: bool,
-) -> tuple[
-    dict, PreTrainedTokenizerBase, PreTrainedModel | None, AutoSpyreModelForCausalLM
-]:
+):
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    adapter_mod = _load_adapter(
-        model_path
-    )  # REVISIT if need_ref and info.get("load_fn") else None
-    ref_model = (
-        _load_ref_model(model_path, adapter_mod=adapter_mod) if need_ref else None
-    )
+    adapter = resolve_adapter_module(model_path)
+
+    ref_model = _load_ref_model(model_path, adapter_mod=adapter) if need_ref else None
     spyre_model = _load_spyre_model(model_path)
     return model_path, tokenizer, ref_model, spyre_model
 
