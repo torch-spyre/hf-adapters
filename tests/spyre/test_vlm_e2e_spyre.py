@@ -55,7 +55,6 @@ Usage (on Spyre pod)::
 """
 
 import gc
-import importlib
 import math
 import types
 from typing import Any
@@ -69,8 +68,12 @@ from _vision_helpers import (
     stock_vlm_generate,
     stock_vlm_greedy_steps,
 )
-from model_registry import VISION_MODELS
+from model_registry import VISION_PATHS
 
+from hf_adapters.auto_spyre_model import (
+    IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+    resolve_adapter_module,
+)
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
@@ -79,7 +82,7 @@ from hf_adapters.hf_common import (
     model_dtype,
     move_to_spyre_with_layout,
 )
-from tests.conftest import torch_dtype_for
+from tests.conftest import torch_dtype_for_model_path
 
 MAX_NEW_TOKENS = 16
 # Decode steps to verify token-by-token (prefill + this many decode steps). Kept
@@ -91,8 +94,6 @@ NUM_COMPARE_STEPS = 5
 # rounding never trips it, while a genuine regression (cosine << 0.999) does.
 MIN_COSINE = 0.999
 PROMPT = "Briefly describe this image."
-
-MODELS = {k: v for k, v in VISION_MODELS.items() if v.get("kind") == "vlm"}
 
 
 def _adapter_generate(
@@ -244,20 +245,20 @@ def _adapter_teacher_forced_steps(
     return per_step_logits
 
 
-@pytest.mark.parametrize("model_key", list(MODELS.keys()), ids=list(MODELS.keys()))
-def test_vlm_generate_spyre(model_key: str) -> None:
-    info = MODELS[model_key]
-    adapter_module_name = info["adapter"].replace(".py", "")
-    adapter = importlib.import_module(f"hf_adapters.{adapter_module_name}")
-    dtype = torch_dtype_for(info)
+@pytest.mark.parametrize("model_path", VISION_PATHS, ids=VISION_PATHS)
+def test_vlm_generate_spyre(model_path: str) -> None:
+    adapter = resolve_adapter_module(
+        model_path, mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING
+    )
+    dtype = torch_dtype_for_model_path(model_path)
 
-    processor, batch = build_vlm_batch(info["path"], PROMPT)
+    processor, batch = build_vlm_batch(model_path, PROMPT)
     batch["pixel_values"] = batch["pixel_values"].to(dtype)
 
     tokenizer = processor.tokenizer
 
     print(f"\n{'=' * 70}")
-    print(f"  {info['name']}: {info['path']}")
+    print(f"  {model_path}")
     print(f"{'=' * 70}")
 
     # --- Stock CPU reference (run first, before prepare_for_spyre patches RMSNorm).
@@ -265,14 +266,14 @@ def test_vlm_generate_spyre(model_key: str) -> None:
     # the per-step top-1 reference), plus its free-run caption for an eyeball. ---
     print("  Running stock CPU reference (per-step greedy) ...")
     ref_logits, ref_tokens = stock_vlm_greedy_steps(
-        info["path"], batch, dtype, NUM_COMPARE_STEPS
+        model_path, batch, dtype, NUM_COMPARE_STEPS
     )
-    ref_text = stock_vlm_generate(info["path"], processor, batch, dtype, MAX_NEW_TOKENS)
+    ref_text = stock_vlm_generate(model_path, processor, batch, dtype, MAX_NEW_TOKENS)
     gc.collect()
 
     # --- Adapter on Spyre ---
     print("  Loading model for Spyre ...")
-    model = adapter.load_hf_model(info["path"], dtype)
+    model = adapter.load_hf_model(model_path, dtype)
     adapter.prepare_for_spyre(model)
     print("  Moving model to Spyre ...")
     move_to_spyre_with_layout(model, dtype)

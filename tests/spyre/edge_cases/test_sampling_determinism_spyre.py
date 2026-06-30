@@ -16,10 +16,10 @@
 
 import pytest
 from _shared import run_sampling_determinism
-from model_registry import CAUSAL_KEYS
+from model_registry import CAUSAL_PATHS
 
 
-@pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
+@pytest.mark.parametrize("model_key", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
 def test_sampling_determinism_spyre(model_key):
     ok, detail = run_sampling_determinism(model_key)

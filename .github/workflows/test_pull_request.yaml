@@ -159,10 +159,10 @@ jobs:
         id: generate
         run: |
           # Manually exclude models here by adding them to --exclude
-          # Example: python .github/scripts/generate_test_matrix.py --exclude granite-vision phi4
+          # Example: python .github/scripts/generate_test_matrix.py --exclude ibm-granite/granite-vision-4.1-4b tiiuae/Falcon3-1B-Base
 
           # We exclude these models - See https://github.com/torch-spyre/hf-adapters/issues/89
-          python .github/scripts/generate_test_matrix.py --exclude granite-vision granite4 mistral3 falcon3
+          python .github/scripts/generate_test_matrix.py --exclude ibm-granite/granite-vision-4.1-4b ibm-granite/granite-4.0-1b-base mistralai/Mistral-Small-3.2-24B-Instruct-2506 tiiuae/Falcon3-1B-Base
 
   adapter-coverage:
     name: adapter coverage

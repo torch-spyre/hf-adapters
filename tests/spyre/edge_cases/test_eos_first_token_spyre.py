@@ -16,10 +16,10 @@
 
 import pytest
 from _shared import run_eos_case
-from model_registry import CAUSAL_KEYS
+from model_registry import CAUSAL_PATHS
 
 
-@pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
+@pytest.mark.parametrize("model_key", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
 def test_eos_first_token_spyre(model_key):
     ok, detail = run_eos_case(model_key, "eos_first_token")

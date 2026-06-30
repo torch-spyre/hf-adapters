@@ -28,10 +28,10 @@ import gc
 
 import pytest
 from conftest import torch_dtype_for
-from model_registry import CAUSAL_KEYS, CAUSAL_LM_MODELS, EMBED_KEYS, EMBEDDING_MODELS
+from model_registry import CAUSAL_LM_MODELS, CAUSAL_PATHS, EMBED_PATHS, EMBEDDING_MODELS
 
 
-@pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
+@pytest.mark.parametrize("model_key", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 def test_load_causal_lm(model_key, auto_spyre_model):
     info = CAUSAL_LM_MODELS[model_key]
     model = auto_spyre_model.AutoSpyreModelForCausalLM.from_pretrained(
@@ -45,7 +45,7 @@ def test_load_causal_lm(model_key, auto_spyre_model):
     gc.collect()
 
 
-@pytest.mark.parametrize("model_key", EMBED_KEYS, ids=EMBED_KEYS)
+@pytest.mark.parametrize("model_key", EMBED_PATHS, ids=EMBED_PATHS)
 def test_load_embedding(model_key, auto_spyre_model):
     info = EMBEDDING_MODELS[model_key]
     model = auto_spyre_model.AutoSpyreModel.from_pretrained(

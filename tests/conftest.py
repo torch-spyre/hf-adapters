@@ -54,6 +54,11 @@ from _pytest.config.argparsing import Parser
 from _pytest.nodes import Item
 from transformers import AutoModelForCausalLM
 
+from hf_adapters.auto_spyre_model import (
+    MODEL_PATH_TO_TORCH_DTYPE,
+    MODEL_PATH_WITH_LOAD_FN,
+)
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADAPTERS_DIR = os.path.join(REPO_ROOT, "hf_adapters")
 
@@ -63,7 +68,7 @@ ADAPTERS_DIR = os.path.join(REPO_ROOT, "hf_adapters")
 
 
 def load_hf_causal_lm(
-    info: dict,
+    model_path: str,
     torch_dtype: torch.dtype,
     adapter_mod: types.ModuleType | None = None,
 ) -> AutoModelForCausalLM:
@@ -73,12 +78,13 @@ def load_hf_causal_lm(
     ``load_hf_model(path, dtype)`` (used for non-standard loading paths like
     granite-vision).
     """
-    if info.get("load_fn"):
+
+    if model_path in MODEL_PATH_WITH_LOAD_FN:
         if adapter_mod is None:
             raise RuntimeError("load_fn=True requires adapter_mod")
-        return adapter_mod.load_hf_model(info["path"], torch_dtype)
+        return adapter_mod.load_hf_model(model_path, torch_dtype)
     return AutoModelForCausalLM.from_pretrained(
-        info["path"], torch_dtype=torch_dtype, device_map="cpu"
+        model_path, torch_dtype=torch_dtype, device_map="cpu"
     )
 
 
@@ -185,3 +191,13 @@ def torch_dtype_for(info: dict) -> torch.dtype:
         "float32": torch.float32,
         "bfloat16": torch.bfloat16,
     }.get(info.get("dtype"), torch.float16)
+
+
+def torch_dtype_for_model_path(model_path: str) -> torch.dtype:
+    """Map a registry entry's ``dtype`` field to a torch dtype.
+
+    Defaults to float16. ``"float32"`` (e.g. Granite 4 1B, where fp16 overflows
+    on CPU) and ``"bfloat16"`` (e.g. EmbeddingGemma, which is bf16-native and
+    overflows fp16) are recognized explicitly.
+    """
+    return MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)

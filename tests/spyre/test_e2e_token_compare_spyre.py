@@ -24,7 +24,6 @@ Usage (on Spyre pod)::
     pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k qwen3
 """
 
-import importlib
 import math
 from typing import Any, Callable
 
@@ -32,7 +31,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from model_registry import CAUSAL_KEYS, CAUSAL_LM_MODELS
+from model_registry import CAUSAL_PATHS
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
@@ -40,7 +39,7 @@ from hf_adapters.hf_common import (
     move_to_spyre_with_layout,
     untie_embedding_and_lm_head,
 )
-from tests.conftest import load_hf_causal_lm, torch_dtype_for
+from tests.conftest import load_hf_causal_lm, torch_dtype_for_model_path
 
 DEVICE = "spyre"
 
@@ -287,22 +286,25 @@ def _print_table(rows: list[dict[str, Any]]) -> None:
         )
 
 
-def _run_model_test(model_key: str, num_decode: int = 4) -> list[dict[str, Any]]:
+def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]]:
     """Full comparison for one model. Returns the list of comparison rows."""
     from transformers import AutoTokenizer
 
-    info = CAUSAL_LM_MODELS[model_key]
-    adapter_module_name = info["adapter"].replace(".py", "")
-    adapter = importlib.import_module(f"hf_adapters.{adapter_module_name}")
+    from hf_adapters.auto_spyre_model import resolve_adapter_module
+
+    adapter = resolve_adapter_module(model_path)
 
     print(f"\n{'=' * 70}")
-    print(f"  {info['name']}: {info['path']}")
+    print(f"  {model_path}")
     print(f"{'=' * 70}")
 
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
-    dtype = torch_dtype_for(info)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    dtype = torch_dtype_for_model_path(model_path)
 
-    model = load_hf_causal_lm(info, dtype, adapter_mod=adapter)
+    model = load_hf_causal_lm(
+        model_path=model_path, torch_dtype=dtype, adapter_mod=adapter
+    )
+
     model.eval()
     model.requires_grad_(False)
 
@@ -320,7 +322,7 @@ def _run_model_test(model_key: str, num_decode: int = 4) -> list[dict[str, Any]]
     print("  Moving model to Spyre ...")
     # Use bfloat16 on Spyre when the registry requests it; otherwise float16.
     # (Spyre does not support float32, so float32 registry entries still use float16.)
-    spyre_dtype = torch.bfloat16 if info.get("dtype") == "bfloat16" else torch.float16
+    spyre_dtype = torch.bfloat16 if dtype == torch.bfloat16 else torch.float16
     move_to_spyre_with_layout(model, spyre_dtype)
     print("  Running adapter on Spyre ...")
     adapter_results = adapter_greedy_steps(
@@ -330,12 +332,12 @@ def _run_model_test(model_key: str, num_decode: int = 4) -> list[dict[str, Any]]
         num_decode=num_decode,
     )
 
-    return _compare_results(hf_results, adapter_results, tokenizer, info["name"])
+    return _compare_results(hf_results, adapter_results, tokenizer, model_path)
 
 
-@pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
-def test_e2e_token_compare_spyre(model_key: str) -> None:
-    rows = _run_model_test(model_key)
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+def test_e2e_token_compare_spyre(model_path: str) -> None:
+    rows = _run_model_test(model_path)
     _print_table(rows)
     n_match = sum(1 for r in rows if r["top1_match"])
     print(f"\nTop-1 agreement: {n_match}/{len(rows)} steps")

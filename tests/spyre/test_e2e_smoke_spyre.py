@@ -30,30 +30,28 @@ import time
 from typing import Any
 
 import pytest
-from model_registry import CAUSAL_KEYS, CAUSAL_LM_MODELS
+from model_registry import CAUSAL_PATHS
 
-from tests.conftest import torch_dtype_for
+from tests.conftest import torch_dtype_for_model_path
 
 
-def _run_smoke(model_key: str) -> dict[str, Any]:
+def _run_smoke(model_path: str) -> dict[str, Any]:
     """Load model, generate 5 tokens, validate output. Returns a result dict."""
     from transformers import AutoTokenizer
 
     from hf_adapters import AutoSpyreModelForCausalLM
 
-    info = CAUSAL_LM_MODELS[model_key]
-
     print(f"\n{'=' * 70}")
-    print(f"  {info['name']}: loading from {info['path']}")
+    print(f"  loading from {model_path}")
     print(f"{'=' * 70}")
 
-    dtype = torch_dtype_for(info)
+    dtype = torch_dtype_for_model_path(model_path)
     t0 = time.time()
-    model = AutoSpyreModelForCausalLM.from_pretrained(info["path"], dtype=dtype)
+    model = AutoSpyreModelForCausalLM.from_pretrained(model_path, dtype=dtype)
     load_time = time.time() - t0
     print(f"  Load time: {load_time:.1f}s")
 
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     prompt = "The capital of France is"
     print(f"  Prompt: {prompt!r}")
 
@@ -89,7 +87,7 @@ def _run_smoke(model_key: str) -> dict[str, Any]:
 
     passed = all(v for k, v in checks.items() if k != "token_ids")
     return {
-        "model": info["name"],
+        "model": model_path,
         "status": "PASS" if passed else "FAIL",
         "tokens": len(checks.get("token_ids", [])),
         "text": output_text[:50],
@@ -99,9 +97,9 @@ def _run_smoke(model_key: str) -> dict[str, Any]:
     }
 
 
-@pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
-def test_e2e_smoke_spyre(model_key: str) -> None:
-    result = _run_smoke(model_key)
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+def test_e2e_smoke_spyre(model_path: str) -> None:
+    result = _run_smoke(model_path)
     print("\n## E2E Smoke Test Results\n")
     print("| Model | Status | Tokens | Generated Text | Load (s) | Gen (s) |")
     print("|-------|--------|--------|----------------|----------|---------|")

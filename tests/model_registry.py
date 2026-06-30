@@ -374,7 +374,7 @@ def _select_representative_models() -> tuple[list[str], list[str]]:
     from the registries above. Prefers smaller models for faster test execution.
 
     Returns:
-        tuple: (causal_keys, embed_keys) where each is a list of model keys
+        tuple: (causal_paths, embed_paths) where each is a list of model keys
     """
     adapter_modules_in_config: set[str] = {
         _get_adapter_module_name(adapter_mod)
@@ -409,7 +409,7 @@ def _select_representative_models() -> tuple[list[str], list[str]]:
 
     # Select one representative per adapter for causal LM
     # Prefer smaller models (by size field) for faster tests
-    causal_keys: list[str] = []
+    causal_paths: list[str] = []
     for adapter in sorted(adapter_modules_in_config):
         if adapter in adapter_to_causal_keys:
             keys = adapter_to_causal_keys[adapter]
@@ -421,11 +421,11 @@ def _select_representative_models() -> tuple[list[str], list[str]]:
                     k,  # Then by key name for consistency
                 ),
             )
-            causal_keys.append(sorted_keys[0])
+            causal_paths.append(CAUSAL_LM_MODELS[sorted_keys[0]]["path"])
 
     # Select one representative per adapter for embeddings
     # Prefer smaller models (by size field) for faster tests
-    embed_keys: list[str] = []
+    embed_paths: list[str] = []
     for adapter in sorted(adapter_modules_in_config):
         if adapter in adapter_to_embed_keys:
             keys = adapter_to_embed_keys[adapter]
@@ -437,12 +437,16 @@ def _select_representative_models() -> tuple[list[str], list[str]]:
                     k,  # Then by key name for consistency
                 ),
             )
-            embed_keys.append(sorted_keys[0])
+            embed_paths.append(EMBEDDING_MODELS[sorted_keys[0]]["path"])
 
-    return causal_keys, embed_keys
+    return causal_paths, embed_paths
 
 
-CAUSAL_KEYS, EMBED_KEYS = _select_representative_models()
+CAUSAL_PATHS, EMBED_PATHS = _select_representative_models()
+
+VISION_PATHS: list[str] = [
+    v["path"] for v in VISION_MODELS.values() if v.get("kind") == "vlm"
+]
 
 
 # Made with Bob

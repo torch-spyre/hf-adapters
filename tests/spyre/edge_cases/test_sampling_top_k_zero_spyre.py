@@ -16,10 +16,10 @@
 
 import pytest
 from _shared import run_top_k_zero
-from model_registry import CAUSAL_KEYS
+from model_registry import CAUSAL_PATHS
 
 
-@pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
+@pytest.mark.parametrize("model_key", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
 def test_sampling_top_k_zero_spyre(model_key):
     ok, detail = run_top_k_zero(model_key)

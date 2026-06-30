@@ -33,7 +33,11 @@ A `generate` method is attached to the model that handles the 64-block
 padded decode generation loop.
 """
 
+from __future__ import annotations
+
+import os
 from types import MethodType, ModuleType
+from typing import Any, Union
 
 import torch
 from transformers import (
@@ -139,11 +143,26 @@ IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     Granite4VisionConfig: hf_granite_vision_mm,
 }
 
+MODEL_PATH_TO_TORCH_DTYPE: dict = {
+    "mistralai/Ministral-3-14B-Instruct-2512": torch.bfloat16,
+    "google/embeddinggemma-300m": torch.bfloat16,
+    "ibm-granite/granite-4.0-1b-base": torch.float32,
+}
 
-def _resolve_adapter_module(
-    model_name_or_path, mapping=CONFIG_TO_ADAPTER_MODULE_MAPPING
-):
-    model_config = AutoConfig.from_pretrained(model_name_or_path)
+MODEL_PATH_WITH_LOAD_FN: set = {
+    "ibm-granite/granite-vision-4.1-4b",
+    "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
+    "mistralai/Ministral-3-14B-Instruct-2512",
+}
+
+
+def resolve_adapter_module(
+    model_name_or_path: Union[str, os.PathLike[str]],
+    mapping: dict[
+        type[PretrainedConfig], ModuleType
+    ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
+) -> ModuleType:
+    model_config: PretrainedConfig = AutoConfig.from_pretrained(model_name_or_path)
     if type(model_config) not in mapping:
         raise SpyreNoAdapterError(
             f"Model {model_name_or_path} of type {type(model_config)} "
@@ -165,11 +184,15 @@ class AutoSpyreModel:
     _auto_model_cls = AutoModel
 
     @classmethod
-    def from_pretrained(cls, model_name_or_path, dtype=torch.float16):
-        module = _resolve_adapter_module(model_name_or_path)
+    def from_pretrained(
+        cls,
+        model_name_or_path: Union[str, os.PathLike[str]],
+        dtype: torch.dtype = torch.float16,
+    ) -> torch.nn.Module:
+        module: ModuleType = resolve_adapter_module(model_name_or_path)
 
         if hasattr(module, "load_model"):
-            model = module.load_model(model_name_or_path, dtype)
+            model: torch.nn.Module = module.load_model(model_name_or_path, dtype)
         else:
             model = load_model_common(
                 model_name_or_path,
@@ -191,11 +214,19 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
     _auto_model_cls = AutoModelForCausalLM  # type: ignore[assignment]
 
     @classmethod
-    def from_pretrained(cls, model_name_or_path, dtype=torch.float16):
-        module = _resolve_adapter_module(model_name_or_path)
-        model = super().from_pretrained(model_name_or_path, dtype=dtype)
+    def from_pretrained(
+        cls,
+        model_name_or_path: Union[str, os.PathLike[str]],
+        dtype: torch.dtype = torch.float16,
+    ) -> torch.nn.Module:
+        module: ModuleType = resolve_adapter_module(model_name_or_path)
+        model: torch.nn.Module = super().from_pretrained(
+            model_name_or_path, dtype=dtype
+        )
 
-        def model_generate(self, tokenizer, prompts, **kwargs):
+        def model_generate(
+            self: torch.nn.Module, tokenizer: Any, prompts: list[str], **kwargs: Any
+        ):
             from hf_adapters.hf_common import generate
 
             return generate(module._run_forward, self, tokenizer, prompts, **kwargs)
@@ -215,28 +246,36 @@ class AutoSpyreModelForImageTextToText:
     """
 
     @classmethod
-    def from_pretrained(cls, model_name_or_path, dtype=torch.float16):
-        module = _resolve_adapter_module(
+    def from_pretrained(
+        cls,
+        model_name_or_path: Union[str, os.PathLike[str]],
+        dtype: torch.dtype = torch.float16,
+    ):
+        module: ModuleType = resolve_adapter_module(
             model_name_or_path,
             mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
         )
-        model = module.load_model(model_name_or_path, dtype)
+        model: torch.nn.Module = module.load_model(model_name_or_path, dtype)
 
         def model_prefill_logits(
-            self, input_ids, attention_mask, pixel_values, image_sizes
+            self: torch.nn.Module,
+            input_ids: torch.Tensor,
+            attention_mask: torch.Tensor,
+            pixel_values: torch.Tensor,
+            image_sizes: torch.Tensor,
         ):
             return module.prefill_logits(
                 self, input_ids, attention_mask, pixel_values, image_sizes
             )
 
         def model_generate(
-            self,
-            processor,
-            input_ids,
-            attention_mask,
-            pixel_values,
-            image_sizes,
-            **kwargs,
+            self: torch.nn.Module,
+            processor: Any,
+            input_ids: torch.Tensor,
+            attention_mask: torch.Tensor,
+            pixel_values: torch.Tensor,
+            image_sizes: torch.Tensor,
+            **kwargs: Any,
         ):
             return module.generate(
                 self,

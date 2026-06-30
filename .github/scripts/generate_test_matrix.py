@@ -29,7 +29,7 @@ def generate_matrices(exclude_models=None):
     Generate test matrices from the model registry.
 
     Args:
-        exclude_models: List of model keys to exclude from all matrices
+        exclude_models: List of model paths to exclude from all matrices
 
     Returns:
         dict: Dictionary with 'causal', 'embed', and 'combined' matrix lists
@@ -37,16 +37,16 @@ def generate_matrices(exclude_models=None):
     exclude_models = set(exclude_models or [])
 
     # Apply exclusions
-    causal_keys = [k for k in model_registry.CAUSAL_KEYS if k not in exclude_models]
-    embed_keys = [k for k in model_registry.EMBED_KEYS if k not in exclude_models]
+    causal_paths = [k for k in model_registry.CAUSAL_PATHS if k not in exclude_models]
+    embed_paths = [k for k in model_registry.EMBED_PATHS if k not in exclude_models]
 
     # Combine for jobs that test both types
-    combined_keys = causal_keys + embed_keys
+    combined_paths = causal_paths + embed_paths
 
     return {
-        "causal": causal_keys,
-        "embed": embed_keys,
-        "combined": combined_keys,
+        "causal": causal_paths,
+        "embed": embed_paths,
+        "combined": combined_paths,
     }
 
 

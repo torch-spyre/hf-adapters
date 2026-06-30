@@ -45,11 +45,16 @@ from _generate_edge_case_helpers import (
     make_prompt_with_eos_inside,
     make_prompts,
 )
-from model_registry import CAUSAL_LM_MODELS
-from transformers import AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
+from torch.nn import Module
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    PreTrainedModel,
+    PreTrainedTokenizerBase,
+)
 
 from hf_adapters import AutoSpyreModelForCausalLM
-from tests.conftest import load_hf_causal_lm
+from tests.conftest import load_hf_causal_lm, torch_dtype_for_model_path
 
 
 # REFACTOR_BENJ : Redundant?
@@ -59,41 +64,46 @@ def _load_adapter(info: dict) -> types.ModuleType:
     return importlib.import_module(f"hf_adapters.{adapter_module_name}")
 
 
-# REFACTOR_BENJ : move to helpers?
+# REFACTOR_BENJ : Revisit
 def _load_ref_model(
-    info: dict,
+    model_path: str,
     adapter_mod: types.ModuleType | None = None,
-) -> PreTrainedModel:
+) -> AutoModelForCausalLM:
     """Load the HF reference model, using the adapter's custom loader when load_fn=True."""
-    ref_dtype = torch.float32 if info.get("dtype") == "float32" else torch.float16
-    ref_model = load_hf_causal_lm(info, ref_dtype, adapter_mod=adapter_mod)
+    dtype = torch_dtype_for_model_path(model_path)
+    ref_model = load_hf_causal_lm(
+        model_path=model_path, torch_dtype=dtype, adapter_mod=adapter_mod
+    )
     ref_model.eval()
     ref_model.requires_grad_(False)
     return ref_model
 
 
-# REFACTOR_BENJ : move to helpers?
-def _load_spyre_model(info: dict) -> AutoSpyreModelForCausalLM:
-    print(f"  Loading {info['name']} on Spyre ...")
+# REFACTOR_BENJ : redundant
+def _load_spyre_model(model_path: str) -> Module:
+    print(f"  Loading {model_path} on Spyre ...")
     t0 = time.time()
-    model = AutoSpyreModelForCausalLM.from_pretrained(info["path"])
+    model = AutoSpyreModelForCausalLM.from_pretrained(model_path)
     print(f"  Spyre load+prepare: {time.time() - t0:.1f}s")
     return model
 
 
-# REFACTOR_BENJ : move to conftest?
+# REFACTOR_BENJ : redundant
 def _setup(
-    model_key: str,
+    model_path: str,
     need_ref: bool,
 ) -> tuple[
     dict, PreTrainedTokenizerBase, PreTrainedModel | None, AutoSpyreModelForCausalLM
 ]:
-    info = CAUSAL_LM_MODELS[model_key]
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
-    adapter_mod = _load_adapter(info) if need_ref and info.get("load_fn") else None
-    ref_model = _load_ref_model(info, adapter_mod=adapter_mod) if need_ref else None
-    spyre_model = _load_spyre_model(info)
-    return info, tokenizer, ref_model, spyre_model
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    adapter_mod = _load_adapter(
+        model_path
+    )  # REVISIT if need_ref and info.get("load_fn") else None
+    ref_model = (
+        _load_ref_model(model_path, adapter_mod=adapter_mod) if need_ref else None
+    )
+    spyre_model = _load_spyre_model(model_path)
+    return model_path, tokenizer, ref_model, spyre_model
 
 
 # REFACTOR_BENJ : move to conftest?
