@@ -33,10 +33,8 @@ import types
 # modules. In the Spyre lane, this import loads `auto_spyre_model` normally
 # with DEVICE="spyre". Do not import `hf_adapters.*` from this module at any
 # point before conftest has run.
-from hf_adapters.auto_spyre_model import CONFIG_TO_ADAPTER_MODULE_MAPPING
 
 # Model registries - shared by all tests
-# REFACTOR_BENJAMIN : The content may be simplified
 CAUSAL_LM_MODELS = {
     # hf_gpt2.py
     "gpt2": {
@@ -207,7 +205,6 @@ CAUSAL_LM_MODELS = {
     },
 }
 
-# REFACTOR_BENJAMIN : The content may be simplified
 EMBEDDING_MODELS = {
     # hf_gemma3.py
     "embeddinggemma": {
@@ -326,7 +323,6 @@ EMBEDDING_MODELS = {
 
 # Vision models. ``kind="tower"`` adapters are encoder-only; ``kind="vlm"`` adapters
 # are full multimodal models with a causal text decoder, RoPE, KV caches, and ``generate``.
-# REFACTOR_BENJAMIN : The content may be simplified
 VISION_MODELS = {
     # hf_siglip_vision.py — SigLIP vision tower of Granite Vision 4.1
     "granite_vision_siglip": {
@@ -369,17 +365,11 @@ def _parse_size(size_str: str) -> float:
 def _select_representative_models() -> tuple[list[str], list[str]]:
     """
     Programmatically select one representative model per adapter module.
-
-    Analyzes CONFIG_TO_ADAPTER_MODULE_MAPPING and selects one model per adapter
-    from the registries above. Prefers smaller models for faster test execution.
+    Prefers smaller models for faster test execution.
 
     Returns:
         tuple: (causal_paths, embed_paths) where each is a list of model keys
     """
-    adapter_modules_in_config: set[str] = {
-        _get_adapter_module_name(adapter_mod)
-        for adapter_mod in CONFIG_TO_ADAPTER_MODULE_MAPPING.values()
-    }
 
     # Map adapter module names to model keys
     adapter_to_causal_keys: dict[str, list[str]] = {}
@@ -390,54 +380,48 @@ def _select_representative_models() -> tuple[list[str], list[str]]:
         if info.get("is_gated", False):
             continue
         adapter = info["adapter"].replace(".py", "")
-        # Only include if adapter is in CONFIG_TO_ADAPTER_MODULE_MAPPING
-        if adapter in adapter_modules_in_config:
-            if adapter not in adapter_to_causal_keys:
-                adapter_to_causal_keys[adapter] = []
-            adapter_to_causal_keys[adapter].append(key)
+        if adapter not in adapter_to_causal_keys:
+            adapter_to_causal_keys[adapter] = []
+        adapter_to_causal_keys[adapter].append(key)
 
     # Group embedding models by adapter
     for key, info in EMBEDDING_MODELS.items():
         if info.get("is_gated", False):
             continue
         adapter = info["adapter"].replace(".py", "")
-        # Only include if adapter is in CONFIG_TO_ADAPTER_MODULE_MAPPING
-        if adapter in adapter_modules_in_config:
-            if adapter not in adapter_to_embed_keys:
-                adapter_to_embed_keys[adapter] = []
-            adapter_to_embed_keys[adapter].append(key)
+        if adapter not in adapter_to_embed_keys:
+            adapter_to_embed_keys[adapter] = []
+        adapter_to_embed_keys[adapter].append(key)
 
     # Select one representative per adapter for causal LM
     # Prefer smaller models (by size field) for faster tests
     causal_paths: list[str] = []
-    for adapter in sorted(adapter_modules_in_config):
-        if adapter in adapter_to_causal_keys:
-            keys = adapter_to_causal_keys[adapter]
-            # Sort by size field (smallest first), then by key name for consistency
-            sorted_keys = sorted(
-                keys,
-                key=lambda k: (
-                    _parse_size(CAUSAL_LM_MODELS[k]["size"]),  # Sort by size
-                    k,  # Then by key name for consistency
-                ),
-            )
-            causal_paths.append(CAUSAL_LM_MODELS[sorted_keys[0]]["path"])
+    for adapter in adapter_to_causal_keys:
+        keys = adapter_to_causal_keys[adapter]
+        # Sort by size field (smallest first), then by key name for consistency
+        sorted_keys = sorted(
+            keys,
+            key=lambda k: (
+                _parse_size(CAUSAL_LM_MODELS[k]["size"]),  # Sort by size
+                k,  # Then by key name for consistency
+            ),
+        )
+        causal_paths.append(CAUSAL_LM_MODELS[sorted_keys[0]]["path"])
 
     # Select one representative per adapter for embeddings
     # Prefer smaller models (by size field) for faster tests
     embed_paths: list[str] = []
-    for adapter in sorted(adapter_modules_in_config):
-        if adapter in adapter_to_embed_keys:
-            keys = adapter_to_embed_keys[adapter]
-            # Sort by size field (smallest first), then by key name for consistency
-            sorted_keys = sorted(
-                keys,
-                key=lambda k: (
-                    _parse_size(EMBEDDING_MODELS[k]["size"]),  # Sort by size
-                    k,  # Then by key name for consistency
-                ),
-            )
-            embed_paths.append(EMBEDDING_MODELS[sorted_keys[0]]["path"])
+    for adapter in adapter_to_embed_keys:
+        keys = adapter_to_embed_keys[adapter]
+        # Sort by size field (smallest first), then by key name for consistency
+        sorted_keys = sorted(
+            keys,
+            key=lambda k: (
+                _parse_size(EMBEDDING_MODELS[k]["size"]),  # Sort by size
+                k,  # Then by key name for consistency
+            ),
+        )
+        embed_paths.append(EMBEDDING_MODELS[sorted_keys[0]]["path"])
 
     return causal_paths, embed_paths
 
