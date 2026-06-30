@@ -45,11 +45,11 @@ from _generate_edge_case_helpers import (
     make_prompt_with_eos_inside,
     make_prompts,
 )
-from tests.conftest import load_hf_causal_lm
 from model_registry import CAUSAL_LM_MODELS
 from transformers import AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
 from hf_adapters import AutoSpyreModelForCausalLM
+from tests.conftest import load_hf_causal_lm
 
 
 # REFACTOR_BENJ : Redundant?
