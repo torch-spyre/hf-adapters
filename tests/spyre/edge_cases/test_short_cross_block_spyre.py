@@ -19,8 +19,8 @@ from _shared import run_greedy_case
 from model_registry import CAUSAL_PATHS
 
 
-@pytest.mark.parametrize("model_key", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_short_cross_block_spyre(model_key):
-    ok, detail = run_greedy_case(model_key, "short_cross_block")
+def test_short_cross_block_spyre(model_path):
+    ok, detail = run_greedy_case(model_path, "short_cross_block")
     assert ok, detail

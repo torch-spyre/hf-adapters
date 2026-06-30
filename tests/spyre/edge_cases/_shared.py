@@ -117,9 +117,9 @@ def _teardown(
     gc.collect()
 
 
-def run_greedy_case(model_key: str, case_id: str) -> tuple[bool, str]:
+def run_greedy_case(model_path: str, case_id: str) -> tuple[bool, str]:
     """Greedy-generate case: HF reference == Spyre output, per row."""
-    info, tokenizer, ref_model, model = _setup(model_key, need_ref=True)
+    info, tokenizer, ref_model, model = _setup(model_path, need_ref=True)
     try:
         targets, max_new = CASES[case_id]
         prompts = make_prompts(tokenizer, targets)
@@ -137,9 +137,9 @@ def run_greedy_case(model_key: str, case_id: str) -> tuple[bool, str]:
         _teardown(model, ref_model)
 
 
-def run_eos_case(model_key: str, case_id: str) -> tuple[bool, str]:
+def run_eos_case(model_path: str, case_id: str) -> tuple[bool, str]:
     """Forced-EOS case: shared eos_token_id stops each row at its requested offset."""
-    info, tokenizer, ref_model, model = _setup(model_key, need_ref=True)
+    info, tokenizer, ref_model, model = _setup(model_path, need_ref=True)
     try:
         eos_offsets, max_new = EOS_CASES[case_id]
         batch_size = len(eos_offsets)
@@ -172,8 +172,8 @@ def run_eos_case(model_key: str, case_id: str) -> tuple[bool, str]:
         _teardown(model, ref_model)
 
 
-def run_zero_new_tokens(model_key: str) -> tuple[bool, str]:
-    info, tokenizer, _, model = _setup(model_key, need_ref=False)
+def run_zero_new_tokens(model_path: str) -> tuple[bool, str]:
+    info, tokenizer, _, model = _setup(model_path, need_ref=False)
     try:
         prompts = make_prompts(tokenizer, [5, 12])
         t0 = time.time()
@@ -187,8 +187,8 @@ def run_zero_new_tokens(model_key: str) -> tuple[bool, str]:
         _teardown(model, None)
 
 
-def run_sampling_determinism(model_key: str) -> tuple[bool, str]:
-    info, tokenizer, _, model = _setup(model_key, need_ref=False)
+def run_sampling_determinism(model_path: str) -> tuple[bool, str]:
+    info, tokenizer, _, model = _setup(model_path, need_ref=False)
     try:
         sampling_prompts = make_prompts(tokenizer, SAMPLING_TARGETS)
         t0 = time.time()
@@ -222,8 +222,8 @@ def run_sampling_determinism(model_key: str) -> tuple[bool, str]:
         _teardown(model, None)
 
 
-def run_no_eos(model_key: str) -> tuple[bool, str]:
-    info, tokenizer, ref_model, model = _setup(model_key, need_ref=True)
+def run_no_eos(model_path: str) -> tuple[bool, str]:
+    info, tokenizer, ref_model, model = _setup(model_path, need_ref=True)
     try:
         no_eos_prompts = make_prompts(tokenizer, [5, 12])
         no_eos_max_new = 64 + 7
@@ -261,8 +261,8 @@ def run_no_eos(model_key: str) -> tuple[bool, str]:
         _teardown(model, ref_model)
 
 
-def run_no_pad(model_key: str) -> tuple[bool, str]:
-    info, tokenizer, ref_model, model = _setup(model_key, need_ref=True)
+def run_no_pad(model_path: str) -> tuple[bool, str]:
+    info, tokenizer, ref_model, model = _setup(model_path, need_ref=True)
     try:
         no_pad_prompts = make_prompts(tokenizer, [5, 12])
         no_pad_max_new = 16
@@ -283,8 +283,8 @@ def run_no_pad(model_key: str) -> tuple[bool, str]:
         _teardown(model, ref_model)
 
 
-def run_top_k_zero(model_key: str) -> tuple[bool, str]:
-    info, tokenizer, _, model = _setup(model_key, need_ref=False)
+def run_top_k_zero(model_path: str) -> tuple[bool, str]:
+    info, tokenizer, _, model = _setup(model_path, need_ref=False)
     try:
         sampling_prompts = make_prompts(tokenizer, SAMPLING_TARGETS)
         kwargs = dict(do_sample=True, temperature=1.0, top_k=0)
@@ -306,8 +306,8 @@ def run_top_k_zero(model_key: str) -> tuple[bool, str]:
         _teardown(model, None)
 
 
-def run_eos_inside_prompt(model_key: str) -> tuple[bool, str]:
-    info, tokenizer, ref_model, model = _setup(model_key, need_ref=True)
+def run_eos_inside_prompt(model_path: str) -> tuple[bool, str]:
+    info, tokenizer, ref_model, model = _setup(model_path, need_ref=True)
     try:
         if tokenizer.eos_token_id is None:
             import pytest

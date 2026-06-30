@@ -19,8 +19,8 @@ from _shared import run_no_eos
 from model_registry import CAUSAL_PATHS
 
 
-@pytest.mark.parametrize("model_key", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_no_eos_runs_full_budget_spyre(model_key):
-    ok, detail = run_no_eos(model_key)
+def test_no_eos_runs_full_budget_spyre(model_path):
+    ok, detail = run_no_eos(model_path)
     assert ok, detail
