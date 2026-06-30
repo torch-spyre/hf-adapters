@@ -72,19 +72,8 @@ from hf_adapters.hf_common import (
     get_backbone,
     kv_cache_update,
     pad_lm_head,
+    text_config,
 )
-
-
-def _text_config(model):
-    """Return the Gemma 3 *text* decoder config.
-
-    The multimodal checkpoints carry a composite ``Gemma3Config`` whose decoder
-    fields (``head_dim``, ``layer_types``, ``sliding_window``, ...) live on the
-    nested ``text_config``. The text-only ``Gemma3TextConfig`` (1B) exposes them
-    directly. This returns whichever holds the decoder fields.
-    """
-    cfg = model.config
-    return getattr(cfg, "text_config", None) or cfg
 
 
 def _patch_gemma3_rmsnorm(rmsnorm_cls):
@@ -281,7 +270,7 @@ def _run_backbone_forward(
     global layers use the base mask as-is.
     """
     backbone = get_backbone(model)
-    cfg = _text_config(model)
+    cfg = text_config(model.config)
 
     h = backbone.embed_tokens(input_ids)
 
@@ -354,7 +343,7 @@ def _run_forward(
 
     # final_logit_softcapping is None on published Gemma 3 (dropped from Gemma 2);
     # applied defensively if a checkpoint sets it.
-    cap = getattr(_text_config(model), "final_logit_softcapping", None)
+    cap = getattr(text_config(model.config), "final_logit_softcapping", None)
     if cap is not None:
         logits = logits / cap
         logits = torch.tanh(logits)
@@ -380,7 +369,7 @@ def prepare_for_spyre(model):
     5. Compile each decoder layer's block.
     """
     backbone = get_backbone(model)
-    cfg = _text_config(model)
+    cfg = text_config(model.config)
 
     # Patch whichever concrete RMSNorm class this model uses. The norm module
     # closest to a decoder layer's input_layernorm is representative.

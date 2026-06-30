@@ -80,6 +80,7 @@ from hf_adapters.hf_common import (
     get_backbone,
     kv_cache_update,
     pad_lm_head,
+    text_config,
 )
 
 
@@ -96,19 +97,6 @@ def _gemma4_backbone(model):
     matching where ``pad_lm_head`` looks.
     """
     return get_backbone(model)
-
-
-def _text_config(model):
-    """Return the Gemma 4 *text* decoder config.
-
-    The as-published multimodal model carries a composite config
-    (``Gemma4Config`` / ``Gemma4UnifiedConfig``) whose decoder fields
-    (``head_dim``, ``layer_types``, ``sliding_window``, ...) live on the nested
-    ``text_config``. A text-only causal-LM config exposes them directly. This
-    returns whichever holds the decoder fields.
-    """
-    cfg = model.config
-    return getattr(cfg, "text_config", None) or cfg
 
 
 def _patch_gemma4_rmsnorm(rmsnorm_cls):
@@ -296,7 +284,7 @@ def _run_backbone_forward(
     ``add_causal_sliding_window_band``). Global layers use the base mask as-is.
     """
     backbone = _gemma4_backbone(model)
-    cfg = _text_config(model)
+    cfg = text_config(model.config)
 
     h = backbone.embed_tokens(input_ids)
 
@@ -367,7 +355,7 @@ def _run_forward(
 
     logits = model.lm_head(h)
 
-    cap = _text_config(model).final_logit_softcapping
+    cap = text_config(model.config).final_logit_softcapping
     if cap is not None:
         logits = logits / cap
         logits = torch.tanh(logits)
@@ -387,7 +375,7 @@ def prepare_for_spyre(model):
     6. Compile each decoder layer's block.
     """
     backbone = _gemma4_backbone(model)
-    cfg = _text_config(model)
+    cfg = text_config(model.config)
 
     assert not getattr(cfg, "hidden_size_per_layer_input", 0), (
         "Gemma 4 adapter does not support per-layer embeddings (PLE); "
