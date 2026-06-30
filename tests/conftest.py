@@ -132,9 +132,8 @@ if not _TARGETS_SPYRE:
     _auto_spec.loader.exec_module(_auto_mod)
     setattr(_pkg, "auto_spyre_model", _auto_mod)
 
-# Spyre lane: hf_adapters is imported normally (real DEVICE="spyre").
-# model_registry populates CAUSAL_KEYS / EMBED_KEYS at import time in both lanes.
-import model_registry  # noqa: E402, F401
+    # model_registry's top-level import will reuse the patched modules.
+    import model_registry  # noqa: E402, F401
 
 
 def pytest_configure(config: Config) -> None:
@@ -180,6 +179,7 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
                 item.add_marker(skip_slow)
 
 
+# REFACTOR - remove!!
 def torch_dtype_for(info: dict) -> torch.dtype:
     """Map a registry entry's ``dtype`` field to a torch dtype.
 

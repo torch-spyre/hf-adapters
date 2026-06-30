@@ -447,6 +447,3 @@ CAUSAL_PATHS, EMBED_PATHS = _select_representative_models()
 VISION_PATHS: list[str] = [
     v["path"] for v in VISION_MODELS.values() if v.get("kind") == "vlm"
 ]
-
-
-# Made with Bob
