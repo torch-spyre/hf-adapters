@@ -32,7 +32,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from _helpers import load_hf_causal_lm, torch_dtype_for
+from conftest import load_hf_causal_lm, torch_dtype_for
 from model_registry import CAUSAL_KEYS, CAUSAL_LM_MODELS
 
 from hf_adapters.hf_common import (

@@ -31,7 +31,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from _helpers import torch_dtype_for
+from conftest import torch_dtype_for
 from model_registry import EMBED_KEYS, EMBEDDING_MODELS
 
 from hf_adapters.hf_common import (

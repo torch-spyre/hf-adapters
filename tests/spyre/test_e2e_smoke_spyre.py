@@ -30,7 +30,7 @@ import time
 from typing import Any
 
 import pytest
-from _helpers import torch_dtype_for
+from conftest import torch_dtype_for
 from model_registry import CAUSAL_KEYS, CAUSAL_LM_MODELS
 
 

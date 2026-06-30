@@ -25,6 +25,10 @@ it in ``sys.modules`` under the canonical name, then synthesize an
 The defensive ``assert`` at the top of this file fails loudly if anything
 imported ``hf_adapters`` before pytest reached us — which would lock in the
 un-patched DEVICE and silently break CPU tests.
+
+Shared test helpers (``cosine_per_row``, ``encode_padded``, ``load_hf_causal_lm``,
+``min_cosine``, ``torch_dtype_for``) are defined here as plain functions so that
+test files can import exactly what they need via ``from conftest import ...``.
 """
 
 from __future__ import annotations
@@ -37,23 +41,100 @@ import types
 
 import pytest
 import torch
-
-# REFACTOR_BENJ - Why?
-# REFACTOR_BENJ : Why do we maintain two conftests?
-from _helpers import (  # noqa: F401  (re-exported for tests via `from conftest import ...`)
-    cosine_per_row,
-    encode_padded,
-    load_hf_causal_lm,
-    min_cosine,
-    torch_dtype_for,
-)
+import torch.nn.functional as F
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.nodes import Item
+from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
+
+# ---------------------------------------------------------------------------
+# Shared test helpers — plain functions (not fixtures) importable via
+# `from conftest import ...` in any test file under tests/.
+# ---------------------------------------------------------------------------
+
+# REFACTOR_BENJ : why keeping 2 conftests?
+
+
+def torch_dtype_for(info: dict) -> torch.dtype:
+    """Map a registry entry's ``dtype`` field to a torch dtype.
+
+    Defaults to float16. ``"float32"`` (e.g. Granite 4 1B, where fp16 overflows
+    on CPU) and ``"bfloat16"`` (e.g. EmbeddingGemma, which is bf16-native and
+    overflows fp16) are recognized explicitly.
+    """
+    return {
+        "float32": torch.float32,
+        "bfloat16": torch.bfloat16,
+    }.get(info.get("dtype"), torch.float16)
+
+
+def load_hf_causal_lm(
+    info: dict,
+    torch_dtype: torch.dtype,
+    adapter_mod: types.ModuleType | None = None,
+) -> AutoModelForCausalLM:
+    """Load the HF causal-LM reference, honoring the per-entry ``load_fn`` flag.
+
+    When ``load_fn`` is set, the adapter module is expected to expose
+    ``load_hf_model(path, dtype)`` (used for non-standard loading paths like
+    granite-vision).
+    """
+    if info.get("load_fn"):
+        if adapter_mod is None:
+            raise RuntimeError("load_fn=True requires adapter_mod")
+        return adapter_mod.load_hf_model(info["path"], torch_dtype)
+    return AutoModelForCausalLM.from_pretrained(
+        info["path"], torch_dtype=torch_dtype, device_map="cpu"
+    )
+
+
+def encode_padded(
+    tokenizer: PreTrainedTokenizerBase,
+    prompts: list[str],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Tokenize a batch with right-padding, returning ``(input_ids, attention_mask)``.
+
+    Sets ``pad_token`` to ``eos_token`` if the tokenizer has none — common for
+    decoder-only models repurposed as embedders.
+    """
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    encoded = tokenizer(
+        prompts, return_tensors="pt", padding=True, padding_side="right"
+    )
+    return encoded["input_ids"], encoded["attention_mask"]
+
+
+def min_cosine(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    attention_mask: torch.Tensor | None = None,
+) -> float:
+    """Minimum cosine similarity between ``a`` and ``b`` along the last dim.
+
+    Args:
+        a, b: tensors with matching shape; cosine is computed over ``dim=-1``.
+        attention_mask: optional ``[B, L]`` mask. When provided, the cosine is
+            taken over real tokens only (``mask == 1``); without it, every
+            element of the result is considered (per-row cosine for ``[B, H]``
+            inputs, per-token for ``[B, L, H]``).
+    """
+    cos = F.cosine_similarity(a.float(), b.float(), dim=-1)
+    if attention_mask is not None:
+        cos = cos[attention_mask.bool()]
+    return cos.min().item()
+
+
+def cosine_per_row(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Per-row cosine similarity for ``[B, H]`` tensors. Returns a 1-D tensor."""
+    return F.cosine_similarity(a.float(), b.float(), dim=-1)
+
+
+# ---------------------------------------------------------------------------
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADAPTERS_DIR = os.path.join(REPO_ROOT, "hf_adapters")
-# REFACTOR_BENH : why?
+# REFACTOR_BENJ : why?
 # Spyre-targeted runs (`pytest tests/spyre/...`) need the unpatched hf_adapters
 # with DEVICE="spyre". Detect that here and skip the CPU patching block — the
 # tests/spyre/conftest.py picks up from there with the real module.

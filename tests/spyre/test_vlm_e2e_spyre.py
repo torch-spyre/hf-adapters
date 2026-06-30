@@ -64,12 +64,12 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from _helpers import torch_dtype_for
 from _vision_helpers import (
     build_vlm_batch,
     stock_vlm_generate,
     stock_vlm_greedy_steps,
 )
+from conftest import torch_dtype_for
 from model_registry import VISION_MODELS
 
 from hf_adapters.hf_common import (
