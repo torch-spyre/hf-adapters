@@ -10,17 +10,6 @@ HF Adapters for Spyre — runtime monkey-patches that make stock HuggingFace Tra
 # Install (editable)
 pip install -e .
 
-# CPU accuracy tests (causal-LM logits + embedding hidden-states)
-# IMPORTANT: Always use pytest from repo root, never `python tests/test_*.py`
-# conftest.py patches hf_adapters modules at collection time for CPU testing
-pytest tests/test_adapter_cpu_accuracy.py
-pytest tests/test_adapter_cpu_accuracy.py -k qwen3   # one model (selects both paths)
-pytest tests/test_adapter_cpu_accuracy.py -k "qwen3 and manual"  # one path
-pytest tests/test_embed_cpu_accuracy.py
-
-# Load test (verify models load without errors)
-pytest tests/test_load_cpu.py      # CPU load test
-
 # Module config tests (on pod — uses OOT framework, requires torch_spyre + oot_framework)
 # First time: uv sync --group oot
 bash tests/run_oot_module_configs.sh tests/configs/module_tests/granite_3_3_8b_instruct_spyre.yaml -v
@@ -60,7 +49,6 @@ Import shared utilities from `hf_common.py`: `PrecomputedRotaryEmbedding`, `appl
 ### Definition of Done (per adapter)
 
 - [ ] Adapter file in `hf_adapters/`
-- [ ] CPU accuracy test passes (identical greedy tokens vs stock HF)
 - [ ] Registry entry in `tests/model_registry.py`
 - [ ] Compiles + runs end-to-end on Spyre (`tests/spyre/test_e2e_*_spyre.py`, no crash/NaN)
 - [ ] Added to the Verified Checkpoints + Model Family Coverage tables in `ARCHITECTURE.md` (the single source of truth; bump the README badge counts)
@@ -82,11 +70,8 @@ Run HF reference forward BEFORE calling `prepare_for_spyre()`. The RMSNorm patch
 ### Zero-length tensors crash Spyre
 Create empty KV caches with `device=` parameter, never `.to("spyre")` on a zero-length tensor.
 
-### Unwrap torch.compile for CPU tests
-Use `getattr(compiled_block, "_orig_mod", compiled_block)` to skip compilation overhead in CPU-only test paths.
-
 ### Gated models
-Llama models require HF authentication. Use non-gated alternatives for CPU tests (e.g., TinyLlama for model_type=llama). HF token is configured on the Spyre pod.
+Llama models require HF authentication. HF token is configured on the Spyre pod.
 
 ## Current Work
 

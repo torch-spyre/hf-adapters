@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """
-Shared scaffolding for CPU accuracy tests.
+Root conftest — CPU-patch scaffolding and global pytest hooks.
 
 Module-level code below runs at conftest import — i.e. before any test module
 in tests/ is loaded — so adapter modules bind to a CPU-patched ``hf_common``.
@@ -22,22 +22,20 @@ it in ``sys.modules`` under the canonical name, then synthesize an
 ``hf_adapters`` package pointing at the source directory. Subsequent
 ``import hf_adapters.X`` calls find our patched version first.
 
-The defensive ``assert`` at the top of this file fails loudly if anything
-imported ``hf_adapters`` before pytest reached us — which would lock in the
-un-patched DEVICE and silently break CPU tests.
+The defensive ``assert`` below fails loudly if anything imported ``hf_adapters``
+before pytest reached us — which would lock in the un-patched DEVICE and
+silently break CPU tests.
 
-Shared test helpers (``cosine_per_row``, ``encode_padded``, ``load_hf_causal_lm``,
-``min_cosine``, ``torch_dtype_for``) are defined here as plain functions so that
-test files can import exactly what they need via ``from conftest import ...``.
-These are also re-exported from ``tests/spyre/conftest.py`` so that spyre tests
-resolve to the same definitions despite having their own local conftest.
+Spyre-targeted runs (``pytest tests/spyre/...``) are detected via ``sys.argv``
+and skip the CPU-patching block entirely; ``model_registry.CAUSAL_KEYS`` /
+``EMBED_KEYS`` are still populated here for the Spyre lane via the ``else``
+branch so no separate ``tests/spyre/conftest.py`` is needed.
+
+CPU-lane test helpers and fixtures live in ``tests/cpu/conftest.py``.
 """
-
-# REFACTOR_BENJ : why keeping 2 conftests?
 
 from __future__ import annotations
 
-import gc
 import importlib.util
 import os
 import sys
@@ -45,29 +43,17 @@ import types
 
 import pytest
 import torch
-import torch.nn.functional as F
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.nodes import Item
-from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
+from transformers import AutoModelForCausalLM
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ADAPTERS_DIR = os.path.join(REPO_ROOT, "hf_adapters")
 
 # ---------------------------------------------------------------------------
-# Shared test helpers — plain functions (not fixtures) importable via
-# `from conftest import ...` in any test file under tests/.
+# Shared helpers — available to all test lanes via `from conftest import ...`
 # ---------------------------------------------------------------------------
-
-
-def torch_dtype_for(info: dict) -> torch.dtype:
-    """Map a registry entry's ``dtype`` field to a torch dtype.
-
-    Defaults to float16. ``"float32"`` (e.g. Granite 4 1B, where fp16 overflows
-    on CPU) and ``"bfloat16"`` (e.g. EmbeddingGemma, which is bf16-native and
-    overflows fp16) are recognized explicitly.
-    """
-    return {
-        "float32": torch.float32,
-        "bfloat16": torch.bfloat16,
-    }.get(info.get("dtype"), torch.float16)
 
 
 def load_hf_causal_lm(
@@ -90,56 +76,15 @@ def load_hf_causal_lm(
     )
 
 
-def encode_padded(
-    tokenizer: PreTrainedTokenizerBase,
-    prompts: list[str],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Tokenize a batch with right-padding, returning ``(input_ids, attention_mask)``.
-
-    Sets ``pad_token`` to ``eos_token`` if the tokenizer has none — common for
-    decoder-only models repurposed as embedders.
-    """
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    encoded = tokenizer(
-        prompts, return_tensors="pt", padding=True, padding_side="right"
-    )
-    return encoded["input_ids"], encoded["attention_mask"]
-
-
-def min_cosine(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    attention_mask: torch.Tensor | None = None,
-) -> float:
-    """Minimum cosine similarity between ``a`` and ``b`` along the last dim.
-
-    Args:
-        a, b: tensors with matching shape; cosine is computed over ``dim=-1``.
-        attention_mask: optional ``[B, L]`` mask. When provided, the cosine is
-            taken over real tokens only (``mask == 1``); without it, every
-            element of the result is considered (per-row cosine for ``[B, H]``
-            inputs, per-token for ``[B, L, H]``).
-    """
-    cos = F.cosine_similarity(a.float(), b.float(), dim=-1)
-    if attention_mask is not None:
-        cos = cos[attention_mask.bool()]
-    return cos.min().item()
-
-
-def cosine_per_row(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Per-row cosine similarity for ``[B, H]`` tensors. Returns a 1-D tensor."""
-    return F.cosine_similarity(a.float(), b.float(), dim=-1)
-
-
 # ---------------------------------------------------------------------------
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ADAPTERS_DIR = os.path.join(REPO_ROOT, "hf_adapters")
-# REFACTOR_BENJ : why?
+# Make tests/ importable so model_registry and helpers resolve from any subdir.
+_TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _TESTS_DIR not in sys.path:
+    sys.path.insert(0, _TESTS_DIR)
+
 # Spyre-targeted runs (`pytest tests/spyre/...`) need the unpatched hf_adapters
-# with DEVICE="spyre". Detect that here and skip the CPU patching block — the
-# tests/spyre/conftest.py picks up from there with the real module.
+# with DEVICE="spyre". Detect that here and skip the CPU patching block.
 _TARGETS_SPYRE = any(
     "tests/spyre" in a or a.rstrip("/").endswith("tests/spyre") for a in sys.argv
 )
@@ -164,25 +109,8 @@ if not _TARGETS_SPYRE:
     _pkg.__path__ = [ADAPTERS_DIR]
     sys.modules["hf_adapters"] = _pkg
 
-
-def _load_adapter(filename: str) -> types.ModuleType:
-    """Load an adapter .py file under hf_adapters/ as a real submodule."""
-    mod_name = f"hf_adapters.{filename.replace('.py', '')}"
-    if mod_name in sys.modules:
-        return sys.modules[mod_name]
-    filepath = os.path.join(ADAPTERS_DIR, filename)
-    spec = importlib.util.spec_from_file_location(mod_name, filepath)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[mod_name] = mod
-    spec.loader.exec_module(mod)
-    setattr(_pkg, filename.replace(".py", ""), mod)
-    return mod
-
-
-# Pre-load every adapter referenced by CONFIG_TO_ADAPTER_MODULE_MAPPING, then
-# auto_spyre_model itself. Doing this here means tests can grab AutoSpyre*
-# off the module without paying the cost on first use.
-if not _TARGETS_SPYRE:
+    # Pre-load auto_spyre_model with the patched hf_common already in sys.modules,
+    # then populate model_registry keys for the CPU lane.
     _auto_path = os.path.join(ADAPTERS_DIR, "auto_spyre_model.py")
     _auto_spec = importlib.util.spec_from_file_location(
         "hf_adapters.auto_spyre_model", _auto_path
@@ -192,8 +120,6 @@ if not _TARGETS_SPYRE:
     _auto_spec.loader.exec_module(_auto_mod)
     setattr(_pkg, "auto_spyre_model", _auto_mod)
 
-    # Now that auto_spyre_model is loaded with patched hf_common, populate the model lists
-    # Import model_registry here (after patching) and update its CAUSAL_KEYS/EMBED_KEYS
     import model_registry  # noqa: E402
 
     model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
@@ -202,25 +128,14 @@ if not _TARGETS_SPYRE:
         )
     )
 
+else:
+    # Spyre lane: hf_adapters is imported normally (real DEVICE="spyre").
+    # Populate model_registry keys so parametrized Spyre tests resolve correctly.
+    import model_registry  # noqa: E402
 
-def _unwrap_compiled_blocks(model: types.ModuleType) -> None:
-    """Replace torch.compile-wrapped blocks with their CPU-runnable originals.
-
-    Covers every block list an adapter may attach: ``_spyre_compiled_blocks``
-    (the common case) plus ``_spyre_text_blocks`` for two-tower VLMs like Granite
-    Vision, whose text decoder is compiled separately from the vision tower.
-    """
-    for attr in ("_spyre_compiled_blocks", "_spyre_text_blocks"):
-        blocks = getattr(model, attr, None)
-        if blocks is None:
-            continue
-        unwrapped = []
-        for cb in blocks:
-            orig = getattr(
-                cb, "_orig_mod", getattr(cb, "_torchdynamo_orig_callable", None)
-            )
-            unwrapped.append(orig if orig is not None else cb)
-        setattr(model, attr, unwrapped)
+    model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
+        model_registry.select_representative_models()
+    )
 
 
 def pytest_configure(config: Config) -> None:
@@ -228,50 +143,6 @@ def pytest_configure(config: Config) -> None:
         "markers",
         "requires_spyre: mark test as requiring the Spyre backend device",
     )
-
-
-def _set_rope_dtype(model: types.ModuleType, dtype: torch.dtype) -> None:
-    """Propagate the chosen dtype to the model's precomputed RoPE freq cache.
-
-    The manual CPU-test paths load via ``AutoModel`` + ``prepare_for_spyre``
-    directly, bypassing ``load_model_common`` / ``_move_to_spyre_with_layout``
-    (where the production paths make this explicit ``set_dtype`` call). Mirror
-    it here so a non-fp16 model (e.g. bf16 EmbeddingGemma) gets a matching freq
-    cache instead of the fp16 default — otherwise ``apply_rope_matmul`` promotes
-    the query to fp32 and SDPA rejects the mismatched key/value dtype.
-    """
-    sys.modules["hf_adapters.hf_common"].set_rope_dtype(model, dtype)
-
-
-@pytest.fixture(scope="session")
-def hf_common_mod() -> types.ModuleType:
-    return sys.modules["hf_adapters.hf_common"]
-
-
-@pytest.fixture(scope="session")
-def auto_spyre_model() -> types.ModuleType:
-    return sys.modules["hf_adapters.auto_spyre_model"]
-
-
-@pytest.fixture
-def load_adapter() -> types.ModuleType:
-    return _load_adapter
-
-
-@pytest.fixture
-def unwrap_compiled_blocks() -> None:
-    return _unwrap_compiled_blocks
-
-
-@pytest.fixture
-def set_rope_dtype() -> None:
-    return _set_rope_dtype
-
-
-@pytest.fixture(autouse=True)
-def _gc_after_test() -> None:
-    yield
-    gc.collect()
 
 
 def pytest_addoption(parser: Parser) -> None:
