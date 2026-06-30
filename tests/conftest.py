@@ -54,10 +54,11 @@ from _pytest.config.argparsing import Parser
 from _pytest.nodes import Item
 from transformers import AutoModelForCausalLM
 
-from hf_adapters.auto_spyre_model import (
-    MODEL_PATH_TO_TORCH_DTYPE,
-    MODEL_PATH_WITH_LOAD_FN,
-)
+# NOTE: do NOT import hf_adapters at module top level. The CPU patch block below
+# rebuilds ``hf_adapters.hf_common`` with ``DEVICE='cpu'`` and asserts that no
+# import has materialized it yet; a top-level import here would always trip that
+# assert. ``MODEL_PATH_TO_TORCH_DTYPE`` / ``MODEL_PATH_WITH_LOAD_FN`` are pulled
+# in lazily inside the helpers that use them.
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADAPTERS_DIR = os.path.join(REPO_ROOT, "hf_adapters")
@@ -79,6 +80,8 @@ def load_hf_causal_lm(
     granite-vision).
     """
 
+    from hf_adapters.auto_spyre_model import MODEL_PATH_WITH_LOAD_FN
+
     if model_path in MODEL_PATH_WITH_LOAD_FN:
         if adapter_mod is None:
             raise RuntimeError("load_fn=True requires adapter_mod")
@@ -96,6 +99,8 @@ def load_hf_vlm(model_path, torch_dtype, adapter_mod=None):
     non-standard loading path); otherwise the stock
     ``AutoModelForImageTextToText`` auto class is used.
     """
+    from hf_adapters.auto_spyre_model import MODEL_PATH_WITH_LOAD_FN
+
     if model_path in MODEL_PATH_WITH_LOAD_FN:
         if adapter_mod is None:
             raise RuntimeError("load_fn=True requires adapter_mod")
@@ -238,4 +243,6 @@ def torch_dtype_for_model_path(model_path: str) -> torch.dtype:
     on CPU) and ``"bfloat16"`` (e.g. EmbeddingGemma, which is bf16-native and
     overflows fp16) are recognized explicitly.
     """
+    from hf_adapters.auto_spyre_model import MODEL_PATH_TO_TORCH_DTYPE
+
     return MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
