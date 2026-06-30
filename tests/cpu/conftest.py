@@ -35,6 +35,11 @@ import os
 import sys
 import types
 
+import pytest
+import torch
+import torch.nn.functional as F
+from transformers import PreTrainedTokenizerBase
+
 # Make tests/ importable so bare-module imports in test files resolve:
 #   from conftest import ...          -> this file (or tests/conftest.py for shared helpers)
 #   from model_registry import ...    -> tests/model_registry.py
@@ -44,10 +49,6 @@ _TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
-import pytest
-import torch
-import torch.nn.functional as F
-from transformers import PreTrainedTokenizerBase
 
 # ---------------------------------------------------------------------------
 # Shared test helpers — plain functions importable via `from conftest import ...`
