@@ -52,14 +52,12 @@ from hf_adapters import AutoSpyreModelForCausalLM
 from tests.conftest import load_hf_causal_lm
 
 
-# REFACTOR_BENJ : Redundant?
 def _load_adapter(info: dict) -> types.ModuleType:
     """Import the adapter module for the given registry entry."""
     adapter_module_name = info["adapter"].replace(".py", "")
     return importlib.import_module(f"hf_adapters.{adapter_module_name}")
 
 
-# REFACTOR_BENJ : move to helpers?
 def _load_ref_model(
     info: dict,
     adapter_mod: types.ModuleType | None = None,
@@ -72,7 +70,6 @@ def _load_ref_model(
     return ref_model
 
 
-# REFACTOR_BENJ : move to helpers?
 def _load_spyre_model(info: dict) -> AutoSpyreModelForCausalLM:
     print(f"  Loading {info['name']} on Spyre ...")
     t0 = time.time()
@@ -81,7 +78,6 @@ def _load_spyre_model(info: dict) -> AutoSpyreModelForCausalLM:
     return model
 
 
-# REFACTOR_BENJ : move to conftest?
 def _setup(
     model_key: str,
     need_ref: bool,
@@ -96,7 +92,6 @@ def _setup(
     return info, tokenizer, ref_model, spyre_model
 
 
-# REFACTOR_BENJ : move to conftest?
 def _teardown(
     spyre_model: AutoSpyreModelForCausalLM,
     ref_model: PreTrainedModel | None,

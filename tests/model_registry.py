@@ -28,7 +28,6 @@ from __future__ import annotations
 import types
 
 # Model registries - shared by all tests
-# REFACTOR_BENJAMIN : The content may be simplified
 CAUSAL_LM_MODELS = {
     # hf_gpt2.py
     "gpt2": {
@@ -199,7 +198,6 @@ CAUSAL_LM_MODELS = {
     },
 }
 
-# REFACTOR_BENJAMIN : The content may be simplified
 EMBEDDING_MODELS = {
     # hf_gemma3.py
     "embeddinggemma": {
@@ -318,7 +316,6 @@ EMBEDDING_MODELS = {
 
 # Vision models. ``kind="tower"`` adapters are encoder-only; ``kind="vlm"`` adapters
 # are full multimodal models with a causal text decoder, RoPE, KV caches, and ``generate``.
-# REFACTOR_BENJAMIN : The content may be simplified
 VISION_MODELS = {
     # hf_siglip_vision.py — SigLIP vision tower of Granite Vision 4.1
     "granite_vision_siglip": {
@@ -337,13 +334,11 @@ VISION_MODELS = {
 }
 
 
-# REFACTOR_BENJAMIN : The content may be simplified - it may induced from the path
 def _get_adapter_module_name(adapter_module: types.ModuleType) -> str:
     """Extract module name from adapter module object (e.g., hf_qwen3)."""
     return adapter_module.__name__.split(".")[-1]
 
 
-# REFACTOR_BENJAMIN : The content may be simplified - we should keep only representative
 def _parse_size(size_str: str) -> float:
     """
     Parse size string (e.g., '2b', '0.3B', '1.5b') to float for comparison.
@@ -358,7 +353,6 @@ def _parse_size(size_str: str) -> float:
     return float(size_str.lower().rstrip("b"))
 
 
-# REFACTOR_BENJAMIN : The content may be simplified
 def select_representative_models(
     config_mapping: dict[str, types.ModuleType] | None = None,
 ) -> tuple[list[str], list[str]]:
@@ -449,7 +443,6 @@ def select_representative_models(
 
 # Defer initialization until after conftest.py has patched hf_adapters
 # These will be populated by conftest.py after it sets up the patched modules
-# REFACTOR_BENJAMIN : The content may be simplified
 CAUSAL_KEYS: list[str] = []
 EMBED_KEYS: list[str] = []
 
