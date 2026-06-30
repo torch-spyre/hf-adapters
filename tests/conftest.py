@@ -27,6 +27,8 @@ imported ``hf_adapters`` before pytest reached us — which would lock in the
 un-patched DEVICE and silently break CPU tests.
 """
 
+from __future__ import annotations
+
 import gc
 import importlib.util
 import os
@@ -34,6 +36,7 @@ import sys
 import types
 
 import pytest
+import torch
 
 # REFACTOR_BENJ - Why?
 # REFACTOR_BENJ : Why do we maintain two conftests?
@@ -44,6 +47,9 @@ from _helpers import (  # noqa: F401  (re-exported for tests via `from conftest 
     min_cosine,
     torch_dtype_for,
 )
+from _pytest.config import Config
+from _pytest.config.argparsing import Parser
+from _pytest.nodes import Item
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADAPTERS_DIR = os.path.join(REPO_ROOT, "hf_adapters")
@@ -76,7 +82,7 @@ if not _TARGETS_SPYRE:
     sys.modules["hf_adapters"] = _pkg
 
 
-def _load_adapter(filename):
+def _load_adapter(filename: str) -> types.ModuleType:
     """Load an adapter .py file under hf_adapters/ as a real submodule."""
     mod_name = f"hf_adapters.{filename.replace('.py', '')}"
     if mod_name in sys.modules:
@@ -114,7 +120,7 @@ if not _TARGETS_SPYRE:
     )
 
 
-def _unwrap_compiled_blocks(model):
+def _unwrap_compiled_blocks(model: types.ModuleType) -> None:
     """Replace torch.compile-wrapped blocks with their CPU-runnable originals.
 
     Covers every block list an adapter may attach: ``_spyre_compiled_blocks``
@@ -134,14 +140,14 @@ def _unwrap_compiled_blocks(model):
         setattr(model, attr, unwrapped)
 
 
-def pytest_configure(config):
+def pytest_configure(config: Config) -> None:
     config.addinivalue_line(
         "markers",
         "requires_spyre: mark test as requiring the Spyre backend device",
     )
 
 
-def _set_rope_dtype(model, dtype):
+def _set_rope_dtype(model: types.ModuleType, dtype: torch.dtype) -> None:
     """Propagate the chosen dtype to the model's precomputed RoPE freq cache.
 
     The manual CPU-test paths load via ``AutoModel`` + ``prepare_for_spyre``
@@ -155,37 +161,37 @@ def _set_rope_dtype(model, dtype):
 
 
 @pytest.fixture(scope="session")
-def hf_common_mod():
+def hf_common_mod() -> types.ModuleType:
     return sys.modules["hf_adapters.hf_common"]
 
 
 @pytest.fixture(scope="session")
-def auto_spyre_model():
+def auto_spyre_model() -> types.ModuleType:
     return sys.modules["hf_adapters.auto_spyre_model"]
 
 
 @pytest.fixture
-def load_adapter():
+def load_adapter() -> types.ModuleType:
     return _load_adapter
 
 
 @pytest.fixture
-def unwrap_compiled_blocks():
+def unwrap_compiled_blocks() -> None:
     return _unwrap_compiled_blocks
 
 
 @pytest.fixture
-def set_rope_dtype():
+def set_rope_dtype() -> None:
     return _set_rope_dtype
 
 
 @pytest.fixture(autouse=True)
-def _gc_after_test():
+def _gc_after_test() -> None:
     yield
     gc.collect()
 
 
-def pytest_addoption(parser):
+def pytest_addoption(parser: Parser) -> None:
     parser.addoption(
         "--run-slow",
         action="store_true",
@@ -194,7 +200,7 @@ def pytest_addoption(parser):
     )
 
 
-def pytest_collection_modifyitems(config, items):
+def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
     """Skip spyre tests if torch_spyre is not installed / device unavailable; skip slow tests unless --run-slow."""
     try:
         import torch
