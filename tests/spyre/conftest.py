@@ -33,6 +33,7 @@ representative will collect 0 tests (all parametrized items deselected by
 import os
 import sys
 
+# REFACTOR_BENJ - why?
 # Make tests/ importable so model_registry and _helpers resolve from this subdir.
 _TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _TESTS_DIR not in sys.path:
@@ -40,6 +41,7 @@ if _TESTS_DIR not in sys.path:
 
 import model_registry  # noqa: E402
 
+# REFACTOR_BENJ - why?
 model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
     model_registry.select_representative_models()
 )
