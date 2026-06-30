@@ -61,6 +61,7 @@ from collections import defaultdict
 from hf_adapters.hf_common import (
     _move_to_spyre_with_layout,
     _untie_embedding_and_lm_head,
+    generate,
     get_backbone,
     prepare_standard_gqa,
 )
@@ -68,6 +69,51 @@ from hf_adapters.hf_mistral import (
     _run_backbone_forward,  # noqa: F401  re-exported as adapter module API
     _run_forward,  # noqa: F401  re-exported as adapter module API
 )
+
+# ---------------------------------------------------------------------------
+# Ministral-8B byte-level BPE decode fix
+# ---------------------------------------------------------------------------
+
+# The Ministral-8B tokenizer (LlamaTokenizer) uses a GPT-2-style byte-level
+# BPE fallback vocabulary where non-printable bytes are encoded as Unicode
+# characters in the range U+0100–U+013F (byte_value + 0x100 for bytes 0–32
+# and 127–160) and printable bytes map to U+0021–U+007E as-is.
+# When these characters appear as standalone tokens in the generated output,
+# tokenizer.decode() returns them verbatim instead of converting them back
+# to the original byte.  Build a translation table that undoes this mapping.
+#
+# Only bytes that differ from their codepoint need a mapping entry:
+#   byte 0x00–0x20 (NUL … space)  → codepoints 0x100–0x120
+#   byte 0x7F–0xA0 (DEL … NBSP)   → codepoints 0x121–0x142  (0x7F→0x121, …)
+# All other bytes (0x21–0x7E, 0xA1–0xFF) map to the same codepoint value, so
+# chr(byte) == chr(codepoint) and no remapping is needed.
+def _build_ministral_byte_decode_table() -> dict:
+    # Printable ASCII that maps to itself: 0x21–0x7E
+    printable = list(range(ord("!"), ord("~") + 1))  # 33–126
+    # All bytes: the GPT-2 encoding assigns the 256-printable characters first
+    # to the 94 printable ASCII bytes, then the remaining 162 slots fill the
+    # gap for the non-printable bytes.
+    # Reconstruction: iterate bytes 0-255; if printable ASCII, codepoint = byte;
+    # otherwise assign the next unused codepoint starting at 256.
+    table = {}
+    extra_cp = 256  # next codepoint to assign for non-printable bytes
+    for byte_val in range(256):
+        if byte_val in printable:
+            cp = byte_val  # maps to itself — no entry needed
+        else:
+            cp = extra_cp
+            extra_cp += 1
+            if cp != byte_val:  # only add when remapping is necessary
+                table[cp] = chr(byte_val)
+    return table
+
+
+_MINISTRAL_BYTE_DECODE_TABLE = str.maketrans(_build_ministral_byte_decode_table())
+
+
+def _fix_ministral_decode(text: str) -> str:
+    """Translate GPT-2 byte-level BPE escape chars back to real bytes."""
+    return text.translate(_MINISTRAL_BYTE_DECODE_TABLE)
 
 
 def _load_hf_model_mistral_small(model_path, dtype):
@@ -189,8 +235,34 @@ def load_hf_model(model_path, dtype):
     return _load_hf_model_mistral_small(model_path, dtype)
 
 
+def _is_ministral_config(model) -> bool:
+    """Return True when the model was loaded from a standalone MinistralConfig."""
+    try:
+        from transformers.models.ministral.configuration_ministral import (
+            MinistralConfig,
+        )
+
+        return isinstance(model.config, MinistralConfig)
+    except ImportError:
+        return False
+
+
+def _generate(model, tokenizer, prompts, **kwargs):
+    """Module-level generate hook checked by AutoSpyreModelForCausalLM.
+
+    Routes to a post-processing wrapper for MinistralConfig models (whose
+    tokenizer leaves GPT-2 byte-level BPE escape characters in the decoded
+    text), and falls back to the standard generate for all other variants
+    (Mistral-Small-3.2, Ministral-3-14B) whose tokenizers decode cleanly.
+    """
+    results = generate(_run_forward, model, tokenizer, prompts, **kwargs)
+    if _is_ministral_config(model):
+        return [_fix_ministral_decode(s) for s in results]
+    return results
+
+
 def load_model(model_path, dtype):
-    """Load a Mistral-3-family text decoder and prepare it for Spyre."""
+    """Load a Mistral-family text decoder and prepare it for Spyre."""
     model = load_hf_model(model_path, dtype)
     # FP8 checkpoints (e.g. Ministral-3-14B) are dequantized to bf16 by
     # transformers regardless of the requested dtype. Use the model's actual
