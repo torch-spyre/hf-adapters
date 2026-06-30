@@ -8,6 +8,7 @@ Currently, we confirmed that a yaml file can be generated for the following mode
 
 - granite 3.3
 - granite 4.0 hybrid
+- granite 4.1
 - gpt-oss
 - llama 3.1
 - mistral small
@@ -38,7 +39,7 @@ Run the following command with an NVIDIA GPU. Multiple GPUs environment is not s
 More details on the yaml files can be found in [RFC](https://github.com/torch-spyre/rfcs/blob/main/0186-TestFrameworks/0186-TestFrameworks.md), [RFC](https://github.com/torch-spyre/rfcs/blob/main/1287-SpyreTestFramework/1287-SpyreTestFrameworkRFC.md), and [document](https://github.com/torch-spyre/torch-spyre/blob/main/tests/docs/input_args_enablement.md).
 
 ```
-python -m models.<model folder>.run_huggingface
+uv run --no-sync python -m models.<model folder>.run_huggingface
 ```
 
 The desired level of logging can be controlled via the environment variable **TEST_GEN_LOGGING_LEVEL**, which can be set to standard python logging levels, namely, one of **DEBUG**, **INFO**, **WARNING**, **ERROR**, and **CRITICAL**.
