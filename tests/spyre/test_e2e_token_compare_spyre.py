@@ -30,7 +30,7 @@ import math
 import pytest
 import torch
 import torch.nn.functional as F
-from _helpers import torch_dtype_for
+from _helpers import load_hf_causal_lm, torch_dtype_for
 from model_registry import CAUSAL_KEYS, CAUSAL_LM_MODELS
 
 from hf_adapters.hf_common import (
@@ -273,7 +273,7 @@ def _print_table(rows):
 
 def _run_model_test(model_key, num_decode=4):
     """Full comparison for one model. Returns the list of comparison rows."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
 
     info = CAUSAL_LM_MODELS[model_key]
     adapter_module_name = info["adapter"].replace(".py", "")
@@ -286,21 +286,9 @@ def _run_model_test(model_key, num_decode=4):
     tokenizer = AutoTokenizer.from_pretrained(info["path"])
     dtype = torch_dtype_for(info)
 
-    # Models with load_fn=True use a custom loader (e.g. FP8-quantized
-    # checkpoints where AutoModelForCausalLM would fail or return wrong dtypes).
-    if info.get("load_fn"):
-        model = adapter.load_hf_model(info["path"], dtype)
-    else:
-        model = AutoModelForCausalLM.from_pretrained(
-            info["path"],
-            torch_dtype=dtype,
-            device_map="cpu",
-        )
+    model = load_hf_causal_lm(info, dtype, adapter_mod=adapter)
     model.eval()
     model.requires_grad_(False)
-    # Use the model's actual dtype (may differ from requested when FP8
-    # dequantization forces bf16 regardless of the dtype argument).
-    actual_dtype = next(model.parameters()).dtype
 
     prompt = "The capital of France is"
     encoded = tokenizer(prompt, return_tensors="pt")
@@ -314,7 +302,10 @@ def _run_model_test(model_key, num_decode=4):
     _untie_embedding_and_lm_head(model)
     adapter.prepare_for_spyre(model)
     print("  Moving model to Spyre ...")
-    _move_to_spyre_with_layout(model, actual_dtype)
+    # Use bfloat16 on Spyre when the registry requests it; otherwise float16.
+    # (Spyre does not support float32, so float32 registry entries still use float16.)
+    spyre_dtype = torch.bfloat16 if info.get("dtype") == "bfloat16" else torch.float16
+    _move_to_spyre_with_layout(model, spyre_dtype)
     print("  Running adapter on Spyre ...")
     adapter_results = adapter_greedy_steps(
         adapter._run_forward,
