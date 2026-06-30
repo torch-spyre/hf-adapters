@@ -34,6 +34,9 @@ import sys
 import types
 
 import pytest
+
+# REFACTOR_BENJ - Why?
+# REFACTOR_BENJ : Why do we maintain two conftests?
 from _helpers import (  # noqa: F401  (re-exported for tests via `from conftest import ...`)
     cosine_per_row,
     encode_padded,
@@ -44,7 +47,7 @@ from _helpers import (  # noqa: F401  (re-exported for tests via `from conftest 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADAPTERS_DIR = os.path.join(REPO_ROOT, "hf_adapters")
-
+# REFACTOR_BENH : why?
 # Spyre-targeted runs (`pytest tests/spyre/...`) need the unpatched hf_adapters
 # with DEVICE="spyre". Detect that here and skip the CPU patching block — the
 # tests/spyre/conftest.py picks up from there with the real module.
