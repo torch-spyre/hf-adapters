@@ -45,7 +45,7 @@ from _generate_edge_case_helpers import (
     make_prompt_with_eos_inside,
     make_prompts,
 )
-from conftest import load_hf_causal_lm
+from tests.conftest import load_hf_causal_lm
 from model_registry import CAUSAL_LM_MODELS
 from transformers import AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 

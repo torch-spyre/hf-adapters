@@ -179,3 +179,16 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
         for item in items:
             if "slow" in item.keywords:
                 item.add_marker(skip_slow)
+
+
+def torch_dtype_for(info: dict) -> torch.dtype:
+    """Map a registry entry's ``dtype`` field to a torch dtype.
+
+    Defaults to float16. ``"float32"`` (e.g. Granite 4 1B, where fp16 overflows
+    on CPU) and ``"bfloat16"`` (e.g. EmbeddingGemma, which is bf16-native and
+    overflows fp16) are recognized explicitly.
+    """
+    return {
+        "float32": torch.float32,
+        "bfloat16": torch.bfloat16,
+    }.get(info.get("dtype"), torch.float16)
