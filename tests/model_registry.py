@@ -311,6 +311,26 @@ EMBEDDING_MODELS = {
 }
 
 
+# Vision models. ``kind="tower"`` adapters are encoder-only; ``kind="vlm"`` adapters
+# are full multimodal models with a causal text decoder, RoPE, KV caches, and ``generate``.
+VISION_MODELS = {
+    # hf_siglip_vision.py — SigLIP vision tower of Granite Vision 4.1
+    "granite_vision_siglip": {
+        "name": "Granite Vision 4.1 4B (SigLIP tower)",
+        "path": "ibm-granite/granite-vision-4.1-4b",
+        "adapter": "hf_siglip_vision.py",
+        "kind": "tower",  # bare vision tower: pixel_values -> patch hidden states
+    },
+    # hf_granite_vision_mm.py — combined two-tower (vision + text) forward
+    "granite_vision_mm": {
+        "name": "Granite Vision 4.1 4B (both towers)",
+        "path": "ibm-granite/granite-vision-4.1-4b",
+        "adapter": "hf_granite_vision_mm.py",
+        "kind": "vlm",  # multimodal: image + text -> generated text
+    },
+}
+
+
 def _get_adapter_module_name(adapter_module):  # type: ignore[no-untyped-def]
     """Extract module name from adapter module object (e.g., hf_qwen3)."""
     return adapter_module.__name__.split(".")[-1]

@@ -109,26 +109,6 @@ runs:
         git log -1 --oneline
         echo "target_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
 
-    - name: Gather runner info
-      shell: bash
-      working-directory: /home/senuser
-      run: |
-        source "$HOME/.bashrc"
-        source /etc/profile.d/ibm-aiu-setup.sh
-        date
-        pwd
-        whoami
-        id
-        echo "GHA_RUNNER_POD_NODE_NAME $GHA_RUNNER_POD_NODE_NAME"
-        echo "PATH $PATH"
-        echo "HOME $HOME"
-        python3 --version
-        python3 -c 'import sys; print(sys.path)'
-        echo "--- env ---"
-        env | sort
-        echo "--- AIU env ---"
-        env | sort | grep AIU || true
-
     - name: Download RPMs
       if: ${{ inputs.rpm_names != '' }}
       shell: bash
@@ -157,6 +137,33 @@ runs:
         ls -la
         ls -la rpms/
         sudo dnf install -y rpms/*.rpm
+
+    - name: Gather runner info
+      shell: bash
+      working-directory: /home/senuser
+      run: |
+        source "$HOME/.bashrc"
+        source /etc/profile.d/ibm-aiu-setup.sh
+        echo "================================="
+        date
+        pwd
+        whoami
+        id
+        echo "GHA_RUNNER_POD_NODE_NAME $GHA_RUNNER_POD_NODE_NAME"
+        echo "PATH $PATH"
+        echo "HOME $HOME"
+        echo "---------------------------------"
+        echo "Installed RPMs"
+        cat "$HOME/installed_rpms.txt"
+        echo "---------------------------------"
+        python3 --version
+        python3 -c 'import sys; print(sys.path)'
+        echo "--- env ---"
+        env | sort
+        echo "--- AIU env ---"
+        env | sort | grep AIU || true
+        echo "================================="
+
 
     - name: Build hf-adapters
       shell: bash

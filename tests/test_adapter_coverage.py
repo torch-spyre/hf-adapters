@@ -21,7 +21,7 @@ entry in either CAUSAL_LM_MODELS or EMBEDDING_MODELS dictionaries.
 
 from pathlib import Path
 
-from tests.model_registry import CAUSAL_LM_MODELS, EMBEDDING_MODELS
+from tests.model_registry import CAUSAL_LM_MODELS, EMBEDDING_MODELS, VISION_MODELS
 
 
 def get_adapter_files():
@@ -63,6 +63,12 @@ def get_registered_adapters():
 
     # Collect adapters from EMBEDDING_MODELS
     for model_info in EMBEDDING_MODELS.values():
+        adapter = model_info.get("adapter")
+        if adapter:
+            registered_adapters.add(adapter)
+
+    # Collect adapters from VISION_MODELS (vision towers + multimodal VLMs)
+    for model_info in VISION_MODELS.values():
         adapter = model_info.get("adapter")
         if adapter:
             registered_adapters.add(adapter)
@@ -132,7 +138,11 @@ def test_adapter_coverage_details():
 
     # Count how many models use each adapter
     adapter_usage = {}
-    for model_info in list(CAUSAL_LM_MODELS.values()) + list(EMBEDDING_MODELS.values()):
+    for model_info in (
+        list(CAUSAL_LM_MODELS.values())
+        + list(EMBEDDING_MODELS.values())
+        + list(VISION_MODELS.values())
+    ):
         adapter = model_info.get("adapter")
         if adapter:
             adapter_usage[adapter] = adapter_usage.get(adapter, 0) + 1
