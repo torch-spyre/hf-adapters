@@ -43,9 +43,11 @@ import gc
 
 import pytest
 import torch
-from conftest import encode_padded, min_cosine, torch_dtype_for
 from model_registry import EMBEDDING_MODELS
 from transformers import AutoModel, AutoTokenizer
+
+from tests.conftest import torch_dtype_for
+from tests.cpu.conftest import encode_padded, min_cosine
 
 PROMPTS = [
     "The capital of France is Paris.",

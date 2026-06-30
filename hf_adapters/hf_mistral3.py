@@ -14,17 +14,22 @@
 
 """HuggingFace Transformers adapter for the text backbone of Mistral-3-family models.
 
-Extracts the language model from a Mistral-3-family multimodal checkpoint
-(no trust_remote_code) and prepares it for Spyre. Vision encoder and
-projection layers are discarded — this adapter handles text-only inference.
+Loads a Mistral-3-family multimodal checkpoint (no trust_remote_code) and runs
+*text-only* causal inference over its decoder. The vision encoder and projector
+are dropped — for the full image→text pipeline this adapter is not used.
 
-Supports two text backbone variants dispatched via ``text_config.model_type``:
+Covers two text-backbone variants, both shipped as
+``Mistral3ForConditionalGeneration`` and distinguished only by their
+``text_config.model_type``:
 
-- ``"mistral"`` — ``MistralForCausalLM`` (e.g. ``mistralai/Mistral-Small-3.2-24B-Instruct-2506``)
-- ``"ministral3"`` — ``Ministral3ForCausalLM`` (e.g. ``mistralai/Ministral-3-14B-Instruct-2512``)
+- ``"mistral"`` — e.g. ``mistralai/Mistral-Small-3.2-24B-Instruct-2506``
+- ``"ministral3"`` — e.g. ``mistralai/Ministral-3-14B-Instruct-2512`` (blocked-FP8,
+  dequantized on load)
 
-Both backbones are architecturally identical to Mistral 7B (standard GQA), so
-compiled block, forward, and prepare logic are reused from ``hf_mistral``.
+Both decoders are architecturally identical to Mistral 7B (standard GQA), so the
+compiled block, forward, and prepare logic are reused from ``hf_mistral``;
+``get_backbone``/``prepare_standard_gqa`` handle the nested VLM shape and the
+RMSNorm class is auto-detected per variant.
 
 Usage::
 
@@ -44,9 +49,6 @@ Usage::
     outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
-import json
-from collections import defaultdict
-
 from hf_adapters.hf_common import (
     get_backbone,
     move_to_spyre_with_layout,
@@ -59,61 +61,22 @@ from hf_adapters.hf_mistral import (
 )
 
 
-def _load_hf_model_mistral_small(model_path, dtype):
-    """Load Mistral-Small text decoder via safetensor key-remap into MistralForCausalLM."""
-    from huggingface_hub import hf_hub_download
-    from safetensors.torch import load_file
-    from transformers import MistralConfig, MistralForCausalLM
+def load_hf_model(model_path, dtype):
+    """Load a Mistral-3-family text decoder from its stock multimodal checkpoint.
 
-    cfg_path = hf_hub_download(model_path, "config.json")
-    with open(cfg_path) as f:
-        full_cfg = json.load(f)
+    Both variants (Mistral-Small-3.2 with a ``mistral`` text backbone, and
+    Ministral-3 with a ``ministral3`` one) ship as
+    ``Mistral3ForConditionalGeneration``, so the full VLM is loaded directly —
+    no shard key-remap. ``get_backbone`` descends through
+    ``model.model.language_model`` to the text decoder and the top-level
+    ``lm_head`` is used as-is (the Gemma4 adapter pattern); the text-only
+    ``forward(input_ids=...)`` provides the causal-LM reference for the harness.
 
-    mistral_cfg = MistralConfig(**full_cfg["text_config"])
-    mistral_cfg.tie_word_embeddings = False
-    model = MistralForCausalLM(mistral_cfg)
-
-    idx_path = hf_hub_download(model_path, "model.safetensors.index.json")
-    with open(idx_path) as f:
-        idx = json.load(f)
-
-    shard_keys = defaultdict(dict)
-    for key, shard in idx["weight_map"].items():
-        if key.startswith("language_model.model."):
-            shard_keys[shard][key.replace("language_model.model.", "model.", 1)] = key
-        elif key.startswith("language_model.lm_head."):
-            shard_keys[shard][
-                key.replace("language_model.lm_head.", "lm_head.", 1)
-            ] = key
-        elif key == "lm_head.weight":
-            shard_keys[shard][key] = key
-
-    state = {}
-    for shard, key_map in shard_keys.items():
-        shard_path = hf_hub_download(model_path, shard)
-        data = load_file(shard_path)
-        for new_key, old_key in key_map.items():
-            state[new_key] = data[old_key]
-
-    model.load_state_dict(state, strict=False)
-    model.to(dtype)
-    model.eval()
-    model.requires_grad_(False)
-    return model
-
-
-def _load_hf_model_ministral(model_path, dtype):
-    """Load Ministral-3 text decoder via AutoModelForCausalLM with automatic dequantization.
-
-    The Ministral-3-14B checkpoint uses blocked FP8 quantization (weight +
-    weight_scale_inv per projection). Loading via safetensor key-remap would
-    bring in the raw quantized tensors with wrong shapes. AutoModelForCausalLM
-    handles dequantization automatically and returns fp16/bf16 weights.
-
-    The full Mistral3ForConditionalGeneration is loaded (vision tower + text
-    decoder) and then the vision tower is deleted to free memory.  get_backbone()
-    descends through model.model.language_model to the text backbone, and the
-    top-level lm_head is used directly — matching the Gemma4 adapter pattern.
+    ``from_pretrained`` also dequantizes automatically: the Ministral-3-14B
+    checkpoint is blocked-FP8 (weight + weight_scale_inv per projection), which a
+    raw key-remap would load with the wrong shapes — here it comes back as
+    fp16/bf16. The vision tower and projector are dropped to free memory since
+    this is text-only inference.
     """
     from transformers.models.mistral3.modeling_mistral3 import (
         Mistral3ForConditionalGeneration,
@@ -134,25 +97,6 @@ def _load_hf_model_ministral(model_path, dtype):
     model.eval()
     model.requires_grad_(False)
     return model
-
-
-def load_hf_model(model_path, dtype):
-    """Load a Mistral-3-family text decoder.
-
-    Dispatches to the correct HF text model class based on ``text_config.model_type``:
-    - ``"mistral"``  → ``MistralForCausalLM`` (Mistral-Small-3.2)
-    - ``"ministral3"`` → ``Ministral3ForCausalLM`` (Ministral-3-14B)
-    """
-    from huggingface_hub import hf_hub_download
-
-    cfg_path = hf_hub_download(model_path, "config.json")
-    with open(cfg_path) as f:
-        full_cfg = json.load(f)
-
-    text_model_type = full_cfg.get("text_config", {}).get("model_type", "mistral")
-    if text_model_type == "ministral3":
-        return _load_hf_model_ministral(model_path, dtype)
-    return _load_hf_model_mistral_small(model_path, dtype)
 
 
 def load_model(model_path, dtype):

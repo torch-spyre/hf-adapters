@@ -44,6 +44,7 @@ from transformers import (
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
+    AutoModelForImageTextToText,
     BertConfig,
     Gemma3Config,
     Gemma3TextConfig,
@@ -236,7 +237,7 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
         return model
 
 
-class AutoSpyreModelForImageTextToText:
+class AutoSpyreModelForImageTextToText(AutoSpyreModel):
     """Load a multimodal (image-text-to-text) model and prepare BOTH towers.
 
     Selects the combined two-tower adapter (vision tower + text decoder),
@@ -244,6 +245,8 @@ class AutoSpyreModelForImageTextToText:
     for Spyre. Attaches Spyre-aware ``prefill_logits`` (image + text → logits)
     and ``generate`` (full image→text decode) methods.
     """
+
+    _auto_model_cls = AutoModelForImageTextToText  # type: ignore[assignment]
 
     @classmethod
     def from_pretrained(
@@ -255,7 +258,12 @@ class AutoSpyreModelForImageTextToText:
             model_name_or_path,
             mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
         )
-        model: torch.nn.Module = module.load_model(model_name_or_path, dtype)
+        model: torch.nn.Module = load_model_common(
+            model_name_or_path,
+            module.prepare_for_spyre,
+            dtype,
+            auto_model_cls=cls._auto_model_cls,
+        )
 
         def model_prefill_logits(
             self: torch.nn.Module,

@@ -78,18 +78,6 @@ from hf_adapters.hf_common import (
 from hf_adapters.hf_granite import _make_compiled_block
 
 
-def load_hf_model(model_path, dtype=torch.float16):
-    """Load the full Granite Vision VLM (both towers) as stock HF, on CPU."""
-    from transformers import AutoModelForImageTextToText
-
-    model = AutoModelForImageTextToText.from_pretrained(
-        model_path, dtype=dtype, device_map="cpu"
-    )
-    model.eval()
-    model.requires_grad_(False)
-    return model
-
-
 def prepare_for_spyre(model):
     """Prepare BOTH towers of a loaded Granite Vision VLM in-place.
 
@@ -574,13 +562,3 @@ def generate(
 
     # Decode generated tokens per sequence (same block-walk as hf_common.generate).
     return decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer)
-
-
-def load_model(model_path, dtype=torch.float16):
-    """Load Granite Vision (both towers) and prepare it for Spyre."""
-    model = load_hf_model(model_path, dtype)
-    prepare_for_spyre(model)
-    print("Moving Granite Vision (both towers) to Spyre ...")
-    torch.nn.Module.to(model, DEVICE)
-    print("Model ready.")
-    return model
