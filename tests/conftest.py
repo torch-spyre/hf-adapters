@@ -27,9 +27,15 @@ before pytest reached us — which would lock in the un-patched DEVICE and
 silently break CPU tests.
 
 Spyre-targeted runs (``pytest tests/spyre/...``) are detected via ``sys.argv``
-and skip the CPU-patching block entirely; ``model_registry.CAUSAL_KEYS`` /
-``EMBED_KEYS`` are still populated here for the Spyre lane via the ``else``
-branch so no separate ``tests/spyre/conftest.py`` is needed.
+and skip the CPU-patching block entirely; the Spyre lane imports
+``hf_adapters`` normally with the real ``DEVICE="spyre"``, so no separate
+``tests/spyre/conftest.py`` is needed.
+
+``model_registry`` populates ``CAUSAL_KEYS`` / ``EMBED_KEYS`` itself at import
+time off ``hf_adapters.auto_spyre_model.CONFIG_TO_ADAPTER_MODULE_MAPPING``. In
+the CPU lane, the patched ``auto_spyre_model`` must already be in
+``sys.modules`` before ``model_registry`` is imported — the block below
+arranges that ordering.
 
 CPU-lane test helpers and fixtures live in ``tests/cpu/conftest.py``.
 """
@@ -109,8 +115,8 @@ if not _TARGETS_SPYRE:
     _pkg.__path__ = [ADAPTERS_DIR]
     sys.modules["hf_adapters"] = _pkg
 
-    # Pre-load auto_spyre_model with the patched hf_common already in sys.modules,
-    # then populate model_registry keys for the CPU lane.
+    # Pre-load auto_spyre_model with the patched hf_common already in sys.modules
+    # so model_registry's top-level import reuses the patched modules.
     _auto_path = os.path.join(ADAPTERS_DIR, "auto_spyre_model.py")
     _auto_spec = importlib.util.spec_from_file_location(
         "hf_adapters.auto_spyre_model", _auto_path
@@ -120,22 +126,9 @@ if not _TARGETS_SPYRE:
     _auto_spec.loader.exec_module(_auto_mod)
     setattr(_pkg, "auto_spyre_model", _auto_mod)
 
-    import model_registry  # noqa: E402
-
-    model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
-        model_registry.select_representative_models(
-            _auto_mod.CONFIG_TO_ADAPTER_MODULE_MAPPING
-        )
-    )
-
-else:
-    # Spyre lane: hf_adapters is imported normally (real DEVICE="spyre").
-    # Populate model_registry keys so parametrized Spyre tests resolve correctly.
-    import model_registry  # noqa: E402
-
-    model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
-        model_registry.select_representative_models()
-    )
+# Spyre lane: hf_adapters is imported normally (real DEVICE="spyre").
+# model_registry populates CAUSAL_KEYS / EMBED_KEYS at import time in both lanes.
+import model_registry  # noqa: E402, F401
 
 
 def pytest_configure(config: Config) -> None:

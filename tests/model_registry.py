@@ -27,6 +27,14 @@ from __future__ import annotations
 
 import types
 
+# In the CPU test lane, `tests/conftest.py` pre-loads `hf_adapters.hf_common`
+# with DEVICE="cpu" and `hf_adapters.auto_spyre_model` into `sys.modules`
+# BEFORE this module is imported, so the import below reuses the patched
+# modules. In the Spyre lane, this import loads `auto_spyre_model` normally
+# with DEVICE="spyre". Do not import `hf_adapters.*` from this module at any
+# point before conftest has run.
+from hf_adapters.auto_spyre_model import CONFIG_TO_ADAPTER_MODULE_MAPPING
+
 # Model registries - shared by all tests
 # REFACTOR_BENJAMIN : The content may be simplified
 CAUSAL_LM_MODELS = {
@@ -358,37 +366,24 @@ def _parse_size(size_str: str) -> float:
     return float(size_str.lower().rstrip("b"))
 
 
-# REFACTOR_BENJAMIN : The content may be simplified
-def select_representative_models(
-    config_mapping: dict[str, types.ModuleType] | None = None,
-) -> tuple[list[str], list[str]]:
+def _select_representative_models() -> tuple[list[str], list[str]]:
     """
     Programmatically select one representative model per adapter module.
 
     Analyzes CONFIG_TO_ADAPTER_MODULE_MAPPING and selects one model per adapter
     from the registries above. Prefers smaller models for faster test execution.
 
-    Args:
-        config_mapping: Optional CONFIG_TO_ADAPTER_MODULE_MAPPING to use.
-                       If None, will be imported from hf_adapters.auto_spyre_model.
-
     Returns:
         tuple: (causal_keys, embed_keys) where each is a list of model keys
     """
-    # Import here to avoid issues with conftest.py patching
-    if config_mapping is None:
-        from hf_adapters.auto_spyre_model import CONFIG_TO_ADAPTER_MODULE_MAPPING
-
-        config_mapping = CONFIG_TO_ADAPTER_MODULE_MAPPING
-
-    # Get set of adapter module names from CONFIG_TO_ADAPTER_MODULE_MAPPING
-    adapter_modules_in_config = {
-        _get_adapter_module_name(adapter_mod) for adapter_mod in config_mapping.values()
+    adapter_modules_in_config: set[str] = {
+        _get_adapter_module_name(adapter_mod)
+        for adapter_mod in CONFIG_TO_ADAPTER_MODULE_MAPPING.values()
     }
 
     # Map adapter module names to model keys
-    adapter_to_causal_keys = {}
-    adapter_to_embed_keys = {}
+    adapter_to_causal_keys: dict[str, list[str]] = {}
+    adapter_to_embed_keys: dict[str, list[str]] = {}
 
     # Group causal LM models by adapter
     for key, info in CAUSAL_LM_MODELS.items():
@@ -414,7 +409,7 @@ def select_representative_models(
 
     # Select one representative per adapter for causal LM
     # Prefer smaller models (by size field) for faster tests
-    causal_keys = []
+    causal_keys: list[str] = []
     for adapter in sorted(adapter_modules_in_config):
         if adapter in adapter_to_causal_keys:
             keys = adapter_to_causal_keys[adapter]
@@ -430,7 +425,7 @@ def select_representative_models(
 
     # Select one representative per adapter for embeddings
     # Prefer smaller models (by size field) for faster tests
-    embed_keys = []
+    embed_keys: list[str] = []
     for adapter in sorted(adapter_modules_in_config):
         if adapter in adapter_to_embed_keys:
             keys = adapter_to_embed_keys[adapter]
@@ -447,10 +442,7 @@ def select_representative_models(
     return causal_keys, embed_keys
 
 
-# Defer initialization until after conftest.py has patched hf_adapters
-# These will be populated by conftest.py after it sets up the patched modules
-# REFACTOR_BENJAMIN : The content may be simplified
-CAUSAL_KEYS: list[str] = []
-EMBED_KEYS: list[str] = []
+CAUSAL_KEYS, EMBED_KEYS = _select_representative_models()
+
 
 # Made with Bob

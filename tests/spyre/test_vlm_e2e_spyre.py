@@ -74,9 +74,9 @@ from model_registry import VISION_MODELS
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
-    _model_dtype,
     allocate_kv_caches,
     build_expansion_mask,
+    model_dtype,
     move_to_spyre_with_layout,
 )
 from tests.conftest import torch_dtype_for
@@ -139,7 +139,7 @@ def _adapter_teacher_forced_steps(
     pixel_values = batch["pixel_values"]
     image_sizes = batch["image_sizes"]
 
-    model_dtype = _model_dtype(model)
+    model_d_type = model_dtype(model)
     backbone = adapter.get_backbone(model)
     emb_mult = backbone.embedding_multiplier
 
@@ -155,7 +155,7 @@ def _adapter_teacher_forced_steps(
         input_ids, actual_prompt_lengths
     )
     key_caches, value_caches = allocate_kv_caches(
-        model, batch_size, max_cache_len, model_dtype
+        model, batch_size, max_cache_len, model_d_type
     )
 
     result = padded_ids.clone()
@@ -223,7 +223,7 @@ def _adapter_teacher_forced_steps(
                 max_cache_len,
                 current_cache_len,
                 prompt_offsets,
-                dtype=model_dtype,
+                dtype=model_d_type,
             )
             logits = adapter._logits_from_embeds(
                 model,

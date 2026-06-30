@@ -17,11 +17,11 @@ import json
 import sys
 from pathlib import Path
 
+import model_registry
+
 # Add the project root to the Python path so we can import from tests/
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
-
-from tests.model_registry import select_representative_models  # noqa: E402
 
 
 def generate_matrices(exclude_models=None):
@@ -36,12 +36,9 @@ def generate_matrices(exclude_models=None):
     """
     exclude_models = set(exclude_models or [])
 
-    # Get representative models (one per adapter)
-    causal_keys, embed_keys = select_representative_models()
-
     # Apply exclusions
-    causal_keys = [k for k in causal_keys if k not in exclude_models]
-    embed_keys = [k for k in embed_keys if k not in exclude_models]
+    causal_keys = [k for k in model_registry.CAUSAL_KEYS if k not in exclude_models]
+    embed_keys = [k for k in model_registry.EMBED_KEYS if k not in exclude_models]
 
     # Combine for jobs that test both types
     combined_keys = causal_keys + embed_keys
