@@ -78,6 +78,7 @@ from hf_adapters import (
     hf_gpt_neox,
     hf_granite,
     hf_granite_vision,
+    hf_granite_vision_mm,
     hf_granitemoehybrid,
     hf_llama,
     hf_mistral,
@@ -127,16 +128,29 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     XLMRobertaConfig: hf_xlm_roberta,
 }
 
+# Multimodal (image-text-to-text) mapping — used by
+# ``AutoSpyreModelForImageTextToText``. A multimodal checkpoint's config (e.g.
+# Granite4VisionConfig) appears here mapped to the *combined* two-tower adapter,
+# and in CONFIG_TO_ADAPTER_MODULE_MAPPING mapped to the *text-only* adapter
+# (used by AutoSpyreModelForCausalLM). The auto class selects which.
+IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
+    type[PretrainedConfig], ModuleType
+] = {
+    Granite4VisionConfig: hf_granite_vision_mm,
+}
 
-def _resolve_adapter_module(model_name_or_path):
+
+def _resolve_adapter_module(
+    model_name_or_path, mapping=CONFIG_TO_ADAPTER_MODULE_MAPPING
+):
     model_config = AutoConfig.from_pretrained(model_name_or_path)
-    if type(model_config) not in CONFIG_TO_ADAPTER_MODULE_MAPPING:
+    if type(model_config) not in mapping:
         raise SpyreNoAdapterError(
             f"Model {model_name_or_path} of type {type(model_config)} "
             "is not supported"
         )
     assert_spyre_dimensions(model_config, model_name=str(model_name_or_path))
-    return CONFIG_TO_ADAPTER_MODULE_MAPPING[type(model_config)]
+    return mapping[type(model_config)]
 
 
 class AutoSpyreModel:
@@ -188,4 +202,52 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
 
         model.generate = MethodType(model_generate, model)
 
+        return model
+
+
+class AutoSpyreModelForImageTextToText:
+    """Load a multimodal (image-text-to-text) model and prepare BOTH towers.
+
+    Selects the combined two-tower adapter (vision tower + text decoder),
+    loads the full VLM via ``AutoModelForImageTextToText``, and prepares both
+    for Spyre. Attaches Spyre-aware ``prefill_logits`` (image + text → logits)
+    and ``generate`` (full image→text decode) methods.
+    """
+
+    @classmethod
+    def from_pretrained(cls, model_name_or_path, dtype=torch.float16):
+        module = _resolve_adapter_module(
+            model_name_or_path,
+            mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+        )
+        model = module.load_model(model_name_or_path, dtype)
+
+        def model_prefill_logits(
+            self, input_ids, attention_mask, pixel_values, image_sizes
+        ):
+            return module.prefill_logits(
+                self, input_ids, attention_mask, pixel_values, image_sizes
+            )
+
+        def model_generate(
+            self,
+            processor,
+            input_ids,
+            attention_mask,
+            pixel_values,
+            image_sizes,
+            **kwargs,
+        ):
+            return module.generate(
+                self,
+                processor,
+                input_ids,
+                attention_mask,
+                pixel_values,
+                image_sizes,
+                **kwargs,
+            )
+
+        model.prefill_logits = MethodType(model_prefill_logits, model)
+        model.generate = MethodType(model_generate, model)
         return model

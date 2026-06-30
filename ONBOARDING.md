@@ -49,9 +49,17 @@ a model manually.
 
 ## Step 1: Check Architecture Constraints
 
-Before writing any code, verify the model is compatible. Currently
-supported: **dense, decoder-only, autoregressive** models with RoPE
-(full or partial) or absolute position encoding.
+Before writing any code, verify the model is compatible. Currently supported:
+
+- **Dense, decoder-only, autoregressive** causal LMs with RoPE (full or partial)
+  or learned absolute position encoding — the main path this guide covers.
+- **Encoder embedders** (BERT / XLM-RoBERTa / MPNet / ModernBERT) via
+  `prefill_embed` / `prefill_encoder` and the `st_backend` — bidirectional, no KV
+  cache. See `hf_bert.py` / `hf_modernbert.py`.
+- **Vision-language (image→text) VLMs** — a vision tower plus a causal text
+  decoder. See the Multimodal VLM Path in `ARCHITECTURE.md` and
+  `hf_granite_vision_mm.py` / `hf_siglip_vision.py`. This guide's per-step
+  causal-LM flow is the decoder half; the vision tower + feature-merge is extra.
 
 Not compatible:
 - MoE with dynamic routing (Mixtral, DBRX) — note: Granite 4.0 with `num_local_experts=1` is fine
@@ -181,32 +189,45 @@ automatically select the correct adapter.
 
 ## Step 5: Register in Tests
 
-Add an entry to the `MODELS` dict in `tests/test_adapter_cpu_accuracy.py`:
+Add an entry to the right registry in `tests/model_registry.py` — the single
+registry that every test file imports (`CAUSAL_LM_MODELS` for generative,
+`EMBEDDING_MODELS` for embedders, `VISION_MODELS` for vision/multimodal):
 
 ```python
+# tests/model_registry.py — CAUSAL_LM_MODELS
 "mymodel": {
     "name": "MyModel 1B",
     "path": "org/mymodel-1b-instruct",
     "adapter": "hf_mymodel.py",
+    "size": "1b",
 },
 ```
 
 Optional fields:
-- `"dtype": "float32"` — use if fp16 overflows on CPU (e.g., large multipliers)
+- `"dtype": "bfloat16"` / `"float32"` — set the test dtype if fp16 is wrong for
+  the model (bf16-native models, or large multipliers that overflow fp16 on CPU)
 - `"load_fn": True` — use if your adapter has a custom `load_hf_model()` function
 
 ## Step 6: Run CPU Accuracy Test
 
+The CPU tests are pytest-parametrized off the registry — run from the repo root
+and select your model with `-k <key>` (never `python tests/...`, which bypasses
+the conftest patching):
+
 ```bash
-source .venv/bin/activate
-python3 tests/test_adapter_cpu_accuracy.py mymodel
-python3 tests/test_adapter_cpu_accuracy.py mymodel --auto-loader
+# Both parametrized cases for one model (test_manual_path + test_auto_loader)
+uv run pytest tests/test_adapter_cpu_accuracy.py -k mymodel
+
+# Just one path
+uv run pytest tests/test_adapter_cpu_accuracy.py -k "mymodel and manual"        # adapter alone
+uv run pytest tests/test_adapter_cpu_accuracy.py -k "mymodel and auto_loader"   # via AutoSpyreModelForCausalLM
 ```
 
-The first command runs prefill + 4 decode steps through both stock
-HuggingFace and your adapter, comparing top-1 token selections. All
-must match. The `--auto-loader` variant verifies the end-to-end path
-through `AutoSpyreModelForCausalLM`.
+`test_manual_path` runs prefill + 4 decode steps through both stock HuggingFace
+and your adapter, comparing top-1 token selections (all must match).
+`test_auto_loader` verifies the end-to-end path through
+`AutoSpyreModelForCausalLM`. (Embedding adapters use
+`tests/test_embed_cpu_accuracy.py`; multimodal VLMs use `tests/test_vlm_e2e_cpu.py`.)
 
 **Important:** The test runs the HF reference forward *before* calling
 `prepare_for_spyre()`, because the RMSNorm patch modifies the class
@@ -214,22 +235,27 @@ globally.
 
 ## Step 7: Test on Spyre
 
-Once CPU accuracy passes, test on hardware (requires Spyre pod access):
+Once CPU accuracy passes, test on hardware (requires Spyre pod access). The Spyre
+lane lives under `tests/spyre/` and is also pytest-parametrized (`-k <key>`):
 
 ```bash
+# End-to-end smoke test (load + generate, non-trivial output)
+uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k mymodel
 
-# End-to-end smoke test
-python3 tests/test_e2e_smoke_spyre.py mymodel
-
-# Token comparison (CPU vs Spyre, real weights)
-python3 tests/test_e2e_token_compare_spyre.py mymodel
+# Token comparison (CPU vs Spyre, real weights, per-step top-1)
+uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k mymodel
 ```
 
 ## Step 8: Update Documentation
 
+`ARCHITECTURE.md` is the **single source of truth** for the supported-model lists
+(README.md links to it and must not duplicate them):
+
 1. Add the model to the "Verified Checkpoints" table in `ARCHITECTURE.md`
-2. Add the adapter to the "Model Family Coverage" table
+2. Add the adapter to the "Model Family Coverage" table (and bump the
+   "Coverage: N adapters · M verified checkpoints" line)
 3. Add any model-specific features to the "Model-Specific Adaptations" table
+4. Bump the badge counts at the top of `README.md` to match
 
 ## Common Gotchas
 
@@ -276,6 +302,6 @@ The block forward uses `attn.head_dim` (now 128) — no conditional logic needed
 ### Verification
 
 ```bash
-python3 tests/test_adapter_cpu_accuracy.py granite2b
+uv run pytest tests/test_adapter_cpu_accuracy.py -k granite2b
 # All tokens match — same adapter handles both 2B and 8B
 ```
