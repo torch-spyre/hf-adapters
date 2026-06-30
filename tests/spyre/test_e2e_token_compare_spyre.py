@@ -32,7 +32,6 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from conftest import load_hf_causal_lm, torch_dtype_for
 from model_registry import CAUSAL_KEYS, CAUSAL_LM_MODELS
 
 from hf_adapters.hf_common import (
@@ -41,6 +40,7 @@ from hf_adapters.hf_common import (
     move_to_spyre_with_layout,
     untie_embedding_and_lm_head,
 )
+from tests.conftest import load_hf_causal_lm, torch_dtype_for
 
 DEVICE = "spyre"
 

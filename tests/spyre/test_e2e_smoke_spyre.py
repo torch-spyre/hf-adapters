@@ -30,8 +30,9 @@ import time
 from typing import Any
 
 import pytest
-from conftest import torch_dtype_for
 from model_registry import CAUSAL_KEYS, CAUSAL_LM_MODELS
+
+from tests.conftest import torch_dtype_for
 
 
 def _run_smoke(model_key: str) -> dict[str, Any]:

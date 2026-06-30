@@ -29,7 +29,11 @@ un-patched DEVICE and silently break CPU tests.
 Shared test helpers (``cosine_per_row``, ``encode_padded``, ``load_hf_causal_lm``,
 ``min_cosine``, ``torch_dtype_for``) are defined here as plain functions so that
 test files can import exactly what they need via ``from conftest import ...``.
+These are also re-exported from ``tests/spyre/conftest.py`` so that spyre tests
+resolve to the same definitions despite having their own local conftest.
 """
+
+# REFACTOR_BENJ : why keeping 2 conftests?
 
 from __future__ import annotations
 
@@ -51,8 +55,6 @@ from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 # Shared test helpers — plain functions (not fixtures) importable via
 # `from conftest import ...` in any test file under tests/.
 # ---------------------------------------------------------------------------
-
-# REFACTOR_BENJ : why keeping 2 conftests?
 
 
 def torch_dtype_for(info: dict) -> torch.dtype:
