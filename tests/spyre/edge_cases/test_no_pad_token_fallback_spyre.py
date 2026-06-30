@@ -21,6 +21,6 @@ from model_registry import CAUSAL_PATHS
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_no_pad_token_fallback_spyre(model_path):
+def test_no_pad_token_fallback_spyre(model_path: str) -> None:
     ok, detail = run_no_pad(model_path)
     assert ok, detail

@@ -21,6 +21,6 @@ from model_registry import CAUSAL_PATHS
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_eos_on_last_step_spyre(model_path):
+def test_eos_on_last_step_spyre(model_path: str) -> None:
     ok, detail = run_eos_case(model_path, "eos_on_last_step")
     assert ok, detail

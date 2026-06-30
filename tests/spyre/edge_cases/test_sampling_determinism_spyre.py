@@ -21,6 +21,6 @@ from model_registry import CAUSAL_PATHS
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_sampling_determinism_spyre(model_path):
+def test_sampling_determinism_spyre(model_path: str) -> None:
     ok, detail = run_sampling_determinism(model_path)
     assert ok, detail

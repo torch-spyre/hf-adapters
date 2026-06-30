@@ -21,6 +21,6 @@ from model_registry import CAUSAL_PATHS
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_short_cross_block_spyre(model_path):
+def test_short_cross_block_spyre(model_path: str) -> None:
     ok, detail = run_greedy_case(model_path, "short_cross_block")
     assert ok, detail
