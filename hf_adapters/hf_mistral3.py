@@ -12,24 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""HuggingFace Transformers adapter for the text backbone of Mistral-3-family models.
+"""HuggingFace Transformers adapter for Mistral-family models on Spyre.
 
-Extracts the language model from a Mistral-3-family multimodal checkpoint
-(no trust_remote_code) and prepares it for Spyre. Vision encoder and
-projection layers are discarded — this adapter handles text-only inference.
+Handles two categories of checkpoints:
 
-Supports two text backbone variants dispatched via ``text_config.model_type``:
+1. **Standalone causal-LM** (``MinistralConfig``):
+   Loaded directly via ``AutoModelForCausalLM``; no multimodal wrapper.
+   Example: ``mistralai/Ministral-8B-Instruct-2410``
 
-- ``"mistral"`` — ``MistralForCausalLM`` (e.g. ``mistralai/Mistral-Small-3.2-24B-Instruct-2506``)
-- ``"ministral3"`` — ``Ministral3ForCausalLM`` (e.g. ``mistralai/Ministral-3-14B-Instruct-2512``)
+2. **Mistral-3 multimodal** (``Mistral3Config``):
+   Extracts the text decoder from the multimodal checkpoint and discards the
+   vision encoder and projection layers — text-only inference.
+   Dispatches via ``text_config.model_type``:
 
-Both backbones are architecturally identical to Mistral 7B (standard GQA), so
+   - ``"mistral"``    → ``MistralForCausalLM``    (e.g. ``mistralai/Mistral-Small-3.2-24B-Instruct-2506``)
+   - ``"ministral3"`` → ``Ministral3ForCausalLM`` (e.g. ``mistralai/Ministral-3-14B-Instruct-2512``)
+
+All backbones are architecturally identical to Mistral 7B (standard GQA), so
 compiled block, forward, and prepare logic are reused from ``hf_mistral``.
 
 Usage::
 
     from hf_adapters import AutoSpyreModelForCausalLM
     from transformers import AutoTokenizer
+
+    model = AutoSpyreModelForCausalLM.from_pretrained(
+        "mistralai/Ministral-8B-Instruct-2410")
+    tokenizer = AutoTokenizer.from_pretrained(
+        "mistralai/Ministral-8B-Instruct-2410")
+    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 
     model = AutoSpyreModelForCausalLM.from_pretrained(
         "mistralai/Mistral-Small-3.2-24B-Instruct-2506")
@@ -136,12 +147,31 @@ def _load_hf_model_ministral(model_path, dtype):
     return model
 
 
-def load_hf_model(model_path, dtype):
-    """Load a Mistral-3-family text decoder.
+def _load_hf_model_ministral8b(model_path, dtype):
+    """Load a standalone Ministral causal-LM (e.g. Ministral-8B-Instruct-2410).
 
-    Dispatches to the correct HF text model class based on ``text_config.model_type``:
-    - ``"mistral"``  → ``MistralForCausalLM`` (Mistral-Small-3.2)
-    - ``"ministral3"`` → ``Ministral3ForCausalLM`` (Ministral-3-14B)
+    These checkpoints use ``MinistralConfig`` and are plain causal-LM models
+    with no multimodal wrapper — load directly via ``AutoModelForCausalLM``.
+    """
+    from transformers import AutoModelForCausalLM
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        dtype=dtype,
+        device_map="cpu",
+    )
+    model.eval()
+    model.requires_grad_(False)
+    return model
+
+
+def load_hf_model(model_path, dtype):
+    """Load a Mistral-family text decoder.
+
+    Dispatches based on the top-level config:
+    - ``MinistralConfig`` (no ``text_config``) → standalone ``MinistralForCausalLM``
+    - ``Mistral3Config`` with ``text_config.model_type == "ministral3"`` → ``Ministral3ForCausalLM``
+    - ``Mistral3Config`` with ``text_config.model_type == "mistral"``    → ``MistralForCausalLM``
     """
     from huggingface_hub import hf_hub_download
 
@@ -149,7 +179,11 @@ def load_hf_model(model_path, dtype):
     with open(cfg_path) as f:
         full_cfg = json.load(f)
 
-    text_model_type = full_cfg.get("text_config", {}).get("model_type", "mistral")
+    # Standalone Ministral causal-LM: no multimodal wrapper.
+    if "text_config" not in full_cfg:
+        return _load_hf_model_ministral8b(model_path, dtype)
+
+    text_model_type = full_cfg["text_config"].get("model_type", "mistral")
     if text_model_type == "ministral3":
         return _load_hf_model_ministral(model_path, dtype)
     return _load_hf_model_mistral_small(model_path, dtype)
@@ -172,16 +206,18 @@ def load_model(model_path, dtype):
 
 
 def prepare_for_spyre(model):
-    """Apply Spyre adaptations to a Mistral-3-family model in-place."""
+    """Apply Spyre adaptations to a Mistral-family model in-place."""
+    from transformers.models.ministral.modeling_ministral import MinistralRMSNorm
     from transformers.models.ministral3.modeling_ministral3 import Ministral3RMSNorm
     from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
-    # Decide the correct RMSNorm class in one place by inspecting the first
-    # decoder layer's norm — Ministral3 uses Ministral3RMSNorm, Mistral-Small
-    # uses MistralRMSNorm.
+    # Decide the correct RMSNorm class by inspecting the first decoder layer's
+    # norm instance — each model variant uses its own RMSNorm subclass.
     first_norm = get_backbone(model).layers[0].input_layernorm
     if isinstance(first_norm, MistralRMSNorm):
         rmsnorm_cls = MistralRMSNorm
+    elif isinstance(first_norm, MinistralRMSNorm):
+        rmsnorm_cls = MinistralRMSNorm
     else:
         rmsnorm_cls = Ministral3RMSNorm
 
