@@ -69,6 +69,7 @@ from _vision_helpers import (
     stock_vlm_generate,
     stock_vlm_greedy_steps,
 )
+from conftest import load_hf_vlm
 from model_registry import VISION_MODELS
 
 from hf_adapters.hf_common import (
@@ -78,6 +79,7 @@ from hf_adapters.hf_common import (
     allocate_kv_caches,
     build_expansion_mask,
     move_to_spyre_with_layout,
+    pad_and_position,
 )
 from tests.conftest import torch_dtype_for
 
@@ -151,7 +153,7 @@ def _adapter_teacher_forced_steps(
         math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
         + math.ceil((n_steps + 1) / BLOCK_SIZE) * BLOCK_SIZE
     )
-    padded_ids, padded_len, prompt_offsets, position_ids = adapter._pad_and_position(
+    padded_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
         input_ids, actual_prompt_lengths
     )
     key_caches, value_caches = allocate_kv_caches(
@@ -272,7 +274,7 @@ def test_vlm_generate_spyre(model_key: str) -> None:
 
     # --- Adapter on Spyre ---
     print("  Loading model for Spyre ...")
-    model = adapter.load_hf_model(info["path"], dtype)
+    model = load_hf_vlm(info, dtype, adapter_mod=adapter)
     adapter.prepare_for_spyre(model)
     print("  Moving model to Spyre ...")
     move_to_spyre_with_layout(model, dtype)

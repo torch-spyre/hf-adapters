@@ -76,6 +76,25 @@ def load_hf_causal_lm(
     )
 
 
+def load_hf_vlm(info, torch_dtype, adapter_mod=None):
+    """Load the HF multimodal (image→text) reference, honoring ``load_fn``.
+
+    Mirrors :func:`load_hf_causal_lm` for VLM adapters: when ``load_fn`` is set,
+    the adapter module is expected to expose ``load_hf_model(path, dtype)`` (a
+    non-standard loading path); otherwise the stock
+    ``AutoModelForImageTextToText`` auto class is used.
+    """
+    if info.get("load_fn"):
+        if adapter_mod is None:
+            raise RuntimeError("load_fn=True requires adapter_mod")
+        return adapter_mod.load_hf_model(info["path"], torch_dtype)
+    from transformers import AutoModelForImageTextToText
+
+    return AutoModelForImageTextToText.from_pretrained(
+        info["path"], dtype=torch_dtype, device_map="cpu"
+    )
+
+
 # ---------------------------------------------------------------------------
 
 # Make tests/ importable so model_registry and helpers resolve from any subdir.
@@ -89,7 +108,17 @@ _TARGETS_SPYRE = any(
     "tests/spyre" in a or a.rstrip("/").endswith("tests/spyre") for a in sys.argv
 )
 
-if not _TARGETS_SPYRE:
+# This module body may execute more than once: pytest first imports it as the
+# rootdir conftest (bare name ``conftest``), and a test doing
+# ``from tests.conftest import ...`` triggers a second import under the dotted
+# package name. The second run must be a no-op for the patch block — the CPU
+# patch is already installed — so guard on whether our patched hf_common is
+# already present. A bare assert here would misfire on that benign re-import.
+_ALREADY_PATCHED = (
+    getattr(sys.modules.get("hf_adapters.hf_common"), "DEVICE", None) == "cpu"
+)
+
+if not _TARGETS_SPYRE and not _ALREADY_PATCHED:
     assert "hf_adapters.hf_common" not in sys.modules, (
         "hf_adapters.hf_common was imported before tests/conftest.py ran; "
         "the DEVICE='cpu' patch will not apply. Check for plugins or other "
@@ -128,7 +157,7 @@ if not _TARGETS_SPYRE:
         )
     )
 
-else:
+elif not _ALREADY_PATCHED:
     # Spyre lane: hf_adapters is imported normally (real DEVICE="spyre").
     # Populate model_registry keys so parametrized Spyre tests resolve correctly.
     import model_registry  # noqa: E402
@@ -136,6 +165,9 @@ else:
     model_registry.CAUSAL_KEYS, model_registry.EMBED_KEYS = (
         model_registry.select_representative_models()
     )
+# When _ALREADY_PATCHED (benign re-import via ``from tests.conftest import ...``)
+# both branches are skipped: hf_adapters is patched and the registry keys are
+# already populated from the first execution.
 
 
 def pytest_configure(config: Config) -> None:
