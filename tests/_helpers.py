@@ -18,12 +18,15 @@ Kept as plain functions (not pytest fixtures) so each test file can import
 exactly what it needs. Re-exported through ``conftest.py`` for convenience.
 """
 
+import types
+
 import torch
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 
 
-def torch_dtype_for(info):
+# REFACTOR_BENJ : This should be removed
+def torch_dtype_for(info: dict) -> torch.dtype:
     """Map a registry entry's ``dtype`` field to a torch dtype.
 
     Defaults to float16. ``"float32"`` (e.g. Granite 4 1B, where fp16 overflows
@@ -36,7 +39,12 @@ def torch_dtype_for(info):
     }.get(info.get("dtype"), torch.float16)
 
 
-def load_hf_causal_lm(info, torch_dtype, adapter_mod=None):
+# REFACTOR_BENJ : This should be part of each one of the loaders. WITH A LIST
+def load_hf_causal_lm(
+    info: dict,
+    torch_dtype: torch.dtype,
+    adapter_mod: types.ModuleType | None = None,
+) -> AutoModelForCausalLM:
     """Load the HF causal-LM reference, honoring the per-entry ``load_fn`` flag.
 
     When ``load_fn`` is set, the adapter module is expected to expose
@@ -52,7 +60,10 @@ def load_hf_causal_lm(info, torch_dtype, adapter_mod=None):
     )
 
 
-def encode_padded(tokenizer, prompts):
+def encode_padded(
+    tokenizer: PreTrainedTokenizerBase,
+    prompts: list[str],
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Tokenize a batch with right-padding, returning ``(input_ids, attention_mask)``.
 
     Sets ``pad_token`` to ``eos_token`` if the tokenizer has none — common for
@@ -66,7 +77,11 @@ def encode_padded(tokenizer, prompts):
     return encoded["input_ids"], encoded["attention_mask"]
 
 
-def min_cosine(a, b, attention_mask=None):
+def min_cosine(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    attention_mask: torch.Tensor | None = None,
+) -> float:
     """Minimum cosine similarity between ``a`` and ``b`` along the last dim.
 
     Args:
@@ -82,6 +97,6 @@ def min_cosine(a, b, attention_mask=None):
     return cos.min().item()
 
 
-def cosine_per_row(a, b):
+def cosine_per_row(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """Per-row cosine similarity for ``[B, H]`` tensors. Returns a 1-D tensor."""
     return F.cosine_similarity(a.float(), b.float(), dim=-1)
