@@ -52,6 +52,25 @@ def load_hf_causal_lm(info, torch_dtype, adapter_mod=None):
     )
 
 
+def load_hf_vlm(info, torch_dtype, adapter_mod=None):
+    """Load the HF multimodal (image→text) reference, honoring ``load_fn``.
+
+    Mirrors :func:`load_hf_causal_lm` for VLM adapters: when ``load_fn`` is set,
+    the adapter module is expected to expose ``load_hf_model(path, dtype)`` (a
+    non-standard loading path); otherwise the stock
+    ``AutoModelForImageTextToText`` auto class is used.
+    """
+    if info.get("load_fn"):
+        if adapter_mod is None:
+            raise RuntimeError("load_fn=True requires adapter_mod")
+        return adapter_mod.load_hf_model(info["path"], torch_dtype)
+    from transformers import AutoModelForImageTextToText
+
+    return AutoModelForImageTextToText.from_pretrained(
+        info["path"], dtype=torch_dtype, device_map="cpu"
+    )
+
+
 def encode_padded(tokenizer, prompts):
     """Tokenize a batch with right-padding, returning ``(input_ids, attention_mask)``.
 

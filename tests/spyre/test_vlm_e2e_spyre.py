@@ -61,7 +61,7 @@ import math
 import pytest
 import torch
 import torch.nn.functional as F
-from _helpers import torch_dtype_for
+from _helpers import load_hf_vlm, torch_dtype_for
 from _vision_helpers import (
     build_vlm_batch,
     stock_vlm_generate,
@@ -259,7 +259,7 @@ def test_vlm_generate_spyre(model_key):
 
     # --- Adapter on Spyre ---
     print("  Loading model for Spyre ...")
-    model = adapter.load_hf_model(info["path"], dtype)
+    model = load_hf_vlm(info, dtype, adapter_mod=adapter)
     adapter.prepare_for_spyre(model)
     print("  Moving model to Spyre ...")
     _move_to_spyre_with_layout(model, dtype)
