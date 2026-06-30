@@ -31,7 +31,6 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from conftest import torch_dtype_for
 from model_registry import EMBED_KEYS, EMBEDDING_MODELS
 
 from hf_adapters.hf_common import (
@@ -40,6 +39,7 @@ from hf_adapters.hf_common import (
     prefill_encoder,
     untie_embedding_and_lm_head,
 )
+from tests.conftest import torch_dtype_for
 
 PROMPTS = [
     "Hi.",
