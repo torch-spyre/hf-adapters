@@ -137,7 +137,7 @@ SAMPLING_TARGETS = [8, 16]
 # ---------------------------------------------------------------------------
 
 
-def make_prompt_of_length(tokenizer, target_tokens):
+def _make_prompt_of_length(tokenizer, target_tokens):
     """Build a prompt that tokenizes to ~target_tokens tokens.
 
     Repeats a base sentence until the tokenized length crosses the target,
@@ -156,7 +156,7 @@ def make_prompt_of_length(tokenizer, target_tokens):
 
 def make_prompts(tokenizer, targets):
     """Build a list of prompts, one per target token length."""
-    return [make_prompt_of_length(tokenizer, t) for t in targets]
+    return [_make_prompt_of_length(tokenizer, t) for t in targets]
 
 
 # ---------------------------------------------------------------------------
