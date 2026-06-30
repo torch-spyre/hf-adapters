@@ -23,6 +23,10 @@ When new adapters are added to CONFIG_TO_ADAPTER_MODULE_MAPPING, tests will
 automatically cover them by selecting one representative model per adapter.
 """
 
+from __future__ import annotations
+
+import types
+
 # Model registries - shared by all tests
 CAUSAL_LM_MODELS = {
     # hf_gpt2.py
@@ -194,7 +198,6 @@ CAUSAL_LM_MODELS = {
     },
 }
 
-
 EMBEDDING_MODELS = {
     # hf_gemma3.py
     "embeddinggemma": {
@@ -331,12 +334,12 @@ VISION_MODELS = {
 }
 
 
-def _get_adapter_module_name(adapter_module):  # type: ignore[no-untyped-def]
+def _get_adapter_module_name(adapter_module: types.ModuleType) -> str:
     """Extract module name from adapter module object (e.g., hf_qwen3)."""
     return adapter_module.__name__.split(".")[-1]
 
 
-def _parse_size(size_str):
+def _parse_size(size_str: str) -> float:
     """
     Parse size string (e.g., '2b', '0.3B', '1.5b') to float for comparison.
 
@@ -350,7 +353,9 @@ def _parse_size(size_str):
     return float(size_str.lower().rstrip("b"))
 
 
-def select_representative_models(config_mapping=None):
+def select_representative_models(
+    config_mapping: dict[str, types.ModuleType] | None = None,
+) -> tuple[list[str], list[str]]:
     """
     Programmatically select one representative model per adapter module.
 
@@ -438,7 +443,7 @@ def select_representative_models(config_mapping=None):
 
 # Defer initialization until after conftest.py has patched hf_adapters
 # These will be populated by conftest.py after it sets up the patched modules
-CAUSAL_KEYS = []
-EMBED_KEYS = []
+CAUSAL_KEYS: list[str] = []
+EMBED_KEYS: list[str] = []
 
 # Made with Bob

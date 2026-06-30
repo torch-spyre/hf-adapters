@@ -35,8 +35,8 @@ import gc
 
 import pytest
 import torch
-from _helpers import load_hf_vlm, torch_dtype_for
 from _vision_helpers import build_vlm_batch, stock_vlm_generate
+from conftest import load_hf_vlm, torch_dtype_for
 from model_registry import VISION_MODELS
 
 MAX_NEW_TOKENS = 16

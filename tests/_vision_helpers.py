@@ -22,7 +22,12 @@ canonical tensor keeps the test fast (no image file, no processor tiling) and
 fully deterministic across runs.
 """
 
+from __future__ import annotations
+
 import torch
+from huggingface_hub import hf_hub_download
+from PIL import Image
+from transformers import AutoProcessor
 
 # ── VLM (image→text) end-to-end helpers ──────────────────────────────────────
 #
@@ -42,20 +47,21 @@ SAMPLE_IMAGE = {
 }
 
 
-def load_sample_image():
+def load_sample_image() -> Image.Image:
     """A real, recognizable hub image (a chonky cat) so a caption is judgeable.
 
     Downloaded at test time — no committed fixture. Human-eyeballable output is
     a deliberate secondary signal on top of the token-exact assertion.
     """
-    from huggingface_hub import hf_hub_download
-    from PIL import Image
-
     path = hf_hub_download(**SAMPLE_IMAGE)
     return Image.open(path).convert("RGB")
 
 
-def build_vlm_batch(model_path, prompt, image=None):
+def build_vlm_batch(
+    model_path: str,
+    prompt: str,
+    image: Image.Image | None = None,
+) -> tuple[AutoProcessor, dict[str, torch.Tensor]]:
     """Processor + tokenized (image + prompt) batch, the official VLM way.
 
     Embeds the image in the conversation and lets ``apply_chat_template`` tokenize
@@ -67,8 +73,6 @@ def build_vlm_batch(model_path, prompt, image=None):
     convention. Returns ``(processor, batch)``; ``batch`` carries whatever image
     inputs the model needs (``pixel_values``, ``image_sizes``, …).
     """
-    from transformers import AutoProcessor
-
     processor = AutoProcessor.from_pretrained(model_path)
     processor.tokenizer.padding_side = "left"
     if image is None:
@@ -92,7 +96,13 @@ def build_vlm_batch(model_path, prompt, image=None):
     return processor, batch
 
 
-def stock_vlm_generate(model_path, processor, batch, dtype, max_new_tokens):
+def stock_vlm_generate(
+    model_path: str,
+    processor: AutoProcessor,
+    batch: dict[str, torch.Tensor],
+    dtype: torch.dtype,
+    max_new_tokens: int,
+) -> str:
     """Reference: stock ``AutoModelForImageTextToText.generate`` on ``batch``.
 
     Loaded via stock HF directly so the reference stays independent of the code
@@ -116,7 +126,12 @@ def stock_vlm_generate(model_path, processor, batch, dtype, max_new_tokens):
     return text
 
 
-def stock_vlm_greedy_steps(model_path, batch, dtype, num_steps):
+def stock_vlm_greedy_steps(
+    model_path: str,
+    batch: dict[str, torch.Tensor],
+    dtype: torch.dtype,
+    num_steps: int,
+) -> tuple[list[torch.Tensor], list[int]]:
     """Stock HF per-step greedy logits + token ids over prefill + decode.
 
     Runs ``AutoModelForImageTextToText.generate`` greedily for ``num_steps``

@@ -24,19 +24,22 @@ Usage (on Spyre pod)::
 """
 
 import importlib
+import types
+from typing import Any
 
 import pytest
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from _helpers import torch_dtype_for
 from model_registry import EMBED_KEYS, EMBEDDING_MODELS
 
 from hf_adapters.hf_common import (
-    _move_to_spyre_with_layout,
-    _untie_embedding_and_lm_head,
+    move_to_spyre_with_layout,
     prefill_embed,
     prefill_encoder,
+    untie_embedding_and_lm_head,
 )
+from tests.conftest import torch_dtype_for
 
 PROMPTS = [
     "Hi.",
@@ -48,7 +51,11 @@ PROMPTS = [
 COSINE_THRESHOLD = 0.99
 
 
-def _hf_reference_forward(model, input_ids, attention_mask):
+def _hf_reference_forward(
+    model: nn.Module,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+) -> torch.Tensor:
     """Run stock HF encoder forward on CPU; return last_hidden_state."""
     with torch.no_grad():
         out = model(
@@ -59,7 +66,12 @@ def _hf_reference_forward(model, input_ids, attention_mask):
     return out.last_hidden_state
 
 
-def _adapter_forward(adapter, model, input_ids, attention_mask):
+def _adapter_forward(
+    adapter: types.ModuleType,
+    model: nn.Module,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+) -> torch.Tensor:
     """Run adapter prefill on Spyre; return last_hidden_state on CPU."""
     with torch.no_grad():
         if getattr(adapter, "_is_encoder_only", False):
@@ -79,14 +91,19 @@ def _adapter_forward(adapter, model, input_ids, attention_mask):
     return h_dev.to("cpu")
 
 
-def _mean_pool(hidden, mask):
+def _mean_pool(hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     m = mask.unsqueeze(-1).float()
     summed = (hidden.float() * m).sum(dim=1)
     counts = m.sum(dim=1).clamp(min=1)
     return summed / counts
 
 
-def _compare_results(hf_hidden, ad_hidden, attention_mask, model_name):
+def _compare_results(
+    hf_hidden: torch.Tensor,
+    ad_hidden: torch.Tensor,
+    attention_mask: torch.Tensor,
+    model_name: str,
+) -> list[dict[str, Any]]:
     """Compare per-sequence: per-token cosine, max diff, pooled cosine, NaN."""
     assert hf_hidden.shape == ad_hidden.shape, (
         f"shape mismatch: hf {tuple(hf_hidden.shape)} vs adapter "
@@ -128,7 +145,7 @@ def _compare_results(hf_hidden, ad_hidden, attention_mask, model_name):
     return rows
 
 
-def _run_model_test(model_key):
+def _run_model_test(model_key: str) -> list[dict[str, Any]]:
     """Full comparison for one encoder model."""
     from transformers import AutoModel, AutoTokenizer
 
@@ -169,17 +186,17 @@ def _run_model_test(model_key):
     hf_hidden = _hf_reference_forward(model, input_ids, attention_mask)
 
     print("  Preparing adapter ...")
-    _untie_embedding_and_lm_head(model)
+    untie_embedding_and_lm_head(model)
     adapter.prepare_for_spyre(model)
     print("  Moving model to Spyre ...")
-    _move_to_spyre_with_layout(model, dtype)
+    move_to_spyre_with_layout(model, dtype)
     print("  Running adapter on Spyre ...")
     ad_hidden = _adapter_forward(adapter, model, input_ids, attention_mask)
 
     return _compare_results(hf_hidden, ad_hidden, attention_mask, info["name"])
 
 
-def _print_table(rows):
+def _print_table(rows: list[dict[str, Any]]) -> None:
     """Markdown comparison table — one line per prompt row."""
     print("\n## E2E Embedding Comparison: HF (CPU) vs Adapter (Spyre)\n")
     print(
@@ -203,7 +220,7 @@ def _print_table(rows):
 
 
 @pytest.mark.parametrize("model_key", EMBED_KEYS, ids=EMBED_KEYS)
-def test_e2e_embed_compare_spyre(model_key):
+def test_e2e_embed_compare_spyre(model_key: str) -> None:
     rows = _run_model_test(model_key)
     _print_table(rows)
     n_match = sum(1 for r in rows if r["match"])
