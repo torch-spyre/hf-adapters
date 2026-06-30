@@ -185,21 +185,4 @@ def prepare_for_spyre(model):
     else:
         rmsnorm_cls = Ministral3RMSNorm
 
-    cfg = model.config
-    text_cfg = getattr(cfg, "text_config", None)
-    if text_cfg is not None:
-        for name in (
-            "hidden_size",
-            "intermediate_size",
-            "num_hidden_layers",
-            "num_attention_heads",
-            "num_key_value_heads",
-            "head_dim",
-            "rope_theta",
-            "max_position_embeddings",
-            "vocab_size",
-        ):
-            if hasattr(text_cfg, name) and not hasattr(cfg, name):
-                setattr(cfg, name, getattr(text_cfg, name))
-
     prepare_standard_gqa(model, rmsnorm_cls)
