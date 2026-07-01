@@ -39,7 +39,7 @@ import torch
 
 from hf_adapters.auto_spyre_model import (
     IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
-    resolve_adapter_module,
+    resolve_adapter_module, TOWER_VISION_MODELS,
 )
 from tests._vision_helpers import build_vlm_batch, stock_vlm_generate
 from tests.conftest import load_hf_vlm, torch_dtype_for_model_path
@@ -77,6 +77,8 @@ def _adapter_generate(
 @pytest.mark.slow
 @pytest.mark.parametrize("model_path", VISION_PATHS, ids=VISION_PATHS)
 def test_vlm_generate(model_path: str, unwrap_compiled_blocks) -> None:
+    if model_path in TOWER_VISION_MODELS:
+        pytest.skip(f"Skip the tower kind model {model_path}")
     adapter = resolve_adapter_module(
         model_path, mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING
     )

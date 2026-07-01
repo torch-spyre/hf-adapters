@@ -156,6 +156,9 @@ MODEL_PATH_WITH_LOAD_FN: set = {
     "mistralai/Ministral-3-14B-Instruct-2512",
 }
 
+TOWER_VISION_MODELS : set = {
+    "ibm-granite/granite-vision-4.1-4b"
+}
 
 def resolve_adapter_module(
     model_name_or_path: Union[str, os.PathLike[str]],

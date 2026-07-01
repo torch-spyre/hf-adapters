@@ -24,17 +24,19 @@ sys.path.insert(0, str(project_root))
 import tests.model_registry  # noqa: E402
 
 
-def generate_matrices(exclude_models=None):
+def generate_matrices(exclude_models=None, vlm_exclude_models=None):
     """
     Generate test matrices from the model registry.
 
     Args:
-        exclude_models: List of model paths to exclude from all matrices
+        exclude_models: List of model paths to exclude from causal/embed/combined matrices
+        vlm_exclude_models: List of model paths to exclude from the vision matrix
 
     Returns:
-        dict: Dictionary with 'causal', 'embed', and 'combined' matrix lists
+        dict: Dictionary with 'causal', 'embed', 'vision', and 'combined' matrix lists
     """
     exclude_models = set(exclude_models or [])
+    vlm_exclude_models = set(vlm_exclude_models or [])
 
     # Apply exclusions
     causal_paths = [
@@ -43,6 +45,9 @@ def generate_matrices(exclude_models=None):
     embed_paths = [
         k for k in tests.model_registry.EMBED_PATHS if k not in exclude_models
     ]
+    vision_paths = [
+        k for k in tests.model_registry.VISION_PATHS if k not in vlm_exclude_models
+    ]
 
     # Combine for jobs that test both types
     combined_paths = causal_paths + embed_paths
@@ -50,6 +55,7 @@ def generate_matrices(exclude_models=None):
     return {
         "causal": causal_paths,
         "embed": embed_paths,
+        "vision": vision_paths,
         "combined": combined_paths,
     }
 
@@ -67,6 +73,7 @@ def format_for_github_actions(matrices):
     return {
         "causal_matrix": json.dumps(matrices["causal"]),
         "embed_matrix": json.dumps(matrices["embed"]),
+        "vision_matrix": json.dumps(matrices["vision"]),
         "combined_matrix": json.dumps(matrices["combined"]),
     }
 
@@ -102,13 +109,23 @@ def main():
         "--exclude",
         nargs="*",
         default=[],
-        help="Model keys to exclude from all matrices (e.g., granite-vision phi4)",
+        help="Model keys to exclude from causal/embed/combined matrices "
+        "(e.g., granite-vision phi4)",
+    )
+    parser.add_argument(
+        "--vlm-exclude",
+        nargs="*",
+        default=[],
+        help="Model paths to exclude from the vision (VLM) matrix",
     )
 
     args = parser.parse_args()
 
     # Generate matrices
-    matrices = generate_matrices(exclude_models=args.exclude)
+    matrices = generate_matrices(
+        exclude_models=args.exclude,
+        vlm_exclude_models=args.vlm_exclude,
+    )
 
     # Print summary for workflow logs
     print("Generated test matrices:")
@@ -119,11 +136,16 @@ def main():
         f"  Embedding models ({len(matrices['embed'])}): {', '.join(matrices['embed'])}"
     )
     print(
+        f"  Vision models ({len(matrices['vision'])}): {', '.join(matrices['vision'])}"
+    )
+    print(
         f"  Combined ({len(matrices['combined'])}): {', '.join(matrices['combined'])}"
     )
 
     if args.exclude:
         print(f"\nExcluded models: {', '.join(args.exclude)}")
+    if args.vlm_exclude:
+        print(f"VLM-excluded models: {', '.join(args.vlm_exclude)}")
 
     # Format for GitHub Actions
     outputs = format_for_github_actions(matrices)
