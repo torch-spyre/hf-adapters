@@ -38,7 +38,7 @@ import torch
 from transformers import AutoTokenizer
 
 from hf_adapters.auto_spyre_model import resolve_adapter_module
-from tests.conftest import load_hf_causal_lm, torch_dtype_for_model_path
+from tests.conftest import load_hf_causal_lm, load_ref_model, torch_dtype_for_model_path
 from tests.model_registry import CAUSAL_PATHS
 
 PROMPT = "The capital of France is"
@@ -167,9 +167,7 @@ def test_manual_path(model_path, unwrap_compiled_blocks, set_rope_dtype):
     input_ids = tokenizer(PROMPT, return_tensors="pt")["input_ids"]
 
     # Phase 1: HF reference
-    model = load_hf_causal_lm(model_path, torch_dtype, adapter_mod=adapter_mod)
-    model.eval()
-    model.requires_grad_(False)
+    model = load_ref_model(model_path, adapter_mod)
     hf_results = hf_greedy_steps(model, input_ids, num_decode=NUM_DECODE)
     del model
     gc.collect()

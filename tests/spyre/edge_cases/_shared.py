@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import gc
 import time
-import types
 
 import torch
 from _generate_edge_case_helpers import (
@@ -46,28 +45,13 @@ from _generate_edge_case_helpers import (
 )
 from torch.nn import Module
 from transformers import (
-    AutoModelForCausalLM,
     AutoTokenizer,
     PreTrainedModel,
 )
 
 from hf_adapters import AutoSpyreModelForCausalLM
 from hf_adapters.auto_spyre_model import resolve_adapter_module
-from tests.conftest import load_hf_causal_lm, torch_dtype_for_model_path
-
-
-def _load_ref_model(
-    model_path: str,
-    adapter_mod: types.ModuleType | None = None,
-) -> AutoModelForCausalLM:
-    """Load the HF reference model, using the adapter's custom loader when load_fn=True."""
-    dtype = torch_dtype_for_model_path(model_path)
-    ref_model = load_hf_causal_lm(
-        model_path=model_path, torch_dtype=dtype, adapter_mod=adapter_mod
-    )
-    ref_model.eval()
-    ref_model.requires_grad_(False)
-    return ref_model
+from tests.conftest import load_ref_model
 
 
 # REFACTOR_BENJ : redundant
@@ -87,7 +71,7 @@ def _setup(
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     adapter = resolve_adapter_module(model_path)
 
-    ref_model = _load_ref_model(model_path, adapter_mod=adapter) if need_ref else None
+    ref_model = load_ref_model(model_path, adapter_mod=adapter) if need_ref else None
     spyre_model = _load_spyre_model(model_path)
     return model_path, tokenizer, ref_model, spyre_model
 
