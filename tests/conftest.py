@@ -52,6 +52,7 @@ import torch
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.nodes import Item
+from _pytest.python import Metafunc
 from transformers import AutoModelForCausalLM
 
 # NOTE: do NOT import hf_adapters at module top level. The CPU patch block below
@@ -193,6 +194,51 @@ def pytest_addoption(parser: Parser) -> None:
         default=False,
         help="Run tests marked @pytest.mark.slow (deselected by default)",
     )
+    parser.addoption(
+        "--model-path",
+        action="append",
+        default=[],
+        help=(
+            "Override the ``model_path`` parametrization for every test that "
+            "takes it. Repeat the flag to run against multiple models, e.g. "
+            "``--model-path foo/bar --model-path baz/qux``. When set, the "
+            "registry-derived CAUSAL_PATHS / EMBED_PATHS / VISION_PATHS lists "
+            "in the test decorators are ignored."
+        ),
+    )
+
+
+def pytest_generate_tests(metafunc: Metafunc) -> None:
+    """Rewrite ``model_path`` parametrization when ``--model-path`` is given.
+
+    Every spyre / cpu test that runs over the registry declares
+    ``@pytest.mark.parametrize("model_path", CAUSAL_PATHS | EMBED_PATHS | ...)``.
+    When the user passes ``--model-path`` on the command line, strip the
+    decorator's parametrize markers for ``model_path`` and reparametrize with
+    the user-supplied list so any HF model path can be exercised — including
+    ones that are not in ``tests/model_registry.py``.
+    """
+    overrides: list[str] = metafunc.config.getoption("--model-path") or []
+    if not overrides:
+        return
+    if "model_path" not in metafunc.fixturenames:
+        return
+
+    # Drop the decorator's own parametrize markers for ``model_path`` so pytest
+    # doesn't raise "duplicate parametrization" when we call metafunc.parametrize
+    # below. Other parameter names on the same @parametrize marker are preserved.
+    kept: list = []
+    for marker in metafunc.definition.iter_markers("parametrize"):
+        argnames = marker.args[0] if marker.args else ""
+        names = [n.strip() for n in argnames.replace(",", " ").split()]
+        if "model_path" in names:
+            continue
+        kept.append(marker)
+    metafunc.definition.own_markers = [
+        m for m in metafunc.definition.own_markers if m.name != "parametrize"
+    ] + kept
+
+    metafunc.parametrize("model_path", overrides, ids=overrides)
 
 
 def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
