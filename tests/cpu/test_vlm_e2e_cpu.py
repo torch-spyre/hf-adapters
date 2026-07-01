@@ -39,7 +39,8 @@ import torch
 
 from hf_adapters.auto_spyre_model import (
     IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
-    resolve_adapter_module, TOWER_VISION_MODELS,
+    TOWER_VISION_MODELS,
+    resolve_adapter_module,
 )
 from tests._vision_helpers import build_vlm_batch, stock_vlm_generate
 from tests.conftest import load_hf_vlm, torch_dtype_for_model_path
