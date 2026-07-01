@@ -150,12 +150,6 @@ MODEL_PATH_TO_TORCH_DTYPE: dict = {
     "ibm-granite/granite-4.0-1b-base": torch.float32,
 }
 
-MODEL_PATH_WITH_LOAD_FN: set = {
-    "ibm-granite/granite-vision-4.1-4b",
-    "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
-    "mistralai/Ministral-3-14B-Instruct-2512",
-}
-
 
 def resolve_adapter_module(
     model_name_or_path: Union[str, os.PathLike[str]],

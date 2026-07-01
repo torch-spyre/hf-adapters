@@ -77,11 +77,8 @@ def load_hf_vlm(model_path, torch_dtype, adapter_mod=None):
     non-standard loading path); otherwise the stock
     ``AutoModelForImageTextToText`` auto class is used.
     """
-    from hf_adapters.auto_spyre_model import MODEL_PATH_WITH_LOAD_FN
 
-    if model_path in MODEL_PATH_WITH_LOAD_FN:
-        if adapter_mod is None:
-            raise RuntimeError("load_fn=True requires adapter_mod")
+    if hasattr(adapter_mod, "load_hf_model"):
         return adapter_mod.load_hf_model(model_path, torch_dtype)
     from transformers import AutoModelForImageTextToText
 
@@ -269,11 +266,8 @@ def _load_hf_causal_lm(
     granite-vision).
     """
 
-    from hf_adapters.auto_spyre_model import MODEL_PATH_WITH_LOAD_FN
 
-    if model_path in MODEL_PATH_WITH_LOAD_FN:
-        if adapter_mod is None:
-            raise RuntimeError("load_fn=True requires adapter_mod")
+    if hasattr(adapter_mod, "load_hf_model"):
         return adapter_mod.load_hf_model(model_path, torch_dtype)
     return AutoModelForCausalLM.from_pretrained(
         model_path, torch_dtype=torch_dtype, device_map="cpu"
