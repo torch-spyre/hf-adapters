@@ -258,11 +258,8 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
             model_name_or_path,
             mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
         )
-        model: torch.nn.Module = load_model_common(
-            model_name_or_path,
-            module.prepare_for_spyre,
-            dtype,
-            auto_model_cls=cls._auto_model_cls,
+        model: torch.nn.Module = super().from_pretrained(
+            model_name_or_path, dtype=dtype
         )
 
         def model_prefill_logits(
