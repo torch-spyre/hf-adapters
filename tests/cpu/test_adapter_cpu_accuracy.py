@@ -174,8 +174,6 @@ def test_manual_path(model_path, unwrap_compiled_blocks, set_rope_dtype):
 
     # Phase 2: adapter (fresh load — prepare_for_spyre is destructive)
     model = load_ref_model(model_path, adapter_mod=adapter_mod)
-    model.eval()
-    model.requires_grad_(False)
     adapter_mod.prepare_for_spyre(model)
     # Manual path skips load_model_common; propagate the chosen dtype to the
     # RoPE freq cache like the production move does (needed for bf16 models).
@@ -216,8 +214,6 @@ def test_auto_loader(model_path, auto_spyre_model, unwrap_compiled_blocks):
     # Phase 2: HF reference (fresh)
     adapter_mod = resolve_adapter_module(model_path)
     hf_model = load_ref_model(model_path, adapter_mod)
-    hf_model.eval()
-    hf_model.requires_grad_(False)
     encoded = tokenizer(PROMPT, return_tensors="pt")
     with torch.no_grad():
         hf_out = hf_model.generate(

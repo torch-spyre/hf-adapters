@@ -88,8 +88,6 @@ def _run_adapter_generate(
     ``do_sample``, ``temperature``, ``top_k``).
     """
     model = load_ref_model(model_path, adapter_mod=adapter_mod)
-    model.eval()
-    model.requires_grad_(False)
     adapter_mod.prepare_for_spyre(model)
     unwrap_fn(model)
     gen_kwargs.setdefault("do_sample", False)
@@ -111,8 +109,6 @@ def _load_prepared_model(
 ) -> torch.nn.Module:
     """Load + prepare an adapter model once. Caller is responsible for ``del`` + gc."""
     model = load_ref_model(model_path, adapter_mod=adapter_mod)
-    model.eval()
-    model.requires_grad_(False)
     adapter_mod.prepare_for_spyre(model)
     unwrap_fn(model)
     return model
@@ -158,8 +154,6 @@ def _hf_reference_cached(
     if key in _HF_REF_CACHE:
         return _HF_REF_CACHE[key]
     ref_model = load_ref_model(model_path, adapter_mod=adapter_mod)
-    ref_model.eval()
-    ref_model.requires_grad_(False)
     outputs = hf_reference_outputs(ref_model, tokenizer, prompts, max_new_tokens)
     del ref_model
     gc.collect()
@@ -274,8 +268,6 @@ def test_generate_forced_eos(
 
     # Step 1: capture each prompt's natural greedy continuation.
     ref_model = load_ref_model(model_path, adapter_mod=adapter_mod)
-    ref_model.eval()
-    ref_model.requires_grad_(False)
     per_prompt_ids = [
         greedy_token_ids(ref_model, tokenizer, p, max_new_tokens) for p in prompts
     ]
@@ -429,8 +421,6 @@ def test_generate_no_eos_runs_full_budget(
 
     # HF reference with eos_token_id=None so HF also runs the full budget.
     ref_model = load_ref_model(model_path, adapter_mod=adapter_mod)
-    ref_model.eval()
-    ref_model.requires_grad_(False)
     hf_outputs: list[str] = []
     for prompt in prompts:
         encoded = tokenizer(prompt, return_tensors="pt")

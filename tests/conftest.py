@@ -266,7 +266,6 @@ def _load_hf_causal_lm(
     granite-vision).
     """
 
-
     if hasattr(adapter_mod, "load_hf_model"):
         return adapter_mod.load_hf_model(model_path, torch_dtype)
     return AutoModelForCausalLM.from_pretrained(

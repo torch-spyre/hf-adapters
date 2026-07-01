@@ -68,16 +68,12 @@ def test_multibatch(model_path: str, unwrap_compiled_blocks, hf_common_mod) -> N
 
     # HF reference (per-prompt, BEFORE patching for cleanliness)
     model = load_ref_model(model_path, adapter_mod)
-    model.eval()
-    model.requires_grad_(False)
     hf_outputs = _hf_reference_outputs(model, tokenizer, PROMPTS, MAX_NEW_TOKENS)
     del model
     gc.collect()
 
     # Adapter batched generate
     model = load_ref_model(model_path, adapter_mod)
-    model.eval()
-    model.requires_grad_(False)
     adapter_mod.prepare_for_spyre(model)
     unwrap_compiled_blocks(model)
     adapter_outputs = hf_common_mod.generate(
