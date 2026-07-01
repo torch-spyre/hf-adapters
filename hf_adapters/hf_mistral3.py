@@ -12,24 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""HuggingFace Transformers adapter for Mistral-family models on Spyre.
+"""HuggingFace Transformers adapter for the text backbone of Mistral-3-family models.
 
-Handles two categories of checkpoints:
+Loads a Mistral-3-family multimodal checkpoint (no trust_remote_code) and runs
+*text-only* causal inference over its decoder. The vision encoder and projector
+are dropped — for the full image→text pipeline this adapter is not used.
 
-1. **Standalone causal-LM** (``MinistralConfig``):
-   Loaded directly via ``AutoModelForCausalLM``; no multimodal wrapper.
-   Example: ``mistralai/Ministral-8B-Instruct-2410``
+Covers two text-backbone variants, both shipped as
+``Mistral3ForConditionalGeneration`` and distinguished only by their
+``text_config.model_type``:
 
-2. **Mistral-3 multimodal** (``Mistral3Config``):
-   Extracts the text decoder from the multimodal checkpoint and discards the
-   vision encoder and projection layers — text-only inference.
-   Dispatches via ``text_config.model_type``:
+- ``"mistral"`` — e.g. ``mistralai/Mistral-Small-3.2-24B-Instruct-2506``
+- ``"ministral3"`` — e.g. ``mistralai/Ministral-3-14B-Instruct-2512`` (blocked-FP8,
+  dequantized on load)
 
-   - ``"mistral"``    → ``MistralForCausalLM``    (e.g. ``mistralai/Mistral-Small-3.2-24B-Instruct-2506``)
-   - ``"ministral3"`` → ``Ministral3ForCausalLM`` (e.g. ``mistralai/Ministral-3-14B-Instruct-2512``)
+Both decoders are architecturally identical to Mistral 7B (standard GQA), so the
+compiled block, forward, and prepare logic are reused from ``hf_mistral``;
+``get_backbone``/``prepare_standard_gqa`` handle the nested VLM shape and the
+RMSNorm class is auto-detected per variant.
 
-All backbones are architecturally identical to Mistral 7B (standard GQA), so
-compiled block, forward, and prepare logic are reused from ``hf_mistral``.
+Also supports the standalone causal-LM variant (``MinistralConfig``):
+
+- ``"ministral"`` — e.g. ``mistralai/Ministral-8B-Instruct-2410``
 
 Usage::
 
@@ -37,12 +41,6 @@ Usage::
     from transformers import AutoTokenizer
 
     model = AutoSpyreModelForCausalLM.from_pretrained(
-        "mistralai/Ministral-8B-Instruct-2410")
-    tokenizer = AutoTokenizer.from_pretrained(
-        "mistralai/Ministral-8B-Instruct-2410")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
-
-    model = AutoSpyreModelForCausalLM.from_pretrained(
         "mistralai/Mistral-Small-3.2-24B-Instruct-2506")
     tokenizer = AutoTokenizer.from_pretrained(
         "mistralai/Mistral-Small-3.2-24B-Instruct-2506")
@@ -52,11 +50,14 @@ Usage::
         "mistralai/Ministral-3-14B-Instruct-2512")
     tokenizer = AutoTokenizer.from_pretrained(
         "mistralai/Ministral-3-14B-Instruct-2512")
+    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+
+    model = AutoSpyreModelForCausalLM.from_pretrained(
+        "mistralai/Ministral-8B-Instruct-2410")
+    tokenizer = AutoTokenizer.from_pretrained(
+        "mistralai/Ministral-8B-Instruct-2410")
     outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
-
-import json
-from collections import defaultdict
 
 from hf_adapters.hf_common import (
     _move_to_spyre_with_layout,
@@ -70,111 +71,83 @@ from hf_adapters.hf_mistral import (
     _run_forward,  # noqa: F401  re-exported as adapter module API
 )
 
-# ---------------------------------------------------------------------------
-# Ministral-8B byte-level BPE decode fix
-# ---------------------------------------------------------------------------
 
-# The Ministral-8B tokenizer (LlamaTokenizer) uses a GPT-2-style byte-level
-# BPE fallback vocabulary where non-printable bytes are encoded as Unicode
-# characters in the range U+0100–U+013F (byte_value + 0x100 for bytes 0–32
-# and 127–160) and printable bytes map to U+0021–U+007E as-is.
-# When these characters appear as standalone tokens in the generated output,
-# tokenizer.decode() returns them verbatim instead of converting them back
-# to the original byte.  Build a translation table that undoes this mapping.
-#
-# Only bytes that differ from their codepoint need a mapping entry:
-#   byte 0x00–0x20 (NUL … space)  → codepoints 0x100–0x120
-#   byte 0x7F–0xA0 (DEL … NBSP)   → codepoints 0x121–0x142  (0x7F→0x121, …)
-# All other bytes (0x21–0x7E, 0xA1–0xFF) map to the same codepoint value, so
-# chr(byte) == chr(codepoint) and no remapping is needed.
-def _build_ministral_byte_decode_table() -> dict:
-    # Printable ASCII that maps to itself: 0x21–0x7E
-    printable = list(range(ord("!"), ord("~") + 1))  # 33–126
-    # All bytes: the GPT-2 encoding assigns the 256-printable characters first
-    # to the 94 printable ASCII bytes, then the remaining 162 slots fill the
-    # gap for the non-printable bytes.
-    # Reconstruction: iterate bytes 0-255; if printable ASCII, codepoint = byte;
-    # otherwise assign the next unused codepoint starting at 256.
-    table = {}
-    extra_cp = 256  # next codepoint to assign for non-printable bytes
-    for byte_val in range(256):
-        if byte_val in printable:
-            cp = byte_val  # maps to itself — no entry needed
-        else:
-            cp = extra_cp
-            extra_cp += 1
-            if cp != byte_val:  # only add when remapping is necessary
-                table[cp] = chr(byte_val)
-    return table
+def _load_hf_model_ministral8b(model_path, dtype):
+    """Load a standalone Ministral-8B causal-LM (``MinistralConfig``).
 
+    ``mistralai/Ministral-8B-Instruct-2410`` ships as a plain causal-LM with
+    no multimodal wrapper — load directly via ``AutoModelForCausalLM``.
 
-_MINISTRAL_BYTE_DECODE_TABLE = str.maketrans(_build_ministral_byte_decode_table())
+    The tokenizer for this checkpoint (``LlamaTokenizer``) uses a GPT-2-style
+    byte-level BPE fallback vocabulary where non-printable bytes are encoded as
+    Unicode characters in the range U+0100–U+0142 (e.g. space → Ġ U+0120,
+    newline → Ċ U+010A). ``tokenizer.decode()`` returns these characters
+    verbatim, so the ``_generate`` hook post-processes the decoded strings
+    through ``_fix_ministral_decode`` to restore the original bytes.
+    """
+    from transformers import AutoModelForCausalLM
 
-
-def _fix_ministral_decode(text: str) -> str:
-    """Translate GPT-2 byte-level BPE escape chars back to real bytes."""
-    return text.translate(_MINISTRAL_BYTE_DECODE_TABLE)
-
-
-def _load_hf_model_mistral_small(model_path, dtype):
-    """Load Mistral-Small text decoder via safetensor key-remap into MistralForCausalLM."""
-    from huggingface_hub import hf_hub_download
-    from safetensors.torch import load_file
-    from transformers import MistralConfig, MistralForCausalLM
-
-    cfg_path = hf_hub_download(model_path, "config.json")
-    with open(cfg_path) as f:
-        full_cfg = json.load(f)
-
-    mistral_cfg = MistralConfig(**full_cfg["text_config"])
-    mistral_cfg.tie_word_embeddings = False
-    model = MistralForCausalLM(mistral_cfg)
-
-    idx_path = hf_hub_download(model_path, "model.safetensors.index.json")
-    with open(idx_path) as f:
-        idx = json.load(f)
-
-    shard_keys = defaultdict(dict)
-    for key, shard in idx["weight_map"].items():
-        if key.startswith("language_model.model."):
-            shard_keys[shard][key.replace("language_model.model.", "model.", 1)] = key
-        elif key.startswith("language_model.lm_head."):
-            shard_keys[shard][
-                key.replace("language_model.lm_head.", "lm_head.", 1)
-            ] = key
-        elif key == "lm_head.weight":
-            shard_keys[shard][key] = key
-
-    state = {}
-    for shard, key_map in shard_keys.items():
-        shard_path = hf_hub_download(model_path, shard)
-        data = load_file(shard_path)
-        for new_key, old_key in key_map.items():
-            state[new_key] = data[old_key]
-
-    model.load_state_dict(state, strict=False)
-    model.to(dtype)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        dtype=dtype,
+        device_map="cpu",
+    )
     model.eval()
     model.requires_grad_(False)
     return model
 
 
-def _load_hf_model_ministral(model_path, dtype):
-    """Load Ministral-3 text decoder via AutoModelForCausalLM with automatic dequantization.
+def _fix_ministral_decode(text: str) -> str:
+    """Translate GPT-2 byte-level BPE escape characters back to real bytes.
 
-    The Ministral-3-14B checkpoint uses blocked FP8 quantization (weight +
-    weight_scale_inv per projection). Loading via safetensor key-remap would
-    bring in the raw quantized tensors with wrong shapes. AutoModelForCausalLM
-    handles dequantization automatically and returns fp16/bf16 weights.
-
-    The full Mistral3ForConditionalGeneration is loaded (vision tower + text
-    decoder) and then the vision tower is deleted to free memory.  get_backbone()
-    descends through model.model.language_model to the text backbone, and the
-    top-level lm_head is used directly — matching the Gemma4 adapter pattern.
+    The GPT-2 encoding assigns printable ASCII bytes (0x21–0x7E) to themselves
+    and maps the remaining 162 non-printable bytes to codepoints starting at
+    U+0100 in the order they are encountered when iterating 0–255.  This
+    function inverts that mapping so generated text is returned as normal UTF-8.
     """
+    printable = set(range(ord("!"), ord("~") + 1))  # 0x21–0x7E
+    table: dict = {}
+    extra_cp = 256
+    for byte_val in range(256):
+        if byte_val in printable:
+            pass  # codepoint == byte_val — no remapping needed
+        else:
+            cp = extra_cp
+            extra_cp += 1
+            if cp != byte_val:
+                table[cp] = chr(byte_val)
+    return text.translate(str.maketrans(table))
+
+
+def load_hf_model(model_path, dtype):
+    """Load a Mistral-3-family text decoder from its stock multimodal checkpoint.
+
+    Both variants (Mistral-Small-3.2 with a ``mistral`` text backbone, and
+    Ministral-3 with a ``ministral3`` one) ship as
+    ``Mistral3ForConditionalGeneration``, so the full VLM is loaded directly —
+    no shard key-remap. ``get_backbone`` descends through
+    ``model.model.language_model`` to the text decoder and the top-level
+    ``lm_head`` is used as-is (the Gemma4 adapter pattern); the text-only
+    ``forward(input_ids=...)`` provides the causal-LM reference for the harness.
+
+    ``from_pretrained`` also dequantizes automatically: the Ministral-3-14B
+    checkpoint is blocked-FP8 (weight + weight_scale_inv per projection), which a
+    raw key-remap would load with the wrong shapes — here it comes back as
+    fp16/bf16. The vision tower and projector are dropped to free memory since
+    this is text-only inference.
+
+    For the standalone ``MinistralConfig`` variant (Ministral-8B), dispatches to
+    ``_load_hf_model_ministral8b`` instead.
+    """
+    from transformers import AutoConfig
+    from transformers.models.ministral.configuration_ministral import MinistralConfig
     from transformers.models.mistral3.modeling_mistral3 import (
         Mistral3ForConditionalGeneration,
     )
+
+    cfg = AutoConfig.from_pretrained(model_path)
+    if isinstance(cfg, MinistralConfig):
+        return _load_hf_model_ministral8b(model_path, dtype)
 
     model = Mistral3ForConditionalGeneration.from_pretrained(
         model_path,
@@ -193,76 +166,8 @@ def _load_hf_model_ministral(model_path, dtype):
     return model
 
 
-def _load_hf_model_ministral8b(model_path, dtype):
-    """Load a standalone Ministral causal-LM (e.g. Ministral-8B-Instruct-2410).
-
-    These checkpoints use ``MinistralConfig`` and are plain causal-LM models
-    with no multimodal wrapper — load directly via ``AutoModelForCausalLM``.
-    """
-    from transformers import AutoModelForCausalLM
-
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        dtype=dtype,
-        device_map="cpu",
-    )
-    model.eval()
-    model.requires_grad_(False)
-    return model
-
-
-def load_hf_model(model_path, dtype):
-    """Load a Mistral-family text decoder.
-
-    Dispatches based on the top-level config:
-    - ``MinistralConfig`` (no ``text_config``) → standalone ``MinistralForCausalLM``
-    - ``Mistral3Config`` with ``text_config.model_type == "ministral3"`` → ``Ministral3ForCausalLM``
-    - ``Mistral3Config`` with ``text_config.model_type == "mistral"``    → ``MistralForCausalLM``
-    """
-    from huggingface_hub import hf_hub_download
-
-    cfg_path = hf_hub_download(model_path, "config.json")
-    with open(cfg_path) as f:
-        full_cfg = json.load(f)
-
-    # Standalone Ministral causal-LM: no multimodal wrapper.
-    if "text_config" not in full_cfg:
-        return _load_hf_model_ministral8b(model_path, dtype)
-
-    text_model_type = full_cfg["text_config"].get("model_type", "mistral")
-    if text_model_type == "ministral3":
-        return _load_hf_model_ministral(model_path, dtype)
-    return _load_hf_model_mistral_small(model_path, dtype)
-
-
-def _is_ministral_config(model) -> bool:
-    """Return True when the model was loaded from a standalone MinistralConfig."""
-    try:
-        from transformers.models.ministral.configuration_ministral import (
-            MinistralConfig,
-        )
-
-        return isinstance(model.config, MinistralConfig)
-    except ImportError:
-        return False
-
-
-def _generate(model, tokenizer, prompts, **kwargs):
-    """Module-level generate hook checked by AutoSpyreModelForCausalLM.
-
-    Routes to a post-processing wrapper for MinistralConfig models (whose
-    tokenizer leaves GPT-2 byte-level BPE escape characters in the decoded
-    text), and falls back to the standard generate for all other variants
-    (Mistral-Small-3.2, Ministral-3-14B) whose tokenizers decode cleanly.
-    """
-    results = generate(_run_forward, model, tokenizer, prompts, **kwargs)
-    if _is_ministral_config(model):
-        return [_fix_ministral_decode(s) for s in results]
-    return results
-
-
 def load_model(model_path, dtype):
-    """Load a Mistral-family text decoder and prepare it for Spyre."""
+    """Load a Mistral-3-family text decoder and prepare it for Spyre."""
     model = load_hf_model(model_path, dtype)
     # FP8 checkpoints (e.g. Ministral-3-14B) are dequantized to bf16 by
     # transformers regardless of the requested dtype. Use the model's actual
@@ -277,14 +182,32 @@ def load_model(model_path, dtype):
     return model
 
 
+def _generate(model, tokenizer, prompts, **kwargs):
+    """Module-level generate hook checked by ``AutoSpyreModelForCausalLM``.
+
+    For ``MinistralConfig`` models (Ministral-8B) the tokenizer returns GPT-2
+    byte-level BPE escape characters (e.g. Ġ for space, Ċ for newline) in the
+    decoded text.  Post-process the results through ``_fix_ministral_decode`` to
+    restore the original bytes.  All other variants decode cleanly and are
+    returned as-is.
+    """
+    from transformers.models.ministral.configuration_ministral import MinistralConfig
+
+    results = generate(_run_forward, model, tokenizer, prompts, **kwargs)
+    if isinstance(model.config, MinistralConfig):
+        return [_fix_ministral_decode(s) for s in results]
+    return results
+
+
 def prepare_for_spyre(model):
-    """Apply Spyre adaptations to a Mistral-family model in-place."""
+    """Apply Spyre adaptations to a Mistral-3-family model in-place."""
     from transformers.models.ministral.modeling_ministral import MinistralRMSNorm
     from transformers.models.ministral3.modeling_ministral3 import Ministral3RMSNorm
     from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
-    # Decide the correct RMSNorm class by inspecting the first decoder layer's
-    # norm instance — each model variant uses its own RMSNorm subclass.
+    # Decide the correct RMSNorm class in one place by inspecting the first
+    # decoder layer's norm — Ministral3 uses Ministral3RMSNorm, Mistral-Small
+    # uses MistralRMSNorm, Ministral-8B uses MinistralRMSNorm.
     first_norm = get_backbone(model).layers[0].input_layernorm
     if isinstance(first_norm, MistralRMSNorm):
         rmsnorm_cls = MistralRMSNorm
