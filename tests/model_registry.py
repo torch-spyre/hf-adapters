@@ -329,13 +329,11 @@ VISION_MODELS = {
 }
 
 
-# REFACTOR_BENJAMIN : The content may be simplified - it may induced from the path
 def _get_adapter_module_name(adapter_module: types.ModuleType) -> str:
     """Extract module name from adapter module object (e.g., hf_qwen3)."""
     return adapter_module.__name__.split(".")[-1]
 
 
-# REFACTOR_BENJAMIN : The content may be simplified - we should keep only representative
 def _parse_size(size_str: str) -> float:
     """
     Parse size string (e.g., '2b', '0.3B', '1.5b') to float for comparison.

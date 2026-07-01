@@ -54,7 +54,6 @@ from hf_adapters.auto_spyre_model import resolve_adapter_module
 from tests.conftest import load_ref_model
 
 
-# REFACTOR_BENJ : redundant
 def _load_spyre_model(model_path: str) -> Module:
     print(f"  Loading {model_path} on Spyre ...")
     t0 = time.time()
@@ -63,7 +62,6 @@ def _load_spyre_model(model_path: str) -> Module:
     return model
 
 
-# REFACTOR_BENJ : redundant
 def _setup(
     model_path: str,
     need_ref: bool,
@@ -76,7 +74,6 @@ def _setup(
     return model_path, tokenizer, ref_model, spyre_model
 
 
-# REFACTOR_BENJ : move to conftest?
 def _teardown(
     spyre_model: AutoSpyreModelForCausalLM,
     ref_model: PreTrainedModel | None,
