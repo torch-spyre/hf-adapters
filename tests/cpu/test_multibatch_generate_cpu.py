@@ -31,7 +31,7 @@ import torch
 from transformers import AutoTokenizer
 
 from hf_adapters.auto_spyre_model import resolve_adapter_module
-from tests.conftest import load_hf_causal_lm, torch_dtype_for_model_path
+from tests.conftest import load_ref_model
 from tests.model_registry import CAUSAL_PATHS
 
 PROMPTS: list[str] = [
@@ -63,12 +63,11 @@ def _hf_reference_outputs(
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 def test_multibatch(model_path: str, unwrap_compiled_blocks, hf_common_mod) -> None:
     adapter_mod = resolve_adapter_module(model_path)
-    torch_dtype = torch_dtype_for_model_path(model_path)
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     # HF reference (per-prompt, BEFORE patching for cleanliness)
-    model = load_hf_causal_lm(model_path, torch_dtype, adapter_mod=adapter_mod)
+    model = load_ref_model(model_path, adapter_mod)
     model.eval()
     model.requires_grad_(False)
     hf_outputs = _hf_reference_outputs(model, tokenizer, PROMPTS, MAX_NEW_TOKENS)
@@ -76,7 +75,7 @@ def test_multibatch(model_path: str, unwrap_compiled_blocks, hf_common_mod) -> N
     gc.collect()
 
     # Adapter batched generate
-    model = load_hf_causal_lm(model_path, torch_dtype, adapter_mod=adapter_mod)
+    model = load_ref_model(model_path, adapter_mod)
     model.eval()
     model.requires_grad_(False)
     adapter_mod.prepare_for_spyre(model)
