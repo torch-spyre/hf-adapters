@@ -80,7 +80,7 @@ from hf_adapters.hf_common import (
     DEVICE,
     allocate_kv_caches,
     build_expansion_mask,
-    model_dtype,
+    get_model_dtype,
     move_to_spyre_with_layout,
     pad_and_position,
 )
@@ -142,7 +142,7 @@ def _adapter_teacher_forced_steps(
     pixel_values = batch["pixel_values"]
     image_sizes = batch["image_sizes"]
 
-    model_d_type = model_dtype(model)
+    model_d_type = get_model_dtype(model)
     backbone = adapter.get_backbone(model)
     emb_mult = backbone.embedding_multiplier
 
