@@ -49,7 +49,7 @@ decoder is ``model.model``, or — for 4B/12B/27B — the multimodal
 ``Gemma3ForConditionalGeneration`` whose text decoder is nested at
 ``model.model.language_model``. The shared ``get_backbone`` resolves both (it
 descends into ``.language_model`` when present); ``lm_head`` stays at the top
-level (``model.lm_head``), matching where ``chunk_lm_head`` looks.
+level (``model.lm_head``), matching where ``pad_lm_head`` looks.
 
 Usage::
 
@@ -69,22 +69,11 @@ from hf_adapters.hf_common import (
     PrecomputedRotaryEmbedding,
     add_causal_sliding_window_band,
     apply_rope_matmul,
-    chunk_lm_head,
     get_backbone,
     kv_cache_update,
+    pad_lm_head,
+    text_config,
 )
-
-
-def _text_config(model):
-    """Return the Gemma 3 *text* decoder config.
-
-    The multimodal checkpoints carry a composite ``Gemma3Config`` whose decoder
-    fields (``head_dim``, ``layer_types``, ``sliding_window``, ...) live on the
-    nested ``text_config``. The text-only ``Gemma3TextConfig`` (1B) exposes them
-    directly. This returns whichever holds the decoder fields.
-    """
-    cfg = model.config
-    return getattr(cfg, "text_config", None) or cfg
 
 
 def _patch_gemma3_rmsnorm(rmsnorm_cls):
@@ -281,7 +270,7 @@ def _run_backbone_forward(
     global layers use the base mask as-is.
     """
     backbone = get_backbone(model)
-    cfg = _text_config(model)
+    cfg = text_config(model.config)
 
     h = backbone.embed_tokens(input_ids)
 
@@ -337,7 +326,7 @@ def _run_forward(
     token_index,
     cache_position,
 ):
-    """Gemma 3 causal-LM forward: backbone + chunked LM head + optional softcap."""
+    """Gemma 3 causal-LM forward: backbone + LM head + optional softcap."""
     h = _run_backbone_forward(
         model,
         input_ids,
@@ -350,18 +339,11 @@ def _run_forward(
         cache_position,
     )
 
-    # Chunked LM head: 262K vocab exceeds Spyre's per-core EAR limit. Split into
-    # N chunks, run each, cat on CPU.
-    logits_parts = []
-    for lm_chunk, real_sz in zip(
-        model._spyre_lm_head_chunks, model._spyre_lm_chunk_sizes
-    ):
-        logits_parts.append(lm_chunk(h).to("cpu")[..., :real_sz])
-    logits = torch.cat(logits_parts, dim=-1)
+    logits = model.lm_head(h)
 
     # final_logit_softcapping is None on published Gemma 3 (dropped from Gemma 2);
     # applied defensively if a checkpoint sets it.
-    cap = getattr(_text_config(model), "final_logit_softcapping", None)
+    cap = getattr(text_config(model.config), "final_logit_softcapping", None)
     if cap is not None:
         logits = logits / cap
         logits = torch.tanh(logits)
@@ -387,7 +369,7 @@ def prepare_for_spyre(model):
     5. Compile each decoder layer's block.
     """
     backbone = get_backbone(model)
-    cfg = _text_config(model)
+    cfg = text_config(model.config)
 
     # Patch whichever concrete RMSNorm class this model uses. The norm module
     # closest to a decoder layer's input_layernorm is representative.
@@ -421,7 +403,9 @@ def prepare_for_spyre(model):
         (num_kv_heads, head_dim, head_dim) for _ in cfg.layer_types
     ]
 
-    chunk_lm_head(model, num_chunks=8)
+    # LM head: smooth-padded to a stick-aligned vocab whose per-core span fits
+    # the 256 MB EAR limit (see hf_common.pad_lm_head).
+    pad_lm_head(model)
 
     model._spyre_compiled_blocks = [
         _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim)

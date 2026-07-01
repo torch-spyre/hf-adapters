@@ -1,7 +1,7 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-17-blue)
-![verified](https://img.shields.io/badge/verified_checkpoints-31-green)
+![adapters](https://img.shields.io/badge/adapters-23-blue)
+![verified](https://img.shields.io/badge/verified_checkpoints-38-green)
 ![compatible](https://img.shields.io/badge/compatible_models-100%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -14,31 +14,17 @@ from `transformers`.
 
 ## Supported Models
 
-**17 adapters · 31 verified checkpoints · 100+ compatible models**
+**23 adapters · 38 verified checkpoints · 100+ compatible models**
 
-| Adapter | Verified | Also Compatible | Usage |
-|---------|----------|-----------------|-------|
-| hf\_llama.py | Llama 3.2 3B, TinyLlama, Falcon 3 1B, DeepSeek-Coder 1.3B, Yi 1.5 6B | Llama 2/3 7–13B, Code Llama 7B/13B, Vicuna, OpenChat, Solar | Generative |
-| hf\_qwen2.py | Qwen2.5 7B, 1.5B, GTE-Qwen2-1.5B | Qwen2 0.5–7B, Qwen2.5 0.5B/3B, Qwen2.5-Coder, Qwen2.5-Math | Generative + Embedding |
-| hf\_granite.py | Granite 3.3 8B/2B | Granite 3.0–3.2, Granite Code 8B/3B | Generative |
-| hf\_granite\_vision.py | Granite Vision 4.1 4B | — | Generative |
-| hf\_qwen3.py | Qwen3 0.6B, Qwen3-Embedding 0.6B | Qwen3 1.7B, 4B, 8B | Generative + Embedding |
-| hf\_mistral.py | Mistral 7B v0.3, E5-Mistral-7B, Linq-Embed-Mistral, SFR-Embedding-Mistral | Mistral v0.1/v0.2, Instruct variants, Zephyr 7B | Generative + Embedding |
-| hf\_phi3.py | Phi-4 mini | Phi-3 mini 4k/128k, Phi-3 small 8k | Generative |
-| hf\_gemma3.py | Gemma 3 1B, EmbeddingGemma 300M | Gemma 3 4B/12B/27B text | Generative + Embedding |
-| hf\_gemma4.py | Gemma 4 12B (fp16) | — | Generative |
-| hf\_granitemoehybrid.py | Granite 4.0 1B | Granite 4.0 Micro | Generative |
-| hf\_smollm3.py | SmolLM3 3B | — | Generative |
-| hf\_olmo.py | OLMo 1B | OLMo 7B | Generative |
-| hf\_olmo2.py | OLMo2 1B | OLMo 2 7B | Generative |
-| hf\_bert.py | BGE-base-en-v1.5, all-MiniLM-L6-v2 | BERT-family encoder models | Embedding |
-| hf\_xlm\_roberta.py | BGE-M3 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes | Embedding |
-| hf\_mpnet.py | all-mpnet-base-v2 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base | Embedding |
-| hf\_modernbert.py | ModernBERT-embed-base, GTE-ModernBERT-base, Granite-Embedding-97m-multilingual-r2 | ModernBERT-base/large, other ModernBERT embed/classifier fine-tunes | Embedding |
+Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
+and **vision-language** (image→text) models — from Llama / Qwen / Granite / Mistral /
+Phi / Gemma / OLMo / GPT decoders to BERT / XLM-RoBERTa / MPNet / ModernBERT
+encoders and the Granite Vision 4.1 multimodal VLM (SigLIP tower + Granite text).
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
-HuggingFace `model_type`. See [ARCHITECTURE.md](ARCHITECTURE.md#verified-checkpoints)
-for head\_dim details, stick alignment, and Spyre numerical accuracy.
+HuggingFace `model_type`. The **canonical, per-adapter model lists** — verified
+checkpoints, also-compatible models, `head_dim` / stick-alignment details, and
+Spyre numerical accuracy — live in **[ARCHITECTURE.md](ARCHITECTURE.md#verified-checkpoints)**.
 
 ## Installation
 
@@ -90,6 +76,46 @@ embeddings = model.encode(["hello world", "how are you"])
 
 The `st_backend` module automatically patches `sentence-transformers` to apply the relevant Spyre adapter when loading the model. All standard SentenceTransformer methods (`encode()`, `similarity()`, etc.) work unchanged.
 
+## Multimodal Models (image → text)
+
+For vision-language models, use `AutoSpyreModelForImageTextToText`. It loads the
+full VLM via `AutoModelForImageTextToText`, prepares **both** towers (vision +
+text decoder) for Spyre, and exposes a multimodal `generate`:
+
+```python
+from hf_adapters import AutoSpyreModelForImageTextToText
+from transformers import AutoProcessor
+from PIL import Image
+
+model = AutoSpyreModelForImageTextToText.from_pretrained("ibm-granite/granite-vision-4.1-4b")
+processor = AutoProcessor.from_pretrained("ibm-granite/granite-vision-4.1-4b")
+processor.tokenizer.padding_side = "left"  # matches the decode loop's right-aligned prompts
+
+# Build the batch the official way — the chat template tokenizes and expands the
+# image tokens in one call (the two-step text/images path mis-tiles anyres images).
+image = Image.open("cat.jpg").convert("RGB")
+conv = [{"role": "user", "content": [
+    {"type": "image", "image": image},
+    {"type": "text", "text": "Briefly describe this image."},
+]}]
+batch = processor.apply_chat_template(
+    conv, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt"
+)
+
+texts = model.generate(
+    processor,
+    batch["input_ids"], batch["attention_mask"],
+    batch["pixel_values"], batch["image_sizes"],
+    max_new_tokens=64,
+)
+print(texts[0])
+```
+
+A multimodal checkpoint's config is registered under both auto classes:
+`AutoSpyreModelForCausalLM` selects the text-only adapter (vision tower
+discarded), while `AutoSpyreModelForImageTextToText` selects the combined
+two-tower adapter.
+
 ## Repo Structure
 
 ```
@@ -104,31 +130,41 @@ hf_adapters/
 │                               KV cache helpers, generate loop
 ├── hf_bert.py                  BERT-family encoder adapter (BGE, MiniLM)
 ├── hf_granite.py               Granite 3.3 adapter
-├── hf_granite_vision.py        Granite Vision 4.1 text backbone adapter
+├── hf_granite_vision.py        Granite Vision 4.1 text backbone adapter (text-only)
+├── hf_granite_vision_mm.py     Granite Vision 4.1 multimodal adapter (vision + text)
+├── hf_siglip_vision.py         SigLIP vision tower adapter (used by the VLM adapter)
 ├── hf_qwen3.py                 Qwen3 adapter
 ├── hf_granitemoehybrid.py      Granite 4.0 dense adapter
 ├── hf_smollm3.py               SmolLM3 adapter
 ├── hf_llama.py                 Llama adapter (Llama 1/2/3, Code Llama, Yi, Falcon 3)
 ├── hf_qwen2.py                 Qwen2 adapter (Qwen2, Qwen2.5, Coder, Math)
 ├── hf_mistral.py               Mistral adapter (Mistral 7B v0.1–v0.3)
+├── hf_mistral3.py              Mistral3 adapter (Mistral 3 24B)
 ├── hf_phi3.py                  Phi-4 / Phi-3 adapter
 ├── hf_olmo.py                  OLMo adapter (OLMo 1B, 7B)
 ├── hf_olmo2.py                 OLMo2 adapter (OLMo 2 1B, 7B)
 ├── hf_gemma3.py                Gemma 3 adapter (Gemma 3 text, EmbeddingGemma)
 ├── hf_gemma4.py                Gemma 4 adapter (unified text backbone)
+├── hf_gpt2.py                  GPT-2 adapter (learned abs pos, LayerNorm, Conv1D)
+├── hf_gpt_neo.py               GPT-Neo adapter (learned abs pos, LayerNorm, nn.Linear)
+├── hf_gpt_neox.py              GPT-NeoX adapter (partial RoPE, parallel residual, fused QKV)
 ├── hf_xlm_roberta.py           XLM-RoBERTa encoder adapter (BGE-M3, multilingual-e5)
 ├── hf_mpnet.py                 MPNet encoder adapter (all-mpnet-base-v2 and variants)
 ├── hf_modernbert.py            ModernBERT encoder adapter (RoPE, GeGLU, local/global attention)
 ├── st_backend.py               sentence-transformers Spyre backend (all decoder adapters)
 └── __init__.py
 
-tests/
+tests/                                 CPU tests (no Spyre required)
 ├── test_adapter_cpu_accuracy.py       CPU: adapter vs stock HF (causal-LM)
 ├── test_embed_cpu_accuracy.py         CPU: embedding hidden-states vs stock HF
-├── test_block_cpu_vs_spyre.py         Per-layer CPU vs Spyre comparison
-├── test_e2e_smoke_spyre.py            E2E: load + generate on Spyre
-├── test_e2e_token_compare_spyre.py    E2E: HF CPU vs adapter Spyre tokens
-└── test_e2e_embed_compare_spyre.py    E2E: HF CPU vs adapter Spyre embeddings
+├── test_vlm_e2e_cpu.py                CPU: multimodal adapter vs stock generate
+├── test_load_cpu.py                   CPU: models load without errors
+└── spyre/                             Spyre tests (require hardware + torch_spyre)
+    ├── test_e2e_smoke_spyre.py        E2E: load + generate on Spyre
+    ├── test_e2e_token_compare_spyre.py E2E: HF CPU vs adapter Spyre tokens
+    ├── test_e2e_embed_compare_spyre.py E2E: HF CPU vs adapter Spyre embeddings
+    ├── test_vlm_e2e_spyre.py          E2E: multimodal adapter on Spyre (teacher-forced)
+    └── test_load_spyre.py             Spyre: models load without errors
 ```
 
 ## Requirements
@@ -163,43 +199,45 @@ uv run pytest tests/test_adapter_cpu_accuracy.py -k "qwen3 and manual"    # manu
 uv run pytest tests/test_embed_cpu_accuracy.py                    # all embedding models
 uv run pytest tests/test_embed_cpu_accuracy.py -k bge_base        # one model
 
-# Load tests (verify models load without errors)
+# Load test (verify models load without errors)
 uv run pytest tests/test_load_cpu.py                              # CPU load test
-uv run pytest tests/test_load_spyre.py                            # Spyre load test (requires hardware)
 ```
 
 **Note**: Do not run CPU tests with `python tests/test_*.py` — this bypasses pytest's conftest.py setup and will cause import errors. Always use `pytest` (or `uv run pytest`).
 
 ### Spyre Tests (requires Spyre hardware)
 
-**Per-layer block comparison** (random weights, no download):
+The Spyre lane lives under `tests/spyre/` and is also pytest-driven (not
+`python tests/...`). Each test is parametrized off the model registry, so a
+single model is selected with `-k <key>` (e.g. `granite8b`, `qwen3`, `bge_base`).
+Run the whole file to cover every registered model. Run from the repository root.
 
 ```bash
-python tests/test_block_cpu_vs_spyre.py all
-python tests/test_block_cpu_vs_spyre.py granite
+# E2E smoke test (real weights, verify non-trivial output)
+uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py                  # all causal-LM models
+uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k granite8b     # one model
+
+# E2E token comparison (HF CPU vs adapter Spyre, per-step greedy tokens)
+uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k granite8b
+
+# E2E embedding comparison (HF CPU vs adapter Spyre, hidden-states cosine)
+uv run pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k bge_base
+
+# E2E multimodal VLM (image→text; teacher-forced per-step logit comparison)
+uv run pytest -s -vvv tests/spyre/test_vlm_e2e_spyre.py -k granite_vision_mm
+
+# Load test (verify a model loads on Spyre without errors)
+uv run pytest -s -vvv tests/spyre/test_load_spyre.py
 ```
 
-**E2E smoke test** (real weights, verify non-trivial output):
+`-s -vvv` matches each test's documented usage and shows the per-step comparison
+tables the token / embedding / VLM tests print.
 
-```bash
-python tests/test_e2e_smoke_spyre.py granite
-```
-
-**E2E token comparison** (HF CPU vs adapter Spyre, greedy tokens):
-
-```bash
-python tests/test_e2e_token_compare_spyre.py granite
-```
-
-**E2E embedding comparison** (HF CPU vs adapter Spyre, hidden-states cosine):
-
-```bash
-python tests/test_e2e_embed_compare_spyre.py bge-base
-python tests/test_e2e_embed_compare_spyre.py minilm
-```
-
-Note: Spyre has known numerical accuracy limitations. Token mismatches
-between CPU and Spyre are expected until torch\_spyre fixes land.
+Note: Spyre has known numerical accuracy limitations. Greedy token mismatches
+between CPU and Spyre are expected on the single-token decode path until
+torch\_spyre fixes land — which is why the VLM lane asserts a per-step logit
+cosine floor rather than exact tokens (see
+[ARCHITECTURE.md](ARCHITECTURE.md#vision-language-imagetext)).
 
 ## Development
 
