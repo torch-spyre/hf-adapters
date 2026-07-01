@@ -38,7 +38,7 @@ import torch
 from transformers import AutoTokenizer
 
 from hf_adapters.auto_spyre_model import resolve_adapter_module
-from tests.conftest import load_hf_causal_lm, load_ref_model, torch_dtype_for_model_path
+from tests.conftest import load_ref_model, torch_dtype_for_model_path
 from tests.model_registry import CAUSAL_PATHS
 
 PROMPT = "The capital of France is"
@@ -173,7 +173,7 @@ def test_manual_path(model_path, unwrap_compiled_blocks, set_rope_dtype):
     gc.collect()
 
     # Phase 2: adapter (fresh load — prepare_for_spyre is destructive)
-    model = load_hf_causal_lm(model_path, torch_dtype, adapter_mod=adapter_mod)
+    model = load_ref_model(model_path, adapter_mod=adapter_mod)
     model.eval()
     model.requires_grad_(False)
     adapter_mod.prepare_for_spyre(model)
@@ -215,7 +215,7 @@ def test_auto_loader(model_path, auto_spyre_model, unwrap_compiled_blocks):
 
     # Phase 2: HF reference (fresh)
     adapter_mod = resolve_adapter_module(model_path)
-    hf_model = load_hf_causal_lm(model_path, torch_dtype, adapter_mod)
+    hf_model = load_ref_model(model_path, adapter_mod)
     hf_model.eval()
     hf_model.requires_grad_(False)
     encoded = tokenizer(PROMPT, return_tensors="pt")
