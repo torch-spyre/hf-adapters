@@ -40,6 +40,7 @@ from transformers import (
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
+    AutoModelForImageTextToText,
     BertConfig,
     Gemma3Config,
     Gemma3TextConfig,
@@ -60,6 +61,7 @@ from transformers import (
     Olmo2Config,
     OlmoConfig,
     Phi3Config,
+    PixtralVisionConfig,
     Qwen2Config,
     Qwen3Config,
     RobertaConfig,
@@ -83,6 +85,7 @@ from hf_adapters import (
     hf_llama,
     hf_mistral,
     hf_mistral3,
+    hf_mistral3_vision_mm,
     hf_modernbert,
     hf_mpnet,
     hf_olmo,
@@ -121,6 +124,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     OlmoConfig: hf_olmo,
     Olmo2Config: hf_olmo2,
     Phi3Config: hf_phi3,
+    PixtralVisionConfig: hf_mistral3_vision_mm,
     Qwen2Config: hf_qwen2,
     Qwen3Config: hf_qwen3,
     RobertaConfig: hf_xlm_roberta,
@@ -137,6 +141,7 @@ IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     type[PretrainedConfig], ModuleType
 ] = {
     Granite4VisionConfig: hf_granite_vision_mm,
+    PixtralVisionConfig: hf_mistral3_vision_mm,
 }
 
 
@@ -205,7 +210,7 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
         return model
 
 
-class AutoSpyreModelForImageTextToText:
+class AutoSpyreModelForImageTextToText(AutoSpyreModel):
     """Load a multimodal (image-text-to-text) model and prepare BOTH towers.
 
     Selects the combined two-tower adapter (vision tower + text decoder),
@@ -214,13 +219,15 @@ class AutoSpyreModelForImageTextToText:
     and ``generate`` (full image→text decode) methods.
     """
 
+    _auto_model_cls = AutoModelForImageTextToText  # type: ignore[assignment]
+
     @classmethod
     def from_pretrained(cls, model_name_or_path, dtype=torch.float16):
         module = _resolve_adapter_module(
             model_name_or_path,
             mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
         )
-        model = module.load_model(model_name_or_path, dtype)
+        model = super().from_pretrained(model_name_or_path, dtype=dtype)
 
         def model_prefill_logits(
             self, input_ids, attention_mask, pixel_values, image_sizes

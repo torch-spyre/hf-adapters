@@ -328,6 +328,20 @@ VISION_MODELS = {
         "adapter": "hf_granite_vision_mm.py",
         "kind": "vlm",  # multimodal: image + text -> generated text
     },
+    # hf_pixtral_vision.py — Pixtral vision tower of Mistral3 Vision models
+    "mistral3_vision_pixtral": {
+        "name": "Mistral-Small-3.1-24B-Instruct-2503 (Pixtral tower)",
+        "path": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+        "adapter": "hf_pixtral_vision.py",
+        "kind": "tower",  # bare vision tower: pixel_values -> patch hidden states
+    },
+    # hf_mistral3_vision_mm.py — combined two-tower (Pixtral + Mistral text) forward
+    "mistral3_vision_mm": {
+        "name": "Mistral-Small-3.1-24B-Instruct-2503 (both towers)",
+        "path": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+        "adapter": "hf_mistral3_vision_mm.py",
+        "kind": "vlm",  # multimodal: image + text -> generated text
+    },
 }
 
 
