@@ -33,18 +33,18 @@ sentence-transformers) so module collection succeeds on hosts that lack
 import gc
 
 import pytest
-from model_registry import EMBEDDING_MODELS
 
 from tests.cpu.conftest import cosine_per_row
+from tests.model_registry import EMBED_PATHS
 
 # sentence_transformers is an optional dependency; skip the whole module if
 # it's missing. The hf_adapters.st_backend import is deferred to inside the
 # test so collection doesn't fail on CPU-only hosts that lack ST.
 pytest.importorskip("sentence_transformers")
 
-COS_SIM_THRESHOLD = 0.999
+COS_SIM_THRESHOLD: float = 0.999
 
-TEST_SENTENCES = [
+TEST_SENTENCES: list[str] = [
     "The quick brown fox jumps over the lazy dog.",
     "Spyre accelerates transformer inference at low latency.",
     "Embeddings are dense vector representations of text.",
@@ -52,24 +52,20 @@ TEST_SENTENCES = [
 ]
 
 
-@pytest.mark.parametrize(
-    "model_key", list(EMBEDDING_MODELS.keys()), ids=list(EMBEDDING_MODELS.keys())
-)
-def test_st_backend(model_key, unwrap_compiled_blocks):
+@pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
+def test_st_backend(model_path: str, unwrap_compiled_blocks) -> None:
     from sentence_transformers import SentenceTransformer
 
     import hf_adapters.st_backend  # noqa: F401  (registers "spyre" backend with ST)
 
-    cfg = EMBEDDING_MODELS[model_key]
-
     # Reference: stock ST on CPU
-    ref_model = SentenceTransformer(cfg["path"], device="cpu")
+    ref_model = SentenceTransformer(model_path, device="cpu")
     ref_embeddings = ref_model.encode(TEST_SENTENCES, convert_to_tensor=True)
     del ref_model
     gc.collect()
 
     # Spyre backend (DEVICE patched to cpu by conftest)
-    spyre_model = SentenceTransformer(cfg["path"], backend="spyre", device="cpu")
+    spyre_model = SentenceTransformer(model_path, backend="spyre", device="cpu")
     unwrap_compiled_blocks(spyre_model._first_module().model)
     spyre_embeddings = spyre_model.encode(TEST_SENTENCES, convert_to_tensor=True)
     del spyre_model

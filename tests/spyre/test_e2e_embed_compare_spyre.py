@@ -23,7 +23,6 @@ Usage (on Spyre pod)::
     pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k bge_base
 """
 
-import importlib
 import types
 from typing import Any
 
@@ -31,15 +30,16 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from model_registry import EMBED_KEYS, EMBEDDING_MODELS
+from model_registry import EMBED_PATHS
 
+from hf_adapters.auto_spyre_model import resolve_adapter_module
 from hf_adapters.hf_common import (
     move_to_spyre_with_layout,
     prefill_embed,
     prefill_encoder,
     untie_embedding_and_lm_head,
 )
-from tests.conftest import torch_dtype_for
+from tests.conftest import torch_dtype_for_model_path
 
 PROMPTS = [
     "Hi.",
@@ -145,22 +145,20 @@ def _compare_results(
     return rows
 
 
-def _run_model_test(model_key: str) -> list[dict[str, Any]]:
+def _run_model_test(model_path: str) -> list[dict[str, Any]]:
     """Full comparison for one encoder model."""
     from transformers import AutoModel, AutoTokenizer
 
-    info = EMBEDDING_MODELS[model_key]
-    adapter_module_name = info["adapter"].replace(".py", "")
-    adapter = importlib.import_module(f"hf_adapters.{adapter_module_name}")
+    adapter = resolve_adapter_module(model_path)
 
     print(f"\n{'=' * 70}")
-    print(f"  {info['name']}: {info['path']}")
+    print(f"  {model_path}")
     print(f"{'=' * 70}")
 
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
-    dtype = torch_dtype_for(info)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    dtype = torch_dtype_for_model_path(model_path)
     model = AutoModel.from_pretrained(
-        info["path"],
+        model_path,
         torch_dtype=dtype,
         device_map="cpu",
     )
@@ -193,7 +191,7 @@ def _run_model_test(model_key: str) -> list[dict[str, Any]]:
     print("  Running adapter on Spyre ...")
     ad_hidden = _adapter_forward(adapter, model, input_ids, attention_mask)
 
-    return _compare_results(hf_hidden, ad_hidden, attention_mask, info["name"])
+    return _compare_results(hf_hidden, ad_hidden, attention_mask, model_path)
 
 
 def _print_table(rows: list[dict[str, Any]]) -> None:
@@ -219,9 +217,9 @@ def _print_table(rows: list[dict[str, Any]]) -> None:
         )
 
 
-@pytest.mark.parametrize("model_key", EMBED_KEYS, ids=EMBED_KEYS)
-def test_e2e_embed_compare_spyre(model_key: str) -> None:
-    rows = _run_model_test(model_key)
+@pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
+def test_e2e_embed_compare_spyre(model_path: str) -> None:
+    rows = _run_model_test(model_path)
     _print_table(rows)
     n_match = sum(1 for r in rows if r["match"])
     print(f"\nPer-row min-cosine >= {COSINE_THRESHOLD}: {n_match}/{len(rows)} rows")
