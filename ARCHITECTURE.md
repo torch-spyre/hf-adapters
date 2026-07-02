@@ -48,10 +48,10 @@ decoder (features + prompt → generated text). Both towers compile and run on
 Spyre; the projector / patch-embed / feature-merge ops that don't lower run on
 CPU (see Multimodal VLM Path below).
 
-| Model | model\_type | Towers | Injection | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
+| Model | model\_type | Towers | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
 |-------|-----------|--------|-----------|--------------|-------------|---------------|-----------|
 | Granite Vision 4.1 4B | granite4\_vision | SigLIP vision + Granite text | Yes (padded) | Yes | Yes | Yes |
-| Mistral-Small-3.1-24B-Instruct-2503 | mistral3 | Pixtral + Mistral text | Flat (single pre-decoder) | Yes (padded) | Yes | Yes | Yes |
+| Mistral-Small-3.1-24B-Instruct-2503 | mistral3 | Pixtral + Mistral text | Yes (single pre-decoder) | Yes (padded) | Yes | Yes | Yes |
 
 **CPU Accurate** = adapter `generate` matches stock `model.generate` token-for-token on CPU (`test_vlm_e2e_cpu.py`).
 **Spyre Runs** = `test_vlm_e2e_spyre.py` drives the adapter teacher-forced on stock's tokens and asserts per-step logit cosine ≥ 0.999 vs the CPU reference over prefill + decode steps (top-1 agreement is reported, not asserted — an open-ended caption hits near-ties where the fp16-substrate winner is numerically arbitrary; see Multimodal VLM Path). granite-vision-4.1 holds cosine ≥ 0.99991 at every step and produces a correct, coherent caption.
