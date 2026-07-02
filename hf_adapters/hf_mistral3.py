@@ -59,62 +59,17 @@ Usage::
     outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
-import torch
-
 from hf_adapters.hf_common import (
     _move_to_spyre_with_layout,
     _untie_embedding_and_lm_head,
     generate,
     get_backbone,
     prepare_standard_gqa,
-    standard_gqa_backbone_forward,
-    standard_gqa_forward,
 )
-
-
-def _run_forward(model, input_ids, position_ids, attn_mask, key_caches, value_caches,
-                 is_filling, token_index, cache_position):
-    """Forward pass for Mistral-family models on Spyre.
-
-    Casts ``input_ids`` to ``int32`` before the call so the Spyre
-    monkey-patch (which silently returns a CPU tensor when downcasting
-    ``int64→int32``) does not cause a device mismatch inside
-    ``embed_tokens``.  Harmless on CPU (no-op when already int32 or
-    when the device is not Spyre).
-    """
-    # Cast input_ids to int32 on CPU before the forward pass.
-    # Spyre does not support int64; its monkey-patch for .to("spyre") on int64
-    # tensors performs the downcast but returns a broken tensor in some
-    # torch-spyre versions. By casting to int32 on CPU first, the subsequent
-    # .to("spyre") inside standard_gqa_backbone_forward sees an int32 tensor
-    # and moves it to Spyre cleanly with no downcast needed.
-    return standard_gqa_forward(
-        model,
-        input_ids.cpu().to(torch.int32),
-        position_ids,
-        attn_mask,
-        key_caches,
-        value_caches,
-        is_filling,
-        token_index,
-        cache_position,
-    )
-
-
-def _run_backbone_forward(model, input_ids, position_ids, attn_mask, key_caches,
-                          value_caches, is_filling, token_index, cache_position):
-    """Backbone-only forward (no lm_head) for Ministral-8B embedding callers."""
-    return standard_gqa_backbone_forward(
-        model,
-        input_ids.cpu().to(torch.int32),
-        position_ids,
-        attn_mask,
-        key_caches,
-        value_caches,
-        is_filling,
-        token_index,
-        cache_position,
-    )
+from hf_adapters.hf_mistral import (
+    _run_backbone_forward,  # noqa: F401  re-exported as adapter module API
+    _run_forward,  # noqa: F401  re-exported as adapter module API
+)
 
 
 def _load_hf_model_ministral8b(model_path, dtype):
@@ -271,8 +226,60 @@ def _generate(model, tokenizer, prompts, **kwargs):
     return generate(_run_forward, model, tokenizer, prompts, **kwargs)
 
 
+
+def _patch_embed_tokens_for_spyre(model):
+    """Wrap embed_tokens to keep its weight on CPU and move embeddings to Spyre.
+
+    ``_move_to_spyre_with_layout`` iterates ``model.named_parameters()`` and
+    moves every parameter — including ``embed_tokens.weight`` — to Spyre.
+    This torch-spyre version's ``aten.embedding.default`` fallback then crashes
+    because ``input_ids`` arrives on CPU (the Spyre int64→int32 monkey-patch
+    returns a CPU tensor).
+
+    Fix: replace ``backbone.embed_tokens`` with a plain ``nn.Module`` that
+    stores the embedding weight as a non-parameter Python attribute (so it is
+    invisible to ``named_parameters()`` and stays on CPU), performs the gather
+    on CPU, then moves the float result to Spyre by copying to the device of
+    the first attention projection.
+
+    Called from ``prepare_for_spyre`` only for ``MinistralConfig`` models,
+    before ``_move_to_spyre_with_layout`` runs.
+    """
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    backbone = get_backbone(model)
+    orig_embed = backbone.embed_tokens  # nn.Embedding, weight on CPU here
+
+    # Extract the raw weight tensor and detach it from nn.Embedding's
+    # parameter tracking.  _ref_weight is a plain Tensor attribute — not a
+    # nn.Parameter — so named_parameters() will not find it and
+    # _move_to_spyre_with_layout will not move it to Spyre.
+    ref_weight = orig_embed.weight.detach()
+
+    class _EmbedCPU(nn.Module):
+        """Embedding whose weight stays on CPU; output is moved to Spyre."""
+
+        def __init__(self):
+            super().__init__()
+            # Store as a plain attribute, not nn.Parameter, to hide it from
+            # named_parameters() and thus from _move_to_spyre_with_layout.
+            object.__setattr__(self, "_w", ref_weight)
+
+        def forward(self, input_ids):
+            w = object.__getattribute__(self, "_w")  # always CPU
+            h = F.embedding(input_ids.cpu(), w)
+            # Move to the device of the first Q-projection weight (Spyre after
+            # _move_to_spyre_with_layout, CPU during CPU tests).
+            target = backbone.layers[0].self_attn.q_proj.weight.device
+            return h.to(target)
+
+    backbone.embed_tokens = _EmbedCPU()
+
+
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to a Mistral-3-family model in-place."""
+    from transformers.models.ministral.configuration_ministral import MinistralConfig
     from transformers.models.ministral.modeling_ministral import MinistralRMSNorm
     from transformers.models.ministral3.modeling_ministral3 import Ministral3RMSNorm
     from transformers.models.mistral.modeling_mistral import MistralRMSNorm
@@ -304,5 +311,10 @@ def prepare_for_spyre(model):
         ):
             if hasattr(text_cfg, name) and not hasattr(cfg, name):
                 setattr(cfg, name, getattr(text_cfg, name))
+
+    # For MinistralConfig: patch embed_tokens before _move_to_spyre_with_layout
+    # so its weight is kept on CPU and the embedding result is moved to Spyre.
+    if isinstance(model.config, MinistralConfig):
+        _patch_embed_tokens_for_spyre(model)
 
     prepare_standard_gqa(model, rmsnorm_cls)
