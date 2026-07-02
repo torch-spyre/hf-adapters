@@ -35,13 +35,12 @@ from model_registry import CAUSAL_PATHS
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
+    DEVICE,
     get_model_dtype,
     move_to_spyre_with_layout,
     untie_embedding_and_lm_head,
 )
 from tests.conftest import load_ref_model, torch_dtype_for_model_path
-
-DEVICE = "spyre"
 
 
 def hf_greedy_steps(
@@ -117,7 +116,7 @@ def adapter_greedy_steps(
     dtype = get_model_dtype(model)
 
     key_caches, value_caches = allocate_kv_caches(
-        model, batch_size, max_cache_len, dtype, device=DEVICE
+        model, batch_size, max_cache_len, dtype
     )
 
     results = []
