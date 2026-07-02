@@ -243,6 +243,8 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
 
 
 def torch_dtype_for_model_path(model_path: str) -> torch.dtype:
+    from hf_adapters.hf_common import DEVICE
+
     """Map a registry entry's ``dtype`` field to a torch dtype.
 
     Defaults to float16. ``"float32"`` (e.g. Granite 4 1B, where fp16 overflows
@@ -251,7 +253,11 @@ def torch_dtype_for_model_path(model_path: str) -> torch.dtype:
     """
     from hf_adapters.auto_spyre_model import MODEL_PATH_TO_TORCH_DTYPE
 
-    return MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
+    dtype = MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
+    if dtype == torch.float32 and DEVICE == "spyre":
+        return torch.float16
+
+    return dtype
 
 
 def _load_hf_causal_lm(
