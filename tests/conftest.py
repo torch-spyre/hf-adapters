@@ -250,6 +250,8 @@ def torch_dtype_for_model_path(model_path: str) -> torch.dtype:
     Defaults to float16. ``"float32"`` (e.g. Granite 4 1B, where fp16 overflows
     on CPU) and ``"bfloat16"`` (e.g. EmbeddingGemma, which is bf16-native and
     overflows fp16) are recognized explicitly.
+    Since bfloat16 is acceptable for both Spyre and CPU, we let it.
+    However float32 is not supported on Spyre and thus, overriden to float16. Since it is supported on CPU, we let it.
     """
     from hf_adapters.auto_spyre_model import MODEL_PATH_TO_TORCH_DTYPE
 
