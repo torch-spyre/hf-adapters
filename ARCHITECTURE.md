@@ -50,8 +50,8 @@ CPU (see Multimodal VLM Path below).
 
 | Model | model\_type | Towers | Injection | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
 |-------|-----------|--------|-----------|--------------|-------------|---------------|-----------|
-| Granite Vision 4.1 4B | granite4\_vision | SigLIP + Granite text | Deepstack (multi-layer) | Yes (padded) | Yes | Yes | Yes |
-| Mistral-Small-3.1-24B-Instruct-2503 | mistral3 | Pixtral + Mistral text | Flat (single pre-decoder) | Yes (padded) | Pending | Pending | Pending |
+| Granite Vision 4.1 4B | granite4\_vision | SigLIP vision + Granite text | Yes (padded) | Yes | Yes | Yes |
+| Mistral-Small-3.1-24B-Instruct-2503 | mistral3 | Pixtral + Mistral text | Flat (single pre-decoder) | Yes (padded) | Yes | Yes | Yes |
 
 **CPU Accurate** = adapter `generate` matches stock `model.generate` token-for-token on CPU (`test_vlm_e2e_cpu.py`).
 **Spyre Runs** = `test_vlm_e2e_spyre.py` drives the adapter teacher-forced on stock's tokens and asserts per-step logit cosine ≥ 0.999 vs the CPU reference over prefill + decode steps (top-1 agreement is reported, not asserted — an open-ended caption hits near-ties where the fp16-substrate winner is numerically arbitrary; see Multimodal VLM Path). granite-vision-4.1 holds cosine ≥ 0.99991 at every step and produces a correct, coherent caption.
@@ -243,7 +243,7 @@ hf_adapters/
 ├── hf_granite.py          — Granite 3.3 adapter
 ├── hf_granite_vision.py   — Granite Vision 4.1 text backbone adapter (text-only)
 ├── hf_granite_vision_mm.py — Granite Vision 4.1 multimodal adapter (vision + text)
-├── hf_siglip_vision.py    — SigLIP vision tower adapter (used by Granite VLM adapter)
+├── hf_siglip_vision.py    — SigLIP vision tower adapter (used by Granite the adapter)
 ├── hf_qwen3.py            — Qwen3 adapter
 ├── hf_granitemoehybrid.py — Granite 4.0 dense adapter
 ├── hf_smollm3.py          — SmolLM3 adapter
