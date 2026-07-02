@@ -64,6 +64,7 @@ from hf_adapters.hf_common import (
     _pad_proj_input_simple,
     _pad_proj_output_simple,
     apply_rope_matmul,
+    pad_qk_proj_for_rope,
     patch_rmsnorm,
 )
 
@@ -101,13 +102,19 @@ def _pad_pixtral_heads(layers, num_heads, orig_head_dim, padded_head_dim):
     """Zero-pad Pixtral per-layer Q/K/V/O projections to a stick boundary.
 
     Pixtral attention lives at ``layer.attention.{q,k,v,o}_proj``.
+
+    Q/K use interleaved (halved-split) padding via ``pad_qk_proj_for_rope`` so
+    that ``apply_rope_matmul``'s ``[2, padded_head_dim//2]`` reshape pairs
+    each original dim ``x[k]`` with ``x[k + orig_head_dim//2]``, matching
+    HF's ``rotate_half`` convention (first half paired with second half).
+    V/O use simple end-padding (no RoPE, so layout within a head doesn't matter).
     """
     for layer in layers:
         attn = layer.attention
-        attn.q_proj = _pad_proj_output_simple(
+        attn.q_proj = pad_qk_proj_for_rope(
             attn.q_proj, num_heads, orig_head_dim, padded_head_dim
         )
-        attn.k_proj = _pad_proj_output_simple(
+        attn.k_proj = pad_qk_proj_for_rope(
             attn.k_proj, num_heads, orig_head_dim, padded_head_dim
         )
         attn.v_proj = _pad_proj_output_simple(
@@ -118,8 +125,29 @@ def _pad_pixtral_heads(layers, num_heads, orig_head_dim, padded_head_dim):
         )
 
 
+def _pixtral_position_ids(h_patches, w_patches, max_width):
+    """2D mesh-grid position IDs for one Pixtral image.
+
+    Mirrors ``position_ids_in_meshgrid`` from the stock Pixtral code:
+    each patch at grid position ``(r, c)`` gets flat index ``r * max_width + c``.
+
+    Args:
+        h_patches: number of patch rows.
+        w_patches: number of patch columns.
+        max_width: ``config.image_size // config.patch_size`` (the inv_freq table width).
+
+    Returns:
+        1-D int64 tensor of shape ``[h_patches * w_patches]``.
+    """
+    rows = torch.arange(h_patches, dtype=torch.long)
+    cols = torch.arange(w_patches, dtype=torch.long)
+    # meshgrid: position = row * max_width + col
+    grid_r, grid_c = torch.meshgrid(rows, cols, indexing="ij")
+    return (grid_r * max_width + grid_c).flatten()
+
+
 def _build_pixtral_rope_matrices(
-    inv_freq_table, num_positions, head_dim, padded_head_dim, dtype
+    inv_freq_table, position_ids, head_dim, padded_head_dim, dtype
 ):
     """Convert Pixtral's ``inv_freq`` table to ``[P, 2, 2, D/2]`` rotation matrices.
 
@@ -127,14 +155,14 @@ def _build_pixtral_rope_matrices(
     head_dim]`` ``inv_freq`` table indexed by 2D position id.  The stock forward
     does ``cos/sin → rotate_half`` which slices along head_dim (Spyre-incompatible).
 
-    Here we take the pre-computed ``inv_freq`` rows corresponding to the current
-    image's position ids and build the ``[P, 2, 2, D/2]`` rotation matrices that
+    Here we index the table by the correct 2D mesh-grid ``position_ids`` (one flat
+    index per patch) and build the ``[P, 2, 2, D/2]`` rotation matrices that
     ``apply_rope_matmul`` expects — identical to ``PrecomputedRotaryEmbedding``
     but built on-the-fly per image (the shape ``P`` varies per image).
 
     Args:
-        inv_freq_table: ``[max_patches, head_dim]`` pre-computed inv_freq (CPU).
-        num_positions: number of patches P for this image (shape of position_ids).
+        inv_freq_table: ``[max_patches**2, head_dim]`` pre-computed inv_freq (CPU).
+        position_ids: ``[P]`` int64 tensor of flat 2D mesh-grid indices (CPU).
         head_dim: original (unpadded) head dim (e.g. 64).
         padded_head_dim: padded head dim (e.g. 128).
         dtype: target dtype (fp16).
@@ -143,10 +171,14 @@ def _build_pixtral_rope_matrices(
         ``[P, 2, 2, padded_head_dim // 2]`` rotation matrices on CPU.
     """
     rope_half = head_dim // 2
-    freqs = inv_freq_table[:num_positions]  # [P, head_dim]
-    # cos/sin over the first rope_half entries (inv_freq is already [P, head_dim])
+    freqs = inv_freq_table[position_ids]  # [P, head_dim] — correct 2D-indexed rows
+    # inv_freq_table stores full head_dim columns (doubled: [freqs_h | freqs_w]),
+    # so each column half already encodes one spatial axis.  cos/sin over the
+    # first rope_half columns suffice because both halves are identical for the
+    # rotate_half convention (the table is built as cat(inv, inv)).
     cos = torch.cos(freqs[:, :rope_half])  # [P, rope_half]
     sin = torch.sin(freqs[:, :rope_half])  # [P, rope_half]
+    num_positions = position_ids.shape[0]
     rot = torch.stack([cos, -sin, sin, cos], dim=1).view(num_positions, 2, 2, rope_half)
 
     if padded_head_dim > head_dim:
@@ -328,6 +360,9 @@ def prepare_for_spyre(model):
     model._spyre_pixtral_inv_freq = inv_freq
     model._spyre_pixtral_orig_head_dim = orig_head_dim
     model._spyre_pixtral_padded_head_dim = head_dim
+    # max_width = max_patches_per_side, needed to build 2D mesh-grid position IDs
+    model._spyre_pixtral_max_width = cfg.image_size // cfg.patch_size
+    model._spyre_pixtral_patch_size = cfg.patch_size
 
     # Compile encoder blocks.
     model._spyre_compiled_blocks = [
@@ -416,17 +451,25 @@ def prefill_vision_tower(model, pixel_values, image_sizes, output_hidden_states=
     patch_counts = []
     all_rope = []
 
+    max_width = model._spyre_pixtral_max_width
+    patch_size = model._spyre_pixtral_patch_size
+
     for i, (pv, isize) in enumerate(zip(pixel_values, image_sizes)):
         pv_single = pv.unsqueeze(0)  # [1, C, H, W]
         emb = patch_embed_fn(pv_single, isize)  # [1, P, hidden]
-        P = emb.shape[1]
         all_embeds.append(emb.squeeze(0))  # [P, hidden]
-        patch_counts.append(P)
+        H, W = isize
+        h_patches = H // patch_size
+        w_patches = W // patch_size
+        patch_counts.append(h_patches * w_patches)
+
+        # Build correct 2D mesh-grid position IDs for this image
+        position_ids = _pixtral_position_ids(h_patches, w_patches, max_width)
 
         # Build 2D RoPE rotation matrices for this image's patches [P, 2, 2, D/2]
         dtype = emb.dtype
         rope_mats = _build_pixtral_rope_matrices(
-            inv_freq, P, orig_head_dim, padded_head_dim, dtype
+            inv_freq, position_ids, orig_head_dim, padded_head_dim, dtype
         )  # [P, 2, 2, padded_head_dim//2] on CPU
         all_rope.append(rope_mats)
 
