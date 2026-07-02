@@ -62,13 +62,13 @@ from hf_adapters import hf_pixtral_vision
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
-    _model_dtype,
     _resolve_generation_params,
     allocate_kv_caches,
     build_expansion_mask,
     build_prefill_mask,
     decode_block_walk,
     get_backbone,
+    get_model_dtype,
     make_standard_gqa_block,
     move_to_spyre_with_layout,
     pad_and_position,
@@ -167,7 +167,7 @@ def _image_features(model, pixel_values, image_sizes):
 
     # Move to CPU for the projector (CPU module; see prepare_for_spyre note).
     projector = model.model.multi_modal_projector
-    dtype = _model_dtype(model)
+    dtype = get_model_dtype(model)
     image_features = projector(selected.to("cpu").to(dtype), image_sizes)
     return image_features  # [total_image_tokens, text_hidden] on CPU
 
@@ -319,7 +319,7 @@ def _prefill_forward(
     decoder once with the features injected before layer 0.  Returns
     full-sequence logits ``[B, padded_len, padded_vocab]``.
     """
-    model_dtype = _model_dtype(model)
+    model_dtype = get_model_dtype(model)
 
     inputs_embeds = _embed_text(model, padded_ids)
     vision_mask = _vision_mask(model, padded_ids)
@@ -371,7 +371,7 @@ def prefill_logits(model, input_ids, attention_mask, pixel_values, image_sizes):
         input_ids, actual_lengths
     )
     key_caches, value_caches = allocate_kv_caches(
-        model, padded_ids.shape[0], padded_len, _model_dtype(model)
+        model, padded_ids.shape[0], padded_len, get_model_dtype(model)
     )
     logits = _prefill_forward(
         model,
@@ -436,7 +436,7 @@ def generate(
     eos_ids = params["eos_ids"]
 
     backbone = get_backbone(model)
-    model_dtype = _model_dtype(model)
+    model_dtype = get_model_dtype(model)
 
     batch_size, prompt_length = input_ids.shape
     actual_prompt_lengths = attention_mask.sum(dim=1)  # [B]
