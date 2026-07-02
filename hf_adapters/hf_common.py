@@ -58,8 +58,7 @@ def assert_spyre_dimensions(config, model_name):
     model's arithmetic. Real models clear this bar; it fires on tiny test
     fixtures (e.g. ``trl-internal-testing/tiny-*``, ``cointegrated/rubert-tiny2``).
     """
-    # text_config holds the dims for multimodal wrappers (Gemma 4, Granite Vision).
-    dim_config = getattr(config, "text_config", None) or config
+    dim_config = text_config(config)
     misaligned = [
         (f, v)
         for f in ("hidden_size", "intermediate_size")
@@ -114,6 +113,18 @@ def get_backbone(model):
     else:
         inner = model
     return getattr(inner, "language_model", inner)
+
+
+def text_config(config):
+    """Return the config carrying the text-decoder dims (``hidden_size``,
+    ``head_dim``, ``num_hidden_layers``, ...).
+
+    The config-level companion of ``get_backbone``: text-only configs expose
+    these directly, while multimodal wrappers (Gemma 3/4, Granite Vision,
+    Mistral3) nest them on a ``text_config`` sub-config. Returns whichever holds
+    them, so the shared RoPE/KV/head helpers read dims.
+    """
+    return getattr(config, "text_config", None) or config
 
 
 # ---------------------------------------------------------------------------
@@ -216,11 +227,13 @@ def _rope_cache_len(model) -> int:
     ``PrecomputedRotaryEmbedding`` default (2048) when no config value is found.
     """
     cfg = model.config
+    # Multimodal configs keep the text context window on a nested text_config;
+    # check both (the outer config may carry a larger window than the text sub-config).
+    objs = [cfg]
+    if (inner := text_config(cfg)) is not cfg:
+        objs.append(inner)
     candidates = []
-    # Multimodal configs keep the text context window on a nested text_config.
-    for obj in (cfg, getattr(cfg, "text_config", None)):
-        if obj is None:
-            continue
+    for obj in objs:
         for attr in ("max_position_embeddings", "n_positions", "max_seq_len"):
             v = getattr(obj, attr, None)
             if isinstance(v, int) and v > 0:
@@ -983,12 +996,13 @@ def kv_cache_shapes(model):
     if explicit is not None:
         return list(explicit)
 
-    num_layers = model.config.num_hidden_layers
-    num_kv_heads = model.config.num_key_value_heads
+    cfg = text_config(model.config)
+    num_layers = cfg.num_hidden_layers
+    num_kv_heads = cfg.num_key_value_heads
     head_dim = (
         getattr(model, "_spyre_head_dim", None)
-        or getattr(model.config, "head_dim", None)
-        or model.config.hidden_size // model.config.num_attention_heads
+        or getattr(cfg, "head_dim", None)
+        or cfg.hidden_size // cfg.num_attention_heads
     )
     v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
     return [(num_kv_heads, head_dim, v_head_dim) for _ in range(num_layers)]
@@ -1079,7 +1093,7 @@ def _embedding_param_ids(model):
     return ids
 
 
-def _untie_embedding_and_lm_head(model):
+def untie_embedding_and_lm_head(model):
     """If the token-embedding weight and the LM head weight share storage, clone
     the LM head's weight so each can take a different Spyre layout.
     """
@@ -1112,7 +1126,7 @@ def _model_dtype(model: nn.Module) -> torch.dtype:
     return torch.float16
 
 
-def _move_to_spyre_with_layout(model, dtype):
+def move_to_spyre_with_layout(model, dtype):
     """Move all parameters and buffers to Spyre with row-major layout for 2D
     matmul weights, except embedding weights which keep the default layout.
     """
@@ -1198,10 +1212,10 @@ def load_model_common(model_path, prepare_fn, dtype=torch.float16, auto_model_cl
     )
     model.eval()
     model.requires_grad_(False)
-    _untie_embedding_and_lm_head(model)
+    untie_embedding_and_lm_head(model)
     prepare_fn(model)
     print("Moving model to Spyre ...")
-    _move_to_spyre_with_layout(model, dtype)
+    move_to_spyre_with_layout(model, dtype)
     print("Model ready.")
     return model
 
@@ -1265,6 +1279,81 @@ def _resolve_generation_params(model, tokenizer, overrides):
         "top_p": cfg.top_p,
         "eos_ids": _normalize_eos_ids(eos),
     }
+
+
+def pad_and_position(input_ids, actual_lengths):
+    """Left block-pad ``input_ids`` to a BLOCK_SIZE multiple and build positions.
+
+    Returns ``(padded_ids, padded_len, prompt_offsets, position_ids)``. Real
+    tokens are right-aligned: each row's positions ``0..actual_len-1`` sit at
+    padded indices ``prompt_offsets[b]..padded_len-1`` (the decode loop's
+    convention). Shared by ``generate`` and the VLM adapters' prefill arms.
+    """
+    batch_size, prompt_length = input_ids.shape
+    padded_len = math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
+    block_pad = padded_len - prompt_length
+    if block_pad > 0:
+        pad = input_ids.new_zeros((batch_size, block_pad))
+        input_ids = torch.cat([pad, input_ids], dim=1)
+
+    prompt_offsets = padded_len - actual_lengths  # [B]
+    position_ids = torch.zeros((batch_size, padded_len), dtype=torch.long)
+    for b in range(batch_size):
+        n = actual_lengths[b].item()
+        position_ids[b, prompt_offsets[b].item() :] = torch.arange(n)
+    return input_ids, padded_len, prompt_offsets, position_ids
+
+
+def select_next_token(next_logits, do_sample, temperature, top_k, top_p):
+    """CPU token selection: greedy argmax, or temperature/top-k/top-p sampling.
+
+    The top-p path mirrors HF's ``TopPLogitsWarper.__call__``.
+    """
+    if not do_sample:
+        return torch.argmax(next_logits, dim=-1)  # [B]
+    scaled = next_logits / temperature
+    if top_k and top_k > 0:
+        v, _ = torch.topk(scaled, min(top_k, scaled.size(-1)), dim=-1)
+        scaled[scaled < v[:, -1:]] = -torch.inf
+    if top_p is not None and top_p < 1.0:
+        sorted_logits, sorted_indices = torch.sort(scaled, descending=False)
+        cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
+        sorted_indices_to_remove = cumulative_probs <= (1 - top_p)
+        sorted_indices_to_remove[..., -1:] = 0  # keep at least one token
+        indices_to_remove = sorted_indices_to_remove.scatter(
+            1, sorted_indices, sorted_indices_to_remove
+        )
+        scaled = scaled.masked_fill(indices_to_remove, -torch.inf)
+    probs = F.softmax(scaled, dim=-1)
+    return torch.multinomial(probs, num_samples=1).squeeze(-1)  # [B]
+
+
+def decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer):
+    """Per-sequence block-walk over generated slots → EOS-trimmed decoded strings.
+
+    Generated tokens are contiguous within each BLOCK_SIZE block but blocks may
+    be separated by unused slots; all sequences share the same block layout
+    starting at ``padded_len``. Walks each sequence using its own
+    ``num_generated`` count, trims at the first EOS, and decodes.
+    """
+    results = []
+    for b in range(result.shape[0]):
+        gen_ids_list = []
+        block_start = padded_len
+        remaining = num_generated[b].item()
+        while remaining > 0:
+            take = min(remaining, BLOCK_SIZE)
+            for j in range(take):
+                gen_ids_list.append(result[b, block_start + j].item())
+            remaining -= take
+            block_start += BLOCK_SIZE
+        gen_ids = torch.tensor(gen_ids_list)
+        if eos_ids is not None:
+            eos_pos = torch.isin(gen_ids, eos_ids).nonzero(as_tuple=True)[0]
+            if len(eos_pos) > 0:
+                gen_ids = gen_ids[: eos_pos[0].item()]
+        results.append(tokenizer.decode(gen_ids, skip_special_tokens=True))
+    return results
 
 
 def generate(
@@ -1356,25 +1445,15 @@ def generate(
     # Per-sequence actual prompt length (excluding tokenizer left-padding)
     actual_prompt_lengths = attention_mask.sum(dim=1)  # [B]
 
-    # Pad further to BLOCK_SIZE multiple (uniform left-pad for all sequences)
-    padded_len = math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
-    block_pad_offset = padded_len - prompt_length
-    max_cache_len = padded_len + math.ceil(max_new_tokens / BLOCK_SIZE) * BLOCK_SIZE
-    if block_pad_offset > 0:
-        pad = input_ids.new_zeros((batch_size, block_pad_offset))
-        input_ids = torch.cat([pad, input_ids], dim=1)
-
-    # Per-sequence total left-padding (tokenizer pad + block-alignment pad)
-    prompt_offsets = padded_len - actual_prompt_lengths  # [B]
-
-    # Position IDs: real tokens at the END of the padded sequence.
-    # Each sequence's real tokens span positions 0..actual_len-1, placed at
-    # padded indices prompt_offsets[b]..padded_len-1.
-    position_ids = torch.zeros((batch_size, padded_len), dtype=torch.long)
-    for b in range(batch_size):
-        actual_len = actual_prompt_lengths[b].item()
-        offset = prompt_offsets[b].item()
-        position_ids[b, offset:] = torch.arange(actual_len)
+    # Block-pad to a BLOCK_SIZE multiple; real tokens right-aligned (positions
+    # 0..actual_len-1 at padded indices prompt_offsets[b]..padded_len-1).
+    max_cache_len = (
+        math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
+        + math.ceil(max_new_tokens / BLOCK_SIZE) * BLOCK_SIZE
+    )
+    input_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
+        input_ids, actual_prompt_lengths
+    )
 
     # Initialize empty KV caches. Per-layer shapes come from the model
     # (``_spyre_kv_shapes``) for heterogeneous architectures like Gemma 4,
@@ -1480,25 +1559,9 @@ def generate(
                 fill_mask_device = exp_mask.to(DEVICE)
 
         # Token selection (CPU)
-        if do_sample:
-            scaled = next_logits / temperature
-            if top_k and top_k > 0:
-                v, _ = torch.topk(scaled, min(top_k, scaled.size(-1)), dim=-1)
-                scaled[scaled < v[:, -1:]] = -torch.inf
-            if top_p is not None and top_p < 1.0:
-                # Nucleus filter, mirroring HF's TopPLogitsWarper.__call__
-                sorted_logits, sorted_indices = torch.sort(scaled, descending=False)
-                cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
-                sorted_indices_to_remove = cumulative_probs <= (1 - top_p)
-                sorted_indices_to_remove[..., -1:] = 0  # keep at least one token
-                indices_to_remove = sorted_indices_to_remove.scatter(
-                    1, sorted_indices, sorted_indices_to_remove
-                )
-                scaled = scaled.masked_fill(indices_to_remove, -torch.inf)
-            probs = F.softmax(scaled, dim=-1)
-            next_tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [B]
-        else:
-            next_tokens = torch.argmax(next_logits, dim=-1)  # [B]
+        next_tokens = select_next_token(
+            next_logits, do_sample, temperature, top_k, top_p
+        )
 
         if timing:
             times_list.append(time.time() - t0)
@@ -1525,30 +1588,7 @@ def generate(
             print(f"Avg next-token latency: {avg*1000:.3f} ms")
         print("Per-token: " + ", ".join(f"{t*1000:.1f}" for t in times_list) + " ms")
 
-    # Decode text — walk the block structure per sequence using each
-    # sequence's own num_generated count. Within a sequence, generated
-    # tokens are contiguous within each BLOCK_SIZE block but blocks may
-    # be separated by unused slots; all sequences share the same block
-    # layout starting at padded_len.
-    results = []
-    for b in range(batch_size):
-        gen_ids_list = []
-        block_start = padded_len
-        remaining = num_generated[b].item()
-        while remaining > 0:
-            take = min(remaining, BLOCK_SIZE)
-            for j in range(take):  # type: ignore[arg-type]
-                gen_ids_list.append(result[b, block_start + j].item())
-            remaining -= take
-            block_start += BLOCK_SIZE
-        gen_ids = torch.tensor(gen_ids_list)
-        if eos_ids is not None:
-            eos_pos = torch.isin(gen_ids, eos_ids).nonzero(as_tuple=True)[0]
-            if len(eos_pos) > 0:
-                gen_ids = gen_ids[: eos_pos[0].item()]  # type: ignore[misc]
-        results.append(tokenizer.decode(gen_ids, skip_special_tokens=True))
-
-    return results
+    return decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer)
 
 
 # ---------------------------------------------------------------------------
@@ -1891,6 +1931,76 @@ def make_encoder_block(
     return torch.compile(block_forward, dynamic=False)
 
 
+def make_vision_encoder_block(
+    *,
+    q_proj,
+    k_proj,
+    v_proj,
+    o_proj,
+    layer_norm1,
+    layer_norm2,
+    ffn_in,
+    act,
+    ffn_out,
+    num_heads,
+    head_dim,
+    scale,
+):
+    """Compile a **pre-LN** bidirectional vision-transformer block (SigLIP/CLIP).
+
+    Counterpart of ``make_encoder_block`` (which is post-LN, BERT-style). A
+    SigLIP/CLIP encoder layer normalizes *before* each sub-block and adds the
+    residual *after*:
+
+        h = h + o_proj(SDPA(qkv(layer_norm1(h))))
+        h = h + ffn_out(act(ffn_in(layer_norm2(h))))
+
+    There is no attention mask and no KV cache — every patch attends to every
+    patch (full bidirectional attention over a fixed-length patch sequence).
+
+    Args:
+        q_proj/k_proj/v_proj/o_proj: per-head attention projections
+            (``self_attn.{q,k,v,out}_proj``). Already head-padded if needed.
+        layer_norm1: pre-attention LayerNorm. layer_norm2: pre-MLP LayerNorm.
+        ffn_in/act/ffn_out: MLP (``fc1`` → activation → ``fc2``).
+        num_heads: attention head count. head_dim: per-head dim (post-padding).
+        scale: SDPA scale (``1/sqrt(orig_head_dim)`` — pass the *original* dim
+            when heads were zero-padded so padded entries don't change the
+            softmax temperature).
+    """
+
+    def block_forward(hidden_states):
+        bsz, seq_len, _ = hidden_states.shape
+
+        residual = hidden_states
+        h = layer_norm1(hidden_states)
+        q = q_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+        k = k_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+        v = v_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+
+        attn_out = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=False,
+            scale=scale,
+        )
+        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
+        attn_out = o_proj(attn_out)
+        hidden_states = residual + attn_out
+
+        residual = hidden_states
+        h = layer_norm2(hidden_states)
+        h = ffn_out(act(ffn_in(h)))
+        hidden_states = residual + h
+
+        return hidden_states
+
+    return torch.compile(block_forward, dynamic=False)
+
+
 def encoder_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_ids):
     """Encoder backbone forward: embedding table + LN + compiled encoder blocks.
 
@@ -1938,7 +2048,7 @@ def encoder_backbone_forward(model, input_ids, attn_mask, position_ids, token_ty
 
 
 def prepare_rope_and_heads(model):
-    cfg = model.config
+    cfg = text_config(model.config)
     assert_spyre_dimensions(
         cfg, model_name=getattr(cfg, "name_or_path", "") or "<unknown>"
     )
@@ -2065,12 +2175,13 @@ def prefill_embed(
     )
 
     # Throwaway KV caches sized to padded_len (no decode budget)
-    num_layers = model.config.num_hidden_layers
-    num_kv_heads = model.config.num_key_value_heads
+    cfg = text_config(model.config)
+    num_layers = cfg.num_hidden_layers
+    num_kv_heads = cfg.num_key_value_heads
     head_dim = (
         getattr(model, "_spyre_head_dim", None)
-        or getattr(model.config, "head_dim", None)
-        or model.config.hidden_size // model.config.num_attention_heads
+        or getattr(cfg, "head_dim", None)
+        or cfg.hidden_size // cfg.num_attention_heads
     )
     v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
     key_caches = [
@@ -2190,3 +2301,86 @@ def prefill_encoder(
     # Crop the block-pad back off
     h = h[:, :seq_len, :]
     return h, attention_mask
+
+
+# ---------------------------------------------------------------------------
+# Vision-encoder prefill driver
+# ---------------------------------------------------------------------------
+
+
+def vision_backbone_forward(model, patch_embeds, output_hidden_states=False):
+    """Vision-tower backbone forward: compiled pre-LN blocks + post-LN.
+
+    The patch embedding (Conv2d + position-embedding add) is done *before* this
+    call by ``prefill_vision`` — it produces ``patch_embeds`` ``[B, P, H]``,
+    which this function feeds through the compiled encoder blocks and the
+    tower's final LayerNorm.
+
+    Mirrors ``encoder_backbone_forward``'s Spyre layout workaround: a pre-LN /
+    LayerNorm-terminated block can leave a Spyre tensor in a layout the next
+    block's matmul mis-reads, so we ``.clone()`` between on-device blocks to
+    force a canonical-layout copy.
+
+    Args:
+        model: prepared vision tower; must have ``model._spyre_compiled_blocks``
+            and ``model._spyre_post_layernorm`` set by ``prepare_for_spyre``.
+        patch_embeds: ``[B, P, H]`` patch sequence (already on DEVICE).
+        output_hidden_states: when True, also return the per-layer hidden states
+            (HF convention: ``[patch_embeds, out_layer0, ..., out_layerN-1]`` —
+            N+1 entries, NOT post-LN'd). VLMs select an intermediate layer
+            (e.g. ``vision_feature_layer=-2``) from this tuple.
+
+    Returns:
+        ``last_hidden_state`` ``[B, P, H]`` (post-LN), or
+        ``(last_hidden_state, hidden_states_tuple)`` when ``output_hidden_states``.
+    """
+    h = patch_embeds
+    h = h.clone() if h.device.type == "spyre" else h
+    hidden_states = [h] if output_hidden_states else None
+    for compiled_block in model._spyre_compiled_blocks:
+        h = compiled_block(h)
+        if h.device.type == "spyre":
+            h = h.clone()
+        if output_hidden_states:
+            hidden_states.append(h)
+    h = model._spyre_post_layernorm(h)
+    if h.device.type == "spyre":
+        h = h.clone()
+    if output_hidden_states:
+        return h, tuple(hidden_states)
+    return h
+
+
+def prefill_vision(
+    run_vision_forward_fn: Callable, model, pixel_values, output_hidden_states=False
+):
+    """One-shot vision-tower prefill: pixels -> patch-sequence hidden states.
+
+    The vision tower has no padding, no attention mask, and a fixed patch count
+    (``(image_size / patch_size) ** 2``), so this is simpler than
+    ``prefill_encoder``: the patch sequence is already a clean BLOCK_SIZE
+    multiple (e.g. SigLIP 384/16 → 24² = 576 = 9·64) and every patch is real.
+
+    The patch embedding (Conv2d) runs on CPU and the result is moved to DEVICE
+    — Conv2d is a tiny fraction of tower FLOPs and ``nn.Conv2d`` does not
+    currently lower on Spyre. The position embedding (``nn.Embedding``) is
+    added on CPU for the same reason; both match the embedding-lookup
+    CPU-fallback pattern used by the decoder adapters.
+
+    Args:
+        run_vision_forward_fn: ``fn(model, patch_embeds) -> [B, P, H]`` — pass
+            the adapter's ``_run_backbone_forward`` (``vision_backbone_forward``).
+        model: prepared vision tower. Must expose ``model._spyre_patch_embed``
+            (callable pixels -> ``[B, P, H]`` on CPU, set by ``prepare_for_spyre``).
+        pixel_values: ``[B, C, image_size, image_size]`` (e.g. ``[B, 3, 384, 384]``).
+            A multi-tile ``[B, T, C, H, W]`` input must be flattened to
+            ``[B*T, C, H, W]`` by the caller.
+
+    Returns:
+        ``last_hidden_state`` ``[B, P, H]``, or
+        ``(last_hidden_state, hidden_states_tuple)`` when ``output_hidden_states``.
+    """
+    patch_embeds = model._spyre_patch_embed(pixel_values)  # CPU, [B, P, H]
+    return run_vision_forward_fn(
+        model, patch_embeds.to(DEVICE), output_hidden_states=output_hidden_states
+    )

@@ -615,6 +615,7 @@ spyre = [
     { name = "torch-spyre" },
 ]
 test = [
+    { name = "pillow" },
     { name = "pytest" },
 ]
 
@@ -645,7 +646,10 @@ models-ops = [
 ]
 oot = [{ name = "oot-framework", git = "https://github.com/torch-spyre/torch-spyre?subdirectory=tests%2Foot_framework&rev=main" }]
 spyre = [{ name = "torch-spyre", git = "https://github.com/torch-spyre/torch-spyre?rev=main" }]
-test = [{ name = "pytest" }]
+test = [
+    { name = "pillow" },
+    { name = "pytest" },
+]
 
 [[package]]
 name = "hf-xet"

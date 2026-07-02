@@ -33,8 +33,9 @@ sentence-transformers) so module collection succeeds on hosts that lack
 import gc
 
 import pytest
-from conftest import cosine_per_row
 from model_registry import EMBEDDING_MODELS
+
+from tests.cpu.conftest import cosine_per_row
 
 # sentence_transformers is an optional dependency; skip the whole module if
 # it's missing. The hf_adapters.st_backend import is deferred to inside the

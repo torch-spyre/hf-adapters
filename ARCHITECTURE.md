@@ -26,7 +26,7 @@ which models are supported on Spyre.
 | Falcon 3 1B | llama | 256 | 128 | Yes | Yes | Yes | Yes |
 | DeepSeek-Coder 1.3B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | Yi 1.5 6B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
-| Granite Vision 4.1 4B | granite (text) | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
+| Granite Vision 4.1 4B (text backbone) | granite (text) | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | Gemma 4 12B | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 3 1B | gemma3\_text | 256 | 128 | Yes | Yes | Yes | Yes |
 | GPT-2 124M | gpt2 | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
@@ -41,6 +41,20 @@ which models are supported on Spyre.
 **Spyre Runs** = block produces output (no crash/NaN).
 
 Unless a row notes otherwise (e.g. `(bf16)`), **verified means verified in fp16** — this holds even for bf16-native checkpoints. A bf16-native model that is only verified in fp16 may behave differently in bf16 on Spyre (and vice versa); the dtype actually tested is what the table certifies.
+
+### Vision-Language (image→text)
+
+Full multimodal VLMs: a vision tower (image → patch features) plus a causal text
+decoder (features + prompt → generated text). Both towers compile and run on
+Spyre; the projector / patch-embed / feature-merge ops that don't lower run on
+CPU (see Multimodal VLM Path below).
+
+| Model | model\_type | Towers | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
+|-------|-----------|--------|--------------|-------------|---------------|-----------|
+| Granite Vision 4.1 4B | granite4\_vision | SigLIP vision + Granite text | Yes (padded) | Yes | Yes | Yes |
+
+**CPU Accurate** = adapter `generate` matches stock `model.generate` token-for-token on CPU (`test_vlm_e2e_cpu.py`).
+**Spyre Runs** = `test_vlm_e2e_spyre.py` drives the adapter teacher-forced on stock's tokens and asserts per-step logit cosine ≥ 0.999 vs the CPU reference over prefill + decode steps (top-1 agreement is reported, not asserted — an open-ended caption hits near-ties where the fp16-substrate winner is numerically arbitrary; see Multimodal VLM Path). granite-vision-4.1 holds cosine ≥ 0.99991 at every step and produces a correct, coherent caption.
 
 ### Embedding
 
@@ -86,6 +100,18 @@ single-token decode path (seq_len=1), not an adapter issue.
 
 ## Model Family Coverage
 
+> **Single source of truth.** This section and the Verified Checkpoints
+> tables above are the canonical list of adapters and supported models.
+> README.md does **not** duplicate them — it links here. When you add an
+> adapter or verify a checkpoint, update *only* this file (and the badge
+> counts in README.md, noted below).
+
+**Coverage:** 23 adapters · 38 verified checkpoints · 100+ compatible models.
+The 38 verified rows are 24 generative + 13 embedding + 1 vision-language (see the
+Verified Checkpoints tables above). `hf_siglip_vision` is a vision-tower component
+used by the VLM adapter rather than a standalone model adapter, and Granite
+Vision 4.1 is verified both as a text backbone (generative) and as a full VLM.
+
 Each adapter handles a HuggingFace `model_type`. Once verified with
 one checkpoint, all size variants and fine-tunes of that architecture
 work with zero additional code — they share the same attention
@@ -110,6 +136,8 @@ pattern, norms, and weight layout.
 | hf\_gpt\_neo.py | gpt_neo | 1 | GPT-Neo 1.3B/2.7B, GPT-Neo-style fine-tunes |
 | hf\_gpt\_neox.py | gpt_neox | 1 | Pythia 160M–12B, GPT-NeoX-20B, Dolly v2, StableLM-base-alpha, other GPT-NeoX-arch checkpoints |
 | hf\_granite\_vision.py | granite (text) | 1 | — |
+| hf\_granite\_vision\_mm.py | granite4\_vision (multimodal) | 1 | — |
+| hf\_siglip\_vision.py | SigLIP vision tower | 1 | SigLIP towers of other VLMs (extracted as a bare `SiglipVisionModel`) |
 | hf\_bert.py | bert | 2 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants |
 | hf\_xlm\_roberta.py | xlm-roberta | 1 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes |
 | hf\_mpnet.py | mpnet | 1 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base, all-mpnet-base-v1 |
@@ -135,6 +163,40 @@ outputs = model.generate(tokenizer, ["What is 2+2?"], max_new_tokens=128)
 ```
 
 `AutoSpyreModelForCausalLM` automatically selects the correct adapter based on the model's config type.
+
+### Multimodal (image→text) Auto API
+
+```python
+from hf_adapters import AutoSpyreModelForImageTextToText
+from transformers import AutoProcessor
+
+model = AutoSpyreModelForImageTextToText.from_pretrained("ibm-granite/granite-vision-4.1-4b")
+processor = AutoProcessor.from_pretrained("ibm-granite/granite-vision-4.1-4b")
+
+# Build the batch the official way (chat template tokenizes + expands image tokens).
+conv = [{"role": "user", "content": [
+    {"type": "image", "image": image},
+    {"type": "text", "text": "Briefly describe this image."},
+]}]
+batch = processor.apply_chat_template(
+    conv, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt"
+)
+
+texts = model.generate(
+    processor,
+    batch["input_ids"], batch["attention_mask"],
+    batch["pixel_values"], batch["image_sizes"],
+    max_new_tokens=64,
+)
+```
+
+`AutoSpyreModelForImageTextToText` loads the full VLM via
+`AutoModelForImageTextToText`, prepares **both** towers for Spyre, and attaches
+Spyre-aware `prefill_logits` (image + text → first-token logits) and `generate`
+(full image→text decode). A multimodal config (e.g. `Granite4VisionConfig`) is in
+both auto-mappings: `AutoSpyreModelForCausalLM` selects the *text-only*
+`hf_granite_vision` adapter (discards the vision tower), while
+`AutoSpyreModelForImageTextToText` selects the *combined* `hf_granite_vision_mm`.
 
 ### Manual Control API
 
@@ -174,7 +236,9 @@ hf_adapters/
 │   kv_cache_update, build_prefill_mask,
 │   build_expansion_mask, load_model_common, generate
 ├── hf_granite.py          — Granite 3.3 adapter
-├── hf_granite_vision.py   — Granite Vision 4.1 text backbone adapter
+├── hf_granite_vision.py   — Granite Vision 4.1 text backbone adapter (text-only)
+├── hf_granite_vision_mm.py — Granite Vision 4.1 multimodal adapter (vision + text)
+├── hf_siglip_vision.py    — SigLIP vision tower adapter (used by the VLM adapter)
 ├── hf_qwen3.py            — Qwen3 adapter
 ├── hf_granitemoehybrid.py — Granite 4.0 dense adapter
 ├── hf_smollm3.py          — SmolLM3 adapter
@@ -462,6 +526,68 @@ pre-norm state and sum into the residual together. `nn.LayerNorm` and exact
 `gelu` need no patching. Backbone at `model.gpt_neox`
 (`embed_in`/`layers`/`final_layer_norm`); LM head is `embed_out`.
 
+### Multimodal VLM Path (vision tower + text decoder)
+
+Two adapters compose into a full image→text VLM. They are the first multimodal
+support and the first vision-encoder support in the repo.
+
+**SigLIP vision tower** (`hf_siglip_vision.py`): a **pre-LN, bidirectional,
+no-RoPE, no-KV-cache** ViT encoder over a fixed patch sequence (Granite Vision
+4.1: 384/16 → 576 patches = 9·64, stick-aligned). Built with
+`make_vision_encoder_block` (the pre-LN counterpart of the BERT-style post-LN
+`make_encoder_block`) and driven by `prefill_vision` → `vision_backbone_forward`.
+SigLIP-specific Spyre adaptations:
+
+- **Head-dim padding 72→128.** `head_dim = 1152/16 = 72` (`D/2 = 36 < 64`), so
+  Q/K/V/O are zero-padded to the next stick multiple with the SDPA scale held at
+  `1/sqrt(72)`. (The RoPE-matmul rule doesn't apply — SigLIP has no RoPE — but the
+  reshape/SDPA still want a stick-aligned head_dim.)
+- **MLP intermediate padding** (`_pad_vision_mlp`). SigLIP's `intermediate_size`
+  (4304 for Granite Vision 4.1) is *not* a stick multiple, so the `fc2` matmul's
+  contraction (K) dim is stick-misaligned and the compiler aborts in DDL
+  conversion (`_extend_matmul_k_to_padded: could not identify K symbol` →
+  `Could not find any suitable dimension mapping` → `dxp_standalone` SIGABRT).
+  Unlike `hidden_size` (residual stream — can't pad), the FFN intermediate is
+  private, so `fc1` out-rows/bias and `fc2` in-cols are zero-padded to a stick
+  boundary (4304→4352 = 68·64). Bit-exact: the extra activations are zero and
+  multiply zero `fc2` columns. (Same reasoning as head-dim/LM-head padding, now
+  applied to the FFN width.)
+- **GELU-tanh** (`gelu_pytorch_tanh`) gets the device-conditional `x*x*x`
+  decomposition on Spyre (the `torch.pow` hazard), fused `F.gelu` on CPU.
+- **Conv2d patch embed runs on CPU.** `nn.Conv2d` (`aten.convolution`) does not
+  lower on Spyre (layout pass rejects its stick expression — see
+  docs/siglip_vision_spyre_findings.md), so the patch embedding + learned
+  position add run on CPU and the result is moved to Spyre. CPU copies of the
+  conv weight/bias and position table are snapshotted at prepare time so the
+  closure survives the blanket device move (`_embedding_param_ids` can't exclude
+  a 4-D conv weight).
+
+**Combined two-tower adapter** (`hf_granite_vision_mm.py`): runs the Spyre SigLIP
+tower, projects/packs its features, splices them into the text-embedding stream at
+`<image>` positions, and runs the Granite text decoder (reusing
+`hf_granite`'s compiled block + the shared `generate`/KV machinery, embedding-driven
+so prefill can carry the image injection). Granite Vision 4.1 uses a multi-layer
+**deepstack + spatial** injection: several vision layers and spatial offset groups
+are projected by their own Blip2-QFormer projectors and **summed** into the
+image-token positions before the mapped decoder layers (`_inject_deepstack`).
+Multimodal-specific Spyre adaptations:
+
+- **Projectors + `image_newline` stay on CPU.** The Blip2-QFormer projectors and
+  `pack_image_features` are stock CPU modules (vision features are moved to CPU
+  first); the blanket device move is undone for them before use, the same
+  CPU-fallback contract as the patch-embed conv.
+- **Deepstack injection scattered on CPU** (`_inject_deepstack`). Stock does
+  `h.masked_scatter(mask, h[mask] + features)`; on Spyre the image slots are zeroed
+  at embed time, so the injection is `h + additive` where `additive` is `features`
+  scattered into image positions on CPU (the bool `mask.sum()`, boolean indexing,
+  and `masked_scatter` don't lower on Spyre — same doctrine as the gemma3/common
+  mask-band helpers, which build int/bool work on CPU and return a device float).
+  Image-slot zeroing uses an elementwise `* keep` multiply, not `masked_fill_`
+  (which doesn't lower either).
+- **Token-embedding gather follows the table's device** — `embed_tokens` lives on
+  Spyre after the move, so prefill ids are moved to the table's device (matching
+  the decode step), then masking happens on-device.
+
 ## Adding a New Model
 
 See [ONBOARDING.md](ONBOARDING.md) for the full step-by-step guide,
@@ -484,6 +610,9 @@ see [docs/fms_comparison.md](docs/fms_comparison.md).
 | `partial_rotary_factor < 1.0` | Non-zero offset assertion in stickify | Identity-padded rotation matrices in `PartialPrecomputedRotaryEmbedding` (implemented in `hf_phi3.py`) |
 | Zero-length tensors crash `copy_host_to_device` | Segfault on `.to("spyre")` | Create empty tensors directly on device |
 | fp16 overflow on CPU for large multipliers | NaN logits on CPU | Test in float32; runs fine on Spyre |
+| Stick-misaligned matmul K dim | DDL conversion aborts (`could not identify K symbol` → `dxp_standalone` SIGABRT) — hits SigLIP's `intermediate_size=4304` | Zero-pad the private dim to a stick boundary (`_pad_vision_mlp`); bit-exact |
+| `nn.Conv2d` (`aten.convolution`) doesn't lower | Patch-embed compile fails in layout pass | Run the Conv2d on CPU (CPU-snapshot weights), move result to Spyre |
+| `masked_fill_` / `masked_scatter` / `bool.sum()` / boolean indexing don't lower | Image-slot zeroing + deepstack injection crash | Zero via `* keep` mul; build the injection additive on CPU and elementwise-add on device |
 
 ### Performance Issues
 

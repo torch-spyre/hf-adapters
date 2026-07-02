@@ -181,6 +181,14 @@ def prepare_for_spyre(model):
         GraniteMoeHybridRMSNorm,
     )
 
+    layer_types = set(model.config.layer_types)
+    assert "mamba" not in layer_types, (
+        "hf_granitemoehybrid adapter only supports pure-attention dense models "
+        f"(layer_types={sorted(layer_types)}). "
+        f"'{model.config._name_or_path}' is a Mamba-attention hybrid — "
+        "Mamba SSM layers are not currently supported on Spyre."
+    )
+
     model._spyre_rope = PrecomputedRotaryEmbedding(get_backbone(model).rotary_emb)
     patch_rmsnorm(GraniteMoeHybridRMSNorm)
     pad_lm_head(model)

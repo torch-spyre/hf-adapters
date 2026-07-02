@@ -15,12 +15,18 @@
 """
 HuggingFace Transformers adapter for the text backbone of Granite Vision models.
 
-Extracts the Granite language model from a Granite Vision checkpoint
-(no trust_remote_code) and prepares it for Spyre.  Vision encoder and
-projection layers are discarded — this adapter handles text-only inference.
+Loads the stock Granite Vision VLM (no trust_remote_code) and runs *text-only*
+causal inference over its Granite text decoder. The SigLIP vision tower and the
+projection layers are loaded but unused — for the full image→text pipeline see
+``hf_granite_vision_mm``.
 
-The text backbone is architecturally identical to Granite 3.3, so
-compiled block, forward, and prepare logic are reused from hf_granite.
+The text decoder is architecturally identical to Granite 3.3, so the compiled
+block and backbone forward are reused from ``hf_granite``. The only differences
+from the bare-Granite causal adapter are checkpoint-shape details that the
+shared helpers already handle (``get_backbone`` descends to
+``model.model.language_model``; ``text_config`` reads the nested text dims):
+this adapter just patches the VLM's own ``Granite4VisionTextRMSNorm`` and reads
+``logits_scaling`` from the nested ``text_config``.
 
 Usage::
 
@@ -33,70 +39,105 @@ Usage::
     outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
-import json
-from collections import defaultdict
-
 import torch
 
-from hf_adapters.hf_common import DEVICE
-from hf_adapters.hf_granite import _run_forward, prepare_for_spyre
+from hf_adapters.hf_common import (
+    get_backbone,
+    load_model_common,
+    pad_lm_head,
+    patch_rmsnorm,
+    prepare_rope_and_heads,
+    text_config,
+)
+from hf_adapters.hf_granite import _make_compiled_block, _run_backbone_forward
 
-# Assignment of _run_forward method for explicit module access
-_run_forward = _run_forward
 
+def load_hf_model(model_path, dtype=torch.float16):
+    """Load the stock Granite Vision VLM (text-only reference for the harness).
 
-def _load_text_backbone(model_path, dtype=torch.float16):
-    """Load just the Granite text backbone from a Granite Vision checkpoint.
-
-    Remaps ``model.language_model.*`` keys to ``model.*`` and loads into
-    a standard GraniteForCausalLM — no trust_remote_code needed.
-    Uses strict=False because lm_head.weight is tied to embed_tokens.weight.
+    Returns the ``Granite4VisionForConditionalGeneration`` with the vision tower
+    and projectors dropped; its text-only ``forward(input_ids=...)`` (no
+    ``pixel_values``) gives the causal-LM reference logits used by the CPU
+    accuracy test, and the dropped modules aren't dragged onto Spyre by the
+    layout move in ``load_model``.
     """
-    from huggingface_hub import hf_hub_download
-    from safetensors.torch import load_file
-    from transformers import GraniteConfig, GraniteForCausalLM
+    from transformers import AutoModelForImageTextToText
 
-    cfg_path = hf_hub_download(model_path, "config.json")
-    with open(cfg_path) as f:
-        full_cfg = json.load(f)
-
-    granite_cfg = GraniteConfig(**full_cfg["text_config"])
-    model = GraniteForCausalLM(granite_cfg)
-
-    idx_path = hf_hub_download(model_path, "model.safetensors.index.json")
-    with open(idx_path) as f:
-        idx = json.load(f)
-
-    shard_keys = defaultdict(dict)
-    for k, shard in idx["weight_map"].items():
-        if k.startswith("model.language_model."):
-            new_key = k.replace("model.language_model.", "model.", 1)
-            shard_keys[shard][new_key] = k
-
-    state = {}
-    for shard, key_map in shard_keys.items():
-        shard_path = hf_hub_download(model_path, shard)
-        data = load_file(shard_path)
-        for new_key, old_key in key_map.items():
-            state[new_key] = data[old_key]
-
-    model.load_state_dict(state, strict=False)
-    model.to(dtype)
+    model = AutoModelForImageTextToText.from_pretrained(
+        model_path, dtype=dtype, device_map="cpu"
+    )
+    # Drop the SigLIP vision tower and the deepstack/spatial projectors — text-only
+    # inference (the full image→text pipeline lives in hf_granite_vision_mm).
+    if hasattr(model, "model"):
+        mm = model.model
+        for attr in ("vision_tower", "layerwise_projectors", "spatial_projectors"):
+            if hasattr(mm, attr):
+                delattr(mm, attr)
     model.eval()
     model.requires_grad_(False)
     return model
 
 
-def load_hf_model(model_path, dtype=torch.float16):
-    """Load the text backbone as a plain GraniteForCausalLM (for test harness)."""
-    return _load_text_backbone(model_path, dtype)
+def prepare_for_spyre(model):
+    """Apply Spyre adaptations to the Granite Vision text decoder in-place.
+
+    Mirrors ``hf_granite.prepare_for_spyre`` against the VLM's nested text
+    backbone: the shared RoPE/head prep and LM-head padding descend via
+    ``get_backbone``/``text_config`` on their own, so the only VLM-specific step
+    is patching the decoder's ``Granite4VisionTextRMSNorm`` (not Granite 3.3's
+    ``GraniteRMSNorm``). The vision tower is left untouched — this is the
+    text-only path.
+    """
+    from transformers.models.granite4_vision.modeling_granite4_vision import (
+        Granite4VisionTextRMSNorm,
+    )
+
+    prepare_rope_and_heads(model)
+    patch_rmsnorm(Granite4VisionTextRMSNorm)
+    pad_lm_head(model)
+    model._spyre_compiled_blocks = [
+        _make_compiled_block(layer) for layer in get_backbone(model).layers
+    ]
+
+
+def _run_forward(
+    model,
+    input_ids,
+    position_ids,
+    attn_mask,
+    key_caches,
+    value_caches,
+    is_filling,
+    token_index,
+    cache_position,
+):
+    """Granite Vision text causal-LM forward: backbone + head / scaling.
+
+    Identical to ``hf_granite._run_forward`` except ``logits_scaling`` lives on
+    the nested ``text_config`` rather than the top-level VLM config.
+    """
+    h = _run_backbone_forward(
+        model,
+        input_ids,
+        position_ids,
+        attn_mask,
+        key_caches,
+        value_caches,
+        is_filling,
+        token_index,
+        cache_position,
+    )
+    logits = model.lm_head(h)
+    return logits / text_config(model.config).logits_scaling
 
 
 def load_model(model_path, dtype=torch.float16):
     """Load Granite Vision text backbone for Spyre."""
-    model = _load_text_backbone(model_path, dtype)
-    prepare_for_spyre(model)
-    print("Moving model to Spyre ...")
-    model.to(DEVICE)
-    print("Model ready.")
-    return model
+    from transformers import AutoModelForImageTextToText
+
+    return load_model_common(
+        model_path,
+        prepare_for_spyre,
+        dtype,
+        auto_model_cls=AutoModelForImageTextToText,
+    )
