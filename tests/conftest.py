@@ -242,23 +242,35 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
                 item.add_marker(skip_slow)
 
 
-def torch_dtype_for_model_path(model_path: str) -> torch.dtype:
-    from hf_adapters.hf_common import DEVICE
-
+def torch_dtype_for_model_path(model_path: str, force_cpu: bool = False) -> torch.dtype:
     """Map a registry entry's ``dtype`` field to a torch dtype.
 
-    Defaults to float16. ``"float32"`` (e.g. Granite 4 1B, where fp16 overflows
-    on CPU) and ``"bfloat16"`` (e.g. EmbeddingGemma, which is bf16-native and
-    overflows fp16) are recognized explicitly.
-    Since bfloat16 is acceptable for both Spyre and CPU, we let it.
-    However float32 is not supported on Spyre and thus, overriden to float16. Since it is supported on CPU, we let it.
+    Looks up *model_path* in ``MODEL_PATH_TO_TORCH_DTYPE``; defaults to
+    ``torch.float16`` when no entry is found.
+
+    ``"bfloat16"`` (e.g. EmbeddingGemma, which is bf16-native and overflows
+    fp16) is passed through unchanged for both Spyre and CPU.
+
+    ``"float32"`` (e.g. Granite 4 1B, where fp16 overflows on CPU) is kept as
+    ``torch.float32`` when *force_cpu* is ``True`` or when ``DEVICE != "spyre"``,
+    but is downcast to ``torch.float16`` on Spyre because float32 is not
+    supported by that backend.
+
+    *force_cpu* should be ``True`` when loading the plain HF reference model
+    (i.e. the unmodified ``transformers`` model used for comparison), as opposed
+    to the Spyre-adapted model.  The reference model runs on CPU regardless of
+    the target device, so Spyre dtype restrictions do not apply and the
+    registry-specified dtype must be preserved as-is.
     """
     from hf_adapters.auto_spyre_model import MODEL_PATH_TO_TORCH_DTYPE
+    from hf_adapters.hf_common import DEVICE
 
     dtype = MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
-    if dtype == torch.float32 and DEVICE == "spyre":
+    print(f"torch_dtype_for_model_path -> {dtype} for {model_path} and device {DEVICE}")
+    if dtype == torch.float32 and not force_cpu and DEVICE == "spyre":
+        print("Return torch.float16")
         return torch.float16
-
+    print(f"Return {dtype}")
     return dtype
 
 
@@ -286,7 +298,7 @@ def load_ref_model(
     adapter_mod: types.ModuleType | None = None,
 ) -> AutoModelForCausalLM:
     """Load the HF reference model, using the adapter's custom loader when load_fn=True."""
-    dtype = torch_dtype_for_model_path(model_path)
+    dtype = torch_dtype_for_model_path(model_path, True)
     ref_model = _load_hf_causal_lm(
         model_path=model_path, torch_dtype=dtype, adapter_mod=adapter_mod
     )
