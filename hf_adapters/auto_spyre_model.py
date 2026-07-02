@@ -61,7 +61,6 @@ from transformers import (
     Olmo2Config,
     OlmoConfig,
     Phi3Config,
-    PixtralVisionConfig,
     Qwen2Config,
     Qwen3Config,
     RobertaConfig,
@@ -124,7 +123,6 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     OlmoConfig: hf_olmo,
     Olmo2Config: hf_olmo2,
     Phi3Config: hf_phi3,
-    PixtralVisionConfig: hf_mistral3_vision_mm,
     Qwen2Config: hf_qwen2,
     Qwen3Config: hf_qwen3,
     RobertaConfig: hf_xlm_roberta,
@@ -141,7 +139,7 @@ IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     type[PretrainedConfig], ModuleType
 ] = {
     Granite4VisionConfig: hf_granite_vision_mm,
-    PixtralVisionConfig: hf_mistral3_vision_mm,
+    Mistral3Config: hf_mistral3_vision_mm,
 }
 
 

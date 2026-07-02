@@ -63,20 +63,20 @@ from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
     _model_dtype,
-    _move_to_spyre_with_layout,
     _resolve_generation_params,
-    _untie_embedding_and_lm_head,
     allocate_kv_caches,
     build_expansion_mask,
     build_prefill_mask,
     decode_block_walk,
     get_backbone,
     make_standard_gqa_block,
+    move_to_spyre_with_layout,
     pad_and_position,
     pad_lm_head,
     patch_rmsnorm,
     prepare_rope_and_heads,
     select_next_token,
+    untie_embedding_and_lm_head,
 )
 
 # ---------------------------------------------------------------------------
@@ -554,10 +554,10 @@ def load_model(model_path, dtype=torch.float16):
     """Load Mistral3 Vision (both towers) and prepare for Spyre."""
     model = load_hf_model(model_path, dtype)
     actual_dtype = next(model.parameters()).dtype
-    _untie_embedding_and_lm_head(model)
+    untie_embedding_and_lm_head(model)
     prepare_for_spyre(model)
     print("Moving Mistral3 Vision (both towers) to Spyre ...")
-    _move_to_spyre_with_layout(model, actual_dtype)
+    move_to_spyre_with_layout(model, actual_dtype)
     # Re-pin the projector to CPU after the layout move (same as prepare note).
     if hasattr(model, "model") and hasattr(model.model, "multi_modal_projector"):
         model.model.multi_modal_projector.to("cpu")

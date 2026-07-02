@@ -29,6 +29,9 @@ two-tower adapters.
 
 Marked ``slow``: loads the full VLM twice and runs an autoregressive decode on
 CPU. Run with ``--run-slow``.
+
+pytest -s -vvv tests/cpu/test_vlm_e2e_cpu.py -k granite_vision_mm
+
 """
 
 import gc
