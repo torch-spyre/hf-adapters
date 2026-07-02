@@ -1114,7 +1114,7 @@ def untie_embedding_and_lm_head(model):
             model.config.tie_word_embeddings = False
 
 
-def model_dtype(model: nn.Module) -> torch.dtype:
+def get_model_dtype(model: nn.Module) -> torch.dtype:
     """Infer the floating-point dtype of a prepared model from its parameters.
 
     Used by KV-cache and mask allocators so they match the model dtype
@@ -1459,7 +1459,7 @@ def generate(
     # (``_spyre_kv_shapes``) for heterogeneous architectures like Gemma 4,
     # otherwise a single uniform shape derived from the config.
     # Match KV cache and mask dtype to the model's weight dtype.
-    model_d_type = model_dtype(model)
+    model_d_type = get_model_dtype(model)
     key_caches, value_caches = allocate_kv_caches(
         model, batch_size, max_cache_len, model_d_type
     )
@@ -2160,7 +2160,7 @@ def prefill_embed(
     # Match KV cache and mask dtype to the model's weight dtype so the
     # compiled block sees a consistent dtype across q/k/v_proj outputs and
     # the SDPA inputs.
-    model_d_type = model_dtype(model)
+    model_d_type = get_model_dtype(model)
 
     # Causal right-padded mask, or bidirectional for some embedders
     is_causal = getattr(model.config, "is_causal", True) and not getattr(

@@ -56,7 +56,7 @@ from tests._generate_edge_case_helpers import (
     make_prompts,
     pick_forced_eos_id,
 )
-from tests.conftest import load_hf_causal_lm, torch_dtype_for_model_path
+from tests.conftest import load_ref_model
 
 # All tests in this file are marked `slow` and dropped from PR runs except
 # `test_generate_zero_new_tokens`, which is the lightest case and acts as the
@@ -87,10 +87,7 @@ def _run_adapter_generate(
     Extra ``gen_kwargs`` are forwarded to ``hf_common.generate`` (e.g.
     ``do_sample``, ``temperature``, ``top_k``).
     """
-    torch_dtype = torch_dtype_for_model_path(model_path)
-    model = load_hf_causal_lm(model_path, torch_dtype, adapter_mod=adapter_mod)
-    model.eval()
-    model.requires_grad_(False)
+    model = load_ref_model(model_path, adapter_mod=adapter_mod)
     adapter_mod.prepare_for_spyre(model)
     unwrap_fn(model)
     gen_kwargs.setdefault("do_sample", False)
@@ -111,10 +108,7 @@ def _load_prepared_model(
     model_path: str, adapter_mod: types.ModuleType, unwrap_fn
 ) -> torch.nn.Module:
     """Load + prepare an adapter model once. Caller is responsible for ``del`` + gc."""
-    torch_dtype = torch_dtype_for_model_path(model_path)
-    model = load_hf_causal_lm(model_path, torch_dtype, adapter_mod=adapter_mod)
-    model.eval()
-    model.requires_grad_(False)
+    model = load_ref_model(model_path, adapter_mod=adapter_mod)
     adapter_mod.prepare_for_spyre(model)
     unwrap_fn(model)
     return model
@@ -159,10 +153,7 @@ def _hf_reference_cached(
     key = (model_path, tuple(prompts), max_new_tokens)
     if key in _HF_REF_CACHE:
         return _HF_REF_CACHE[key]
-    torch_dtype = torch_dtype_for_model_path(model_path)
-    ref_model = load_hf_causal_lm(model_path, torch_dtype, adapter_mod=adapter_mod)
-    ref_model.eval()
-    ref_model.requires_grad_(False)
+    ref_model = load_ref_model(model_path, adapter_mod=adapter_mod)
     outputs = hf_reference_outputs(ref_model, tokenizer, prompts, max_new_tokens)
     del ref_model
     gc.collect()
@@ -276,10 +267,7 @@ def test_generate_forced_eos(
     prompts = make_prompts(tokenizer, [5] * batch_size)
 
     # Step 1: capture each prompt's natural greedy continuation.
-    torch_dtype = torch_dtype_for_model_path(model_path)
-    ref_model = load_hf_causal_lm(model_path, torch_dtype, adapter_mod=adapter_mod)
-    ref_model.eval()
-    ref_model.requires_grad_(False)
+    ref_model = load_ref_model(model_path, adapter_mod=adapter_mod)
     per_prompt_ids = [
         greedy_token_ids(ref_model, tokenizer, p, max_new_tokens) for p in prompts
     ]
@@ -432,10 +420,7 @@ def test_generate_no_eos_runs_full_budget(
     max_new_tokens = BLOCK_SIZE + 7  # cross a block boundary
 
     # HF reference with eos_token_id=None so HF also runs the full budget.
-    torch_dtype = torch_dtype_for_model_path(model_path)
-    ref_model = load_hf_causal_lm(model_path, torch_dtype, adapter_mod=adapter_mod)
-    ref_model.eval()
-    ref_model.requires_grad_(False)
+    ref_model = load_ref_model(model_path, adapter_mod=adapter_mod)
     hf_outputs: list[str] = []
     for prompt in prompts:
         encoded = tokenizer(prompt, return_tensors="pt")

@@ -69,29 +69,6 @@ ADAPTERS_DIR = os.path.join(REPO_ROOT, "hf_adapters")
 # ---------------------------------------------------------------------------
 
 
-def load_hf_causal_lm(
-    model_path: str,
-    torch_dtype: torch.dtype,
-    adapter_mod: types.ModuleType | None = None,
-) -> AutoModelForCausalLM:
-    """Load the HF causal-LM reference, honoring the per-entry ``load_fn`` flag.
-
-    When ``load_fn`` is set, the adapter module is expected to expose
-    ``load_hf_model(path, dtype)`` (used for non-standard loading paths like
-    granite-vision).
-    """
-
-    from hf_adapters.auto_spyre_model import MODEL_PATH_WITH_LOAD_FN
-
-    if model_path in MODEL_PATH_WITH_LOAD_FN:
-        if adapter_mod is None:
-            raise RuntimeError("load_fn=True requires adapter_mod")
-        return adapter_mod.load_hf_model(model_path, torch_dtype)
-    return AutoModelForCausalLM.from_pretrained(
-        model_path, torch_dtype=torch_dtype, device_map="cpu"
-    )
-
-
 def load_hf_vlm(model_path, torch_dtype, adapter_mod=None):
     """Load the HF multimodal (image→text) reference, honoring ``load_fn``.
 
@@ -100,11 +77,8 @@ def load_hf_vlm(model_path, torch_dtype, adapter_mod=None):
     non-standard loading path); otherwise the stock
     ``AutoModelForImageTextToText`` auto class is used.
     """
-    from hf_adapters.auto_spyre_model import MODEL_PATH_WITH_LOAD_FN
 
-    if model_path in MODEL_PATH_WITH_LOAD_FN:
-        if adapter_mod is None:
-            raise RuntimeError("load_fn=True requires adapter_mod")
+    if hasattr(adapter_mod, "load_hf_model"):
         return adapter_mod.load_hf_model(model_path, torch_dtype)
     from transformers import AutoModelForImageTextToText
 
@@ -280,13 +254,32 @@ def torch_dtype_for_model_path(model_path: str) -> torch.dtype:
     return MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
 
 
+def _load_hf_causal_lm(
+    model_path: str,
+    torch_dtype: torch.dtype,
+    adapter_mod: types.ModuleType | None = None,
+) -> AutoModelForCausalLM:
+    """Load the HF causal-LM reference, honoring the per-entry ``load_fn`` flag.
+
+    When ``load_fn`` is set, the adapter module is expected to expose
+    ``load_hf_model(path, dtype)`` (used for non-standard loading paths like
+    granite-vision).
+    """
+
+    if hasattr(adapter_mod, "load_hf_model"):
+        return adapter_mod.load_hf_model(model_path, torch_dtype)
+    return AutoModelForCausalLM.from_pretrained(
+        model_path, torch_dtype=torch_dtype, device_map="cpu"
+    )
+
+
 def load_ref_model(
     model_path: str,
     adapter_mod: types.ModuleType | None = None,
 ) -> AutoModelForCausalLM:
     """Load the HF reference model, using the adapter's custom loader when load_fn=True."""
     dtype = torch_dtype_for_model_path(model_path)
-    ref_model = load_hf_causal_lm(
+    ref_model = _load_hf_causal_lm(
         model_path=model_path, torch_dtype=dtype, adapter_mod=adapter_mod
     )
     ref_model.eval()

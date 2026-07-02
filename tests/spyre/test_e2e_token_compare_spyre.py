@@ -35,7 +35,7 @@ from model_registry import CAUSAL_PATHS
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
-    model_dtype,
+    get_model_dtype,
     move_to_spyre_with_layout,
     untie_embedding_and_lm_head,
 )
@@ -114,7 +114,7 @@ def adapter_greedy_steps(
         padded_len + math.ceil(num_decode / BLOCK_SIZE) * BLOCK_SIZE + BLOCK_SIZE
     )
 
-    dtype = model_dtype(model)
+    dtype = get_model_dtype(model)
 
     key_caches, value_caches = allocate_kv_caches(
         model, batch_size, max_cache_len, dtype, device=DEVICE
