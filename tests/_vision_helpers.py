@@ -73,8 +73,13 @@ def build_vlm_batch(
     convention. Returns ``(processor, batch)``; ``batch`` carries whatever image
     inputs the model needs (``pixel_values``, ``image_sizes``, …).
     """
-    processor = AutoProcessor.from_pretrained(model_path)
+    if "mistral" in model_path.lower():
+        processor = AutoProcessor.from_pretrained(model_path, fix_mistral_regex=True)
+    else:
+        processor = AutoProcessor.from_pretrained(model_path)
+    # processor = AutoProcessor.from_pretrained(model_path)
     processor.tokenizer.padding_side = "left"
+
     if image is None:
         image = load_sample_image()
     conv = [

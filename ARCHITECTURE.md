@@ -49,8 +49,9 @@ Spyre; the projector / patch-embed / feature-merge ops that don't lower run on
 CPU (see Multimodal VLM Path below).
 
 | Model | model\_type | Towers | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
-|-------|-----------|--------|--------------|-------------|---------------|-----------|
+|-------|-----------|--------|-----------|--------------|-------------|---------------|-----------|
 | Granite Vision 4.1 4B | granite4\_vision | SigLIP vision + Granite text | Yes (padded) | Yes | Yes | Yes |
+| Mistral-Small-3.1-24B-Instruct-2503 | mistral3 | Pixtral + Mistral text | Yes (single pre-decoder) | Yes (padded) | Yes | Yes | Yes |
 
 **CPU Accurate** = adapter `generate` matches stock `model.generate` token-for-token on CPU (`test_vlm_e2e_cpu.py`).
 **Spyre Runs** = `test_vlm_e2e_spyre.py` drives the adapter teacher-forced on stock's tokens and asserts per-step logit cosine ≥ 0.999 vs the CPU reference over prefill + decode steps (top-1 agreement is reported, not asserted — an open-ended caption hits near-ties where the fp16-substrate winner is numerically arbitrary; see Multimodal VLM Path). granite-vision-4.1 holds cosine ≥ 0.99991 at every step and produces a correct, coherent caption.
@@ -105,11 +106,13 @@ single-token decode path (seq_len=1), not an adapter issue.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 23 adapters · 38 verified checkpoints · 100+ compatible models.
+**Coverage:** 25 adapters · 38 verified checkpoints · 100+ compatible models.
 The 38 verified rows are 24 generative + 13 embedding + 1 vision-language (see the
-Verified Checkpoints tables above). `hf_siglip_vision` is a vision-tower component
-used by the VLM adapter rather than a standalone model adapter, and Granite
-Vision 4.1 is verified both as a text backbone (generative) and as a full VLM.
+Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are
+vision-tower components used by VLM adapters rather than standalone model adapters.
+Granite Vision 4.1 is verified both as a text backbone (generative) and as a full VLM;
+Mistral3 Vision is registered and the two-tower adapter is implemented — CPU and Spyre
+verification is pending.
 
 Each adapter handles a HuggingFace `model_type`. Once verified with
 one checkpoint, all size variants and fine-tunes of that architecture
@@ -137,6 +140,8 @@ pattern, norms, and weight layout.
 | hf\_granite\_vision.py | granite (text) | 1 | — |
 | hf\_granite\_vision\_mm.py | granite4\_vision (multimodal) | 1 | — |
 | hf\_siglip\_vision.py | SigLIP vision tower | 1 | SigLIP towers of other VLMs (extracted as a bare `SiglipVisionModel`) |
+| hf\_mistral3\_vision\_mm.py | mistral3 (multimodal) | 1 | Mistral-Small-3.1 Vision  |
+| hf\_pixtral\_vision.py | Pixtral vision tower | 1 | Pixtral towers of Mistral3 Vision checkpoints |
 | hf\_bert.py | bert | 2 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants |
 | hf\_xlm\_roberta.py | xlm-roberta | 1 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes |
 | hf\_mpnet.py | mpnet | 1 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base, all-mpnet-base-v1 |
@@ -192,10 +197,11 @@ texts = model.generate(
 `AutoSpyreModelForImageTextToText` loads the full VLM via
 `AutoModelForImageTextToText`, prepares **both** towers for Spyre, and attaches
 Spyre-aware `prefill_logits` (image + text → first-token logits) and `generate`
-(full image→text decode). A multimodal config (e.g. `Granite4VisionConfig`) is in
-both auto-mappings: `AutoSpyreModelForCausalLM` selects the *text-only*
-`hf_granite_vision` adapter (discards the vision tower), while
-`AutoSpyreModelForImageTextToText` selects the *combined* `hf_granite_vision_mm`.
+(full image→text decode). A multimodal config is registered in both auto-mappings:
+`AutoSpyreModelForCausalLM` selects the *text-only* adapter (discards the vision
+tower), while `AutoSpyreModelForImageTextToText` selects the *combined* two-tower
+adapter. This applies to both `Granite4VisionConfig` → `hf_granite_vision_mm` and
+`Mistral3Config` → `hf_mistral3_vision_mm`.
 
 ### Manual Control API
 
@@ -237,14 +243,16 @@ hf_adapters/
 ├── hf_granite.py          — Granite 3.3 adapter
 ├── hf_granite_vision.py   — Granite Vision 4.1 text backbone adapter (text-only)
 ├── hf_granite_vision_mm.py — Granite Vision 4.1 multimodal adapter (vision + text)
-├── hf_siglip_vision.py    — SigLIP vision tower adapter (used by the VLM adapter)
+├── hf_siglip_vision.py    — SigLIP vision tower adapter (used by Granite the adapter)
 ├── hf_qwen3.py            — Qwen3 adapter
 ├── hf_granitemoehybrid.py — Granite 4.0 dense adapter
 ├── hf_smollm3.py          — SmolLM3 adapter
 ├── hf_llama.py            — Llama adapter (Llama 1/2/3, Code Llama, Yi, TinyLlama)
 ├── hf_qwen2.py            — Qwen2 adapter (Qwen 1.5, Qwen 2, Qwen 2.5)
 ├── hf_mistral.py          — Mistral adapter (Mistral 7B v0.2, v0.3)
-├── hf_mistral3.py         — Mistral-3 adapter (Mistral-Small-3.2 24B, Ministral-3 14B multimodal text decoder)
+├── hf_mistral3.py         — Mistral-3 adapter (Mistral-Small-3.2 24B, Ministral-3 14B — text-only)
+├── hf_mistral3_vision_mm.py — Mistral3 Vision multimodal adapter (Pixtral + Mistral text)
+├── hf_pixtral_vision.py   — Pixtral vision tower adapter (used by Mistral3 VLM adapter)
 ├── hf_phi3.py             — Phi-4 mini adapter
 ├── hf_olmo.py             — OLMo adapter (OLMo 1B, 7B)
 ├── hf_olmo2.py            — OLMo2 adapter (OLMo 2 7B)
@@ -561,15 +569,15 @@ SigLIP-specific Spyre adaptations:
   closure survives the blanket device move (`_embedding_param_ids` can't exclude
   a 4-D conv weight).
 
-**Combined two-tower adapter** (`hf_granite_vision_mm.py`): runs the Spyre SigLIP
-tower, projects/packs its features, splices them into the text-embedding stream at
-`<image>` positions, and runs the Granite text decoder (reusing
-`hf_granite`'s compiled block + the shared `generate`/KV machinery, embedding-driven
-so prefill can carry the image injection). Granite Vision 4.1 uses a multi-layer
-**deepstack + spatial** injection: several vision layers and spatial offset groups
-are projected by their own Blip2-QFormer projectors and **summed** into the
-image-token positions before the mapped decoder layers (`_inject_deepstack`).
-Multimodal-specific Spyre adaptations:
+**Combined two-tower adapter — Granite** (`hf_granite_vision_mm.py`): runs the
+Spyre SigLIP tower, projects/packs its features, splices them into the
+text-embedding stream at `<image>` positions, and runs the Granite text decoder
+(reusing `hf_granite`'s compiled block + the shared `generate`/KV machinery,
+embedding-driven so prefill can carry the image injection). Granite Vision 4.1
+uses a multi-layer **deepstack + spatial** injection: several vision layers and
+spatial offset groups are projected by their own Blip2-QFormer projectors and
+**summed** into the image-token positions before the mapped decoder layers
+(`_inject_deepstack`). Multimodal-specific Spyre adaptations:
 
 - **Projectors + `image_newline` stay on CPU.** The Blip2-QFormer projectors and
   `pack_image_features` are stock CPU modules (vision features are moved to CPU
@@ -586,6 +594,58 @@ Multimodal-specific Spyre adaptations:
 - **Token-embedding gather follows the table's device** — `embed_tokens` lives on
   Spyre after the move, so prefill ids are moved to the table's device (matching
   the decode step), then masking happens on-device.
+
+**Pixtral vision tower** (`hf_pixtral_vision.py`): a **pre-LN, bidirectional,
+2D-RoPE** ViT encoder used by Mistral3 Vision checkpoints. Key differences from
+the SigLIP tower:
+
+- **2D RoPE.** Pixtral encodes patch positions with a 2D `(row, col)` meshgrid
+  mapped through a pre-computed `[max_patches, head_dim]` `inv_freq` table.
+  Stock applies it via `rotate_half` (slices along head_dim — Spyre-incompatible).
+  The adapter converts the per-image position ids into `[P, 2, 2, D/2]`
+  rotation matrices at prepare time via `_build_pixtral_rope_matrices` and applies
+  them with `apply_rope_matmul` (no slicing). The rotation matrices are re-built
+  per image at inference time (shape `P` varies) from the snapshotted `inv_freq`.
+- **Block-diagonal attention mask.** When multiple images are batched into one
+  sequence, each image's patches attend only within that image. Built on CPU as an
+  additive fp16 mask (`_build_block_attn_mask`) and moved to Spyre.
+- **SwiGLU MLP** (`gate_proj` × `up_proj` → `down_proj`), unlike SigLIP's GELU-tanh
+  two-layer MLP. No MLP intermediate padding needed (`intermediate_size=4096` is a
+  multiple of 64).
+- **`PixtralRMSNorm`** (pre-LN on both attention and MLP sub-layers) patched via
+  `patch_rmsnorm`, same as text decoders.
+- **Head-dim padding 64→128** (`_pad_pixtral_heads`). Pixtral's default
+  `head_dim = 1024/16 = 64` (`D/2 = 32 < 64`), below one stick. Q/K/V/O are
+  zero-padded to 128 with the SDPA scale held at `1/sqrt(64)`.
+- **Conv2d patch embed runs on CPU.** Snapshotted at prepare time (same
+  CPU-fallback contract as SigLIP).
+
+**Combined two-tower adapter — Mistral3** (`hf_mistral3_vision_mm.py`): runs the
+Spyre Pixtral tower, applies the stock `multi_modal_projector` (RMSNorm +
+`Mistral3PatchMerger` + two linear layers) on CPU, then scatters the image
+features into the text-embedding stream once before decoder layer 0. Mistral3
+uses a simpler **flat single-injection** pattern (contrast with Granite's
+deepstack multi-layer injection):
+
+1. Run Pixtral tower with `output_hidden_states=True`.
+2. Select `vision_feature_layer` hidden state(s), apply `multi_modal_projector`
+   on CPU → `image_features [N_img_tokens, text_hidden]`.
+3. Zero the `[IMG]` token slots in text embeddings (`* keep` elementwise mul);
+   scatter `image_features` into those slots via a CPU-built additive tensor
+   (same Spyre-safe technique as `_inject_deepstack`).
+4. Run the full Mistral text decoder once with the resulting `inputs_embeds`.
+   Decode steps are pure text — no image re-encoding.
+
+Multimodal-specific Spyre adaptations (beyond those shared with Granite VLM):
+
+- **`_spyre_text_blocks` vs `_spyre_compiled_blocks`** — `prepare_for_spyre`
+  explicitly stores Mistral decoder blocks in `model._spyre_text_blocks` to avoid
+  collision with the vision tower's compiled blocks stored by
+  `hf_pixtral_vision.prepare_for_spyre` in `model._spyre_compiled_blocks`.
+- **`multi_modal_projector` pinned to CPU** after `_move_to_spyre_with_layout`
+  (same pattern as Granite's `layerwise_projectors` pin).
+- **`Mistral3PatchMerger`** (`nn.functional.unfold` + `merging_layer`) runs on
+  CPU inside the projector — `unfold` doesn't lower on Spyre.
 
 ## Adding a New Model
 

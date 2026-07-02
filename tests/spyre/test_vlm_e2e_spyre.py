@@ -144,7 +144,9 @@ def _adapter_teacher_forced_steps(
 
     model_d_type = get_model_dtype(model)
     backbone = adapter.get_backbone(model)
-    emb_mult = backbone.embedding_multiplier
+    # emb_mult = backbone.embedding_multiplier
+    # Falls back to 1.0 for models (Mistral) that don't scale embeddings
+    emb_mult = getattr(backbone, "embedding_multiplier", 1.0)
 
     batch_size, prompt_length = input_ids.shape
     actual_prompt_lengths = attention_mask.sum(dim=1)
