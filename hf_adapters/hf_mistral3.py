@@ -82,9 +82,15 @@ def _run_forward(model, input_ids, position_ids, attn_mask, key_caches, value_ca
     ``embed_tokens``.  Harmless on CPU (no-op when already int32 or
     when the device is not Spyre).
     """
+    # Cast input_ids to int32 on CPU before the forward pass.
+    # Spyre does not support int64; its monkey-patch for .to("spyre") on int64
+    # tensors performs the downcast but returns a broken tensor in some
+    # torch-spyre versions. By casting to int32 on CPU first, the subsequent
+    # .to("spyre") inside standard_gqa_backbone_forward sees an int32 tensor
+    # and moves it to Spyre cleanly with no downcast needed.
     return standard_gqa_forward(
         model,
-        input_ids.to(torch.int32),
+        input_ids.cpu().to(torch.int32),
         position_ids,
         attn_mask,
         key_caches,
@@ -100,7 +106,7 @@ def _run_backbone_forward(model, input_ids, position_ids, attn_mask, key_caches,
     """Backbone-only forward (no lm_head) for Ministral-8B embedding callers."""
     return standard_gqa_backbone_forward(
         model,
-        input_ids.to(torch.int32),
+        input_ids.cpu().to(torch.int32),
         position_ids,
         attn_mask,
         key_caches,
