@@ -485,6 +485,56 @@ jobs:
           uv run pytest -s -vvv tests/spyre/test_vlm_e2e_spyre.py -k "${{ matrix.model_key }}"
           echo "tests done"
 
+  spyre-vlm-embed-tests:
+    name: Spyre VLM embed (${{ matrix.model_key }})
+    needs: [generate-matrix]
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - ${{ inputs.runner_label || 'image_torch_spyre' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Same VISION_PATHS matrix as spyre-vlm-tests — the embedding test
+        # (last_hidden_state, pre-lm_head) shares the exact model set, just
+        # probes one layer upstream to isolate decoder correctness from the
+        # LM head.
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.vision_matrix) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - name: Run test_vlm_e2e_embed_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_vlm_e2e_embed_spyre.py for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv tests/spyre/test_vlm_e2e_embed_spyre.py -k "${{ matrix.model_key }}"
+          echo "tests done"
+
   spyre-model-module-tests:
     name: Spyre model-module tests (${{ matrix.config }})
     runs-on:
@@ -563,6 +613,7 @@ jobs:
       - spyre-token-compare-tests
       - spyre-embed-compare-tests
       - spyre-vlm-tests
+      - spyre-vlm-embed-tests
       - spyre-model-module-tests #updated to run model centric HF module tests
     if: always()
     steps:
@@ -581,6 +632,7 @@ jobs:
                  contains(needs.spyre-token-compare-tests.result, 'failure') || contains(needs.spyre-token-compare-tests.result, 'cancelled') ||
                  contains(needs.spyre-embed-compare-tests.result, 'failure') || contains(needs.spyre-embed-compare-tests.result, 'cancelled') ||
                  contains(needs.spyre-vlm-tests.result, 'failure') || contains(needs.spyre-vlm-tests.result, 'cancelled') ||
+                 contains(needs.spyre-vlm-embed-tests.result, 'failure') || contains(needs.spyre-vlm-embed-tests.result, 'cancelled') ||
                  contains(needs.spyre-model-module-tests.result, 'failure') || contains(needs.spyre-model-module-tests.result, 'cancelled') }}; then
             echo "One or more test suites failed."
             exit 1
