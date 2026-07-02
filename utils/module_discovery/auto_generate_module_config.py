@@ -524,8 +524,14 @@ def _convert_constructor_arg_to_sample_input(
 ) -> Dict[str, Any]:
     """Convert constructor arg spec to sample_inputs_func format."""
     if arg_spec["type"] == "config":
-        # Config objects become a special marker - will be handled by test code
-        return {"value": f"<config:{arg_spec['config_path']}>"}
+        # Emit a structured config arg carrying the captured model dimensions so
+        # the framework can rebuild the config (config_path + config_kwargs) with
+        # the right shapes instead of library defaults. Resolved by
+        # InputsEdits.build_cpu_args -> InputArgConfig in the OOT framework.
+        return {
+            "config_path": arg_spec["config_path"],
+            "config_kwargs": arg_spec.get("config_kwargs", {}),
+        }
     elif arg_spec["type"] == "int":
         return {"value": arg_spec["value"]}
     elif arg_spec["type"] == "float":
