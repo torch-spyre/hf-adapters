@@ -62,13 +62,13 @@ from hf_adapters import hf_siglip_vision
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
-    _model_dtype,
     _resolve_generation_params,
     allocate_kv_caches,
     build_expansion_mask,
     build_prefill_mask,
     decode_block_walk,
     get_backbone,
+    get_model_dtype,
     pad_and_position,
     pad_lm_head,
     patch_rmsnorm,
@@ -143,7 +143,7 @@ def _deepstack_features(model, pixel_values, image_sizes):
     _, hidden_states = hf_siglip_vision.prefill_vision_tower(
         model, pixel_values, output_hidden_states=True
     )
-    dtype = _model_dtype(model)
+    dtype = get_model_dtype(model)
 
     # The deepstack/spatial projectors (Blip2 QFormers) and the image_newline
     # parameter are stock CPU modules: _project_and_pack / pack_image_features run
@@ -302,7 +302,7 @@ def _prefill_forward(
     KV caches are passed in (not allocated here) so ``generate`` can size them
     for the whole decode while ``prefill_logits`` sizes them for one forward.
     """
-    model_dtype = _model_dtype(model)
+    model_d_type = get_model_dtype(model)
     # _embed_text returns embeds on the embedding table's device (Spyre after
     # the layout move). Zero the <image> slots by multiplying with a keep factor
     # (0 at image positions, 1 elsewhere): masked_fill_ does not lower on the
@@ -310,7 +310,7 @@ def _prefill_forward(
     # CPU (the bool/not op also doesn't lower) then moved to the embeds' device.
     inputs_embeds = _embed_text(model, padded_ids)
     vision_mask = _vision_mask(model, padded_ids)
-    keep = (~vision_mask).to(model_dtype).to(inputs_embeds.device)
+    keep = (~vision_mask).to(model_d_type).to(inputs_embeds.device)
     inputs_embeds = inputs_embeds * keep
     deepstack = _deepstack_features(model, pixel_values, image_sizes)
     prefill_mask = build_prefill_mask(
@@ -318,7 +318,7 @@ def _prefill_forward(
         padded_len,
         max_cache_len,
         prompt_offsets,
-        dtype=model_dtype,
+        dtype=model_d_type,
     )
     return _logits_from_embeds(
         model,
@@ -349,7 +349,7 @@ def prefill_logits(model, input_ids, attention_mask, pixel_values, image_sizes):
         input_ids, actual_lengths
     )
     key_caches, value_caches = allocate_kv_caches(
-        model, padded_ids.shape[0], padded_len, _model_dtype(model)
+        model, padded_ids.shape[0], padded_len, get_model_dtype(model)
     )
     logits = _prefill_forward(
         model,
@@ -448,7 +448,7 @@ def generate(
 
     backbone = get_backbone(model)
     emb_mult = backbone.embedding_multiplier
-    model_dtype = _model_dtype(model)
+    model_d_type = get_model_dtype(model)
 
     batch_size, prompt_length = input_ids.shape
     actual_prompt_lengths = attention_mask.sum(dim=1)  # [B]
@@ -462,7 +462,7 @@ def generate(
     )
 
     key_caches, value_caches = allocate_kv_caches(
-        model, batch_size, max_cache_len, model_dtype
+        model, batch_size, max_cache_len, model_d_type
     )
 
     result = input_ids.clone()
@@ -528,7 +528,7 @@ def generate(
                     max_cache_len,
                     current_cache_len,
                     prompt_offsets,
-                    dtype=model_dtype,
+                    dtype=model_d_type,
                 )
                 logits = _logits_from_embeds(
                     model,

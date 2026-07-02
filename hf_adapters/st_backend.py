@@ -40,7 +40,7 @@ import types
 import torch
 from transformers.modeling_outputs import BaseModelOutput
 
-from hf_adapters.auto_spyre_model import AutoSpyreModel, _resolve_adapter_module
+from hf_adapters.auto_spyre_model import AutoSpyreModel, resolve_adapter_module
 from hf_adapters.hf_common import prefill_embed, prefill_encoder
 
 
@@ -68,7 +68,7 @@ def _spyre_load_model(
     dtype = model_kwargs.pop("torch_dtype", torch.float16)
     model = AutoSpyreModel.from_pretrained(model_name_or_path, dtype=dtype)
 
-    adapter_module = _resolve_adapter_module(model_name_or_path)
+    adapter_module = resolve_adapter_module(model_name_or_path)
     run_backbone_forward = adapter_module._run_backbone_forward
 
     # Route to the right prefill driver. Encoder-only adapters set

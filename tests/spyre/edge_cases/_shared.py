@@ -27,9 +27,7 @@ ordering discipline from the previous one-process driver.
 from __future__ import annotations
 
 import gc
-import importlib
 import time
-import types
 
 import torch
 from _generate_edge_case_helpers import (
@@ -45,51 +43,35 @@ from _generate_edge_case_helpers import (
     make_prompt_with_eos_inside,
     make_prompts,
 )
-from model_registry import CAUSAL_LM_MODELS
-from transformers import AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
+from torch.nn import Module
+from transformers import (
+    AutoTokenizer,
+    PreTrainedModel,
+)
 
 from hf_adapters import AutoSpyreModelForCausalLM
-from tests.conftest import load_hf_causal_lm
+from hf_adapters.auto_spyre_model import resolve_adapter_module
+from tests.conftest import load_ref_model
 
 
-def _load_adapter(info: dict) -> types.ModuleType:
-    """Import the adapter module for the given registry entry."""
-    adapter_module_name = info["adapter"].replace(".py", "")
-    return importlib.import_module(f"hf_adapters.{adapter_module_name}")
-
-
-def _load_ref_model(
-    info: dict,
-    adapter_mod: types.ModuleType | None = None,
-) -> PreTrainedModel:
-    """Load the HF reference model, using the adapter's custom loader when load_fn=True."""
-    ref_dtype = torch.float32 if info.get("dtype") == "float32" else torch.float16
-    ref_model = load_hf_causal_lm(info, ref_dtype, adapter_mod=adapter_mod)
-    ref_model.eval()
-    ref_model.requires_grad_(False)
-    return ref_model
-
-
-def _load_spyre_model(info: dict) -> AutoSpyreModelForCausalLM:
-    print(f"  Loading {info['name']} on Spyre ...")
+def _load_spyre_model(model_path: str) -> Module:
+    print(f"  Loading {model_path} on Spyre ...")
     t0 = time.time()
-    model = AutoSpyreModelForCausalLM.from_pretrained(info["path"])
+    model = AutoSpyreModelForCausalLM.from_pretrained(model_path)
     print(f"  Spyre load+prepare: {time.time() - t0:.1f}s")
     return model
 
 
 def _setup(
-    model_key: str,
+    model_path: str,
     need_ref: bool,
-) -> tuple[
-    dict, PreTrainedTokenizerBase, PreTrainedModel | None, AutoSpyreModelForCausalLM
-]:
-    info = CAUSAL_LM_MODELS[model_key]
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
-    adapter_mod = _load_adapter(info) if need_ref and info.get("load_fn") else None
-    ref_model = _load_ref_model(info, adapter_mod=adapter_mod) if need_ref else None
-    spyre_model = _load_spyre_model(info)
-    return info, tokenizer, ref_model, spyre_model
+):
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    adapter = resolve_adapter_module(model_path)
+
+    ref_model = load_ref_model(model_path, adapter_mod=adapter) if need_ref else None
+    spyre_model = _load_spyre_model(model_path)
+    return model_path, tokenizer, ref_model, spyre_model
 
 
 def _teardown(
@@ -102,9 +84,9 @@ def _teardown(
     gc.collect()
 
 
-def run_greedy_case(model_key: str, case_id: str) -> tuple[bool, str]:
+def run_greedy_case(model_path: str, case_id: str) -> tuple[bool, str]:
     """Greedy-generate case: HF reference == Spyre output, per row."""
-    info, tokenizer, ref_model, model = _setup(model_key, need_ref=True)
+    info, tokenizer, ref_model, model = _setup(model_path, need_ref=True)
     try:
         targets, max_new = CASES[case_id]
         prompts = make_prompts(tokenizer, targets)
@@ -122,9 +104,9 @@ def run_greedy_case(model_key: str, case_id: str) -> tuple[bool, str]:
         _teardown(model, ref_model)
 
 
-def run_eos_case(model_key: str, case_id: str) -> tuple[bool, str]:
+def run_eos_case(model_path: str, case_id: str) -> tuple[bool, str]:
     """Forced-EOS case: shared eos_token_id stops each row at its requested offset."""
-    info, tokenizer, ref_model, model = _setup(model_key, need_ref=True)
+    info, tokenizer, ref_model, model = _setup(model_path, need_ref=True)
     try:
         eos_offsets, max_new = EOS_CASES[case_id]
         batch_size = len(eos_offsets)
@@ -157,8 +139,8 @@ def run_eos_case(model_key: str, case_id: str) -> tuple[bool, str]:
         _teardown(model, ref_model)
 
 
-def run_zero_new_tokens(model_key: str) -> tuple[bool, str]:
-    info, tokenizer, _, model = _setup(model_key, need_ref=False)
+def run_zero_new_tokens(model_path: str) -> tuple[bool, str]:
+    info, tokenizer, _, model = _setup(model_path, need_ref=False)
     try:
         prompts = make_prompts(tokenizer, [5, 12])
         t0 = time.time()
@@ -172,8 +154,8 @@ def run_zero_new_tokens(model_key: str) -> tuple[bool, str]:
         _teardown(model, None)
 
 
-def run_sampling_determinism(model_key: str) -> tuple[bool, str]:
-    info, tokenizer, _, model = _setup(model_key, need_ref=False)
+def run_sampling_determinism(model_path: str) -> tuple[bool, str]:
+    info, tokenizer, _, model = _setup(model_path, need_ref=False)
     try:
         sampling_prompts = make_prompts(tokenizer, SAMPLING_TARGETS)
         t0 = time.time()
@@ -207,8 +189,8 @@ def run_sampling_determinism(model_key: str) -> tuple[bool, str]:
         _teardown(model, None)
 
 
-def run_no_eos(model_key: str) -> tuple[bool, str]:
-    info, tokenizer, ref_model, model = _setup(model_key, need_ref=True)
+def run_no_eos(model_path: str) -> tuple[bool, str]:
+    info, tokenizer, ref_model, model = _setup(model_path, need_ref=True)
     try:
         no_eos_prompts = make_prompts(tokenizer, [5, 12])
         no_eos_max_new = 64 + 7
@@ -246,8 +228,8 @@ def run_no_eos(model_key: str) -> tuple[bool, str]:
         _teardown(model, ref_model)
 
 
-def run_no_pad(model_key: str) -> tuple[bool, str]:
-    info, tokenizer, ref_model, model = _setup(model_key, need_ref=True)
+def run_no_pad(model_path: str) -> tuple[bool, str]:
+    info, tokenizer, ref_model, model = _setup(model_path, need_ref=True)
     try:
         no_pad_prompts = make_prompts(tokenizer, [5, 12])
         no_pad_max_new = 16
@@ -268,8 +250,8 @@ def run_no_pad(model_key: str) -> tuple[bool, str]:
         _teardown(model, ref_model)
 
 
-def run_top_k_zero(model_key: str) -> tuple[bool, str]:
-    info, tokenizer, _, model = _setup(model_key, need_ref=False)
+def run_top_k_zero(model_path: str) -> tuple[bool, str]:
+    info, tokenizer, _, model = _setup(model_path, need_ref=False)
     try:
         sampling_prompts = make_prompts(tokenizer, SAMPLING_TARGETS)
         kwargs = dict(do_sample=True, temperature=1.0, top_k=0)
@@ -291,8 +273,8 @@ def run_top_k_zero(model_key: str) -> tuple[bool, str]:
         _teardown(model, None)
 
 
-def run_eos_inside_prompt(model_key: str) -> tuple[bool, str]:
-    info, tokenizer, ref_model, model = _setup(model_key, need_ref=True)
+def run_eos_inside_prompt(model_path: str) -> tuple[bool, str]:
+    info, tokenizer, ref_model, model = _setup(model_path, need_ref=True)
     try:
         if tokenizer.eos_token_id is None:
             import pytest

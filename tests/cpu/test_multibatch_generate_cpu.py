@@ -28,61 +28,27 @@ import gc
 
 import pytest
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
-PROMPTS = [
+from hf_adapters.auto_spyre_model import resolve_adapter_module
+from tests.conftest import load_ref_model
+from tests.model_registry import CAUSAL_PATHS
+
+PROMPTS: list[str] = [
     "The capital of France is",
     "The chemical formula for water is",
 ]
-MAX_NEW_TOKENS = 8
-
-MODELS = {
-    "qwen3": {
-        "name": "Qwen3 0.6B",
-        "path": "Qwen/Qwen3-0.6B",
-        "adapter": "hf_qwen3.py",
-    },
-    "granite2b": {
-        "name": "Granite 3.3 2B",
-        "path": "ibm-granite/granite-3.3-2b-instruct",
-        "adapter": "hf_granite.py",
-    },
-    "smollm3": {
-        "name": "SmolLM3 3B",
-        "path": "HuggingFaceTB/SmolLM3-3B-Base",
-        "adapter": "hf_smollm3.py",
-    },
-    "llama": {
-        "name": "TinyLlama 1.1B",
-        "path": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        "adapter": "hf_llama.py",
-    },
-    "granite4": {
-        "name": "Granite 4.0 1B",
-        "path": "ibm-granite/granite-4.0-1b-base",
-        "adapter": "hf_granitemoehybrid.py",
-        "dtype": "float32",
-    },
-    "qwen2": {
-        "name": "Qwen2.5 1.5B",
-        "path": "Qwen/Qwen2.5-1.5B",
-        "adapter": "hf_qwen2.py",
-    },
-    "olmo": {
-        "name": "OLMo 1B",
-        "path": "allenai/OLMo-1B-hf",
-        "adapter": "hf_olmo.py",
-    },
-}
+MAX_NEW_TOKENS: int = 8
 
 
-def _torch_dtype(info):
-    return torch.float32 if info.get("dtype") == "float32" else torch.float16
-
-
-def _hf_reference_outputs(model, tokenizer, prompts, max_new_tokens):
+def _hf_reference_outputs(
+    model: torch.nn.Module,
+    tokenizer: AutoTokenizer,
+    prompts: list[str],
+    max_new_tokens: int,
+) -> list[str]:
     """Run HF native generate() on each prompt individually."""
-    results = []
+    results: list[str] = []
     for prompt in prompts:
         encoded = tokenizer(prompt, return_tensors="pt")
         with torch.no_grad():
@@ -94,30 +60,20 @@ def _hf_reference_outputs(model, tokenizer, prompts, max_new_tokens):
     return results
 
 
-@pytest.mark.parametrize("model_key", list(MODELS.keys()), ids=list(MODELS.keys()))
-def test_multibatch(model_key, load_adapter, unwrap_compiled_blocks, hf_common_mod):
-    info = MODELS[model_key]
-    adapter_mod = load_adapter(info["adapter"])
-    torch_dtype = _torch_dtype(info)
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+def test_multibatch(model_path: str, unwrap_compiled_blocks, hf_common_mod) -> None:
+    adapter_mod = resolve_adapter_module(model_path)
 
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     # HF reference (per-prompt, BEFORE patching for cleanliness)
-    model = AutoModelForCausalLM.from_pretrained(
-        info["path"], torch_dtype=torch_dtype, device_map="cpu"
-    )
-    model.eval()
-    model.requires_grad_(False)
+    model = load_ref_model(model_path, adapter_mod)
     hf_outputs = _hf_reference_outputs(model, tokenizer, PROMPTS, MAX_NEW_TOKENS)
     del model
     gc.collect()
 
     # Adapter batched generate
-    model = AutoModelForCausalLM.from_pretrained(
-        info["path"], torch_dtype=torch_dtype, device_map="cpu"
-    )
-    model.eval()
-    model.requires_grad_(False)
+    model = load_ref_model(model_path, adapter_mod)
     adapter_mod.prepare_for_spyre(model)
     unwrap_compiled_blocks(model)
     adapter_outputs = hf_common_mod.generate(
