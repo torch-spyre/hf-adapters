@@ -137,6 +137,7 @@ jobs:
     outputs:
       causal_matrix: ${{ steps.generate.outputs.causal_matrix }}
       embed_matrix: ${{ steps.generate.outputs.embed_matrix }}
+      vision_matrix: ${{ steps.generate.outputs.vision_matrix }}
       combined_matrix: ${{ steps.generate.outputs.combined_matrix }}
     defaults:
       run:
@@ -435,6 +436,7 @@ jobs:
 
   spyre-vlm-e2e-tests:
     name: Spyre VLM e2e (${{ matrix.model_key }})
+    needs: [generate-matrix]
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -444,10 +446,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Static matrix of VLM (kind="vlm") entries in tests/model_registry.py::VISION_MODELS.
-        # Keep in sync when new VLM adapters are added.
-        model_key:
-          - granite_vision_mm
+        # Dynamic matrix: VLM (kind="vlm") models from tests/model_registry.py
+        # Generated from VISION_PATHS - one entry per VLM adapter
+        # To exclude models, add them to the --exclude list in the generate-matrix job
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.vision_matrix) }}
 
     steps:
       - name: Checkout composite actions
