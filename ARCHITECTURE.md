@@ -32,7 +32,7 @@ which models are supported on Spyre.
 | GPT-2 124M | gpt2 | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
 | GPT-Neo 125M | gpt_neo | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
 | Pythia 70M | gpt_neox | 64→128 | 16 (partial) | Yes (padded) | Yes | Yes | Yes |
-| Ministral-8B Instruct 2410 | ministral | 128 | 64 | Yes | Yes | — | — |
+| Ministral-8B Instruct | ministral | 128 | 64 | Yes | Yes | Yes | Yes |
 | Mistral Small 3 24B | mistral3 | 128 | 64 | Yes | Yes | Yes | Yes |
 | Ministral-3 14B Instruct | ministral3 | 128 | 64 | Yes | Yes | Yes | Yes |
 
@@ -181,7 +181,7 @@ hf_adapters/
 ├── hf_llama.py            — Llama adapter (Llama 1/2/3, Code Llama, Yi, TinyLlama)
 ├── hf_qwen2.py            — Qwen2 adapter (Qwen 1.5, Qwen 2, Qwen 2.5)
 ├── hf_mistral.py          — Mistral adapter (Mistral 7B v0.2, v0.3)
-├── hf_mistral3.py         — Mistral-3 adapter (Mistral-Small-3.2 24B, Ministral-3 14B multimodal text decoder)
+├── hf_mistral3.py         — Mistral-3 adapter (Mistral-Small-3.2 24B, Ministral-3 14B multimodal text decoder, Ministral-8B Instruct)
 ├── hf_phi3.py             — Phi-4 mini adapter
 ├── hf_olmo.py             — OLMo adapter (OLMo 1B, 7B)
 ├── hf_olmo2.py            — OLMo2 adapter (OLMo 2 7B)
