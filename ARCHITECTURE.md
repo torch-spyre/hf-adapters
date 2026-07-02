@@ -140,8 +140,8 @@ pattern, norms, and weight layout.
 | hf\_granite\_vision.py | granite (text) | 1 | — |
 | hf\_granite\_vision\_mm.py | granite4\_vision (multimodal) | 1 | — |
 | hf\_siglip\_vision.py | SigLIP vision tower | 1 | SigLIP towers of other VLMs (extracted as a bare `SiglipVisionModel`) |
-| hf\_mistral3\_vision\_mm.py | mistral3 (multimodal) | 0 (pending) | Mistral-Small-3.1/3.2 Vision variants |
-| hf\_pixtral\_vision.py | Pixtral vision tower | 0 (pending) | Pixtral towers of Mistral3 Vision checkpoints |
+| hf\_mistral3\_vision\_mm.py | mistral3 (multimodal) | 1 | Mistral-Small-3.1 Vision  |
+| hf\_pixtral\_vision.py | Pixtral vision tower | 1 | Pixtral towers of Mistral3 Vision checkpoints |
 | hf\_bert.py | bert | 2 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants |
 | hf\_xlm\_roberta.py | xlm-roberta | 1 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes |
 | hf\_mpnet.py | mpnet | 1 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base, all-mpnet-base-v1 |
