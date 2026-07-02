@@ -165,3 +165,54 @@ def stock_vlm_greedy_steps(
     token_ids = gen.sequences[0, prompt_len : prompt_len + num_steps].tolist()
     del ref_model
     return logits, token_ids
+
+
+def stock_vlm_greedy_hidden_steps(
+    model_path: str,
+    batch: dict[str, torch.Tensor],
+    dtype: torch.dtype,
+    num_steps: int,
+) -> tuple[list[torch.Tensor], list[int], torch.Tensor]:
+    """Stock HF per-step greedy last-layer hidden state + token ids.
+
+    Sister of ``stock_vlm_greedy_steps`` — same greedy ``generate`` call, but
+    returns the text decoder's post-final-norm hidden state (what ``lm_head``
+    reads) instead of the post-``lm_head`` logits. Used by the VLM embedding
+    e2e test to teacher-force the adapter against the same greedy prefix and
+    compare last_hidden_state per step.
+
+    Returns
+      - ``hidden_steps``: list of ``num_steps`` fp32 tensors.
+          Step 0  : ``[prompt_len, H]`` — full prefill last-layer hidden state,
+                    one row per input token (post-final-norm).
+          Step k>0: ``[H]``             — hidden state at the newly-decoded token.
+      - ``token_ids``: ``num_steps`` greedily chosen ids (same sequence
+        ``stock_vlm_greedy_steps`` returns), used as the teacher-forcing prefix.
+      - ``prefill_attention_mask``: ``[prompt_len]`` bool, so the step-0
+        per-token cosine can be restricted to real (non-padded) positions.
+    """
+    from transformers import AutoModelForImageTextToText
+
+    ref_model = AutoModelForImageTextToText.from_pretrained(
+        model_path, dtype=dtype, device_map="cpu"
+    ).eval()
+    with torch.no_grad():
+        gen = ref_model.generate(
+            **batch,
+            max_new_tokens=num_steps,
+            do_sample=False,
+            use_cache=True,
+            output_hidden_states=True,
+            return_dict_in_generate=True,
+        )
+    # gen.hidden_states: tuple of len num_steps; each step is a tuple of per-layer
+    # tensors, [-1] being post-final-norm. Step 0: [B, prompt_len, H]; step k>0: [B, 1, H].
+    hidden_steps: list[torch.Tensor] = []
+    for step_i, layers in enumerate(gen.hidden_states):
+        last_layer = layers[-1][0].float().clone()
+        hidden_steps.append(last_layer if step_i == 0 else last_layer[0])
+    prompt_len = batch["input_ids"].shape[1]
+    token_ids = gen.sequences[0, prompt_len : prompt_len + num_steps].tolist()
+    prefill_amask = batch["attention_mask"][0].bool().clone()
+    del ref_model
+    return hidden_steps, token_ids, prefill_amask

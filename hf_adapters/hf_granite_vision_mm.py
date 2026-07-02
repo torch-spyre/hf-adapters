@@ -335,6 +335,93 @@ def _prefill_forward(
     )
 
 
+def _prefill_hidden(
+    model,
+    padded_ids,
+    padded_len,
+    prompt_offsets,
+    position_ids,
+    pixel_values,
+    image_sizes,
+    key_caches,
+    value_caches,
+    max_cache_len,
+):
+    """``_prefill_forward`` counterpart returning ``last_hidden_state``, not logits.
+
+    Same deepstack image injection + KV-cache write path as ``_prefill_forward``;
+    only the final ``lm_head`` projection (and ``/ logits_scaling``) is dropped.
+    Returns ``[B, padded_len, H]`` post-final-norm hidden state — exactly what
+    ``model.lm_head`` would consume. Used by the VLM embedding e2e test
+    (``tests/spyre/test_vlm_e2e_embed_spyre.py``) to isolate decoder correctness
+    (KV cache, mask, RoPE, deepstack injection) from the LM head.
+    """
+    model_d_type = get_model_dtype(model)
+    inputs_embeds = _embed_text(model, padded_ids)
+    vision_mask = _vision_mask(model, padded_ids)
+    keep = (~vision_mask).to(model_d_type).to(inputs_embeds.device)
+    inputs_embeds = inputs_embeds * keep
+    deepstack = _deepstack_features(model, pixel_values, image_sizes)
+    prefill_mask = build_prefill_mask(
+        padded_ids.shape[0],
+        padded_len,
+        max_cache_len,
+        prompt_offsets,
+        dtype=model_d_type,
+    )
+    return _hidden_from_embeds(
+        model,
+        inputs_embeds.to(DEVICE),
+        position_ids.to(DEVICE),
+        prefill_mask.to(DEVICE),
+        key_caches,
+        value_caches,
+        is_filling=False,
+        token_index=0,
+        cache_position=0,
+        deepstack=deepstack,
+        vision_mask=vision_mask,
+    )
+
+
+def _hidden_from_embeds(
+    model,
+    inputs_embeds,
+    position_ids,
+    attn_mask,
+    key_caches,
+    value_caches,
+    is_filling,
+    token_index,
+    cache_position,
+    deepstack=None,
+    vision_mask=None,
+):
+    """Text backbone over embeds → ``last_hidden_state`` (post-norm, pre-lm_head).
+
+    Mirror of ``_logits_from_embeds`` that stops one step earlier — returns
+    exactly what ``model.lm_head`` would consume. Used by the VLM embedding
+    e2e test (``tests/spyre/test_vlm_e2e_embed_spyre.py``) at each teacher-forced
+    decode step; the single-batch test slices this the same way it would slice
+    logits (``[0, -1, :]`` for prefill, ``[0, grab_idx, :]`` / ``[0, -BLOCK_SIZE, :]``
+    for decode) since the trailing dim is ``H`` instead of ``V`` — layout is
+    otherwise identical.
+    """
+    return _run_text_backbone(
+        model,
+        inputs_embeds,
+        position_ids,
+        attn_mask,
+        key_caches,
+        value_caches,
+        is_filling,
+        token_index,
+        cache_position,
+        deepstack=deepstack,
+        vision_mask=vision_mask,
+    )
+
+
 def prefill_logits(model, input_ids, attention_mask, pixel_values, image_sizes):
     """One-shot prefill of the (text + deepstack-injected image) sequence → logits.
 
