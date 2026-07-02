@@ -32,7 +32,7 @@ def generate_matrices(exclude_models=None):
         exclude_models: List of model paths to exclude from all matrices
 
     Returns:
-        dict: Dictionary with 'causal', 'embed', and 'combined' matrix lists
+        dict: Dictionary with 'causal', 'embed', 'vision', and 'combined' matrix lists
     """
     exclude_models = set(exclude_models or [])
 
@@ -43,6 +43,9 @@ def generate_matrices(exclude_models=None):
     embed_paths = [
         k for k in tests.model_registry.EMBED_PATHS if k not in exclude_models
     ]
+    vision_paths = [
+        k for k in tests.model_registry.VISION_PATHS if k not in exclude_models
+    ]
 
     # Combine for jobs that test both types
     combined_paths = causal_paths + embed_paths
@@ -50,6 +53,7 @@ def generate_matrices(exclude_models=None):
     return {
         "causal": causal_paths,
         "embed": embed_paths,
+        "vision": vision_paths,
         "combined": combined_paths,
     }
 
@@ -67,6 +71,7 @@ def format_for_github_actions(matrices):
     return {
         "causal_matrix": json.dumps(matrices["causal"]),
         "embed_matrix": json.dumps(matrices["embed"]),
+        "vision_matrix": json.dumps(matrices["vision"]),
         "combined_matrix": json.dumps(matrices["combined"]),
     }
 
@@ -117,6 +122,9 @@ def main():
     )
     print(
         f"  Embedding models ({len(matrices['embed'])}): {', '.join(matrices['embed'])}"
+    )
+    print(
+        f"  Vision models ({len(matrices['vision'])}): {', '.join(matrices['vision'])}"
     )
     print(
         f"  Combined ({len(matrices['combined'])}): {', '.join(matrices['combined'])}"
