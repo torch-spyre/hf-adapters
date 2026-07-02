@@ -226,7 +226,6 @@ def _generate(model, tokenizer, prompts, **kwargs):
     return generate(_run_forward, model, tokenizer, prompts, **kwargs)
 
 
-
 def _patch_embed_tokens_for_spyre(model):
     """Wrap embed_tokens to keep its weight on CPU and move embeddings to Spyre.
 
