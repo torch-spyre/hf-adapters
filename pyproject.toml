@@ -11,7 +11,6 @@ dependencies = [
     "sentencepiece",
     "accelerate",
     "sentence_transformers",
-    "torchvision==0.26",
 ]
 
 [build-system]
