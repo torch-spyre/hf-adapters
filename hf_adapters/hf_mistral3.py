@@ -182,21 +182,48 @@ def load_model(model_path, dtype):
     return model
 
 
+def _patch_ministral_tokenizer(tokenizer):
+    """Patch tokenizer.decode / batch_decode to fix GPT-2 byte-level BPE escapes.
+
+    The Ministral-8B tokenizer (``LlamaTokenizer``) returns Unicode characters
+    such as Ġ (U+0120, space) and Ċ (U+010A, newline) verbatim from decode()
+    instead of converting them back to the real bytes.  Patching the instance
+    methods ensures both our ``generate`` path and any external decode call
+    (e.g. the CPU accuracy test's HF-reference comparison) see clean text.
+
+    Idempotent — a second call on an already-patched tokenizer is a no-op.
+    """
+    if getattr(tokenizer, "_ministral_decode_patched", False):
+        return
+
+    _orig_decode = tokenizer.decode
+    _orig_batch_decode = tokenizer.batch_decode
+
+    def _decode(token_ids, **kw):
+        return _fix_ministral_decode(_orig_decode(token_ids, **kw))
+
+    def _batch_decode(sequences, **kw):
+        return [_fix_ministral_decode(s) for s in _orig_batch_decode(sequences, **kw)]
+
+    tokenizer.decode = _decode
+    tokenizer.batch_decode = _batch_decode
+    tokenizer._ministral_decode_patched = True
+
+
 def _generate(model, tokenizer, prompts, **kwargs):
     """Module-level generate hook checked by ``AutoSpyreModelForCausalLM``.
 
     For ``MinistralConfig`` models (Ministral-8B) the tokenizer returns GPT-2
     byte-level BPE escape characters (e.g. Ġ for space, Ċ for newline) in the
-    decoded text.  Post-process the results through ``_fix_ministral_decode`` to
-    restore the original bytes.  All other variants decode cleanly and are
-    returned as-is.
+    decoded text.  Patch the tokenizer instance so that all decode calls —
+    including any HF-reference comparison made by the test harness — see clean
+    text.  All other variants decode cleanly and are returned as-is.
     """
     from transformers.models.ministral.configuration_ministral import MinistralConfig
 
-    results = generate(_run_forward, model, tokenizer, prompts, **kwargs)
     if isinstance(model.config, MinistralConfig):
-        return [_fix_ministral_decode(s) for s in results]
-    return results
+        _patch_ministral_tokenizer(tokenizer)
+    return generate(_run_forward, model, tokenizer, prompts, **kwargs)
 
 
 def prepare_for_spyre(model):
