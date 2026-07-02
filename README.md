@@ -209,16 +209,16 @@ uv run pytest tests/test_load_cpu.py                              # CPU load tes
 
 The Spyre lane lives under `tests/spyre/` and is also pytest-driven (not
 `python tests/...`). Each test is parametrized off the model registry, so a
-single model is selected with `-k <key>` (e.g. `granite8b`, `qwen3`, `bge_base`).
+single model is selected with `-k <key>` (e.g. `granite2b`, `qwen3`, `bge_base`).
 Run the whole file to cover every registered model. Run from the repository root.
 
 ```bash
 # E2E smoke test (real weights, verify non-trivial output)
-uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py                  # all causal-LM models
-uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k granite8b     # one model
+uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py                  # one representative model per adapter
+uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k granite2b     # one model
 
 # E2E token comparison (HF CPU vs adapter Spyre, per-step greedy tokens)
-uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k granite8b
+uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k granite2b
 
 # E2E embedding comparison (HF CPU vs adapter Spyre, hidden-states cosine)
 uv run pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k bge_base
