@@ -242,8 +242,18 @@ def _compare_prefill(
     sp: torch.Tensor,
     mask: torch.Tensor,
     step_label: str,
+    input_ids: torch.Tensor | None = None,
+    image_token_id: int | None = None,
+    top_k_outliers: int = 8,
 ) -> dict[str, Any]:
-    """Per-token cosine + pooled cosine over real tokens (step 0 / prefill)."""
+    """Per-token cosine + pooled cosine over real tokens (step 0 / prefill).
+
+    When ``input_ids`` and ``image_token_id`` are provided, also prints the
+    worst-``top_k_outliers`` per-token cosines with their absolute position
+    in the sequence and whether they land on an ``<image>`` slot — the shape
+    of the divergence (image-token vs boundary vs uniform) tells us which
+    subsystem drifted (deepstack injection vs alignment vs decoder).
+    """
     assert (
         ref.shape == sp.shape
     ), f"prefill shape mismatch: ref {tuple(ref.shape)} vs adapter {tuple(sp.shape)}"
@@ -262,6 +272,30 @@ def _compare_prefill(
     cos_real: torch.Tensor = per_tok_cos[m_bool]
     diff_real: torch.Tensor = abs_diff[m_bool]
     min_cos: float = cos_real.min().item()
+
+    if input_ids is not None and image_token_id is not None:
+        # Per-token diagnostic: worst-K real positions. Report absolute position
+        # in the sequence (0-indexed), token id, whether it's an <image> slot,
+        # and the per-token cosine + max abs diff at that row.
+        real_positions: torch.Tensor = m_bool.nonzero(as_tuple=True)[0]
+        cos_worst_idx: torch.Tensor = torch.argsort(cos_real)[:top_k_outliers]
+        n_image_tokens: int = int((input_ids == image_token_id).sum().item())
+        print(
+            f"  [diag] real tokens: {int(m_bool.sum().item())}, "
+            f"of which <image> slots: {n_image_tokens}"
+        )
+        print(f"  [diag] worst {min(top_k_outliers, len(cos_real))} per-token cosines:")
+        print("  [diag] rank | seq_pos | token_id | is_image | cosine   | max_diff")
+        for rank, k in enumerate(cos_worst_idx.tolist()):
+            seq_pos: int = int(real_positions[k].item())
+            tok_id: int = int(input_ids[seq_pos].item())
+            is_img: bool = tok_id == image_token_id
+            row_max_diff: float = abs_diff[seq_pos].max().item()
+            print(
+                f"  [diag] {rank:>4} | {seq_pos:>7} | {tok_id:>8} "
+                f"| {str(is_img):>8} | {cos_real[k].item():.6f} | {row_max_diff:.4f}"
+            )
+
     return {
         "step": step_label,
         "n_real": int(m_bool.sum().item()),
@@ -383,13 +417,28 @@ def test_vlm_embed_spyre(model_path: str) -> None:
         # aligned slice only covers real tokens. Clip ref down to the real
         # positions using the mask so shapes match.
         ref_prefill = ref_prefill[prefill_amask]
+        prefill_input_ids: torch.Tensor = batch["input_ids"][0][prefill_amask]
         prefill_mask_use = torch.ones(ref_prefill.shape[0], dtype=torch.bool)
     else:
+        prefill_input_ids = batch["input_ids"][0]
         prefill_mask_use = prefill_amask
+
+    # For the diagnostic: read image_token_id off the checkpoint config (static).
+    from transformers import AutoConfig
+
+    cfg = AutoConfig.from_pretrained(model_path)
+    image_token_id: int = int(cfg.image_token_id)
 
     rows: list[dict[str, Any]] = []
     rows.append(
-        _compare_prefill(ref_prefill, sp_prefill_real, prefill_mask_use, "prefill")
+        _compare_prefill(
+            ref_prefill,
+            sp_prefill_real,
+            prefill_mask_use,
+            "prefill",
+            input_ids=prefill_input_ids,
+            image_token_id=image_token_id,
+        )
     )
     for k in range(1, len(ref_hidden_steps)):
         rows.append(
