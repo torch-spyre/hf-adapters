@@ -298,8 +298,6 @@ def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]
     print(f"{'=' * 70}")
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    dtype = torch_dtype_for_model_path(model_path)
-
     model = load_ref_model(model_path=model_path, adapter_mod=adapter)
 
     prompt = "The capital of France is"
@@ -316,7 +314,7 @@ def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]
     print("  Moving model to Spyre ...")
     # Use bfloat16 on Spyre when the registry requests it; otherwise float16.
     # (Spyre does not support float32, so float32 registry entries still use float16.)
-    spyre_dtype = torch.bfloat16 if dtype == torch.bfloat16 else torch.float16
+    spyre_dtype = torch_dtype_for_model_path(model_path)
     move_to_spyre_with_layout(model, spyre_dtype)
     print("  Running adapter on Spyre ...")
     adapter_results = adapter_greedy_steps(
