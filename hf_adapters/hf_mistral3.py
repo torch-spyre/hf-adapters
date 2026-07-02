@@ -59,17 +59,56 @@ Usage::
     outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
+import torch
+
 from hf_adapters.hf_common import (
     _move_to_spyre_with_layout,
     _untie_embedding_and_lm_head,
     generate,
     get_backbone,
     prepare_standard_gqa,
+    standard_gqa_backbone_forward,
+    standard_gqa_forward,
 )
-from hf_adapters.hf_mistral import (
-    _run_backbone_forward,  # noqa: F401  re-exported as adapter module API
-    _run_forward,  # noqa: F401  re-exported as adapter module API
-)
+
+
+def _run_forward(model, input_ids, position_ids, attn_mask, key_caches, value_caches,
+                 is_filling, token_index, cache_position):
+    """Forward pass for Mistral-family models on Spyre.
+
+    Casts ``input_ids`` to ``int32`` before the call so the Spyre
+    monkey-patch (which silently returns a CPU tensor when downcasting
+    ``int64→int32``) does not cause a device mismatch inside
+    ``embed_tokens``.  Harmless on CPU (no-op when already int32 or
+    when the device is not Spyre).
+    """
+    return standard_gqa_forward(
+        model,
+        input_ids.to(torch.int32),
+        position_ids,
+        attn_mask,
+        key_caches,
+        value_caches,
+        is_filling,
+        token_index,
+        cache_position,
+    )
+
+
+def _run_backbone_forward(model, input_ids, position_ids, attn_mask, key_caches,
+                          value_caches, is_filling, token_index, cache_position):
+    """Backbone-only forward (no lm_head) for Ministral-8B embedding callers."""
+    return standard_gqa_backbone_forward(
+        model,
+        input_ids.to(torch.int32),
+        position_ids,
+        attn_mask,
+        key_caches,
+        value_caches,
+        is_filling,
+        token_index,
+        cache_position,
+    )
 
 
 def _load_hf_model_ministral8b(model_path, dtype):
