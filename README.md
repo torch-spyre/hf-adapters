@@ -19,7 +19,7 @@ from `transformers`.
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
 and **vision-language** (image→text) models — from Llama / Qwen / Granite / Mistral /
 Phi / Gemma / OLMo / GPT decoders to BERT / XLM-RoBERTa / MPNet / ModernBERT
-encoders and the Granite Vision 4.1 ((SigLIP tower + Granite text) and Mistral3 Vision multimodal VLMs.
+encoders and the Granite Vision 4.1 (SigLIP tower + Granite text) and Mistral3 Vision multimodal VLMs.
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. The **canonical, per-adapter model lists** — verified
