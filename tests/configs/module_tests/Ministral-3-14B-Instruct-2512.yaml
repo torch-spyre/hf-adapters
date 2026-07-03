@@ -20,7 +20,14 @@ test_suite_config:
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3Model'
                   constructor_inputs:
                     args:
-                      - value: <config:transformers.models.ministral3.configuration_ministral3.Ministral3Config>
+                      - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
+                        config_kwargs:
+                          hidden_size: 5120
+                          num_attention_heads: 32
+                          num_key_value_heads: 8
+                          intermediate_size: 16384
+                          max_position_embeddings: 262144
+                          _attn_implementation: null
                     kwargs: {}
                   forward_inputs:
                     - args: []
@@ -68,7 +75,14 @@ test_suite_config:
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3RotaryEmbedding'
                   constructor_inputs:
                     args:
-                      - value: <config:transformers.models.ministral3.configuration_ministral3.Ministral3Config>
+                      - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
+                        config_kwargs:
+                          hidden_size: 5120
+                          num_attention_heads: 32
+                          num_key_value_heads: 8
+                          intermediate_size: 16384
+                          max_position_embeddings: 262144
+                          _attn_implementation: null
                     kwargs: {}
                   forward_inputs:
                     - args:
@@ -114,7 +128,14 @@ test_suite_config:
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3DecoderLayer'
                   constructor_inputs:
                     args:
-                      - value: <config:transformers.models.ministral3.configuration_ministral3.Ministral3Config>
+                      - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
+                        config_kwargs:
+                          hidden_size: 5120
+                          num_attention_heads: 32
+                          num_key_value_heads: 8
+                          intermediate_size: 16384
+                          max_position_embeddings: 262144
+                          _attn_implementation: null
                     kwargs:
                       layer_idx: 0
                   forward_inputs:
@@ -223,7 +244,14 @@ test_suite_config:
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3Attention'
                   constructor_inputs:
                     args:
-                      - value: <config:transformers.models.ministral3.configuration_ministral3.Ministral3Config>
+                      - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
+                        config_kwargs:
+                          hidden_size: 5120
+                          num_attention_heads: 32
+                          num_key_value_heads: 8
+                          intermediate_size: 16384
+                          max_position_embeddings: 262144
+                          _attn_implementation: null
                     kwargs:
                       layer_idx: 0
                   forward_inputs:
@@ -308,7 +336,14 @@ test_suite_config:
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3MLP'
                   constructor_inputs:
                     args:
-                      - value: <config:transformers.models.ministral3.configuration_ministral3.Ministral3Config>
+                      - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
+                        config_kwargs:
+                          hidden_size: 5120
+                          num_attention_heads: 32
+                          num_key_value_heads: 8
+                          intermediate_size: 16384
+                          max_position_embeddings: 262144
+                          _attn_implementation: null
                     kwargs: {}
                   forward_inputs:
                     - args:
