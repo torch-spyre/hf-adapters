@@ -166,10 +166,18 @@ class TestModuleCustom(TestCase):
         run_eager = os.getenv("TEST_EAGER_WITH_CPU", "0") == "1"
         module_cls = module_info.module_cls
         module_inputs = module_info.module_inputs_func(
-            module_info, device=device, dtype=dtype, requires_grad=False, training=training
+            module_info,
+            device=device,
+            dtype=dtype,
+            requires_grad=False,
+            training=training,
         )
 
-        modes = [name for name, run in [("compiled", run_compile), ("eager", run_eager)] if run]
+        modes = [
+            name
+            for name, run in [("compiled", run_compile), ("eager", run_eager)]
+            if run
+        ]
         if not modes:
             raise ValueError("At least one of run_compile or run_eager must be True")
 
@@ -216,10 +224,12 @@ class TestModuleCustom(TestCase):
                 # === Device forward pass. ===
                 # Move inputs to device using pytree to handle nested structures.
                 args_device = tree_map(
-                    lambda x: x.to(device, dtype) if isinstance(x, torch.Tensor) else x, args
+                    lambda x: x.to(device, dtype) if isinstance(x, torch.Tensor) else x,
+                    args,
                 )
                 kwargs_device = tree_map(
-                    lambda x: x.to(device, dtype) if isinstance(x, torch.Tensor) else x, kwargs
+                    lambda x: x.to(device, dtype) if isinstance(x, torch.Tensor) else x,
+                    kwargs,
                 )
                 with torch.no_grad():
                     device_outputs = module_device(*args_device, **kwargs_device)
