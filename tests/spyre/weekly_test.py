@@ -6,10 +6,11 @@ pytests in this file consume the resulting CSV.
 
 Run directly to perform the fetch step::
 
-    python tests/spyre/weekly_test.py --top-k 200
+    python tests/spyre/weekly_test.py --top-k 200 --workers 4
 """
 
 import argparse
+import multiprocessing
 import os
 import subprocess
 import sys
@@ -112,6 +113,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Destination CSV (defaults to resources/top_embedding_models.csv).",
     )
+    parser.add_argument(
+        "--workers",
+        "-k",
+        type=int,
+        default=1,
+        help="Number of parallel worker processes for eval_embedding (default: 1).",
+    )
     return parser.parse_args(argv)
 
 
@@ -178,11 +186,69 @@ def eval_embedding(model_id: str) -> dict:
     }
 
 
+def _worker(model_id: str) -> dict:
+    """Top-level picklable worker: runs eval_embedding in a child process.
+
+    Returns the metrics dict on success, or a dict with ``runs=False`` and
+    error details on failure.  The caller is responsible for merging the result
+    into the record and for cache cleanup.
+    """
+    try:
+        metrics = eval_embedding(model_id)
+        return {"runs": True, **metrics}
+    except Exception as e:
+        tb = traceback.format_exc()
+        return {
+            "runs": False,
+            "correct": False,
+            "error": f"{type(e).__name__}: {e}",
+            "traceback_tail": "".join(tb.splitlines(keepends=True)[-6:]),
+        }
+
+
 def _human_bytes(n):
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024 or unit == "TB":
             return f"{n:.1f}{unit}"
         n /= 1024
+
+
+def _build_base_rec(
+    row: dict[str, Any], add_dates: dict[str, str | None], preexisting: set
+) -> tuple[dict, bool]:
+    """Build the base record dict and adapter fields for a row.
+
+    Returns ``(rec, had_weights)``.  Raises on adapter resolution failure so
+    the caller can mark the record as failed.
+    """
+    model_id = row["model_id"]
+    had_weights = model_id in preexisting
+    csv_config_class = row.get("config_class")
+
+    rec: dict[str, Any] = {
+        "model_id": model_id,
+        "rank": row.get("rank"),
+        "downloads": row.get("downloads"),
+        "config_class": csv_config_class,
+        "model_type": row.get("model_type"),
+        "params": row.get("parameters (str)"),
+        "had_cached_weights_at_start": had_weights,
+        "attempted_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+    adapter_module = resolve_adapter_module(model_id)
+    adapter_name = os.path.splitext(os.path.basename(adapter_module.__file__))[0]
+    rec["adapter"] = adapter_name
+    rec["adapter_added"] = add_dates.get(adapter_name)
+
+    params = row.get("parameters")
+    if params not in (None, "") and int(params) > 60_000_000_000:
+        print(
+            f"Model {model_id} has {int(params):,} parameters, "
+            f"exceeding the 60B limit for Spyre bring-up."
+        )
+
+    return rec, had_weights
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -191,104 +257,71 @@ def main(argv: list[str] | None = None) -> None:
     _print_adapter_add_dates(add_dates)
     preexisting: set = _repos_with_weights()
     total_freed = 0
-    # supported_list = list(iter_supported_rows(args.path))
-    # supported_rows = {r["model_id"]: r for r in supported_list}
 
     supported_list: list[dict[str, Any]] = fetch_top_embedding_models(
         limit=args.top_k, output_csv=args.output_csv
     )
-    # supported_rows = {r["model_id"]: r for r in supported_list}
-    # print("\n".join(supported_rows))
 
-    try:
-        for row in supported_list:
-            # if attempted >= args.limit:
-            #     break
+    # Use the 'spawn' start method so each worker is a fresh Python interpreter
+    # with no inherited GPU / Spyre state from the parent process.
+    mp_ctx = multiprocessing.get_context("spawn")
+
+    # Pre-resolve adapter metadata in the parent (cheap, no GPU involvement).
+    # Rows that fail resolution are recorded immediately without spawning a worker.
+    pending: list[tuple[dict[str, Any], bool]] = []  # (rec, had_weights)
+    model_ids: list[str] = []
+    for row in supported_list:
+        try:
+            rec, had_weights = _build_base_rec(row, add_dates, preexisting)
+            pending.append((rec, had_weights))
+            model_ids.append(row["model_id"])
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            tb = traceback.format_exc()
             model_id = row["model_id"]
-            # if model_id in done:
-            #     continue
-
-            csv_config_class = row.get("config_class")
-            # gated = row.get("is_gated") == "True"
-            # if gated and not args.include_gated:
-            #     record(
-            #         {
-            #             "model_id": model_id,
-            #             "config_class": csv_config_class,
-            #             "status": "skipped:gated",
-            #             "rank": row.get("rank"),
-            #             "attempted_at": datetime.now().isoformat(timespec="seconds"),
-            #         }
-            #     )
-            #     continue
-
-            # attempted += 1
             had_weights = model_id in preexisting
-            # print(f"\n[{attempted}/{args.limit}] {model_id} ({csv_config_class})")
-
-            rec = {
+            rec: dict[str, Any] = {
                 "model_id": model_id,
                 "rank": row.get("rank"),
                 "downloads": row.get("downloads"),
-                "config_class": csv_config_class,
+                "config_class": row.get("config_class"),
                 "model_type": row.get("model_type"),
                 "params": row.get("parameters (str)"),
                 "had_cached_weights_at_start": had_weights,
                 "attempted_at": datetime.now().isoformat(timespec="seconds"),
+                "adapter": None,
+                "adapter_added": None,
+                "runs": False,
+                "correct": False,
+                "error": f"{type(e).__name__}: {e}",
+                "traceback_tail": "".join(tb.splitlines(keepends=True)[-6:]),
             }
-
-            try:
-                adapter_module = resolve_adapter_module(model_id)
-                adapter_name = os.path.splitext(
-                    os.path.basename(adapter_module.__file__)
-                )[0]
-                rec["adapter"] = adapter_name
-                rec["adapter_added"] = add_dates.get(adapter_name)
-
-                params = row.get("parameters")
-                if params not in (None, "") and int(params) > 60_000_000_000:
-                    # TODO - Raise Exception?
-                    # raise SpyreUnsupportedModelError(
-                    print(
-                        f"Model {model_id} has {int(params):,} parameters, "
-                        f"exceeding the 60B limit for Spyre bring-up."
-                    )
-
-                # if args.path == "generative":
-                #     metrics = eval_generative(
-                #         model_id, adapter, csv_config_class, args.num_decode
-                #     )
-                # else:
-                metrics = eval_embedding(model_id)
-
-                rec["runs"] = True
-                rec["correct"] = metrics["correct"]
-                rec.update(metrics)
-                print(f"    runs=True correct={rec.get('correct')} ")
-            except KeyboardInterrupt:
-                raise
-            except Exception as e:
-                tb = traceback.format_exc()
-                rec["runs"] = False
-                rec["correct"] = False
-                rec["error"] = f"{type(e).__name__}: {e}"
-                rec["traceback_tail"] = "".join(tb.splitlines(keepends=True)[-6:])
-                # adapter fields may be unset if resolve_adapter failed
-                rec.setdefault("adapter", None)
-                rec.setdefault("adapter_added", None)
-                print(f"    runs=False error={rec['error']}")
-
+            print(f"    runs=False error={rec['error']}")
             # record(rec)
 
-            # Cache cleanup: weights absent at start -> delete downloaded weights.
-            if not had_weights:
-                freed = _delete_repo_weights(model_id)
-                total_freed += freed
-                if freed:
-                    print(
-                        f"    freed {_human_bytes(freed)} "
-                        f"(total {_human_bytes(total_freed)})"
-                    )
+    try:
+        with mp_ctx.Pool(processes=args.workers) as pool:
+            for (rec, had_weights), result in zip(
+                pending, pool.imap(_worker, model_ids)
+            ):
+                rec.update(result)
+                if result.get("runs"):
+                    print(f"    runs=True correct={rec.get('correct')} ")
+                else:
+                    print(f"    runs=False error={rec.get('error')}")
+
+                # record(rec)
+
+                # Cache cleanup: weights absent at start -> delete downloaded weights.
+                if not had_weights:
+                    freed = _delete_repo_weights(rec["model_id"])
+                    total_freed += freed
+                    if freed:
+                        print(
+                            f"    freed {_human_bytes(freed)} "
+                            f"(total {_human_bytes(total_freed)})"
+                        )
     except KeyboardInterrupt:
         print("\nInterrupted — results so far are saved; rerun to resume.")
     # finally:
