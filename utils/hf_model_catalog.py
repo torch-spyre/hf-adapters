@@ -308,8 +308,4 @@ def build_catalog(
             writer.writeheader()
             writer.writerows(rows)
 
-    print(f"Done. Top 5 {label} models:")
-    for i, m in enumerate(models[:5], start=1):
-        print(f"  {i}. {m.id} — {m.downloads:,} downloads")
-
     return rows
