@@ -26,6 +26,7 @@ Usage (on Spyre pod)::
 """
 
 import time
+from typing import Any
 
 import pytest
 from model_registry import CAUSAL_PATHS, EMBED_PATHS
@@ -54,8 +55,7 @@ def test_load_causal_lm(model_path: str) -> None:
     print(f"| {model_path} | causal-LM | PASS | {load_s:.1f} |")
 
 
-@pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
-def test_load_embedding(model_path: str) -> None:
+def load_embedding(model_path: str) -> tuple[Any, float]:
     from hf_adapters import AutoSpyreModel
 
     dtype = torch_dtype_for_model_path(model_path)
@@ -63,8 +63,14 @@ def test_load_embedding(model_path: str) -> None:
     t0 = time.time()
     model = AutoSpyreModel.from_pretrained(model_path, dtype=dtype)
     load_s = time.time() - t0
+    return model is not None, load_s
 
-    assert model is not None, f"{model_path}: from_pretrained returned None"
+
+@pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
+def test_load_embedding(model_path: str) -> None:
+
+    model_loaded, load_s = load_embedding(model_path)
+    assert model_loaded, f"{model_path}: from_pretrained returned None"
     print(f"  [{model_path}] embedding load time: {load_s:.1f}s")
     print("\n## Spyre Load Test Results\n")
     print("| Path | Kind | Status | Load (s) |")
