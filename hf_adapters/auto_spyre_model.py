@@ -209,13 +209,10 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
                 return _gen_fn(self, tokenizer, prompts, **kwargs)
 
         else:
-
             def model_generate(self, tokenizer, prompts, **kwargs):
                 from hf_adapters.hf_common import generate
 
-                return generate(
-                    module._run_forward, self, tokenizer, prompts, **kwargs
-                )
+                return generate(module._run_forward, self, tokenizer, prompts, **kwargs)
 
         model.generate = MethodType(model_generate, model)
 
