@@ -10,7 +10,8 @@ Run directly to perform the fetch step::
 """
 
 import argparse
-import multiprocessing
+import concurrent.futures
+import json
 import os
 import subprocess
 import sys
@@ -186,23 +187,75 @@ def eval_embedding(model_id: str) -> dict:
     }
 
 
-def _worker(model_id: str) -> dict:
-    """Top-level picklable worker: runs eval_embedding in a child process.
+# ---------------------------------------------------------------------------
+# Subprocess-based worker
+# Each model is evaluated in a *completely fresh* Python interpreter that exits
+# after producing its result.  This avoids any shared Spyre/GPU driver state
+# that multiprocessing.Pool workers would carry across tasks.
+# ---------------------------------------------------------------------------
 
-    Returns the metrics dict on success, or a dict with ``runs=False`` and
-    error details on failure.  The caller is responsible for merging the result
-    into the record and for cache cleanup.
+_WORKER_SCRIPT = """\
+import json, sys, traceback
+# Re-add the same sys.path entries the parent uses so imports resolve.
+for _p in {paths!r}:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+from test_load_spyre import load_embedding
+from test_e2e_embed_compare_spyre import embed_compare_spyre
+model_id = {model_id!r}
+try:
+    loads, _ = load_embedding(model_id)
+    mismatches, _ = embed_compare_spyre(model_id)
+    result = {{"runs": True, "correct": loads and not mismatches,
+               "load": loads, "compare_spyre": not mismatches}}
+except Exception as exc:
+    tb = traceback.format_exc()
+    result = {{"runs": False, "correct": False,
+               "error": f"{{type(exc).__name__}}: {{exc}}",
+               "traceback_tail": "".join(tb.splitlines(keepends=True)[-6:])}}
+print(json.dumps(result))
+"""
+
+_WORKER_PATHS = [
+    str(_SPYRE_TESTS_DIR),
+    str(_TESTS_DIR),
+    str(_UTILS_DIR),
+    str(_REPO_ROOT),
+]
+
+
+def _run_in_subprocess(model_id: str) -> dict:
+    """Evaluate one model in a fresh Python interpreter.
+
+    Stdout is expected to be a single JSON line written by _WORKER_SCRIPT.
+    Returns a metrics dict (never raises).
     """
+    script = _WORKER_SCRIPT.format(paths=_WORKER_PATHS, model_id=model_id)
     try:
-        metrics = eval_embedding(model_id)
-        return {"runs": True, **metrics}
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+        )
+        # The worker prints exactly one JSON line as its last stdout line.
+        for line in reversed(proc.stdout.splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                return json.loads(line)
+        # No valid JSON found — treat as a crash.
+        stderr_tail = "".join(proc.stderr.splitlines(keepends=True)[-6:])
+        return {
+            "runs": False,
+            "correct": False,
+            "error": f"subprocess exited {proc.returncode} with no JSON output",
+            "traceback_tail": stderr_tail,
+        }
     except Exception as e:
-        tb = traceback.format_exc()
         return {
             "runs": False,
             "correct": False,
             "error": f"{type(e).__name__}: {e}",
-            "traceback_tail": "".join(tb.splitlines(keepends=True)[-6:]),
+            "traceback_tail": traceback.format_exc(),
         }
 
 
@@ -262,12 +315,8 @@ def main(argv: list[str] | None = None) -> None:
         limit=args.top_k, output_csv=args.output_csv
     )
 
-    # Use the 'spawn' start method so each worker is a fresh Python interpreter
-    # with no inherited GPU / Spyre state from the parent process.
-    mp_ctx = multiprocessing.get_context("spawn")
-
     # Pre-resolve adapter metadata in the parent (cheap, no GPU involvement).
-    # Rows that fail resolution are recorded immediately without spawning a worker.
+    # Rows that fail resolution are recorded immediately without spawning a subprocess.
     pending: list[tuple[dict[str, Any], bool]] = []  # (rec, had_weights)
     model_ids: list[str] = []
     for row in supported_list:
@@ -300,11 +349,21 @@ def main(argv: list[str] | None = None) -> None:
             print(f"    runs=False error={rec['error']}")
             # record(rec)
 
+    # Each model runs in its own fresh subprocess (args.workers subprocesses at
+    # a time).  ProcessPoolExecutor is used only to cap concurrency; the actual
+    # work is a subprocess.run call so no Spyre state is shared between slots.
     try:
-        with mp_ctx.Pool(processes=args.workers) as pool:
-            for (rec, had_weights), result in zip(
-                pending, pool.imap(_worker, model_ids)
-            ):
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=args.workers
+        ) as executor:
+            futures = {
+                executor.submit(_run_in_subprocess, mid): i
+                for i, mid in enumerate(model_ids)
+            }
+            for fut in concurrent.futures.as_completed(futures):
+                idx = futures[fut]
+                rec, had_weights = pending[idx]
+                result = fut.result()
                 rec.update(result)
                 if result.get("runs"):
                     print(f"    runs=True correct={rec.get('correct')} ")
