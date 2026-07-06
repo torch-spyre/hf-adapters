@@ -15,6 +15,7 @@ import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from test_e2e_embed_compare_spyre import embed_compare_spyre
 
@@ -145,7 +146,7 @@ def main(argv: list[str] | None = None) -> None:
     # supported_list = list(iter_supported_rows(args.path))
     # supported_rows = {r["model_id"]: r for r in supported_list}
 
-    supported_list = fetch_top_embedding_models(
+    supported_list: list[dict[str, Any]] = fetch_top_embedding_models(
         limit=args.top_k, output_csv=args.output_csv
     )
     supported_rows = {r["model_id"]: r for r in supported_list}

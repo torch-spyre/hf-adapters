@@ -30,7 +30,6 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from model_registry import EMBED_PATHS
 
 from hf_adapters.auto_spyre_model import resolve_adapter_module
 from hf_adapters.hf_common import (
@@ -40,6 +39,7 @@ from hf_adapters.hf_common import (
     untie_embedding_and_lm_head,
 )
 from tests.conftest import torch_dtype_for_model_path
+from tests.model_registry import EMBED_PATHS
 
 PROMPTS = [
     "Hi.",
