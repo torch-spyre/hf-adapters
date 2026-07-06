@@ -33,7 +33,6 @@ Usage::
 """
 
 from hf_adapters.hf_common import (
-    get_backbone,
     prepare_standard_gqa,
     standard_gqa_backbone_forward,
     standard_gqa_forward,
@@ -43,36 +42,8 @@ _run_forward = standard_gqa_forward
 _run_backbone_forward = standard_gqa_backbone_forward
 
 
-def _patch_embed_tokens_for_spyre(model):
-    """Replace embed_tokens with a CPU-resident wrapper to avoid Spyre device mismatch.
-
-    Stores the embedding weight as a plain Python attribute (not ``nn.Parameter``)
-    so ``move_to_spyre_with_layout`` does not move it to Spyre.  The gather runs
-    on CPU; the float output is moved to the device of the first Q-projection.
-    """
-    import torch.nn as nn
-    import torch.nn.functional as F
-
-    backbone = get_backbone(model)
-    ref_weight = backbone.embed_tokens.weight.detach()
-
-    class _EmbedCPU(nn.Module):
-        def __init__(self):
-            super().__init__()
-            object.__setattr__(self, "_w", ref_weight)
-
-        def forward(self, input_ids):
-            w = object.__getattribute__(self, "_w")
-            h = F.embedding(input_ids.cpu(), w)
-            target = backbone.layers[0].self_attn.q_proj.weight.device
-            return h.to(target)
-
-    backbone.embed_tokens = _EmbedCPU()
-
-
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to a Ministral causal-LM in-place."""
     from transformers.models.ministral.modeling_ministral import MinistralRMSNorm
 
-    _patch_embed_tokens_for_spyre(model)
     prepare_standard_gqa(model, MinistralRMSNorm)
