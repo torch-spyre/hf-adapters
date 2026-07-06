@@ -128,6 +128,45 @@ def _print_adapter_add_dates(add_dates: dict[str, str | None]) -> None:
         print(f"  {'unknown':<10}  {module:<{name_w}}")
 
 
+def _delete_repo_weights(repo_id):
+    """Delete cached weight files (and their blobs) for a repo. Keep configs.
+
+    Returns bytes freed. Only touches files under the HF cache whose name ends
+    in a weight suffix; resolves each snapshot symlink to its blob and unlinks
+    both. Never touches datasets-- repos.
+    """
+    from huggingface_hub import scan_cache_dir
+
+    if repo_id is None:
+        return 0
+    freed = 0
+    try:
+        cache = scan_cache_dir()
+    except Exception:
+        return 0
+    for repo in cache.repos:
+        if repo.repo_id != repo_id or repo.repo_type != "model":
+            continue
+        for rev in repo.revisions:
+            for fobj in rev.files:
+                if not fobj.file_name.endswith(_WEIGHT_SUFFIXES):
+                    continue
+                snap = Path(fobj.file_path)
+                # Resolve the blob (snapshot files are symlinks into blobs/).
+                try:
+                    blob = snap.resolve()
+                    if blob.exists():
+                        freed += blob.stat().st_size
+                        blob.unlink()
+                    if snap.is_symlink() or snap.exists():
+                        snap.unlink()
+                except FileNotFoundError:
+                    pass
+                except Exception as e:
+                    print(f"    warn: could not delete {snap}: {e}")
+    return freed
+
+
 def eval_embedding(model_id: str) -> dict:
     """Load and compare embeddings for one model. Returns a metrics dict."""
     loads, _ = load_embedding(model_id)
@@ -139,11 +178,19 @@ def eval_embedding(model_id: str) -> dict:
     }
 
 
+def _human_bytes(n):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.1f}{unit}"
+        n /= 1024
+
+
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     add_dates: dict[str, str | None] = _adapter_add_dates()
     _print_adapter_add_dates(add_dates)
     preexisting: set = _repos_with_weights()
+    total_freed = 0
     # supported_list = list(iter_supported_rows(args.path))
     # supported_rows = {r["model_id"]: r for r in supported_list}
 
@@ -234,14 +281,14 @@ def main(argv: list[str] | None = None) -> None:
             # record(rec)
 
             # Cache cleanup: weights absent at start -> delete downloaded weights.
-            # if not had_weights:
-            #     freed = delete_repo_weights(model_id)
-            #     total_freed += freed
-            #     if freed:
-            #         print(
-            #             f"    freed {human_bytes(freed)} "
-            #             f"(total {human_bytes(total_freed)})"
-            #         )
+            if not had_weights:
+                freed = _delete_repo_weights(model_id)
+                total_freed += freed
+                if freed:
+                    print(
+                        f"    freed {_human_bytes(freed)} "
+                        f"(total {_human_bytes(total_freed)})"
+                    )
     except KeyboardInterrupt:
         print("\nInterrupted — results so far are saved; rerun to resume.")
     # finally:
