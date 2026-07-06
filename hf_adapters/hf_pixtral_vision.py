@@ -341,8 +341,15 @@ def prepare_for_spyre(model):
 
     layers = tower.transformer.layers
 
-    # Pad heads to next stick boundary (64 → 128 for the default config).
-    padded_head_dim = ((orig_head_dim + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
+    # Pad heads so that D/2 >= BLOCK_SIZE, i.e. head_dim >= 2*BLOCK_SIZE.
+    # apply_rope_matmul reshapes to [B, L, H, 2, D/2]; the D/2 dimension must
+    # be stick-aligned (>= BLOCK_SIZE = 64). A head_dim of 64 gives D/2 = 32
+    # which is sub-stick and triggers an InductorError on Spyre.
+    # Using 2*BLOCK_SIZE as the alignment target (same as prepare_rope_and_heads)
+    # ensures D/2 = head_dim//2 >= BLOCK_SIZE. 64 → 128 for the default config.
+    padded_head_dim = ((orig_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)) * (
+        2 * BLOCK_SIZE
+    )
     if padded_head_dim > orig_head_dim:
         _pad_pixtral_heads(layers, num_heads, orig_head_dim, padded_head_dim)
     head_dim = padded_head_dim
