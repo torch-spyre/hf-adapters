@@ -144,14 +144,15 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_mistral.py",
         "size": "3b",
     },
-    # hf_mistral3.py
+    # hf_ministral.py
     "ministral8b": {
         "name": "Ministral-8B-Instruct-2410",
         "path": "mistralai/Ministral-8B-Instruct-2410",
-        "adapter": "hf_mistral3.py",
+        "adapter": "hf_ministral.py",
         "load_fn": True,
         "size": "8b",
     },
+    # hf_mistral3.py
     "mistral3": {
         "name": "Mistral-Small-3.2-24B-Instruct-2506",
         "path": "mistralai/Mistral-Small-3.2-24B-Instruct-2506",

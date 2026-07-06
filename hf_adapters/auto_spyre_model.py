@@ -83,6 +83,7 @@ from hf_adapters import (
     hf_granite_vision_mm,
     hf_granitemoehybrid,
     hf_llama,
+    hf_ministral,
     hf_mistral,
     hf_mistral3,
     hf_modernbert,
@@ -117,7 +118,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     GraniteMoeHybridConfig: hf_granitemoehybrid,
     LlamaConfig: hf_llama,
     MistralConfig: hf_mistral,
-    MinistralConfig: hf_mistral3,
+    MinistralConfig: hf_ministral,
     Mistral3Config: hf_mistral3,
     ModernBertConfig: hf_modernbert,
     MPNetConfig: hf_mpnet,
@@ -212,7 +213,9 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
             def model_generate(self, tokenizer, prompts, **kwargs):
                 from hf_adapters.hf_common import generate
 
-                return generate(module._run_forward, self, tokenizer, prompts, **kwargs)
+                return generate(
+                    module._run_forward, self, tokenizer, prompts, **kwargs
+                )
 
         model.generate = MethodType(model_generate, model)
 

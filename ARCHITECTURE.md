@@ -124,7 +124,8 @@ pattern, norms, and weight layout.
 | hf\_granite.py | granite | 3 | Granite 3.3 8B/2B Base, Granite 3.2 8B, Granite 3.1 8B/2B, Granite 3.0 8B, Granite Code 8B/3B |
 | hf\_qwen3.py | qwen3 | 2 | Qwen3 1.7B, Qwen3 4B, Qwen3 8B |
 | hf\_mistral.py | mistral | 2 | Mistral 7B v0.1/v0.2, Mistral 7B Instruct v0.1–v0.3, Zephyr 7B |
-| hf\_mistral3.py | mistral3 / ministral | 3 | Ministral-3 14B Base (multimodal text decoder), Ministral-8B fine-tunes |
+| hf\_mistral3.py | mistral3 | 2 | Mistral-Small-3.2 24B, Ministral-3 14B (multimodal text decoder) |
+| hf\_ministral.py | ministral | 1 | Ministral-8B Instruct fine-tunes |
 | hf\_phi3.py | phi3 | 1 | Phi-3 mini 4k/128k, Phi-3 small 8k |
 | hf\_granitemoehybrid.py | granitemoehybrid | 1 | Granite 4.0 Micro |
 | hf\_smollm3.py | smollm3 | 1 | — |
@@ -245,7 +246,8 @@ hf_adapters/
 ├── hf_llama.py            — Llama adapter (Llama 1/2/3, Code Llama, Yi, TinyLlama)
 ├── hf_qwen2.py            — Qwen2 adapter (Qwen 1.5, Qwen 2, Qwen 2.5)
 ├── hf_mistral.py          — Mistral adapter (Mistral 7B v0.2, v0.3)
-├── hf_mistral3.py         — Mistral-3 adapter (Mistral-Small-3.2 24B, Ministral-3 14B multimodal text decoder, Ministral-8B Instruct)
+├── hf_mistral3.py         — Mistral-3 adapter (Mistral-Small-3.2 24B, Ministral-3 14B multimodal text decoder)
+├── hf_ministral.py        — Ministral adapter (Ministral-8B Instruct)
 ├── hf_phi3.py             — Phi-4 mini adapter
 ├── hf_olmo.py             — OLMo adapter (OLMo 1B, 7B)
 ├── hf_olmo2.py            — OLMo2 adapter (OLMo 2 7B)
