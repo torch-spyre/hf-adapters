@@ -34,8 +34,8 @@ likewise compares per-step logits — but it asserts the cosine rather than top-
     as a human-eyeball diagnostic.
 
 Why cosine, not top-1? Both paths run the same fp16 dtype, so any divergence is
-Spyre's native accumulation + the adapter's op decomposition (``x*x*x`` gelu-tanh,
-matmul-RoPE, padded SDPA) versus CPU's fp16 — not a precision tier. Teacher-forcing
+Spyre's native accumulation + the adapter's op decomposition (matmul-RoPE, padded
+SDPA) versus CPU's fp16 — not a precision tier. Teacher-forcing
 (same prefix both sides) removes greedy-fork amplification, so the cosine cleanly
 measures per-step logit fidelity and exercises the full decode path (KV-cache,
 masks, RoPE) that a prefill-only check would skip; a real decode bug tanks it. But
