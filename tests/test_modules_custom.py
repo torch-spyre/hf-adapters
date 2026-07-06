@@ -44,7 +44,9 @@ def _extract_all_tensors(output):
     return tensors
 
 
-def _construct_module(module_info, module_input, *, dtype=None, device=None, training=False):
+def _construct_module(
+    module_info, module_input, *, dtype=None, device=None, training=False
+):
     """Construct a module from a module_input's constructor args/kwargs.
 
     Optionally casts to ``dtype`` and/or moves to ``device``, then sets train/eval
@@ -254,7 +256,11 @@ class TestModuleCustom(TestCase):
                 torch._dynamo.reset_code_caches()
                 torch._inductor.codecache.FxGraphCache.clear()
                 module_device = _construct_module(
-                    module_info, module_input, dtype=dtype, device=device, training=training
+                    module_info,
+                    module_input,
+                    dtype=dtype,
+                    device=device,
+                    training=training,
                 )
                 module_device.load_state_dict(cpu_state_dict)
                 if mode == "compiled":
