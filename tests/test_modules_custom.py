@@ -44,6 +44,56 @@ def _extract_all_tensors(output):
     return tensors
 
 
+def _construct_module(module_info, module_input, *, dtype=None, device=None, training=False):
+    """Construct a module from a module_input's constructor args/kwargs.
+
+    Optionally casts to ``dtype`` and/or moves to ``device``, then sets train/eval
+    mode. All of ``dtype``/``device``/``training`` are optional so every test method
+    can reuse this regardless of whether it casts dtype or only calls ``.eval()``.
+    """
+    module = module_info.module_cls(
+        *module_input.constructor_input.args,
+        **module_input.constructor_input.kwargs,
+    )
+    if dtype is not None:
+        module = module.to(dtype)
+    if device is not None:
+        module = module.to(device)
+    module.train(training)
+    return module
+
+
+def _move_inputs(module_input, *, dtype=None, device=None):
+    """Move a module_input's forward args/kwargs to ``dtype`` and/or ``device``.
+
+    Both ``dtype`` and ``device`` are optional so callers that only relocate to a
+    device (no dtype cast) can reuse this too. Uses pytree so nested input
+    structures (tuples, lists, dicts) are handled. Returns an ``(args, kwargs)`` tuple.
+    """
+
+    def move(x):
+        if not isinstance(x, torch.Tensor):
+            return x
+        if device is not None and dtype is not None:
+            return x.to(device, dtype)
+        if device is not None:
+            return x.to(device)
+        if dtype is not None:
+            return x.to(dtype)
+        return x
+
+    args = tree_map(move, module_input.forward_input.args)
+    kwargs = tree_map(move, module_input.forward_input.kwargs)
+    return args, kwargs
+
+
+def _run_forward(module, args, kwargs):
+    """Run a no-grad forward pass and return the flattened list of output tensors."""
+    with torch.no_grad():
+        output = module(*args, **kwargs)
+    return _extract_all_tensors(output)
+
+
 class TestModuleCustom(TestCase):
     """Custom test cases for module validation with different execution modes and layouts."""
 
@@ -164,7 +214,6 @@ class TestModuleCustom(TestCase):
         """
         run_compile = os.getenv("TEST_COMPILE_WITH_CPU", "1") == "1"
         run_eager = os.getenv("TEST_EAGER_WITH_CPU", "0") == "1"
-        module_cls = module_info.module_cls
         module_inputs = module_info.module_inputs_func(
             module_info,
             device=device,
@@ -189,57 +238,38 @@ class TestModuleCustom(TestCase):
                 # === Instantiate the module on CPU (eager). ===
                 torch._dynamo.reset_code_caches()
                 torch._inductor.codecache.FxGraphCache.clear()
-                args_ctor = module_input.constructor_input.args
-                kwargs_ctor = module_input.constructor_input.kwargs
-                module_cpu = module_cls(*args_ctor, **kwargs_ctor)
-                module_cpu = module_cpu.to(dtype)
-                module_cpu.train(training)
+                module_cpu = _construct_module(
+                    module_info, module_input, dtype=dtype, training=training
+                )
                 # Capture the CPU module's (randomly-initialized) weights so the
                 # device module below can be given the SAME weights. Without this
                 # the two modules have different random weights and outputs never match.
                 cpu_state_dict = module_cpu.state_dict()
 
                 # === CPU forward pass. ===
-                args = module_input.forward_input.args
-                kwargs = module_input.forward_input.kwargs
-                args_cpu = tree_map(
-                    lambda x: x.to(dtype) if isinstance(x, torch.Tensor) else x, args
-                )
-                kwargs_cpu = tree_map(
-                    lambda x: x.to(dtype) if isinstance(x, torch.Tensor) else x, kwargs
-                )
-                with torch.no_grad():
-                    cpu_outputs = module_cpu(*args_cpu, **kwargs_cpu)
+                args_cpu, kwargs_cpu = _move_inputs(module_input, dtype=dtype)
+                cpu_tensors = _run_forward(module_cpu, args_cpu, kwargs_cpu)
 
                 # === Instantiate the module on device with the same weights. ===
                 torch._dynamo.reset_code_caches()
                 torch._inductor.codecache.FxGraphCache.clear()
-                module_device = module_cls(*args_ctor, **kwargs_ctor)
+                module_device = _construct_module(
+                    module_info, module_input, dtype=dtype, device=device, training=training
+                )
                 module_device.load_state_dict(cpu_state_dict)
-                module_device = module_device.to(dtype).to(device)
-                module_device.train(training)
                 if mode == "compiled":
                     module_device = torch.compile(module_device)
 
                 # === Device forward pass. ===
                 # Move inputs to device using pytree to handle nested structures.
-                args_device = tree_map(
-                    lambda x: x.to(device, dtype) if isinstance(x, torch.Tensor) else x,
-                    args,
+                args_device, kwargs_device = _move_inputs(
+                    module_input, dtype=dtype, device=device
                 )
-                kwargs_device = tree_map(
-                    lambda x: x.to(device, dtype) if isinstance(x, torch.Tensor) else x,
-                    kwargs,
-                )
-                with torch.no_grad():
-                    device_outputs = module_device(*args_device, **kwargs_device)
-
                 # Outputs may be a bare tensor, a tuple/list, or a dict (e.g.
                 # attention/decoder layers return hidden_states + attn weights +
                 # cache). Flatten both sides with pytree and compare every tensor,
                 # moving device tensors back to CPU for the comparison.
-                cpu_tensors = _extract_all_tensors(cpu_outputs)
-                device_tensors = _extract_all_tensors(device_outputs)
+                device_tensors = _run_forward(module_device, args_device, kwargs_device)
 
                 if len(cpu_tensors) != len(device_tensors):
                     self.fail(
