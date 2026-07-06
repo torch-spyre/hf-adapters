@@ -199,20 +199,10 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
         module = _resolve_adapter_module(model_name_or_path)
         model = super().from_pretrained(model_name_or_path, dtype=dtype)
 
-        # Adapters may expose a module-level ``_generate`` to override the
-        # default generate binding (e.g. for post-processing decoded text).
-        # It must have signature: (model, tokenizer, prompts, **kwargs).
-        if hasattr(module, "_generate"):
-            _gen_fn = module._generate
+        def model_generate(self, tokenizer, prompts, **kwargs):
+            from hf_adapters.hf_common import generate
 
-            def model_generate(self, tokenizer, prompts, **kwargs):
-                return _gen_fn(self, tokenizer, prompts, **kwargs)
-
-        else:
-            def model_generate(self, tokenizer, prompts, **kwargs):
-                from hf_adapters.hf_common import generate
-
-                return generate(module._run_forward, self, tokenizer, prompts, **kwargs)
+            return generate(module._run_forward, self, tokenizer, prompts, **kwargs)
 
         model.generate = MethodType(model_generate, model)
 

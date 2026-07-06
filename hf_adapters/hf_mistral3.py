@@ -130,4 +130,3 @@ def prepare_for_spyre(model):
         rmsnorm_cls = Ministral3RMSNorm
 
     prepare_standard_gqa(model, rmsnorm_cls)
-
