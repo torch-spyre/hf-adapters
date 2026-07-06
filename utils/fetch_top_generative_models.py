@@ -9,6 +9,7 @@ from hf_model_catalog import (
     RESOURCES_DIR,
     build_catalog,
     is_baseline_keep,
+    is_moe,
 )
 from huggingface_hub import HfApi
 from huggingface_hub.hf_api import ModelInfo
@@ -29,17 +30,21 @@ def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
 
 
 def _keep(model: ModelInfo) -> bool:
-    return is_baseline_keep(model)
+    if not is_baseline_keep(model):
+        return False
+    if is_moe(model):
+        return False
+    if model.gated:
+        return False
+    return True
 
 
 def fetch_top_generative_models(
     limit: int, output_csv: Path | str | None = None
-) -> None:
-    if output_csv is None:
-        output_csv = RESOURCES_DIR / "top_generative_models.csv"
+) -> list[dict[str, object]]:
     token: str | bool = os.environ.get("HF_TOKEN", True)
     api: HfApi = HfApi(token=token)
-    build_catalog(
+    return build_catalog(
         fetch_fn=lambda lim: _fetch(api, lim),
         filter_fn=_keep,
         limit=limit,
@@ -51,4 +56,6 @@ def fetch_top_generative_models(
 
 if __name__ == "__main__":
     limit_: int = int(sys.argv[1]) if len(sys.argv) > 1 else 10000
-    fetch_top_generative_models(limit=limit_)
+    fetch_top_generative_models(
+        limit=limit_, output_csv=RESOURCES_DIR / "top_generative_models.csv"
+    )
