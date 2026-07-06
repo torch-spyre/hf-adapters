@@ -10,6 +10,7 @@ Run directly to perform the fetch step::
 """
 
 import argparse
+import os
 import subprocess
 import sys
 import traceback
@@ -137,6 +138,52 @@ def eval_embedding(model_id: str) -> dict:
     }
 
 
+def _delete_repo_weights(repo_id):
+    """Delete cached weight files (and their blobs) for a repo. Keep configs.
+
+    Returns bytes freed. Only touches files under the HF cache whose name ends
+    in a weight suffix; resolves each snapshot symlink to its blob and unlinks
+    both. Never touches datasets-- repos.
+    """
+    from huggingface_hub import scan_cache_dir
+
+    if repo_id is None:
+        return 0
+    freed = 0
+    try:
+        cache = scan_cache_dir()
+    except Exception:
+        return 0
+    for repo in cache.repos:
+        if repo.repo_id != repo_id or repo.repo_type != "model":
+            continue
+        for rev in repo.revisions:
+            for fobj in rev.files:
+                if not fobj.file_name.endswith(_WEIGHT_SUFFIXES):
+                    continue
+                snap = Path(fobj.file_path)
+                # Resolve the blob (snapshot files are symlinks into blobs/).
+                try:
+                    blob = snap.resolve()
+                    if blob.exists():
+                        freed += blob.stat().st_size
+                        blob.unlink()
+                    if snap.is_symlink() or snap.exists():
+                        snap.unlink()
+                except FileNotFoundError:
+                    pass
+                except Exception as e:
+                    print(f"    warn: could not delete {snap}: {e}")
+    return freed
+
+
+def _human_bytes(n):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.1f}{unit}"
+        n /= 1024
+
+
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     add_dates: dict[str, str | None] = _adapter_add_dates()
@@ -144,18 +191,16 @@ def main(argv: list[str] | None = None) -> None:
     preexisting: set = _repos_with_weights()
     # supported_list = list(iter_supported_rows(args.path))
     # supported_rows = {r["model_id"]: r for r in supported_list}
-
+    total_freed = 0
     supported_list = fetch_top_embedding_models(
         limit=args.top_k, output_csv=args.output_csv
     )
-    supported_rows = {r["model_id"]: r for r in supported_list}
-    print("\n".join(supported_rows))
 
     try:
         for row in supported_list:
             # if attempted >= args.limit:
             #     break
-            model_id = row["model_id"]
+            model_path = row["model_id"]
             # if model_id in done:
             #     continue
 
@@ -174,11 +219,11 @@ def main(argv: list[str] | None = None) -> None:
             #     continue
 
             # attempted += 1
-            had_weights = model_id in preexisting
+            had_weights = model_path in preexisting
             # print(f"\n[{attempted}/{args.limit}] {model_id} ({csv_config_class})")
 
             rec = {
-                "model_id": model_id,
+                "model_id": model_path,
                 "rank": row.get("rank"),
                 "downloads": row.get("downloads"),
                 "config_class": csv_config_class,
@@ -189,7 +234,10 @@ def main(argv: list[str] | None = None) -> None:
             }
 
             try:
-                adapter, adapter_name = resolve_adapter_module(model_id)
+                adapter_module = resolve_adapter_module(model_path)
+                adapter_name = os.path.splitext(
+                    os.path.basename(adapter_module.__file__)
+                )[0]
                 rec["adapter"] = adapter_name
                 rec["adapter_added"] = add_dates.get(adapter_name)
 
@@ -201,7 +249,7 @@ def main(argv: list[str] | None = None) -> None:
                     # TODO - Raise Exception?
                     # raise SpyreUnsupportedModelError(
                     print(
-                        f"Model {model_id} has {int(params):,} parameters, "
+                        f"Model {model_path} has {int(params):,} parameters, "
                         f"exceeding the 60B limit for Spyre bring-up."
                     )
 
@@ -210,7 +258,7 @@ def main(argv: list[str] | None = None) -> None:
                 #         model_id, adapter, csv_config_class, args.num_decode
                 #     )
                 # else:
-                metrics = eval_embedding(model_id)
+                metrics = eval_embedding(model_path)
 
                 rec["runs"] = True
                 rec["error"] = None
@@ -232,14 +280,14 @@ def main(argv: list[str] | None = None) -> None:
             # record(rec)
 
             # Cache cleanup: weights absent at start -> delete downloaded weights.
-            # if not had_weights:
-            #     freed = delete_repo_weights(model_id)
-            #     total_freed += freed
-            #     if freed:
-            #         print(
-            #             f"    freed {human_bytes(freed)} "
-            #             f"(total {human_bytes(total_freed)})"
-            #         )
+            if not had_weights:
+                freed = _delete_repo_weights(model_path)
+                total_freed += freed
+                if freed:
+                    print(
+                        f"    freed {_human_bytes(freed)} "
+                        f"(total {_human_bytes(total_freed)})"
+                    )
     except KeyboardInterrupt:
         print("\nInterrupted — results so far are saved; rerun to resume.")
     # finally:
