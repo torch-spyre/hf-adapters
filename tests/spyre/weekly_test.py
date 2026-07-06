@@ -6,19 +6,15 @@ pytests in this file consume the resulting CSV.
 
 Run directly to perform the fetch step::
 
-    python tests/spyre/weekly_test.py --top-k 200 --workers 4
+    python tests/spyre/weekly_test.py --top-k 200
 """
 
 import argparse
-import concurrent.futures
-import json
-import os
 import subprocess
 import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from test_e2e_embed_compare_spyre import embed_compare_spyre
 
@@ -105,7 +101,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--top-k",
         type=int,
-        default=10,
+        default=200,
         help="Number of top embedding models to fetch (by downloads).",
     )
     parser.add_argument(
@@ -113,13 +109,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help="Destination CSV (defaults to resources/top_embedding_models.csv).",
-    )
-    parser.add_argument(
-        "--workers",
-        "-k",
-        type=int,
-        default=1,
-        help="Number of parallel worker processes for eval_embedding (default: 1).",
     )
     return parser.parse_args(argv)
 
@@ -137,45 +126,6 @@ def _print_adapter_add_dates(add_dates: dict[str, str | None]) -> None:
         print(f"  {'unknown':<10}  {module:<{name_w}}")
 
 
-def _delete_repo_weights(repo_id):
-    """Delete cached weight files (and their blobs) for a repo. Keep configs.
-
-    Returns bytes freed. Only touches files under the HF cache whose name ends
-    in a weight suffix; resolves each snapshot symlink to its blob and unlinks
-    both. Never touches datasets-- repos.
-    """
-    from huggingface_hub import scan_cache_dir
-
-    if repo_id is None:
-        return 0
-    freed = 0
-    try:
-        cache = scan_cache_dir()
-    except Exception:
-        return 0
-    for repo in cache.repos:
-        if repo.repo_id != repo_id or repo.repo_type != "model":
-            continue
-        for rev in repo.revisions:
-            for fobj in rev.files:
-                if not fobj.file_name.endswith(_WEIGHT_SUFFIXES):
-                    continue
-                snap = Path(fobj.file_path)
-                # Resolve the blob (snapshot files are symlinks into blobs/).
-                try:
-                    blob = snap.resolve()
-                    if blob.exists():
-                        freed += blob.stat().st_size
-                        blob.unlink()
-                    if snap.is_symlink() or snap.exists():
-                        snap.unlink()
-                except FileNotFoundError:
-                    pass
-                except Exception as e:
-                    print(f"    warn: could not delete {snap}: {e}")
-    return freed
-
-
 def eval_embedding(model_id: str) -> dict:
     """Load and compare embeddings for one model. Returns a metrics dict."""
     loads, _ = load_embedding(model_id)
@@ -187,200 +137,109 @@ def eval_embedding(model_id: str) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Subprocess-based worker
-# Each model is evaluated in a *completely fresh* Python interpreter that exits
-# after producing its result.  This avoids any shared Spyre/GPU driver state
-# that multiprocessing.Pool workers would carry across tasks.
-# ---------------------------------------------------------------------------
-
-_WORKER_SCRIPT = """\
-import json, sys, traceback
-# Re-add the same sys.path entries the parent uses so imports resolve.
-for _p in {paths!r}:
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-from test_load_spyre import load_embedding
-from test_e2e_embed_compare_spyre import embed_compare_spyre
-model_id = {model_id!r}
-try:
-    loads, _ = load_embedding(model_id)
-    mismatches, _ = embed_compare_spyre(model_id)
-    result = {{"runs": True, "correct": loads and not mismatches,
-               "load": loads, "compare_spyre": not mismatches}}
-except Exception as exc:
-    tb = traceback.format_exc()
-    result = {{"runs": False, "correct": False,
-               "error": f"{{type(exc).__name__}}: {{exc}}",
-               "traceback_tail": "".join(tb.splitlines(keepends=True)[-6:])}}
-print(json.dumps(result))
-"""
-
-_WORKER_PATHS = [
-    str(_SPYRE_TESTS_DIR),
-    str(_TESTS_DIR),
-    str(_UTILS_DIR),
-    str(_REPO_ROOT),
-]
-
-
-def _run_in_subprocess(model_id: str) -> dict:
-    """Evaluate one model in a fresh Python interpreter.
-
-    Stdout is expected to be a single JSON line written by _WORKER_SCRIPT.
-    Returns a metrics dict (never raises).
-    """
-    script = _WORKER_SCRIPT.format(paths=_WORKER_PATHS, model_id=model_id)
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-c", script],
-            capture_output=True,
-            text=True,
-        )
-        # The worker prints exactly one JSON line as its last stdout line.
-        for line in reversed(proc.stdout.splitlines()):
-            line = line.strip()
-            if line.startswith("{"):
-                return json.loads(line)
-        # No valid JSON found — treat as a crash.
-        stderr_tail = "".join(proc.stderr.splitlines(keepends=True)[-6:])
-        return {
-            "runs": False,
-            "correct": False,
-            "error": f"subprocess exited {proc.returncode} with no JSON output",
-            "traceback_tail": stderr_tail,
-        }
-    except Exception as e:
-        return {
-            "runs": False,
-            "correct": False,
-            "error": f"{type(e).__name__}: {e}",
-            "traceback_tail": traceback.format_exc(),
-        }
-
-
-def _human_bytes(n):
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024 or unit == "TB":
-            return f"{n:.1f}{unit}"
-        n /= 1024
-
-
-def _build_base_rec(
-    row: dict[str, Any], add_dates: dict[str, str | None], preexisting: set
-) -> tuple[dict, bool]:
-    """Build the base record dict and adapter fields for a row.
-
-    Returns ``(rec, had_weights)``.  Raises on adapter resolution failure so
-    the caller can mark the record as failed.
-    """
-    model_id = row["model_id"]
-    had_weights = model_id in preexisting
-    csv_config_class = row.get("config_class")
-
-    rec: dict[str, Any] = {
-        "model_id": model_id,
-        "rank": row.get("rank"),
-        "downloads": row.get("downloads"),
-        "config_class": csv_config_class,
-        "model_type": row.get("model_type"),
-        "params": row.get("parameters (str)"),
-        "had_cached_weights_at_start": had_weights,
-        "attempted_at": datetime.now().isoformat(timespec="seconds"),
-    }
-
-    adapter_module = resolve_adapter_module(model_id)
-    adapter_name = os.path.splitext(os.path.basename(adapter_module.__file__))[0]
-    rec["adapter"] = adapter_name
-    rec["adapter_added"] = add_dates.get(adapter_name)
-
-    params = row.get("parameters")
-    if params not in (None, "") and int(params) > 60_000_000_000:
-        print(
-            f"Model {model_id} has {int(params):,} parameters, "
-            f"exceeding the 60B limit for Spyre bring-up."
-        )
-
-    return rec, had_weights
-
-
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     add_dates: dict[str, str | None] = _adapter_add_dates()
-    _print_adapter_add_dates(add_dates)
+    # _print_adapter_add_dates(add_dates)
     preexisting: set = _repos_with_weights()
-    total_freed = 0
+    # supported_list = list(iter_supported_rows(args.path))
+    # supported_rows = {r["model_id"]: r for r in supported_list}
 
-    supported_list: list[dict[str, Any]] = fetch_top_embedding_models(
+    supported_list = fetch_top_embedding_models(
         limit=args.top_k, output_csv=args.output_csv
     )
+    supported_rows = {r["model_id"]: r for r in supported_list}
+    print("\n".join(supported_rows))
 
-    # Pre-resolve adapter metadata in the parent (cheap, no GPU involvement).
-    # Rows that fail resolution are recorded immediately without spawning a subprocess.
-    pending: list[tuple[dict[str, Any], bool]] = []  # (rec, had_weights)
-    model_ids: list[str] = []
-    for row in supported_list:
-        try:
-            rec, had_weights = _build_base_rec(row, add_dates, preexisting)
-            pending.append((rec, had_weights))
-            model_ids.append(row["model_id"])
-        except KeyboardInterrupt:
-            raise
-        except Exception as e:
-            tb = traceback.format_exc()
+    try:
+        for row in supported_list:
+            # if attempted >= args.limit:
+            #     break
             model_id = row["model_id"]
+            # if model_id in done:
+            #     continue
+
+            csv_config_class = row.get("config_class")
+            # gated = row.get("is_gated") == "True"
+            # if gated and not args.include_gated:
+            #     record(
+            #         {
+            #             "model_id": model_id,
+            #             "config_class": csv_config_class,
+            #             "status": "skipped:gated",
+            #             "rank": row.get("rank"),
+            #             "attempted_at": datetime.now().isoformat(timespec="seconds"),
+            #         }
+            #     )
+            #     continue
+
+            # attempted += 1
             had_weights = model_id in preexisting
-            rec: dict[str, Any] = {
+            # print(f"\n[{attempted}/{args.limit}] {model_id} ({csv_config_class})")
+
+            rec = {
                 "model_id": model_id,
                 "rank": row.get("rank"),
                 "downloads": row.get("downloads"),
-                "config_class": row.get("config_class"),
+                "config_class": csv_config_class,
                 "model_type": row.get("model_type"),
                 "params": row.get("parameters (str)"),
                 "had_cached_weights_at_start": had_weights,
                 "attempted_at": datetime.now().isoformat(timespec="seconds"),
-                "adapter": None,
-                "adapter_added": None,
-                "runs": False,
-                "correct": False,
-                "error": f"{type(e).__name__}: {e}",
-                "traceback_tail": "".join(tb.splitlines(keepends=True)[-6:]),
             }
-            print(f"    runs=False error={rec['error']}")
+
+            try:
+                adapter, adapter_name = resolve_adapter_module(model_id)
+                rec["adapter"] = adapter_name
+                rec["adapter_added"] = add_dates.get(adapter_name)
+
+                # Reject models too large to bring up on Spyre. Recorded as a
+                # clean SpyreUnsupportedModelError, same as stick-misaligned dims.
+
+                params = row.get("parameters")
+                if params not in (None, "") and int(params) > 60_000_000_000:
+                    # TODO - Raise Exception?
+                    # raise SpyreUnsupportedModelError(
+                    print(
+                        f"Model {model_id} has {int(params):,} parameters, "
+                        f"exceeding the 60B limit for Spyre bring-up."
+                    )
+
+                # if args.path == "generative":
+                #     metrics = eval_generative(
+                #         model_id, adapter, csv_config_class, args.num_decode
+                #     )
+                # else:
+                metrics = eval_embedding(model_id)
+
+                rec["runs"] = True
+                rec["error"] = None
+                rec.update(metrics)
+                print(f"    runs=True correct={rec.get('correct')} ")
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                tb = traceback.format_exc()
+                rec["runs"] = False
+                rec["correct"] = False
+                rec["error"] = f"{type(e).__name__}: {e}"
+                rec["traceback_tail"] = "".join(tb.splitlines(keepends=True)[-6:])
+                # adapter fields may be unset if resolve_adapter failed
+                rec.setdefault("adapter", None)
+                rec.setdefault("adapter_added", None)
+                print(f"    runs=False error={rec['error']}")
+
             # record(rec)
 
-    # Each model runs in its own fresh subprocess (args.workers subprocesses at
-    # a time).  ProcessPoolExecutor is used only to cap concurrency; the actual
-    # work is a subprocess.run call so no Spyre state is shared between slots.
-    try:
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=args.workers
-        ) as executor:
-            futures = {
-                executor.submit(_run_in_subprocess, mid): i
-                for i, mid in enumerate(model_ids)
-            }
-            for fut in concurrent.futures.as_completed(futures):
-                idx = futures[fut]
-                rec, had_weights = pending[idx]
-                result = fut.result()
-                rec.update(result)
-                if result.get("runs"):
-                    print(f"    runs=True correct={rec.get('correct')} ")
-                else:
-                    print(f"    runs=False error={rec.get('error')}")
-
-                # record(rec)
-
-                # Cache cleanup: weights absent at start -> delete downloaded weights.
-                if not had_weights:
-                    freed = _delete_repo_weights(rec["model_id"])
-                    total_freed += freed
-                    if freed:
-                        print(
-                            f"    freed {_human_bytes(freed)} "
-                            f"(total {_human_bytes(total_freed)})"
-                        )
+            # Cache cleanup: weights absent at start -> delete downloaded weights.
+            # if not had_weights:
+            #     freed = delete_repo_weights(model_id)
+            #     total_freed += freed
+            #     if freed:
+            #         print(
+            #             f"    freed {human_bytes(freed)} "
+            #             f"(total {human_bytes(total_freed)})"
+            #         )
     except KeyboardInterrupt:
         print("\nInterrupted — results so far are saved; rerun to resume.")
     # finally:
