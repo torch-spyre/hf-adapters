@@ -10,6 +10,7 @@ Run directly to perform the fetch step::
 """
 
 import argparse
+import os
 import subprocess
 import sys
 import traceback
@@ -102,7 +103,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--top-k",
         type=int,
-        default=200,
+        default=10,
         help="Number of top embedding models to fetch (by downloads).",
     )
     parser.add_argument(
@@ -141,7 +142,7 @@ def eval_embedding(model_id: str) -> dict:
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     add_dates: dict[str, str | None] = _adapter_add_dates()
-    # _print_adapter_add_dates(add_dates)
+    _print_adapter_add_dates(add_dates)
     preexisting: set = _repos_with_weights()
     # supported_list = list(iter_supported_rows(args.path))
     # supported_rows = {r["model_id"]: r for r in supported_list}
@@ -149,8 +150,8 @@ def main(argv: list[str] | None = None) -> None:
     supported_list: list[dict[str, Any]] = fetch_top_embedding_models(
         limit=args.top_k, output_csv=args.output_csv
     )
-    supported_rows = {r["model_id"]: r for r in supported_list}
-    print("\n".join(supported_rows))
+    # supported_rows = {r["model_id"]: r for r in supported_list}
+    # print("\n".join(supported_rows))
 
     try:
         for row in supported_list:
@@ -190,12 +191,12 @@ def main(argv: list[str] | None = None) -> None:
             }
 
             try:
-                adapter, adapter_name = resolve_adapter_module(model_id)
+                adapter_module = resolve_adapter_module(model_id)
+                adapter_name = os.path.splitext(
+                    os.path.basename(adapter_module.__file__)
+                )[0]
                 rec["adapter"] = adapter_name
                 rec["adapter_added"] = add_dates.get(adapter_name)
-
-                # Reject models too large to bring up on Spyre. Recorded as a
-                # clean SpyreUnsupportedModelError, same as stick-misaligned dims.
 
                 params = row.get("parameters")
                 if params not in (None, "") and int(params) > 60_000_000_000:
@@ -214,7 +215,7 @@ def main(argv: list[str] | None = None) -> None:
                 metrics = eval_embedding(model_id)
 
                 rec["runs"] = True
-                rec["error"] = None
+                rec["correct"] = metrics["correct"]
                 rec.update(metrics)
                 print(f"    runs=True correct={rec.get('correct')} ")
             except KeyboardInterrupt:
