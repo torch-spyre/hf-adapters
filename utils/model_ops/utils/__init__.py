@@ -11,16 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-"""Spyre edge case: ``forced_eos:eos_first_of_second_block`` (expansion arm)."""
-
-import pytest
-from _shared import run_eos_case
-from model_registry import CAUSAL_PATHS
-
-
-@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
-@pytest.mark.slow
-def test_eos_first_of_second_block_spyre(model_path: str) -> None:
-    ok, detail = run_eos_case(model_path, "eos_first_of_second_block")
-    assert ok, detail

@@ -21,9 +21,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from tests.model_registry import (  # noqa: E402
-    select_representative_models,
-)
+import tests.model_registry  # noqa: E402
 
 
 def generate_matrices(exclude_models=None):
@@ -31,19 +29,22 @@ def generate_matrices(exclude_models=None):
     Generate test matrices from the model registry.
 
     Args:
-        exclude_models: List of paths to exclude from all
-            matrices.
+        exclude_models: List of model paths to exclude from all matrices
 
     Returns:
-        dict: Dictionary with 'causal', 'embed', and 'combined' matrix lists
+        dict: Dictionary with 'causal', 'embed', 'vision', and 'combined' matrix lists
     """
 
-    # Get representative model paths (one per adapter)
-    causal_paths, embed_paths = select_representative_models()
-
     # Apply exclusions
-    causal_paths = [p for p in causal_paths if p not in exclude_models]
-    embed_paths = [p for p in embed_paths if p not in exclude_models]
+    causal_paths = [
+        k for k in tests.model_registry.CAUSAL_PATHS if k not in exclude_models
+    ]
+    embed_paths = [
+        k for k in tests.model_registry.EMBED_PATHS if k not in exclude_models
+    ]
+    vision_paths = [
+        k for k in tests.model_registry.VISION_PATHS if k not in exclude_models
+    ]
 
     # Combine for jobs that test both types
     combined_paths = causal_paths + embed_paths
@@ -51,6 +52,7 @@ def generate_matrices(exclude_models=None):
     return {
         "causal": causal_paths,
         "embed": embed_paths,
+        "vision": vision_paths,
         "combined": combined_paths,
     }
 
@@ -68,6 +70,7 @@ def format_for_github_actions(matrices):
     return {
         "causal_matrix": json.dumps(matrices["causal"]),
         "embed_matrix": json.dumps(matrices["embed"]),
+        "vision_matrix": json.dumps(matrices["vision"]),
         "combined_matrix": json.dumps(matrices["combined"]),
     }
 
@@ -118,6 +121,9 @@ def main():
     )
     print(
         f"  Embedding models ({len(matrices['embed'])}): {', '.join(matrices['embed'])}"
+    )
+    print(
+        f"  Vision models ({len(matrices['vision'])}): {', '.join(matrices['vision'])}"
     )
     print(
         f"  Combined ({len(matrices['combined'])}): {', '.join(matrices['combined'])}"

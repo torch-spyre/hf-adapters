@@ -20,6 +20,10 @@ capture, forced-EOS tokenizer wrapper, and the case tables — into one place
 so the two drivers can share them.
 """
 
+from __future__ import annotations
+
+from typing import Any, Optional
+
 import torch
 
 BLOCK_SIZE = 64  # mirrors hf_common.BLOCK_SIZE; kept local so case ids are stable
@@ -37,7 +41,7 @@ BLOCK_SIZE = 64  # mirrors hf_common.BLOCK_SIZE; kept local so case ids are stab
 # minutes); the CPU pytest runs the full grid. Keep keys stable so the
 # Spyre subset stays in sync.
 
-CASES = {
+CASES: dict[str, tuple[list[int], int]] = {
     # --- batch=1: single-prompt control-flow regimes ---
     "single_token_prompt": ([1], 16),  # extreme left-padding (63 pads, 1 real)
     "short_one_token": ([5], 1),  # only the prefill arm runs
@@ -70,7 +74,7 @@ CASES = {
 # Subset of CASES marked @pytest.mark.slow on the CPU lane: each is covered by
 # a cheaper sibling regime (see issue #35), so on the default lane they are
 # deselected. Run them with `--run-slow`.
-SLOW_CPU_CASE_KEYS = {
+SLOW_CPU_CASE_KEYS: set[str] = {
     "short_three_blocks",  # 3rd expansion is the same path as 2nd (covered by short_two_blocks_plus)
     "short_two_blocks_exact",  # exact-block boundary == same path as +N (covered by short_two_blocks_plus)
     "long_prompt_long_gen",  # long-prompt covered by long_multi_block; long-gen by short_two_blocks_plus
@@ -81,7 +85,7 @@ SLOW_CPU_CASE_KEYS = {
 # (eos_offset_per_prompt, max_new_tokens). EOS offset is 0-indexed: the token
 # at that position becomes the EOS marker, so the decoded output should be the
 # tokens up to (but excluding) that position.
-EOS_CASES = {
+EOS_CASES: dict[str, tuple[list[int], int]] = {
     # batch=1 single-row regimes
     "eos_first_token": ([0], 16),  # finished.all() trips on step 0
     "eos_mid_block": ([10], 32),  # within first block, fill arm
@@ -102,7 +106,7 @@ EOS_CASES = {
 
 
 # Subset of CASES the Spyre script runs (each Spyre case takes minutes).
-SPYRE_CASE_KEYS = [
+SPYRE_CASE_KEYS: list[str] = [
     "single_token_prompt",
     "short_one_token",
     "short_block_minus_one",
@@ -115,7 +119,7 @@ SPYRE_CASE_KEYS = [
 ]
 
 # Subset of EOS_CASES the Spyre script runs.
-SPYRE_EOS_CASE_KEYS = [
+SPYRE_EOS_CASE_KEYS: list[str] = [
     "eos_first_token",
     "eos_mid_block",
     "eos_first_of_second_block",
@@ -125,11 +129,11 @@ SPYRE_EOS_CASE_KEYS = [
 
 # Sampling kwargs used by both the CPU pytest sampling-determinism test and the
 # Spyre script. Kept here so the two stay in sync.
-SAMPLING_KWARGS = dict(do_sample=True, temperature=1.0, top_k=20)
-SAMPLING_MAX_NEW = (
+SAMPLING_KWARGS: dict[str, Any] = dict(do_sample=True, temperature=1.0, top_k=20)
+SAMPLING_MAX_NEW: int = (
     20  # short — sampling reproducibility is RNG-state, not block-expansion
 )
-SAMPLING_TARGETS = [8, 16]
+SAMPLING_TARGETS: list[int] = [8, 16]
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +141,7 @@ SAMPLING_TARGETS = [8, 16]
 # ---------------------------------------------------------------------------
 
 
-def make_prompt_of_length(tokenizer, target_tokens):
+def _make_prompt_of_length(tokenizer: Any, target_tokens: int) -> str:
     """Build a prompt that tokenizes to ~target_tokens tokens.
 
     Repeats a base sentence until the tokenized length crosses the target,
@@ -154,9 +158,9 @@ def make_prompt_of_length(tokenizer, target_tokens):
     return tokenizer.decode(ids, skip_special_tokens=True)
 
 
-def make_prompts(tokenizer, targets):
+def make_prompts(tokenizer: Any, targets: list[int]) -> list[str]:
     """Build a list of prompts, one per target token length."""
-    return [make_prompt_of_length(tokenizer, t) for t in targets]
+    return [_make_prompt_of_length(tokenizer, t) for t in targets]
 
 
 # ---------------------------------------------------------------------------
@@ -164,11 +168,16 @@ def make_prompts(tokenizer, targets):
 # ---------------------------------------------------------------------------
 
 
-def hf_reference_outputs(model, tokenizer, prompts, max_new_tokens):
+def hf_reference_outputs(
+    model: Any,
+    tokenizer: Any,
+    prompts: list[str],
+    max_new_tokens: int,
+) -> list[str]:
     """Run stock HF ``generate(do_sample=False)`` on each prompt individually."""
     if max_new_tokens == 0:
         return ["" for _ in prompts]
-    results = []
+    results: list[str] = []
     for prompt in prompts:
         encoded = tokenizer(prompt, return_tensors="pt")
         with torch.no_grad():
@@ -180,7 +189,12 @@ def hf_reference_outputs(model, tokenizer, prompts, max_new_tokens):
     return results
 
 
-def greedy_token_ids(model, tokenizer, prompt, max_new_tokens):
+def greedy_token_ids(
+    model: Any,
+    tokenizer: Any,
+    prompt: str,
+    max_new_tokens: int,
+) -> list[int]:
     """Return the list of token IDs HF ``generate(do_sample=False)`` emits."""
     encoded = tokenizer(prompt, return_tensors="pt")
     with torch.no_grad():
@@ -194,7 +208,10 @@ def greedy_token_ids(model, tokenizer, prompt, max_new_tokens):
 #
 
 
-def pick_forced_eos_id(per_prompt_ids, eos_offsets):
+def pick_forced_eos_id(
+    per_prompt_ids: list[list[int]],
+    eos_offsets: list[int],
+) -> Optional[int]:
     """Pick a token id that lands at offset[b] in row b for every row, and is
     absent from earlier positions.
 
@@ -218,7 +235,11 @@ def pick_forced_eos_id(per_prompt_ids, eos_offsets):
     return None
 
 
-def forced_eos_expected(per_prompt_ids, eos_offsets, tokenizer):
+def forced_eos_expected(
+    per_prompt_ids: list[list[int]],
+    eos_offsets: list[int],
+    tokenizer: Any,
+) -> list[str]:
     """Decode the per-row tokens up to (not including) each row's EOS offset."""
     return [
         tokenizer.decode(per_prompt_ids[b][: eos_offsets[b]], skip_special_tokens=True)
@@ -237,16 +258,16 @@ class _DelegatingTokenizer:
     ``hf_common.generate`` (e.g. no pad token).
     """
 
-    def __init__(self, base):
+    def __init__(self, base: Any) -> None:
         self._base = base
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self._base(*args, **kwargs)
 
-    def decode(self, *args, **kwargs):
+    def decode(self, *args: Any, **kwargs: Any) -> str:
         return self._base.decode(*args, **kwargs)
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         return getattr(self._base, name)
 
 
@@ -258,11 +279,11 @@ class NoPadTokenizer(_DelegatingTokenizer):
     """
 
     @property
-    def pad_token(self):
+    def pad_token(self) -> None:
         return None
 
     @pad_token.setter
-    def pad_token(self, value):
+    def pad_token(self, value: str) -> None:
         # generate() does ``tokenizer.pad_token = tokenizer.eos_token`` when
         # pad_token is None — let that assignment land on the real tokenizer
         # so subsequent ``tokenizer(... padding=True ...)`` calls work.
@@ -275,7 +296,11 @@ class NoPadTokenizer(_DelegatingTokenizer):
 # ---------------------------------------------------------------------------
 
 
-def make_prompt_with_eos_inside(tokenizer, eos_token_id, target_tokens=10):
+def make_prompt_with_eos_inside(
+    tokenizer: Any,
+    eos_token_id: int,
+    target_tokens: int = 10,
+) -> str:
     """Build a prompt whose token ids include ``eos_token_id`` somewhere in
     the middle. The ``finished`` mask is only updated on emitted tokens (line
     949 of hf_common.generate), so generation should proceed normally.

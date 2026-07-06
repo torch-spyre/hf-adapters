@@ -27,15 +27,15 @@ DEVICE='cpu' patching of ``hf_common`` happens once in ``tests/conftest.py``.
 import gc
 
 import pytest
-from conftest import torch_dtype_for
-from model_registry import CAUSAL_KEYS, CAUSAL_LM_MODELS, EMBED_KEYS, EMBEDDING_MODELS
+
+from tests.conftest import torch_dtype_for_model_path
+from tests.model_registry import CAUSAL_PATHS, EMBED_PATHS
 
 
-@pytest.mark.parametrize("model_key", CAUSAL_KEYS, ids=CAUSAL_KEYS)
-def test_load_causal_lm(model_key, auto_spyre_model):
-    info = CAUSAL_LM_MODELS[model_key]
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+def test_load_causal_lm(model_path, auto_spyre_model):
     model = auto_spyre_model.AutoSpyreModelForCausalLM.from_pretrained(
-        info["path"], dtype=torch_dtype_for(info)
+        model_path, dtype=torch_dtype_for_model_path(model_path)
     )
     assert model is not None
     assert callable(
@@ -45,11 +45,10 @@ def test_load_causal_lm(model_key, auto_spyre_model):
     gc.collect()
 
 
-@pytest.mark.parametrize("model_key", EMBED_KEYS, ids=EMBED_KEYS)
-def test_load_embedding(model_key, auto_spyre_model):
-    info = EMBEDDING_MODELS[model_key]
+@pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
+def test_load_embedding(model_path, auto_spyre_model):
     model = auto_spyre_model.AutoSpyreModel.from_pretrained(
-        info["path"], dtype=torch_dtype_for(info)
+        model_path, dtype=torch_dtype_for_model_path(model_path)
     )
     assert model is not None
     del model

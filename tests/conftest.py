@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """
-Shared scaffolding for CPU accuracy tests.
+Root conftest — CPU-patch scaffolding and global pytest hooks.
 
 Module-level code below runs at conftest import — i.e. before any test module
 in tests/ is loaded — so adapter modules bind to a CPU-patched ``hf_common``.
@@ -22,37 +22,95 @@ it in ``sys.modules`` under the canonical name, then synthesize an
 ``hf_adapters`` package pointing at the source directory. Subsequent
 ``import hf_adapters.X`` calls find our patched version first.
 
-The defensive ``assert`` at the top of this file fails loudly if anything
-imported ``hf_adapters`` before pytest reached us — which would lock in the
-un-patched DEVICE and silently break CPU tests.
+The defensive ``assert`` below fails loudly if anything imported ``hf_adapters``
+before pytest reached us — which would lock in the un-patched DEVICE and
+silently break CPU tests.
+
+Spyre-targeted runs (``pytest tests/spyre/...``) are detected via ``sys.argv``
+and skip the CPU-patching block entirely; the Spyre lane imports
+``hf_adapters`` normally with the real ``DEVICE="spyre"``, so no separate
+``tests/spyre/conftest.py`` is needed.
+
+``model_registry`` populates ``CAUSAL_KEYS`` / ``EMBED_KEYS`` itself at import
+time off ``hf_adapters.auto_spyre_model.CONFIG_TO_ADAPTER_MODULE_MAPPING``. In
+the CPU lane, the patched ``auto_spyre_model`` must already be in
+``sys.modules`` before ``model_registry`` is imported — the block below
+arranges that ordering.
+
+CPU-lane test helpers and fixtures live in ``tests/cpu/conftest.py``.
 """
 
-import gc
+from __future__ import annotations
+
 import importlib.util
 import os
 import sys
 import types
 
 import pytest
-from _helpers import (  # noqa: F401  (re-exported for tests via `from conftest import ...`)
-    cosine_per_row,
-    encode_padded,
-    load_hf_causal_lm,
-    min_cosine,
-    torch_dtype_for,
-)
+import torch
+from _pytest.config import Config
+from _pytest.config.argparsing import Parser
+from _pytest.nodes import Item
+from _pytest.python import Metafunc
+from transformers import AutoModelForCausalLM
+
+# NOTE: do NOT import hf_adapters at module top level. The CPU patch block below
+# rebuilds ``hf_adapters.hf_common`` with ``DEVICE='cpu'`` and asserts that no
+# import has materialized it yet; a top-level import here would always trip that
+# assert. ``MODEL_PATH_TO_TORCH_DTYPE`` / ``MODEL_PATH_WITH_LOAD_FN`` are pulled
+# in lazily inside the helpers that use them.
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADAPTERS_DIR = os.path.join(REPO_ROOT, "hf_adapters")
 
+# ---------------------------------------------------------------------------
+# Shared helpers — available to all test lanes via `from conftest import ...`
+# ---------------------------------------------------------------------------
+
+
+def load_hf_vlm(model_path, torch_dtype, adapter_mod=None):
+    """Load the HF multimodal (image→text) reference, honoring ``load_fn``.
+
+    Mirrors :func:`load_hf_causal_lm` for VLM adapters: when ``load_fn`` is set,
+    the adapter module is expected to expose ``load_hf_model(path, dtype)`` (a
+    non-standard loading path); otherwise the stock
+    ``AutoModelForImageTextToText`` auto class is used.
+    """
+
+    if hasattr(adapter_mod, "load_hf_model"):
+        return adapter_mod.load_hf_model(model_path, torch_dtype)
+    from transformers import AutoModelForImageTextToText
+
+    return AutoModelForImageTextToText.from_pretrained(
+        model_path, dtype=torch_dtype, device_map="cpu"
+    )
+
+
+# ---------------------------------------------------------------------------
+
+# Make tests/ importable so model_registry and helpers resolve from any subdir.
+_TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _TESTS_DIR not in sys.path:
+    sys.path.insert(0, _TESTS_DIR)
+
 # Spyre-targeted runs (`pytest tests/spyre/...`) need the unpatched hf_adapters
-# with DEVICE="spyre". Detect that here and skip the CPU patching block — the
-# tests/spyre/conftest.py picks up from there with the real module.
+# with DEVICE="spyre". Detect that here and skip the CPU patching block.
 _TARGETS_SPYRE = any(
     "tests/spyre" in a or a.rstrip("/").endswith("tests/spyre") for a in sys.argv
 )
 
-if not _TARGETS_SPYRE:
+# This module body may execute more than once: pytest first imports it as the
+# rootdir conftest (bare name ``conftest``), and a test doing
+# ``from tests.conftest import ...`` triggers a second import under the dotted
+# package name. The second run must be a no-op for the patch block — the CPU
+# patch is already installed — so guard on whether our patched hf_common is
+# already present. A bare assert here would misfire on that benign re-import.
+_ALREADY_PATCHED = (
+    getattr(sys.modules.get("hf_adapters.hf_common"), "DEVICE", None) == "cpu"
+)
+
+if not _TARGETS_SPYRE and not _ALREADY_PATCHED:
     assert "hf_adapters.hf_common" not in sys.modules, (
         "hf_adapters.hf_common was imported before tests/conftest.py ran; "
         "the DEVICE='cpu' patch will not apply. Check for plugins or other "
@@ -72,25 +130,8 @@ if not _TARGETS_SPYRE:
     _pkg.__path__ = [ADAPTERS_DIR]
     sys.modules["hf_adapters"] = _pkg
 
-
-def _load_adapter(filename):
-    """Load an adapter .py file under hf_adapters/ as a real submodule."""
-    mod_name = f"hf_adapters.{filename.replace('.py', '')}"
-    if mod_name in sys.modules:
-        return sys.modules[mod_name]
-    filepath = os.path.join(ADAPTERS_DIR, filename)
-    spec = importlib.util.spec_from_file_location(mod_name, filepath)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[mod_name] = mod
-    spec.loader.exec_module(mod)
-    setattr(_pkg, filename.replace(".py", ""), mod)
-    return mod
-
-
-# Pre-load every adapter referenced by CONFIG_TO_ADAPTER_MODULE_MAPPING, then
-# auto_spyre_model itself. Doing this here means tests can grab AutoSpyre*
-# off the module without paying the cost on first use.
-if not _TARGETS_SPYRE:
+    # Pre-load auto_spyre_model with the patched hf_common already in sys.modules
+    # so model_registry's top-level import reuses the patched modules.
     _auto_path = os.path.join(ADAPTERS_DIR, "auto_spyre_model.py")
     _auto_spec = importlib.util.spec_from_file_location(
         "hf_adapters.auto_spyre_model", _auto_path
@@ -100,89 +141,81 @@ if not _TARGETS_SPYRE:
     _auto_spec.loader.exec_module(_auto_mod)
     setattr(_pkg, "auto_spyre_model", _auto_mod)
 
-    # Now that auto_spyre_model is loaded with patched hf_common, populate the model lists
-    # Import model_registry here (after patching) and update its CAUSAL_PATHS/EMBED_PATHS
-    import model_registry  # noqa: E402
+    # model_registry's top-level import will reuse the patched modules.
+    import model_registry  # noqa: E402, F401
 
-    model_registry.CAUSAL_PATHS, model_registry.EMBED_PATHS = (
-        model_registry.select_representative_models(
-            _auto_mod.CONFIG_TO_ADAPTER_MODULE_MAPPING
-        )
-    )
+elif not _ALREADY_PATCHED:
+    # Spyre lane: hf_adapters is imported normally (real DEVICE="spyre").
+    # model_registry populates CAUSAL_PATHS / EMBED_PATHS at import time.
+    pass  # noqa: E402
 
-
-def _unwrap_compiled_blocks(model):
-    """Replace torch.compile-wrapped blocks with their CPU-runnable originals."""
-    if not hasattr(model, "_spyre_compiled_blocks"):
-        return
-    unwrapped = []
-    for cb in model._spyre_compiled_blocks:
-        orig = getattr(cb, "_orig_mod", getattr(cb, "_torchdynamo_orig_callable", None))
-        unwrapped.append(orig if orig is not None else cb)
-    model._spyre_compiled_blocks = unwrapped
+# When _ALREADY_PATCHED (benign re-import via ``from tests.conftest import ...``)
+# both branches are skipped: hf_adapters is patched and the registry is
+# already populated from the first execution.
 
 
-def pytest_configure(config):
+def pytest_configure(config: Config) -> None:
     config.addinivalue_line(
         "markers",
         "requires_spyre: mark test as requiring the Spyre backend device",
     )
 
 
-def _set_rope_dtype(model, dtype):
-    """Propagate the chosen dtype to the model's precomputed RoPE freq cache.
-
-    The manual CPU-test paths load via ``AutoModel`` + ``prepare_for_spyre``
-    directly, bypassing ``load_model_common`` / ``_move_to_spyre_with_layout``
-    (where the production paths make this explicit ``set_dtype`` call). Mirror
-    it here so a non-fp16 model (e.g. bf16 EmbeddingGemma) gets a matching freq
-    cache instead of the fp16 default — otherwise ``apply_rope_matmul`` promotes
-    the query to fp32 and SDPA rejects the mismatched key/value dtype.
-    """
-    sys.modules["hf_adapters.hf_common"].set_rope_dtype(model, dtype)
-
-
-@pytest.fixture(scope="session")
-def hf_common_mod():
-    return sys.modules["hf_adapters.hf_common"]
-
-
-@pytest.fixture(scope="session")
-def auto_spyre_model():
-    return sys.modules["hf_adapters.auto_spyre_model"]
-
-
-@pytest.fixture
-def load_adapter():
-    return _load_adapter
-
-
-@pytest.fixture
-def unwrap_compiled_blocks():
-    return _unwrap_compiled_blocks
-
-
-@pytest.fixture
-def set_rope_dtype():
-    return _set_rope_dtype
-
-
-@pytest.fixture(autouse=True)
-def _gc_after_test():
-    yield
-    gc.collect()
-
-
-def pytest_addoption(parser):
+def pytest_addoption(parser: Parser) -> None:
     parser.addoption(
         "--run-slow",
         action="store_true",
         default=False,
         help="Run tests marked @pytest.mark.slow (deselected by default)",
     )
+    parser.addoption(
+        "--model-path",
+        action="append",
+        default=[],
+        help=(
+            "Override the ``model_path`` parametrization for every test that "
+            "takes it. Repeat the flag to run against multiple models, e.g. "
+            "``--model-path foo/bar --model-path baz/qux``. When set, the "
+            "registry-derived CAUSAL_PATHS / EMBED_PATHS / VISION_PATHS lists "
+            "in the test decorators are ignored."
+        ),
+    )
 
 
-def pytest_collection_modifyitems(config, items):
+def pytest_generate_tests(metafunc: Metafunc) -> None:
+    """Rewrite ``model_path`` parametrization when ``--model-path`` is given.
+
+    Every spyre / cpu test that runs over the registry declares
+    ``@pytest.mark.parametrize("model_path", CAUSAL_PATHS | EMBED_PATHS | ...)``.
+    When the user passes ``--model-path`` on the command line, strip the
+    decorator's parametrize markers for ``model_path`` and reparametrize with
+    the user-supplied list so any HF model path can be exercised — including
+    ones that are not in ``tests/model_registry.py``.
+    """
+    overrides: list[str] = metafunc.config.getoption("--model-path") or []
+    if not overrides:
+        return
+    if "model_path" not in metafunc.fixturenames:
+        return
+
+    # Drop the decorator's own parametrize markers for ``model_path`` so pytest
+    # doesn't raise "duplicate parametrization" when we call metafunc.parametrize
+    # below. Other parameter names on the same @parametrize marker are preserved.
+    kept: list = []
+    for marker in metafunc.definition.iter_markers("parametrize"):
+        argnames = marker.args[0] if marker.args else ""
+        names = [n.strip() for n in argnames.replace(",", " ").split()]
+        if "model_path" in names:
+            continue
+        kept.append(marker)
+    metafunc.definition.own_markers = [
+        m for m in metafunc.definition.own_markers if m.name != "parametrize"
+    ] + kept
+
+    metafunc.parametrize("model_path", overrides, ids=overrides)
+
+
+def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
     """Skip spyre tests if torch_spyre is not installed / device unavailable; skip slow tests unless --run-slow."""
     try:
         import torch
@@ -207,3 +240,68 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if "slow" in item.keywords:
                 item.add_marker(skip_slow)
+
+
+def torch_dtype_for_model_path(model_path: str, force_cpu: bool = False) -> torch.dtype:
+    """Map a registry entry's ``dtype`` field to a torch dtype.
+
+    Looks up *model_path* in ``MODEL_PATH_TO_TORCH_DTYPE``; defaults to
+    ``torch.float16`` when no entry is found.
+
+    ``"bfloat16"`` (e.g. EmbeddingGemma, which is bf16-native and overflows
+    fp16) is passed through unchanged for both Spyre and CPU.
+
+    ``"float32"`` (e.g. Granite 4 1B, where fp16 overflows on CPU) is kept as
+    ``torch.float32`` when *force_cpu* is ``True`` or when ``DEVICE != "spyre"``,
+    but is downcast to ``torch.float16`` on Spyre because float32 is not
+    supported by that backend.
+
+    *force_cpu* should be ``True`` when loading the plain HF reference model
+    (i.e. the unmodified ``transformers`` model used for comparison), as opposed
+    to the Spyre-adapted model.  The reference model runs on CPU regardless of
+    the target device, so Spyre dtype restrictions do not apply and the
+    registry-specified dtype must be preserved as-is.
+    """
+    from hf_adapters.auto_spyre_model import MODEL_PATH_TO_TORCH_DTYPE
+    from hf_adapters.hf_common import DEVICE
+
+    dtype = MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
+    print(f"torch_dtype_for_model_path -> {dtype} for {model_path} and device {DEVICE}")
+    if dtype == torch.float32 and not force_cpu and DEVICE == "spyre":
+        print("Return torch.float16")
+        return torch.float16
+    print(f"Return {dtype}")
+    return dtype
+
+
+def _load_hf_causal_lm(
+    model_path: str,
+    torch_dtype: torch.dtype,
+    adapter_mod: types.ModuleType | None = None,
+) -> AutoModelForCausalLM:
+    """Load the HF causal-LM reference, honoring the per-entry ``load_fn`` flag.
+
+    When ``load_fn`` is set, the adapter module is expected to expose
+    ``load_hf_model(path, dtype)`` (used for non-standard loading paths like
+    granite-vision).
+    """
+
+    if hasattr(adapter_mod, "load_hf_model"):
+        return adapter_mod.load_hf_model(model_path, torch_dtype)
+    return AutoModelForCausalLM.from_pretrained(
+        model_path, torch_dtype=torch_dtype, device_map="cpu"
+    )
+
+
+def load_ref_model(
+    model_path: str,
+    adapter_mod: types.ModuleType | None = None,
+) -> AutoModelForCausalLM:
+    """Load the HF reference model, using the adapter's custom loader when load_fn=True."""
+    dtype = torch_dtype_for_model_path(model_path, True)
+    ref_model = _load_hf_causal_lm(
+        model_path=model_path, torch_dtype=dtype, adapter_mod=adapter_mod
+    )
+    ref_model.eval()
+    ref_model.requires_grad_(False)
+    return ref_model

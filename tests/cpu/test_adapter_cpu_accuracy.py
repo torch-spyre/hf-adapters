@@ -35,9 +35,11 @@ import gc
 
 import pytest
 import torch
-from conftest import load_hf_causal_lm, torch_dtype_for
-from model_registry import CAUSAL_LM_MODELS as MODELS
 from transformers import AutoTokenizer
+
+from hf_adapters.auto_spyre_model import resolve_adapter_module
+from tests.conftest import load_ref_model, torch_dtype_for_model_path
+from tests.model_registry import CAUSAL_PATHS
 
 PROMPT = "The capital of France is"
 NUM_DECODE = 4
@@ -155,28 +157,23 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=NUM_DECODE
     return results
 
 
-@pytest.mark.parametrize("model_key", list(MODELS.keys()), ids=list(MODELS.keys()))
-def test_manual_path(model_key, load_adapter, unwrap_compiled_blocks, set_rope_dtype):
-    info = MODELS[model_key]
-    adapter_mod = load_adapter(info["adapter"])
-    torch_dtype = torch_dtype_for(info)
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+def test_manual_path(model_path, unwrap_compiled_blocks, set_rope_dtype):
+    adapter_mod = resolve_adapter_module(model_path)
+    torch_dtype = torch_dtype_for_model_path(model_path)
 
-    tokenizer_path = info.get("tokenizer_path", info["path"])
+    tokenizer_path = model_path
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     input_ids = tokenizer(PROMPT, return_tensors="pt")["input_ids"]
 
     # Phase 1: HF reference
-    model = load_hf_causal_lm(info, torch_dtype, adapter_mod=adapter_mod)
-    model.eval()
-    model.requires_grad_(False)
+    model = load_ref_model(model_path, adapter_mod)
     hf_results = hf_greedy_steps(model, input_ids, num_decode=NUM_DECODE)
     del model
     gc.collect()
 
     # Phase 2: adapter (fresh load — prepare_for_spyre is destructive)
-    model = load_hf_causal_lm(info, torch_dtype, adapter_mod=adapter_mod)
-    model.eval()
-    model.requires_grad_(False)
+    model = load_ref_model(model_path, adapter_mod=adapter_mod)
     adapter_mod.prepare_for_spyre(model)
     # Manual path skips load_model_common; propagate the chosen dtype to the
     # RoPE freq cache like the production move does (needed for bf16 models).
@@ -198,15 +195,14 @@ def test_manual_path(model_key, load_adapter, unwrap_compiled_blocks, set_rope_d
         )
 
 
-@pytest.mark.parametrize("model_key", list(MODELS.keys()), ids=list(MODELS.keys()))
-def test_auto_loader(model_key, auto_spyre_model, unwrap_compiled_blocks, load_adapter):
-    info = MODELS[model_key]
-    torch_dtype = torch_dtype_for(info)
-    tokenizer = AutoTokenizer.from_pretrained(info["path"])
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+def test_auto_loader(model_path, auto_spyre_model, unwrap_compiled_blocks):
+    torch_dtype = torch_dtype_for_model_path(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     # Phase 1: auto-loader generate
     model = auto_spyre_model.AutoSpyreModelForCausalLM.from_pretrained(
-        info["path"], dtype=torch_dtype
+        model_path, dtype=torch_dtype
     )
     unwrap_compiled_blocks(model)
     auto_outputs = model.generate(
@@ -216,10 +212,8 @@ def test_auto_loader(model_key, auto_spyre_model, unwrap_compiled_blocks, load_a
     gc.collect()
 
     # Phase 2: HF reference (fresh)
-    adapter_mod = load_adapter(info["adapter"]) if info.get("load_fn") else None
-    hf_model = load_hf_causal_lm(info, torch_dtype, adapter_mod=adapter_mod)
-    hf_model.eval()
-    hf_model.requires_grad_(False)
+    adapter_mod = resolve_adapter_module(model_path)
+    hf_model = load_ref_model(model_path, adapter_mod)
     encoded = tokenizer(PROMPT, return_tensors="pt")
     with torch.no_grad():
         hf_out = hf_model.generate(

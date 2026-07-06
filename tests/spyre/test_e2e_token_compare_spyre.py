@@ -25,25 +25,29 @@ Usage (on Spyre pod)::
 """
 
 import math
+from typing import Any, Callable
 
 import pytest
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from _helpers import resolve_adapter
 from model_registry import CAUSAL_PATHS
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
-    _model_dtype,
-    _move_to_spyre_with_layout,
-    _untie_embedding_and_lm_head,
+    DEVICE,
+    get_model_dtype,
+    move_to_spyre_with_layout,
+    untie_embedding_and_lm_head,
 )
-from tests._helpers import torch_dtype_for_model_path
-
-DEVICE = "spyre"
+from tests.conftest import load_ref_model, torch_dtype_for_model_path
 
 
-def hf_greedy_steps(model, input_ids, num_decode=4):
+def hf_greedy_steps(
+    model: nn.Module,
+    input_ids: torch.Tensor,
+    num_decode: int = 4,
+) -> list[dict[str, Any]]:
     """Run stock HF model for prefill + N decode steps on CPU."""
     from transformers import DynamicCache
 
@@ -75,7 +79,12 @@ def hf_greedy_steps(model, input_ids, num_decode=4):
     return results
 
 
-def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
+def adapter_greedy_steps(
+    run_forward_fn: Callable,
+    model: nn.Module,
+    input_ids: torch.Tensor,
+    num_decode: int = 4,
+) -> list[dict[str, Any]]:
     """Run adapter forward on Spyre for prefill + N decode steps."""
     from hf_adapters.hf_common import (
         allocate_kv_caches,
@@ -104,10 +113,10 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
         padded_len + math.ceil(num_decode / BLOCK_SIZE) * BLOCK_SIZE + BLOCK_SIZE
     )
 
-    dtype = _model_dtype(model)
+    dtype = get_model_dtype(model)
 
     key_caches, value_caches = allocate_kv_caches(
-        model, batch_size, max_cache_len, dtype, device=DEVICE
+        model, batch_size, max_cache_len, dtype
     )
 
     results = []
@@ -206,7 +215,12 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=4):
     return results
 
 
-def _compare_results(hf_results, adapter_results, tokenizer, model_name):
+def _compare_results(
+    hf_results: list[dict[str, Any]],
+    adapter_results: list[dict[str, Any]],
+    tokenizer: Any,
+    model_name: str,
+) -> list[dict[str, Any]]:
     """Compare HF vs adapter results, return comparison rows."""
     rows = []
     for hf_r, ad_r in zip(hf_results, adapter_results):
@@ -247,7 +261,7 @@ def _compare_results(hf_results, adapter_results, tokenizer, model_name):
     return rows
 
 
-def _print_table(rows):
+def _print_table(rows: list[dict[str, Any]]) -> None:
     """Markdown comparison table — one line per step."""
     print("\n## E2E Token Comparison: HF (CPU) vs Adapter (Spyre)\n")
     print(
@@ -271,25 +285,20 @@ def _print_table(rows):
         )
 
 
-def _run_model_test(model_path, num_decode=4):
+def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]]:
     """Full comparison for one model. Returns the list of comparison rows."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
 
-    adapter, _ = resolve_adapter(model_path)
+    from hf_adapters.auto_spyre_model import resolve_adapter_module
+
+    adapter = resolve_adapter_module(model_path)
 
     print(f"\n{'=' * 70}")
     print(f"  {model_path}")
     print(f"{'=' * 70}")
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    dtype = torch_dtype_for_model_path(model_path)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype=dtype,
-        device_map="cpu",
-    )
-    model.eval()
-    model.requires_grad_(False)
+    model = load_ref_model(model_path=model_path, adapter_mod=adapter)
 
     prompt = "The capital of France is"
     encoded = tokenizer(prompt, return_tensors="pt")
@@ -300,10 +309,13 @@ def _run_model_test(model_path, num_decode=4):
     hf_results = hf_greedy_steps(model, input_ids, num_decode=num_decode)
 
     print("  Preparing adapter ...")
-    _untie_embedding_and_lm_head(model)
+    untie_embedding_and_lm_head(model)
     adapter.prepare_for_spyre(model)
     print("  Moving model to Spyre ...")
-    _move_to_spyre_with_layout(model, dtype)
+    # Use bfloat16 on Spyre when the registry requests it; otherwise float16.
+    # (Spyre does not support float32, so float32 registry entries still use float16.)
+    spyre_dtype = torch_dtype_for_model_path(model_path)
+    move_to_spyre_with_layout(model, spyre_dtype)
     print("  Running adapter on Spyre ...")
     adapter_results = adapter_greedy_steps(
         adapter._run_forward,
@@ -316,7 +328,7 @@ def _run_model_test(model_path, num_decode=4):
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
-def test_e2e_token_compare_spyre(model_path):
+def test_e2e_token_compare_spyre(model_path: str) -> None:
     rows = _run_model_test(model_path)
     _print_table(rows)
     n_match = sum(1 for r in rows if r["top1_match"])

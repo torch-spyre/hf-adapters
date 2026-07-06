@@ -21,6 +21,6 @@ from model_registry import CAUSAL_PATHS
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_zero_new_tokens_spyre(model_path):
+def test_zero_new_tokens_spyre(model_path: str) -> None:
     ok, detail = run_zero_new_tokens(model_path)
     assert ok, detail
