@@ -302,8 +302,16 @@ class ModuleInfoCapture:
             past_key_values = kwargs.get("past_key_values", None)
             attention_mask = kwargs.get("attention_mask", None)
 
-            # Detect execution mode
+            # Detect execution mode. A pre-allocated but empty cache (e.g. a
+            # freshly constructed StaticCache passed into prefill) is not None,
+            # so fall back to its sequence length to distinguish prefill from
+            # decode.
             if past_key_values is None:
+                mode = "prefill"
+            elif (
+                hasattr(past_key_values, "get_seq_length")
+                and past_key_values.get_seq_length() == 0
+            ):
                 mode = "prefill"
             else:
                 mode = "decode"
@@ -780,7 +788,235 @@ def generate_unified_yaml_config(
     return yaml_str
 
 
-def main():
+def run_prefill(model, inputs) -> Any:
+    """Run a prefill forward pass under ``torch.no_grad()``.
+
+    Wraps a single ``model(**inputs, use_cache=True)`` call so the same
+    error-handling can be reused anywhere a prefill forward is needed.
+
+    Args:
+        model: The model to invoke.
+        inputs: Mapping of forward kwargs (e.g. tokenizer output).
+
+    Returns:
+        The model outputs, or ``None`` if the forward pass raised.
+    """
+    logger.info(f"  Input shape: {inputs['input_ids'].shape}")
+    try:
+        with torch.no_grad():
+            return model(**inputs, use_cache=True)
+    except Exception as e:
+        logger.exception(f"  ERROR during prefill: {e}")
+        return None
+
+
+def _build_decode_inputs(inputs, past_key_values) -> Dict[str, Any]:
+    """Build the forward kwargs for a single decode step from prefill state."""
+    batch_size = inputs["input_ids"].shape[0]
+    # Single new token for decode
+    next_token = torch.zeros((batch_size, 1), dtype=torch.long)
+    return {
+        "input_ids": next_token,  # Shape: [B, 1]
+        "attention_mask": torch.cat(
+            [
+                inputs["attention_mask"],
+                torch.ones((batch_size, 1), dtype=torch.long),
+            ],
+            dim=1,
+        ),
+        "past_key_values": past_key_values,  # Use cached KV
+        "use_cache": True,
+    }
+
+
+def run_decode(model, inputs, prefill_outputs) -> Any:
+    """Run a single decode forward pass using the KV cache from prefill.
+
+    No-op (returns ``None``) when ``prefill_outputs`` carries no usable KV
+    cache. Wraps the ``model(**decode_inputs)`` call with the same
+    error-handling so it can be reused wherever a decode forward is needed.
+
+    Args:
+        model: The model to invoke.
+        inputs: The original prefill forward kwargs (for shapes / masks).
+        prefill_outputs: The outputs returned by :func:`run_prefill`.
+
+    Returns:
+        The decode outputs, or ``None`` if skipped or the forward raised.
+    """
+    if (
+        prefill_outputs is None
+        or not hasattr(prefill_outputs, "past_key_values")
+        or prefill_outputs.past_key_values is None
+    ):
+        logger.info("\n  Skipping decode pass - no KV cache available")
+        return None
+
+    decode_inputs = _build_decode_inputs(inputs, prefill_outputs.past_key_values)
+    logger.info(f"Decode input_ids shape: {decode_inputs['input_ids'].shape}")
+    logger.info(f"Decode attention_mask shape: {decode_inputs['attention_mask'].shape}")
+    logger.info(
+        f"Decode past_key_values layers: {len(decode_inputs['past_key_values'])}"
+    )
+    try:
+        with torch.no_grad():
+            decode_outputs = model(**decode_inputs)
+        logger.info(
+            f"Decode complete. Output shape: "
+            f"{decode_outputs.logits.shape if hasattr(decode_outputs, 'logits') else 'N/A'}"
+        )
+        return decode_outputs
+    except Exception:
+        logger.exception("ERROR during decode")
+        return None
+
+
+def capture_module_invocations(model, capture: ModuleInfoCapture, inputs) -> None:
+    """Register capture hooks, run prefill + decode, then remove the hooks.
+
+    This drives the model through both execution modes so that
+    ``capture`` observes every unique module invocation pattern. Hooks are
+    always removed, even if a forward pass raises.
+
+    Args:
+        model: The model to instrument and run.
+        capture: The :class:`ModuleInfoCapture` to populate.
+        inputs: Forward kwargs for the prefill pass (e.g. tokenizer output).
+    """
+    all_custom_modules = get_all_custom_modules(model)
+    logger.info(f"Found {len(all_custom_modules)} custom module instances")
+
+    # This hook sets context that module-level hooks will read
+    model_hook = capture.create_model_hook()
+    model_handle = model.register_forward_pre_hook(model_hook, with_kwargs=True)
+    handles = [model_handle]
+
+    # Register hooks on ALL custom module instances (not just unique types)
+    for module_name, module_type, module_instance in all_custom_modules:
+        hook = capture.create_hook(module_name, module_type, module_instance)
+        handle = module_instance.register_forward_pre_hook(hook, with_kwargs=True)
+        handles.append(handle)
+
+    try:
+        prefill_outputs = run_prefill(model, inputs)
+        run_decode(model, inputs, prefill_outputs)
+    finally:
+        # Remove hooks even if a forward pass raised
+        for handle in handles:
+            handle.remove()
+
+
+def load_model_only(
+    model_path: str,
+    model_cls=AutoModel,
+    **from_pretrained_kwargs: Any,
+):
+    """Load an eval-mode model (no tokenizer).
+
+    Split out from :func:`load_model_and_tokenizer` so callers whose tokenizer
+    is not an ``AutoTokenizer`` (e.g. ``mistral_common``'s ``MistralTokenizer``,
+    or a VLM processor) can still reuse the model-loading path.
+
+    Args:
+        model_path: HuggingFace model path or local directory.
+        model_cls: The class to load with. Defaults to :class:`AutoModel`;
+            pass :class:`AutoModelForCausalLM` for causal LMs whose bare
+            backbone lacks ``past_key_values`` / logits (e.g. ``gpt_oss``), or
+            an explicit architecture class such as
+            ``Mistral3ForConditionalGeneration`` for VLMs.
+        **from_pretrained_kwargs: Extra kwargs forwarded to
+            ``from_pretrained`` (e.g. ``torch_dtype``, ``device_map``,
+            ``quantization_config``, ``trust_remote_code``).
+
+    Returns:
+        The loaded, ``.eval()``-mode model.
+    """
+    logger.info(f"Loading model: {model_path} via {model_cls.__name__}")
+    return model_cls.from_pretrained(model_path, **from_pretrained_kwargs).eval()
+
+
+def load_model_and_tokenizer(
+    model_path: str,
+    model_cls=AutoModel,
+    **from_pretrained_kwargs: Any,
+):
+    """Load an eval-mode model and its ``AutoTokenizer``, fixing a missing pad token.
+
+    Convenience wrapper around :func:`load_model_only` for the common case
+    where the tokenizer is a standard HF ``AutoTokenizer``. See
+    :func:`load_model_only` for the argument semantics.
+
+    Returns:
+        ``(model, tokenizer)``.
+    """
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+    # Fix missing pad_token for Mistral tokenizers
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model = load_model_only(model_path, model_cls=model_cls, **from_pretrained_kwargs)
+    return model, tokenizer
+
+
+def build_dummy_inputs(tokenizer, seq_len: int) -> Dict[str, Any]:
+    """Tokenize placeholder text padded/truncated to ``seq_len``."""
+    # Generate enough text to reach desired seq_len
+    text = "This is a test input for capturing module information. " * (
+        seq_len // 10 + 1
+    )
+    return tokenizer(
+        text,
+        return_tensors="pt",
+        max_length=seq_len,
+        truncation=True,
+        padding="max_length",
+    )
+
+
+def write_module_config(
+    capture: ModuleInfoCapture, model_path: str, output: str = None
+):
+    """Generate the unified YAML config from captured modules and write it out."""
+    # Extract model name from path (handle both local paths and HuggingFace paths)
+    model_path_parts = model_path.rstrip("/").split("/")
+    model_name = model_path_parts[
+        -1
+    ]  # e.g., "granite-3.3-8b-instruct" or "granite-3.0-2b-instruct"
+
+    # For the YAML content, use underscores for the model_name field
+    model_name_normalized = model_name.replace("-", "_").replace(".", "_")
+
+    # Generate unified YAML config (new format)
+    unified_yaml_content = generate_unified_yaml_config(
+        capture.get_captured_modules(), model_name_normalized
+    )
+
+    # Determine output path
+    if output:
+        output_path = output
+    else:
+        # Use tests/configs directory for unified format
+        output_path = f"./tests/configs/{model_name_normalized}_spyre.yaml"
+
+    # Write unified YAML file
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_file, "w") as f:
+        f.write(unified_yaml_content)
+
+    logger.info(f"\n✓ Generated unified configuration: {output_file}")
+
+    # Print module summary
+    captured_modules = capture.get_captured_modules()
+    logger.info("\n  Module Summary:")
+    logger.info(f"    Total modules captured: {len(captured_modules)}")
+    for module_info in captured_modules:
+        logger.info(f"      - {module_info['name']}")
+
+    return output_file
+
+
+def parse_args():
     parser = argparse.ArgumentParser(
         description="Auto-generate module configuration YAML using forward hooks"
     )
@@ -800,139 +1036,21 @@ def main():
         "--output",
         type=str,
         default=None,
-        help="Output YAML file path (default: ./configs/<model>_spyre.yaml)",
+        help="Output YAML file path (default: ./tests/configs/<model>_spyre.yaml)",
     )
+    return parser.parse_args()
 
-    args = parser.parse_args()
 
-    logger.info(f"Loading model: {args.model_path}")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+def main():
+    args = parse_args()
 
-    # Fix missing pad_token for Mistral tokenizers
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModel.from_pretrained(args.model_path).eval()
-    all_custom_modules = get_all_custom_modules(model)
-    logger.info(f"Found {len(all_custom_modules)} custom module instances")
+    model, tokenizer = load_model_and_tokenizer(args.model_path)
+    inputs = build_dummy_inputs(tokenizer, args.seq_len)
 
-    # Create capture object
     capture = ModuleInfoCapture()
+    capture_module_invocations(model, capture, inputs)
 
-    # This hook sets context that module-level hooks will read
-    model_hook = capture.create_model_hook()
-    model_handle = model.register_forward_pre_hook(model_hook, with_kwargs=True)
-    handles = [model_handle]
-
-    # Register hooks on ALL custom module instances (not just unique types)
-    for module_name, module_type, module_instance in all_custom_modules:
-        hook = capture.create_hook(module_name, module_type, module_instance)
-        handle = module_instance.register_forward_pre_hook(hook, with_kwargs=True)
-        handles.append(handle)
-
-    # Create dummy input with specified sequence length
-    # Generate enough text to reach desired seq_len
-    text = "This is a test input for capturing module information. " * (
-        args.seq_len // 10 + 1
-    )
-    inputs = tokenizer(
-        text,
-        return_tensors="pt",
-        max_length=args.seq_len,
-        truncation=True,
-        padding="max_length",
-    )
-    logger.info(f"  Input shape: {inputs['input_ids'].shape}")
-    outputs = None
-    try:
-        with torch.no_grad():
-            outputs = model(**inputs, use_cache=True)
-    except Exception as e:
-        logger.exception(f"  ERROR during prefill: {e}")
-
-    if (
-        outputs is not None
-        and hasattr(outputs, "past_key_values")
-        and outputs.past_key_values is not None
-    ):
-        try:
-            with torch.no_grad():
-                # Single new token for decode
-                next_token = torch.zeros(
-                    (inputs["input_ids"].shape[0], 1), dtype=torch.long
-                )
-                decode_inputs = {
-                    "input_ids": next_token,  # Shape: [B, 1]
-                    "attention_mask": torch.cat(
-                        [
-                            inputs["attention_mask"],
-                            torch.ones(
-                                (inputs["input_ids"].shape[0], 1), dtype=torch.long
-                            ),
-                        ],
-                        dim=1,
-                    ),
-                    "past_key_values": outputs.past_key_values,  # Use cached KV
-                    "use_cache": True,
-                }
-                logger.info(
-                    f"Decode input_ids shape: {decode_inputs['input_ids'].shape}"
-                )
-                logger.info(
-                    f"Decode attention_mask shape: {decode_inputs['attention_mask'].shape}"
-                )
-                logger.info(
-                    f"Decode past_key_values layers: {len(decode_inputs['past_key_values'])}"
-                )
-
-                decode_outputs = model(**decode_inputs)
-                logger.info(
-                    f"Decode complete. Output shape: {decode_outputs.logits.shape if hasattr(decode_outputs, 'logits') else 'N/A'}"
-                )
-        except Exception:
-            logger.exception("ERROR during decode")
-    else:
-        logger.info("\n  Skipping decode pass - no KV cache available")
-
-    # Remove hooks
-    for handle in handles:
-        handle.remove()
-
-    # Generate YAML
-    # Extract model name from path (handle both local paths and HuggingFace paths)
-    model_path_parts = args.model_path.rstrip("/").split("/")
-    model_name = model_path_parts[
-        -1
-    ]  # e.g., "granite-3.3-8b-instruct" or "granite-3.0-2b-instruct"
-
-    # For the YAML content, use underscores for the model_name field
-    model_name_normalized = model_name.replace("-", "_").replace(".", "_")
-
-    # Generate unified YAML config (new format)
-    unified_yaml_content = generate_unified_yaml_config(
-        capture.get_captured_modules(), model_name_normalized
-    )
-
-    # Determine output path
-    if args.output:
-        output_path = args.output
-    else:
-        # Use tests/configs directory for unified format
-        output_path = f"./tests/configs/{model_name_normalized}_spyre.yaml"
-
-    # Write unified YAML file
-    output_file = Path(output_path)
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_file, "w") as f:
-        f.write(unified_yaml_content)
-
-    logger.info(f"\n✓ Generated unified configuration: {output_file}")
-
-    # Print module summary
-    total_modules = len(capture.get_captured_modules())
-    logger.info("\n  Module Summary:")
-    logger.info(f"    Total modules captured: {total_modules}")
-    for module_info in capture.get_captured_modules():
-        logger.info(f"      - {module_info['name']}")
+    write_module_config(capture, args.model_path, args.output)
 
 
 if __name__ == "__main__":
