@@ -6,10 +6,12 @@ pytests in this file consume the resulting CSV.
 
 Run directly to perform the fetch step::
 
-    python tests/spyre/weekly_test.py --top-k 200
+    python tests/spyre/weekly_test.py --top-k 200 --workers 4
 """
 
 import argparse
+import concurrent.futures
+import json
 import os
 import subprocess
 import sys
@@ -111,6 +113,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Destination CSV (defaults to resources/top_embedding_models.csv).",
     )
+    parser.add_argument(
+        "--workers",
+        "-k",
+        type=int,
+        default=1,
+        help="Number of parallel subprocesses for eval_embedding (default: 1).",
+    )
     return parser.parse_args(argv)
 
 
@@ -136,6 +145,70 @@ def eval_embedding(model_id: str) -> dict:
         "load": loads,
         "compare_spyre": not mismatches,
     }
+
+
+# ---------------------------------------------------------------------------
+# Each model is evaluated in a completely fresh Python interpreter so that no
+# Spyre/GPU driver state leaks between runs.  A ThreadPoolExecutor caps how
+# many subprocesses run concurrently (--workers).
+# ---------------------------------------------------------------------------
+
+_EVAL_SCRIPT = """\
+import json, sys, traceback
+sys.path[:0] = {paths!r}
+from test_load_spyre import load_embedding
+from test_e2e_embed_compare_spyre import embed_compare_spyre
+model_id = {model_id!r}
+try:
+    loads, _ = load_embedding(model_id)
+    mismatches, _ = embed_compare_spyre(model_id)
+    print(json.dumps({{"correct": loads and not mismatches,
+                       "load": loads, "compare_spyre": not mismatches}}))
+except Exception as exc:
+    tb = traceback.format_exc()
+    print(json.dumps({{"_error": f"{{type(exc).__name__}}: {{exc}}",
+                       "_tb": "".join(tb.splitlines(keepends=True)[-6:])}}))
+"""
+
+_EVAL_PATHS = [
+    str(_SPYRE_TESTS_DIR),
+    str(_TESTS_DIR),
+    str(_UTILS_DIR),
+    str(_REPO_ROOT),
+]
+
+
+def _eval_embedding_subprocess(model_id: str) -> dict:
+    """Run eval_embedding in a fresh interpreter; return the metrics dict.
+
+    On success returns the same keys as eval_embedding().
+    On failure raises RuntimeError so the caller's existing except block fires.
+    """
+    env = os.environ.copy()
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        os.pathsep.join(_EVAL_PATHS) + os.pathsep + existing
+        if existing
+        else os.pathsep.join(_EVAL_PATHS)
+    )
+    script = _EVAL_SCRIPT.format(paths=_EVAL_PATHS, model_id=model_id)
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    for line in reversed(proc.stdout.splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            data = json.loads(line)
+            if "_error" in data:
+                raise RuntimeError(data["_error"])
+            return data
+    stderr_tail = "".join(proc.stderr.splitlines(keepends=True)[-6:])
+    raise RuntimeError(
+        f"subprocess exited {proc.returncode} with no JSON output\n{stderr_tail}"
+    )
 
 
 def _delete_repo_weights(repo_id):
@@ -196,6 +269,7 @@ def main(argv: list[str] | None = None) -> None:
         limit=args.top_k, output_csv=args.output_csv
     )
 
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=args.workers)
     try:
         for row in supported_list:
             # if attempted >= args.limit:
@@ -258,7 +332,8 @@ def main(argv: list[str] | None = None) -> None:
                 #         model_id, adapter, csv_config_class, args.num_decode
                 #     )
                 # else:
-                metrics = eval_embedding(model_path)
+                fut = executor.submit(_eval_embedding_subprocess, model_path)
+                metrics = fut.result()
 
                 rec["runs"] = True
                 rec["error"] = None
@@ -290,8 +365,9 @@ def main(argv: list[str] | None = None) -> None:
                     )
     except KeyboardInterrupt:
         print("\nInterrupted — results so far are saved; rerun to resume.")
-    # finally:
-    #     fout.close()
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+    # fout.close()
 
 
 if __name__ == "__main__":
