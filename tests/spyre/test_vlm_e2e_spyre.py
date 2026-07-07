@@ -269,7 +269,13 @@ def test_vlm_generate_spyre(model_path: str) -> None:
     ref_logits, ref_tokens = stock_vlm_greedy_steps(
         model_path, batch, NUM_COMPARE_STEPS
     )
-    ref_text = stock_vlm_generate(model_path, processor, batch, MAX_NEW_TOKENS)
+    ref_text = stock_vlm_generate(
+        model_path=model_path,
+        processor=processor,
+        batch=batch,
+        max_new_tokens=MAX_NEW_TOKENS,
+        adapter_mod=adapter,
+    )
     gc.collect()
 
     # --- Adapter on Spyre ---
