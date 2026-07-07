@@ -51,9 +51,7 @@ Usage::
 
 from hf_adapters.hf_common import (
     get_backbone,
-    move_to_spyre_with_layout,
     prepare_standard_gqa,
-    untie_embedding_and_lm_head,
 )
 from hf_adapters.hf_mistral import (
     _run_backbone_forward,  # noqa: F401  re-exported as adapter module API
@@ -94,24 +92,6 @@ def load_hf_model(model_path, dtype):
             del mm.vision_tower
         if hasattr(mm, "multi_modal_projector"):
             del mm.multi_modal_projector
-    model.eval()
-    model.requires_grad_(False)
-    return model
-
-
-def load_model(model_path, dtype):
-    """Load a Mistral-3-family text decoder and prepare it for Spyre."""
-    model = load_hf_model(model_path, dtype)
-    # FP8 checkpoints (e.g. Ministral-3-14B) are dequantized to bf16 by
-    # transformers regardless of the requested dtype. Use the model's actual
-    # dtype for _move_to_spyre_with_layout so every parameter is cast
-    # consistently and no bf16/fp16 mismatch arises.
-    actual_dtype = next(model.parameters()).dtype
-    untie_embedding_and_lm_head(model)
-    prepare_for_spyre(model)
-    print("Moving model to Spyre ...")
-    move_to_spyre_with_layout(model, actual_dtype)
-    print("Model ready.")
     return model
 
 

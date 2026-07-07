@@ -53,7 +53,6 @@ import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
-    DEVICE,
     _pad_proj_input_simple,
     _pad_proj_output_simple,
     make_vision_encoder_block,
@@ -263,16 +262,6 @@ def load_hf_model(model_path, dtype=torch.float16):
     tower.eval()
     tower.requires_grad_(False)
     return tower
-
-
-def load_model(model_path, dtype=torch.float16):
-    """Load a SigLIP vision tower and prepare it for Spyre."""
-    model = load_hf_model(model_path, dtype)
-    prepare_for_spyre(model)
-    print("Moving vision tower to Spyre ...")
-    torch.nn.Module.to(model, DEVICE)
-    print("Vision tower ready.")
-    return model
 
 
 def prefill_vision_tower(model, pixel_values, output_hidden_states=False):
