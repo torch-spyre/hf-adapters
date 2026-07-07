@@ -72,8 +72,6 @@ def load_hf_model(model_path, dtype=torch.float16):
         for attr in ("vision_tower", "layerwise_projectors", "spatial_projectors"):
             if hasattr(mm, attr):
                 delattr(mm, attr)
-    model.eval()
-    model.requires_grad_(False)
     return model
 
 

@@ -191,7 +191,7 @@ class AutoSpyreModel:
         else:
             model = load_model_common(
                 model_name_or_path,
-                module.prepare_for_spyre,
+                module,
                 dtype,
                 auto_model_cls=cls._auto_model_cls,
             )
