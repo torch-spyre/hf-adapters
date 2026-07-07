@@ -40,11 +40,10 @@ from transformers import AutoModelForImageTextToText
 
 from hf_adapters.auto_spyre_model import (
     IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
-    MODEL_PATH_TO_TORCH_DTYPE,
     resolve_adapter_module,
 )
 from tests._vision_helpers import build_vlm_batch, stock_vlm_generate
-from tests.conftest import load_ref_model
+from tests.conftest import get_dtype_for_cpu, load_ref_model
 from tests.model_registry import VISION_PATHS
 
 MAX_NEW_TOKENS: int = 16
@@ -82,7 +81,7 @@ def test_vlm_generate(model_path: str, unwrap_compiled_blocks) -> None:
     adapter = resolve_adapter_module(
         model_path, mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING
     )
-    dtype = MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
+    dtype = get_dtype_for_cpu(model_path=model_path)
 
     processor, batch = build_vlm_batch(model_path, PROMPT)
     batch["pixel_values"] = batch["pixel_values"].to(dtype)

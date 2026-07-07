@@ -38,10 +38,9 @@ import torch
 from transformers import AutoTokenizer
 
 from hf_adapters.auto_spyre_model import (
-    MODEL_PATH_TO_TORCH_DTYPE,
     resolve_adapter_module,
 )
-from tests.conftest import load_ref_model
+from tests.conftest import get_dtype_for_cpu, load_ref_model
 from tests.model_registry import CAUSAL_PATHS
 
 PROMPT = "The capital of France is"
@@ -162,7 +161,7 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=NUM_DECODE
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 def test_auto_loader(model_path, auto_spyre_model, unwrap_compiled_blocks):
-    torch_dtype = MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
+    torch_dtype = get_dtype_for_cpu(model_path=model_path)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     # Phase 1: auto-loader generate

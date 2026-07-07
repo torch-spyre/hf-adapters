@@ -66,8 +66,8 @@ import torch.nn.functional as F
 from _vision_helpers import (
     build_vlm_batch,
     stock_vlm_generate,
-    stock_vlm_greedy_steps,
 )
+from conftest import load_ref_model
 from model_registry import VISION_PATHS
 
 from hf_adapters import AutoSpyreModelForImageTextToText
@@ -246,6 +246,49 @@ def _adapter_teacher_forced_steps(
     return per_step_logits
 
 
+def _stock_vlm_greedy_steps(
+    model_path: str,
+    batch: dict[str, torch.Tensor],
+    adapter_mod,
+    num_steps: int,
+) -> tuple[list[torch.Tensor], list[int]]:
+    """Stock HF per-step greedy logits + token ids over prefill + decode.
+
+    Runs ``AutoModelForImageTextToText.generate`` greedily for ``num_steps``
+    tokens with ``output_logits=True`` and returns ``(logits, token_ids)``:
+
+    - ``logits``: list of ``num_steps`` fp32 ``[vocab]`` tensors — the
+      distribution stock greedily picked each generated token from (step 0 =
+      prefill / first token, step k = after k generated tokens).
+    - ``token_ids``: the ``num_steps`` greedily chosen ids (``logits[i].argmax()``).
+
+    The Spyre e2e test uses ``token_ids`` as the teacher-forcing sequence and
+    ``logits`` as the per-step top-1 reference, so the adapter is compared on the
+    *same* prefix at every step (no greedy-fork amplification).
+    """
+    from transformers import AutoModelForImageTextToText
+
+    ref_model = load_ref_model(
+        model_path=model_path,
+        adapter_mod=adapter_mod,
+        auto_model_cls=AutoModelForImageTextToText,
+    )
+    with torch.no_grad():
+        gen = ref_model.generate(
+            **batch,
+            max_new_tokens=num_steps,
+            do_sample=False,
+            use_cache=True,
+            output_logits=True,
+            return_dict_in_generate=True,
+        )
+    logits = [step[0].float().clone() for step in gen.logits]
+    prompt_len = batch["input_ids"].shape[1]
+    token_ids = gen.sequences[0, prompt_len : prompt_len + num_steps].tolist()
+    del ref_model
+    return logits, token_ids
+
+
 @pytest.mark.parametrize("model_path", VISION_PATHS, ids=VISION_PATHS)
 def test_vlm_generate_spyre(model_path: str) -> None:
     adapter = resolve_adapter_module(
@@ -266,8 +309,11 @@ def test_vlm_generate_spyre(model_path: str) -> None:
     # Capture stock's per-step greedy logits + token ids (the forcing sequence and
     # the per-step top-1 reference), plus its free-run caption for an eyeball. ---
     print("  Running stock CPU reference (per-step greedy) ...")
-    ref_logits, ref_tokens = stock_vlm_greedy_steps(
-        model_path, batch, NUM_COMPARE_STEPS
+    ref_logits, ref_tokens = _stock_vlm_greedy_steps(
+        model_path=model_path,
+        batch=batch,
+        num_steps=NUM_COMPARE_STEPS,
+        adapter_mod=adapter,
     )
     ref_text = stock_vlm_generate(
         model_path=model_path,

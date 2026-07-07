@@ -221,15 +221,18 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
                 item.add_marker(skip_slow)
 
 
+def get_dtype_for_cpu(model_path: str) -> torch.dtype:
+    from hf_adapters.auto_spyre_model import MODEL_PATH_TO_TORCH_DTYPE
+
+    return MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
+
+
 def load_ref_model(
     model_path: str,
     adapter_mod: types.ModuleType | None = None,
     auto_model_cls: type = AutoModelForCausalLM,
 ):
-    """Load the HF reference model, using the adapter's custom loader when load_fn=True."""
-    from hf_adapters.auto_spyre_model import MODEL_PATH_TO_TORCH_DTYPE
-
-    dtype = MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
+    dtype = get_dtype_for_cpu(model_path)
 
     ref_model = load_model_common(
         model_path=model_path,

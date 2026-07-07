@@ -47,10 +47,9 @@ import torch
 from transformers import AutoModel, AutoTokenizer
 
 from hf_adapters.auto_spyre_model import (
-    MODEL_PATH_TO_TORCH_DTYPE,
     resolve_adapter_module,
-)  # , torch_dtype_for_model_path
-from tests.conftest import load_ref_model
+)
+from tests.conftest import get_dtype_for_cpu, load_ref_model
 from tests.cpu.conftest import encode_padded, min_cosine
 from tests.model_registry import EMBED_PATHS
 
@@ -83,7 +82,7 @@ def _run_prefill(
 def test_auto_loader(
     model_path: str, auto_spyre_model, unwrap_compiled_blocks, hf_common_mod
 ) -> None:
-    torch_dtype = MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
+    torch_dtype = get_dtype_for_cpu(model_path=model_path)
     adapter_module = resolve_adapter_module(model_path)
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
