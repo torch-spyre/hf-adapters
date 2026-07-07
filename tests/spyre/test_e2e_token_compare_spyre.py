@@ -37,7 +37,7 @@ from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
     get_model_dtype,
-    move_to_spyre_with_layout,
+    move_to_spyre,
     untie_embedding_and_lm_head,
 )
 from tests.conftest import load_ref_model, torch_dtype_for_model_path
@@ -315,7 +315,7 @@ def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]
     # Use bfloat16 on Spyre when the registry requests it; otherwise float16.
     # (Spyre does not support float32, so float32 registry entries still use float16.)
     spyre_dtype = torch_dtype_for_model_path(model_path)
-    move_to_spyre_with_layout(model, spyre_dtype)
+    move_to_spyre(model, spyre_dtype)
     print("  Running adapter on Spyre ...")
     adapter_results = adapter_greedy_steps(
         adapter._run_forward,

@@ -126,7 +126,7 @@ def _set_rope_dtype(model: types.ModuleType, dtype: torch.dtype) -> None:
     """Propagate the chosen dtype to the model's precomputed RoPE freq cache.
 
     The manual CPU-test paths load via ``AutoModel`` + ``prepare_for_spyre``
-    directly, bypassing ``load_model_common`` / ``_move_to_spyre_with_layout``
+    directly, bypassing ``load_model_common`` / ``move_to_spyre``
     (where the production paths make this explicit ``set_dtype`` call). Mirror
     it here so a non-fp16 model (e.g. bf16 EmbeddingGemma) gets a matching freq
     cache instead of the fp16 default — otherwise ``apply_rope_matmul`` promotes

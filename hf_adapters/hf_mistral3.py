@@ -51,7 +51,7 @@ Usage::
 
 from hf_adapters.hf_common import (
     get_backbone,
-    move_to_spyre_with_layout,
+    move_to_spyre,
     prepare_standard_gqa,
     untie_embedding_and_lm_head,
 )
@@ -104,13 +104,13 @@ def load_model(model_path, dtype):
     model = load_hf_model(model_path, dtype)
     # FP8 checkpoints (e.g. Ministral-3-14B) are dequantized to bf16 by
     # transformers regardless of the requested dtype. Use the model's actual
-    # dtype for _move_to_spyre_with_layout so every parameter is cast
-    # consistently and no bf16/fp16 mismatch arises.
+    # dtype for move_to_spyre so the RoPE freq cache is built at the same
+    # dtype and no bf16/fp16 mismatch arises.
     actual_dtype = next(model.parameters()).dtype
     untie_embedding_and_lm_head(model)
     prepare_for_spyre(model)
     print("Moving model to Spyre ...")
-    move_to_spyre_with_layout(model, actual_dtype)
+    move_to_spyre(model, actual_dtype)
     print("Model ready.")
     return model
 

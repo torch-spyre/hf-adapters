@@ -34,7 +34,7 @@ from model_registry import EMBED_PATHS
 
 from hf_adapters.auto_spyre_model import resolve_adapter_module
 from hf_adapters.hf_common import (
-    move_to_spyre_with_layout,
+    move_to_spyre,
     prefill_embed,
     prefill_encoder,
     untie_embedding_and_lm_head,
@@ -187,7 +187,7 @@ def _run_model_test(model_path: str) -> list[dict[str, Any]]:
     untie_embedding_and_lm_head(model)
     adapter.prepare_for_spyre(model)
     print("  Moving model to Spyre ...")
-    move_to_spyre_with_layout(model, dtype)
+    move_to_spyre(model, dtype)
     print("  Running adapter on Spyre ...")
     ad_hidden = _adapter_forward(adapter, model, input_ids, attention_mask)
 

@@ -81,7 +81,7 @@ from hf_adapters.hf_common import (
     allocate_kv_caches,
     build_expansion_mask,
     get_model_dtype,
-    move_to_spyre_with_layout,
+    move_to_spyre,
     pad_and_position,
 )
 from tests.conftest import torch_dtype_for_model_path
@@ -278,7 +278,7 @@ def test_vlm_generate_spyre(model_path: str) -> None:
     model = load_hf_vlm(model_path, dtype, adapter_mod=adapter)
     adapter.prepare_for_spyre(model)
     print("  Moving model to Spyre ...")
-    move_to_spyre_with_layout(model, dtype)
+    move_to_spyre(model, dtype)
 
     # Per-step adapter logits on Spyre, teacher-forced on stock's tokens (so the
     # comparison is free of greedy-fork drift while still exercising decode).

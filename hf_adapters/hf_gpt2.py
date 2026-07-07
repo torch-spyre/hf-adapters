@@ -61,8 +61,8 @@ def _conv1d_to_linear(conv):
     ``Conv1D`` computes ``y = x @ W + b`` with ``W`` of shape ``[in, out]`` and
     ``b`` of shape ``[out]``. ``nn.Linear`` computes ``y = x @ W.T + b`` with
     ``W`` of shape ``[out, in]``, so the weight is the transpose. Spyre's
-    row-major matmul layout (see ``_move_to_spyre_with_layout``) targets 2-D
-    ``nn.Linear`` weights, so we convert before moving to device.
+    row-major matmul layout (applied by torch-spyre inside ``model.to(spyre)``)
+    targets 2-D ``nn.Linear`` weights, so we convert before moving to device.
     """
     in_features, out_features = conv.weight.shape
     linear = nn.Linear(in_features, out_features, bias=conv.bias is not None)
