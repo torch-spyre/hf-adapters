@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Set, Tuple
 import torch
 import yaml
 from torch.utils._pytree import tree_flatten
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, StaticCache
 
 logger = logging.getLogger(__name__)
 
@@ -1038,6 +1038,19 @@ def parse_args():
         default=None,
         help="Output YAML file path (default: ./tests/configs/<model>_spyre.yaml)",
     )
+    parser.add_argument(
+        "--no_static_cache",
+        action="store_true",
+        help="Disable the StaticCache used for the forward pass (default: enabled). "
+        "When set, the model uses its default dynamic KV cache instead.",
+    )
+    parser.add_argument(
+        "--max_cache_len",
+        type=int,
+        default=2048,
+        help="max_cache_len for the StaticCache (default: 2048). "
+        "Ignored when --no_static_cache is set.",
+    )
     return parser.parse_args()
 
 
@@ -1046,6 +1059,14 @@ def main():
 
     model, tokenizer = load_model_and_tokenizer(args.model_path)
     inputs = build_dummy_inputs(tokenizer, args.seq_len)
+
+    # Use a StaticCache by default; --no_static_cache falls back to the model's
+    # default dynamic cache. The (empty) StaticCache is passed into the prefill
+    # forward and reused for decode.
+    if not args.no_static_cache:
+        inputs["past_key_values"] = StaticCache(
+            config=model.config, max_cache_len=args.max_cache_len
+        )
 
     capture = ModuleInfoCapture()
     capture_module_invocations(model, capture, inputs)
