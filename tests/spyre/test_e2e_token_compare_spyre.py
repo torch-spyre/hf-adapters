@@ -33,14 +33,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from model_registry import CAUSAL_PATHS
 
+from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
     get_model_dtype,
-    move_to_spyre_with_layout,
-    untie_embedding_and_lm_head,
+    move_model_to_spyre,
 )
-from tests.conftest import load_ref_model, torch_dtype_for_model_path
+from tests.conftest import load_ref_model
 
 
 def hf_greedy_steps(
@@ -308,14 +308,10 @@ def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]
     print("  Running HF reference on CPU ...")
     hf_results = hf_greedy_steps(model, input_ids, num_decode=num_decode)
 
-    print("  Preparing adapter ...")
-    untie_embedding_and_lm_head(model)
-    adapter.prepare_for_spyre(model)
-    print("  Moving model to Spyre ...")
     # Use bfloat16 on Spyre when the registry requests it; otherwise float16.
     # (Spyre does not support float32, so float32 registry entries still use float16.)
     spyre_dtype = torch_dtype_for_model_path(model_path)
-    move_to_spyre_with_layout(model, spyre_dtype)
+    move_model_to_spyre(model=model, module=adapter, dtype=spyre_dtype)
     print("  Running adapter on Spyre ...")
     adapter_results = adapter_greedy_steps(
         adapter._run_forward,

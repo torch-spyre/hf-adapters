@@ -40,11 +40,6 @@ Spyre adaptations:
   output is moved to Spyre), matching the embedding-lookup CPU fallback used
   by the decoder adapters. ``nn.Conv2d`` lowering on Spyre is not assumed; see
   docs/siglip_vision_spyre_findings.md.
-- ``gelu_pytorch_tanh`` (``GELUTanh``) defaults to a single fused
-  ``F.gelu(approximate="tanh")`` aten op — no ``torch.pow``. If torch-spyre
-  does not lower that op, ``_patch_gelu_tanh`` swaps in the device-conditional
-  ``x*x*x`` decomposition (same hazard class as ``patch_new_gelu``).
-
 Usage::
 
     from hf_adapters.hf_siglip_vision import load_model, prefill_vision_tower
@@ -53,15 +48,11 @@ Usage::
     last_hidden = prefill_vision_tower(model, pixel_values)
 """
 
-import math
-
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
-    DEVICE,
     _pad_proj_input_simple,
     _pad_proj_output_simple,
     make_vision_encoder_block,
@@ -105,26 +96,6 @@ def _get_inner(tower):
     if hasattr(tower, "encoder") and hasattr(tower, "embeddings"):
         return tower
     return getattr(tower, "vision_model", tower)
-
-
-def _patch_gelu_tanh(act_module):
-    """Make a ``GELUTanh`` activation Spyre-safe.
-
-    ``GELUTanh`` defaults to ``F.gelu(x, approximate="tanh")`` (a single fused
-    op, no ``torch.pow``). If torch-spyre lowers that op, nothing is needed.
-    As a defensive fallback we install a device-conditional forward that uses
-    the explicit ``x*x*x`` tanh-approx form on Spyre (the ``torch.pow`` hazard)
-    and the original fused op on CPU, so CPU output stays bit-identical.
-    """
-    coeff = math.sqrt(2.0 / math.pi)
-
-    def _forward(self, x):
-        if x.device.type == "spyre":
-            inner = coeff * (x + 0.044715 * (x * x * x))
-            return 0.5 * x * (1.0 + torch.tanh(inner))
-        return nn.functional.gelu(x, approximate="tanh")
-
-    type(act_module).forward = _forward
 
 
 def _pad_vision_heads(layers, num_heads, orig_head_dim, padded_head_dim):
@@ -202,9 +173,9 @@ def _make_patch_embed(inner):
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to a SigLIP vision tower in-place.
 
-    Pads attention heads to a stick boundary, patches the GELU-tanh activation,
-    builds the CPU patch-embed closure and the compiled pre-LN encoder blocks,
-    and stashes the tower's final LayerNorm. After this the tower runs via
+    Pads attention heads and MLP intermediate dim to stick boundaries, builds
+    the CPU patch-embed closure and the compiled pre-LN encoder blocks, and
+    stashes the tower's final LayerNorm. After this the tower runs via
     ``prefill_vision`` / ``vision_backbone_forward``.
     """
     tower = _get_vision_tower(model)
@@ -229,10 +200,6 @@ def prepare_for_spyre(model):
     padded_inter = ((orig_inter + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
     if padded_inter > orig_inter:
         _pad_vision_mlp(layers, orig_inter, padded_inter)
-
-    # SigLIP MLP activation is gelu_pytorch_tanh (GELUTanh). Patch every layer's
-    # activation module class once (they share the class).
-    _patch_gelu_tanh(layers[0].mlp.activation_fn)
 
     model._spyre_patch_embed = _make_patch_embed(inner)
     model._spyre_post_layernorm = inner.post_layernorm
@@ -295,16 +262,6 @@ def load_hf_model(model_path, dtype=torch.float16):
     tower.eval()
     tower.requires_grad_(False)
     return tower
-
-
-def load_model(model_path, dtype=torch.float16):
-    """Load a SigLIP vision tower and prepare it for Spyre."""
-    model = load_hf_model(model_path, dtype)
-    prepare_for_spyre(model)
-    print("Moving vision tower to Spyre ...")
-    torch.nn.Module.to(model, DEVICE)
-    print("Vision tower ready.")
-    return model
 
 
 def prefill_vision_tower(model, pixel_values, output_hidden_states=False):

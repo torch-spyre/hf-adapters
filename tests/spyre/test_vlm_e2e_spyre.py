@@ -34,8 +34,8 @@ likewise compares per-step logits — but it asserts the cosine rather than top-
     as a human-eyeball diagnostic.
 
 Why cosine, not top-1? Both paths run the same fp16 dtype, so any divergence is
-Spyre's native accumulation + the adapter's op decomposition (``x*x*x`` gelu-tanh,
-matmul-RoPE, padded SDPA) versus CPU's fp16 — not a precision tier. Teacher-forcing
+Spyre's native accumulation + the adapter's op decomposition (matmul-RoPE, padded
+SDPA) versus CPU's fp16 — not a precision tier. Teacher-forcing
 (same prefix both sides) removes greedy-fork amplification, so the cosine cleanly
 measures per-step logit fidelity and exercises the full decode path (KV-cache,
 masks, RoPE) that a prefill-only check would skip; a real decode bug tanks it. But
@@ -66,14 +66,15 @@ import torch.nn.functional as F
 from _vision_helpers import (
     build_vlm_batch,
     stock_vlm_generate,
-    stock_vlm_greedy_steps,
 )
-from conftest import load_hf_vlm
+from conftest import load_ref_model
 from model_registry import VISION_PATHS
 
+from hf_adapters import AutoSpyreModelForImageTextToText
 from hf_adapters.auto_spyre_model import (
     IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
     resolve_adapter_module,
+    torch_dtype_for_model_path,
 )
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
@@ -81,10 +82,8 @@ from hf_adapters.hf_common import (
     allocate_kv_caches,
     build_expansion_mask,
     get_model_dtype,
-    move_to_spyre_with_layout,
     pad_and_position,
 )
-from tests.conftest import torch_dtype_for_model_path
 
 MAX_NEW_TOKENS = 16
 # Decode steps to verify token-by-token (prefill + this many decode steps). Kept
@@ -247,6 +246,49 @@ def _adapter_teacher_forced_steps(
     return per_step_logits
 
 
+def _stock_vlm_greedy_steps(
+    model_path: str,
+    batch: dict[str, torch.Tensor],
+    adapter_mod,
+    num_steps: int,
+) -> tuple[list[torch.Tensor], list[int]]:
+    """Stock HF per-step greedy logits + token ids over prefill + decode.
+
+    Runs ``AutoModelForImageTextToText.generate`` greedily for ``num_steps``
+    tokens with ``output_logits=True`` and returns ``(logits, token_ids)``:
+
+    - ``logits``: list of ``num_steps`` fp32 ``[vocab]`` tensors — the
+      distribution stock greedily picked each generated token from (step 0 =
+      prefill / first token, step k = after k generated tokens).
+    - ``token_ids``: the ``num_steps`` greedily chosen ids (``logits[i].argmax()``).
+
+    The Spyre e2e test uses ``token_ids`` as the teacher-forcing sequence and
+    ``logits`` as the per-step top-1 reference, so the adapter is compared on the
+    *same* prefix at every step (no greedy-fork amplification).
+    """
+    from transformers import AutoModelForImageTextToText
+
+    ref_model = load_ref_model(
+        model_path=model_path,
+        adapter_mod=adapter_mod,
+        auto_model_cls=AutoModelForImageTextToText,
+    )
+    with torch.no_grad():
+        gen = ref_model.generate(
+            **batch,
+            max_new_tokens=num_steps,
+            do_sample=False,
+            use_cache=True,
+            output_logits=True,
+            return_dict_in_generate=True,
+        )
+    logits = [step[0].float().clone() for step in gen.logits]
+    prompt_len = batch["input_ids"].shape[1]
+    token_ids = gen.sequences[0, prompt_len : prompt_len + num_steps].tolist()
+    del ref_model
+    return logits, token_ids
+
+
 @pytest.mark.parametrize("model_path", VISION_PATHS, ids=VISION_PATHS)
 def test_vlm_generate_spyre(model_path: str) -> None:
     adapter = resolve_adapter_module(
@@ -267,18 +309,26 @@ def test_vlm_generate_spyre(model_path: str) -> None:
     # Capture stock's per-step greedy logits + token ids (the forcing sequence and
     # the per-step top-1 reference), plus its free-run caption for an eyeball. ---
     print("  Running stock CPU reference (per-step greedy) ...")
-    ref_logits, ref_tokens = stock_vlm_greedy_steps(
-        model_path, batch, dtype, NUM_COMPARE_STEPS
+    ref_logits, ref_tokens = _stock_vlm_greedy_steps(
+        model_path=model_path,
+        batch=batch,
+        num_steps=NUM_COMPARE_STEPS,
+        adapter_mod=adapter,
     )
-    ref_text = stock_vlm_generate(model_path, processor, batch, dtype, MAX_NEW_TOKENS)
+    ref_text = stock_vlm_generate(
+        model_path=model_path,
+        processor=processor,
+        batch=batch,
+        max_new_tokens=MAX_NEW_TOKENS,
+        adapter_mod=adapter,
+    )
     gc.collect()
 
     # --- Adapter on Spyre ---
     print("  Loading model for Spyre ...")
-    model = load_hf_vlm(model_path, dtype, adapter_mod=adapter)
-    adapter.prepare_for_spyre(model)
-    print("  Moving model to Spyre ...")
-    move_to_spyre_with_layout(model, dtype)
+    model = AutoSpyreModelForImageTextToText.from_pretrained(
+        model_name_or_path=model_path, dtype=dtype
+    )
 
     # Per-step adapter logits on Spyre, teacher-forced on stock's tokens (so the
     # comparison is free of greedy-fork drift while still exercising decode).
