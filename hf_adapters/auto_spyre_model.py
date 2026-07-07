@@ -186,15 +186,12 @@ class AutoSpyreModel:
     ) -> torch.nn.Module:
         module: ModuleType = resolve_adapter_module(model_name_or_path)
 
-        if hasattr(module, "load_model"):
-            model: torch.nn.Module = module.load_model(model_name_or_path, dtype)
-        else:
-            model = load_model_common(
-                model_name_or_path,
-                module,
-                dtype,
-                auto_model_cls=cls._auto_model_cls,
-            )
+        model = load_model_common(
+            model_name_or_path,
+            module,
+            dtype,
+            auto_model_cls=cls._auto_model_cls,
+        )
 
         return model
 
