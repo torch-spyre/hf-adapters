@@ -1188,7 +1188,13 @@ def move_to_spyre_with_layout(model, dtype):
         owner.register_buffer(attr, new, persistent=persistent)
 
 
-def load_model_common(model_path, prepare_fn, dtype=torch.float16, auto_model_cls=None):
+def load_model_common(
+    model_path,
+    prepare_fn,
+    dtype=torch.float16,
+    auto_model_cls=None,
+    trust_remote_code=False,
+):
     """Load an HF model, apply Spyre adaptations, move to device.
 
     Args:
@@ -1197,6 +1203,8 @@ def load_model_common(model_path, prepare_fn, dtype=torch.float16, auto_model_cl
         dtype: Weight dtype (default fp16).
         auto_model_cls: HF auto-model class to use (e.g. ``AutoModel``,
             ``AutoModelForCausalLM``). Defaults to ``AutoModel``.
+        trust_remote_code: Passed to ``from_pretrained`` for models that ship
+            custom modelling code (default False).
     """
     if auto_model_cls is None:
         from transformers import AutoModel
@@ -1209,6 +1217,7 @@ def load_model_common(model_path, prepare_fn, dtype=torch.float16, auto_model_cl
         model_path,
         dtype=dtype,
         device_map="cpu",
+        trust_remote_code=trust_remote_code,
     )
     model.eval()
     model.requires_grad_(False)
