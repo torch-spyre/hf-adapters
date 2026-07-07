@@ -229,7 +229,7 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
 
             return generate(module._run_forward, self, tokenizer, prompts, **kwargs)
 
-        object.__setattr__(model, "generate", MethodType(model_generate, model))
+        model.generate = MethodType(model_generate, model)  # type: ignore[assignment]
 
         return model
 
@@ -292,10 +292,8 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
                 **kwargs,
             )
 
-        object.__setattr__(
-            model, "prefill_logits", MethodType(model_prefill_logits, model)
-        )
-        object.__setattr__(model, "generate", MethodType(model_generate, model))
+        model.prefill_logits = MethodType(model_prefill_logits, model)  # type: ignore[assignment]
+        model.generate = MethodType(model_generate, model)  # type: ignore[assignment]
         return model
 
 
