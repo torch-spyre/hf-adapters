@@ -30,8 +30,6 @@ import pytest
 import torch
 
 from hf_adapters.auto_spyre_model import MODEL_PATH_TO_TORCH_DTYPE
-
-# from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
 from tests.model_registry import CAUSAL_PATHS, EMBED_PATHS
 
 
