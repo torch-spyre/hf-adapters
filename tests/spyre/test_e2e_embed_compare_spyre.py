@@ -30,7 +30,6 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from conftest import load_ref_model
 from model_registry import EMBED_PATHS
 
 from hf_adapters.auto_spyre_model import (
@@ -42,6 +41,7 @@ from hf_adapters.hf_common import (
     prefill_embed,
     prefill_encoder,
 )
+from tests.conftest import load_ref_model
 
 PROMPTS = [
     "Hi.",
