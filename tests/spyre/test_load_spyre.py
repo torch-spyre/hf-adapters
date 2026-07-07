@@ -61,9 +61,7 @@ def load_embedding(model_path: str) -> tuple[Any, float]:
     dtype = torch_dtype_for_model_path(model_path)
 
     t0 = time.time()
-    model = AutoSpyreModel.from_pretrained(
-        model_path, dtype=dtype, trust_remote_code=True
-    )
+    model = AutoSpyreModel.from_pretrained(model_path, dtype=dtype)
     load_s = time.time() - t0
     return model is not None, load_s
 
