@@ -1126,7 +1126,7 @@ def get_model_dtype(model: nn.Module) -> torch.dtype:
     return torch.float16
 
 
-def move_to_spyre_with_layout(model, dtype):
+def _move_to_spyre_with_layout(model, dtype):
     """Move all parameters and buffers to Spyre with row-major layout for 2D
     matmul weights, except embedding weights which keep the default layout.
     """
@@ -1224,7 +1224,7 @@ def move_model_to_spyre(d_type: torch.dtype, model, module):
     module.prepare_fn(model)
     print("Moving model to Spyre ...")
     _patch_torch_empty()
-    move_to_spyre_with_layout(model, d_type)
+    _move_to_spyre_with_layout(model, d_type)
     print("Model on Spyre ready.")
 
 
