@@ -1114,7 +1114,7 @@ def untie_embedding_and_lm_head(model):
             model.config.tie_word_embeddings = False
 
 
-def _model_dtype(model: nn.Module) -> torch.dtype:
+def get_model_dtype(model: nn.Module) -> torch.dtype:
     """Infer the floating-point dtype of a prepared model from its parameters.
 
     Used by KV-cache and mask allocators so they match the model dtype
@@ -1459,9 +1459,9 @@ def generate(
     # (``_spyre_kv_shapes``) for heterogeneous architectures like Gemma 4,
     # otherwise a single uniform shape derived from the config.
     # Match KV cache and mask dtype to the model's weight dtype.
-    model_dtype = _model_dtype(model)
+    model_d_type = get_model_dtype(model)
     key_caches, value_caches = allocate_kv_caches(
-        model, batch_size, max_cache_len, model_dtype
+        model, batch_size, max_cache_len, model_d_type
     )
 
     # Decode state
@@ -1485,7 +1485,7 @@ def generate(
                 padded_len,
                 max_cache_len,
                 prompt_offsets,
-                dtype=model_dtype,
+                dtype=model_d_type,
             )
             logits = run_forward_fn(
                 model,
@@ -1541,7 +1541,7 @@ def generate(
                     max_cache_len,
                     current_cache_len,
                     prompt_offsets,
-                    dtype=model_dtype,
+                    dtype=model_d_type,
                 )
                 logits = run_forward_fn(
                     model,
@@ -2160,7 +2160,7 @@ def prefill_embed(
     # Match KV cache and mask dtype to the model's weight dtype so the
     # compiled block sees a consistent dtype across q/k/v_proj outputs and
     # the SDPA inputs.
-    model_dtype = _model_dtype(model)
+    model_d_type = get_model_dtype(model)
 
     # Causal right-padded mask, or bidirectional for some embedders
     is_causal = getattr(model.config, "is_causal", True) and not getattr(
@@ -2171,7 +2171,7 @@ def prefill_embed(
         padded_len,
         actual_lengths,
         is_causal=is_causal,
-        dtype=model_dtype,
+        dtype=model_d_type,
     )
 
     # Throwaway KV caches sized to padded_len (no decode budget)
@@ -2190,7 +2190,7 @@ def prefill_embed(
             num_kv_heads,
             padded_len,
             head_dim,
-            dtype=model_dtype,
+            dtype=model_d_type,
             device=DEVICE,
         )
         for _ in range(num_layers)
@@ -2201,7 +2201,7 @@ def prefill_embed(
             num_kv_heads,
             padded_len,
             v_head_dim,
-            dtype=model_dtype,
+            dtype=model_d_type,
             device=DEVICE,
         )
         for _ in range(num_layers)

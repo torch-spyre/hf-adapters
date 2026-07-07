@@ -21,7 +21,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from tests.model_registry import select_representative_models  # noqa: E402
+import tests.model_registry  # noqa: E402
 
 
 def generate_matrices(exclude_models=None):
@@ -29,27 +29,32 @@ def generate_matrices(exclude_models=None):
     Generate test matrices from the model registry.
 
     Args:
-        exclude_models: List of model keys to exclude from all matrices
+        exclude_models: List of model paths to exclude from all matrices
 
     Returns:
-        dict: Dictionary with 'causal', 'embed', and 'combined' matrix lists
+        dict: Dictionary with 'causal', 'embed', 'vision', and 'combined' matrix lists
     """
     exclude_models = set(exclude_models or [])
 
-    # Get representative models (one per adapter)
-    causal_keys, embed_keys = select_representative_models()
-
     # Apply exclusions
-    causal_keys = [k for k in causal_keys if k not in exclude_models]
-    embed_keys = [k for k in embed_keys if k not in exclude_models]
+    causal_paths = [
+        k for k in tests.model_registry.CAUSAL_PATHS if k not in exclude_models
+    ]
+    embed_paths = [
+        k for k in tests.model_registry.EMBED_PATHS if k not in exclude_models
+    ]
+    vision_paths = [
+        k for k in tests.model_registry.VISION_PATHS if k not in exclude_models
+    ]
 
     # Combine for jobs that test both types
-    combined_keys = causal_keys + embed_keys
+    combined_paths = causal_paths + embed_paths
 
     return {
-        "causal": causal_keys,
-        "embed": embed_keys,
-        "combined": combined_keys,
+        "causal": causal_paths,
+        "embed": embed_paths,
+        "vision": vision_paths,
+        "combined": combined_paths,
     }
 
 
@@ -66,6 +71,7 @@ def format_for_github_actions(matrices):
     return {
         "causal_matrix": json.dumps(matrices["causal"]),
         "embed_matrix": json.dumps(matrices["embed"]),
+        "vision_matrix": json.dumps(matrices["vision"]),
         "combined_matrix": json.dumps(matrices["combined"]),
     }
 
@@ -116,6 +122,9 @@ def main():
     )
     print(
         f"  Embedding models ({len(matrices['embed'])}): {', '.join(matrices['embed'])}"
+    )
+    print(
+        f"  Vision models ({len(matrices['vision'])}): {', '.join(matrices['vision'])}"
     )
     print(
         f"  Combined ({len(matrices['combined'])}): {', '.join(matrices['combined'])}"

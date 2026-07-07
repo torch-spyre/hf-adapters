@@ -24,30 +24,38 @@ generated text against stock's REAL ``model.generate(**inputs)``.
     decode → decoded string) on a real hub sample image and asserts the
     generated token sequence matches stock ``model.generate`` token-for-token.
 
-Parametrized off ``model_registry.VISION_MODELS``; selects the multimodal
-two-tower adapters.
+Parametrized off ``model_registry.VISION_PATHS`` (the multimodal two-tower
+adapters that load both towers and run a full generate).
 
 Marked ``slow``: loads the full VLM twice and runs an autoregressive decode on
 CPU. Run with ``--run-slow``.
 """
 
 import gc
+import types
 
 import pytest
 import torch
-from _vision_helpers import build_vlm_batch, stock_vlm_generate
-from model_registry import VISION_MODELS
 
-from tests.conftest import load_hf_vlm, torch_dtype_for
+from hf_adapters.auto_spyre_model import (
+    IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+    resolve_adapter_module,
+)
+from tests._vision_helpers import build_vlm_batch, stock_vlm_generate
+from tests.conftest import load_hf_vlm, torch_dtype_for_model_path
+from tests.model_registry import VISION_PATHS
 
-MAX_NEW_TOKENS = 16
-PROMPT = "Briefly describe this image."
-
-# Multimodal (image→text) vlm adapters load both towers and run a full generate.
-MODELS = {k: v for k, v in VISION_MODELS.items() if v.get("kind") == "vlm"}
+MAX_NEW_TOKENS: int = 16
+PROMPT: str = "Briefly describe this image."
 
 
-def _adapter_generate(adapter, model, processor, batch, max_new_tokens):
+def _adapter_generate(
+    adapter: types.ModuleType,
+    model: torch.nn.Module,
+    processor,
+    batch: dict,
+    max_new_tokens: int,
+) -> list[str]:
     """Drive an adapter's multimodal ``generate`` from a processor batch.
 
     Adapters take image inputs positionally (``input_ids, attention_mask,
@@ -67,17 +75,18 @@ def _adapter_generate(adapter, model, processor, batch, max_new_tokens):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("model_key", list(MODELS.keys()), ids=list(MODELS.keys()))
-def test_vlm_generate(model_key, load_adapter, unwrap_compiled_blocks):
-    info = MODELS[model_key]
-    adapter = load_adapter(info["adapter"])
-    dtype = torch_dtype_for(info)
+@pytest.mark.parametrize("model_path", VISION_PATHS, ids=VISION_PATHS)
+def test_vlm_generate(model_path: str, unwrap_compiled_blocks) -> None:
+    adapter = resolve_adapter_module(
+        model_path, mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING
+    )
+    dtype = torch_dtype_for_model_path(model_path)
 
-    processor, batch = build_vlm_batch(info["path"], PROMPT)
+    processor, batch = build_vlm_batch(model_path, PROMPT)
     batch["pixel_values"] = batch["pixel_values"].to(dtype)
 
     # --- Adapter generate (greedy) ---
-    model = load_hf_vlm(info, dtype, adapter_mod=adapter)
+    model = load_hf_vlm(model_path, dtype, adapter_mod=adapter)
     adapter.prepare_for_spyre(model)
     unwrap_compiled_blocks(model)
     with torch.no_grad():
@@ -88,13 +97,13 @@ def test_vlm_generate(model_key, load_adapter, unwrap_compiled_blocks):
     gc.collect()
 
     # --- Stock reference: the FULL model.generate() (real deepstack) ---
-    ref_text = stock_vlm_generate(info["path"], processor, batch, dtype, MAX_NEW_TOKENS)
+    ref_text = stock_vlm_generate(model_path, processor, batch, dtype, MAX_NEW_TOKENS)
     gc.collect()
 
     # Print both captions so a human can eyeball the result (visible with -s).
-    print(f"\n[{model_key} e2e] prompt: {PROMPT!r}")
-    print(f"[{model_key} e2e] adapter: {adapter_text[0]!r}")
-    print(f"[{model_key} e2e] stock:   {ref_text!r}")
+    print(f"\n[{model_path} e2e] prompt: {PROMPT!r}")
+    print(f"[{model_path} e2e] adapter: {adapter_text[0]!r}")
+    print(f"[{model_path} e2e] stock:   {ref_text!r}")
 
     # The adapter must match stock's REAL multimodal generate token-for-token.
     assert adapter_text[0] == ref_text, (

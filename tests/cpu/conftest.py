@@ -102,33 +102,6 @@ def cosine_per_row(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 
-# ADAPTERS_DIR is resolved from the parent conftest's patched sys.modules entry.
-# We reference it lazily (inside functions) so this module can be imported
-# before the parent conftest has run its patching block.
-def _adapters_dir() -> str:
-    return os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "hf_adapters",
-    )
-
-
-def _load_adapter(filename: str) -> types.ModuleType:
-    """Load an adapter .py file under hf_adapters/ as a real submodule."""
-    mod_name = f"hf_adapters.{filename.replace('.py', '')}"
-    if mod_name in sys.modules:
-        return sys.modules[mod_name]
-    _pkg = sys.modules["hf_adapters"]
-    filepath = os.path.join(_adapters_dir(), filename)
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(mod_name, filepath)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[mod_name] = mod
-    spec.loader.exec_module(mod)
-    setattr(_pkg, filename.replace(".py", ""), mod)
-    return mod
-
-
 def _unwrap_compiled_blocks(model: types.ModuleType) -> None:
     """Replace torch.compile-wrapped blocks with their CPU-runnable originals.
 
@@ -178,21 +151,16 @@ def auto_spyre_model() -> types.ModuleType:
 
 
 @pytest.fixture
-def load_adapter() -> types.ModuleType:
-    return _load_adapter
-
-
-@pytest.fixture
-def unwrap_compiled_blocks() -> None:
+def unwrap_compiled_blocks():
     return _unwrap_compiled_blocks
 
 
 @pytest.fixture
-def set_rope_dtype() -> None:
+def set_rope_dtype():
     return _set_rope_dtype
 
 
 @pytest.fixture(autouse=True)
-def _gc_after_test() -> None:
+def _gc_after_test():
     yield
     gc.collect()
