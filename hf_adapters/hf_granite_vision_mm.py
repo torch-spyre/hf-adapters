@@ -106,7 +106,7 @@ def prepare_for_spyre(model):
 def _embed_text(model, input_ids):
     """Token embeddings * embedding_multiplier (Granite scales its embeddings).
 
-    The gather runs on ``embed_tokens``' device — after ``_move_to_spyre_with_layout``
+    The gather runs on ``embed_tokens``' device — after ``move_to_spyre``
     the table lives on Spyre, so ``input_ids`` is moved to match (mirrors the
     decode-step ``embed_ids``). Returns embeddings on the embedding's device.
     """
@@ -147,7 +147,7 @@ def _deepstack_features(model, pixel_values, image_sizes):
 
     # The deepstack/spatial projectors (Blip2 QFormers) and the image_newline
     # parameter are stock CPU modules: _project_and_pack / pack_image_features run
-    # them on CPU (vision features are moved to CPU first). _move_to_spyre_with_layout
+    # them on CPU (vision features are moved to CPU first). move_to_spyre
     # blanket-moves every param to Spyre, so re-pin these to CPU before use — the
     # same CPU-fallback contract as the patch-embed conv (idempotent; .to(cpu) on an
     # already-CPU module is a no-op).

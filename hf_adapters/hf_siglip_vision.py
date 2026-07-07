@@ -146,11 +146,11 @@ def _make_patch_embed(inner):
 
     The Conv2d weight/bias and position table are captured as CPU copies here, at
     prepare time, so this closure keeps running on CPU after
-    ``_move_to_spyre_with_layout`` relocates the module's own params to Spyre
+    ``move_to_spyre`` relocates the module's own params to Spyre
     (``nn.Conv2d`` is not assumed to lower on Spyre — see
-    docs/siglip_vision_spyre_findings.md). ``_embedding_param_ids`` cannot exclude
-    these because the conv weight is 4-D / the position table is reached via a
-    tower-specific path, so we snapshot rather than skip-the-move.
+    docs/siglip_vision_spyre_findings.md). The Spyre layout monkey patch cannot
+    exclude these (the conv weight is 4-D, the position table is reached via a
+    tower-specific path), so we snapshot on CPU rather than skip-the-move.
     """
     emb = inner.embeddings
     weight = emb.patch_embedding.weight.detach().cpu()
