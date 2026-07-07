@@ -30,16 +30,18 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from conftest import load_ref_model
 from model_registry import EMBED_PATHS
 
-from hf_adapters.auto_spyre_model import resolve_adapter_module
+from hf_adapters.auto_spyre_model import (
+    resolve_adapter_module,
+    torch_dtype_for_model_path,
+)
 from hf_adapters.hf_common import (
-    move_to_spyre_with_layout,
+    move_model_to_spyre,
     prefill_embed,
     prefill_encoder,
-    untie_embedding_and_lm_head,
 )
-from tests.conftest import torch_dtype_for_model_path
 
 PROMPTS = [
     "Hi.",
@@ -156,14 +158,11 @@ def _run_model_test(model_path: str) -> list[dict[str, Any]]:
     print(f"{'=' * 70}")
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    dtype = torch_dtype_for_model_path(model_path)
-    model = AutoModel.from_pretrained(
-        model_path,
-        torch_dtype=dtype,
-        device_map="cpu",
+    model = load_ref_model(
+        model_path=model_path,
+        adapter_mod=adapter,
+        auto_model_cls=AutoModel,
     )
-    model.eval()
-    model.requires_grad_(False)
 
     encoded = tokenizer(
         PROMPTS,
@@ -183,11 +182,9 @@ def _run_model_test(model_path: str) -> list[dict[str, Any]]:
     print("  Running HF reference on CPU ...")
     hf_hidden = _hf_reference_forward(model, input_ids, attention_mask)
 
-    print("  Preparing adapter ...")
-    untie_embedding_and_lm_head(model)
-    adapter.prepare_for_spyre(model)
-    print("  Moving model to Spyre ...")
-    move_to_spyre_with_layout(model, dtype)
+    d_type = torch_dtype_for_model_path(model_path=model_path)
+    move_model_to_spyre(model=model, module=adapter, d_type=d_type)
+
     print("  Running adapter on Spyre ...")
     ad_hidden = _adapter_forward(adapter, model, input_ids, attention_mask)
 
