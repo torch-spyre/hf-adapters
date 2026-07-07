@@ -25,10 +25,11 @@ fully deterministic across runs.
 from __future__ import annotations
 
 import torch
-from conftest import load_ref_model
 from huggingface_hub import hf_hub_download
 from PIL import Image
 from transformers import AutoProcessor
+
+from tests.conftest import load_ref_model
 
 # ── VLM (image→text) end-to-end helpers ──────────────────────────────────────
 #
