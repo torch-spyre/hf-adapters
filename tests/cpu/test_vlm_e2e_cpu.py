@@ -75,7 +75,6 @@ def _adapter_generate(
     )
 
 
-@pytest.mark.slow
 @pytest.mark.parametrize("model_path", VISION_PATHS, ids=VISION_PATHS)
 def test_vlm_generate(model_path: str, unwrap_compiled_blocks) -> None:
     adapter = resolve_adapter_module(
