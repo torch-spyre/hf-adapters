@@ -183,6 +183,7 @@ class AutoSpyreModel:
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype = torch.float16,
+        trust_remote_code: bool = False,
     ) -> torch.nn.Module:
         module: ModuleType = resolve_adapter_module(model_name_or_path)
 
@@ -194,6 +195,7 @@ class AutoSpyreModel:
                 module.prepare_for_spyre,
                 dtype,
                 auto_model_cls=cls._auto_model_cls,
+                trust_remote_code=trust_remote_code,
             )
 
         return model
