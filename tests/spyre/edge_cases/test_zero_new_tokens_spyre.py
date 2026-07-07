@@ -14,13 +14,33 @@
 
 """Spyre edge case: ``zero_new_tokens`` (max_new_tokens=0 returns empty strings)."""
 
+from __future__ import annotations
+
+import time
+
 import pytest
-from _shared import run_zero_new_tokens
+from _generate_edge_case_helpers import make_prompts
+from edge_cases._shared import _setup, _teardown
 from model_registry import CAUSAL_PATHS
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
 def test_zero_new_tokens_spyre(model_path: str) -> None:
-    ok, detail = run_zero_new_tokens(model_path)
+    ok, detail = _run_zero_new_tokens(model_path)
     assert ok, detail
+
+
+def _run_zero_new_tokens(model_path: str) -> tuple[bool, str]:
+    info, tokenizer, _, model = _setup(model_path, need_ref=False)
+    try:
+        prompts = make_prompts(tokenizer, [5, 12])
+        t0 = time.time()
+        out = model.generate(tokenizer, prompts, max_new_tokens=0, do_sample=False)
+        elapsed = time.time() - t0
+        ok = len(out) == len(prompts) and all(s == "" for s in out)
+        detail = "" if ok else f"got={out!r}"
+        print(f"  zero_new_tokens: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
+        return ok, detail
+    finally:
+        _teardown(model, None)
