@@ -182,8 +182,8 @@ def _run_model_test(model_path: str) -> list[dict[str, Any]]:
     print("  Running HF reference on CPU ...")
     hf_hidden = _hf_reference_forward(model, input_ids, attention_mask)
 
-    d_type = torch_dtype_for_model_path(model_path=model_path)
-    move_model_to_spyre(model=model, module=adapter, d_type=d_type)
+    dtype = torch_dtype_for_model_path(model_path=model_path)
+    move_model_to_spyre(model=model, module=adapter, dtype=dtype)
 
     print("  Running adapter on Spyre ...")
     ad_hidden = _adapter_forward(adapter, model, input_ids, attention_mask)

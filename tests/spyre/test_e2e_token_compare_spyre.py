@@ -311,7 +311,7 @@ def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]
     # Use bfloat16 on Spyre when the registry requests it; otherwise float16.
     # (Spyre does not support float32, so float32 registry entries still use float16.)
     spyre_dtype = torch_dtype_for_model_path(model_path)
-    move_model_to_spyre(model=model, module=adapter, d_type=spyre_dtype)
+    move_model_to_spyre(model=model, module=adapter, dtype=spyre_dtype)
     print("  Running adapter on Spyre ...")
     adapter_results = adapter_greedy_steps(
         adapter._run_forward,

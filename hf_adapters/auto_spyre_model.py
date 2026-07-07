@@ -198,7 +198,7 @@ class AutoSpyreModel:
             dtype,
             auto_model_cls=cls._auto_model_cls,
         )
-        move_model_to_spyre(dtype, model, module)
+        move_model_to_spyre(model, module, dtype)
         return model
 
 
@@ -244,7 +244,9 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
     """
 
     _auto_model_cls = AutoModelForImageTextToText  # type: ignore[assignment]
-    _mapping = IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING
+    _module_mapping: dict[type[PretrainedConfig], ModuleType] = (
+        IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING
+    )
 
     @classmethod
     def from_pretrained(
@@ -254,7 +256,7 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
     ):
         module: ModuleType = resolve_adapter_module(
             model_name_or_path,
-            mapping=cls._mapping,
+            mapping=cls._module_mapping,
         )
         model: torch.nn.Module = super().from_pretrained(
             model_name_or_path, dtype=dtype
@@ -296,23 +298,16 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
 
 
 def torch_dtype_for_model_path(model_path: str) -> torch.dtype:
-    """Map a registry entry's ``dtype`` field to a torch dtype.
+    """Resolve the Spyre-safe torch dtype for *model_path*.
 
     Looks up *model_path* in ``MODEL_PATH_TO_TORCH_DTYPE``; defaults to
-    ``torch.float16`` when no entry is found.
-
-    ``"bfloat16"`` (e.g. EmbeddingGemma, which is bf16-native and overflows
-    fp16) is passed through unchanged for both Spyre and CPU.
-
-    ``"float32"`` (e.g. Granite 4 1B, where fp16 overflows on CPU) is kept as
-    ``torch.float32`` when ``DEVICE != "spyre"``,
-    but is downcast to ``torch.float16`` on Spyre because float32 is not
-    supported by that backend.
-
+    ``torch.float16`` when no entry is found. Registry entries of
+    ``torch.float32`` (e.g. Granite 4 1B, where fp16 overflows on CPU) are
+    downcast to ``torch.float16`` because Spyre does not support float32;
+    ``torch.bfloat16`` entries (e.g. EmbeddingGemma) are passed through
+    unchanged.
     """
     dtype = MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
     if dtype == torch.float32:
-        print("Return torch.float16")
         return torch.float16
-    print(f"Return {dtype}")
     return dtype

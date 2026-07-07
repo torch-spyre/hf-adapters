@@ -1219,12 +1219,12 @@ def load_model_common(model_path, module, dtype=torch.float16, auto_model_cls=No
     return model
 
 
-def move_model_to_spyre(d_type: torch.dtype, model, module):
+def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
     untie_embedding_and_lm_head(model)
     module.prepare_for_spyre(model)
     print("Moving model to Spyre ...")
     _patch_torch_empty()
-    _move_to_spyre_with_layout(model, d_type)
+    _move_to_spyre_with_layout(model, dtype)
     print("Model on Spyre ready.")
 
 
