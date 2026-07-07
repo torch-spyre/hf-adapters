@@ -68,12 +68,13 @@ from _vision_helpers import (
     stock_vlm_generate,
     stock_vlm_greedy_steps,
 )
-from conftest import load_hf_vlm
 from model_registry import VISION_PATHS
 
+from hf_adapters import AutoSpyreModelForImageTextToText
 from hf_adapters.auto_spyre_model import (
     IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
     resolve_adapter_module,
+    torch_dtype_for_model_path,
 )
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
@@ -81,10 +82,8 @@ from hf_adapters.hf_common import (
     allocate_kv_caches,
     build_expansion_mask,
     get_model_dtype,
-    move_to_spyre_with_layout,
     pad_and_position,
 )
-from tests.conftest import torch_dtype_for_model_path
 
 MAX_NEW_TOKENS = 16
 # Decode steps to verify token-by-token (prefill + this many decode steps). Kept
@@ -268,17 +267,16 @@ def test_vlm_generate_spyre(model_path: str) -> None:
     # the per-step top-1 reference), plus its free-run caption for an eyeball. ---
     print("  Running stock CPU reference (per-step greedy) ...")
     ref_logits, ref_tokens = stock_vlm_greedy_steps(
-        model_path, batch, dtype, NUM_COMPARE_STEPS
+        model_path, batch, NUM_COMPARE_STEPS
     )
-    ref_text = stock_vlm_generate(model_path, processor, batch, dtype, MAX_NEW_TOKENS)
+    ref_text = stock_vlm_generate(model_path, processor, batch, MAX_NEW_TOKENS)
     gc.collect()
 
     # --- Adapter on Spyre ---
     print("  Loading model for Spyre ...")
-    model = load_hf_vlm(model_path, dtype, adapter_mod=adapter)
-    adapter.prepare_for_spyre(model)
-    print("  Moving model to Spyre ...")
-    move_to_spyre_with_layout(model, dtype)
+    model = AutoSpyreModelForImageTextToText.from_pretrained(
+        model_name_or_path=model_path, dtype=dtype
+    )
 
     # Per-step adapter logits on Spyre, teacher-forced on stock's tokens (so the
     # comparison is free of greedy-fork drift while still exercising decode).

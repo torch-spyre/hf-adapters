@@ -29,6 +29,8 @@ from huggingface_hub import hf_hub_download
 from PIL import Image
 from transformers import AutoProcessor
 
+from hf_adapters.auto_spyre_model import MODEL_PATH_TO_TORCH_DTYPE
+
 # ── VLM (image→text) end-to-end helpers ──────────────────────────────────────
 #
 # These drive a full multimodal adapter (both towers) the way an application
@@ -100,7 +102,6 @@ def stock_vlm_generate(
     model_path: str,
     processor: AutoProcessor,
     batch: dict[str, torch.Tensor],
-    dtype: torch.dtype,
     max_new_tokens: int,
 ) -> str:
     """Reference: stock ``AutoModelForImageTextToText.generate`` on ``batch``.
@@ -110,6 +111,7 @@ def stock_vlm_generate(
     """
     from transformers import AutoModelForImageTextToText
 
+    dtype = MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
     ref_model = AutoModelForImageTextToText.from_pretrained(
         model_path, dtype=dtype, device_map="cpu"
     ).eval()
@@ -129,7 +131,6 @@ def stock_vlm_generate(
 def stock_vlm_greedy_steps(
     model_path: str,
     batch: dict[str, torch.Tensor],
-    dtype: torch.dtype,
     num_steps: int,
 ) -> tuple[list[torch.Tensor], list[int]]:
     """Stock HF per-step greedy logits + token ids over prefill + decode.
@@ -148,6 +149,7 @@ def stock_vlm_greedy_steps(
     """
     from transformers import AutoModelForImageTextToText
 
+    dtype = MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
     ref_model = AutoModelForImageTextToText.from_pretrained(
         model_path, dtype=dtype, device_map="cpu"
     ).eval()
