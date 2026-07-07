@@ -23,7 +23,6 @@ compiled block functions.
 
 import math
 import time
-from types import ModuleType
 from typing import Callable, Optional
 
 import torch
@@ -1189,9 +1188,7 @@ def move_to_spyre_with_layout(model, dtype):
         owner.register_buffer(attr, new, persistent=persistent)
 
 
-def load_model_common(
-    model_path, module, dtype=torch.float16, auto_model_cls=None
-):
+def load_model_common(model_path, module, dtype=torch.float16, auto_model_cls=None):
     """Load an HF model, apply Spyre adaptations, move to device.
 
     Args:
