@@ -155,13 +155,12 @@ def _run_model_test(model_path: str) -> list[dict[str, Any]]:
     print(f"  {model_path}")
     print(f"{'=' * 70}")
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     dtype = torch_dtype_for_model_path(model_path)
     model = AutoModel.from_pretrained(
         model_path,
         torch_dtype=dtype,
         device_map="cpu",
-        trust_remote_code=True,
     )
     model.eval()
     model.requires_grad_(False)
