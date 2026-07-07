@@ -287,3 +287,26 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
         model.prefill_logits = MethodType(model_prefill_logits, model)
         model.generate = MethodType(model_generate, model)
         return model
+
+
+def torch_dtype_for_model_path(model_path: str) -> torch.dtype:
+    """Map a registry entry's ``dtype`` field to a torch dtype.
+
+    Looks up *model_path* in ``MODEL_PATH_TO_TORCH_DTYPE``; defaults to
+    ``torch.float16`` when no entry is found.
+
+    ``"bfloat16"`` (e.g. EmbeddingGemma, which is bf16-native and overflows
+    fp16) is passed through unchanged for both Spyre and CPU.
+
+    ``"float32"`` (e.g. Granite 4 1B, where fp16 overflows on CPU) is kept as
+    ``torch.float32`` when ``DEVICE != "spyre"``,
+    but is downcast to ``torch.float16`` on Spyre because float32 is not
+    supported by that backend.
+
+    """
+    dtype = MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
+    if dtype == torch.float32:
+        print("Return torch.float16")
+        return torch.float16
+    print(f"Return {dtype}")
+    return dtype
