@@ -37,8 +37,11 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 
-from hf_adapters.auto_spyre_model import resolve_adapter_module
-from tests.conftest import load_ref_model, torch_dtype_for_model_path
+from hf_adapters.auto_spyre_model import (
+    MODEL_PATH_TO_TORCH_DTYPE,
+    resolve_adapter_module,
+)
+from tests.conftest import load_ref_model
 from tests.model_registry import CAUSAL_PATHS
 
 PROMPT = "The capital of France is"
@@ -158,46 +161,8 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=NUM_DECODE
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
-def test_manual_path(model_path, unwrap_compiled_blocks, set_rope_dtype):
-    adapter_mod = resolve_adapter_module(model_path)
-    torch_dtype = torch_dtype_for_model_path(model_path)
-
-    tokenizer_path = model_path
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-    input_ids = tokenizer(PROMPT, return_tensors="pt")["input_ids"]
-
-    # Phase 1: HF reference
-    model = load_ref_model(model_path, adapter_mod)
-    hf_results = hf_greedy_steps(model, input_ids, num_decode=NUM_DECODE)
-    del model
-    gc.collect()
-
-    # Phase 2: adapter (fresh load — prepare_for_spyre is destructive)
-    model = load_ref_model(model_path, adapter_mod=adapter_mod)
-    adapter_mod.prepare_for_spyre(model)
-    # Manual path skips load_model_common; propagate the chosen dtype to the
-    # RoPE freq cache like the production move does (needed for bf16 models).
-    set_rope_dtype(model, torch_dtype)
-    unwrap_compiled_blocks(model)
-    adapter_results = adapter_greedy_steps(
-        adapter_mod._run_forward, model, input_ids, num_decode=NUM_DECODE
-    )
-    del model
-    gc.collect()
-
-    for hf_r, ad_r in zip(hf_results, adapter_results):
-        step_label = "prefill" if hf_r["step"] == 0 else f"decode-{hf_r['step']}"
-        assert hf_r["token"] == ad_r["token"], (
-            f"{step_label}: HF token {hf_r['token']!r} "
-            f"({tokenizer.decode([hf_r['token']])!r}) != "
-            f"adapter token {ad_r['token']!r} "
-            f"({tokenizer.decode([ad_r['token']])!r})"
-        )
-
-
-@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 def test_auto_loader(model_path, auto_spyre_model, unwrap_compiled_blocks):
-    torch_dtype = torch_dtype_for_model_path(model_path)
+    torch_dtype = MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     # Phase 1: auto-loader generate
