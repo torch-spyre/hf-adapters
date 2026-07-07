@@ -551,8 +551,6 @@ SigLIP-specific Spyre adaptations:
   boundary (4304→4352 = 68·64). Bit-exact: the extra activations are zero and
   multiply zero `fc2` columns. (Same reasoning as head-dim/LM-head padding, now
   applied to the FFN width.)
-- **GELU-tanh** (`gelu_pytorch_tanh`) gets the device-conditional `x*x*x`
-  decomposition on Spyre (the `torch.pow` hazard), fused `F.gelu` on CPU.
 - **Conv2d patch embed runs on CPU.** `nn.Conv2d` (`aten.convolution`) does not
   lower on Spyre (layout pass rejects its stick expression — see
   docs/siglip_vision_spyre_findings.md), so the patch embedding + learned

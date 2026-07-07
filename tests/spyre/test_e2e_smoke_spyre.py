@@ -32,7 +32,7 @@ from typing import Any
 import pytest
 from model_registry import CAUSAL_PATHS
 
-from tests.conftest import torch_dtype_for_model_path
+from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
 
 
 def _run_smoke(model_path: str) -> dict[str, Any]:

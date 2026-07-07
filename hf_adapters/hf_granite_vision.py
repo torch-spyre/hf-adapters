@@ -43,7 +43,6 @@ import torch
 
 from hf_adapters.hf_common import (
     get_backbone,
-    load_model_common,
     pad_lm_head,
     patch_rmsnorm,
     prepare_rope_and_heads,
@@ -73,8 +72,6 @@ def load_hf_model(model_path, dtype=torch.float16):
         for attr in ("vision_tower", "layerwise_projectors", "spatial_projectors"):
             if hasattr(mm, attr):
                 delattr(mm, attr)
-    model.eval()
-    model.requires_grad_(False)
     return model
 
 
@@ -129,15 +126,3 @@ def _run_forward(
     )
     logits = model.lm_head(h)
     return logits / text_config(model.config).logits_scaling
-
-
-def load_model(model_path, dtype=torch.float16):
-    """Load Granite Vision text backbone for Spyre."""
-    from transformers import AutoModelForImageTextToText
-
-    return load_model_common(
-        model_path,
-        prepare_for_spyre,
-        dtype,
-        auto_model_cls=AutoModelForImageTextToText,
-    )
