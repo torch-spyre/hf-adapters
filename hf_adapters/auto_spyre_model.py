@@ -178,6 +178,9 @@ class AutoSpyreModel:
     """
 
     _auto_model_cls = AutoModel
+    _module_mapping: dict[type[PretrainedConfig], ModuleType] = (
+        CONFIG_TO_ADAPTER_MODULE_MAPPING
+    )
 
     @classmethod
     def from_pretrained(
@@ -185,7 +188,9 @@ class AutoSpyreModel:
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype = torch.float16,
     ) -> torch.nn.Module:
-        module: ModuleType = resolve_adapter_module(model_name_or_path)
+        module: ModuleType = resolve_adapter_module(
+            model_name_or_path=model_name_or_path, mapping=cls._module_mapping
+        )
 
         model = load_model_common(
             model_name_or_path,
@@ -239,6 +244,7 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
     """
 
     _auto_model_cls = AutoModelForImageTextToText  # type: ignore[assignment]
+    _mapping = IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING
 
     @classmethod
     def from_pretrained(
@@ -248,7 +254,7 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
     ):
         module: ModuleType = resolve_adapter_module(
             model_name_or_path,
-            mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+            mapping=cls._mapping,
         )
         model: torch.nn.Module = super().from_pretrained(
             model_name_or_path, dtype=dtype
