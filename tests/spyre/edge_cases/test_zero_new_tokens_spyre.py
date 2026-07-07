@@ -27,11 +27,6 @@ from model_registry import CAUSAL_PATHS
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
 def test_zero_new_tokens_spyre(model_path: str) -> None:
-    ok, detail = _run_zero_new_tokens(model_path)
-    assert ok, detail
-
-
-def _run_zero_new_tokens(model_path: str) -> tuple[bool, str]:
     info, tokenizer, _, model = _setup(model_path, need_ref=False)
     try:
         prompts = make_prompts(tokenizer, [5, 12])
@@ -41,6 +36,6 @@ def _run_zero_new_tokens(model_path: str) -> tuple[bool, str]:
         ok = len(out) == len(prompts) and all(s == "" for s in out)
         detail = "" if ok else f"got={out!r}"
         print(f"  zero_new_tokens: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
-        return ok, detail
+        assert ok, detail
     finally:
         _teardown(model, None)

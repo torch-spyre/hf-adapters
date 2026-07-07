@@ -30,11 +30,6 @@ from model_registry import CAUSAL_PATHS
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
 def test_eos_inside_prompt_spyre(model_path: str) -> None:
-    ok, detail = _run_eos_inside_prompt(model_path)
-    assert ok, detail
-
-
-def _run_eos_inside_prompt(model_path: str) -> tuple[bool, str]:
     info, tokenizer, ref_model, model = _setup(model_path, need_ref=True)
     try:
         if tokenizer.eos_token_id is None:
@@ -59,6 +54,6 @@ def _run_eos_inside_prompt(model_path: str) -> tuple[bool, str]:
         ok = eos_in_prompt_refs[0].strip() == out[0].strip()
         detail = "" if ok else f"hf={eos_in_prompt_refs!r} spyre={out!r}"
         print(f"  eos_inside_prompt: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
-        return ok, detail
+        assert ok, detail
     finally:
         _teardown(model, ref_model)

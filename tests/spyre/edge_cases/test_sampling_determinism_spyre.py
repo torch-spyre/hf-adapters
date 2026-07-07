@@ -33,11 +33,6 @@ from model_registry import CAUSAL_PATHS
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
 def test_sampling_determinism_spyre(model_path: str) -> None:
-    ok, detail = _run_sampling_determinism(model_path)
-    assert ok, detail
-
-
-def _run_sampling_determinism(model_path: str) -> tuple[bool, str]:
     info, tokenizer, _, model = _setup(model_path, need_ref=False)
     try:
         sampling_prompts = make_prompts(tokenizer, SAMPLING_TARGETS)
@@ -67,6 +62,6 @@ def _run_sampling_determinism(model_path: str) -> tuple[bool, str]:
         ok = a1 == a2 and a1 != b
         detail = "" if ok else f"a1={a1!r} a2={a2!r} b={b!r}"
         print(f"  sampling_determinism: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
-        return ok, detail
+        assert ok, detail
     finally:
         _teardown(model, None)

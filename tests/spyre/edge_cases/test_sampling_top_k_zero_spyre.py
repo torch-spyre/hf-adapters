@@ -28,11 +28,6 @@ from model_registry import CAUSAL_PATHS
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
 def test_sampling_top_k_zero_spyre(model_path: str) -> None:
-    ok, detail = _run_top_k_zero(model_path)
-    assert ok, detail
-
-
-def _run_top_k_zero(model_path: str) -> tuple[bool, str]:
     info, tokenizer, _, model = _setup(model_path, need_ref=False)
     try:
         sampling_prompts = make_prompts(tokenizer, SAMPLING_TARGETS)
@@ -50,6 +45,6 @@ def _run_top_k_zero(model_path: str) -> tuple[bool, str]:
         ok = out1 == out2 and all(s for s in out1)
         detail = "" if ok else f"out1={out1!r} out2={out2!r}"
         print(f"  sampling_top_k_zero: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
-        return ok, detail
+        assert ok, detail
     finally:
         _teardown(model, None)

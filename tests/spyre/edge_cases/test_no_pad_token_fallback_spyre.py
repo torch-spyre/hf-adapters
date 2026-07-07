@@ -31,11 +31,6 @@ from model_registry import CAUSAL_PATHS
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
 def test_no_pad_token_fallback_spyre(model_path: str) -> None:
-    ok, detail = _run_no_pad(model_path)
-    assert ok, detail
-
-
-def _run_no_pad(model_path: str) -> tuple[bool, str]:
     info, tokenizer, ref_model, model = _setup(model_path, need_ref=True)
     try:
         no_pad_prompts = make_prompts(tokenizer, [5, 12])
@@ -52,6 +47,6 @@ def _run_no_pad(model_path: str) -> tuple[bool, str]:
         ok = all(hf.strip() == sp.strip() for hf, sp in zip(no_pad_refs, out))
         detail = "" if ok else f"hf={no_pad_refs!r} spyre={out!r}"
         print(f"  no_pad_token_fallback: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
-        return ok, detail
+        assert ok, detail
     finally:
         _teardown(model, ref_model)
