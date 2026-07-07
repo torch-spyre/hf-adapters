@@ -55,8 +55,6 @@ from _pytest.nodes import Item
 from _pytest.python import Metafunc
 from transformers import AutoModelForCausalLM
 
-from hf_adapters.hf_common import load_model_common
-
 # NOTE: do NOT import hf_adapters at module top level. The CPU patch block below
 # rebuilds ``hf_adapters.hf_common`` with ``DEVICE='cpu'`` and asserts that no
 # import has materialized it yet; a top-level import here would always trip that
@@ -232,6 +230,8 @@ def load_ref_model(
     adapter_mod: types.ModuleType | None = None,
     auto_model_cls: type = AutoModelForCausalLM,
 ):
+    from hf_adapters.hf_common import load_model_common
+
     dtype = get_dtype_for_cpu(model_path)
 
     ref_model = load_model_common(
