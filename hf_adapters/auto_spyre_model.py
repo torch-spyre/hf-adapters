@@ -145,7 +145,7 @@ IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     Granite4VisionConfig: hf_granite_vision_mm,
 }
 
-MODEL_PATH_TO_TORCH_DTYPE: dict = {
+MODEL_PATH_TO_TORCH_DTYPE: dict[str, torch.dtype] = {
     "mistralai/Ministral-3-14B-Instruct-2512": torch.bfloat16,
     "google/embeddinggemma-300m": torch.bfloat16,
     "ibm-granite/granite-4.0-1b-base": torch.float32,
@@ -192,7 +192,7 @@ class AutoSpyreModel:
             model_name_or_path=model_name_or_path, mapping=cls._module_mapping
         )
 
-        model = load_model_common(
+        model: torch.nn.Module = load_model_common(
             model_name_or_path,
             module,
             dtype,
@@ -229,7 +229,7 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
 
             return generate(module._run_forward, self, tokenizer, prompts, **kwargs)
 
-        model.generate = MethodType(model_generate, model)
+        model.generate = MethodType(model_generate, model)  # type: ignore[assignment]
 
         return model
 
@@ -292,8 +292,8 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
                 **kwargs,
             )
 
-        model.prefill_logits = MethodType(model_prefill_logits, model)
-        model.generate = MethodType(model_generate, model)
+        model.prefill_logits = MethodType(model_prefill_logits, model)  # type: ignore[assignment]
+        model.generate = MethodType(model_generate, model)  # type: ignore[assignment]
         return model
 
 
