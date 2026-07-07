@@ -1126,7 +1126,7 @@ def get_model_dtype(model: nn.Module) -> torch.dtype:
     return torch.float16
 
 
-def move_to_spyre_with_layout(model, dtype):
+def _move_to_spyre_with_layout(model, dtype):
     """Move all parameters and buffers to Spyre with row-major layout for 2D
     matmul weights, except embedding weights which keep the default layout.
     """
@@ -1188,12 +1188,12 @@ def move_to_spyre_with_layout(model, dtype):
         owner.register_buffer(attr, new, persistent=persistent)
 
 
-def load_model_common(model_path, prepare_fn, dtype=torch.float16, auto_model_cls=None):
-    """Load an HF model, apply Spyre adaptations, move to device.
+def load_model_common(model_path, module, dtype=torch.float16, auto_model_cls=None):
+    """Load an HF model.
 
     Args:
         model_path: HF model path or local directory.
-        prepare_fn: Model-specific ``prepare_for_spyre(model)`` callable.
+        module: HF model module
         dtype: Weight dtype (default fp16).
         auto_model_cls: HF auto-model class to use (e.g. ``AutoModel``,
             ``AutoModelForCausalLM``). Defaults to ``AutoModel``.
@@ -1203,21 +1203,29 @@ def load_model_common(model_path, prepare_fn, dtype=torch.float16, auto_model_cl
 
         auto_model_cls = AutoModel
 
-    _patch_torch_empty()
     print(f"Loading model from {model_path} ...")
-    model = auto_model_cls.from_pretrained(
-        model_path,
-        dtype=dtype,
-        device_map="cpu",
-    )
+
+    if hasattr(module, "load_hf_model"):
+        model = module.load_hf_model(model_path, dtype)
+    else:
+        model = auto_model_cls.from_pretrained(
+            model_path,
+            dtype=dtype,
+            device_map="cpu",
+        )
+
     model.eval()
     model.requires_grad_(False)
-    untie_embedding_and_lm_head(model)
-    prepare_fn(model)
-    print("Moving model to Spyre ...")
-    move_to_spyre_with_layout(model, dtype)
-    print("Model ready.")
     return model
+
+
+def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
+    untie_embedding_and_lm_head(model)
+    module.prepare_for_spyre(model)
+    print("Moving model to Spyre ...")
+    _patch_torch_empty()
+    _move_to_spyre_with_layout(model, dtype)
+    print("Model on Spyre ready.")
 
 
 # ---------------------------------------------------------------------------

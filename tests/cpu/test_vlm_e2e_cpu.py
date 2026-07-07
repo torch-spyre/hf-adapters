@@ -36,13 +36,14 @@ import types
 
 import pytest
 import torch
+from transformers import AutoModelForImageTextToText
 
 from hf_adapters.auto_spyre_model import (
     IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
     resolve_adapter_module,
 )
 from tests._vision_helpers import build_vlm_batch, stock_vlm_generate
-from tests.conftest import load_hf_vlm, torch_dtype_for_model_path
+from tests.conftest import get_dtype_for_cpu, load_ref_model
 from tests.model_registry import VISION_PATHS
 
 MAX_NEW_TOKENS: int = 16
@@ -74,19 +75,22 @@ def _adapter_generate(
     )
 
 
-@pytest.mark.slow
 @pytest.mark.parametrize("model_path", VISION_PATHS, ids=VISION_PATHS)
 def test_vlm_generate(model_path: str, unwrap_compiled_blocks) -> None:
     adapter = resolve_adapter_module(
         model_path, mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING
     )
-    dtype = torch_dtype_for_model_path(model_path)
+    dtype = get_dtype_for_cpu(model_path=model_path)
 
     processor, batch = build_vlm_batch(model_path, PROMPT)
     batch["pixel_values"] = batch["pixel_values"].to(dtype)
 
     # --- Adapter generate (greedy) ---
-    model = load_hf_vlm(model_path, dtype, adapter_mod=adapter)
+    model = load_ref_model(
+        model_path=model_path,
+        adapter_mod=adapter,
+        auto_model_cls=AutoModelForImageTextToText,
+    )
     adapter.prepare_for_spyre(model)
     unwrap_compiled_blocks(model)
     with torch.no_grad():
@@ -97,7 +101,13 @@ def test_vlm_generate(model_path: str, unwrap_compiled_blocks) -> None:
     gc.collect()
 
     # --- Stock reference: the FULL model.generate() (real deepstack) ---
-    ref_text = stock_vlm_generate(model_path, processor, batch, dtype, MAX_NEW_TOKENS)
+    ref_text = stock_vlm_generate(
+        model_path=model_path,
+        processor=processor,
+        batch=batch,
+        max_new_tokens=MAX_NEW_TOKENS,
+        adapter_mod=adapter,
+    )
     gc.collect()
 
     # Print both captions so a human can eyeball the result (visible with -s).

@@ -28,14 +28,15 @@ import gc
 
 import pytest
 
-from tests.conftest import torch_dtype_for_model_path
+from tests.conftest import get_dtype_for_cpu
 from tests.model_registry import CAUSAL_PATHS, EMBED_PATHS
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 def test_load_causal_lm(model_path, auto_spyre_model):
+    dtype = get_dtype_for_cpu(model_path)
     model = auto_spyre_model.AutoSpyreModelForCausalLM.from_pretrained(
-        model_path, dtype=torch_dtype_for_model_path(model_path)
+        model_path, dtype=dtype
     )
     assert model is not None
     assert callable(
@@ -47,9 +48,8 @@ def test_load_causal_lm(model_path, auto_spyre_model):
 
 @pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
 def test_load_embedding(model_path, auto_spyre_model):
-    model = auto_spyre_model.AutoSpyreModel.from_pretrained(
-        model_path, dtype=torch_dtype_for_model_path(model_path)
-    )
+    dtype = get_dtype_for_cpu(model_path)
+    model = auto_spyre_model.AutoSpyreModel.from_pretrained(model_path, dtype=dtype)
     assert model is not None
     del model
     gc.collect()
