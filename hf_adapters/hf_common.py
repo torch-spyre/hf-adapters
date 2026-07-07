@@ -1189,7 +1189,7 @@ def move_to_spyre_with_layout(model, dtype):
 
 
 def load_model_common(model_path, module, dtype=torch.float16, auto_model_cls=None):
-    """Load an HF model, apply Spyre adaptations, move to device.
+    """Load an HF model.
 
     Args:
         model_path: HF model path or local directory.
@@ -1203,7 +1203,6 @@ def load_model_common(model_path, module, dtype=torch.float16, auto_model_cls=No
 
         auto_model_cls = AutoModel
 
-    _patch_torch_empty()
     print(f"Loading model from {model_path} ...")
 
     if hasattr(module, "load_hf_model"):
@@ -1217,12 +1216,16 @@ def load_model_common(model_path, module, dtype=torch.float16, auto_model_cls=No
 
     model.eval()
     model.requires_grad_(False)
+    return model
+
+
+def move_model_to_spyre(d_type: torch.dtype, model, module):
     untie_embedding_and_lm_head(model)
     module.prepare_fn(model)
     print("Moving model to Spyre ...")
-    move_to_spyre_with_layout(model, dtype)
-    print("Model ready.")
-    return model
+    _patch_torch_empty()
+    move_to_spyre_with_layout(model, d_type)
+    print("Model on Spyre ready.")
 
 
 # ---------------------------------------------------------------------------

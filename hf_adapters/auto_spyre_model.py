@@ -102,6 +102,7 @@ from hf_adapters.hf_common import (
     SpyreNoAdapterError,
     assert_spyre_dimensions,
     load_model_common,
+    move_model_to_spyre,
 )
 
 CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
@@ -192,7 +193,7 @@ class AutoSpyreModel:
             dtype,
             auto_model_cls=cls._auto_model_cls,
         )
-
+        move_model_to_spyre(dtype, model, module)
         return model
 
 
