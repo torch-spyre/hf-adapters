@@ -67,40 +67,6 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADAPTERS_DIR = os.path.join(REPO_ROOT, "hf_adapters")
 
 # ---------------------------------------------------------------------------
-# Shared helpers — available to all test lanes via `from conftest import ...`
-# ---------------------------------------------------------------------------
-
-
-def load_hf_vlm(model_path, torch_dtype, adapter_mod=None):
-    """Load the HF multimodal (image→text) reference, honoring ``load_fn``.
-
-    Mirrors :func:`load_hf_causal_lm` for VLM adapters: when ``load_fn`` is set,
-    the adapter module is expected to expose ``load_hf_model(path, dtype)`` (a
-    non-standard loading path); otherwise the stock
-    ``AutoModelForImageTextToText`` auto class is used.
-    """
-    from hf_adapters.auto_spyre_model import MODEL_PATH_TO_TORCH_DTYPE
-
-    dtype = MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
-
-    ref_model = load_model_common(
-        model_path=model_path,
-        module=adapter_mod,
-        dtype=dtype,
-        auto_model_cls=AutoModelForCausalLM,
-    )
-    return ref_model
-
-    if hasattr(adapter_mod, "load_hf_model"):
-        return adapter_mod.load_hf_model(model_path, torch_dtype)
-    from transformers import AutoModelForImageTextToText
-
-    return AutoModelForImageTextToText.from_pretrained(
-        model_path, dtype=torch_dtype, device_map="cpu"
-    )
-
-
-# ---------------------------------------------------------------------------
 
 # Make tests/ importable so model_registry and helpers resolve from any subdir.
 _TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
