@@ -25,6 +25,7 @@ fully deterministic across runs.
 from __future__ import annotations
 
 import torch
+from conftest import load_ref_model
 from huggingface_hub import hf_hub_download
 from PIL import Image
 from transformers import AutoProcessor
@@ -102,6 +103,7 @@ def stock_vlm_generate(
     model_path: str,
     processor: AutoProcessor,
     batch: dict[str, torch.Tensor],
+    adapter_mod,
     max_new_tokens: int,
 ) -> str:
     """Reference: stock ``AutoModelForImageTextToText.generate`` on ``batch``.
@@ -111,10 +113,12 @@ def stock_vlm_generate(
     """
     from transformers import AutoModelForImageTextToText
 
-    dtype = MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
-    ref_model = AutoModelForImageTextToText.from_pretrained(
-        model_path, dtype=dtype, device_map="cpu"
-    ).eval()
+    ref_model = load_ref_model(
+        model_path=model_path,
+        adapter_mod=adapter_mod,
+        auto_model_cls=AutoModelForImageTextToText,
+    )
+
     prompt_len = batch["input_ids"].shape[1]
     with torch.no_grad():
         gen = ref_model.generate(
