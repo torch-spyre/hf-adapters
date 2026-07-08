@@ -189,8 +189,6 @@ def main(argv: list[str] | None = None) -> None:
     add_dates: dict[str, str | None] = _adapter_add_dates()
     # _print_adapter_add_dates(add_dates)
     preexisting: set = _repos_with_weights()
-    preex_list = ".\n".join(list(preexisting))
-    print(f"Pre-existing repos: {preex_list}")
     # supported_list = list(iter_supported_rows(args.path))
     # supported_rows = {r["model_id"]: r for r in supported_list}
     total_freed = 0
