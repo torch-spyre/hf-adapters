@@ -18,6 +18,7 @@ import traceback
 from datetime import date
 from pathlib import Path
 
+from cpu.test_load_cpu import _load_embedding
 from test_e2e_embed_compare_spyre import embed_compare_spyre
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -133,15 +134,30 @@ def _print_adapter_add_dates(add_dates: dict[str, str | None]) -> None:
         print(f"  {'unknown':<10}  {module:<{name_w}}")
 
 
-def eval_embedding_on_spyre(model_id: str) -> dict:
+def eval_embedding(model_id: str) -> dict:
+    load_on_cpu = False
+    loads_on_spyre = False
+    mismatches = True
+
     """Load and compare embeddings for one model. Returns a metrics dict."""
-    loads, _ = load_embedding(model_id)
-    mismatches, _ = embed_compare_spyre(model_id)
-    return {
-        "correct": loads and not mismatches,
-        "load": loads,
-        "compare_spyre": not mismatches,
-    }
+    try:
+        # First we check that it is loadable on cpu:
+        import hf_adapters.auto_spyre_model as auto_spyre_model
+
+        model_on_cpu = _load_embedding(
+            model_path=model_id, auto_spyre_model=auto_spyre_model
+        )
+        load_on_cpu = model_on_cpu is not None
+        del model_on_cpu
+
+        loads_on_spyre, _ = load_embedding(model_id)
+        mismatches, _ = embed_compare_spyre(model_id)
+    finally:
+        return {
+            "correct": loads_on_spyre and not mismatches,
+            "load": load_on_cpu,
+            "compare_spyre": not mismatches,
+        }
 
 
 def _delete_repo_weights(repo_id):
@@ -260,7 +276,7 @@ def main(argv: list[str] | None = None) -> None:
                         f"exceeding the 60B limit for Spyre bring-up."
                     )
 
-                metrics = eval_embedding_on_spyre(model_path)
+                metrics = eval_embedding(model_path)
 
                 # TODO
                 rec["verified_on_cpu"] = metrics.get("load", False)

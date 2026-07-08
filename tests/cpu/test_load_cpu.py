@@ -25,6 +25,8 @@ DEVICE='cpu' patching of ``hf_common`` happens once in ``tests/conftest.py``.
 """
 
 import gc
+from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -48,8 +50,13 @@ def test_load_causal_lm(model_path, auto_spyre_model):
 
 @pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
 def test_load_embedding(model_path, auto_spyre_model):
-    dtype = get_dtype_for_cpu(model_path)
-    model = auto_spyre_model.AutoSpyreModel.from_pretrained(model_path, dtype=dtype)
+    model = _load_embedding(auto_spyre_model, model_path)
     assert model is not None
     del model
     gc.collect()
+
+
+def _load_embedding(auto_spyre_model: ModuleType, model_path: str) -> Any:
+    dtype = get_dtype_for_cpu(model_path)
+    model = auto_spyre_model.AutoSpyreModel.from_pretrained(model_path, dtype=dtype)
+    return model
