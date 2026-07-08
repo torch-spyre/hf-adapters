@@ -51,12 +51,6 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Put the repo root on sys.path so ``from tests.conftest import ...`` and
-# ``from tests.model_registry import ...`` resolve regardless of pytest's
-# import mode, cwd, or version. Without this, whether ``tests`` is importable
-# as a package depends on which dir pytest happens to prepend (repo root vs.
-# the test file's own dir), which broke Spyre-lane collection on the pod.
-pythonpath = ["."]
 # Spyre-pod-only tests live under tests/spyre/. They import torch_spyre and
 # need DEVICE="spyre" (the parent tests/conftest.py CPU-patches hf_adapters
 # for the rest of the tests/ tree). Default pytest runs from the repo root
