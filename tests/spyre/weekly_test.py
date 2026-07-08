@@ -19,6 +19,8 @@ import traceback
 from datetime import date
 from pathlib import Path
 
+from conftest import get_dtype_for_cpu
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SPYRE_TESTS_DIR = _REPO_ROOT / "tests" / "spyre"
 _TESTS_DIR = _REPO_ROOT / "tests"
@@ -32,7 +34,6 @@ from test_e2e_embed_compare_spyre import embed_compare_spyre  # noqa: E402
 from test_load_spyre import load_embedding  # noqa: E402
 
 from hf_adapters.auto_spyre_model import resolve_adapter_module  # noqa: E402
-from tests.cpu.test_load_cpu import load_embedding as cpu_load_embedding  # noqa: E402
 from tests.spyre.create_model_spyre_table import (  # noqa: E402
     CREATE_TABLE_SQL,
     get_client,
@@ -161,6 +162,20 @@ def _temp_boolean_random() -> bool:
     return random.choice([True, False])
 
 
+def _load_embedding(model_path: str) -> bool:
+    from hf_adapters.auto_spyre_model import (
+        AutoSpyreModel,
+    )  # noqa: E402
+
+    try:
+        dtype = get_dtype_for_cpu(model_path)
+        model = AutoSpyreModel.from_pretrained(model_path, dtype=dtype)
+        return model is not None
+    except Exception as e:
+        print(e)
+        return False
+
+
 def eval_embedding(model_id: str, boolean_run: bool = False) -> dict:
     load_on_cpu = False
     loads_on_spyre = False
@@ -169,11 +184,7 @@ def eval_embedding(model_id: str, boolean_run: bool = False) -> dict:
     """Load and compare embeddings for one model. Returns a metrics dict."""
     try:
         # First we check that it is loadable on cpu:
-        import hf_adapters.auto_spyre_model as auto_spyre_model
-
-        model_on_cpu = cpu_load_embedding(
-            model_path=model_id, auto_spyre_model=auto_spyre_model
-        )
+        model_on_cpu = _load_embedding(model_path=model_id)
         load_on_cpu = model_on_cpu is not None
         del model_on_cpu
 
@@ -183,6 +194,8 @@ def eval_embedding(model_id: str, boolean_run: bool = False) -> dict:
         else:
             loads_on_spyre, _ = load_embedding(model_id)
             mismatches, _ = embed_compare_spyre(model_id)
+    except Exception as e:
+        print(e)
     finally:
         return {
             "correct": loads_on_spyre and not mismatches,
