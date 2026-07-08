@@ -10,6 +10,7 @@ Run directly to perform the fetch step::
 """
 
 import argparse
+import csv
 import os
 import subprocess
 import sys
@@ -26,6 +27,9 @@ for _p in (_SPYRE_TESTS_DIR, _TESTS_DIR, _UTILS_DIR, _REPO_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+
+from test_e2e_embed_compare_spyre import embed_compare_spyre  # noqa: E402
+from test_load_spyre import load_embedding  # noqa: E402
 
 from hf_adapters.auto_spyre_model import resolve_adapter_module  # noqa: E402
 from tests.cpu.test_load_cpu import load_embedding as cpu_load_embedding  # noqa: E402
@@ -116,6 +120,25 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Destination CSV (defaults to resources/top_embedding_models.csv).",
     )
+    parser.add_argument(
+        "--write-to-csv",
+        type=Path,
+        default=None,
+        metavar="RESULTS_CSV",
+        help=(
+            "Write evaluation results to this CSV file instead of inserting "
+            "into ClickHouse. No DB connection is made when this flag is set."
+        ),
+    )
+    parser.add_argument(
+        "--boolean-run",
+        action="store_true",
+        default=False,
+        help=(
+            "Replace Spyre evaluation calls with random boolean stubs "
+            "(_temp_boolean_random). Useful for dry-runs without Spyre hardware."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -138,7 +161,7 @@ def _temp_boolean_random() -> bool:
     return random.choice([True, False])
 
 
-def eval_embedding(model_id: str) -> dict:
+def eval_embedding(model_id: str, boolean_run: bool = False) -> dict:
     load_on_cpu = False
     loads_on_spyre = False
     mismatches = True
@@ -154,8 +177,12 @@ def eval_embedding(model_id: str) -> dict:
         load_on_cpu = model_on_cpu is not None
         del model_on_cpu
 
-        loads_on_spyre, _ = _temp_boolean_random()  # load_embedding(model_id)
-        mismatches, _ = _temp_boolean_random()  # embed_compare_spyre(model_id)
+        if boolean_run:
+            loads_on_spyre, _ = _temp_boolean_random()
+            mismatches, _ = _temp_boolean_random()
+        else:
+            loads_on_spyre, _ = load_embedding(model_id)
+            mismatches, _ = embed_compare_spyre(model_id)
     finally:
         return {
             "correct": loads_on_spyre and not mismatches,
@@ -221,13 +248,20 @@ def main(argv: list[str] | None = None) -> None:
         limit=args.top_k, output_csv=args.output_csv
     )
 
-    # Ensure the ClickHouse table exists before processing any models.
-    db_client = get_client()
-    if not table_exists(db_client):
-        db_client.command(CREATE_TABLE_SQL)
-        print("ClickHouse: table created.\n")
+    # ClickHouse setup — skipped when --write-to-csv is given.
+    db_client = None
+    csv_rows: list[dict] = []
+    if args.write_to_csv:
+        print(
+            f"CSV mode: results will be written to '{args.write_to_csv}' (no DB access).\n"
+        )
     else:
-        print("ClickHouse: table already exists.\n")
+        db_client = get_client()
+        if not table_exists(db_client):
+            db_client.command(CREATE_TABLE_SQL)
+            print("ClickHouse: table created.\n")
+        else:
+            print("ClickHouse: table already exists.\n")
 
     total = len(supported_list)
     processed = 0
@@ -283,7 +317,7 @@ def main(argv: list[str] | None = None) -> None:
                         f"Model {model_path} has {int(params):,} parameters, "
                     )
 
-                metrics = eval_embedding(model_path)
+                metrics = eval_embedding(model_path, boolean_run=args.boolean_run)
 
                 rec["verified_on_cpu"] = metrics.get("load", False)
                 rec["verified_on_spyre"] = metrics.get("correct", False)
@@ -305,22 +339,26 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 print("".join(traceback.format_exc().splitlines(keepends=True)[-6:]))
 
-            inserted = insert_model_row(
-                db_client,
-                model_name=rec["model_name"],
-                architecture=rec["architecture"],
-                adapter_name=rec["adapter_name"],
-                added_date=rec["added_date"],
-                snapshot_date=rec["snapshot_date"],
-                verified_on_cpu=rec["verified_on_cpu"],
-                verified_on_gpu=rec["verified_on_gpu"],
-                verified_on_spyre=rec["verified_on_spyre"],
-                num_downloads=rec["num_downloads"],
-            )
-            if inserted:
-                print(f"    db: row inserted for '{model_path}'")
+            if args.write_to_csv:
+                csv_rows.append(rec)
+                print(f"    csv: row queued for '{model_path}'")
             else:
-                print(f"    db: row skipped for '{model_path}' (guard rejected)")
+                inserted = insert_model_row(
+                    db_client,
+                    model_name=rec["model_name"],
+                    architecture=rec["architecture"],
+                    adapter_name=rec["adapter_name"],
+                    added_date=rec["added_date"],
+                    snapshot_date=rec["snapshot_date"],
+                    verified_on_cpu=rec["verified_on_cpu"],
+                    verified_on_gpu=rec["verified_on_gpu"],
+                    verified_on_spyre=rec["verified_on_spyre"],
+                    num_downloads=rec["num_downloads"],
+                )
+                if inserted:
+                    print(f"    db: row inserted for '{model_path}'")
+                else:
+                    print(f"    db: row skipped for '{model_path}' (guard rejected)")
 
             # Cache cleanup: weights absent at start -> delete downloaded weights.
             if not had_weights:
@@ -334,6 +372,25 @@ def main(argv: list[str] | None = None) -> None:
     except KeyboardInterrupt:
         print("\nInterrupted — results so far are saved; rerun to resume.")
     finally:
+        if args.write_to_csv and csv_rows:
+            _FIELDNAMES = [
+                "model_name",
+                "architecture",
+                "adapter_name",
+                "added_date",
+                "snapshot_date",
+                "verified_on_cpu",
+                "verified_on_gpu",
+                "verified_on_spyre",
+                "num_downloads",
+            ]
+            args.write_to_csv.parent.mkdir(parents=True, exist_ok=True)
+            with open(args.write_to_csv, "w", newline="") as fh:
+                writer = csv.DictWriter(fh, fieldnames=_FIELDNAMES)
+                writer.writeheader()
+                writer.writerows(csv_rows)
+            print(f"\nCSV: {len(csv_rows)} rows written to '{args.write_to_csv}'")
+
         overall_elapsed = time.monotonic() - overall_start
         mins, secs = divmod(int(overall_elapsed), 60)
         print(
