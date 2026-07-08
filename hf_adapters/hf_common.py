@@ -1203,8 +1203,6 @@ def load_model_common(model_path, module, dtype=torch.float16, auto_model_cls=No
 
         auto_model_cls = AutoModel
 
-    print(f"Loading model from {model_path} ...")
-
     if hasattr(module, "load_hf_model"):
         model = module.load_hf_model(model_path, dtype)
     else:
