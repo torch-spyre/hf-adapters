@@ -14,13 +14,37 @@
 
 """Spyre edge case: ``sampling_top_k_zero`` (top_k=0 -> deterministic)."""
 
+from __future__ import annotations
+
+import time
+
 import pytest
-from _shared import run_top_k_zero
+import torch
+from _generate_edge_case_helpers import SAMPLING_MAX_NEW, SAMPLING_TARGETS, make_prompts
+from edge_cases._shared import _setup, _teardown
 from model_registry import CAUSAL_PATHS
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
 def test_sampling_top_k_zero_spyre(model_path: str) -> None:
-    ok, detail = run_top_k_zero(model_path)
-    assert ok, detail
+    info, tokenizer, _, model = _setup(model_path, need_ref=False)
+    try:
+        sampling_prompts = make_prompts(tokenizer, SAMPLING_TARGETS)
+        kwargs = dict(do_sample=True, temperature=1.0, top_k=0)
+        t0 = time.time()
+        torch.manual_seed(2024)
+        out1 = model.generate(
+            tokenizer, sampling_prompts, max_new_tokens=SAMPLING_MAX_NEW, **kwargs
+        )
+        torch.manual_seed(2024)
+        out2 = model.generate(
+            tokenizer, sampling_prompts, max_new_tokens=SAMPLING_MAX_NEW, **kwargs
+        )
+        elapsed = time.time() - t0
+        ok = out1 == out2 and all(s for s in out1)
+        detail = "" if ok else f"out1={out1!r} out2={out2!r}"
+        print(f"  sampling_top_k_zero: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
+        assert ok, detail
+    finally:
+        _teardown(model, None)

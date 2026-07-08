@@ -72,6 +72,7 @@ from transformers import (
     XLMRobertaConfig,
 )
 from transformers.configuration_utils import PretrainedConfig
+from transformers.models.ministral.configuration_ministral import MinistralConfig
 from transformers.models.mistral3.configuration_mistral3 import Mistral3Config
 
 from hf_adapters import (
@@ -86,6 +87,7 @@ from hf_adapters import (
     hf_granite_vision_mm,
     hf_granitemoehybrid,
     hf_llama,
+    hf_ministral,
     hf_mistral,
     hf_mistral3,
     hf_mistral3_vision_mm,
@@ -103,6 +105,7 @@ from hf_adapters.hf_common import (
     SpyreNoAdapterError,
     assert_spyre_dimensions,
     load_model_common,
+    move_model_to_spyre,
 )
 
 CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
@@ -121,6 +124,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     GraniteMoeHybridConfig: hf_granitemoehybrid,
     LlamaConfig: hf_llama,
     MistralConfig: hf_mistral,
+    MinistralConfig: hf_ministral,
     Mistral3Config: hf_mistral3,
     ModernBertConfig: hf_modernbert,
     MPNetConfig: hf_mpnet,
@@ -146,7 +150,7 @@ IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     Mistral3Config: hf_mistral3_vision_mm
 }
 
-MODEL_PATH_TO_TORCH_DTYPE: dict = {
+MODEL_PATH_TO_TORCH_DTYPE: dict[str, torch.dtype] = {
     "mistralai/Ministral-3-14B-Instruct-2512": torch.bfloat16,
     "google/embeddinggemma-300m": torch.bfloat16,
     "ibm-granite/granite-4.0-1b-base": torch.float32,
@@ -179,6 +183,9 @@ class AutoSpyreModel:
     """
 
     _auto_model_cls = AutoModel
+    _module_mapping: dict[type[PretrainedConfig], ModuleType] = (
+        CONFIG_TO_ADAPTER_MODULE_MAPPING
+    )
 
     @classmethod
     def from_pretrained(
@@ -186,18 +193,17 @@ class AutoSpyreModel:
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype = torch.float16,
     ) -> torch.nn.Module:
-        module: ModuleType = resolve_adapter_module(model_name_or_path)
+        module: ModuleType = resolve_adapter_module(
+            model_name_or_path=model_name_or_path, mapping=cls._module_mapping
+        )
 
-        if hasattr(module, "load_model"):
-            model: torch.nn.Module = module.load_model(model_name_or_path, dtype)
-        else:
-            model = load_model_common(
-                model_name_or_path,
-                module.prepare_for_spyre,
-                dtype,
-                auto_model_cls=cls._auto_model_cls,
-            )
-
+        model: torch.nn.Module = load_model_common(
+            model_name_or_path,
+            module,
+            dtype,
+            auto_model_cls=cls._auto_model_cls,
+        )
+        move_model_to_spyre(model, module, dtype)
         return model
 
 
@@ -228,7 +234,7 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
 
             return generate(module._run_forward, self, tokenizer, prompts, **kwargs)
 
-        model.generate = MethodType(model_generate, model)
+        model.generate = MethodType(model_generate, model)  # type: ignore[assignment]
 
         return model
 
@@ -243,6 +249,9 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
     """
 
     _auto_model_cls = AutoModelForImageTextToText  # type: ignore[assignment]
+    _module_mapping: dict[type[PretrainedConfig], ModuleType] = (
+        IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING
+    )
 
     @classmethod
     def from_pretrained(
@@ -252,7 +261,7 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
     ):
         module: ModuleType = resolve_adapter_module(
             model_name_or_path,
-            mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+            mapping=cls._module_mapping,
         )
         model: torch.nn.Module = super().from_pretrained(
             model_name_or_path, dtype=dtype
@@ -288,6 +297,22 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
                 **kwargs,
             )
 
-        model.prefill_logits = MethodType(model_prefill_logits, model)
-        model.generate = MethodType(model_generate, model)
+        model.prefill_logits = MethodType(model_prefill_logits, model)  # type: ignore[assignment]
+        model.generate = MethodType(model_generate, model)  # type: ignore[assignment]
         return model
+
+
+def torch_dtype_for_model_path(model_path: str) -> torch.dtype:
+    """Resolve the Spyre-safe torch dtype for *model_path*.
+
+    Looks up *model_path* in ``MODEL_PATH_TO_TORCH_DTYPE``; defaults to
+    ``torch.float16`` when no entry is found. Registry entries of
+    ``torch.float32`` (e.g. Granite 4 1B, where fp16 overflows on CPU) are
+    downcast to ``torch.float16`` because Spyre does not support float32;
+    ``torch.bfloat16`` entries (e.g. EmbeddingGemma) are passed through
+    unchanged.
+    """
+    dtype = MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
+    if dtype == torch.float32:
+        return torch.float16
+    return dtype

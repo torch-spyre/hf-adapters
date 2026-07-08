@@ -46,8 +46,10 @@ import pytest
 import torch
 from transformers import AutoModel, AutoTokenizer
 
-from hf_adapters.auto_spyre_model import resolve_adapter_module
-from tests.conftest import torch_dtype_for_model_path
+from hf_adapters.auto_spyre_model import (
+    resolve_adapter_module,
+)
+from tests.conftest import get_dtype_for_cpu, load_ref_model
 from tests.cpu.conftest import encode_padded, min_cosine
 from tests.model_registry import EMBED_PATHS
 
@@ -77,66 +79,20 @@ def _run_prefill(
 
 
 @pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
-def test_manual_path(
-    model_path: str, unwrap_compiled_blocks, set_rope_dtype, hf_common_mod
-) -> None:
-    adapter_mod = resolve_adapter_module(model_path)
-    torch_dtype = torch_dtype_for_model_path(model_path)
-
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    input_ids, attention_mask = encode_padded(tokenizer, PROMPTS)
-
-    # HF reference
-    model = AutoModel.from_pretrained(model_path, dtype=torch_dtype, device_map="cpu")
-    model.eval()
-    model.requires_grad_(False)
-    with torch.no_grad():
-        ref_hidden = model(
-            input_ids=input_ids, attention_mask=attention_mask, return_dict=True
-        ).last_hidden_state
-    del model
-    gc.collect()
-
-    # Adapter (fresh load — prepare_for_spyre is destructive on the instance)
-    model = AutoModel.from_pretrained(model_path, dtype=torch_dtype, device_map="cpu")
-    model.eval()
-    model.requires_grad_(False)
-    adapter_mod.prepare_for_spyre(model)
-    # Manual path skips load_model_common; propagate the chosen dtype to the
-    # RoPE freq cache like the production move does (needed for bf16 models).
-    set_rope_dtype(model, torch_dtype)
-    unwrap_compiled_blocks(model)
-    with torch.no_grad():
-        adapter_hidden, _ = _run_prefill(
-            adapter_mod, hf_common_mod, model, input_ids, attention_mask
-        )
-    del model
-    gc.collect()
-
-    assert (
-        adapter_hidden.shape == ref_hidden.shape
-    ), f"shape mismatch: adapter {adapter_hidden.shape} vs ref {ref_hidden.shape}"
-    min_cos = min_cosine(adapter_hidden, ref_hidden, attention_mask)
-    assert (
-        min_cos >= COS_THRESHOLD
-    ), f"min per-token cosine {min_cos:.6f} < threshold {COS_THRESHOLD}"
-
-
-@pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
 def test_auto_loader(
     model_path: str, auto_spyre_model, unwrap_compiled_blocks, hf_common_mod
 ) -> None:
-    torch_dtype = torch_dtype_for_model_path(model_path)
+    torch_dtype = get_dtype_for_cpu(model_path=model_path)
+    adapter_module = resolve_adapter_module(model_path)
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     input_ids, attention_mask = encode_padded(tokenizer, PROMPTS)
 
     # HF reference (loaded fresh, before the auto-loader path).
-    ref_model = AutoModel.from_pretrained(
-        model_path, dtype=torch_dtype, device_map="cpu"
+    ref_model = load_ref_model(
+        model_path=model_path, adapter_mod=adapter_module, auto_model_cls=AutoModel
     )
-    ref_model.eval()
-    ref_model.requires_grad_(False)
+
     with torch.no_grad():
         ref_hidden = ref_model(
             input_ids=input_ids, attention_mask=attention_mask, return_dict=True
@@ -149,7 +105,6 @@ def test_auto_loader(
         model_path, dtype=torch_dtype
     )
     unwrap_compiled_blocks(model)
-    adapter_module = resolve_adapter_module(model_path)
     with torch.no_grad():
         adapter_hidden, _ = _run_prefill(
             adapter_module, hf_common_mod, model, input_ids, attention_mask

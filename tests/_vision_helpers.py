@@ -29,6 +29,8 @@ from huggingface_hub import hf_hub_download
 from PIL import Image
 from transformers import AutoProcessor
 
+from tests.conftest import load_ref_model
+
 # ── VLM (image→text) end-to-end helpers ──────────────────────────────────────
 #
 # These drive a full multimodal adapter (both towers) the way an application
@@ -47,7 +49,7 @@ SAMPLE_IMAGE = {
 }
 
 
-def load_sample_image() -> Image.Image:
+def _load_sample_image() -> Image.Image:
     """A real, recognizable hub image (a chonky cat) so a caption is judgeable.
 
     Downloaded at test time — no committed fixture. Human-eyeballable output is
@@ -81,7 +83,7 @@ def build_vlm_batch(
     processor.tokenizer.padding_side = "left"
 
     if image is None:
-        image = load_sample_image()
+        image = _load_sample_image()
     conv = [
         {
             "role": "user",
@@ -105,7 +107,7 @@ def stock_vlm_generate(
     model_path: str,
     processor: AutoProcessor,
     batch: dict[str, torch.Tensor],
-    dtype: torch.dtype,
+    adapter_mod,
     max_new_tokens: int,
 ) -> str:
     """Reference: stock ``AutoModelForImageTextToText.generate`` on ``batch``.
@@ -115,9 +117,12 @@ def stock_vlm_generate(
     """
     from transformers import AutoModelForImageTextToText
 
-    ref_model = AutoModelForImageTextToText.from_pretrained(
-        model_path, dtype=dtype, device_map="cpu"
-    ).eval()
+    ref_model = load_ref_model(
+        model_path=model_path,
+        adapter_mod=adapter_mod,
+        auto_model_cls=AutoModelForImageTextToText,
+    )
+
     prompt_len = batch["input_ids"].shape[1]
     with torch.no_grad():
         gen = ref_model.generate(
@@ -129,44 +134,3 @@ def stock_vlm_generate(
     text = processor.tokenizer.decode(gen[0, prompt_len:], skip_special_tokens=True)
     del ref_model
     return text
-
-
-def stock_vlm_greedy_steps(
-    model_path: str,
-    batch: dict[str, torch.Tensor],
-    dtype: torch.dtype,
-    num_steps: int,
-) -> tuple[list[torch.Tensor], list[int]]:
-    """Stock HF per-step greedy logits + token ids over prefill + decode.
-
-    Runs ``AutoModelForImageTextToText.generate`` greedily for ``num_steps``
-    tokens with ``output_logits=True`` and returns ``(logits, token_ids)``:
-
-    - ``logits``: list of ``num_steps`` fp32 ``[vocab]`` tensors — the
-      distribution stock greedily picked each generated token from (step 0 =
-      prefill / first token, step k = after k generated tokens).
-    - ``token_ids``: the ``num_steps`` greedily chosen ids (``logits[i].argmax()``).
-
-    The Spyre e2e test uses ``token_ids`` as the teacher-forcing sequence and
-    ``logits`` as the per-step top-1 reference, so the adapter is compared on the
-    *same* prefix at every step (no greedy-fork amplification).
-    """
-    from transformers import AutoModelForImageTextToText
-
-    ref_model = AutoModelForImageTextToText.from_pretrained(
-        model_path, dtype=dtype, device_map="cpu"
-    ).eval()
-    with torch.no_grad():
-        gen = ref_model.generate(
-            **batch,
-            max_new_tokens=num_steps,
-            do_sample=False,
-            use_cache=True,
-            output_logits=True,
-            return_dict_in_generate=True,
-        )
-    logits = [step[0].float().clone() for step in gen.logits]
-    prompt_len = batch["input_ids"].shape[1]
-    token_ids = gen.sequences[0, prompt_len : prompt_len + num_steps].tolist()
-    del ref_model
-    return logits, token_ids
