@@ -12,6 +12,7 @@ Run directly to perform the fetch step::
 import argparse
 import csv
 import os
+import random
 import subprocess
 import sys
 import time
@@ -19,7 +20,7 @@ import traceback
 from datetime import date
 from pathlib import Path
 
-from conftest import get_dtype_for_cpu
+from tests.conftest import get_dtype_for_cpu
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SPYRE_TESTS_DIR = _REPO_ROOT / "tests" / "spyre"
@@ -143,26 +144,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _print_adapter_add_dates(add_dates: dict[str, str | None]) -> None:
-    """Print adapters sorted oldest→newest, aligned, with an `unknown` bucket."""
-    dated = [(d, m) for m, d in add_dates.items() if d]
-    undated = sorted(m for m, d in add_dates.items() if not d)
-
-    name_w = max((len(m) for m in add_dates), default=0)
-    print(f"Adapter add-dates ({len(add_dates)} modules):")
-    for date_, module in sorted(dated):
-        print(f"  {date_}  {module:<{name_w}}")
-    for module in undated:
-        print(f"  {'unknown':<10}  {module:<{name_w}}")
-
-
 def _temp_boolean_random() -> bool:
-    import random
-
     return random.choice([True, False])
 
 
-def _load_embedding(model_path: str) -> bool:
+def _load_embedding_on_cpu(model_path: str) -> bool:
     from hf_adapters.auto_spyre_model import (
         AutoSpyreModel,
     )  # noqa: E402
@@ -172,7 +158,7 @@ def _load_embedding(model_path: str) -> bool:
         model = AutoSpyreModel.from_pretrained(model_path, dtype=dtype)
         return model is not None
     except Exception as e:
-        print(e)
+        print(f"_load_embedding_on_cpu exception - {e}")
         return False
 
 
@@ -184,7 +170,7 @@ def eval_embedding(model_id: str, boolean_run: bool = False) -> dict:
     """Load and compare embeddings for one model. Returns a metrics dict."""
     try:
         # First we check that it is loadable on cpu:
-        model_on_cpu = _load_embedding(model_path=model_id)
+        model_on_cpu = _load_embedding_on_cpu(model_path=model_id)
         load_on_cpu = model_on_cpu is not None
         del model_on_cpu
 
@@ -195,7 +181,7 @@ def eval_embedding(model_id: str, boolean_run: bool = False) -> dict:
             loads_on_spyre, _ = load_embedding(model_id)
             mismatches, _ = embed_compare_spyre(model_id)
     except Exception as e:
-        print(e)
+        print(f"eval_embedding exception - {e}")
     finally:
         return {
             "correct": loads_on_spyre and not mismatches,
