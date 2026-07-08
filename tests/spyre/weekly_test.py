@@ -149,10 +149,11 @@ def _temp_boolean_random() -> bool:
 
 
 def _load_embedding_on_cpu(model_path: str) -> bool:
-    from hf_adapters.auto_spyre_model import (
-        AutoSpyreModel,
-    )  # noqa: E402
+    import hf_adapters.hf_common as _hf_common
+    from hf_adapters.auto_spyre_model import AutoSpyreModel
 
+    _orig_device = _hf_common.DEVICE  # save
+    _hf_common.DEVICE = "cpu"  # patch
     try:
         dtype = get_dtype_for_cpu(model_path)
         model = AutoSpyreModel.from_pretrained(model_path, dtype=dtype)
@@ -160,6 +161,8 @@ def _load_embedding_on_cpu(model_path: str) -> bool:
     except Exception as e:
         print(f"_load_embedding_on_cpu exception - {e}")
         return False
+    finally:
+        _hf_common.DEVICE = _orig_device  # restore
 
 
 def eval_embedding(model_id: str, boolean_run: bool = False) -> dict:
