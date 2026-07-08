@@ -70,30 +70,16 @@ from hf_adapters.hf_common import (
     get_backbone,
     get_model_dtype,
     make_standard_gqa_block,
-    move_to_spyre_with_layout,
     pad_and_position,
     pad_lm_head,
     patch_rmsnorm,
     prepare_rope_and_heads,
     select_next_token,
-    untie_embedding_and_lm_head,
 )
 
 # ---------------------------------------------------------------------------
 # Loading and preparation
 # ---------------------------------------------------------------------------
-
-
-def load_hf_model(model_path, dtype=torch.float16):
-    """Load the full Mistral3 VLM (both towers) as stock HF, on CPU."""
-    from transformers import AutoModelForImageTextToText
-
-    model = AutoModelForImageTextToText.from_pretrained(
-        model_path, dtype=dtype, device_map="cpu"
-    )
-    model.eval()
-    model.requires_grad_(False)
-    return model
 
 
 def prepare_for_spyre(model):
@@ -548,18 +534,3 @@ def generate(
             break
 
     return decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer)
-
-
-def load_model(model_path, dtype=torch.float16):
-    """Load Mistral3 Vision (both towers) and prepare for Spyre."""
-    model = load_hf_model(model_path, dtype)
-    actual_dtype = next(model.parameters()).dtype
-    untie_embedding_and_lm_head(model)
-    prepare_for_spyre(model)
-    print("Moving Mistral3 Vision (both towers) to Spyre ...")
-    move_to_spyre_with_layout(model, actual_dtype)
-    # Re-pin the projector to CPU after the layout move (same as prepare note).
-    if hasattr(model, "model") and hasattr(model.model, "multi_modal_projector"):
-        model.model.multi_modal_projector.to("cpu")
-    print("Model ready.")
-    return model
