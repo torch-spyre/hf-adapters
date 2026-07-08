@@ -117,12 +117,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Number of top embedding models to fetch (by downloads).",
     )
     parser.add_argument(
-        "--output-csv",
-        type=Path,
-        default=None,
-        help="Destination CSV (defaults to resources/top_embedding_models.csv).",
-    )
-    parser.add_argument(
         "--write-to-csv",
         type=Path,
         default=None,
@@ -246,9 +240,7 @@ def main(argv: list[str] | None = None) -> None:
     preexisting: set = _repos_with_weights()
     total_freed = 0
     snapshot_date = date.today()
-    supported_list = fetch_top_embedding_models(
-        limit=args.top_k, output_csv=args.output_csv
-    )
+    supported_list = fetch_top_embedding_models(limit=args.top_k)
 
     # ClickHouse setup — skipped when --write-to-csv is given.
     db_client = None
