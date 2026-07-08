@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 import traceback
-from datetime import datetime
+from datetime import date
 from pathlib import Path
 
 from test_e2e_embed_compare_spyre import embed_compare_spyre
@@ -32,6 +32,17 @@ from test_load_spyre import load_embedding  # noqa: E402
 
 from hf_adapters.auto_spyre_model import resolve_adapter_module  # noqa: E402
 from utils.fetch_top_embedding_models import fetch_top_embedding_models  # noqa: E402
+
+_GITHUB_SCRIPTS_DIR = _REPO_ROOT / ".github" / "scripts"
+if str(_GITHUB_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_GITHUB_SCRIPTS_DIR))
+
+from create_model_spyre_table import (  # noqa: E402
+    CREATE_TABLE_SQL,
+    get_client,
+    insert_model_row,
+    table_exists,
+)
 
 # Weight-file suffixes. A repo with at least one of these cached "has weights";
 # a repo with only config/tokenizer files does not, so its later-downloaded
@@ -122,8 +133,8 @@ def _print_adapter_add_dates(add_dates: dict[str, str | None]) -> None:
 
     name_w = max((len(m) for m in add_dates), default=0)
     print(f"Adapter add-dates ({len(add_dates)} modules):")
-    for date, module in sorted(dated):
-        print(f"  {date}  {module:<{name_w}}")
+    for date_, module in sorted(dated):
+        print(f"  {date_}  {module:<{name_w}}")
     for module in undated:
         print(f"  {'unknown':<10}  {module:<{name_w}}")
 
@@ -190,12 +201,19 @@ def main(argv: list[str] | None = None) -> None:
     add_dates: dict[str, str | None] = _adapter_add_dates()
     # _print_adapter_add_dates(add_dates)
     preexisting: set = _repos_with_weights()
-    # supported_list = list(iter_supported_rows(args.path))
-    # supported_rows = {r["model_id"]: r for r in supported_list}
     total_freed = 0
+    snapshot_date = date.today()
     supported_list = fetch_top_embedding_models(
         limit=args.top_k, output_csv=args.output_csv
     )
+
+    # Ensure the ClickHouse table exists before processing any models.
+    db_client = get_client()
+    if not table_exists(db_client):
+        db_client.command(CREATE_TABLE_SQL)
+        print("ClickHouse: table created.\n")
+    else:
+        print("ClickHouse: table already exists.\n")
 
     total = len(supported_list)
     processed = 0
@@ -203,8 +221,9 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         for row in supported_list:
-            model_path = row["model_id"]
+            model_path = str(row["model_id"])
             csv_config_class = row.get("config_class")
+            print(f"csv_config_class: {csv_config_class}")
             processed += 1
             model_start = time.monotonic()
             elapsed_overall = model_start - overall_start
@@ -212,32 +231,19 @@ def main(argv: list[str] | None = None) -> None:
                 f"\n[{processed}/{total}] {model_path}  "
                 f"(overall elapsed: {elapsed_overall:.0f}s)"
             )
-            # gated = row.get("is_gated") == "True"
-            # if gated and not args.include_gated:
-            #     record(
-            #         {
-            #             "model_id": model_id,
-            #             "config_class": csv_config_class,
-            #             "status": "skipped:gated",
-            #             "rank": row.get("rank"),
-            #             "attempted_at": datetime.now().isoformat(timespec="seconds"),
-            #         }
-            #     )
-            #     continue
 
-            # attempted += 1
             had_weights = model_path in preexisting
-            # print(f"\n[{attempted}/{args.limit}] {model_id} ({csv_config_class})")
 
             rec = {
-                "model_id": model_path,
-                "rank": row.get("rank"),
-                "downloads": row.get("downloads"),
-                "config_class": csv_config_class,
-                "model_type": row.get("model_type"),
-                "params": row.get("parameters (str)"),
-                "had_cached_weights_at_start": had_weights,
-                "attempted_at": datetime.now().isoformat(timespec="seconds"),
+                "model_name": model_path,
+                "architecture": row.get("model_type", ""),
+                "adapter_name": "",
+                "added_date": None,
+                "snapshot_date": snapshot_date,
+                "verified_on_cpu": False,
+                "verified_on_gpu": False,
+                "verified_on_spyre": False,
+                "num_downloads": int(row.get("downloads") or 0),
             }
 
             try:
@@ -245,53 +251,61 @@ def main(argv: list[str] | None = None) -> None:
                 adapter_name = os.path.splitext(
                     os.path.basename(adapter_module.__file__)
                 )[0]
-                rec["adapter"] = adapter_name
-                rec["adapter_added"] = add_dates.get(adapter_name)
+                rec["adapter_name"] = adapter_name
+                added_iso = add_dates.get(adapter_name)
+                rec["added_date"] = (
+                    date.fromisoformat(added_iso) if added_iso else date.today()
+                )
 
                 # Reject models too large to bring up on Spyre. Recorded as a
                 # clean SpyreUnsupportedModelError, same as stick-misaligned dims.
-
                 params = row.get("parameters")
                 if params not in (None, "") and int(params) > 60_000_000_000:
-                    # TODO - Raise Exception?
-                    # raise SpyreUnsupportedModelError(
                     print(
                         f"Model {model_path} has {int(params):,} parameters, "
                         f"exceeding the 60B limit for Spyre bring-up."
                     )
 
-                # if args.path == "generative":
-                #     metrics = eval_generative(
-                #         model_id, adapter, csv_config_class, args.num_decode
-                #     )
-                # else:
                 metrics = eval_embedding(model_path)
 
-                rec["runs"] = True
-                rec["error"] = None
-                rec.update(metrics)
+                # TODO
+                rec["verified_on_cpu"] = metrics.get("load", False)
                 model_elapsed = time.monotonic() - model_start
                 print(
-                    f"    runs=True  correct={rec.get('correct')}  "
+                    f"    verified_on_cpu={rec['verified_on_cpu']}  "
+                    f"correct={metrics.get('correct')}  "
                     f"model_time={model_elapsed:.1f}s"
                 )
             except KeyboardInterrupt:
                 raise
             except Exception as e:
-                tb = traceback.format_exc()
-                rec["runs"] = False
-                rec["correct"] = False
-                rec["error"] = f"{type(e).__name__}: {e}"
-                rec["traceback_tail"] = "".join(tb.splitlines(keepends=True)[-6:])
-                rec.setdefault("adapter", None)
-                rec.setdefault("adapter_added", None)
+                rec["verified_on_cpu"] = False
+                rec.setdefault("adapter_name", "")
+                rec["added_date"] = rec["added_date"] or date.today()
                 model_elapsed = time.monotonic() - model_start
                 print(
-                    f"    runs=False  error={rec['error']}  "
+                    f"    verified_on_cpu=False  "
+                    f"error={type(e).__name__}: {e}  "
                     f"model_time={model_elapsed:.1f}s"
                 )
+                print("".join(traceback.format_exc().splitlines(keepends=True)[-6:]))
 
-            # record(rec)
+            inserted = insert_model_row(
+                db_client,
+                model_name=rec["model_name"],
+                architecture=rec["architecture"],
+                adapter_name=rec["adapter_name"],
+                added_date=rec["added_date"],
+                snapshot_date=rec["snapshot_date"],
+                verified_on_cpu=rec["verified_on_cpu"],
+                verified_on_gpu=rec["verified_on_gpu"],
+                verified_on_spyre=rec["verified_on_spyre"],
+                num_downloads=rec["num_downloads"],
+            )
+            if inserted:
+                print(f"    db: row inserted for '{model_path}'")
+            else:
+                print(f"    db: row skipped for '{model_path}' (guard rejected)")
 
             # Cache cleanup: weights absent at start -> delete downloaded weights.
             if not had_weights:
