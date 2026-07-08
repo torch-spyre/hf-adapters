@@ -6,7 +6,7 @@ Columns:
   - model_name         (String)  – unique model identifier
   - architecture       (String)  – model architecture (e.g. llama, mistral)
   - adapter_name       (String)  – adapter name (e.g. LoRA config name)
-  - added_date         (Date)    – date the adapter was added to the git repo
+  - added_date         (Date?)   – date the adapter was added to the git repo (optional)
   - snapshot_date      (Date)    – date this weekly snapshot was taken
   - verified_on_cpu    (Bool)    – passes on CPU
   - verified_on_gpu    (Bool)    – passes on GPU
@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS {DATABASE}.{TABLE_NAME}
     model_name        String,
     architecture      String,
     adapter_name      String,
-    added_date        Date,
+    added_date        Nullable(Date),
     snapshot_date     Date,
     verified_on_cpu   Bool,
     verified_on_gpu   Bool,
@@ -144,7 +144,7 @@ def insert_model_row(
     model_name: str,
     architecture: str,
     adapter_name: str,
-    added_date: date,
+    added_date: date | None,
     snapshot_date: date,
     verified_on_cpu: bool = False,
     verified_on_gpu: bool = False,
@@ -218,7 +218,7 @@ def main():
     parser.add_argument("--architecture", default="")
     parser.add_argument("--adapter-name", default="")
     parser.add_argument(
-        "--added-date", default=str(date.today()), help="YYYY-MM-DD (default: today)"
+        "--added-date", default=None, help="YYYY-MM-DD (omit to leave empty)"
     )
     parser.add_argument(
         "--snapshot-date", default=str(date.today()), help="YYYY-MM-DD (default: today)"
@@ -259,7 +259,7 @@ def main():
             model_name=args.model_name,
             architecture=args.architecture,
             adapter_name=args.adapter_name,
-            added_date=date.fromisoformat(args.added_date),
+            added_date=date.fromisoformat(args.added_date) if args.added_date else None,
             snapshot_date=date.fromisoformat(args.snapshot_date),
             verified_on_cpu=args.verified_on_cpu,
             verified_on_gpu=args.verified_on_gpu,
