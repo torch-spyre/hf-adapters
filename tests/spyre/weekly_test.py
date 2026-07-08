@@ -28,21 +28,15 @@ for _p in (_SPYRE_TESTS_DIR, _TESTS_DIR, _UTILS_DIR, _REPO_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from test_load_spyre import load_embedding  # noqa: E402
-
 from hf_adapters.auto_spyre_model import resolve_adapter_module  # noqa: E402
-from utils.fetch_top_embedding_models import fetch_top_embedding_models  # noqa: E402
-
-_GITHUB_SCRIPTS_DIR = _REPO_ROOT / ".github" / "scripts"
-if str(_GITHUB_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_GITHUB_SCRIPTS_DIR))
-
-from create_model_spyre_table import (  # noqa: E402
+from tests.spyre.create_model_spyre_table import (  # noqa: E402
     CREATE_TABLE_SQL,
     get_client,
     insert_model_row,
     table_exists,
 )
+from tests.spyre.test_load_spyre import load_embedding  # noqa: E402
+from utils.fetch_top_embedding_models import fetch_top_embedding_models  # noqa: E402
 
 # Weight-file suffixes. A repo with at least one of these cached "has weights";
 # a repo with only config/tokenizer files does not, so its later-downloaded
@@ -139,7 +133,7 @@ def _print_adapter_add_dates(add_dates: dict[str, str | None]) -> None:
         print(f"  {'unknown':<10}  {module:<{name_w}}")
 
 
-def eval_embedding(model_id: str) -> dict:
+def eval_embedding_on_spyre(model_id: str) -> dict:
     """Load and compare embeddings for one model. Returns a metrics dict."""
     loads, _ = load_embedding(model_id)
     mismatches, _ = embed_compare_spyre(model_id)
@@ -266,7 +260,7 @@ def main(argv: list[str] | None = None) -> None:
                         f"exceeding the 60B limit for Spyre bring-up."
                     )
 
-                metrics = eval_embedding(model_path)
+                metrics = eval_embedding_on_spyre(model_path)
 
                 # TODO
                 rec["verified_on_cpu"] = metrics.get("load", False)
