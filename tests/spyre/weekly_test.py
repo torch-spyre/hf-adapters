@@ -301,9 +301,8 @@ def main(argv: list[str] | None = None) -> None:
                 )[0]
                 rec["adapter_name"] = adapter_name
                 added_iso = add_dates.get(adapter_name)
-                rec["added_date"] = (
-                    date.fromisoformat(added_iso) if added_iso else date.today()
-                )
+                if added_iso is not None:
+                    rec["added_date"] = date.fromisoformat(added_iso)
 
                 # Reject models too large to bring up on Spyre. Recorded as a
                 # clean SpyreUnsupportedModelError, same as stick-misaligned dims.
