@@ -13,6 +13,7 @@ import argparse
 import os
 import subprocess
 import sys
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -196,15 +197,21 @@ def main(argv: list[str] | None = None) -> None:
         limit=args.top_k, output_csv=args.output_csv
     )
 
+    total = len(supported_list)
+    processed = 0
+    overall_start = time.monotonic()
+
     try:
         for row in supported_list:
-            # if attempted >= args.limit:
-            #     break
             model_path = row["model_id"]
-            # if model_id in done:
-            #     continue
-
             csv_config_class = row.get("config_class")
+            processed += 1
+            model_start = time.monotonic()
+            elapsed_overall = model_start - overall_start
+            print(
+                f"\n[{processed}/{total}] {model_path}  "
+                f"(overall elapsed: {elapsed_overall:.0f}s)"
+            )
             # gated = row.get("is_gated") == "True"
             # if gated and not args.include_gated:
             #     record(
@@ -263,7 +270,11 @@ def main(argv: list[str] | None = None) -> None:
                 rec["runs"] = True
                 rec["error"] = None
                 rec.update(metrics)
-                print(f"    runs=True correct={rec.get('correct')} ")
+                model_elapsed = time.monotonic() - model_start
+                print(
+                    f"    runs=True  correct={rec.get('correct')}  "
+                    f"model_time={model_elapsed:.1f}s"
+                )
             except KeyboardInterrupt:
                 raise
             except Exception as e:
@@ -272,10 +283,13 @@ def main(argv: list[str] | None = None) -> None:
                 rec["correct"] = False
                 rec["error"] = f"{type(e).__name__}: {e}"
                 rec["traceback_tail"] = "".join(tb.splitlines(keepends=True)[-6:])
-                # adapter fields may be unset if resolve_adapter failed
                 rec.setdefault("adapter", None)
                 rec.setdefault("adapter_added", None)
-                print(f"    runs=False error={rec['error']}")
+                model_elapsed = time.monotonic() - model_start
+                print(
+                    f"    runs=False  error={rec['error']}  "
+                    f"model_time={model_elapsed:.1f}s"
+                )
 
             # record(rec)
 
@@ -290,8 +304,15 @@ def main(argv: list[str] | None = None) -> None:
                     )
     except KeyboardInterrupt:
         print("\nInterrupted — results so far are saved; rerun to resume.")
-    # finally:
-    #     fout.close()
+    finally:
+        overall_elapsed = time.monotonic() - overall_start
+        mins, secs = divmod(int(overall_elapsed), 60)
+        print(
+            f"\n{'='*60}\n"
+            f"Processed {processed}/{total} models  |  "
+            f"Total time: {mins}m {secs:02d}s\n"
+            f"{'='*60}"
+        )
 
 
 if __name__ == "__main__":
