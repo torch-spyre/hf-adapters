@@ -166,7 +166,7 @@ def _image_features(model, pixel_values, image_sizes):
         selected = torch.cat(parts, dim=-1)  # [P, hidden * N]
 
     # Move to CPU for the projector (CPU module; see prepare_for_spyre note).
-    projector = model.model.multi_modal_projector
+    projector = model.model.multi_modal_projector.to("cpu")
     dtype = get_model_dtype(model)
     image_features = projector(selected.to("cpu").to(dtype), image_sizes)
     return image_features  # [total_image_tokens, text_hidden] on CPU

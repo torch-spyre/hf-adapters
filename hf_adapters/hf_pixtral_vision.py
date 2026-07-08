@@ -55,6 +55,8 @@ Usage::
     last_hidden = prefill_vision_tower(model, pixel_values, image_sizes)
 """
 
+import math
+
 import torch
 import torch.nn.functional as F
 
@@ -240,20 +242,31 @@ def _make_patch_embed_fn(tower):
     return patch_embed
 
 
-def _build_block_attn_mask(patch_counts, dtype=torch.float16):
+def _build_block_attn_mask(patch_counts, padded_total=None, dtype=torch.float16):
     """Build a block-diagonal additive attention mask on CPU.
 
     Each image in the batch attends only to its own patches. Returns a
-    ``[1, 1, total_patches, total_patches]`` additive mask (0 = attend,
-    ``-inf`` = block), matching the convention used by Spyre text adapters.
+    ``[1, 1, T, T]`` additive mask (0 = attend, ``-inf`` = block), matching the
+    convention used by Spyre text adapters.
+
+    When ``padded_total`` is given (> ``sum(patch_counts)``), the sequence has
+    been right-padded to a Spyre stick (``BLOCK_SIZE``) multiple — see
+    ``prefill_vision_tower``. The pad **columns** are masked with ``-inf`` so no
+    real query attends to a pad key (the score matmul over the padded length is
+    then math-identical to the unpadded one). Pad **rows** compute garbage
+    (all-``-inf`` → NaN softmax) but are cropped off after the blocks and never
+    feed a real query, exactly like the BERT encoder path
+    (``build_prefill_mask_right_padded``). Each masked cell receives a single
+    ``-inf`` (never ``-inf + -inf``), so the merged-NaN hazard does not fire.
     """
     total = sum(patch_counts)
-    mask = torch.full((total, total), fill_value=float("-inf"), dtype=dtype)
+    T = padded_total if padded_total is not None else total
+    mask = torch.full((T, T), fill_value=float("-inf"), dtype=dtype)
     start = 0
     for n in patch_counts:
         mask[start : start + n, start : start + n] = 0.0
         start += n
-    return mask[None, None, :, :]  # [1, 1, total, total]
+    return mask[None, None, :, :]  # [1, 1, T, T]
 
 
 def _make_compiled_pixtral_block(layer, num_heads, head_dim, scale):
@@ -289,9 +302,14 @@ def _make_compiled_pixtral_block(layer, num_heads, head_dim, scale):
         k = k_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
         v = v_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
 
-        # Apply 2D RoPE via matmul (Spyre-safe: no slicing)
-        q = apply_rope_matmul(q, selected_freqs)
-        k = apply_rope_matmul(k, selected_freqs)
+        # Apply 2D RoPE via matmul (Spyre-safe: no slicing).
+        # .contiguous() is REQUIRED on Spyre: fusing apply_rope_matmul directly
+        # into the SDPA compiled graph selects a lowering that overflows fp16 to
+        # Inf for some blocks' activations (observed at the last tower block on
+        # the Mistral-Small-3.1 e2e image). Materializing the rope'd q/k at a
+        # buffer boundary breaks that fusion.
+        q = apply_rope_matmul(q, selected_freqs).contiguous()
+        k = apply_rope_matmul(k, selected_freqs).contiguous()
 
         attn_out = F.scaled_dot_product_attention(
             q,
@@ -482,12 +500,29 @@ def prefill_vision_tower(model, pixel_values, image_sizes, output_hidden_states=
 
     # Concatenate all images into a single sequence [1, total_patches, hidden]
     hidden = torch.cat(all_embeds, dim=0).unsqueeze(0)  # [1, total_patches, hidden]
-
-    # Build the block-diagonal attention mask on CPU [1, 1, total, total]
-    attn_mask = _build_block_attn_mask(patch_counts, dtype=hidden.dtype)
+    total_patches = hidden.shape[1]
 
     # Concatenate per-image RoPE matrices [1, total_patches, 2, 2, D/2]
     rope_mats_all = torch.cat(all_rope, dim=0).unsqueeze(0)  # [1, P_total, 2, 2, D/2]
+
+    # Right-pad the patch sequence to a Spyre stick (BLOCK_SIZE) multiple.
+    # The attention score matmul q@kᵀ is [P, P]; when P is NOT a multiple of
+    # BLOCK_SIZE (e.g. 3500 = 54.7 sticks) the wide matmul lowers WRONG on Spyre
+    # (cos ~0.74 vs CPU — a ragged final stick in the tiled contraction). Padding
+    # P to a stick multiple makes it bit-faithful (cos ~1.0). The pad KEYS are
+    # masked (see _build_block_attn_mask) so real queries ignore them; the pad
+    # ROWS compute garbage and are cropped off below — identical to the verified
+    # BERT encoder path (hf_common.prefill_encoder).
+    padded_total = math.ceil(total_patches / BLOCK_SIZE) * BLOCK_SIZE
+    pad = padded_total - total_patches
+    if pad > 0:
+        hidden = F.pad(hidden, (0, 0, 0, pad))  # pad the patch dim with zeros
+        rope_mats_all = F.pad(rope_mats_all, (0, 0, 0, 0, 0, 0, 0, pad))
+
+    # Build the block-diagonal attention mask on CPU [1, 1, padded, padded]
+    attn_mask = _build_block_attn_mask(
+        patch_counts, padded_total=padded_total, dtype=hidden.dtype
+    )
 
     # Move inputs to Spyre
     hidden = hidden.to(DEVICE)
@@ -500,6 +535,14 @@ def prefill_vision_tower(model, pixel_values, image_sizes, output_hidden_states=
         hidden = compiled_block(hidden, rope_mats_all, attn_mask)
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden,)
+
+    # Crop the stick-padding back off so downstream sees exactly total_patches.
+    if pad > 0:
+        hidden = hidden[:, :total_patches, :]
+        if output_hidden_states:
+            all_hidden_states = tuple(
+                hs[:, :total_patches, :] for hs in all_hidden_states
+            )
 
     if output_hidden_states:
         return hidden, all_hidden_states
