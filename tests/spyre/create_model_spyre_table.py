@@ -65,7 +65,7 @@ def get_client():
     )
 
 
-TABLE_NAME = "model_spyre_support"
+TABLE_NAME = "embedding_model_spyre_support"
 DATABASE = "spyre"
 
 CREATE_TABLE_SQL = f"""
