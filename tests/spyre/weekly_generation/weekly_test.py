@@ -11,6 +11,7 @@ Run directly to perform the fetch step::
 
 import argparse
 import csv
+import multiprocessing
 import os
 import random
 import subprocess
@@ -186,6 +187,64 @@ def eval_embedding(model_id: str, adapter, boolean_run: bool = False) -> dict:
         }
 
 
+def _process_row(model_path: str, boolean_run: bool) -> dict:
+    """Worker executed in an isolated subprocess (spawn context, 1 task/worker).
+
+    Returns a dict with keys: adapter_name, added_date, metrics, error.
+    Resolving the adapter and running eval happens here so that any GPU/memory
+    state is fully torn down when the worker process exits.
+    """
+    import traceback
+
+    result = {
+        "adapter_name": "",
+        "added_date": None,
+        "metrics": {"correct": False, "load": False, "compare_spyre": False},
+        "error": None,
+    }
+    try:
+        from tests.conftest import resolve_adapter_module_for_test
+
+        adapter_module = resolve_adapter_module_for_test(model_path)
+        result["adapter_name"] = os.path.splitext(
+            os.path.basename(adapter_module.__file__)
+        )[0]
+
+        # add_date resolved inside the worker to avoid pickling issues
+        import subprocess as _sp
+        from pathlib import Path
+
+        adapter_file = Path(adapter_module.__file__)
+        repo_root = adapter_file.parents[2]
+        out = _sp.run(
+            [
+                "git",
+                "log",
+                "--diff-filter=A",
+                "--follow",
+                "--format=%aI",
+                "-1",
+                "--",
+                str(adapter_file.relative_to(repo_root)),
+            ],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        iso = out.stdout.strip().splitlines()
+        result["added_date"] = iso[-1][:10] if iso else None
+
+        result["metrics"] = eval_embedding(
+            model_path, adapter_module, boolean_run=boolean_run
+        )
+    except Exception as e:
+        result["error"] = (
+            f"{type(e).__name__}: {e}\n{''.join(traceback.format_exc().splitlines(keepends=True)[-6:])}"
+        )
+    return result
+
+
 def _delete_repo_weights(repo_id):
     """Delete cached weight files (and their blobs) for a repo. Keep configs.
 
@@ -234,8 +293,6 @@ def _human_bytes(n):
 
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
-    add_dates: dict[str, str | None] = _adapter_add_dates()
-    # _print_adapter_add_dates(add_dates)
     preexisting: set = _repos_with_weights()
     total_freed = 0
     snapshot_date = date.today()
@@ -260,6 +317,7 @@ def main(argv: list[str] | None = None) -> None:
     processed = 0
     overall_start = time.monotonic()
 
+    ctx = multiprocessing.get_context("spawn")
     try:
         for row in supported_list:
             model_path = str(row["model_id"])
@@ -288,19 +346,7 @@ def main(argv: list[str] | None = None) -> None:
             }
 
             try:
-                from tests.conftest import resolve_adapter_module_for_test  # noqa: E402
-
-                adapter_module = resolve_adapter_module_for_test(model_path)
-                adapter_name = os.path.splitext(
-                    os.path.basename(adapter_module.__file__)
-                )[0]
-                rec["adapter_name"] = adapter_name
-                added_iso = add_dates.get(adapter_name)
-                if added_iso is not None:
-                    rec["added_date"] = date.fromisoformat(added_iso)
-
-                # Reject models too large to bring up on Spyre. Recorded as a
-                # clean SpyreUnsupportedModelError, same as stick-misaligned dims.
+                # Reject models too large to bring up on Spyre before spawning.
                 params = row.get("parameters")
                 if params not in (None, "") and int(params) > 60_000_000_000:
                     print(
@@ -311,10 +357,19 @@ def main(argv: list[str] | None = None) -> None:
                         f"Model {model_path} has {int(params):,} parameters, "
                     )
 
-                metrics = eval_embedding(
-                    model_path, adapter_module, boolean_run=args.boolean_run
-                )
+                with ctx.Pool(processes=1, maxtasksperchild=1) as pool:
+                    worker_result = pool.apply(
+                        _process_row, (model_path, args.boolean_run)
+                    )
 
+                rec["adapter_name"] = worker_result["adapter_name"]
+                if worker_result["added_date"] is not None:
+                    rec["added_date"] = date.fromisoformat(worker_result["added_date"])
+
+                if worker_result["error"]:
+                    raise Exception(worker_result["error"])
+
+                metrics = worker_result["metrics"]
                 rec["verified_on_cpu"] = metrics.get("load", False)
                 rec["verified_on_spyre"] = metrics.get("correct", False)
                 model_elapsed = time.monotonic() - model_start
