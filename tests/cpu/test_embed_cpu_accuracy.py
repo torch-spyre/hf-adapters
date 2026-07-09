@@ -40,6 +40,7 @@ The DEVICE='cpu' patching of ``hf_common`` happens once in
 """
 
 import gc
+import sys
 import types
 
 import pytest
@@ -50,7 +51,7 @@ from hf_adapters.auto_spyre_model import (
     resolve_adapter_module,
 )
 from tests.conftest import get_dtype_for_cpu, load_ref_model
-from tests.cpu.conftest import encode_padded, min_cosine
+from tests.cpu.conftest import _unwrap_compiled_blocks, encode_padded, min_cosine
 from tests.model_registry import EMBED_PATHS
 
 PROMPTS: list[str] = [
@@ -79,9 +80,9 @@ def _run_prefill(
 
 
 @pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
-def test_auto_loader(
-    model_path: str, auto_spyre_model, unwrap_compiled_blocks, hf_common_mod
-) -> None:
+def test_auto_loader(model_path: str) -> None:
+    auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
+    hf_common_mod = sys.modules["hf_adapters.hf_common"]
     torch_dtype = get_dtype_for_cpu(model_path=model_path)
     adapter_module = resolve_adapter_module(model_path)
 
@@ -104,7 +105,7 @@ def test_auto_loader(
     model = auto_spyre_model.AutoSpyreModel.from_pretrained(
         model_path, dtype=torch_dtype
     )
-    unwrap_compiled_blocks(model)
+    _unwrap_compiled_blocks(model)
     with torch.no_grad():
         adapter_hidden, _ = _run_prefill(
             adapter_module, hf_common_mod, model, input_ids, attention_mask

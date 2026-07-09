@@ -34,7 +34,7 @@ import gc
 
 import pytest
 
-from tests.cpu.conftest import cosine_per_row
+from tests.cpu.conftest import _unwrap_compiled_blocks, cosine_per_row
 from tests.model_registry import EMBED_PATHS
 
 # sentence_transformers is an optional dependency; skip the whole module if
@@ -53,7 +53,7 @@ TEST_SENTENCES: list[str] = [
 
 
 @pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
-def test_st_backend(model_path: str, unwrap_compiled_blocks) -> None:
+def test_st_backend(model_path: str) -> None:
     from sentence_transformers import SentenceTransformer
 
     import hf_adapters.st_backend  # noqa: F401  (registers "spyre" backend with ST)
@@ -66,7 +66,7 @@ def test_st_backend(model_path: str, unwrap_compiled_blocks) -> None:
 
     # Spyre backend (DEVICE patched to cpu by conftest)
     spyre_model = SentenceTransformer(model_path, backend="spyre", device="cpu")
-    unwrap_compiled_blocks(spyre_model._first_module().model)
+    _unwrap_compiled_blocks(spyre_model._first_module().model)
     spyre_embeddings = spyre_model.encode(TEST_SENTENCES, convert_to_tensor=True)
     del spyre_model
     gc.collect()
