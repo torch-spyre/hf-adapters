@@ -334,19 +334,19 @@ test_suite_config:
                             device: spyre
                             init: randn
                       kwargs: {}
-    - path: ${TORCH_DEVICE_ROOT}/tests/test_modules_custom.py
-      unlisted_test_mode: skip
-      tests:
-        - names:
-            - '*TestModuleCustom*::test_eager_vs_compile'
-            - '*TestModuleCustom*::test_layout_stride'
-          mode: xfail
-          tags:
-            - model__granite_3_3_8b_instruct
-            - custom_tests
-          edits:
-            modules:
-              include: *id001
+    # - path: ${TORCH_DEVICE_ROOT}/tests/test_modules_custom.py
+    #   unlisted_test_mode: skip
+    #   tests:
+    #     - names:
+    #         - '*TestModuleCustom*::test_eager_vs_compile'
+    #         - '*TestModuleCustom*::test_layout_stride'
+    #       mode: xfail
+    #       tags:
+    #         - model__granite_3_3_8b_instruct
+    #         - custom_tests
+    #       edits:
+    #         modules:
+    #           include: *id001
   global:
     supported_dtypes:
       - name: bfloat16
