@@ -111,29 +111,6 @@ texts = model.generate(
 )
 print(texts[0])
 
-# --- Mistral3 Vision (Mistral-Small-3.1-24B-Instruct-2503) ---
-model = AutoSpyreModelForImageTextToText.from_pretrained(
-    "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
-)
-processor = AutoProcessor.from_pretrained("mistralai/Mistral-Small-3.1-24B-Instruct-2503")
-processor.tokenizer.padding_side = "left"
-
-image = Image.open("cat.jpg").convert("RGB")
-conv = [{"role": "user", "content": [
-    {"type": "image", "image": image},
-    {"type": "text",  "text": "Briefly describe this image."},
-]}]
-batch = processor.apply_chat_template(
-    conv, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt"
-)
-
-texts = model.generate(
-    processor,
-    batch["input_ids"], batch["attention_mask"],
-    batch["pixel_values"], batch["image_sizes"],
-    max_new_tokens=64,
-)
-print(texts[0])
 ```
 
 A multimodal checkpoint's config is registered under both auto classes:
