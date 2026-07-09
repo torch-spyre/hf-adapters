@@ -32,6 +32,7 @@ this file is plain pytest.
 """
 
 import gc
+import sys
 
 import pytest
 import torch
@@ -42,6 +43,7 @@ from tests.conftest import (
     load_ref_model,
     resolve_adapter_module_for_test,
 )
+from tests.cpu.conftest import _unwrap_compiled_blocks
 from tests.model_registry import CAUSAL_PATHS
 
 PROMPT = "The capital of France is"
@@ -161,7 +163,8 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=NUM_DECODE
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
-def test_auto_loader(model_path, auto_spyre_model, unwrap_compiled_blocks):
+def test_auto_loader(model_path):
+    auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
     torch_dtype = get_dtype_for_cpu(model_path=model_path)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
@@ -169,7 +172,7 @@ def test_auto_loader(model_path, auto_spyre_model, unwrap_compiled_blocks):
     model = auto_spyre_model.AutoSpyreModelForCausalLM.from_pretrained(
         model_path, dtype=torch_dtype
     )
-    unwrap_compiled_blocks(model)
+    _unwrap_compiled_blocks(model)
     auto_outputs = model.generate(
         tokenizer, [PROMPT], max_new_tokens=NUM_DECODE, do_sample=False
     )

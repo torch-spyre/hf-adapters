@@ -178,7 +178,7 @@ def get_param_count(model: ModelInfo) -> int | None:
 def get_config_type(model_id: str, token: str | bool) -> str | None:
     try:
         model_config = AutoConfig.from_pretrained(
-            model_id, token=token, trust_remote_code=True
+            model_id, token=token, trust_remote_code=False
         )
         return type(model_config).__name__
     except Exception:

@@ -25,6 +25,7 @@ this file is plain pytest.
 """
 
 import gc
+import sys
 
 import pytest
 import torch
@@ -32,6 +33,7 @@ from conftest import resolve_adapter_module_for_test
 from transformers import AutoTokenizer
 
 from tests.conftest import load_ref_model
+from tests.cpu.conftest import _unwrap_compiled_blocks
 from tests.model_registry import CAUSAL_PATHS
 
 PROMPTS: list[str] = [
@@ -61,7 +63,8 @@ def _hf_reference_outputs(
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
-def test_multibatch(model_path: str, unwrap_compiled_blocks, hf_common_mod) -> None:
+def test_multibatch(model_path: str) -> None:
+    hf_common_mod = sys.modules["hf_adapters.hf_common"]
     adapter_mod = resolve_adapter_module_for_test(model_path)
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -75,7 +78,7 @@ def test_multibatch(model_path: str, unwrap_compiled_blocks, hf_common_mod) -> N
     # Adapter batched generate
     model = load_ref_model(model_path, adapter_mod)
     adapter_mod.prepare_for_spyre(model)
-    unwrap_compiled_blocks(model)
+    _unwrap_compiled_blocks(model)
     adapter_outputs = hf_common_mod.generate(
         adapter_mod._run_forward,
         model,
