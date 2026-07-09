@@ -16,10 +16,12 @@ from hf_adapters.auto_spyre_model import (
     AutoSpyreModel,
     AutoSpyreModelForCausalLM,
     AutoSpyreModelForImageTextToText,
+    AutoSpyreModelForSequenceClassification,
 )
 
 __all__ = [
     "AutoSpyreModel",
     "AutoSpyreModelForCausalLM",
     "AutoSpyreModelForImageTextToText",
+    "AutoSpyreModelForSequenceClassification",
 ]
