@@ -15,61 +15,61 @@ test_suite_config:
           edits:
             modules:
               include: &id001
-                - name: Ministral3Model_d7945082
-                  module_path: transformers.models.ministral3.modeling_ministral3.Ministral3Model
-                  description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3Model'
-                  constructor_inputs:
-                    args:
-                      - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
-                        config_kwargs:
-                          hidden_size: 5120
-                          num_attention_heads: 32
-                          num_key_value_heads: 8
-                          intermediate_size: 16384
-                          max_position_embeddings: 262144
-                          _attn_implementation: sdpa
-                    kwargs: {}
-                  forward_inputs:
-                    - args: []
-                      kwargs:
-                        attention_mask:
-                          tensor:
-                            shape: [1, 128]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.int64
-                            device: spyre
-                            init: randint
-                            init_args:
-                              high: 10000
-                        inputs_embeds:
-                          tensor:
-                            shape: [1, 128, 5120]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.bfloat16
-                            device: spyre
-                            init: randn
-                    - args: []
-                      kwargs:
-                        attention_mask:
-                          tensor:
-                            shape: [1, 129]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.int64
-                            device: spyre
-                            init: randint
-                            init_args:
-                              high: 10000
-                        inputs_embeds:
-                          tensor:
-                            shape: [1, 1, 5120]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.bfloat16
-                            device: spyre
-                            init: randn
+                # - name: Ministral3Model_d7945082
+                #   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3Model
+                #   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3Model'
+                #   constructor_inputs:
+                #     args:
+                #       - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
+                #         config_kwargs:
+                #           hidden_size: 5120
+                #           num_attention_heads: 32
+                #           num_key_value_heads: 8
+                #           intermediate_size: 16384
+                #           max_position_embeddings: 262144
+                #           _attn_implementation: sdpa
+                #     kwargs: {}
+                #   forward_inputs:
+                #     - args: []
+                #       kwargs:
+                #         attention_mask:
+                #           tensor:
+                #             shape: [1, 128]
+                #             stride: null
+                #             storage_offset: 0
+                #             dtype: torch.int64
+                #             device: spyre
+                #             init: randint
+                #             init_args:
+                #               high: 10000
+                #         inputs_embeds:
+                #           tensor:
+                #             shape: [1, 128, 5120]
+                #             stride: null
+                #             storage_offset: 0
+                #             dtype: torch.bfloat16
+                #             device: spyre
+                #             init: randn
+                #     - args: []
+                #       kwargs:
+                #         attention_mask:
+                #           tensor:
+                #             shape: [1, 129]
+                #             stride: null
+                #             storage_offset: 0
+                #             dtype: torch.int64
+                #             device: spyre
+                #             init: randint
+                #             init_args:
+                #               high: 10000
+                #         inputs_embeds:
+                #           tensor:
+                #             shape: [1, 1, 5120]
+                #             stride: null
+                #             storage_offset: 0
+                #             dtype: torch.bfloat16
+                #             device: spyre
+                #             init: randn
                 - name: Ministral3RotaryEmbedding_483e0b9c
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3RotaryEmbedding
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3RotaryEmbedding'
