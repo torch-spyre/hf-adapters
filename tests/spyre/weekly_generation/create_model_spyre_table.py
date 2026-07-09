@@ -60,7 +60,7 @@ def get_client():
         port=int(os.environ.get("CLICKHOUSE_PORT", 443)),
         user=os.environ.get("CLICKHOUSE_USER", "default"),
         password=os.environ["CLICKHOUSE_PASS"],
-        database=os.environ.get("CLICKHOUSE_DB", "spyre"),
+        database=os.environ.get("CLICKHOUSE_DB", ".."),
         secure=True,
     )
 

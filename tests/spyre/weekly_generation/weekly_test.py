@@ -35,13 +35,13 @@ from test_e2e_embed_compare_spyre import embed_compare_spyre  # noqa: E402
 from test_load_spyre import load_embedding  # noqa: E402
 
 from hf_adapters.auto_spyre_model import resolve_adapter_module  # noqa: E402
-from tests.spyre.create_model_spyre_table import (  # noqa: E402
+from utils.fetch_top_embedding_models import fetch_top_embedding_models  # noqa: E402
+from weekly_generation.create_model_spyre_table import (  # noqa: E402
     CREATE_TABLE_SQL,
     get_client,
     insert_model_row,
     table_exists,
 )
-from utils.fetch_top_embedding_models import fetch_top_embedding_models  # noqa: E402
 
 # Weight-file suffixes. A repo with at least one of these cached "has weights";
 # a repo with only config/tokenizer files does not, so its later-downloaded
