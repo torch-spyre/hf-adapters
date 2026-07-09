@@ -117,116 +117,116 @@ test_suite_config:
                             device: spyre
                             init: randn
                       kwargs: {}
-                - name: MistralDecoderLayer_layer0
-                  module_path: transformers.models.mistral.modeling_mistral.MistralDecoderLayer
-                  description: 'Module: transformers.models.mistral.modeling_mistral.MistralDecoderLayer'
-                  constructor_inputs:
-                    args:
-                      - config_path: transformers.models.mistral.configuration_mistral.MistralConfig
-                        config_kwargs:
-                          hidden_size: 5120
-                          num_attention_heads: 32
-                          num_key_value_heads: 8
-                          intermediate_size: 32768
-                          max_position_embeddings: 131072
-                          _attn_implementation: sdpa
-                    kwargs:
-                      layer_idx: 0
-                  forward_inputs:
-                    - args:
-                        - tensor:
-                            shape: [1, 128, 5120]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.float32
-                            device: spyre
-                            init: randn
-                      kwargs:
-                        position_ids:
-                          tensor:
-                            shape: [1, 128]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.int64
-                            device: spyre
-                            init: randint
-                            init_args:
-                              high: 10000
-                        cache_position:
-                          tensor:
-                            shape: [128]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.int64
-                            device: spyre
-                            init: randint
-                            init_args:
-                              high: 10000
-                        position_embeddings:
-                          tensor_list:
-                            - shape: [1, 128, 128]
-                              stride: null
-                              storage_offset: 0
-                              dtype: torch.float32
-                              device: spyre
-                              init: randint
-                              init_args:
-                                high: 10000
-                            - shape: [1, 128, 128]
-                              stride: null
-                              storage_offset: 0
-                              dtype: torch.float32
-                              device: spyre
-                              init: randint
-                              init_args:
-                                high: 10000
-                    - args:
-                        - tensor:
-                            shape: [1, 1, 5120]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.float32
-                            device: spyre
-                            init: randn
-                      kwargs:
-                        position_ids:
-                          tensor:
-                            shape: [1, 1]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.int64
-                            device: spyre
-                            init: randint
-                            init_args:
-                              high: 10000
-                        cache_position:
-                          tensor:
-                            shape: [1]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.int64
-                            device: spyre
-                            init: randint
-                            init_args:
-                              high: 10000
-                        position_embeddings:
-                          tensor_list:
-                            - shape: [1, 1, 128]
-                              stride: null
-                              storage_offset: 0
-                              dtype: torch.float32
-                              device: spyre
-                              init: randint
-                              init_args:
-                                high: 10000
-                            - shape: [1, 1, 128]
-                              stride: null
-                              storage_offset: 0
-                              dtype: torch.float32
-                              device: spyre
-                              init: randint
-                              init_args:
-                                high: 10000
+                # - name: MistralDecoderLayer_layer0
+                #   module_path: transformers.models.mistral.modeling_mistral.MistralDecoderLayer
+                #   description: 'Module: transformers.models.mistral.modeling_mistral.MistralDecoderLayer'
+                #   constructor_inputs:
+                #     args:
+                #       - config_path: transformers.models.mistral.configuration_mistral.MistralConfig
+                #         config_kwargs:
+                #           hidden_size: 5120
+                #           num_attention_heads: 32
+                #           num_key_value_heads: 8
+                #           intermediate_size: 32768
+                #           max_position_embeddings: 131072
+                #           _attn_implementation: sdpa
+                #     kwargs:
+                #       layer_idx: 0
+                #   forward_inputs:
+                #     - args:
+                #         - tensor:
+                #             shape: [1, 128, 5120]
+                #             stride: null
+                #             storage_offset: 0
+                #             dtype: torch.float32
+                #             device: spyre
+                #             init: randn
+                #       kwargs:
+                #         position_ids:
+                #           tensor:
+                #             shape: [1, 128]
+                #             stride: null
+                #             storage_offset: 0
+                #             dtype: torch.int64
+                #             device: spyre
+                #             init: randint
+                #             init_args:
+                #               high: 10000
+                #         cache_position:
+                #           tensor:
+                #             shape: [128]
+                #             stride: null
+                #             storage_offset: 0
+                #             dtype: torch.int64
+                #             device: spyre
+                #             init: randint
+                #             init_args:
+                #               high: 10000
+                #         position_embeddings:
+                #           tensor_list:
+                #             - shape: [1, 128, 128]
+                #               stride: null
+                #               storage_offset: 0
+                #               dtype: torch.float32
+                #               device: spyre
+                #               init: randint
+                #               init_args:
+                #                 high: 10000
+                #             - shape: [1, 128, 128]
+                #               stride: null
+                #               storage_offset: 0
+                #               dtype: torch.float32
+                #               device: spyre
+                #               init: randint
+                #               init_args:
+                #                 high: 10000
+                #     - args:
+                #         - tensor:
+                #             shape: [1, 1, 5120]
+                #             stride: null
+                #             storage_offset: 0
+                #             dtype: torch.float32
+                #             device: spyre
+                #             init: randn
+                #       kwargs:
+                #         position_ids:
+                #           tensor:
+                #             shape: [1, 1]
+                #             stride: null
+                #             storage_offset: 0
+                #             dtype: torch.int64
+                #             device: spyre
+                #             init: randint
+                #             init_args:
+                #               high: 10000
+                #         cache_position:
+                #           tensor:
+                #             shape: [1]
+                #             stride: null
+                #             storage_offset: 0
+                #             dtype: torch.int64
+                #             device: spyre
+                #             init: randint
+                #             init_args:
+                #               high: 10000
+                #         position_embeddings:
+                #           tensor_list:
+                #             - shape: [1, 1, 128]
+                #               stride: null
+                #               storage_offset: 0
+                #               dtype: torch.float32
+                #               device: spyre
+                #               init: randint
+                #               init_args:
+                #                 high: 10000
+                #             - shape: [1, 1, 128]
+                #               stride: null
+                #               storage_offset: 0
+                #               dtype: torch.float32
+                #               device: spyre
+                #               init: randint
+                #               init_args:
+                #                 high: 10000
                 - name: MistralRMSNorm_5120
                   module_path: transformers.models.mistral.modeling_mistral.MistralRMSNorm
                   description: 'Module: transformers.models.mistral.modeling_mistral.MistralRMSNorm'

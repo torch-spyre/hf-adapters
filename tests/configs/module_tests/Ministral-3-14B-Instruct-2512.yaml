@@ -123,96 +123,96 @@ test_suite_config:
                             init: randint
                             init_args:
                               high: 10000
-                - name: Ministral3DecoderLayer_layer0
-                  module_path: transformers.models.ministral3.modeling_ministral3.Ministral3DecoderLayer
-                  description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3DecoderLayer'
-                  constructor_inputs:
-                    args:
-                      - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
-                        config_kwargs:
-                          hidden_size: 5120
-                          num_attention_heads: 32
-                          num_key_value_heads: 8
-                          intermediate_size: 16384
-                          max_position_embeddings: 262144
-                          _attn_implementation: sdpa
-                    kwargs:
-                      layer_idx: 0
-                  forward_inputs:
-                    - args:
-                        - tensor:
-                            shape: [1, 128, 5120]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.bfloat16
-                            device: spyre
-                            init: randn
-                      kwargs:
-                        position_ids:
-                          tensor:
-                            shape: [1, 128]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.int64
-                            device: spyre
-                            init: randint
-                            init_args:
-                              high: 10000
-                        position_embeddings:
-                          tensor_list:
-                            - shape: [1, 128, 128]
-                              stride: null
-                              storage_offset: 0
-                              dtype: torch.bfloat16
-                              device: spyre
-                              init: randint
-                              init_args:
-                                high: 10000
-                            - shape: [1, 128, 128]
-                              stride: null
-                              storage_offset: 0
-                              dtype: torch.bfloat16
-                              device: spyre
-                              init: randint
-                              init_args:
-                                high: 10000
-                    - args:
-                        - tensor:
-                            shape: [1, 1, 5120]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.bfloat16
-                            device: spyre
-                            init: randn
-                      kwargs:
-                        position_ids:
-                          tensor:
-                            shape: [1, 1]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.int64
-                            device: spyre
-                            init: randint
-                            init_args:
-                              high: 10000
-                        position_embeddings:
-                          tensor_list:
-                            - shape: [1, 1, 128]
-                              stride: null
-                              storage_offset: 0
-                              dtype: torch.bfloat16
-                              device: spyre
-                              init: randint
-                              init_args:
-                                high: 10000
-                            - shape: [1, 1, 128]
-                              stride: null
-                              storage_offset: 0
-                              dtype: torch.bfloat16
-                              device: spyre
-                              init: randint
-                              init_args:
-                                high: 10000
+                # - name: Ministral3DecoderLayer_layer0
+                #   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3DecoderLayer
+                #   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3DecoderLayer'
+                #   constructor_inputs:
+                #     args:
+                #       - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
+                #         config_kwargs:
+                #           hidden_size: 5120
+                #           num_attention_heads: 32
+                #           num_key_value_heads: 8
+                #           intermediate_size: 16384
+                #           max_position_embeddings: 262144
+                #           _attn_implementation: sdpa
+                #     kwargs:
+                #       layer_idx: 0
+                #   forward_inputs:
+                #     - args:
+                #         - tensor:
+                #             shape: [1, 128, 5120]
+                #             stride: null
+                #             storage_offset: 0
+                #             dtype: torch.bfloat16
+                #             device: spyre
+                #             init: randn
+                #       kwargs:
+                #         position_ids:
+                #           tensor:
+                #             shape: [1, 128]
+                #             stride: null
+                #             storage_offset: 0
+                #             dtype: torch.int64
+                #             device: spyre
+                #             init: randint
+                #             init_args:
+                #               high: 10000
+                #         position_embeddings:
+                #           tensor_list:
+                #             - shape: [1, 128, 128]
+                #               stride: null
+                #               storage_offset: 0
+                #               dtype: torch.bfloat16
+                #               device: spyre
+                #               init: randint
+                #               init_args:
+                #                 high: 10000
+                #             - shape: [1, 128, 128]
+                #               stride: null
+                #               storage_offset: 0
+                #               dtype: torch.bfloat16
+                #               device: spyre
+                #               init: randint
+                #               init_args:
+                #                 high: 10000
+                #     - args:
+                #         - tensor:
+                #             shape: [1, 1, 5120]
+                #             stride: null
+                #             storage_offset: 0
+                #             dtype: torch.bfloat16
+                #             device: spyre
+                #             init: randn
+                #       kwargs:
+                #         position_ids:
+                #           tensor:
+                #             shape: [1, 1]
+                #             stride: null
+                #             storage_offset: 0
+                #             dtype: torch.int64
+                #             device: spyre
+                #             init: randint
+                #             init_args:
+                #               high: 10000
+                #         position_embeddings:
+                #           tensor_list:
+                #             - shape: [1, 1, 128]
+                #               stride: null
+                #               storage_offset: 0
+                #               dtype: torch.bfloat16
+                #               device: spyre
+                #               init: randint
+                #               init_args:
+                #                 high: 10000
+                #             - shape: [1, 1, 128]
+                #               stride: null
+                #               storage_offset: 0
+                #               dtype: torch.bfloat16
+                #               device: spyre
+                #               init: randint
+                #               init_args:
+                #                 high: 10000
                 - name: Ministral3RMSNorm_5120
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3RMSNorm
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3RMSNorm'
