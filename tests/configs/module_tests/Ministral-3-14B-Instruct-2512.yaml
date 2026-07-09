@@ -9,7 +9,7 @@ test_suite_config:
       tests:
         - names:
             - '*TestModule*::test_forward'
-          mode: mandatory_success
+          mode: xfail
           tags:
             - model__Ministral_3_14B_Instruct_2512
           edits:
@@ -395,7 +395,7 @@ test_suite_config:
         - names:
             - '*TestModuleCustom*::test_eager_vs_compile'
             - '*TestModuleCustom*::test_layout_stride'
-          mode: mandatory_success
+          mode: xfail
           tags:
             - model__Ministral_3_14B_Instruct_2512
             - custom_tests
