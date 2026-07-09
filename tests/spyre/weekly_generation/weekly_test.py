@@ -12,6 +12,7 @@ Run directly to perform the fetch step::
 import argparse
 import csv
 import multiprocessing
+import multiprocessing.managers
 import os
 import random
 import subprocess
@@ -187,12 +188,13 @@ def eval_embedding(model_id: str, adapter, boolean_run: bool = False) -> dict:
         }
 
 
-def _process_row(model_path: str, boolean_run: bool) -> dict:
-    """Worker executed in an isolated subprocess (spawn context, 1 task/worker).
+def _process_row(model_path: str, boolean_run: bool, return_dict) -> None:
+    """Worker target for a raw spawn Process — no Pool machinery in the parent.
 
-    Returns a dict with keys: adapter_name, added_date, metrics, error.
-    Resolving the adapter and running eval happens here so that any GPU/memory
-    state is fully torn down when the worker process exits.
+    Writes its result into *return_dict* (a multiprocessing.Manager dict) so
+    the parent can retrieve it after join(). Using a raw Process means zero
+    persistent file-descriptors, semaphores, or pool-supervisor threads
+    accumulate in the parent across iterations.
     """
     import traceback
 
@@ -240,9 +242,11 @@ def _process_row(model_path: str, boolean_run: bool) -> dict:
         )
     except Exception as e:
         result["error"] = (
-            f"{type(e).__name__}: {e}\n{''.join(traceback.format_exc().splitlines(keepends=True)[-6:])}"
+            f"{type(e).__name__}: {e}\n"
+            f"{''.join(traceback.format_exc().splitlines(keepends=True)[-6:])}"
         )
-    return result
+    finally:
+        return_dict["result"] = result
 
 
 def _delete_repo_weights(repo_id):
@@ -357,10 +361,31 @@ def main(argv: list[str] | None = None) -> None:
                         f"Model {model_path} has {int(params):,} parameters, "
                     )
 
-                with ctx.Pool(processes=1, maxtasksperchild=1) as pool:
-                    worker_result = pool.apply(
-                        _process_row, (model_path, args.boolean_run)
+                # Use a raw Process instead of Pool so that no pipes, semaphores,
+                # or pool-supervisor state accumulate in the parent over 100+
+                # iterations. The Manager lives only for the duration of one row.
+                with multiprocessing.managers.SyncManager() as manager:
+                    return_dict = manager.dict()
+                    proc = ctx.Process(
+                        target=_process_row,
+                        args=(model_path, args.boolean_run, return_dict),
                     )
+                    proc.start()
+                    proc.join()
+
+                worker_result = return_dict.get(
+                    "result",
+                    {
+                        "adapter_name": "",
+                        "added_date": None,
+                        "metrics": {
+                            "correct": False,
+                            "load": False,
+                            "compare_spyre": False,
+                        },
+                        "error": f"Worker process exited with code {proc.exitcode} and returned no result",
+                    },
+                )
 
                 rec["adapter_name"] = worker_result["adapter_name"]
                 if worker_result["added_date"] is not None:
