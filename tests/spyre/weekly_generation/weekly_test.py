@@ -11,8 +11,8 @@ Run directly to perform the fetch step::
 
 import argparse
 import csv
+import gc
 import multiprocessing
-import multiprocessing.managers
 import os
 import random
 import subprocess
@@ -74,15 +74,17 @@ def _repos_with_weights():
     return have
 
 
-def _adapter_add_dates() -> dict[str, str]:
+def _get_adapter_dates() -> dict[str, str | None]:
     """Map adapter module name (e.g. 'hf_qwen3') -> ISO date it was first added.
 
-    Derived from the git add-date of each hf_adapters/hf_*.py file.
+    Derived from the git add-date of each hf_adapters/hf_*.py file. Computed
+    once per run in the parent and passed to workers, rather than re-running
+    ~200 git subprocess calls (one per model).
     """
-    dates = {}
-    adapter_dir = _REPO_ROOT / "hf_adapters"
+    dates: dict[str, str | None] = {}
+    adapter_dir: Path = _REPO_ROOT / "hf_adapters"
     for f in sorted(adapter_dir.glob("hf_*.py")):
-        module_name = f.stem
+        module_name: str = f.stem
         try:
             out = subprocess.run(
                 [
@@ -100,7 +102,7 @@ def _adapter_add_dates() -> dict[str, str]:
                 text=True,
                 check=False,
             )
-            iso = out.stdout.strip().splitlines()
+            iso: list[str] = out.stdout.strip().splitlines()
             dates[module_name] = iso[-1][:10] if iso else None
         except Exception:
             dates[module_name] = None
@@ -188,17 +190,26 @@ def eval_embedding(model_id: str, adapter, boolean_run: bool = False) -> dict:
         }
 
 
-def _process_row(model_path: str, boolean_run: bool, return_dict) -> None:
+def _process_row(
+    model_path: str,
+    boolean_run: bool,
+    adapter_dates: dict[str, str | None],
+    result_queue,
+) -> None:
     """Worker target for a raw spawn Process — no Pool machinery in the parent.
 
-    Writes its result into *return_dict* (a multiprocessing.Manager dict) so
-    the parent can retrieve it after join(). Using a raw Process means zero
-    persistent file-descriptors, semaphores, or pool-supervisor threads
-    accumulate in the parent across iterations.
+    Puts its result onto *result_queue* (a multiprocessing.Queue from the
+    spawn context) so the parent can retrieve it after join(). Queues use an
+    anonymous OS pipe inherited by the child at fork/spawn time — there is no
+    on-disk socket that a `/tmp` cleaner (or an OOM-killed helper) can pull
+    out from under us, which is why we avoid SyncManager here.
+
+    *adapter_dates* is precomputed by the parent (one git log per adapter
+    file, not per model) and passed in as a plain dict.
     """
     import traceback
 
-    result = {
+    result: dict = {
         "adapter_name": "",
         "added_date": None,
         "metrics": {"correct": False, "load": False, "compare_spyre": False},
@@ -208,34 +219,11 @@ def _process_row(model_path: str, boolean_run: bool, return_dict) -> None:
         from tests.conftest import resolve_adapter_module_for_test
 
         adapter_module = resolve_adapter_module_for_test(model_path)
-        result["adapter_name"] = os.path.splitext(
-            os.path.basename(adapter_module.__file__)
-        )[0]
-
-        # add_date resolved inside the worker to avoid pickling issues
-        import subprocess as _sp
-        from pathlib import Path
-
-        adapter_file = Path(adapter_module.__file__)
-        repo_root = adapter_file.parents[2]
-        out = _sp.run(
-            [
-                "git",
-                "log",
-                "--diff-filter=A",
-                "--follow",
-                "--format=%aI",
-                "-1",
-                "--",
-                str(adapter_file.relative_to(repo_root)),
-            ],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        iso = out.stdout.strip().splitlines()
-        result["added_date"] = iso[-1][:10] if iso else None
+        adapter_name: str = os.path.splitext(os.path.basename(adapter_module.__file__))[
+            0
+        ]
+        result["adapter_name"] = adapter_name
+        result["added_date"] = adapter_dates.get(adapter_name)
 
         result["metrics"] = eval_embedding(
             model_path, adapter_module, boolean_run=boolean_run
@@ -246,7 +234,11 @@ def _process_row(model_path: str, boolean_run: bool, return_dict) -> None:
             f"{''.join(traceback.format_exc().splitlines(keepends=True)[-6:])}"
         )
     finally:
-        return_dict["result"] = result
+        try:
+            result_queue.put(result)
+            gc.collect()
+        except Exception:
+            pass
 
 
 def _delete_repo_weights(repo_id):
@@ -298,9 +290,10 @@ def _human_bytes(n):
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     preexisting: set = _repos_with_weights()
-    total_freed = 0
+    total_freed: int = 0
     snapshot_date = date.today()
     supported_list = fetch_top_embedding_models(limit=args.top_k)
+    adapter_dates: dict[str, str | None] = _get_adapter_dates()
 
     # ClickHouse setup — skipped when --write-to-csv is given.
     db_client = None
@@ -361,21 +354,24 @@ def main(argv: list[str] | None = None) -> None:
                         f"Model {model_path} has {int(params):,} parameters, "
                     )
 
-                # Use a raw Process instead of Pool so that no pipes, semaphores,
-                # or pool-supervisor state accumulate in the parent over 100+
-                # iterations. The Manager lives only for the duration of one row.
-                with multiprocessing.managers.SyncManager() as manager:
-                    return_dict = manager.dict()
-                    proc = ctx.Process(
-                        target=_process_row,
-                        args=(model_path, args.boolean_run, return_dict),
-                    )
-                    proc.start()
-                    proc.join()
+                # Use a raw Process instead of Pool so that no pipes,
+                # semaphores, or pool-supervisor state accumulate in the
+                # parent over 100+ iterations. A ctx.Queue uses an anonymous
+                # OS pipe inherited by the child, so — unlike SyncManager —
+                # there is no on-disk unix socket in /tmp that a pod cleaner
+                # or OOM-killed helper can yank out from under us.
+                result_queue = ctx.Queue()
+                proc = ctx.Process(
+                    target=_process_row,
+                    args=(model_path, args.boolean_run, adapter_dates, result_queue),
+                )
+                proc.start()
+                proc.join()
 
-                worker_result = return_dict.get(
-                    "result",
-                    {
+                try:
+                    worker_result = result_queue.get_nowait()
+                except Exception:
+                    worker_result = {
                         "adapter_name": "",
                         "added_date": None,
                         "metrics": {
@@ -383,9 +379,14 @@ def main(argv: list[str] | None = None) -> None:
                             "load": False,
                             "compare_spyre": False,
                         },
-                        "error": f"Worker process exited with code {proc.exitcode} and returned no result",
-                    },
-                )
+                        "error": (
+                            f"Worker process exited with code {proc.exitcode} "
+                            f"and returned no result"
+                        ),
+                    }
+                finally:
+                    result_queue.close()
+                    result_queue.join_thread()
 
                 rec["adapter_name"] = worker_result["adapter_name"]
                 if worker_result["added_date"] is not None:
