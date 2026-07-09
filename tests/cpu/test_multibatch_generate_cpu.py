@@ -28,9 +28,9 @@ import gc
 
 import pytest
 import torch
+from conftest import resolve_adapter_module_for_test
 from transformers import AutoTokenizer
 
-from hf_adapters.auto_spyre_model import resolve_adapter_module
 from tests.conftest import load_ref_model
 from tests.model_registry import CAUSAL_PATHS
 
@@ -62,7 +62,7 @@ def _hf_reference_outputs(
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 def test_multibatch(model_path: str, unwrap_compiled_blocks, hf_common_mod) -> None:
-    adapter_mod = resolve_adapter_module(model_path)
+    adapter_mod = resolve_adapter_module_for_test(model_path)
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 

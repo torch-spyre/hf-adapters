@@ -32,7 +32,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from hf_adapters.auto_spyre_model import (
-    resolve_adapter_module,
     torch_dtype_for_model_path,
 )
 from hf_adapters.hf_common import (
@@ -40,7 +39,7 @@ from hf_adapters.hf_common import (
     prefill_embed,
     prefill_encoder,
 )
-from tests.conftest import load_ref_model
+from tests.conftest import load_ref_model, resolve_adapter_module_for_test
 from tests.model_registry import EMBED_PATHS
 
 PROMPTS = [
@@ -151,7 +150,7 @@ def _run_model_test(model_path: str) -> list[dict[str, Any]]:
     """Full comparison for one encoder model."""
     from transformers import AutoModel, AutoTokenizer
 
-    adapter = resolve_adapter_module(model_path)
+    adapter = resolve_adapter_module_for_test(model_path)
 
     print(f"\n{'=' * 70}")
     print(f"  {model_path}")

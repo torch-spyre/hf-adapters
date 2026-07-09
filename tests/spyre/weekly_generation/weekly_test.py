@@ -20,8 +20,6 @@ import traceback
 from datetime import date
 from pathlib import Path
 
-from tests.conftest import get_dtype_for_cpu
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SPYRE_TESTS_DIR = _REPO_ROOT / "tests" / "spyre"
 _TESTS_DIR = _REPO_ROOT / "tests"
@@ -31,7 +29,9 @@ for _p in (_SPYRE_TESTS_DIR, _TESTS_DIR, _UTILS_DIR, _REPO_ROOT):
         sys.path.insert(0, str(_p))
 
 
-from hf_adapters.auto_spyre_model import resolve_adapter_module  # noqa: E402
+from tests.conftest import get_dtype_for_cpu # noqa: E402
+from tests.conftest import resolve_adapter_module_for_test  # noqa: E402
+
 from tests.spyre.test_e2e_embed_compare_spyre import embed_compare_spyre  # noqa: E402
 from tests.spyre.test_load_spyre import load_embedding  # noqa: E402
 from tests.spyre.weekly_generation.create_model_spyre_table import (  # noqa: E402
@@ -158,24 +158,26 @@ def _load_embedding_on_cpu(model_path: str) -> bool:
         _hf_common.DEVICE = _orig_device  # restore
 
 
-def eval_embedding(model_id: str, boolean_run: bool = False) -> dict:
+def eval_embedding(model_id: str, adapter, boolean_run: bool = False) -> dict:
     load_on_cpu = False
     loads_on_spyre = False
     mismatches = True
 
     """Load and compare embeddings for one model. Returns a metrics dict."""
     try:
-        # First we check that it is loadable on cpu:
-        model_on_cpu = _load_embedding_on_cpu(model_path=model_id)
-        load_on_cpu = model_on_cpu is not None
-        del model_on_cpu
+        if adapter is not None:
+            # First we check that it is loadable on cpu:
+            model_on_cpu = _load_embedding_on_cpu(model_path=model_id)
+            load_on_cpu = model_on_cpu is not None
+            del model_on_cpu
 
-        if boolean_run:
-            loads_on_spyre = _temp_boolean_random()
-            mismatches = _temp_boolean_random()
-        else:
-            loads_on_spyre, _ = load_embedding(model_id)
-            mismatches, _ = embed_compare_spyre(model_id)
+            if load_on_cpu:
+                if boolean_run:
+                    loads_on_spyre = _temp_boolean_random()
+                    mismatches = _temp_boolean_random()
+                else:
+                    loads_on_spyre, _ = load_embedding(model_id)
+                    mismatches, _ = embed_compare_spyre(model_id)
     except Exception as e:
         print(f"eval_embedding exception - {e}")
     finally:
@@ -288,7 +290,7 @@ def main(argv: list[str] | None = None) -> None:
             }
 
             try:
-                adapter_module = resolve_adapter_module(model_path)
+                adapter_module = resolve_adapter_module_for_test(model_path)
                 adapter_name = os.path.splitext(
                     os.path.basename(adapter_module.__file__)
                 )[0]
@@ -309,7 +311,9 @@ def main(argv: list[str] | None = None) -> None:
                         f"Model {model_path} has {int(params):,} parameters, "
                     )
 
-                metrics = eval_embedding(model_path, boolean_run=args.boolean_run)
+                metrics = eval_embedding(
+                    model_path, adapter, boolean_run=args.boolean_run
+                )
 
                 rec["verified_on_cpu"] = metrics.get("load", False)
                 rec["verified_on_spyre"] = metrics.get("correct", False)

@@ -46,10 +46,11 @@ import pytest
 import torch
 from transformers import AutoModel, AutoTokenizer
 
-from hf_adapters.auto_spyre_model import (
-    resolve_adapter_module,
+from tests.conftest import (
+    get_dtype_for_cpu,
+    load_ref_model,
+    resolve_adapter_module_for_test,
 )
-from tests.conftest import get_dtype_for_cpu, load_ref_model
 from tests.cpu.conftest import encode_padded, min_cosine
 from tests.model_registry import EMBED_PATHS
 
@@ -83,7 +84,7 @@ def test_auto_loader(
     model_path: str, auto_spyre_model, unwrap_compiled_blocks, hf_common_mod
 ) -> None:
     torch_dtype = get_dtype_for_cpu(model_path=model_path)
-    adapter_module = resolve_adapter_module(model_path)
+    adapter_module = resolve_adapter_module_for_test(model_path)
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     input_ids, attention_mask = encode_padded(tokenizer, PROMPTS)

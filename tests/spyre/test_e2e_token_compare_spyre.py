@@ -40,7 +40,7 @@ from hf_adapters.hf_common import (
     get_model_dtype,
     move_model_to_spyre,
 )
-from tests.conftest import load_ref_model
+from tests.conftest import load_ref_model, resolve_adapter_module_for_test
 
 
 def hf_greedy_steps(
@@ -289,9 +289,7 @@ def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]
     """Full comparison for one model. Returns the list of comparison rows."""
     from transformers import AutoTokenizer
 
-    from hf_adapters.auto_spyre_model import resolve_adapter_module
-
-    adapter = resolve_adapter_module(model_path)
+    adapter = resolve_adapter_module_for_test(model_path)
 
     print(f"\n{'=' * 70}")
     print(f"  {model_path}")

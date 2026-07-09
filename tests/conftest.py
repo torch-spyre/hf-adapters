@@ -46,6 +46,7 @@ import importlib.util
 import os
 import sys
 import types
+from typing import Union
 
 import pytest
 import torch
@@ -53,7 +54,12 @@ from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.nodes import Item
 from _pytest.python import Metafunc
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, PretrainedConfig
+
+from hf_adapters.auto_spyre_model import (
+    CONFIG_TO_ADAPTER_MODULE_MAPPING,
+    resolve_adapter_module,
+)
 
 # NOTE: do NOT import hf_adapters at module top level. The CPU patch block below
 # rebuilds ``hf_adapters.hf_common`` with ``DEVICE='cpu'`` and asserts that no
@@ -241,3 +247,14 @@ def load_ref_model(
         auto_model_cls=auto_model_cls,
     )
     return ref_model
+
+
+def resolve_adapter_module_for_test(
+    model_name_or_path: Union[str, os.PathLike[str]],
+    mapping: dict[
+        type[PretrainedConfig], types.ModuleType
+    ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
+) -> types.ModuleType:
+    return resolve_adapter_module(
+        model_name_or_path=model_name_or_path, mapping=mapping, trust_remote_code=False
+    )
