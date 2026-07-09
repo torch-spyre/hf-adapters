@@ -172,8 +172,8 @@ def eval_embedding(model_id: str, boolean_run: bool = False) -> dict:
         del model_on_cpu
 
         if boolean_run:
-            loads_on_spyre, _ = _temp_boolean_random()
-            mismatches, _ = _temp_boolean_random()
+            loads_on_spyre = _temp_boolean_random()
+            mismatches = _temp_boolean_random()
         else:
             loads_on_spyre, _ = load_embedding(model_id)
             mismatches, _ = embed_compare_spyre(model_id)
