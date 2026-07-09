@@ -140,11 +140,6 @@ def _set_rope_dtype(model: types.ModuleType, dtype: torch.dtype) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="session")
-def hf_common_mod() -> types.ModuleType:
-    return sys.modules["hf_adapters.hf_common"]
-
-
 @pytest.fixture
 def unwrap_compiled_blocks():
     return _unwrap_compiled_blocks

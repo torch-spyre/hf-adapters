@@ -80,8 +80,9 @@ def _run_prefill(
 
 
 @pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
-def test_auto_loader(model_path: str, unwrap_compiled_blocks, hf_common_mod) -> None:
+def test_auto_loader(model_path: str, unwrap_compiled_blocks) -> None:
     auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
+    hf_common_mod = sys.modules["hf_adapters.hf_common"]
     torch_dtype = get_dtype_for_cpu(model_path=model_path)
     adapter_module = resolve_adapter_module(model_path)
 

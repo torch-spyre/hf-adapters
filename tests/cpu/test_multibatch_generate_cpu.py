@@ -25,6 +25,7 @@ this file is plain pytest.
 """
 
 import gc
+import sys
 
 import pytest
 import torch
@@ -61,7 +62,8 @@ def _hf_reference_outputs(
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
-def test_multibatch(model_path: str, unwrap_compiled_blocks, hf_common_mod) -> None:
+def test_multibatch(model_path: str, unwrap_compiled_blocks) -> None:
+    hf_common_mod = sys.modules["hf_adapters.hf_common"]
     adapter_mod = resolve_adapter_module(model_path)
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
