@@ -145,11 +145,6 @@ def hf_common_mod() -> types.ModuleType:
     return sys.modules["hf_adapters.hf_common"]
 
 
-@pytest.fixture(scope="session")
-def auto_spyre_model() -> types.ModuleType:
-    return sys.modules["hf_adapters.auto_spyre_model"]
-
-
 @pytest.fixture
 def unwrap_compiled_blocks():
     return _unwrap_compiled_blocks

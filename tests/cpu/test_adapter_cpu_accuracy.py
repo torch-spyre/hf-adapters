@@ -32,6 +32,7 @@ this file is plain pytest.
 """
 
 import gc
+import sys
 
 import pytest
 import torch
@@ -160,7 +161,8 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=NUM_DECODE
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
-def test_auto_loader(model_path, auto_spyre_model, unwrap_compiled_blocks):
+def test_auto_loader(model_path, unwrap_compiled_blocks):
+    auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
     torch_dtype = get_dtype_for_cpu(model_path=model_path)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
