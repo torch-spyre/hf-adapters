@@ -29,9 +29,7 @@ for _p in (_SPYRE_TESTS_DIR, _TESTS_DIR, _UTILS_DIR, _REPO_ROOT):
         sys.path.insert(0, str(_p))
 
 
-from tests.conftest import get_dtype_for_cpu # noqa: E402
-from tests.conftest import resolve_adapter_module_for_test  # noqa: E402
-
+from tests.conftest import get_dtype_for_cpu  # noqa: E402
 from tests.spyre.test_e2e_embed_compare_spyre import embed_compare_spyre  # noqa: E402
 from tests.spyre.test_load_spyre import load_embedding  # noqa: E402
 from tests.spyre.weekly_generation.create_model_spyre_table import (  # noqa: E402
@@ -290,6 +288,8 @@ def main(argv: list[str] | None = None) -> None:
             }
 
             try:
+                from tests.conftest import resolve_adapter_module_for_test  # noqa: E402
+
                 adapter_module = resolve_adapter_module_for_test(model_path)
                 adapter_name = os.path.splitext(
                     os.path.basename(adapter_module.__file__)
@@ -312,7 +312,7 @@ def main(argv: list[str] | None = None) -> None:
                     )
 
                 metrics = eval_embedding(
-                    model_path, adapter, boolean_run=args.boolean_run
+                    model_path, adapter_module, boolean_run=args.boolean_run
                 )
 
                 rec["verified_on_cpu"] = metrics.get("load", False)
