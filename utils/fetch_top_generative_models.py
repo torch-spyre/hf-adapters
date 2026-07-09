@@ -4,15 +4,16 @@ import os
 import sys
 from pathlib import Path
 
-from hf_model_catalog import (
+from huggingface_hub import HfApi
+from huggingface_hub.hf_api import ModelInfo
+
+from utils.hf_model_catalog import (
     EXPAND_FIELDS,
     RESOURCES_DIR,
     build_catalog,
     is_baseline_keep,
     is_moe,
 )
-from huggingface_hub import HfApi
-from huggingface_hub.hf_api import ModelInfo
 
 
 def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:

@@ -23,17 +23,17 @@ import os
 import sys
 from pathlib import Path
 
-from hf_model_catalog import (
+from huggingface_hub import HfApi
+from huggingface_hub.hf_api import ModelInfo
+
+from utils.hf_model_catalog import (
     EXPAND_FIELDS,
     RESOURCES_DIR,
     build_catalog,
     is_baseline_keep,
+    is_moe,
     tags,
 )
-from huggingface_hub import HfApi
-from huggingface_hub.hf_api import ModelInfo
-
-from utils.hf_model_catalog import is_moe
 
 # Pipeline tags that embedding models are filed under. They are mutually
 # exclusive (one primary tag per model), so we query both and union.
