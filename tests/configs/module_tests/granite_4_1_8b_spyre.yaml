@@ -12,6 +12,7 @@ test_suite_config:
           mode: xfail
           tags:
             - model__granite_4_1_8b
+          no_grad: true
           edits:
             modules:
               include: &id001

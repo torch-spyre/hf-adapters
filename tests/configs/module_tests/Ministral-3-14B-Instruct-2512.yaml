@@ -15,6 +15,7 @@ test_suite_config:
           mode: xfail
           tags:
             - model__Ministral_3_14B_Instruct_2512
+          no_grad: true
           edits:
             modules:
               include: &id001
