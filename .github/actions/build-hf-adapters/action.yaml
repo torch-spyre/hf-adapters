@@ -139,30 +139,9 @@ runs:
         sudo dnf install -y rpms/*.rpm
 
     - name: Gather runner info
-      shell: bash
-      working-directory: /home/senuser
-      run: |
-        source "$HOME/.bashrc"
-        source /etc/profile.d/ibm-aiu-setup.sh
-        echo "================================="
-        date
-        pwd
-        whoami
-        id
-        echo "GHA_RUNNER_POD_NODE_NAME $GHA_RUNNER_POD_NODE_NAME"
-        echo "PATH $PATH"
-        echo "HOME $HOME"
-        echo "---------------------------------"
-        echo "Installed RPMs"
-        cat "$HOME/installed_rpms.txt"
-        echo "---------------------------------"
-        python3 --version
-        python3 -c 'import sys; print(sys.path)'
-        echo "--- env ---"
-        env | sort
-        echo "--- AIU env ---"
-        env | sort | grep AIU || true
-        echo "================================="
+      uses: ./.github/actions/gather-runner-info
+      with:
+        verbose: 'true'
 
 
     - name: Build hf-adapters
