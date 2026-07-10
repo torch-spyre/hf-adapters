@@ -295,12 +295,30 @@ def main(argv: list[str] | None = None) -> None:
     supported_list = fetch_top_embedding_models(limit=args.top_k)
     adapter_dates: dict[str, str | None] = _get_adapter_dates()
 
+    _FIELDNAMES = [
+        "model_name",
+        "architecture",
+        "adapter_name",
+        "added_date",
+        "snapshot_date",
+        "verified_on_cpu",
+        "verified_on_gpu",
+        "verified_on_spyre",
+        "num_downloads",
+    ]
+
     # ClickHouse setup — skipped when --write-to-csv is given.
     db_client = None
-    csv_rows: list[dict] = []
+    csv_fh = None
+    csv_writer = None
     if args.write_to_csv:
+        args.write_to_csv.parent.mkdir(parents=True, exist_ok=True)
+        csv_fh = open(args.write_to_csv, "w", newline="")
+        csv_writer = csv.DictWriter(csv_fh, fieldnames=_FIELDNAMES)
+        csv_writer.writeheader()
+        csv_fh.flush()
         print(
-            f"CSV mode: results will be written to '{args.write_to_csv}' (no DB access).\n"
+            f"CSV mode: results will be written immediately to '{args.write_to_csv}' (no DB access).\n"
         )
     else:
         db_client = get_client()
@@ -417,8 +435,8 @@ def main(argv: list[str] | None = None) -> None:
                 print("".join(traceback.format_exc().splitlines(keepends=True)[-6:]))
 
             if args.write_to_csv:
-                csv_rows.append(rec)
-                print(f"    csv: row queued for '{model_path}'")
+                csv_writer.writerow(rec)
+                csv_fh.flush()
             else:
                 inserted = insert_model_row(
                     db_client,
@@ -449,24 +467,9 @@ def main(argv: list[str] | None = None) -> None:
     except KeyboardInterrupt:
         print("\nInterrupted — results so far are saved; rerun to resume.")
     finally:
-        if args.write_to_csv and csv_rows:
-            _FIELDNAMES = [
-                "model_name",
-                "architecture",
-                "adapter_name",
-                "added_date",
-                "snapshot_date",
-                "verified_on_cpu",
-                "verified_on_gpu",
-                "verified_on_spyre",
-                "num_downloads",
-            ]
-            args.write_to_csv.parent.mkdir(parents=True, exist_ok=True)
-            with open(args.write_to_csv, "w", newline="") as fh:
-                writer = csv.DictWriter(fh, fieldnames=_FIELDNAMES)
-                writer.writeheader()
-                writer.writerows(csv_rows)
-            print(f"\nCSV: {len(csv_rows)} rows written to '{args.write_to_csv}'")
+        if csv_fh is not None:
+            csv_fh.close()
+            print(f"\nCSV: '{args.write_to_csv}' closed ({processed} rows processed).")
 
         overall_elapsed = time.monotonic() - overall_start
         mins, secs = divmod(int(overall_elapsed), 60)
