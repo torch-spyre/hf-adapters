@@ -282,6 +282,12 @@ jobs:
       - name: Run test_load_spyre.py for ${{ matrix.model_key }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Disable spyre_fuse_nodes bundling — flash attention's tiled softmax
+          # fused with neighboring ops crashes Deeptools' DDL dimension mapper
+          # (see torch-spyre issue: ddc/ddl/ddl_conversion.cpp "Could not find
+          # any suitable dimension mapping"). Temporary workaround pending a
+          # real fix upstream.
+          BUNDLE_SYMBOLIC_ARGS: "0"
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -330,6 +336,8 @@ jobs:
       - name: Run test_e2e_smoke_spyre.py for ${{ matrix.model_key }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # See BUNDLE_SYMBOLIC_ARGS note in spyre-load-tests above.
+          BUNDLE_SYMBOLIC_ARGS: "0"
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -378,6 +386,8 @@ jobs:
       - name: Run test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # See BUNDLE_SYMBOLIC_ARGS note in spyre-load-tests above.
+          BUNDLE_SYMBOLIC_ARGS: "0"
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -426,6 +436,8 @@ jobs:
       - name: Run test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # See BUNDLE_SYMBOLIC_ARGS note in spyre-load-tests above.
+          BUNDLE_SYMBOLIC_ARGS: "0"
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -475,6 +487,8 @@ jobs:
       - name: Run test_vlm_e2e_spyre.py for ${{ matrix.model_key }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # See BUNDLE_SYMBOLIC_ARGS note in spyre-load-tests above.
+          BUNDLE_SYMBOLIC_ARGS: "0"
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -528,6 +542,8 @@ jobs:
           # ${TORCH_DEVICE_ROOT}/tests/test_modules_custom.py in the YAML configs
           # resolves to hf-adapters/tests/test_modules_custom.py (not torch-spyre).
           TORCH_DEVICE_ROOT: ${{ env.CLONED_HF_ADAPTERS_DIR }}
+          # See BUNDLE_SYMBOLIC_ARGS note in spyre-load-tests above.
+          BUNDLE_SYMBOLIC_ARGS: "0"
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
