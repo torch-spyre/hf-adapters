@@ -1602,7 +1602,7 @@ wheels = [
 [[package]]
 name = "oot-framework"
 version = "0.1.0"
-source = { git = "https://github.com/torch-spyre/torch-spyre?subdirectory=tests%2Foot_framework&rev=main#b7dd52a773d233ab78caba8d619cbf454d0d451a" }
+source = { git = "https://github.com/torch-spyre/torch-spyre?subdirectory=tests%2Foot_framework&rev=main#997bafcfd0072af955f4a500cf6cf9ae6aff5a5f" }
 dependencies = [
     { name = "expecttest" },
     { name = "pydantic" },
@@ -3052,7 +3052,7 @@ wheels = [
 [[package]]
 name = "torch-spyre"
 version = "0.0.1"
-source = { git = "https://github.com/torch-spyre/torch-spyre?rev=main#b7dd52a773d233ab78caba8d619cbf454d0d451a" }
+source = { git = "https://github.com/torch-spyre/torch-spyre?rev=main#997bafcfd0072af955f4a500cf6cf9ae6aff5a5f" }
 dependencies = [
     { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },

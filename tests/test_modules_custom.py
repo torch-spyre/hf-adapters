@@ -139,9 +139,19 @@ class TestModuleCustom(TestCase):
                 zip(cpu_tensors, device_eager_tensors, device_compile_tensors)
             ):
                 # Compare CPU eager vs Spyre eager
+                #
+                # atol/rtol are passed explicitly (sourced from self.precision /
+                # self.rel_tol, populated by the OOT framework's YAML-driven
+                # tolerance overrides). Without explicit values, assertEqual
+                # falls back to torch's per-dtype default_tolerances() and only
+                # ever widens it via max(default, override) -- so a YAML rtol
+                # tighter than the dtype default (e.g. bfloat16's built-in 0.016)
+                # would otherwise be silently ignored.
                 self.assertEqual(
                     cpu_t,
                     eager_t.cpu(),
+                    atol=self.precision,
+                    rtol=self.rel_tol,
                     msg=f"{module_info.name}: CPU eager vs Spyre eager mismatch (tensor {i})",
                 )
 
@@ -151,6 +161,8 @@ class TestModuleCustom(TestCase):
                 self.assertEqual(
                     eager_t.cpu(),
                     compile_t.cpu(),
+                    atol=self.precision,
+                    rtol=self.rel_tol,
                     msg=f"{module_info.name}: Spyre eager vs Spyre compile mismatch (tensor {i})",
                 )
 
@@ -220,9 +232,14 @@ class TestModuleCustom(TestCase):
 
             # Compare all tensors (hidden states, KV cache, attention weights, etc.)
             for i, (cpu_t, device_t) in enumerate(zip(cpu_tensors, device_tensors)):
+                # See comment in test_eager_vs_compile for why atol/rtol are
+                # passed explicitly rather than relying on assertEqual's
+                # implicit default+override tolerance resolution.
                 self.assertEqual(
                     cpu_t,
                     device_t.cpu(),
+                    atol=self.precision,
+                    rtol=self.rel_tol,
                     msg=f"{module_info.name}: layout/stride mismatch on real inputs (tensor {i})",
                 )
 
