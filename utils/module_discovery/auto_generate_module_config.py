@@ -753,6 +753,11 @@ def generate_unified_yaml_config(
                             ],
                             "mode": "xfail",
                             "tags": [f"model__{model_name}", "custom_tests"],
+                            # Same AOTAutograd/no_grad issue as test_forward
+                            # above: these custom tests also build modules
+                            # with requires_grad=True parameters and compile
+                            # them for Spyre.
+                            "no_grad": True,
                             "edits": {"modules": {"include": module_entries}},
                         }
                     ],

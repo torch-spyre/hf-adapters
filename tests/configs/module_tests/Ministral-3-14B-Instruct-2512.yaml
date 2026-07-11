@@ -404,6 +404,7 @@ test_suite_config:
           tags:
             - model__Ministral_3_14B_Instruct_2512
             - custom_tests
+          no_grad: true
           edits:
             modules:
               include: *id001
