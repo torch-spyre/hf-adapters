@@ -321,11 +321,17 @@ def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]
     return _compare_results(hf_results, adapter_results, tokenizer, model_path)
 
 
+def token_compare_spyre(
+    model_path: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rows = _run_model_test(model_path)
+    mismatches = [r for r in rows if not r["top1_match"]]
+    return mismatches, rows
+
+
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 def test_e2e_token_compare_spyre(model_path: str) -> None:
-    rows = _run_model_test(model_path)
-    _print_table(rows)
+    mismatches, rows = token_compare_spyre(model_path)
     n_match = sum(1 for r in rows if r["top1_match"])
     print(f"\nTop-1 agreement: {n_match}/{len(rows)} steps")
-    mismatches = [r for r in rows if not r["top1_match"]]
     assert not mismatches, mismatches

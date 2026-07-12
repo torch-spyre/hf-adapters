@@ -19,7 +19,13 @@ import sys
 import time
 import traceback
 from datetime import date
+from enum import Enum
 from pathlib import Path
+from typing import Literal
+
+from test_e2e_smoke_spyre import run_smoke_test
+
+from hf_adapters import AutoSpyreModelForCausalLM
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SPYRE_TESTS_DIR = _REPO_ROOT / "tests" / "spyre"
@@ -32,13 +38,15 @@ for _p in (_SPYRE_TESTS_DIR, _TESTS_DIR, _UTILS_DIR, _REPO_ROOT):
 
 from tests.conftest import get_dtype_for_cpu  # noqa: E402
 from tests.spyre.test_e2e_embed_compare_spyre import embed_compare_spyre  # noqa: E402
-from tests.spyre.test_load_spyre import load_embedding  # noqa: E402
+from tests.spyre.test_e2e_token_compare_spyre import token_compare_spyre  # noqa: E402
+from tests.spyre.test_load_spyre import load_causal_lm, load_embedding  # noqa: E402
 from tests.spyre.weekly_generation.result_sink import (  # noqa: E402
     ClickHouseResultSink,
     CsvResultSink,
     ResultSink,
 )
 from utils.fetch_top_embedding_models import fetch_top_embedding_models  # noqa: E402
+from utils.fetch_top_generative_models import fetch_top_generative_models  # noqa: E402
 
 # Weight-file suffixes. A repo with at least one of these cached "has weights";
 # a repo with only config/tokenizer files does not, so its later-downloaded
@@ -53,6 +61,11 @@ _WEIGHT_SUFFIXES = (
     ".h5",
     ".msgpack",
 )
+
+
+class EmbeddingGenerativeMode(str, Enum):
+    EMBEDDING = "embedding"
+    GENERATIVE = "generative"
 
 
 def _repos_with_weights():
@@ -110,10 +123,19 @@ def _get_adapter_dates() -> dict[str, str | None]:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--mode",
+        choices=["embedding", "generative"],
+        help=(
+            "Which model class to evaluate: 'embedding' runs the "
+            "embedding load + cosine-compare pipeline; 'generative' runs the "
+            "causal-LM load + token-compare pipeline."
+        ),
+    )
+    parser.add_argument(
         "--top-k",
         type=int,
         default=200,
-        help="Number of top embedding models to fetch (by downloads).",
+        help="Number of top models to fetch (by downloads).",
     )
     parser.add_argument(
         "--write-to-csv",
@@ -141,7 +163,7 @@ def _temp_random_bool() -> bool:
     return random.choice([True, False])
 
 
-def _load_embedding_on_cpu(model_path: str) -> bool:
+def _load_on_cpu(model_path: str, mode: EmbeddingGenerativeMode) -> bool:
     import hf_adapters.hf_common as _hf_common
     from hf_adapters.auto_spyre_model import AutoSpyreModel
 
@@ -149,13 +171,58 @@ def _load_embedding_on_cpu(model_path: str) -> bool:
     _hf_common.DEVICE = "cpu"  # patch
     try:
         dtype = get_dtype_for_cpu(model_path)
-        model = AutoSpyreModel.from_pretrained(model_path, dtype=dtype)
+        model = None
+        match mode:
+            case "embedding":
+                model = AutoSpyreModel.from_pretrained(model_path, dtype=dtype)
+            case "generative":
+                model = AutoSpyreModelForCausalLM.from_pretrained(
+                    model_path, dtype=dtype
+                )
+
         return model is not None
     except Exception as e:
         print(f"_load_embedding_on_cpu exception - {e}")
         return False
     finally:
         _hf_common.DEVICE = _orig_device  # restore
+
+
+def eval_generative(model_id: str, adapter, random_run: bool = False) -> dict:
+    load_on_cpu = False
+    loads_on_spyre = False
+    run_smoke_status = False
+    mismatches = True
+
+    """Load and compare token outputs for one generative model. Returns a metrics dict."""
+    try:
+        if adapter is not None:
+            model_on_cpu = _load_on_cpu(
+                model_path=model_id, mode=EmbeddingGenerativeMode.GENERATIVE
+            )
+            load_on_cpu = model_on_cpu is not None
+
+            if load_on_cpu:
+                if random_run:
+                    loads_on_spyre = _temp_random_bool()
+                else:
+                    model_is_not_none, callables, _ = load_causal_lm(
+                        model_path=model_id
+                    )
+                    loads_on_spyre = model_is_not_none and callables
+
+                    run_smoke_status = (
+                        run_smoke_test(model_path=model_id)["status"] == "PASS"
+                    )
+                    mismatches, _ = token_compare_spyre(model_id)
+
+    except Exception as e:
+        print(f"eval_generative exception - {e}")
+    finally:
+        return {
+            "correct": loads_on_spyre and run_smoke_status and not mismatches,
+            "load": load_on_cpu,
+        }
 
 
 def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
@@ -167,7 +234,9 @@ def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
     try:
         if adapter is not None:
             # First we check that it is loadable on cpu:
-            model_on_cpu = _load_embedding_on_cpu(model_path=model_id)
+            model_on_cpu = _load_on_cpu(
+                model_path=model_id, mode=EmbeddingGenerativeMode.EMBEDDING
+            )
             load_on_cpu = model_on_cpu is not None
             del model_on_cpu
 
@@ -193,6 +262,7 @@ def _process_row(
     random_run: bool,
     adapter_dates: dict[str, str | None],
     result_queue,
+    mode: Literal["embedding", "generative"],
 ) -> None:
     """Worker target for a raw spawn Process — no Pool machinery in the parent.
 
@@ -222,10 +292,13 @@ def _process_row(
         ]
         result["adapter_name"] = adapter_name
         result["added_date"] = adapter_dates.get(adapter_name)
-
-        result["metrics"] = eval_embedding(
-            model_path, adapter_module, random_run=random_run
-        )
+        if mode == "generative":
+            eval_fn = eval_generative
+        elif mode == "embedding":
+            eval_fn = eval_embedding
+        else:
+            raise Exception(f"Unknown mode: {mode}")
+        result["metrics"] = eval_fn(model_path, adapter_module, random_run=random_run)
     except Exception as e:
         result["error"] = (
             f"{type(e).__name__}: {e}\n"
@@ -290,12 +363,17 @@ def main(argv: list[str] | None = None) -> None:
     preexisting: set = _repos_with_weights()
     total_freed: int = 0
     snapshot_date = date.today()
-    to_process_list = fetch_top_embedding_models(limit=args.top_k)
+    if args.mode == "generative":
+        to_process_list = fetch_top_generative_models(limit=args.top_k)
+    elif args.mode == "embedding":
+        to_process_list = fetch_top_embedding_models(limit=args.top_k)
+    else:
+        raise Exception(f"Unknown mode: {args.mode}")
     adapter_dates: dict[str, str | None] = _get_adapter_dates()
 
     sink: ResultSink
     if args.write_to_csv:
-        sink = CsvResultSink(args.write_to_csv, today=snapshot_date)
+        sink = CsvResultSink(path=args.write_to_csv, today=snapshot_date)
         print(
             f"CSV mode: results will be appended to '{args.write_to_csv}' (no DB access).\n"
         )
@@ -361,7 +439,14 @@ def main(argv: list[str] | None = None) -> None:
                 result_queue = ctx.Queue()
                 proc = ctx.Process(
                     target=_process_row,
-                    args=(model_path, args.random_run, adapter_dates, result_queue),
+                    args=(
+                        model_path,
+                        args.random_run,
+                        args.mode,
+                        adapter_dates,
+                        result_queue,
+                        args.mode,
+                    ),
                 )
                 proc.start()
                 proc.join()
