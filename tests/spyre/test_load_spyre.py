@@ -26,7 +26,7 @@ Usage (on Spyre pod)::
 """
 
 import time
-from typing import Any, Callable, TypeIs
+from typing import Any
 
 import pytest
 from model_registry import CAUSAL_PATHS, EMBED_PATHS
@@ -50,7 +50,7 @@ def test_load_causal_lm(model_path: str) -> None:
     ), f"{model_path}: AutoSpyreModelForCausalLM did not attach generate()"
 
 
-def load_causal_lm(model_path: str) -> tuple[Any, TypeIs[Callable[..., object]], float]:
+def load_causal_lm(model_path: str) -> tuple[Any, Any, float]:
     from hf_adapters import AutoSpyreModelForCausalLM
 
     dtype = torch_dtype_for_model_path(model_path)
