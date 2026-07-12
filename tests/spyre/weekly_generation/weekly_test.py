@@ -313,12 +313,17 @@ def main(argv: list[str] | None = None) -> None:
     csv_writer = None
     if args.write_to_csv:
         args.write_to_csv.parent.mkdir(parents=True, exist_ok=True)
-        csv_fh = open(args.write_to_csv, "w", newline="")
+        csv_exists: bool = (
+            args.write_to_csv.exists() and args.write_to_csv.stat().st_size > 0
+        )
+        csv_fh = open(args.write_to_csv, "a", newline="")
         csv_writer = csv.DictWriter(csv_fh, fieldnames=_FIELDNAMES)
-        csv_writer.writeheader()
-        csv_fh.flush()
+        if not csv_exists:
+            csv_writer.writeheader()
+            csv_fh.flush()
         print(
-            f"CSV mode: results will be written immediately to '{args.write_to_csv}' (no DB access).\n"
+            f"CSV mode: results will be {'appended to' if csv_exists else 'written to'} "
+            f"'{args.write_to_csv}' (no DB access).\n"
         )
     else:
         db_client = get_client()
