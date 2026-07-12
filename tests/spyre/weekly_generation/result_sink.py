@@ -125,8 +125,8 @@ class ResultSink(ABC):
         Callers can invoke this directly to short-circuit expensive work when
         the sink will reject the row anyway (see ``weekly_test.py``).
         """
-        key: str = _require_non_empty(model_name, "model_name")
-        return not self.get_recent_cpu_verified_entries(key)
+        model_name: str = _require_non_empty(model_name, "model_name")
+        return not self.get_recent_cpu_verified_entries(model_name)
 
     def __enter__(self) -> ResultSink:
         return self
