@@ -290,7 +290,7 @@ def main(argv: list[str] | None = None) -> None:
     preexisting: set = _repos_with_weights()
     total_freed: int = 0
     snapshot_date = date.today()
-    supported_list = fetch_top_embedding_models(limit=args.top_k)
+    to_process_list = fetch_top_embedding_models(limit=args.top_k)
     adapter_dates: dict[str, str | None] = _get_adapter_dates()
 
     sink: ResultSink
@@ -302,16 +302,15 @@ def main(argv: list[str] | None = None) -> None:
     else:
         sink = ClickHouseResultSink(today=snapshot_date)
 
-    total = len(supported_list)
+    total = len(to_process_list)
     processed = 0
     overall_start = time.monotonic()
 
     ctx = multiprocessing.get_context("spawn")
     try:
-        for row in supported_list:
+        for row in to_process_list:
             model_path = str(row["model_id"])
             csv_config_class = row.get("config_class")
-            print(f"csv_config_class: {csv_config_class}")
             processed += 1
             model_start = time.monotonic()
             elapsed_overall = model_start - overall_start
