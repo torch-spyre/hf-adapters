@@ -6,7 +6,7 @@ pytests in this file consume the resulting CSV.
 
 Run directly to perform the fetch step::
 
-    python tests/spyre/weekly_test.py --top-k 200
+    python tests/spyre/weekly_generation/weekly_test.py --top-k 200
 """
 
 import argparse
@@ -22,7 +22,7 @@ import traceback
 from datetime import date
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _SPYRE_TESTS_DIR = _REPO_ROOT / "tests" / "spyre"
 _TESTS_DIR = _REPO_ROOT / "tests"
 _UTILS_DIR = _REPO_ROOT / "utils"
