@@ -310,7 +310,6 @@ def main(argv: list[str] | None = None) -> None:
     try:
         for row in to_process_list:
             model_path = str(row["model_id"])
-            csv_config_class = row.get("config_class")
             processed += 1
             model_start = time.monotonic()
             elapsed_overall = model_start - overall_start
@@ -318,6 +317,16 @@ def main(argv: list[str] | None = None) -> None:
                 f"\n[{processed}/{total}] {model_path}  "
                 f"(overall elapsed: {elapsed_overall:.0f}s)"
             )
+
+            if not sink.should_insert_row(model_path):
+                print(
+                    f"    sink: '{model_path}' skipped early — "
+                    f"CPU-verified snapshot exists within the last "
+                    f"{sink.__class__.__name__} skip window"
+                )
+                continue
+
+            csv_config_class = row.get("config_class")
 
             had_weights = model_path in preexisting
 
@@ -341,9 +350,7 @@ def main(argv: list[str] | None = None) -> None:
                         f"Model {model_path} has {int(params):,} parameters, "
                         f"exceeding the 60B limit for Spyre bring-up."
                     )
-                    raise Exception(
-                        f"Model {model_path} has {int(params):,} parameters, "
-                    )
+                    continue
 
                 # Use a raw Process instead of Pool so that no pipes,
                 # semaphores, or pool-supervisor state accumulate in the

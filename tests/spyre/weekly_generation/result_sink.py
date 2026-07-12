@@ -113,15 +113,20 @@ class ResultSink(ABC):
         Returns True if the row was written, False if ``should_insert_row``
         rejected it. Idempotent to call for every row in the driver loop.
         """
-        if not self._should_insert_row(rec):
+        model_name: str = _require_model_name(rec)
+        if not self.should_insert_row(model_name):
             return False
         self._insert_entry(rec)
         return True
 
-    def _should_insert_row(self, rec: dict[str, Any]) -> bool:
-        """Skip when a CPU-verified prior entry exists inside the skip window."""
-        model_name: str = _require_model_name(rec)
-        return not self.get_recent_cpu_verified_entries(model_name)
+    def should_insert_row(self, model_name: str) -> bool:
+        """Return False when *model_name* has a CPU-verified entry in the window.
+
+        Callers can invoke this directly to short-circuit expensive work when
+        the sink will reject the row anyway (see ``weekly_test.py``).
+        """
+        key: str = _require_non_empty(model_name, "model_name")
+        return not self.get_recent_cpu_verified_entries(key)
 
     def __enter__(self) -> ResultSink:
         return self
