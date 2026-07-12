@@ -25,8 +25,6 @@ from typing import Literal
 
 from test_e2e_smoke_spyre import run_smoke_test
 
-from hf_adapters import AutoSpyreModelForCausalLM
-
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SPYRE_TESTS_DIR = _REPO_ROOT / "tests" / "spyre"
 _TESTS_DIR = _REPO_ROOT / "tests"
@@ -35,7 +33,7 @@ for _p in (_SPYRE_TESTS_DIR, _TESTS_DIR, _UTILS_DIR, _REPO_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-
+from hf_adapters import AutoSpyreModelForCausalLM  # noqa: E402
 from tests.conftest import get_dtype_for_cpu  # noqa: E402
 from tests.spyre.test_e2e_embed_compare_spyre import embed_compare_spyre  # noqa: E402
 from tests.spyre.test_e2e_token_compare_spyre import token_compare_spyre  # noqa: E402
