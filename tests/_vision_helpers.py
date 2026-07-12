@@ -104,19 +104,23 @@ def stock_vlm_generate(
     batch: dict[str, torch.Tensor],
     adapter_mod,
     max_new_tokens: int,
+    ref_model=None,
 ) -> str:
     """Reference: stock ``AutoModelForImageTextToText.generate`` on ``batch``.
 
     Loaded via stock HF directly so the reference stays independent of the code
     under test. Returns the decoded **new** text (prompt tokens sliced off).
+
+    Pass ``ref_model`` to reuse an already-loaded stock model.
     """
     from transformers import AutoModelForImageTextToText
 
-    ref_model = load_ref_model(
-        model_path=model_path,
-        adapter_mod=adapter_mod,
-        auto_model_cls=AutoModelForImageTextToText,
-    )
+    if ref_model is None:
+        ref_model = load_ref_model(
+            model_path=model_path,
+            adapter_mod=adapter_mod,
+            auto_model_cls=AutoModelForImageTextToText,
+        )
 
     prompt_len = batch["input_ids"].shape[1]
     with torch.no_grad():
@@ -127,5 +131,4 @@ def stock_vlm_generate(
             use_cache=True,
         )
     text = processor.tokenizer.decode(gen[0, prompt_len:], skip_special_tokens=True)
-    del ref_model
     return text
