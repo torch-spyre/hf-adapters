@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import csv
 from abc import ABC, abstractmethod
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -47,14 +47,23 @@ def _within_skip_window(existing_snapshot: date, today: date) -> bool:
     return (today - existing_snapshot).days < _SKIP_WINDOW_DAYS
 
 
+_SNAPSHOT_DATE_FORMATS = (
+    "%Y-%m-%d",  # ISO 8601 — primary format written by this module
+    "%d/%m/%Y",  # DD/MM/YYYY
+    "%m/%d/%Y",  # MM/DD/YYYY
+    "%Y/%m/%d",  # YYYY/MM/DD
+)
+
+
 def _coerce_snapshot(value: object) -> date | None:
     if isinstance(value, date):
         return value
     if isinstance(value, str) and value:
-        try:
-            return date.fromisoformat(value)
-        except ValueError:
-            return None
+        for fmt in _SNAPSHOT_DATE_FORMATS:
+            try:
+                return datetime.strptime(value.strip(), fmt).date()
+            except ValueError:
+                continue
     return None
 
 
@@ -171,6 +180,11 @@ class CsvResultSink(ResultSink):
                     )
                     continue
                 self._rows_by_model.setdefault(model_name, []).append(dict(raw_row))
+        loaded = sum(len(v) for v in self._rows_by_model.values())
+        print(
+            f"    index: loaded {loaded} row(s) for "
+            f"{len(self._rows_by_model)} model(s) from '{self._path}'"
+        )
 
     def get_recent_cpu_verified_entries(self, model_name: str) -> list[dict[str, Any]]:
         key: str = _require_non_empty(model_name, "model_name")
