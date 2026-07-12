@@ -18,10 +18,10 @@ import subprocess
 import sys
 import time
 import traceback
+from asyncio import Queue
 from datetime import date
 from enum import Enum
 from pathlib import Path
-from typing import Literal
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SPYRE_TESTS_DIR = _REPO_ROOT / "tests" / "spyre"
@@ -258,8 +258,8 @@ def _process_row(
     model_path: str,
     random_run: bool,
     adapter_dates: dict[str, str | None],
-    result_queue,
-    mode: Literal["embedding", "generative"],
+    result_queue: Queue,
+    mode: EmbeddingGenerativeMode,
 ) -> None:
     """Worker target for a raw spawn Process — no Pool machinery in the parent.
 
@@ -289,12 +289,11 @@ def _process_row(
         ]
         result["adapter_name"] = adapter_name
         result["added_date"] = adapter_dates.get(adapter_name)
-        if mode == "generative":
-            eval_fn = eval_generative
-        elif mode == "embedding":
-            eval_fn = eval_embedding
-        else:
-            raise Exception(f"Unknown mode: {mode}")
+        match mode:
+            case EmbeddingGenerativeMode.EMBEDDING:
+                eval_fn = eval_embedding
+            case EmbeddingGenerativeMode.GENERATIVE:
+                eval_fn = eval_generative
         result["metrics"] = eval_fn(model_path, adapter_module, random_run=random_run)
     except Exception as e:
         result["error"] = (
@@ -439,7 +438,6 @@ def main(argv: list[str] | None = None) -> None:
                     args=(
                         model_path,
                         args.random_run,
-                        args.mode,
                         adapter_dates,
                         result_queue,
                         args.mode,
