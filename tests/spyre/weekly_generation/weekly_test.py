@@ -10,7 +10,6 @@ Run directly to perform the fetch step::
 """
 
 import argparse
-import csv
 import gc
 import multiprocessing
 import os
@@ -34,11 +33,10 @@ for _p in (_SPYRE_TESTS_DIR, _TESTS_DIR, _UTILS_DIR, _REPO_ROOT):
 from tests.conftest import get_dtype_for_cpu  # noqa: E402
 from tests.spyre.test_e2e_embed_compare_spyre import embed_compare_spyre  # noqa: E402
 from tests.spyre.test_load_spyre import load_embedding  # noqa: E402
-from tests.spyre.weekly_generation.create_model_spyre_table import (  # noqa: E402
-    CREATE_TABLE_SQL,
-    get_client,
-    insert_model_row,
-    table_exists,
+from tests.spyre.weekly_generation.result_sink import (  # noqa: E402
+    ClickHouseResultSink,
+    CsvResultSink,
+    ResultSink,
 )
 from utils.fetch_top_embedding_models import fetch_top_embedding_models  # noqa: E402
 
@@ -295,43 +293,14 @@ def main(argv: list[str] | None = None) -> None:
     supported_list = fetch_top_embedding_models(limit=args.top_k)
     adapter_dates: dict[str, str | None] = _get_adapter_dates()
 
-    _FIELDNAMES = [
-        "model_name",
-        "architecture",
-        "adapter_name",
-        "added_date",
-        "snapshot_date",
-        "verified_on_cpu",
-        "verified_on_gpu",
-        "verified_on_spyre",
-        "num_downloads",
-    ]
-
-    # ClickHouse setup — skipped when --write-to-csv is given.
-    db_client = None
-    csv_fh = None
-    csv_writer = None
+    sink: ResultSink
     if args.write_to_csv:
-        args.write_to_csv.parent.mkdir(parents=True, exist_ok=True)
-        csv_exists: bool = (
-            args.write_to_csv.exists() and args.write_to_csv.stat().st_size > 0
-        )
-        csv_fh = open(args.write_to_csv, "a", newline="")
-        csv_writer = csv.DictWriter(csv_fh, fieldnames=_FIELDNAMES)
-        if not csv_exists:
-            csv_writer.writeheader()
-            csv_fh.flush()
+        sink = CsvResultSink(args.write_to_csv, today=snapshot_date)
         print(
-            f"CSV mode: results will be {'appended to' if csv_exists else 'written to'} "
-            f"'{args.write_to_csv}' (no DB access).\n"
+            f"CSV mode: results will be appended to '{args.write_to_csv}' (no DB access).\n"
         )
     else:
-        db_client = get_client()
-        if not table_exists(db_client):
-            db_client.command(CREATE_TABLE_SQL)
-            print("ClickHouse: table created.\n")
-        else:
-            print("ClickHouse: table already exists.\n")
+        sink = ClickHouseResultSink(today=snapshot_date)
 
     total = len(supported_list)
     processed = 0
@@ -439,26 +408,10 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 print("".join(traceback.format_exc().splitlines(keepends=True)[-6:]))
 
-            if args.write_to_csv:
-                csv_writer.writerow(rec)
-                csv_fh.flush()
+            if sink.add_entry(rec):
+                print(f"    sink: row written for '{model_path}'")
             else:
-                inserted = insert_model_row(
-                    db_client,
-                    model_name=rec["model_name"],
-                    architecture=rec["architecture"],
-                    adapter_name=rec["adapter_name"],
-                    added_date=rec["added_date"],
-                    snapshot_date=rec["snapshot_date"],
-                    verified_on_cpu=rec["verified_on_cpu"],
-                    verified_on_gpu=rec["verified_on_gpu"],
-                    verified_on_spyre=rec["verified_on_spyre"],
-                    num_downloads=rec["num_downloads"],
-                )
-                if inserted:
-                    print(f"    db: row inserted for '{model_path}'")
-                else:
-                    print(f"    db: row skipped for '{model_path}' (guard rejected)")
+                print(f"    sink: row skipped for '{model_path}' (guard rejected)")
 
             # Cache cleanup: weights absent at start -> delete downloaded weights.
             if not had_weights:
@@ -472,8 +425,8 @@ def main(argv: list[str] | None = None) -> None:
     except KeyboardInterrupt:
         print("\nInterrupted — results so far are saved; rerun to resume.")
     finally:
-        if csv_fh is not None:
-            csv_fh.close()
+        sink.close()
+        if args.write_to_csv:
             print(f"\nCSV: '{args.write_to_csv}' closed ({processed} rows processed).")
 
         overall_elapsed = time.monotonic() - overall_start

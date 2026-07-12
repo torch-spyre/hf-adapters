@@ -68,6 +68,23 @@ def get_client():
 TABLE_NAME = "embedding_model_spyre_support"
 DATABASE = "spyre"
 
+# Single source of truth for the Python-facing column list. Order matches the
+# CREATE TABLE DDL below and the positional values used by insert_model_row —
+# keep the three in sync when adding columns.
+TABLE_COLUMNS: tuple[str, ...] = (
+    "model_name",
+    "architecture",
+    "adapter_name",
+    "added_date",
+    "snapshot_date",
+    "verified_on_cpu",
+    "verified_on_gpu",
+    "verified_on_spyre",
+    "num_downloads",
+)
+
+# The column names and order below MUST match ``TABLE_COLUMNS`` above.
+# When adding/removing/renaming a column, update both in the same change.
 CREATE_TABLE_SQL = f"""
 CREATE TABLE IF NOT EXISTS {DATABASE}.{TABLE_NAME}
 (
@@ -107,37 +124,6 @@ def print_table(client) -> None:
         print(f"  {col_name:<25} {col_type}")
 
 
-def should_insert_row(
-    client,
-    *,
-    model_name: str,
-    snapshot_date: date,
-    verified_on_cpu: bool,
-) -> bool:
-    """
-    Return True when the row may be inserted.
-
-    If the model already exists in the table and the most-recent snapshot_date
-    for that model is within 3 days of *snapshot_date*, the row is only allowed
-    when *verified_on_cpu* is True.
-    """
-    result = client.query(
-        "SELECT max(snapshot_date) FROM {db:Identifier}.{tbl:Identifier} "
-        "WHERE model_name = {model:String}",
-        parameters={"db": DATABASE, "tbl": TABLE_NAME, "model": model_name},
-    )
-    existing_snapshot = result.result_rows[0][0]  # None when no rows match
-
-    if existing_snapshot is None:
-        return True  # model not yet in the table — always insert
-
-    delta = abs((snapshot_date - existing_snapshot).days)
-    if delta < 3:
-        return verified_on_cpu  # too close: only insert when CPU-verified
-
-    return True
-
-
 def insert_model_row(
     client,
     *,
@@ -153,17 +139,9 @@ def insert_model_row(
 ) -> bool:
     """Insert a single row into model_spyre_support.
 
-    Calls should_insert_row first; returns False (and skips the write) when
-    the guard rejects the row, True when the row was actually inserted.
+    The caller is responsible for any duplicate-suppression guard (e.g.
+    ``ResultSink.should_insert_row``). This function always writes.
     """
-    if not should_insert_row(
-        client,
-        model_name=model_name,
-        snapshot_date=snapshot_date,
-        verified_on_cpu=verified_on_cpu,
-    ):
-        return False
-
     client.insert(
         TABLE_NAME,
         [
@@ -179,17 +157,7 @@ def insert_model_row(
                 num_downloads,
             ]
         ],
-        column_names=[
-            "model_name",
-            "architecture",
-            "adapter_name",
-            "added_date",
-            "snapshot_date",
-            "verified_on_cpu",
-            "verified_on_gpu",
-            "verified_on_spyre",
-            "num_downloads",
-        ],
+        column_names=list(TABLE_COLUMNS),
     )
     return True
 
@@ -254,7 +222,7 @@ def main():
     elif args.insert:
         if not args.model_name:
             parser.error("--insert requires --model-name")
-        inserted = insert_model_row(
+        insert_model_row(
             client,
             model_name=args.model_name,
             architecture=args.architecture,
@@ -266,16 +234,10 @@ def main():
             verified_on_spyre=args.verified_on_spyre,
             num_downloads=args.num_downloads,
         )
-        if inserted:
-            print(
-                f"Inserted row for model '{args.model_name}' into "
-                f"'{DATABASE}.{TABLE_NAME}'."
-            )
-        else:
-            print(
-                f"Skipped: model '{args.model_name}' already has a snapshot within "
-                f"3 days of {args.snapshot_date} and verified_on_cpu is False."
-            )
+        print(
+            f"Inserted row for model '{args.model_name}' into "
+            f"'{DATABASE}.{TABLE_NAME}'."
+        )
     else:
         if table_exists(client):
             print_table(client)

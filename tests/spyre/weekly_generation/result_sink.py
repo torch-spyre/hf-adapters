@@ -1,0 +1,241 @@
+"""Abstract result sink for the weekly Spyre test suite.
+
+Two implementations:
+- ``CsvResultSink`` — appends rows to a CSV file; loads existing rows once so
+  the skip guard is O(1) per call.
+- ``ClickHouseResultSink`` — inserts rows into ClickHouse; the skip guard runs
+  a single SELECT per model.
+
+Skip rule (both sinks):
+    Skip when an existing entry for ``model_name`` has ``snapshot_date`` within
+    the last 7 days AND ``verified_on_cpu`` is True. In other words: don't re-run
+    a model that was successfully CPU-verified less than a week ago.
+"""
+
+from __future__ import annotations
+
+import csv
+from abc import ABC, abstractmethod
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Any
+
+from tests.spyre.weekly_generation.create_model_spyre_table import (
+    CREATE_TABLE_SQL,
+    DATABASE,
+    TABLE_COLUMNS,
+    TABLE_NAME,
+    get_client,
+    insert_model_row,
+    table_exists,
+)
+
+# Constant value
+_SKIP_WINDOW_DAYS: int = 7
+
+
+def _rec_is_cpu_verified(rec: dict[str, Any]) -> bool:
+    value: Any = rec.get("verified_on_cpu", False)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return bool(value)
+
+
+def _within_skip_window(existing_snapshot: date, today: date) -> bool:
+    return (today - existing_snapshot).days < _SKIP_WINDOW_DAYS
+
+
+def _coerce_snapshot(value: object) -> date | None:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _require_non_empty(value: str, field_name: str) -> str:
+    stripped: str = value.strip()
+    if not stripped:
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return stripped
+
+
+def _require_model_name(rec: dict[str, Any]) -> str:
+    raw: object = rec.get("model_name")
+    if raw is None:
+        raise ValueError("rec is missing required key 'model_name'")
+    return _require_non_empty(str(raw), "model_name")
+
+
+class ResultSink(ABC):
+    """Abstract destination for weekly-test result rows.
+
+    Implementations must be usable as a context manager; ``__exit__`` should
+    release any external resources (CSV file handle, DB client).
+    """
+
+    _today: date
+
+    def __init__(self, today: date | None = None) -> None:
+        """Store the reference *today* used by the skip-window guard.
+
+        Subclasses must call ``super().__init__(today=today)`` before touching
+        anything that depends on ``self._today``.
+        """
+        self._today = today or date.today()
+
+    @abstractmethod
+    def get_recent_cpu_verified_entries(self, model_name: str) -> list[dict[str, Any]]:
+        """Return prior CPU-verified rows for *model_name* within the skip window.
+
+        Filters to entries where ``verified_on_cpu`` is True AND
+        ``today - snapshot_date < _SKIP_WINDOW_DAYS``. Sorted by
+        ``snapshot_date`` descending. Each row is a dict keyed by column name.
+        Empty list when no such prior entries exist — the caller can treat
+        empty as "no skip needed" without inspecting the rows further.
+        """
+
+    @abstractmethod
+    def _insert_entry(self, rec: dict[str, Any]) -> None:
+        """Storage-specific write of *rec*. Called by ``add_entry`` after the
+        skip guard has passed. Subclasses must not perform any deduplication
+        here — that is the responsibility of ``should_insert_row``.
+        """
+
+    def add_entry(self, rec: dict[str, Any]) -> bool:
+        """Persist *rec* when the skip guard allows it.
+
+        Returns True if the row was written, False if ``should_insert_row``
+        rejected it. Idempotent to call for every row in the driver loop.
+        """
+        if not self._should_insert_row(rec):
+            return False
+        self._insert_entry(rec)
+        return True
+
+    def _should_insert_row(self, rec: dict[str, Any]) -> bool:
+        """Skip when a CPU-verified prior entry exists inside the skip window."""
+        model_name: str = _require_model_name(rec)
+        return not self.get_recent_cpu_verified_entries(model_name)
+
+    def __enter__(self) -> ResultSink:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Release resources. Default is a no-op; subclasses override."""
+
+
+class CsvResultSink(ResultSink):
+    """Append rows to a CSV file.
+
+    On construction, any existing rows are read once into an in-memory index of
+    ``{model_name: list[dict]}`` so lookups are O(1).
+    """
+
+    def __init__(self, path: Path, today: date | None = None) -> None:
+        super().__init__(today=today)
+        self._path: Path = path
+        self._rows_by_model: dict[str, list[dict[str, Any]]] = {}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        file_exists: bool = path.exists() and path.stat().st_size > 0
+        if file_exists:
+            self._load_index()
+        self._fh = open(path, "a", newline="")
+        self._writer = csv.DictWriter(self._fh, fieldnames=list(TABLE_COLUMNS))
+        if not file_exists:
+            self._writer.writeheader()
+            self._fh.flush()
+
+    def _load_index(self) -> None:
+        with open(self._path, newline="") as fh:
+            reader = csv.DictReader(fh)
+            for raw_row in reader:
+                model_name: str = (raw_row.get("model_name") or "").strip()
+                if not model_name:
+                    print(
+                        f"    warn: skipping CSV row with empty model_name in "
+                        f"'{self._path}' (line {reader.line_num})"
+                    )
+                    continue
+                self._rows_by_model.setdefault(model_name, []).append(dict(raw_row))
+
+    def get_recent_cpu_verified_entries(self, model_name: str) -> list[dict[str, Any]]:
+        key: str = _require_non_empty(model_name, "model_name")
+        rows: list[dict[str, Any]] = list(self._rows_by_model.get(key, ()))
+        filtered: list[tuple[date, dict[str, Any]]] = []
+        for row in rows:
+            if not _rec_is_cpu_verified(row):
+                continue
+            snap: date | None = _coerce_snapshot(row.get("snapshot_date"))
+            if snap is None:
+                continue
+            if not _within_skip_window(snap, self._today):
+                continue
+            filtered.append((snap, row))
+        filtered.sort(key=lambda item: item[0], reverse=True)
+        return [row for _, row in filtered]
+
+    def _insert_entry(self, rec: dict[str, Any]) -> None:
+        self._writer.writerow(rec)
+        self._fh.flush()
+        model_name: str = _require_model_name(rec)
+        self._rows_by_model.setdefault(model_name, []).append(dict(rec))
+
+    def close(self) -> None:
+        if self._fh is not None:
+            self._fh.close()
+
+
+class ClickHouseResultSink(ResultSink):
+    """Insert rows into ClickHouse. Table is created on construction if missing."""
+
+    def __init__(self, today: date | None = None) -> None:
+        super().__init__(today=today)
+        self._client = get_client()
+        if not table_exists(self._client):
+            self._client.command(CREATE_TABLE_SQL)
+            print("ClickHouse: table created.\n")
+        else:
+            print("ClickHouse: table already exists.\n")
+
+    def get_recent_cpu_verified_entries(self, model_name: str) -> list[dict[str, Any]]:
+        key: str = _require_non_empty(model_name, "model_name")
+        cutoff: date = self._today - timedelta(days=_SKIP_WINDOW_DAYS - 1)
+        columns_sql: str = ", ".join(TABLE_COLUMNS)
+        result = self._client.query(
+            f"SELECT {columns_sql} "
+            "FROM {db:Identifier}.{tbl:Identifier} "
+            "WHERE model_name = {model:String} "
+            "AND verified_on_cpu = 1 "
+            "AND snapshot_date >= {cutoff:Date} "
+            "ORDER BY snapshot_date DESC",
+            parameters={
+                "db": DATABASE,
+                "tbl": TABLE_NAME,
+                "model": key,
+                "cutoff": cutoff,
+            },
+        )
+        return [dict(zip(TABLE_COLUMNS, row)) for row in result.result_rows]
+
+    def _insert_entry(self, rec: dict[str, Any]) -> None:
+        insert_model_row(
+            self._client,
+            model_name=rec["model_name"],
+            architecture=rec["architecture"],
+            adapter_name=rec["adapter_name"],
+            added_date=rec["added_date"],
+            snapshot_date=rec["snapshot_date"],
+            verified_on_cpu=rec["verified_on_cpu"],
+            verified_on_gpu=rec["verified_on_gpu"],
+            verified_on_spyre=rec["verified_on_spyre"],
+            num_downloads=rec["num_downloads"],
+        )
