@@ -126,18 +126,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--boolean-run",
+        "--random-run",
         action="store_true",
         default=False,
         help=(
             "Replace Spyre evaluation calls with random boolean stubs "
-            "(_temp_boolean_random). Useful for dry-runs without Spyre hardware."
+            "(_temp_random_bool). Useful for dry-runs without Spyre hardware."
         ),
     )
     return parser.parse_args(argv)
 
 
-def _temp_boolean_random() -> bool:
+def _temp_random_bool() -> bool:
     return random.choice([True, False])
 
 
@@ -158,7 +158,7 @@ def _load_embedding_on_cpu(model_path: str) -> bool:
         _hf_common.DEVICE = _orig_device  # restore
 
 
-def eval_embedding(model_id: str, adapter, boolean_run: bool = False) -> dict:
+def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
     load_on_cpu = False
     loads_on_spyre = False
     mismatches = True
@@ -172,9 +172,9 @@ def eval_embedding(model_id: str, adapter, boolean_run: bool = False) -> dict:
             del model_on_cpu
 
             if load_on_cpu:
-                if boolean_run:
-                    loads_on_spyre = _temp_boolean_random()
-                    mismatches = _temp_boolean_random()
+                if random_run:
+                    loads_on_spyre = _temp_random_bool()
+                    mismatches = _temp_random_bool()
                 else:
                     loads_on_spyre, _ = load_embedding(model_id)
                     mismatches, _ = embed_compare_spyre(model_id)
@@ -190,7 +190,7 @@ def eval_embedding(model_id: str, adapter, boolean_run: bool = False) -> dict:
 
 def _process_row(
     model_path: str,
-    boolean_run: bool,
+    random_run: bool,
     adapter_dates: dict[str, str | None],
     result_queue,
 ) -> None:
@@ -224,7 +224,7 @@ def _process_row(
         result["added_date"] = adapter_dates.get(adapter_name)
 
         result["metrics"] = eval_embedding(
-            model_path, adapter_module, boolean_run=boolean_run
+            model_path, adapter_module, random_run=random_run
         )
     except Exception as e:
         result["error"] = (
@@ -361,7 +361,7 @@ def main(argv: list[str] | None = None) -> None:
                 result_queue = ctx.Queue()
                 proc = ctx.Process(
                     target=_process_row,
-                    args=(model_path, args.boolean_run, adapter_dates, result_queue),
+                    args=(model_path, args.random_run, adapter_dates, result_queue),
                 )
                 proc.start()
                 proc.join()
