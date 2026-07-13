@@ -58,7 +58,7 @@ on:
           image_hf_adapters_pr_flex_8ddcf3e155e9). The per-PR ephemeral flow passes
           that PR's set label so jobs land on the per-PR image (the changed RPM is
           baked in -> no runtime sudo). Empty keeps push/PR/merge_group runs on the
-          standing image_torch_spyre set (today's behaviour).
+          standing image_torch_spyre_shadow set (today's behaviour).
         required: false
         type: string
         default: ""
@@ -193,7 +193,7 @@ jobs:
 #      - x86_64
 #      - spyre_pf_x0__pvc_1tb_x1
 #      - linux
-#      - ${{ inputs.runner_label || 'image_torch_spyre' }}
+#      - ${{ inputs.runner_label || 'image_torch_spyre_shadow' }}
 #    timeout-minutes: 120
 #    strategy:
 #      matrix:
@@ -248,7 +248,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - ${{ inputs.runner_label || 'image_torch_spyre' }}
+      - ${{ inputs.runner_label || 'image_torch_spyre_shadow' }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -297,7 +297,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - ${{ inputs.runner_label || 'image_torch_spyre' }}
+      - ${{ inputs.runner_label || 'image_torch_spyre_shadow' }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -345,7 +345,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - ${{ inputs.runner_label || 'image_torch_spyre' }}
+      - ${{ inputs.runner_label || 'image_torch_spyre_shadow' }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -393,7 +393,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - ${{ inputs.runner_label || 'image_torch_spyre' }}
+      - ${{ inputs.runner_label || 'image_torch_spyre_shadow' }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -489,7 +489,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - ${{ inputs.runner_label || 'image_torch_spyre' }}
+      - ${{ inputs.runner_label || 'image_torch_spyre_shadow' }}
     timeout-minutes: 120
     strategy:
       fail-fast: false

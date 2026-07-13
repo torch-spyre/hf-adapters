@@ -35,7 +35,7 @@ jobs:
       - x86_64
       - spyre_pf_x0__pvc_1tb_x1
       - linux
-      - image_torch_spyre # set having 0 spyre cards and pvc mounted
+      - image_torch_spyre_shadow # set having 0 spyre cards and pvc mounted
     timeout-minutes: 720
     env:
       CACHE_CONFIG_FILE_PATH: ${{ inputs.cache_config_file }}
