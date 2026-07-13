@@ -31,7 +31,6 @@ from utils.hf_model_catalog import (
     RESOURCES_DIR,
     build_catalog,
     is_baseline_keep,
-    is_moe,
     tags,
 )
 
@@ -139,8 +138,6 @@ def _keep(model: ModelInfo) -> bool:
     if not _has_embedding_signal(model):
         return False
     if _is_reranker(model):
-        return False
-    if is_moe(model):
         return False
     if model.gated:
         return False

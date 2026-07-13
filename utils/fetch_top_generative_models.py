@@ -12,7 +12,6 @@ from utils.hf_model_catalog import (
     RESOURCES_DIR,
     build_catalog,
     is_baseline_keep,
-    is_moe,
 )
 
 
@@ -32,8 +31,6 @@ def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
 
 def _keep(model: ModelInfo) -> bool:
     if not is_baseline_keep(model):
-        return False
-    if is_moe(model):
         return False
     if model.gated:
         return False
