@@ -537,7 +537,7 @@ def main(argv: list[str] | None = None) -> None:
                 worker_results: list[dict] = [
                     {
                         "model_name": path,
-                        "architecture": row.get("config_class"),
+                        "config_class": row.get("config_class"),
                         "adapter_name": "",
                         "added_date": None,
                         "snapshot_date": snapshot_date,

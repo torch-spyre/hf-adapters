@@ -4,9 +4,9 @@ Creates or drops the model_spyre_support table in ClickHouse.
 
 Columns:
   - model_name         (String)  – unique model identifier
-  - architecture       (String)  – model architecture (e.g. llama, mistral)
-  - adapter_name       (String)  – adapter name (e.g. LoRA config name)
-  - added_date         (Date?)   – date the adapter was added to the git repo (optional)
+  - config_class       (String)  – model config_class (e.g. BertConfig, Qwen3Config)
+  - adapter_name       (String)  – adapter name (e.g. hf_bert, hf_gemma4)
+  - added_date         (Date?)   – date the adapter was added to the git repo (optional - None if not existing)
   - snapshot_date      (Date)    – date this weekly snapshot was taken
   - verified_on_cpu    (Bool)    – passes on CPU
   - verified_on_gpu    (Bool)    – passes on GPU
@@ -54,7 +54,7 @@ DATABASE = "spyre"
 # keep the three in sync when adding columns.
 TABLE_COLUMNS: tuple[str, ...] = (
     "model_name",
-    "architecture",
+    "config_class",
     "adapter_name",
     "added_date",
     "snapshot_date",
@@ -70,7 +70,7 @@ def _make_create_table_sql(table_name: str) -> str:
 CREATE TABLE IF NOT EXISTS {DATABASE}.{table_name}
 (
     model_name        String,
-    architecture      String,
+    config_class      String,
     adapter_name      String,
     added_date        Nullable(Date),
     snapshot_date     Date,
@@ -116,7 +116,7 @@ def insert_model_row(
     *,
     table_name: str,
     model_name: str,
-    architecture: str,
+    config_class: str,
     adapter_name: str,
     added_date: date | None,
     snapshot_date: date,
@@ -135,7 +135,7 @@ def insert_model_row(
         [
             [
                 model_name,
-                architecture,
+                config_class,
                 adapter_name,
                 added_date,
                 snapshot_date,

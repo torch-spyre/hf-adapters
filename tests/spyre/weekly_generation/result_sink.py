@@ -262,7 +262,7 @@ class ClickHouseResultSink(ResultSink):
             self._client,
             table_name=self._table_name,
             model_name=rec["model_name"],
-            architecture=rec["architecture"],
+            config_class=rec["config_class"],
             adapter_name=rec["adapter_name"],
             added_date=rec["added_date"],
             snapshot_date=rec["snapshot_date"],
