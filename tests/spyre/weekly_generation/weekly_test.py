@@ -10,7 +10,6 @@ Run directly to perform the fetch step::
 """
 
 import argparse
-import gc
 import multiprocessing
 import os
 import random
@@ -316,9 +315,20 @@ def _process_row(
                 f"{_t.monotonic() - _child_entered:.2f}s for {model_path!r}",
                 flush=True,
             )
-            gc.collect()
         except Exception:
             pass
+
+    # Skip Python's graceful shutdown: no atexit handlers, no thread
+    # finalization, no torch/torch_spyre destructors walking the tensor graph
+    # that the kernel is about to reclaim in bulk anyway. Closing the Spyre
+    # device FD on _exit(2) triggers the driver's own release path (VFIO
+    # unmap-all + IOMMU teardown), which is what actually returns the
+    # accelerator memory. Prior measurements: leaving Python's graceful
+    # shutdown in place cost ~30 s per child; running gc.collect() here on
+    # top of that added another ~20 s.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 def _delete_repo_weights(repo_id):
