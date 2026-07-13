@@ -13,9 +13,19 @@
 # limitations under the License.
 
 """
-E2E embedding accuracy: HF stock forward (CPU) vs adapter forward (Spyre).
+E2E embedding accuracy: stock SentenceTransformers (CPU) vs ``backend="spyre"``.
 
-Encoder-only counterpart of test_e2e_token_compare_spyre.py.
+Both sides go through the standard ``sentence_transformers`` API. The CPU side
+uses the stock loader; the Spyre side uses the ``"spyre"`` backend registered by
+``hf_adapters.st_backend``, which loads/prepares the backbone via
+``AutoSpyreModel`` and runs prefill on device. All downstream ST modules
+(``Pooling``, ``Normalize``, ``model.encode()``) run unchanged on both sides.
+
+We encode with ``output_value=None`` so ST hands back the full per-sequence
+feature dict (``token_embeddings``, ``attention_mask``, ``sentence_embedding``).
+This lets us report both the final sentence-embedding cosine and the detailed
+per-token metrics (mean/min token cosine, pooled cosine) from the raw
+``last_hidden_state`` — the same diagnostics the original raw-backbone test had.
 
 Usage (on Spyre pod)::
 
@@ -23,25 +33,17 @@ Usage (on Spyre pod)::
     pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k bge_base
 """
 
-import types
 from typing import Any
 
 import pytest
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from conftest import load_ref_model
-from model_registry import EMBED_PATHS
 
-from hf_adapters.auto_spyre_model import (
-    resolve_adapter_module,
-    torch_dtype_for_model_path,
-)
-from hf_adapters.hf_common import (
-    move_model_to_spyre,
-    prefill_embed,
-    prefill_encoder,
-)
+# Registers the "spyre" backend with sentence_transformers on import.
+import hf_adapters.st_backend  # noqa: F401
+from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
+from tests.conftest import get_dtype_for_cpu
+from tests.model_registry import EMBED_PATHS
 
 PROMPTS = [
     "Hi.",
@@ -53,164 +55,129 @@ PROMPTS = [
 COSINE_THRESHOLD = 0.99
 
 
-def _hf_reference_forward(
-    model: nn.Module,
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-) -> torch.Tensor:
-    """Run stock HF encoder forward on CPU; return last_hidden_state."""
-    with torch.no_grad():
-        out = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            return_dict=True,
-        )
-    return out.last_hidden_state
+def _encode(model, prompts: list[str]) -> list[dict[str, torch.Tensor]]:
+    """Encode prompts, returning ST's full per-sequence feature dicts.
 
-
-def _adapter_forward(
-    adapter: types.ModuleType,
-    model: nn.Module,
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-) -> torch.Tensor:
-    """Run adapter prefill on Spyre; return last_hidden_state on CPU."""
-    with torch.no_grad():
-        if getattr(adapter, "_is_encoder_only", False):
-            h_dev, _ = prefill_encoder(
-                adapter._run_backbone_forward,
-                model,
-                input_ids,
-                attention_mask,
-            )
-        else:
-            h_dev, _ = prefill_embed(
-                adapter._run_backbone_forward,
-                model,
-                input_ids,
-                attention_mask,
-            )
-    return h_dev.to("cpu")
+    ``output_value=None`` yields a list (one dict per prompt) carrying
+    ``token_embeddings`` (padded ``[seq, hidden]``), ``attention_mask``, and the
+    final ``sentence_embedding``.
+    """
+    return model.encode(prompts, output_value=None, convert_to_numpy=False)
 
 
 def _mean_pool(hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     m = mask.unsqueeze(-1).float()
-    summed = (hidden.float() * m).sum(dim=1)
-    counts = m.sum(dim=1).clamp(min=1)
+    summed = (hidden.float() * m).sum(dim=0)
+    counts = m.sum(dim=0).clamp(min=1)
     return summed / counts
 
 
 def _compare_results(
-    hf_hidden: torch.Tensor,
-    ad_hidden: torch.Tensor,
-    attention_mask: torch.Tensor,
+    cpu_out: list[dict[str, torch.Tensor]],
+    spyre_out: list[dict[str, torch.Tensor]],
     model_name: str,
 ) -> list[dict[str, Any]]:
-    """Compare per-sequence: per-token cosine, max diff, pooled cosine, NaN."""
-    assert hf_hidden.shape == ad_hidden.shape, (
-        f"shape mismatch: hf {tuple(hf_hidden.shape)} vs adapter "
-        f"{tuple(ad_hidden.shape)}"
-    )
-
-    h32 = hf_hidden.float()
-    a32 = ad_hidden.float()
-
-    per_tok_cos = F.cosine_similarity(h32, a32, dim=-1)
-    abs_diff = (h32 - a32).abs()
-
-    pooled_h = _mean_pool(hf_hidden, attention_mask)
-    pooled_a = _mean_pool(ad_hidden, attention_mask)
-    pooled_cos = F.cosine_similarity(pooled_h, pooled_a, dim=-1)
+    """Compare per-prompt: token-level cosine/diff, pooled cosine, sentence cosine."""
+    assert len(cpu_out) == len(
+        spyre_out
+    ), f"row count mismatch: cpu {len(cpu_out)} vs spyre {len(spyre_out)}"
 
     rows = []
-    bsz = hf_hidden.shape[0]
-    for b in range(bsz):
-        m = attention_mask[b].bool()
-        n_real = int(m.sum().item())
-        cos_real = per_tok_cos[b][m]
-        diff_real = abs_diff[b][m]
+    for b, (c, s) in enumerate(zip(cpu_out, spyre_out)):
+        c_tok = c["token_embeddings"].float().cpu()
+        s_tok = s["token_embeddings"].float().cpu()
+        assert c_tok.shape == s_tok.shape, (
+            f"row {b} token shape mismatch: cpu {tuple(c_tok.shape)} vs spyre "
+            f"{tuple(s_tok.shape)}"
+        )
+
+        mask = c["attention_mask"].bool().cpu()
+        n_real = int(mask.sum().item())
+
+        per_tok_cos = F.cosine_similarity(c_tok, s_tok, dim=-1)[mask]
+        abs_diff = (c_tok - s_tok).abs()[mask]
+
+        pooled_c = _mean_pool(c_tok, c["attention_mask"].cpu())
+        pooled_s = _mean_pool(s_tok, s["attention_mask"].cpu())
+        pooled_cos = F.cosine_similarity(pooled_c, pooled_s, dim=0).item()
+
+        sent_c = c["sentence_embedding"].float().cpu()
+        sent_s = s["sentence_embedding"].float().cpu()
+        sent_cos = F.cosine_similarity(sent_c, sent_s, dim=0).item()
+
         rows.append(
             {
                 "model": model_name,
                 "row": b,
                 "n_real": n_real,
-                "mean_cos": cos_real.mean().item(),
-                "min_cos": cos_real.min().item(),
-                "pooled_cos": pooled_cos[b].item(),
-                "max_diff": diff_real.max().item(),
-                "mean_diff": diff_real.mean().item(),
-                "hf_nan": bool(hf_hidden[b].isnan().any().item()),
-                "spyre_nan": bool(ad_hidden[b].isnan().any().item()),
-                "match": cos_real.min().item() >= COSINE_THRESHOLD,
+                "mean_cos": per_tok_cos.mean().item(),
+                "min_cos": per_tok_cos.min().item(),
+                "pooled_cos": pooled_cos,
+                "sent_cos": sent_cos,
+                "max_diff": abs_diff.max().item(),
+                "mean_diff": abs_diff.mean().item(),
+                "cpu_nan": bool(c_tok.isnan().any().item()),
+                "spyre_nan": bool(s_tok.isnan().any().item()),
+                "match": per_tok_cos.min().item() >= COSINE_THRESHOLD,
             }
         )
     return rows
 
 
 def _run_model_test(model_path: str) -> list[dict[str, Any]]:
-    """Full comparison for one encoder model."""
-    from transformers import AutoModel, AutoTokenizer
-
-    adapter = resolve_adapter_module(model_path)
+    """Full comparison for one embedding model via the ST API."""
+    from sentence_transformers import SentenceTransformer
 
     print(f"\n{'=' * 70}")
     print(f"  {model_path}")
     print(f"{'=' * 70}")
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = load_ref_model(
-        model_path=model_path,
-        adapter_mod=adapter,
-        auto_model_cls=AutoModel,
+    print("  Loading stock SentenceTransformer on CPU ...")
+    cpu_dtype = get_dtype_for_cpu(model_path)
+    cpu_model = SentenceTransformer(
+        model_path,
+        device="cpu",
+        model_kwargs={"torch_dtype": cpu_dtype},
     )
 
-    encoded = tokenizer(
-        PROMPTS,
-        return_tensors="pt",
-        padding=True,
-        padding_side="right",
-        truncation=True,
-    )
-    input_ids = encoded["input_ids"]
-    attention_mask = encoded["attention_mask"]
-    lengths = attention_mask.sum(dim=1).tolist()
-    print(
-        f"  Inputs: {len(PROMPTS)} prompts, padded to {input_ids.shape[1]} tokens"
-        f" (real lengths: {lengths})"
-    )
+    print("  Encoding on CPU ...")
+    cpu_out = _encode(cpu_model, PROMPTS)
 
-    print("  Running HF reference on CPU ...")
-    hf_hidden = _hf_reference_forward(model, input_ids, attention_mask)
-
+    # Match the Spyre-safe dtype the backend uses so the comparison is fair.
     dtype = torch_dtype_for_model_path(model_path=model_path)
-    move_model_to_spyre(model=model, module=adapter, dtype=dtype)
+    print(f"  Loading SentenceTransformer with backend='spyre' (dtype={dtype}) ...")
+    spyre_model = SentenceTransformer(
+        model_path,
+        backend="spyre",
+        model_kwargs={"torch_dtype": dtype},
+    )
 
-    print("  Running adapter on Spyre ...")
-    ad_hidden = _adapter_forward(adapter, model, input_ids, attention_mask)
+    print("  Encoding on Spyre ...")
+    spyre_out = _encode(spyre_model, PROMPTS)
 
-    return _compare_results(hf_hidden, ad_hidden, attention_mask, model_path)
+    return _compare_results(cpu_out, spyre_out, model_path)
 
 
 def _print_table(rows: list[dict[str, Any]]) -> None:
     """Markdown comparison table — one line per prompt row."""
-    print("\n## E2E Embedding Comparison: HF (CPU) vs Adapter (Spyre)\n")
+    print("\n## E2E Embedding Comparison: ST (CPU) vs backend='spyre'\n")
     print(
-        "| Model | Row | Real Len | Mean Cos | Min Cos | Pooled Cos "
-        "| Max Diff | Mean Diff | HF NaN | Spyre NaN | Match |"
+        "| Model | Row | Real Len | Mean Cos | Min Cos | Pooled Cos | Sent Cos "
+        "| Max Diff | Mean Diff | CPU NaN | Spyre NaN | Match |"
     )
     print(
-        "|-------|-----|----------|----------|---------|------------"
-        "|----------|-----------|--------|-----------|-------|"
+        "|-------|-----|----------|----------|---------|------------|----------"
+        "|----------|-----------|---------|-----------|-------|"
     )
     for r in rows:
         match = "OK" if r["match"] else "FAIL"
-        hn = "Yes" if r["hf_nan"] else "No"
+        cn = "Yes" if r["cpu_nan"] else "No"
         sn = "Yes" if r["spyre_nan"] else "No"
         print(
             f"| {r['model']} | {r['row']} | {r['n_real']} "
             f"| {r['mean_cos']:.6f} | {r['min_cos']:.6f} | {r['pooled_cos']:.6f} "
-            f"| {r['max_diff']:.4f} | {r['mean_diff']:.6f} "
-            f"| {hn} | {sn} | {match} |"
+            f"| {r['sent_cos']:.6f} | {r['max_diff']:.4f} | {r['mean_diff']:.6f} "
+            f"| {cn} | {sn} | {match} |"
         )
 
 

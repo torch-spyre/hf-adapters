@@ -2127,6 +2127,11 @@ def prefill_embed(
     - **No ``lm_head``.** Returns ``[B, L, H]`` hidden states directly,
       so callers (pooling, normalize) operate on the backbone output.
 
+    Device split: all the auxiliary tensors this driver derives from the inputs
+    (padding, ``position_ids``, ``attention_mask``, throwaway KV caches) are
+    built on **CPU**, then moved to Spyre right before the backbone call. Only
+    the backbone matmuls run on Spyre; the returned hidden state is on Spyre.
+
     Args:
         run_backbone_forward_fn: ``fn(model, input_ids, position_ids,
             attn_mask, key_caches, value_caches, is_filling, token_index,
@@ -2140,12 +2145,8 @@ def prefill_embed(
             ``0`` for tokenizer pads.
 
     Returns:
-        Tuple ``(last_hidden_state, attention_mask)``:
-          - ``last_hidden_state``: ``[B, L, H]`` on Spyre, cropped back to
-            the input ``L``. Caller moves to CPU as needed.
-          - ``attention_mask``: the input mask, unchanged. Returned for
-            convenience so the caller can pipe ``(h, mask)`` straight
-            into a pooling layer.
+        ``last_hidden_state``: ``[B, L, H]`` on Spyre, cropped back to the input
+        ``L``. Caller moves to CPU as needed.
     """
     bsz, seq_len = input_ids.shape
 
@@ -2227,9 +2228,10 @@ def prefill_embed(
         cache_position=0,
     )
 
-    # Crop the block-pad back off; tokenizer pad stays so pooling can mask it
+    # Crop the block-pad back off; tokenizer pad stays so pooling can mask it.
+    # h is on Spyre here.
     h = h[:, :seq_len, :]
-    return h, attention_mask
+    return h
 
 
 # ---------------------------------------------------------------------------
@@ -2250,20 +2252,24 @@ def prefill_encoder(
     (``prefill_embed`` reads `model.config.num_key_value_heads`` and
     allocates KV caches, which ``BertConfig`` and similar encoder configs do not provide.
 
+    Device split: same as ``prefill_embed``. The auxiliary tensors
+    (padding, ``position_ids``, ``token_type_ids``, ``attn_mask``) are built on
+    **CPU**, then moved to Spyre right before the backbone call. Only the
+    backbone matmuls run on Spyre; the returned hidden state is on Spyre.
+
     Args:
         run_encoder_forward_fn: ``fn(model, input_ids, attn_mask, position_ids,
             token_type_ids) -> [B, padded_len, H]``. Pass the adapter's
             ``_run_backbone_forward`` (i.e. ``encoder_backbone_forward``).
-        model: Prepared encoder backbone on device (loaded via ``AutoModel``).
-        input_ids: ``[B, L]`` token ids. Right-padded by the tokenizer.
-        attention_mask: ``[B, L]`` mask; 1 for real tokens, 0 for pad.
-        token_type_ids: Optional ``[B, L]``. Defaults to all-zeros when None
-            (correct for single-sentence embedding workloads).
+        model: Prepared encoder backbone on Spyre (loaded via ``AutoModel``).
+        input_ids: ``[B, L]`` token ids on CPU. Right-padded by the tokenizer.
+        attention_mask: ``[B, L]`` mask on CPU; 1 for real tokens, 0 for pad.
+        token_type_ids: Optional ``[B, L]`` on CPU. Defaults to all-zeros when
+            None (correct for single-sentence embedding workloads).
 
     Returns:
-        Tuple ``(last_hidden_state, attention_mask)``:
-          - ``last_hidden_state``: ``[B, L, H]`` cropped to the input length.
-          - ``attention_mask``: the input mask, unchanged (for pooling callers).
+        ``last_hidden_state``: ``[B, L, H]`` on Spyre, cropped back to the input
+        ``L``. Caller moves to CPU as needed.
     """
     bsz, seq_len = input_ids.shape
 
@@ -2306,9 +2312,9 @@ def prefill_encoder(
         tt_ids.to(DEVICE),
     )
 
-    # Crop the block-pad back off
+    # Crop the block-pad back off. h is on Spyre here.
     h = h[:, :seq_len, :]
-    return h, attention_mask
+    return h
 
 
 # ---------------------------------------------------------------------------
