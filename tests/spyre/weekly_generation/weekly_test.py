@@ -272,6 +272,14 @@ def _process_row(
     *adapter_dates* is precomputed by the parent (one git log per adapter
     file, not per model) and passed in as a plain dict.
     """
+    import time as _t
+
+    _child_entered: float = _t.monotonic()
+    print(
+        f"      child[{os.getpid()}] entered _process_row for {model_path!r}",
+        flush=True,
+    )
+
     import traceback
 
     result: dict = {
@@ -303,6 +311,11 @@ def _process_row(
     finally:
         try:
             result_queue.put(result)
+            print(
+                f"      child[{os.getpid()}] done in "
+                f"{_t.monotonic() - _child_entered:.2f}s for {model_path!r}",
+                flush=True,
+            )
             gc.collect()
         except Exception:
             pass
@@ -418,7 +431,6 @@ def main(argv: list[str] | None = None) -> None:
                 "num_downloads": int(row.get("downloads") or 0),
             }
 
-            t_spawn_start: float = 0.0
             t_spawn: float = 0.0
             t_join: float = 0.0
             t_queue: float = 0.0
@@ -454,10 +466,20 @@ def main(argv: list[str] | None = None) -> None:
                 t_spawn_start = time.monotonic()
                 proc.start()
                 t_spawn = time.monotonic() - t_spawn_start
+                print(
+                    f"      parent: proc.start() returned pid={proc.pid} "
+                    f"after {t_spawn*1000:.1f}ms",
+                    flush=True,
+                )
 
                 t_join_start: float = time.monotonic()
                 proc.join()
                 t_join = time.monotonic() - t_join_start
+                print(
+                    f"      parent: proc.join() returned pid={proc.pid} "
+                    f"after {t_join:.2f}s",
+                    flush=True,
+                )
 
                 t_queue_start: float = time.monotonic()
                 try:
