@@ -67,7 +67,7 @@ def _run_prefill(
     model: torch.nn.Module,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     """Dispatch to prefill_encoder or prefill_embed based on adapter type."""
     if getattr(adapter_mod, "_is_encoder_only", False):
         return hf_common_mod.prefill_encoder(
@@ -107,7 +107,7 @@ def test_auto_loader(model_path: str) -> None:
     )
     _unwrap_compiled_blocks(model)
     with torch.no_grad():
-        adapter_hidden, _ = _run_prefill(
+        adapter_hidden = _run_prefill(
             adapter_module, hf_common_mod, model, input_ids, attention_mask
         )
     del model

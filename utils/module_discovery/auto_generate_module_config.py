@@ -739,6 +739,13 @@ def generate_unified_yaml_config(
                             "names": ["*TestModule*::test_forward"],
                             "mode": "xfail",
                             "tags": [f"model__{model_name}"],
+                            # Spyre's custom ops have no registered autograd
+                            # formula, so upstream's test_forward (which builds
+                            # modules with ordinary requires_grad=True
+                            # parameters) must run under torch.no_grad() to
+                            # avoid AOTAutograd tracing a backward graph at
+                            # compile time.
+                            "no_grad": True,
                             "edits": {"modules": {"include": module_entries}},
                         }
                     ],
@@ -754,6 +761,11 @@ def generate_unified_yaml_config(
                             ],
                             "mode": "xfail",
                             "tags": [f"model__{model_name}", "custom_tests"],
+                            # Same AOTAutograd/no_grad issue as test_forward
+                            # above: these custom tests also build modules
+                            # with requires_grad=True parameters and compile
+                            # them for Spyre.
+                            "no_grad": True,
                             "edits": {"modules": {"include": module_entries}},
                         }
                     ],
