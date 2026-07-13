@@ -352,7 +352,8 @@ def _process_batch(
         print(
             f"      child[{os.getpid()}] finished model "
             f"{len(results)}/{len(batch)}: {model_path!r}  "
-            f"(verified_on_spyre={rec['verified_on_spyre']}, "
+            f"(verified_on_cpu={rec['verified_on_cpu']}, "
+            f"verified_on_spyre={rec['verified_on_spyre']}, "
             f"error={bool(rec['error'])})",
             flush=True,
         )
@@ -551,6 +552,7 @@ def main(argv: list[str] | None = None) -> None:
                         "adapter_name": "",
                         "added_date": None,
                         "snapshot_date": snapshot_date,
+                        "verified_on_cpu": False,
                         "verified_on_gpu": False,
                         "verified_on_spyre": False,
                         "num_downloads": int(row.get("downloads") or 0),
@@ -583,7 +585,8 @@ def main(argv: list[str] | None = None) -> None:
                 if sink.add_entry(sink_rec):
                     print(
                         f"    sink: row written for '{model_path}' "
-                        f"(verified_on_spyre={rec.get('verified_on_spyre')})"
+                        f"(verified_on_cpu={rec.get('verified_on_cpu')}, "
+                        f"verified_on_spyre={rec.get('verified_on_spyre')})"
                     )
                 else:
                     print(f"    sink: row skipped for '{model_path}' (guard rejected)")
