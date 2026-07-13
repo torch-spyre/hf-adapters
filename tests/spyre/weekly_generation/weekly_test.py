@@ -16,7 +16,6 @@ import random
 import subprocess
 import sys
 import time
-import traceback
 from asyncio import Queue
 from datetime import date
 from enum import Enum
@@ -62,6 +61,13 @@ _WEIGHT_SUFFIXES = (
 class EmbeddingGenerativeMode(str, Enum):
     EMBEDDING = "embedding"
     GENERATIVE = "generative"
+
+
+# How many models one spawned child processes before exiting. Higher values
+# amortize per-child spawn + import + kernel-teardown cost (~15 s currently)
+# across more work. Lower values reduce the blast radius when the Spyre
+# driver/state gets into a bad shape mid-batch.
+NUMBER_OF_MODEL_PER_PROCESS: int = 10
 
 
 def _repos_with_weights():
@@ -253,70 +259,113 @@ def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
         }
 
 
-def _process_row(
-    model_path: str,
+def _process_batch(
+    batch: list[dict],
     random_run: bool,
     adapter_dates: dict[str, str | None],
     result_queue: Queue,
     mode: EmbeddingGenerativeMode,
+    snapshot_date: date,
 ) -> None:
-    """Worker target for a raw spawn Process — no Pool machinery in the parent.
+    """Worker target: evaluate up to ``NUMBER_OF_MODEL_PER_PROCESS`` models
+    in a single spawned child.
 
-    Puts its result onto *result_queue* (a multiprocessing.Queue from the
-    spawn context) so the parent can retrieve it after join(). Queues use an
-    anonymous OS pipe inherited by the child at fork/spawn time — there is no
-    on-disk socket that a `/tmp` cleaner (or an OOM-killed helper) can pull
-    out from under us, which is why we avoid SyncManager here.
+    Amortizes the per-child fixed cost (spawn + module imports + kernel
+    teardown on exit) across N models. Puts a ``list[dict]`` on the queue —
+    one full result dict per row, in the same order as *batch*. If a single
+    model errors, its ``error`` field is populated and the loop continues to
+    the next model; the child does NOT abort.
 
-    *adapter_dates* is precomputed by the parent (one git log per adapter
-    file, not per model) and passed in as a plain dict.
+    Each returned dict has the same shape ``main`` expects for a rec plus an
+    ``error`` field (str or None):
+
+        {
+            "model_name":       ...,
+            "architecture":     ...,
+            "adapter_name":     ...,
+            "added_date":       ...,   # ISO 8601 str or None
+            "snapshot_date":    ...,   # date object
+            "verified_on_cpu":  bool,
+            "verified_on_gpu":  False,
+            "verified_on_spyre": bool,
+            "num_downloads":    int,
+            "error":            None or str,
+        }
     """
     import time as _t
 
     _child_entered: float = _t.monotonic()
     print(
-        f"      child[{os.getpid()}] entered _process_row for {model_path!r}",
+        f"      child[{os.getpid()}] entered _process_batch with {len(batch)} model(s)",
         flush=True,
     )
 
-    import traceback
+    import traceback as _traceback
 
-    result: dict = {
-        "adapter_name": "",
-        "added_date": None,
-        "metrics": {"correct": False, "load": False, "compare_spyre": False},
-        "error": None,
-    }
-    try:
-        from tests.conftest import resolve_adapter_module_for_test
+    from tests.conftest import resolve_adapter_module_for_test
 
-        adapter_module = resolve_adapter_module_for_test(model_path)
-        adapter_name: str = os.path.splitext(os.path.basename(adapter_module.__file__))[
-            0
-        ]
-        result["adapter_name"] = adapter_name
-        result["added_date"] = adapter_dates.get(adapter_name)
-        match mode:
-            case EmbeddingGenerativeMode.EMBEDDING:
-                eval_fn = eval_embedding
-            case EmbeddingGenerativeMode.GENERATIVE:
-                eval_fn = eval_generative
-        result["metrics"] = eval_fn(model_path, adapter_module, random_run=random_run)
-    except Exception as e:
-        result["error"] = (
-            f"{type(e).__name__}: {e}\n"
-            f"{''.join(traceback.format_exc().splitlines(keepends=True)[-6:])}"
-        )
-    finally:
+    results: list[dict] = []
+    for row in batch:
+        model_path: str = str(row["model_id"])
+        rec: dict = {
+            "model_name": model_path,
+            "architecture": row.get("config_class"),
+            "adapter_name": "",
+            "added_date": None,
+            "snapshot_date": snapshot_date,
+            "verified_on_cpu": False,
+            "verified_on_gpu": False,
+            "verified_on_spyre": False,
+            "num_downloads": int(row.get("downloads") or 0),
+            "error": None,
+        }
         try:
-            result_queue.put(result)
-            print(
-                f"      child[{os.getpid()}] done in "
-                f"{_t.monotonic() - _child_entered:.2f}s for {model_path!r}",
-                flush=True,
+            # Reject models too large to bring up on Spyre before evaluating.
+            params = row.get("parameters")
+            if params not in (None, "") and int(params) > 60_000_000_000:
+                raise Exception(
+                    f"Model {model_path} has {int(params):,} parameters, "
+                    f"exceeding the 60B limit for Spyre bring-up."
+                )
+
+            adapter_module = resolve_adapter_module_for_test(model_path)
+            adapter_name: str = os.path.splitext(
+                os.path.basename(adapter_module.__file__)
+            )[0]
+            rec["adapter_name"] = adapter_name
+            rec["added_date"] = adapter_dates.get(adapter_name)
+
+            match mode:
+                case EmbeddingGenerativeMode.EMBEDDING:
+                    eval_fn = eval_embedding
+                case EmbeddingGenerativeMode.GENERATIVE:
+                    eval_fn = eval_generative
+            metrics = eval_fn(model_path, adapter_module, random_run=random_run)
+            rec["verified_on_cpu"] = bool(metrics.get("load", False))
+            rec["verified_on_spyre"] = bool(metrics.get("correct", False))
+        except Exception as e:
+            rec["error"] = (
+                f"{type(e).__name__}: {e}\n"
+                f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
             )
-        except Exception:
-            pass
+        results.append(rec)
+        print(
+            f"      child[{os.getpid()}] finished model "
+            f"{len(results)}/{len(batch)}: {model_path!r}  "
+            f"(verified_on_spyre={rec['verified_on_spyre']}, "
+            f"error={bool(rec['error'])})",
+            flush=True,
+        )
+
+    try:
+        result_queue.put(results)
+        print(
+            f"      child[{os.getpid()}] done in "
+            f"{_t.monotonic() - _child_entered:.2f}s ({len(results)} results)",
+            flush=True,
+        )
+    except Exception:
+        pass
 
     # Skip Python's graceful shutdown: no atexit handlers, no thread
     # finalization, no torch/torch_spyre destructors walking the tensor graph
@@ -377,6 +426,13 @@ def _human_bytes(n):
         n /= 1024
 
 
+def _chunk_into_batches(rows: list[dict], batch_size: int) -> list[list[dict]]:
+    """Split *rows* into consecutive sub-lists of length *batch_size* (the
+    last batch may be shorter).
+    """
+    return [rows[i : i + batch_size] for i in range(0, len(rows), batch_size)]
+
+
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     preexisting: set = _repos_with_weights()
@@ -404,169 +460,149 @@ def main(argv: list[str] | None = None) -> None:
     overall_start = time.monotonic()
 
     ctx = multiprocessing.get_context("spawn")
-    try:
-        for row in to_process_list:
-            model_path = str(row["model_id"])
-            processed += 1
-            model_start = time.monotonic()
-            elapsed_overall = model_start - overall_start
+
+    # Early-stop guard runs in the parent (fast: dict lookup for CSV,
+    # single SELECT for CH), so we drop already-recent models BEFORE
+    # batching. That keeps batch sizes uniform relative to real work.
+    prefiltered: list[dict] = []
+    early_skipped: int = 0
+    for row in to_process_list:
+        model_path: str = str(row["model_id"])
+        if not sink.should_insert_row(model_path):
+            early_skipped += 1
             print(
-                f"\n[{processed}/{total}] {model_path}  "
-                f"(overall elapsed: {elapsed_overall:.0f}s)"
+                f"    sink: '{model_path}' skipped early — "
+                f"recent snapshot exists within the "
+                f"{sink.__class__.__name__} skip window"
             )
+            continue
+        prefiltered.append(row)
+    if early_skipped:
+        print(
+            f"\nEarly-skip: {early_skipped}/{total} models already have a "
+            f"recent snapshot; {len(prefiltered)} left to evaluate.\n"
+        )
 
-            t_guard_start: float = time.monotonic()
-            if not sink.should_insert_row(model_path):
-                print(
-                    f"    sink: '{model_path}' skipped early — "
-                    f"CPU-verified snapshot exists within the last "
-                    f"{sink.__class__.__name__} skip window"
-                )
-                continue
-            t_guard: float = time.monotonic() - t_guard_start
+    batches: list[list[dict]] = _chunk_into_batches(
+        prefiltered, NUMBER_OF_MODEL_PER_PROCESS
+    )
+    total_batches: int = len(batches)
 
-            csv_config_class = row.get("config_class")
+    try:
+        for batch_idx, batch in enumerate(batches, start=1):
+            batch_start = time.monotonic()
+            batch_paths: list[str] = [str(r["model_id"]) for r in batch]
+            print(
+                f"\n[batch {batch_idx}/{total_batches}] {len(batch)} model(s) "
+                f"(overall elapsed: {batch_start - overall_start:.0f}s)"
+            )
+            for path in batch_paths:
+                print(f"    - {path}")
 
-            had_weights = model_path in preexisting
-
-            rec = {
-                "model_name": model_path,
-                "architecture": csv_config_class,
-                "adapter_name": "",
-                "added_date": None,
-                "snapshot_date": snapshot_date,
-                "verified_on_cpu": False,
-                "verified_on_gpu": False,
-                "verified_on_spyre": False,
-                "num_downloads": int(row.get("downloads") or 0),
+            # Track which weights existed BEFORE this batch ran, so we can
+            # decide per-model whether to delete after.
+            had_weights_map: dict[str, bool] = {
+                path: path in preexisting for path in batch_paths
             }
 
-            t_spawn: float = 0.0
-            t_join: float = 0.0
-            t_queue: float = 0.0
-            t_write: float = 0.0
-            t_cleanup: float = 0.0
-            try:
-                # Reject models too large to bring up on Spyre before spawning.
-                params = row.get("parameters")
-                if params not in (None, "") and int(params) > 60_000_000_000:
-                    print(
-                        f"Model {model_path} has {int(params):,} parameters, "
-                        f"exceeding the 60B limit for Spyre bring-up."
-                    )
-                    continue
+            result_queue = ctx.SimpleQueue()
+            proc = ctx.Process(
+                target=_process_batch,
+                args=(
+                    batch,
+                    args.random_run,
+                    adapter_dates,
+                    result_queue,
+                    args.mode,
+                    snapshot_date,
+                ),
+            )
+            t_spawn_start = time.monotonic()
+            proc.start()
+            t_spawn = time.monotonic() - t_spawn_start
+            print(
+                f"      parent: proc.start() returned pid={proc.pid} "
+                f"after {t_spawn*1000:.1f}ms",
+                flush=True,
+            )
 
-                # Use a raw Process instead of Pool so that no pipes,
-                # semaphores, or pool-supervisor state accumulate in the
-                # parent over 100+ iterations. A ctx.Queue uses an anonymous
-                # OS pipe inherited by the child, so — unlike SyncManager —
-                # there is no on-disk unix socket in /tmp that a pod cleaner
-                # or OOM-killed helper can yank out from under us.
-                result_queue = ctx.Queue()
-                proc = ctx.Process(
-                    target=_process_row,
-                    args=(
-                        model_path,
-                        args.random_run,
-                        adapter_dates,
-                        result_queue,
-                        args.mode,
-                    ),
-                )
-                t_spawn_start = time.monotonic()
-                proc.start()
-                t_spawn = time.monotonic() - t_spawn_start
+            t_join_start: float = time.monotonic()
+            proc.join()
+            t_join = time.monotonic() - t_join_start
+            print(
+                f"      parent: proc.join() returned pid={proc.pid} "
+                f"after {t_join:.2f}s",
+                flush=True,
+            )
+
+            # Drain the queue. SimpleQueue.get() blocks if empty, so probe
+            # first; the child has already exited so a non-empty queue
+            # returns instantly, and an empty one signals a crash.
+            if result_queue.empty():
                 print(
-                    f"      parent: proc.start() returned pid={proc.pid} "
-                    f"after {t_spawn*1000:.1f}ms",
-                    flush=True,
+                    f"    batch: worker exited code {proc.exitcode} "
+                    f"and returned no results — marking all {len(batch)} "
+                    f"models as failed"
                 )
-
-                t_join_start: float = time.monotonic()
-                proc.join()
-                t_join = time.monotonic() - t_join_start
-                print(
-                    f"      parent: proc.join() returned pid={proc.pid} "
-                    f"after {t_join:.2f}s",
-                    flush=True,
-                )
-
-                t_queue_start: float = time.monotonic()
-                try:
-                    worker_result = result_queue.get_nowait()
-                except Exception:
-                    worker_result = {
+                worker_results: list[dict] = [
+                    {
+                        "model_name": path,
+                        "architecture": row.get("config_class"),
                         "adapter_name": "",
                         "added_date": None,
-                        "metrics": {
-                            "correct": False,
-                            "load": False,
-                            "compare_spyre": False,
-                        },
-                        "error": (
-                            f"Worker process exited with code {proc.exitcode} "
-                            f"and returned no result"
-                        ),
+                        "snapshot_date": snapshot_date,
+                        "verified_on_gpu": False,
+                        "verified_on_spyre": False,
+                        "num_downloads": int(row.get("downloads") or 0),
+                        "error": f"worker died (exitcode={proc.exitcode})",
                     }
-                finally:
-                    result_queue.close()
-                    result_queue.join_thread()
-                t_queue = time.monotonic() - t_queue_start
-
-                rec["adapter_name"] = worker_result["adapter_name"]
-                if worker_result["added_date"] is not None:
-                    rec["added_date"] = date.fromisoformat(worker_result["added_date"])
-
-                if worker_result["error"]:
-                    raise Exception(worker_result["error"])
-
-                metrics = worker_result["metrics"]
-                rec["verified_on_cpu"] = metrics.get("load", False)
-                rec["verified_on_spyre"] = metrics.get("correct", False)
-                model_elapsed = time.monotonic() - model_start
-                print(
-                    f"    verified_on_cpu={rec['verified_on_cpu']}  "
-                    f"correct={metrics.get('correct')}  "
-                    f"model_time={model_elapsed:.1f}s"
-                )
-            except KeyboardInterrupt:
-                raise
-            except Exception as e:
-                rec["verified_on_cpu"] = False
-                model_elapsed = time.monotonic() - model_start
-                print(
-                    f"    verified_on_cpu=False  "
-                    f"error={type(e).__name__}: {e}  "
-                    f"model_time={model_elapsed:.1f}s"
-                )
-                print("".join(traceback.format_exc().splitlines(keepends=True)[-6:]))
-
-            t_write_start: float = time.monotonic()
-            if sink.add_entry(rec):
-                print(f"    sink: row written for '{model_path}'")
+                    for row, path in zip(batch, batch_paths)
+                ]
             else:
-                print(f"    sink: row skipped for '{model_path}' (guard rejected)")
-            t_write = time.monotonic() - t_write_start
+                worker_results = result_queue.get()
 
-            # Cache cleanup: weights absent at start -> delete downloaded weights.
-            t_cleanup_start: float = time.monotonic()
-            if not had_weights:
-                freed = _delete_repo_weights(model_path)
-                total_freed += freed
-                if freed:
+            # Write each result to the sink and clean up cache per model.
+            for rec in worker_results:
+                model_path = str(rec.get("model_name") or "")
+                processed += 1
+
+                if rec.get("error"):
+                    print(f"    [{model_path}] error: {rec['error']}")
+
+                # Coerce added_date from ISO string (as the worker wrote it)
+                # to a date object for the sink.
+                added_iso = rec.get("added_date")
+                if isinstance(added_iso, str):
+                    try:
+                        rec["added_date"] = date.fromisoformat(added_iso)
+                    except ValueError:
+                        rec["added_date"] = None
+
+                # Sink writes: don't store the `error` field.
+                sink_rec: dict = {k: v for k, v in rec.items() if k != "error"}
+                if sink.add_entry(sink_rec):
                     print(
-                        f"    freed {_human_bytes(freed)} "
-                        f"(total {_human_bytes(total_freed)})"
+                        f"    sink: row written for '{model_path}' "
+                        f"(verified_on_spyre={rec.get('verified_on_spyre')})"
                     )
-            t_cleanup = time.monotonic() - t_cleanup_start
+                else:
+                    print(f"    sink: row skipped for '{model_path}' (guard rejected)")
 
+                # Cache cleanup: weights absent at start -> delete downloaded.
+                if not had_weights_map.get(model_path, False):
+                    freed = _delete_repo_weights(model_path)
+                    total_freed += freed
+                    if freed:
+                        print(
+                            f"    freed {_human_bytes(freed)} "
+                            f"(total {_human_bytes(total_freed)})"
+                        )
+
+            batch_elapsed = time.monotonic() - batch_start
             print(
-                f"    timing: guard={t_guard*1000:.1f}ms  "
-                f"spawn={t_spawn*1000:.1f}ms  "
-                f"join={t_join:.2f}s  "
-                f"queue={t_queue*1000:.1f}ms  "
-                f"write={t_write*1000:.1f}ms  "
-                f"cleanup={t_cleanup*1000:.1f}ms"
+                f"    batch {batch_idx}/{total_batches} done: "
+                f"{len(worker_results)} model(s) in {batch_elapsed:.1f}s  "
+                f"(per-model avg: {batch_elapsed / max(1, len(worker_results)):.1f}s)"
             )
     except KeyboardInterrupt:
         print("\nInterrupted — results so far are saved; rerun to resume.")
