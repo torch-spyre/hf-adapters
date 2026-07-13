@@ -38,7 +38,7 @@ Usage::
 
     encoded = tokenizer(["hello", "world"], return_tensors="pt",
                         padding=True, padding_side="right")
-    last_hidden_state, mask = prefill_encoder(
+    last_hidden_state = prefill_encoder(
         encoder_backbone_forward, model,
         encoded["input_ids"], encoded["attention_mask"],
     )
