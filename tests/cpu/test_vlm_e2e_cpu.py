@@ -47,6 +47,7 @@ from hf_adapters.auto_spyre_model import (
 )
 from tests._vision_helpers import build_vlm_batch, stock_vlm_generate
 from tests.conftest import get_dtype_for_cpu, load_ref_model
+from tests.cpu.conftest import _unwrap_compiled_blocks
 from tests.model_registry import VISION_PATHS
 
 MAX_NEW_TOKENS: int = 16
@@ -79,7 +80,7 @@ def _adapter_generate(
 
 
 @pytest.mark.parametrize("model_path", VISION_PATHS, ids=VISION_PATHS)
-def test_vlm_generate(model_path: str, unwrap_compiled_blocks) -> None:
+def test_vlm_generate(model_path: str) -> None:
     adapter = resolve_adapter_module(
         model_path, mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING
     )
@@ -95,7 +96,7 @@ def test_vlm_generate(model_path: str, unwrap_compiled_blocks) -> None:
         auto_model_cls=AutoModelForImageTextToText,
     )
     adapter.prepare_for_spyre(model)
-    unwrap_compiled_blocks(model)
+    _unwrap_compiled_blocks(model)
     with torch.no_grad():
         adapter_text = _adapter_generate(
             adapter, model, processor, batch, MAX_NEW_TOKENS
