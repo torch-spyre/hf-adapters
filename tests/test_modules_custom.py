@@ -2,8 +2,10 @@
 Custom module tests for torch-spyre.
 
 This file contains additional test methods for modules defined in YAML configs:
-- test_eager_vs_compile: Compare eager and compile mode outputs (CPU vs Spyre eager vs Spyre compiled)
-- test_with_cpu: Compare CPU (eager) vs device (compile and/or eager), selectable via env vars
+- test_eager_vs_compile: Cross-check that Spyre eager and Spyre compiled agree with
+  each other and with CPU (all three run in a single pass)
+- test_with_cpu: Use CPU as the golden reference and compare device output against it;
+  which device mode(s) to run (compile and/or eager) is selectable via env vars
 - test_layout_stride: Validate real YAML-specified SpyreTensorLayouts and strides (CPU vs Spyre)
 
 All tests use pytree for robust handling of nested input/output structures and test only
@@ -201,16 +203,21 @@ class TestModuleCustom(TestCase):
 
     @modules(module_db)
     def test_with_cpu(self, device, dtype, module_info, training):
-        """Compare CPU (eager) outputs against device outputs for each module.
+        """Use CPU output as the golden reference and compare device output against it.
+
+        Unlike test_eager_vs_compile (which cross-checks Spyre eager vs Spyre compiled
+        in a single pass), this test treats the CPU forward as ground truth and validates
+        the device against it. The device mode being validated is selectable, so this test
+        can exercise device-compile-vs-CPU and device-eager-vs-CPU independently.
 
         For every module input this test:
-        1. Instantiates the module on CPU (eager) and runs a forward pass.
-        2. Instantiates the same module on the device with the SAME weights and
-           runs a forward pass in compile and/or eager mode.
+        1. Instantiates the module on CPU and runs a forward pass (the golden reference).
+        2. Instantiates the same module on the device with the SAME weights and runs a
+           forward pass in the selected device mode(s).
         3. Compares every output tensor (CPU vs device).
 
         Which device mode(s) run is controlled by environment variables (torch.compile
-        default to enabled):
+        defaults to enabled):
         - TEST_COMPILE_WITH_CPU=1 -> run torch.compile on device
         - TEST_EAGER_WITH_CPU=1   -> run eager on device
         """
