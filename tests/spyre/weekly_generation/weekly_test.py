@@ -63,7 +63,8 @@ _WEIGHT_SUFFIXES = (
 # amortize per-child spawn + import + kernel-teardown cost (~15 s currently)
 # across more work. Lower values reduce the blast radius when the Spyre
 # driver/state gets into a bad shape mid-batch.
-NUMBER_OF_MODEL_PER_PROCESS: int = 50
+GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS: int = 50
+EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS: int = 90
 
 
 def _repos_with_weights():
@@ -425,9 +426,11 @@ def main(argv: list[str] | None = None) -> None:
     snapshot_date = date.today()
     if args.mode == "generative":
         mode = EmbeddingGenerativeMode.GENERATIVE
+        number_of_model_per_process = GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS
         to_process_list = fetch_top_generative_models(limit=args.top_k)
     elif args.mode == "embedding":
         mode = EmbeddingGenerativeMode.EMBEDDING
+        number_of_model_per_process = EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS
         to_process_list = fetch_top_embedding_models(limit=args.top_k)
     else:
         raise Exception(f"Unknown mode: {args.mode}")
@@ -471,7 +474,7 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     batches: list[list[dict]] = _chunk_into_batches(
-        prefiltered, NUMBER_OF_MODEL_PER_PROCESS
+        prefiltered, number_of_model_per_process
     )
     total_batches: int = len(batches)
 
