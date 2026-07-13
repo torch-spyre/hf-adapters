@@ -30,6 +30,7 @@ from utils.hf_model_catalog import (
     EXPAND_FIELDS,
     RESOURCES_DIR,
     build_catalog,
+    contains_remote_code,
     is_baseline_keep,
     tags,
 )
@@ -140,6 +141,8 @@ def _keep(model: ModelInfo) -> bool:
     if _is_reranker(model):
         return False
     if model.gated:
+        return False
+    if contains_remote_code(model):
         return False
     return True
 

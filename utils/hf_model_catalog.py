@@ -116,6 +116,15 @@ def is_baseline_keep(model: ModelInfo) -> bool:
     return True
 
 
+def contains_remote_code(model: ModelInfo) -> bool:
+    """Return False if the model requires trust_remote_code=True to load its config."""
+    try:
+        AutoConfig.from_pretrained(model.id, trust_remote_code=False)
+        return False
+    except Exception:
+        return True
+
+
 def format_number_to_billions_smart(num: int | float) -> str:
     """Smart formatting that adjusts precision based on magnitude."""
     billions: float = num / 1_000_000_000
