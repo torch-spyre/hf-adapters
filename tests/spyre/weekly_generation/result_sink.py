@@ -113,6 +113,16 @@ class ResultSink(ABC):
         """
 
     @abstractmethod
+    def get_all_models(self) -> list[dict[str, Any]]:
+        """Return one row per known ``model_name``, reflecting its most recent snapshot.
+
+        When a model appears in multiple rows (one per weekly run), only the row
+        with the greatest ``snapshot_date`` is returned. The result is a flat
+        list of dicts keyed by column name (same keys as ``TABLE_COLUMNS``), one
+        dict per distinct model, in no guaranteed order.
+        """
+
+    @abstractmethod
     def _insert_entry(self, rec: dict[str, Any]) -> None:
         """Storage-specific write of *rec*. Called by ``add_entry`` after the
         skip guard has passed. Subclasses must not perform any deduplication
@@ -205,6 +215,16 @@ class CsvResultSink(ResultSink):
         filtered.sort(key=lambda item: item[0], reverse=True)
         return [row for _, row in filtered]
 
+    def get_all_models(self) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for rows in self._rows_by_model.values():
+            best: dict[str, Any] = max(
+                rows,
+                key=lambda r: _coerce_snapshot(r.get("snapshot_date")) or date.min,
+            )
+            result.append(best)
+        return result
+
     def _insert_entry(self, rec: dict[str, Any]) -> None:
         self._writer.writerow(rec)
         self._fh.flush()
@@ -254,6 +274,19 @@ class ClickHouseResultSink(ResultSink):
                 "model": key,
                 "cutoff": cutoff,
             },
+        )
+        return [dict(zip(TABLE_COLUMNS, row)) for row in result.result_rows]
+
+    def get_all_models(self) -> list[dict[str, Any]]:
+        columns_sql: str = ", ".join(
+            f"argMax({col}, snapshot_date) AS {col}" if col != "model_name" else col
+            for col in TABLE_COLUMNS
+        )
+        result = self._client.query(
+            f"SELECT {columns_sql} "
+            "FROM {db:Identifier}.{tbl:Identifier} "
+            "GROUP BY model_name",
+            parameters={"db": DATABASE, "tbl": self._table_name},
         )
         return [dict(zip(TABLE_COLUMNS, row)) for row in result.result_rows]
 
