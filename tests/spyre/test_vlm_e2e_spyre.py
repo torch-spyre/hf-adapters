@@ -67,7 +67,6 @@ from _vision_helpers import (
     build_vlm_batch,
     stock_vlm_generate,
 )
-from conftest import load_ref_model
 from model_registry import VISION_PATHS
 
 from hf_adapters import AutoSpyreModelForImageTextToText
@@ -84,6 +83,7 @@ from hf_adapters.hf_common import (
     get_model_dtype,
     pad_and_position,
 )
+from tests.conftest import load_ref_model
 
 MAX_NEW_TOKENS = 16
 # Decode steps to verify token-by-token (prefill + this many decode steps). Kept
@@ -251,6 +251,7 @@ def _stock_vlm_greedy_steps(
     batch: dict[str, torch.Tensor],
     adapter_mod,
     num_steps: int,
+    ref_model=None,
 ) -> tuple[list[torch.Tensor], list[int]]:
     """Stock HF per-step greedy logits + token ids over prefill + decode.
 
@@ -265,14 +266,17 @@ def _stock_vlm_greedy_steps(
     The Spyre e2e test uses ``token_ids`` as the teacher-forcing sequence and
     ``logits`` as the per-step top-1 reference, so the adapter is compared on the
     *same* prefix at every step (no greedy-fork amplification).
+
+    Pass ``ref_model`` to reuse an already-loaded stock model.
     """
     from transformers import AutoModelForImageTextToText
 
-    ref_model = load_ref_model(
-        model_path=model_path,
-        adapter_mod=adapter_mod,
-        auto_model_cls=AutoModelForImageTextToText,
-    )
+    if ref_model is None:
+        ref_model = load_ref_model(
+            model_path=model_path,
+            adapter_mod=adapter_mod,
+            auto_model_cls=AutoModelForImageTextToText,
+        )
     with torch.no_grad():
         gen = ref_model.generate(
             **batch,
@@ -285,7 +289,6 @@ def _stock_vlm_greedy_steps(
     logits = [step[0].float().clone() for step in gen.logits]
     prompt_len = batch["input_ids"].shape[1]
     token_ids = gen.sequences[0, prompt_len : prompt_len + num_steps].tolist()
-    del ref_model
     return logits, token_ids
 
 
@@ -307,13 +310,22 @@ def test_vlm_generate_spyre(model_path: str) -> None:
 
     # --- Stock CPU reference (run first, before prepare_for_spyre patches RMSNorm).
     # Capture stock's per-step greedy logits + token ids (the forcing sequence and
-    # the per-step top-1 reference), plus its free-run caption for an eyeball. ---
+    # the per-step top-1 reference), plus its free-run caption for an eyeball. Both
+    # ride off a single stock load (freed here) rather than reloading the model. ---
     print("  Running stock CPU reference (per-step greedy) ...")
+    from transformers import AutoModelForImageTextToText
+
+    ref_model = load_ref_model(
+        model_path=model_path,
+        adapter_mod=adapter,
+        auto_model_cls=AutoModelForImageTextToText,
+    )
     ref_logits, ref_tokens = _stock_vlm_greedy_steps(
         model_path=model_path,
         batch=batch,
         num_steps=NUM_COMPARE_STEPS,
         adapter_mod=adapter,
+        ref_model=ref_model,
     )
     ref_text = stock_vlm_generate(
         model_path=model_path,
@@ -321,7 +333,9 @@ def test_vlm_generate_spyre(model_path: str) -> None:
         batch=batch,
         max_new_tokens=MAX_NEW_TOKENS,
         adapter_mod=adapter,
+        ref_model=ref_model,
     )
+    del ref_model
     gc.collect()
 
     # --- Adapter on Spyre ---

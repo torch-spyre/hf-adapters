@@ -17,6 +17,7 @@ test_suite_config:
           mode: xfail
           tags:
             - model__Mistral_Small_3_2_24B_Instruct_2506
+          no_grad: true
           edits:
             modules:
               include: &id001
@@ -439,6 +440,7 @@ test_suite_config:
           tags:
             - model__Mistral_Small_3_2_24B_Instruct_2506
             - custom_tests
+          no_grad: true
           edits:
             modules:
               include: *id001
