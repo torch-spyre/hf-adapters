@@ -67,7 +67,6 @@ from _vision_helpers import (
     build_vlm_batch,
     stock_vlm_generate,
 )
-from conftest import load_ref_model
 from model_registry import VISION_PATHS
 
 from hf_adapters import AutoSpyreModelForImageTextToText
@@ -84,6 +83,7 @@ from hf_adapters.hf_common import (
     get_model_dtype,
     pad_and_position,
 )
+from tests.conftest import load_ref_model
 
 MAX_NEW_TOKENS = 16
 # Decode steps to verify token-by-token (prefill + this many decode steps). Kept

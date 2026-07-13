@@ -38,12 +38,13 @@ from typing import Any
 import pytest
 import torch
 import torch.nn.functional as F
-from conftest import get_dtype_for_cpu
-from model_registry import EMBED_PATHS
 
 # Registers the "spyre" backend with sentence_transformers on import.
 import hf_adapters.st_backend  # noqa: F401
 from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
+from tests.conftest import get_dtype_for_cpu
+from tests.model_registry import EMBED_PATHS
+
 
 PROMPTS = [
     "Hi.",
