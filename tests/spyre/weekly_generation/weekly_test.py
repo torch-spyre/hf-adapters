@@ -20,7 +20,7 @@ from asyncio import Queue
 from datetime import date
 from pathlib import Path
 
-from weekly_generation.result_sink import EmbeddingGenerativeMode
+from tests.spyre.weekly_generation.result_sink import EmbeddingGenerativeMode
 
 MAX_NUMBER_PARAMS = 60_000_000_000
 
