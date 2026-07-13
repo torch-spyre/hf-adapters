@@ -25,6 +25,8 @@ from tests.spyre.weekly_generation.create_model_spyre_table import (
     CREATE_TABLE_SQL,
     DATABASE,
     EMBEDDING_TABLE_NAME,
+    GENERATIVE_CREATE_TABLE_SQL,
+    GENERATIVE_TABLE_NAME,
     TABLE_COLUMNS,
     get_client,
     insert_model_row,
@@ -221,12 +223,19 @@ class ClickHouseResultSink(ResultSink):
         self, embedding_generative: EmbeddingGenerativeMode, today: date | None = None
     ) -> None:
         super().__init__(today=today)
-        self._client = get_client()
-        if not table_exists(self._client):
-            self._client.command(CREATE_TABLE_SQL)
-            print("ClickHouse: table created.\n")
+        self._embedding_generative = embedding_generative
+        if embedding_generative is EmbeddingGenerativeMode.EMBEDDING:
+            self._table_name = EMBEDDING_TABLE_NAME
+            create_sql = CREATE_TABLE_SQL
         else:
-            print("ClickHouse: table already exists.\n")
+            self._table_name = GENERATIVE_TABLE_NAME
+            create_sql = GENERATIVE_CREATE_TABLE_SQL
+        self._client = get_client()
+        if not table_exists(self._client, self._table_name):
+            self._client.command(create_sql)
+            print(f"ClickHouse: table '{self._table_name}' created.\n")
+        else:
+            print(f"ClickHouse: table '{self._table_name}' already exists.\n")
 
     def get_recent_cpu_verified_entries(self, model_name: str) -> list[dict[str, Any]]:
         key: str = _require_non_empty(model_name, "model_name")
@@ -241,7 +250,7 @@ class ClickHouseResultSink(ResultSink):
             "ORDER BY snapshot_date DESC",
             parameters={
                 "db": DATABASE,
-                "tbl": EMBEDDING_TABLE_NAME,
+                "tbl": self._table_name,
                 "model": key,
                 "cutoff": cutoff,
             },
@@ -251,6 +260,7 @@ class ClickHouseResultSink(ResultSink):
     def _insert_entry(self, rec: dict[str, Any]) -> None:
         insert_model_row(
             self._client,
+            table_name=self._table_name,
             model_name=rec["model_name"],
             architecture=rec["architecture"],
             adapter_name=rec["adapter_name"],

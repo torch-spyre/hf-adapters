@@ -46,6 +46,7 @@ def get_client():
 
 
 EMBEDDING_TABLE_NAME = "embedding_model_spyre_support"
+GENERATIVE_TABLE_NAME = "generative_model_spyre_support"
 DATABASE = "spyre"
 
 # Single source of truth for the Python-facing column list. Order matches the
@@ -63,10 +64,10 @@ TABLE_COLUMNS: tuple[str, ...] = (
     "num_downloads",
 )
 
-# The column names and order below MUST match ``TABLE_COLUMNS`` above.
-# When adding/removing/renaming a column, update both in the same change.
-CREATE_TABLE_SQL = f"""
-CREATE TABLE IF NOT EXISTS {DATABASE}.{EMBEDDING_TABLE_NAME}
+
+def _make_create_table_sql(table_name: str) -> str:
+    return f"""
+CREATE TABLE IF NOT EXISTS {DATABASE}.{table_name}
 (
     model_name        String,
     architecture      String,
@@ -83,23 +84,29 @@ ORDER BY (model_name, snapshot_date)
 """
 
 
-def table_exists(client) -> bool:
+# The column names and order below MUST match ``TABLE_COLUMNS`` above.
+# When adding/removing/renaming a column, update both in the same change.
+CREATE_TABLE_SQL = _make_create_table_sql(EMBEDDING_TABLE_NAME)
+GENERATIVE_CREATE_TABLE_SQL = _make_create_table_sql(GENERATIVE_TABLE_NAME)
+
+
+def table_exists(client, table_name: str) -> bool:
     result = client.query(
         "SELECT count() FROM system.tables "
         "WHERE database = {db:String} AND name = {tbl:String}",
-        parameters={"db": DATABASE, "tbl": EMBEDDING_TABLE_NAME},
+        parameters={"db": DATABASE, "tbl": table_name},
     )
     return result.result_rows[0][0] > 0
 
 
-def print_table(client) -> None:
+def print_table(client, table_name: str) -> None:
     result = client.query(
         "SELECT name, type FROM system.columns "
         "WHERE database = {db:String} AND table = {tbl:String} "
         "ORDER BY position",
-        parameters={"db": DATABASE, "tbl": EMBEDDING_TABLE_NAME},
+        parameters={"db": DATABASE, "tbl": table_name},
     )
-    print(f"Table '{DATABASE}.{EMBEDDING_TABLE_NAME}' already exists with columns:")
+    print(f"Table '{DATABASE}.{table_name}' already exists with columns:")
     for col_name, col_type in result.result_rows:
         print(f"  {col_name:<25} {col_type}")
 
@@ -107,6 +114,7 @@ def print_table(client) -> None:
 def insert_model_row(
     client,
     *,
+    table_name: str,
     model_name: str,
     architecture: str,
     adapter_name: str,
@@ -117,13 +125,13 @@ def insert_model_row(
     verified_on_spyre: bool,
     num_downloads: int,
 ) -> bool:
-    """Insert a single row into model_spyre_support.
+    """Insert a single row into the given table.
 
     The caller is responsible for any duplicate-suppression guard (e.g.
     ``ResultSink.should_insert_row``). This function always writes.
     """
     client.insert(
-        EMBEDDING_TABLE_NAME,
+        table_name,
         [
             [
                 model_name,
