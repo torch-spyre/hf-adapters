@@ -392,6 +392,7 @@ def main(argv: list[str] | None = None) -> None:
                 f"(overall elapsed: {elapsed_overall:.0f}s)"
             )
 
+            t_guard_start: float = time.monotonic()
             if not sink.should_insert_row(model_path):
                 print(
                     f"    sink: '{model_path}' skipped early — "
@@ -399,6 +400,7 @@ def main(argv: list[str] | None = None) -> None:
                     f"{sink.__class__.__name__} skip window"
                 )
                 continue
+            t_guard: float = time.monotonic() - t_guard_start
 
             csv_config_class = row.get("config_class")
 
@@ -416,6 +418,12 @@ def main(argv: list[str] | None = None) -> None:
                 "num_downloads": int(row.get("downloads") or 0),
             }
 
+            t_spawn_start: float = 0.0
+            t_spawn: float = 0.0
+            t_join: float = 0.0
+            t_queue: float = 0.0
+            t_write: float = 0.0
+            t_cleanup: float = 0.0
             try:
                 # Reject models too large to bring up on Spyre before spawning.
                 params = row.get("parameters")
@@ -443,9 +451,15 @@ def main(argv: list[str] | None = None) -> None:
                         args.mode,
                     ),
                 )
+                t_spawn_start = time.monotonic()
                 proc.start()
-                proc.join()
+                t_spawn = time.monotonic() - t_spawn_start
 
+                t_join_start: float = time.monotonic()
+                proc.join()
+                t_join = time.monotonic() - t_join_start
+
+                t_queue_start: float = time.monotonic()
                 try:
                     worker_result = result_queue.get_nowait()
                 except Exception:
@@ -465,6 +479,7 @@ def main(argv: list[str] | None = None) -> None:
                 finally:
                     result_queue.close()
                     result_queue.join_thread()
+                t_queue = time.monotonic() - t_queue_start
 
                 rec["adapter_name"] = worker_result["adapter_name"]
                 if worker_result["added_date"] is not None:
@@ -494,12 +509,15 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 print("".join(traceback.format_exc().splitlines(keepends=True)[-6:]))
 
+            t_write_start: float = time.monotonic()
             if sink.add_entry(rec):
                 print(f"    sink: row written for '{model_path}'")
             else:
                 print(f"    sink: row skipped for '{model_path}' (guard rejected)")
+            t_write = time.monotonic() - t_write_start
 
             # Cache cleanup: weights absent at start -> delete downloaded weights.
+            t_cleanup_start: float = time.monotonic()
             if not had_weights:
                 freed = _delete_repo_weights(model_path)
                 total_freed += freed
@@ -508,6 +526,16 @@ def main(argv: list[str] | None = None) -> None:
                         f"    freed {_human_bytes(freed)} "
                         f"(total {_human_bytes(total_freed)})"
                     )
+            t_cleanup = time.monotonic() - t_cleanup_start
+
+            print(
+                f"    timing: guard={t_guard*1000:.1f}ms  "
+                f"spawn={t_spawn*1000:.1f}ms  "
+                f"join={t_join:.2f}s  "
+                f"queue={t_queue*1000:.1f}ms  "
+                f"write={t_write*1000:.1f}ms  "
+                f"cleanup={t_cleanup*1000:.1f}ms"
+            )
     except KeyboardInterrupt:
         print("\nInterrupted — results so far are saved; rerun to resume.")
     finally:
