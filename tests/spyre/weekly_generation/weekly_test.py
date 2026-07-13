@@ -18,8 +18,11 @@ import sys
 import time
 from asyncio import Queue
 from datetime import date
-from enum import Enum
 from pathlib import Path
+
+from weekly_generation.result_sink import EmbeddingGenerativeMode
+
+MAX_NUMBER_PARAMS = 60_000_000_000
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SPYRE_TESTS_DIR = _REPO_ROOT / "tests" / "spyre"
@@ -34,7 +37,6 @@ from tests.conftest import get_dtype_for_cpu  # noqa: E402
 from tests.spyre.test_e2e_embed_compare_spyre import embed_compare_spyre  # noqa: E402
 from tests.spyre.test_e2e_smoke_spyre import run_smoke_test  # noqa: E402
 from tests.spyre.test_e2e_token_compare_spyre import token_compare_spyre  # noqa: E402
-from tests.spyre.test_load_spyre import load_causal_lm, load_embedding  # noqa: E402
 from tests.spyre.weekly_generation.result_sink import (  # noqa: E402
     ClickHouseResultSink,
     CsvResultSink,
@@ -57,17 +59,11 @@ _WEIGHT_SUFFIXES = (
     ".msgpack",
 )
 
-
-class EmbeddingGenerativeMode(str, Enum):
-    EMBEDDING = "embedding"
-    GENERATIVE = "generative"
-
-
 # How many models one spawned child processes before exiting. Higher values
 # amortize per-child spawn + import + kernel-teardown cost (~15 s currently)
 # across more work. Lower values reduce the blast radius when the Spyre
 # driver/state gets into a bad shape mid-batch.
-NUMBER_OF_MODEL_PER_PROCESS: int = 10
+NUMBER_OF_MODEL_PER_PROCESS: int = 50
 
 
 def _repos_with_weights():
@@ -192,7 +188,6 @@ def _load_on_cpu(model_path: str, mode: EmbeddingGenerativeMode) -> bool:
 
 def eval_generative(model_id: str, adapter, random_run: bool = False) -> dict:
     load_on_cpu = False
-    loads_on_spyre = False
     run_smoke_status = False
     mismatches = True
 
@@ -206,13 +201,9 @@ def eval_generative(model_id: str, adapter, random_run: bool = False) -> dict:
 
             if load_on_cpu:
                 if random_run:
-                    loads_on_spyre = _temp_random_bool()
+                    run_smoke_status = _temp_random_bool()
+                    mismatches = _temp_random_bool()
                 else:
-                    model_is_not_none, callables, _ = load_causal_lm(
-                        model_path=model_id
-                    )
-                    loads_on_spyre = model_is_not_none and callables
-
                     run_smoke_status = (
                         run_smoke_test(model_path=model_id)["status"] == "PASS"
                     )
@@ -222,14 +213,13 @@ def eval_generative(model_id: str, adapter, random_run: bool = False) -> dict:
         print(f"eval_generative exception - {e}")
     finally:
         return {
-            "correct": loads_on_spyre and run_smoke_status and not mismatches,
+            "correct": run_smoke_status and not mismatches,
             "load": load_on_cpu,
         }
 
 
 def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
     load_on_cpu = False
-    loads_on_spyre = False
     mismatches = True
 
     """Load and compare embeddings for one model. Returns a metrics dict."""
@@ -244,18 +234,15 @@ def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
 
             if load_on_cpu:
                 if random_run:
-                    loads_on_spyre = _temp_random_bool()
                     mismatches = _temp_random_bool()
                 else:
-                    loads_on_spyre, _ = load_embedding(model_id)
                     mismatches, _ = embed_compare_spyre(model_id)
     except Exception as e:
         print(f"eval_embedding exception - {e}")
     finally:
         return {
-            "correct": loads_on_spyre and not mismatches,
+            "correct": not mismatches,
             "load": load_on_cpu,
-            "compare_spyre": not mismatches,
         }
 
 
@@ -322,7 +309,7 @@ def _process_batch(
         try:
             # Reject models too large to bring up on Spyre before evaluating.
             params = row.get("parameters")
-            if params not in (None, "") and int(params) > 60_000_000_000:
+            if params not in (None, "") and int(params) > MAX_NUMBER_PARAMS:
                 raise Exception(
                     f"Model {model_path} has {int(params):,} parameters, "
                     f"exceeding the 60B limit for Spyre bring-up."
@@ -358,15 +345,12 @@ def _process_batch(
             flush=True,
         )
 
-    try:
-        result_queue.put(results)
-        print(
-            f"      child[{os.getpid()}] done in "
-            f"{_t.monotonic() - _child_entered:.2f}s ({len(results)} results)",
-            flush=True,
-        )
-    except Exception:
-        pass
+    result_queue.put(results)
+    print(
+        f"      child[{os.getpid()}] done in "
+        f"{_t.monotonic() - _child_entered:.2f}s ({len(results)} results)",
+        flush=True,
+    )
 
     # Skip Python's graceful shutdown: no atexit handlers, no thread
     # finalization, no torch/torch_spyre destructors walking the tensor graph
@@ -440,8 +424,10 @@ def main(argv: list[str] | None = None) -> None:
     total_freed: int = 0
     snapshot_date = date.today()
     if args.mode == "generative":
+        mode = EmbeddingGenerativeMode.GENERATIVE
         to_process_list = fetch_top_generative_models(limit=args.top_k)
     elif args.mode == "embedding":
+        mode = EmbeddingGenerativeMode.EMBEDDING
         to_process_list = fetch_top_embedding_models(limit=args.top_k)
     else:
         raise Exception(f"Unknown mode: {args.mode}")
@@ -454,7 +440,7 @@ def main(argv: list[str] | None = None) -> None:
             f"CSV mode: results will be appended to '{args.write_to_csv}' (no DB access).\n"
         )
     else:
-        sink = ClickHouseResultSink(today=snapshot_date)
+        sink = ClickHouseResultSink(today=snapshot_date, embedding_generative=mode)
 
     total = len(to_process_list)
     processed = 0

@@ -19,25 +19,6 @@ Copy .env.example → .env and fill in the values before running.
 
   CLICKHOUSE_HOST, CLICKHOUSE_PORT, CLICKHOUSE_USER, CLICKHOUSE_PASS, CLICKHOUSE_DB
 
-Usage:
-    # check / create table
-    python3 .github/scripts/create_model_spyre_table.py
-
-    # drop table (asks for confirmation)
-    python3 .github/scripts/create_model_spyre_table.py --drop
-
-    # drop table without confirmation prompt
-    python3 .github/scripts/create_model_spyre_table.py --drop --yes
-
-    # insert a single row
-    python3 .github/scripts/create_model_spyre_table.py --insert \\
-        --model-name  "meta-llama/Llama-3.2-1B" \\
-        --architecture llama \\
-        --adapter-name my_lora \\
-        --added-date   2025-01-15 \\
-        --snapshot-date 2025-07-01 \\
-        --verified-on-cpu \\
-        --num-downloads 42000
 """
 
 import os
@@ -64,7 +45,7 @@ def get_client():
     )
 
 
-TABLE_NAME = "embedding_model_spyre_support"
+EMBEDDING_TABLE_NAME = "embedding_model_spyre_support"
 DATABASE = "spyre"
 
 # Single source of truth for the Python-facing column list. Order matches the
@@ -85,7 +66,7 @@ TABLE_COLUMNS: tuple[str, ...] = (
 # The column names and order below MUST match ``TABLE_COLUMNS`` above.
 # When adding/removing/renaming a column, update both in the same change.
 CREATE_TABLE_SQL = f"""
-CREATE TABLE IF NOT EXISTS {DATABASE}.{TABLE_NAME}
+CREATE TABLE IF NOT EXISTS {DATABASE}.{EMBEDDING_TABLE_NAME}
 (
     model_name        String,
     architecture      String,
@@ -106,7 +87,7 @@ def table_exists(client) -> bool:
     result = client.query(
         "SELECT count() FROM system.tables "
         "WHERE database = {db:String} AND name = {tbl:String}",
-        parameters={"db": DATABASE, "tbl": TABLE_NAME},
+        parameters={"db": DATABASE, "tbl": EMBEDDING_TABLE_NAME},
     )
     return result.result_rows[0][0] > 0
 
@@ -116,9 +97,9 @@ def print_table(client) -> None:
         "SELECT name, type FROM system.columns "
         "WHERE database = {db:String} AND table = {tbl:String} "
         "ORDER BY position",
-        parameters={"db": DATABASE, "tbl": TABLE_NAME},
+        parameters={"db": DATABASE, "tbl": EMBEDDING_TABLE_NAME},
     )
-    print(f"Table '{DATABASE}.{TABLE_NAME}' already exists with columns:")
+    print(f"Table '{DATABASE}.{EMBEDDING_TABLE_NAME}' already exists with columns:")
     for col_name, col_type in result.result_rows:
         print(f"  {col_name:<25} {col_type}")
 
@@ -131,10 +112,10 @@ def insert_model_row(
     adapter_name: str,
     added_date: date | None,
     snapshot_date: date,
-    verified_on_cpu: bool = False,
-    verified_on_gpu: bool = False,
-    verified_on_spyre: bool = False,
-    num_downloads: int = 0,
+    verified_on_cpu: bool,
+    verified_on_gpu: bool,
+    verified_on_spyre: bool,
+    num_downloads: int,
 ) -> bool:
     """Insert a single row into model_spyre_support.
 
@@ -142,7 +123,7 @@ def insert_model_row(
     ``ResultSink.should_insert_row``). This function always writes.
     """
     client.insert(
-        TABLE_NAME,
+        EMBEDDING_TABLE_NAME,
         [
             [
                 model_name,

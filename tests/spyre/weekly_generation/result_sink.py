@@ -17,14 +17,15 @@ from __future__ import annotations
 import csv
 from abc import ABC, abstractmethod
 from datetime import date, datetime, timedelta
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from tests.spyre.weekly_generation.create_model_spyre_table import (
     CREATE_TABLE_SQL,
     DATABASE,
+    EMBEDDING_TABLE_NAME,
     TABLE_COLUMNS,
-    TABLE_NAME,
     get_client,
     insert_model_row,
     table_exists,
@@ -216,7 +217,9 @@ class CsvResultSink(ResultSink):
 class ClickHouseResultSink(ResultSink):
     """Insert rows into ClickHouse. Table is created on construction if missing."""
 
-    def __init__(self, today: date | None = None) -> None:
+    def __init__(
+        self, embedding_generative: EmbeddingGenerativeMode, today: date | None = None
+    ) -> None:
         super().__init__(today=today)
         self._client = get_client()
         if not table_exists(self._client):
@@ -238,7 +241,7 @@ class ClickHouseResultSink(ResultSink):
             "ORDER BY snapshot_date DESC",
             parameters={
                 "db": DATABASE,
-                "tbl": TABLE_NAME,
+                "tbl": EMBEDDING_TABLE_NAME,
                 "model": key,
                 "cutoff": cutoff,
             },
@@ -258,3 +261,8 @@ class ClickHouseResultSink(ResultSink):
             verified_on_spyre=rec["verified_on_spyre"],
             num_downloads=rec["num_downloads"],
         )
+
+
+class EmbeddingGenerativeMode(str, Enum):
+    EMBEDDING = "embedding"
+    GENERATIVE = "generative"
