@@ -269,7 +269,7 @@ def _process_batch(
 
         {
             "model_name":       ...,
-            "architecture":     ...,
+            "config_class":     ...,
             "adapter_name":     ...,
             "added_date":       ...,   # ISO 8601 str or None
             "snapshot_date":    ...,   # date object
@@ -297,7 +297,7 @@ def _process_batch(
         model_path: str = str(row["model_id"])
         rec: dict = {
             "model_name": model_path,
-            "architecture": row.get("config_class"),
+            "config_class": row.get("config_class"),
             "adapter_name": "",
             "added_date": None,
             "snapshot_date": snapshot_date,
