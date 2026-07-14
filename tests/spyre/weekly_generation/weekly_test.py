@@ -408,6 +408,27 @@ def _delete_repo_weights(repo_id):
     return freed
 
 
+def _cleanup_batch_weights(
+    batch_paths: list[str],
+    had_weights_map: dict[str, bool],
+    total_freed: int,
+) -> int:
+    """Delete downloaded weights for paths that were not pre-cached at startup.
+
+    Returns the updated total_freed byte count.
+    """
+    for path in batch_paths:
+        if not had_weights_map.get(path, False):
+            freed = _delete_repo_weights(path)
+            total_freed += freed
+            if freed:
+                print(
+                    f"    freed {_human_bytes(freed)} "
+                    f"(total {_human_bytes(total_freed)})"
+                )
+    return total_freed
+
+
 def _human_bytes(n):
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024 or unit == "TB":
@@ -483,10 +504,15 @@ def main(argv: list[str] | None = None) -> None:
 
     ctx = multiprocessing.get_context("spawn")
 
+    # Initialised here so the finally block can clean up the in-flight batch
+    # even when KeyboardInterrupt fires mid-batch.
+    batch_paths: list[str] = []
+    had_weights_map: dict[str, bool] = {}
+
     try:
         for batch_idx, batch in enumerate(batches, start=1):
             batch_start = time.monotonic()
-            batch_paths: list[str] = [str(r["model_id"]) for r in batch]
+            batch_paths = [str(r["model_id"]) for r in batch]
             print(
                 f"\n[batch {batch_idx}/{total_batches}] {len(batch)} model(s) "
                 f"(overall elapsed: {batch_start - overall_start:.0f}s)"
@@ -496,9 +522,7 @@ def main(argv: list[str] | None = None) -> None:
 
             # Track which weights existed BEFORE this batch ran, so we can
             # decide per-model whether to delete after.
-            had_weights_map: dict[str, bool] = {
-                path: path in preexisting for path in batch_paths
-            }
+            had_weights_map = {path: path in preexisting for path in batch_paths}
 
             result_queue = ctx.SimpleQueue()
             proc = ctx.Process(
@@ -573,15 +597,9 @@ def main(argv: list[str] | None = None) -> None:
 
             # Cache cleanup: delete weights downloaded during this batch,
             # regardless of whether the worker processed each model.
-            for path in batch_paths:
-                if not had_weights_map.get(path, False):
-                    freed = _delete_repo_weights(path)
-                    total_freed += freed
-                    if freed:
-                        print(
-                            f"    freed {_human_bytes(freed)} "
-                            f"(total {_human_bytes(total_freed)})"
-                        )
+            total_freed = _cleanup_batch_weights(
+                batch_paths, had_weights_map, total_freed
+            )
 
             batch_elapsed = time.monotonic() - batch_start
             print(
@@ -592,6 +610,9 @@ def main(argv: list[str] | None = None) -> None:
     except KeyboardInterrupt:
         print("\nInterrupted — results so far are saved; rerun to resume.")
     finally:
+        # Clean up weights for the in-flight batch if interrupted mid-run.
+        _ = _cleanup_batch_weights(batch_paths, had_weights_map, total_freed)
+
         sink.close()
         if args.write_to_csv:
             print(f"\nCSV: '{args.write_to_csv}' closed ({processed} rows processed).")
