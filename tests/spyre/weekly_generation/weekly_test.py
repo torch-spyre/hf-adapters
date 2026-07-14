@@ -620,5 +620,5 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    print("Starting weekly generation...")
+    print("Starting weekly generation...", flush=True)
     main()
