@@ -47,7 +47,7 @@ from hf_adapters.auto_spyre_model import (
 )
 from tests._vision_helpers import build_vlm_batch, stock_vlm_generate
 from tests.conftest import get_dtype_for_cpu, load_ref_model
-from tests.cpu.conftest import _unwrap_compiled_blocks
+from tests.cpu.conftest import _set_rope_dtype, _unwrap_compiled_blocks
 from tests.model_registry import VISION_PATHS
 
 MAX_NEW_TOKENS: int = 16
@@ -96,6 +96,7 @@ def test_vlm_generate(model_path: str) -> None:
         auto_model_cls=AutoModelForImageTextToText,
     )
     adapter.prepare_for_spyre(model)
+    _set_rope_dtype(model, dtype)
     _unwrap_compiled_blocks(model)
     with torch.no_grad():
         adapter_text = _adapter_generate(
