@@ -37,7 +37,6 @@ for _p in (_SPYRE_TESTS_DIR, _TESTS_DIR, _UTILS_DIR, _REPO_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from hf_adapters import AutoSpyreModelForCausalLM  # noqa: E402
 from tests.conftest import get_dtype_for_cpu  # noqa: E402
 from tests.spyre.test_e2e_embed_compare_spyre import embed_compare_spyre  # noqa: E402
 from tests.spyre.test_e2e_smoke_spyre import run_smoke_test  # noqa: E402
@@ -167,6 +166,7 @@ def _temp_random_bool() -> bool:
 
 def _load_on_cpu(model_path: str, mode: EmbeddingGenerativeMode) -> bool:
     import hf_adapters.hf_common as _hf_common
+    from hf_adapters import AutoSpyreModelForCausalLM
     from hf_adapters.auto_spyre_model import AutoSpyreModel
 
     _orig_device = _hf_common.DEVICE  # save
