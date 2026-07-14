@@ -435,7 +435,7 @@ jobs:
           uv run pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k "${{ matrix.model_key }}"
           echo "tests done"
 
-    spyre-reranker-compare-tests:
+  spyre-reranker-compare-tests:
     name: Spyre reranker compare (${{ matrix.model_key }})
     needs: [generate-matrix]
     runs-on:
