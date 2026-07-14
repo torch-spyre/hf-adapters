@@ -2405,7 +2405,7 @@ def prefill_reranker(
     Returns:
         ``scores``: ``[B]`` float32 tensor on CPU — raw logits.
     """
-    last_hidden_state, _ = prefill_encoder(
+    last_hidden_state = prefill_encoder(
         run_encoder_forward_fn,
         model,
         input_ids,
