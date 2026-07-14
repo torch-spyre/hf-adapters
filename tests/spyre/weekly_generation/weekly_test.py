@@ -363,45 +363,48 @@ def _process_batch(
     os._exit(0)
 
 
+def _repo_cache_dir(repo_id: str) -> Path:
+    """Return the local cache folder for a model repo without scanning the cache.
+
+    HF layout: <HF_HUB_CACHE>/models--<org>--<name>
+    e.g. 'BAAI/bge-m3' -> '<cache>/models--BAAI--bge-m3'
+    """
+    from huggingface_hub import constants
+
+    folder_name = "models--" + repo_id.replace("/", "--")
+    return Path(constants.HF_HUB_CACHE) / folder_name
+
+
 def _delete_repo_weights(repo_id_list: list[str]) -> int:
     """Delete cached weight files (and their blobs) for a list of repos. Keep configs.
 
-    Returns bytes freed. Calls scan_cache_dir once for the entire list.
-    Only touches files under the HF cache whose name ends in a weight suffix;
-    resolves each snapshot symlink to its blob and unlinks both.
-    Never touches datasets repos.
+    Returns bytes freed. Navigates directly to each repo's cache folder using
+    the known HF layout — avoids the expensive scan_cache_dir() call entirely.
+    Only touches files whose name ends in a weight suffix; resolves each
+    snapshot symlink to its blob and unlinks both.
     """
-    from huggingface_hub import scan_cache_dir
-    from huggingface_hub.utils import CacheNotFound
-
-    repo_id_set: set[str] = set(repo_id_list)
-    if not repo_id_set:
+    if not repo_id_list:
         return 0
     freed = 0
-    try:
-        cache = scan_cache_dir()
-    except CacheNotFound:
-        return 0
-    for repo in cache.repos:
-        if repo.repo_id not in repo_id_set or repo.repo_type != "model":
+    for repo_id in repo_id_list:
+        repo_dir = _repo_cache_dir(repo_id)
+        snapshots_dir = repo_dir / "snapshots"
+        if not snapshots_dir.is_dir():
             continue
-        for rev in repo.revisions:
-            for fobj in rev.files:
-                if not fobj.file_name.endswith(_WEIGHT_SUFFIXES):
-                    continue
-                snap = Path(fobj.file_path)
-                # Resolve the blob (snapshot files are symlinks into blobs/).
-                try:
-                    blob = snap.resolve()
-                    if blob.exists():
-                        freed += blob.stat().st_size
-                        blob.unlink()
-                    if snap.is_symlink() or snap.exists():
-                        snap.unlink()
-                except FileNotFoundError:
-                    pass
-                except OSError as e:
-                    print(f"    warn: could not delete {snap}: {e}")
+        for snap in snapshots_dir.rglob("*"):
+            if not snap.name.endswith(_WEIGHT_SUFFIXES):
+                continue
+            try:
+                blob = snap.resolve()
+                if blob.exists():
+                    freed += blob.stat().st_size
+                    blob.unlink()
+                if snap.is_symlink() or snap.exists():
+                    snap.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                print(f"    warn: could not delete {snap}: {e}")
     return freed
 
 
