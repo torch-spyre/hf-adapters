@@ -10,6 +10,7 @@ Run directly to perform the fetch step::
 """
 
 import argparse
+import logging
 import multiprocessing
 import os
 import random
@@ -20,7 +21,11 @@ from asyncio import Queue
 from datetime import date
 from pathlib import Path
 
-from tests.spyre.weekly_generation.result_sink import EmbeddingGenerativeMode
+from tests.spyre.weekly_generation.result_sink import (
+    EmbeddingGenerativeMode,
+)
+
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
 MAX_NUMBER_PARAMS = 60_000_000_000
 
@@ -63,8 +68,8 @@ _WEIGHT_SUFFIXES = (
 # amortize per-child spawn + import + kernel-teardown cost (~15 s currently)
 # across more work. Lower values reduce the blast radius when the Spyre
 # driver/state gets into a bad shape mid-batch.
-GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS: int = 50
-EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS: int = 90
+GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS: int = 25
+EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS: int = 25
 
 
 def _repos_with_weights():
