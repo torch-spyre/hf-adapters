@@ -448,14 +448,16 @@ def xfail_non_blocking(paths: list[str]) -> list[object]:
     but a failure won't fail the pytest run or block CI.
     """
     return [
-        pytest.param(
-            path,
-            marks=pytest.mark.xfail(
-                reason=NON_BLOCKING_CAUSAL_MODELS[path], strict=False
-            ),
-            id=path,
+        (
+            pytest.param(
+                path,
+                marks=pytest.mark.xfail(
+                    reason=NON_BLOCKING_CAUSAL_MODELS[path], strict=False
+                ),
+                id=path,
+            )
+            if path in NON_BLOCKING_CAUSAL_MODELS
+            else path
         )
-        if path in NON_BLOCKING_CAUSAL_MODELS
-        else path
         for path in paths
     ]
