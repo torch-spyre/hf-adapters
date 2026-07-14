@@ -125,13 +125,15 @@ class TestModuleCustom(TestCase):
                 *module_input.constructor_input.args,
                 **module_input.constructor_input.kwargs,
             )
+            module_cpu.to(dtype)
             module_cpu.eval()
 
             # Create module on device (eager)
             module_device_eager = module_info.module_cls(
                 *module_input.constructor_input.args,
                 **module_input.constructor_input.kwargs,
-            ).to(device)
+            )
+            module_device_eager.to(device).to(dtype)
             module_device_eager.eval()
 
             # Copy weights from CPU to device
@@ -141,21 +143,27 @@ class TestModuleCustom(TestCase):
             module_device_compile_base = module_info.module_cls(
                 *module_input.constructor_input.args,
                 **module_input.constructor_input.kwargs,
-            ).to(device)
+            )
+            module_device_compile_base.to(device).to(dtype)
             module_device_compile_base.eval()
             module_device_compile_base.load_state_dict(module_cpu.state_dict())
             module_device_compile = torch.compile(module_device_compile_base)
 
-            # Prepare inputs
-            args_cpu = module_input.forward_input.args
-            kwargs_cpu = module_input.forward_input.kwargs
+            # module_input.forward_input tensors are already placed on `device`
+            # by the OOT framework's module_inputs_func (it builds on CPU, then
+            # relocates to the test device so upstream's single-module
+            # test_forward can use them directly -- see _move_to_test_device in
+            # oot_test_config_models.py). They are NOT CPU tensors despite the
+            # attribute name, so build a genuine CPU copy for the CPU reference
+            # module instead of using them as-is.
+            args_device = module_input.forward_input.args
+            kwargs_device = module_input.forward_input.kwargs
 
-            # Move inputs to device using pytree to handle nested structures
-            args_device = tree_map(
-                lambda x: x.to(device) if isinstance(x, torch.Tensor) else x, args_cpu
+            args_cpu = tree_map(
+                lambda x: x.cpu() if isinstance(x, torch.Tensor) else x, args_device
             )
-            kwargs_device = tree_map(
-                lambda x: x.to(device) if isinstance(x, torch.Tensor) else x, kwargs_cpu
+            kwargs_cpu = tree_map(
+                lambda x: x.cpu() if isinstance(x, torch.Tensor) else x, kwargs_device
             )
 
             # Run forward passes
@@ -188,16 +196,30 @@ class TestModuleCustom(TestCase):
                 zip(cpu_tensors, device_eager_tensors, device_compile_tensors)
             ):
                 # Compare CPU eager vs Spyre eager
+                #
+                # atol/rtol are passed explicitly (sourced from self.precision /
+                # self.rel_tol, populated by the OOT framework's YAML-driven
+                # tolerance overrides). Without explicit values, assertEqual
+                # falls back to torch's per-dtype default_tolerances() and only
+                # ever widens it via max(default, override) -- so a YAML rtol
+                # tighter than the dtype default (e.g. bfloat16's built-in 0.016)
+                # would otherwise be silently ignored.
                 self.assertEqual(
                     cpu_t,
                     eager_t.cpu(),
+                    atol=self.precision,
+                    rtol=self.rel_tol,
                     msg=f"{module_info.name}: CPU eager vs Spyre eager mismatch (tensor {i})",
                 )
 
-                # Compare Spyre eager vs Spyre compile
+                # Compare Spyre eager vs Spyre compile. torch.isclose (used
+                # internally by assertEqual) needs aten::isnan, which has no
+                # Spyre kernel, so the comparison must happen on CPU tensors.
                 self.assertEqual(
-                    eager_t,
-                    compile_t,
+                    eager_t.cpu(),
+                    compile_t.cpu(),
+                    atol=self.precision,
+                    rtol=self.rel_tol,
                     msg=f"{module_info.name}: Spyre eager vs Spyre compile mismatch (tensor {i})",
                 )
 
@@ -314,28 +336,35 @@ class TestModuleCustom(TestCase):
                 *module_input.constructor_input.args,
                 **module_input.constructor_input.kwargs,
             )
+            module_cpu.to(dtype)
             module_cpu.eval()
 
             # Create module on device
             module_device = module_info.module_cls(
                 *module_input.constructor_input.args,
                 **module_input.constructor_input.kwargs,
-            ).to(device)
+            )
+            module_device.to(device).to(dtype)
             module_device.eval()
 
             # Copy weights from CPU to device
             module_device.load_state_dict(module_cpu.state_dict())
 
-            # Prepare inputs
-            args_cpu = module_input.forward_input.args
-            kwargs_cpu = module_input.forward_input.kwargs
+            # module_input.forward_input tensors are already placed on `device`
+            # by the OOT framework's module_inputs_func (it builds on CPU, then
+            # relocates to the test device so upstream's single-module
+            # test_forward can use them directly -- see _move_to_test_device in
+            # oot_test_config_models.py). They are NOT CPU tensors despite the
+            # attribute name, so build a genuine CPU copy for the CPU reference
+            # module instead of using them as-is.
+            args_device = module_input.forward_input.args
+            kwargs_device = module_input.forward_input.kwargs
 
-            # Move inputs to device using pytree to handle nested structures
-            args_device = tree_map(
-                lambda x: x.to(device) if isinstance(x, torch.Tensor) else x, args_cpu
+            args_cpu = tree_map(
+                lambda x: x.cpu() if isinstance(x, torch.Tensor) else x, args_device
             )
-            kwargs_device = tree_map(
-                lambda x: x.to(device) if isinstance(x, torch.Tensor) else x, kwargs_cpu
+            kwargs_cpu = tree_map(
+                lambda x: x.cpu() if isinstance(x, torch.Tensor) else x, kwargs_device
             )
 
             # Run forward passes
@@ -356,9 +385,14 @@ class TestModuleCustom(TestCase):
 
             # Compare all tensors (hidden states, KV cache, attention weights, etc.)
             for i, (cpu_t, device_t) in enumerate(zip(cpu_tensors, device_tensors)):
+                # See comment in test_eager_vs_compile for why atol/rtol are
+                # passed explicitly rather than relying on assertEqual's
+                # implicit default+override tolerance resolution.
                 self.assertEqual(
                     cpu_t,
                     device_t.cpu(),
+                    atol=self.precision,
+                    rtol=self.rel_tol,
                     msg=f"{module_info.name}: layout/stride mismatch on real inputs (tensor {i})",
                 )
 
