@@ -514,14 +514,7 @@ def main(argv: list[str] | None = None) -> None:
             )
             proc.start()
 
-            t_join_start: float = time.monotonic()
             proc.join()
-            t_join = time.monotonic() - t_join_start
-            print(
-                f"      parent: proc.join() returned pid={proc.pid} "
-                f"after {t_join:.2f}s",
-                flush=True,
-            )
 
             # Drain the queue. SimpleQueue.get() blocks if empty, so probe
             # first; the child has already exited so a non-empty queue
