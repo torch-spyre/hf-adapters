@@ -51,6 +51,9 @@ def generate_matrices(exclude_models=None, only_models=None):
     vision_paths = [
         k for k in tests.model_registry.VISION_PATHS if k not in exclude_models
     ]
+    reranker_paths = [
+        k for k in tests.model_registry.RERANKER_PATHS if k not in exclude_models
+    ]
 
     # Apply allowlist filter, if given
     if only_models:
@@ -66,6 +69,7 @@ def generate_matrices(exclude_models=None, only_models=None):
         "embed": embed_paths,
         "vision": vision_paths,
         "combined": combined_paths,
+        "reranker": reranker_paths,
     }
 
 
@@ -84,7 +88,8 @@ def format_for_github_actions(matrices):
         "embed_matrix": json.dumps(matrices["embed"]),
         "vision_matrix": json.dumps(matrices["vision"]),
         "combined_matrix": json.dumps(matrices["combined"]),
-    }
+        "reranker_matrix": json.dumps(matrices["reranker"]),
+        }
 
 
 def write_github_output(outputs):
@@ -146,6 +151,9 @@ def main():
     )
     print(
         f"  Combined ({len(matrices['combined'])}): {', '.join(matrices['combined'])}"
+    )
+    print(
+        f"  Reranker models ({len(matrices['reranker'])}): {', '.join(matrices['reranker'])}"
     )
 
     if args.exclude:

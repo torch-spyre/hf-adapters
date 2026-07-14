@@ -1,167 +1,635 @@
-name: test each pull request
+name: test_pull_request
 
 on:
   push:
     branches: [main]
-    tags: ['*']
+    tags: ["*"]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened]
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
     inputs:
-      ref:
-        description: Branch, tag, or SHA to check out and test
+      torch_spyre_ref:
+        description: Branch, tag, or SHA of torch-spyre to check out and test
         required: false
         type: string
-        default: ''
-      repository:
-        description: Full clone URL of the fork to check out (e.g. "https://github.com/myuser/hf-adapters.git"); leave empty for the base repo
-        required: true
+        default: ""
+      rpm_location:
+        description: The Artifactory location where to download the RPM from
+        required: false
         type: string
-        default: ''
+        default: ""
+      rpm_names:
+        description: A space separated list of RPM names to download and install
+        required: false
+        type: string
+        default: ""
+      ref:
+        description: Branch, tag, or SHA of hf-adapters to check out and test
+        required: false
+        type: string
+        default: ""
+      repository:
+        description: |
+          Full clone URL of the hf-adapters fork to check out (e.g.
+          "https://github.com/myuser/hf-adapters.git"); leave empty for the base repo.
+          Used by the cross-repo Test-With: flow to test a companion fork/branch.
+        required: false
+        type: string
+        default: ""
       pr_url_hash:
         description: |
           Hash of the full URL of the PR that triggered this run.
-          Required when triggered by an external PR.
-        required: true
+          Sent by the internal integration pipeline; unused on push/PR/merge_group.
+        required: false
         type: string
+        default: ""
+      build_torch_spyre:
+        description: Accepted for dispatch-contract parity with torch-spyre; unused here.
+        required: false
+        type: boolean
+        default: true
       runner_label:
         description: |
-          Per-PR ephemeral runner-set IMAGE label to select
-          (image_torch_spyre_pinned_pr_<component>_<sha12>, e.g. image_torch_spyre_pinned_pr_flex_8ddcf3e155e9).
-          Empty = use the standing image_torch_spyre_pinned set
+          Per-PR ephemeral runner-set IMAGE label to select for runs-on
+          (image_hf_adapters_pr_<component>_<sha12>, e.g.
+          image_hf_adapters_pr_flex_8ddcf3e155e9). The per-PR ephemeral flow passes
+          that PR's set label so jobs land on the per-PR image (the changed RPM is
+          baked in -> no runtime sudo). Empty keeps push/PR/merge_group runs on the
+          standing image_torch_spyre_pinned set (today's behaviour).
         required: false
         type: string
-        default: ''
-      test_type:
-        description: >-
-          Test tier to run: smoke | core | full. "smoke" runs only the smoke
-          suite; "core" runs every other suite (load, token_compare,
-          embed_compare, vlm, model_module); "full" runs everything. This is
-          a plain string underneath (see _test_matrix.yaml), so a caller
-          using the API/gh CLI can also pass an individual suite key or a
-          space-separated combo (e.g. "smoke token_compare") for finer
-          control than the dropdown offers.
-        required: false
-        type: choice
-        default: full
-        options:
-          - smoke
-          - core
-          - full
+        default: ""
 
 concurrency:
-  group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.pull_request.html_url) || (github.event_name == 'workflow_dispatch'
-    && inputs.pr_url_hash != '' && inputs.pr_url_hash) || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+    working-directory: /home/senuser
 
 permissions:
   contents: read
   checks: write
-  pull-requests: read # so that gh pr view can fetch the file list
+
+env:
+  # The CI env var is very important.
+  # GitHub actions automatically sets CI=true
+  # which causes the pytest inductor tests to fail with AssertionError
+  # due to a mix of fallbacks and decompositions.
+  # Here we set it to an empty string (or we could also unset it).
+  CI: ""
+  CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
+  STORAGE_1_DIR: /storage-1/hf-adapters
+  HF_HOME: /storage-1/hf-adapters/.cache/huggingface
+  # Single source of truth for the set of models exercised by the CPU
+  # test matrix's `-k` filter. PR is the fast smoke — qwen3 (causal LM) and
+  # bge_base (embedding) on CPU; the same bge_base runs on the Spyre
+  # embed-compare matrix below so CPU and hardware embedding coverage stay
+  # aligned. Daily and weekly cover the broader model set.
+  # Invariant: every model_key used in a Spyre matrix below must have its
+  # substring present here so CPU sanity-checks anything that runs on hardware.
+  # MODELS_FILTER: "qwen3 or bge_base"
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Job 1: changes
+  pre-commit:
+    name: pre-commit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run pre-commit
+        uses: pre-commit/action@v3.0.1
+        with:
+          # Skip the local mypy hook — it requires the project venv with
+          # torch/transformers installed, which we don't set up in this lint job.
+          extra_args: --all-files --hook-stage commit --show-diff-on-failure
+        env:
+          SKIP: mypy
+
+  # ===========================================================================
+  # Dynamic matrix generation
   #
-  # Runs on every PR. Uses gh CLI to fetch the full list of changed files
-  # and checks if any file outside tests/docs/, docs/, README.md, or
-  # CODEOWNERS was modified.
+  # This job generates test matrices dynamically from tests/model_registry.py
+  # using the select_representative_models() function. This ensures that:
+  # 1. The CI automatically tests new adapters added to CONFIG_TO_ADAPTER_MODULE_MAPPING
+  # 2. We maintain a single source of truth for model selection
+  # 3. Manual exclusions can be specified below (e.g., for temporarily broken models)
   #
-  # code_changed=true  --> non-doc files changed  --> run tests
-  # code_changed=false --> only doc/CODEOWNERS files changed --> skip tests
-  # ---------------------------------------------------------------------------
-  changes:
-    name: Detect changed files
+  # To exclude models from all test matrices, add them to the --exclude list below.
+  # ===========================================================================
+  generate-matrix:
+    name: Generate test matrices
     runs-on: ubuntu-latest
     outputs:
-      code_changed: ${{ steps.filter.outputs.code_changed }}
+      causal_matrix: ${{ steps.generate.outputs.causal_matrix }}
+      embed_matrix: ${{ steps.generate.outputs.embed_matrix }}
+      vision_matrix: ${{ steps.generate.outputs.vision_matrix }}
+      combined_matrix: ${{ steps.generate.outputs.combined_matrix }}
+      reranker_matrix: ${{ steps.generate.outputs.reranker_matrix }}
+    defaults:
+      run:
+        working-directory: .
     steps:
-      - name: Check which paths changed
-        id: filter
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
         run: |
-          # On pull_request events, fetch the full list of changed files via
-          # the GitHub API. On push to main/tag or workflow_dispatch, assume
-          # tests should always run since we don't have a PR to query.
-          if [[ -n "${{ github.event.pull_request.number }}" ]]; then
-            FILES=$(gh pr view ${{ github.event.pull_request.number }} \
-              --repo ${{ github.repository }} \
-              --json files --jq '.files[].path')
-          else
-            # push to main, tag, or manual dispatch -- always run tests
-            FILES="non-doc-change"
-          fi
+          python -m pip install --upgrade pip
+          pip install transformers torch pytest
 
-          echo "Changed files:"
-          echo "$FILES"
+      - name: Generate matrices
+        id: generate
+        run: |
+          # Manually exclude models here by adding them to --exclude
+          # Example: python .github/scripts/generate_test_matrix.py --exclude ibm-granite/granite-vision-4.1-4b tiiuae/Falcon3-1B-Base
 
-          # Check if any changed file is outside the doc directories.
-          # tests/docs/, docs/, README.md, and CODEOWNERS are the only paths
-          # that should skip tests.
-          NON_DOC=$(echo "$FILES" | grep -v '^tests/docs/' | grep -v '^docs/' | grep -v '^README\.md$' | grep -v '^CODEOWNERS$' || true)
+          # We exclude these models - See https://github.com/torch-spyre/hf-adapters/issues/89
+          python .github/scripts/generate_test_matrix.py --exclude tiiuae/Falcon3-1B-Base mistralai/Mistral-Small-3.1-24B-Instruct-2503
 
-          if [[ -z "$NON_DOC" ]]; then
-            echo "Only doc files changed — skipping tests."
-            echo "code_changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "Non-doc files changed — running tests."
-            echo "code_changed=true" >> "$GITHUB_OUTPUT"
-          fi
+  adapter-coverage:
+    name: adapter coverage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-  # ---------------------------------------------------------------------------
-  # Job 2: delegate to the shared test matrix
-  #
-  # Only runs when `changes.code_changed == 'true'`. For docs-only PRs the
-  # reusable workflow is never invoked — no hardware runners are consumed.
-  # ---------------------------------------------------------------------------
-  run-tests:
-    needs: changes
-    if: needs.changes.outputs.code_changed == 'true'
-    uses: ./.github/workflows/_test_matrix.yaml
-    with:
-      # Per-PR ephemeral image label when provided, else the standing set.
-      image_label: ${{ inputs.runner_label || 'image_torch_spyre_pinned' }}
-      extra_test_flags: -vvv -s
-      extra_test_flags_multi_spyre: -vvv -s
-      ref: ${{ inputs.ref || '' }}
-      repository: ${{ inputs.repository || '' }}
-      test_type: ${{ inputs.test_type || 'full' }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-  # ---------------------------------------------------------------------------
-  # Job 3: run-spyre-unit-tests (required check gate)
-  #
-  # This job name MUST match the branch protection required check exactly:
-  #   "tests / Run Spyre unit tests"
-  #
-  # It fans in the reusable workflow result. Three outcomes are handled:
-  #
-  #   run-tests result = success -> all suites passed      -> green
-  #   run-tests result = skipped -> docs-only PR, no tests -> green (instant)
-  #   run-tests result = failure -> one or more suites bad -> red   (blocks merge)
-  # ---------------------------------------------------------------------------
+      - name: Run adapter coverage test
+        run: |
+          echo "Checking that all adapter files are registered in model_registry.py..."
+          python -m pip install --quiet pytest
+          python -m pytest -v --noconftest tests/test_adapter_coverage.py
+          echo "Adapter coverage check passed."
+
+#  cpu-tests:
+#    name: CPU tests (${{ matrix.test_file }})
+#    runs-on:
+#      - x86_64
+#      - spyre_pf_x0__pvc_1tb_x1
+#      - linux
+#      - ${{ inputs.runner_label || 'image_torch_spyre_pinned' }}
+#    timeout-minutes: 120
+#    strategy:
+#      matrix:
+#        # Tests marked `@pytest.mark.slow` are dropped from PR runs (see the
+#        # `-m "not slow"` flag below) and instead exercised by the weekly cron.
+#        test_file:
+#          - test_load_cpu.py
+#          - test_adapter_cpu_accuracy.py
+#          - test_embed_cpu_accuracy.py
+#          - test_generate_edge_cases_cpu.py
+#          - test_multibatch_generate_cpu.py
+#          - test_st_backend_cpu.py
+#
+#    steps:
+#      - name: Checkout composite actions
+#        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+#        with:
+#          sparse-checkout: .github/actions
+#          sparse-checkout-cone-mode: false
+#
+#      - uses: ./.github/actions/build-hf-adapters
+#        with:
+#          uv_groups: "dev test"
+#          rpm_names: ${{ inputs.rpm_names }}
+#          rpm_location: ${{ inputs.rpm_location }}
+#          output_dir: ${{ inputs.output_dir }}
+#          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+#          ref: ${{ inputs.ref }}
+#          repository: ${{ inputs.repository }}
+#          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+#          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+#          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+#          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+#
+#      - name: Run ${{ matrix.test_file }}
+#        env:
+#          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+#        run: |
+#          unset _IBM_AIU_SETUP
+#          rm -f /tmp/etc/ibm/spyre/topo.json
+#          source "$HOME/.bashrc"
+#          source /etc/profile.d/ibm-aiu-setup.sh
+#          cd "$CLONED_HF_ADAPTERS_DIR"
+#          echo "Running ${{ matrix.test_file }}..."
+#          uv run pytest -s -vvv -m "not slow" -k "$MODELS_FILTER" "tests/${{ matrix.test_file }}"
+#          echo "tests done"
+
+  spyre-load-tests:
+    name: Spyre load (${{ matrix.model_key }})
+    needs: [generate-matrix]
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - ${{ inputs.runner_label || 'image_torch_spyre_pinned' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Dynamic matrix: all causal-LM and embedding models from tests/model_registry.py
+        # Generated by select_representative_models() - one model per adapter
+        # To exclude models, add them to the --exclude list in the generate-matrix job
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.combined_matrix) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - name: Run test_load_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_load_spyre.py for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv tests/spyre/test_load_spyre.py -k "${{ matrix.model_key }}"
+          echo "tests done"
+
+  spyre-smoke-tests:
+    name: Spyre smoke (${{ matrix.model_key }})
+    needs: [generate-matrix]
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - ${{ inputs.runner_label || 'image_torch_spyre_pinned' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Dynamic matrix: causal-LM models only from tests/model_registry.py
+        # Generated by select_representative_models() - one model per adapter
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.causal_matrix) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - name: Run test_e2e_smoke_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k "${{ matrix.model_key }}"
+          echo "tests done"
+
+  spyre-token-compare-tests:
+    name: Spyre token compare (${{ matrix.model_key }})
+    needs: [generate-matrix]
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - ${{ inputs.runner_label || 'image_torch_spyre_pinned' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Dynamic matrix: causal-LM models only from tests/model_registry.py
+        # Generated by select_representative_models() - one model per adapter
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.causal_matrix) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - name: Run test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k "${{ matrix.model_key }}"
+          echo "tests done"
+
+  spyre-embed-compare-tests:
+    name: Spyre embed compare (${{ matrix.model_key }})
+    needs: [generate-matrix]
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - ${{ inputs.runner_label || 'image_torch_spyre_pinned' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Dynamic matrix: embedding models only from tests/model_registry.py
+        # Generated by select_representative_models() - one model per adapter
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.embed_matrix) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - name: Run test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k "${{ matrix.model_key }}"
+          echo "tests done"
+
+    spyre-reranker-compare-tests:
+    name: Spyre reranker compare (${{ matrix.model_key }})
+    needs: [generate-matrix]
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - ${{ inputs.runner_label || 'image_torch_spyre' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.reranker_matrix) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - name: Run test_e2e_reranker_compare_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_e2e_reranker_compare_spyre.py for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv tests/spyre/test_e2e_reranker_compare_spyre.py -k "${{ matrix.model_key }}"
+          echo "tests done"
+
+  spyre-vlm-e2e-tests:
+    name: Spyre VLM e2e (${{ matrix.model_key }})
+    needs: [generate-matrix]
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - ${{ inputs.runner_label || 'image_torch_spyre_pinned' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Dynamic matrix: VLM (kind="vlm") models from tests/model_registry.py
+        # Generated from VISION_PATHS - one entry per VLM adapter
+        # To exclude models, add them to the --exclude list in the generate-matrix job
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.vision_matrix) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - name: Run test_vlm_e2e_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_vlm_e2e_spyre.py for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv tests/spyre/test_vlm_e2e_spyre.py -k "${{ matrix.model_key }}"
+          echo "tests done"
+
+  spyre-model-module-tests:
+    name: Spyre model-module tests (${{ matrix.config }})
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - ${{ inputs.runner_label || 'image_torch_spyre_pinned' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - granite_4_1_8b_spyre.yaml
+          - granite_3_3_8b_instruct_spyre.yaml
+          - Ministral-3-14B-Instruct-2512.yaml
+          - Mistral-Small-3.2-24B-Instruct-2506.yaml
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test oot"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - name: Run module tests for ${{ matrix.config }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # TORCH_DEVICE_ROOT must point to the hf-adapters repo root so that
+          # ${TORCH_DEVICE_ROOT}/tests/test_modules_custom.py in the YAML configs
+          # resolves to hf-adapters/tests/test_modules_custom.py (not torch-spyre).
+          TORCH_DEVICE_ROOT: ${{ env.CLONED_HF_ADAPTERS_DIR }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          source .venv/bin/activate
+          _run_test=$(python3 -c \
+            "import oot_framework, os; print(os.path.join(os.path.dirname(oot_framework.__file__), 'run_test.sh'))")
+          echo "Using oot-framework runner: $_run_test"
+          bash "$_run_test" \
+            "tests/configs/module_tests/${{ matrix.config }}" \
+            -v
+
+  # ===========================================================================
+  # Required check gate — fans in all matrix jobs so a single branch
+  # protection rule ("tests / run spyre unit tests") passes only when every
+  # suite passes.
+  # ===========================================================================
   run-spyre-unit-tests:
     name: run spyre unit tests
     runs-on: ubuntu-latest
-    needs: [changes, run-tests]
+    defaults:
+      run:
+        working-directory: .
+    needs:
+      - pre-commit
+      - generate-matrix
+      - adapter-coverage
+#      - cpu-tests
+      - spyre-load-tests
+      - spyre-smoke-tests
+      - spyre-token-compare-tests
+      - spyre-embed-compare-tests
+      - spyre-reranker-compare-tests
+      - spyre-vlm-e2e-tests
+      - spyre-model-module-tests #updated to run model centric HF module tests
     if: always()
     steps:
-      - name: Evaluate test results
+      - name: Check all suites passed
+        # NOTE: the `cpu-tests` predicates are
+        # intentionally omitted from the `if` below while those jobs are
+        # commented out. Re-add the corresponding
+        #   contains(needs.<job>.result, 'failure') || contains(needs.<job>.result, 'cancelled') ||
+        # lines when restoring either job.
         run: |-
-          RESULT="${{ needs.run-tests.result }}"
-          echo "run-tests result: ${RESULT}"
-
-          if [[ "${RESULT}" == "success" ]]; then
-            echo "All test suites passed."
-            exit 0
+          if ${{ contains(needs.pre-commit.result, 'failure') || contains(needs.pre-commit.result, 'cancelled') ||
+                 contains(needs.generate-matrix.result, 'failure') || contains(needs.generate-matrix.result, 'cancelled') ||
+                 contains(needs.adapter-coverage.result, 'failure') || contains(needs.adapter-coverage.result, 'cancelled') ||
+                 contains(needs.spyre-load-tests.result, 'failure') || contains(needs.spyre-load-tests.result, 'cancelled') ||
+                 contains(needs.spyre-smoke-tests.result, 'failure') || contains(needs.spyre-smoke-tests.result, 'cancelled') ||
+                 contains(needs.spyre-token-compare-tests.result, 'failure') || contains(needs.spyre-token-compare-tests.result, 'cancelled') ||
+                 contains(needs.spyre-embed-compare-tests.result, 'failure') || contains(needs.spyre-embed-compare-tests.result, 'cancelled') ||
+                 contains(needs.spyre-reranker-compare-tests.result, 'failure') || contains(needs.spyre-reranker-compare-tests.result, 'cancelled') ||
+                 contains(needs.spyre-vlm-e2e-tests.result, 'failure') || contains(needs.spyre-vlm-e2e-tests.result, 'cancelled') ||
+                 contains(needs.spyre-model-module-tests.result, 'failure') || contains(needs.spyre-model-module-tests.result, 'cancelled') }}; then
+            echo "One or more test suites failed."
+            exit 1
           fi
-
-          if [[ "${RESULT}" == "skipped" ]]; then
-            echo "Tests skipped — docs-only change, no test-relevant files modified."
-            exit 0
-          fi
-
-          echo "One or more test suites failed or were cancelled."
-          exit 1
+          echo "All test suites passed."
