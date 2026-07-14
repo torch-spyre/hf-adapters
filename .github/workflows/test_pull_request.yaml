@@ -154,7 +154,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install transformers torch
+          pip install transformers torch pytest
 
       - name: Generate matrices
         id: generate
@@ -163,7 +163,7 @@ jobs:
           # Example: python .github/scripts/generate_test_matrix.py --exclude ibm-granite/granite-vision-4.1-4b tiiuae/Falcon3-1B-Base
 
           # We exclude these models - See https://github.com/torch-spyre/hf-adapters/issues/89
-          python .github/scripts/generate_test_matrix.py --exclude tiiuae/Falcon3-1B-Base
+          python .github/scripts/generate_test_matrix.py --exclude tiiuae/Falcon3-1B-Base mistralai/Mistral-Small-3.1-24B-Instruct-2503
 
   adapter-coverage:
     name: adapter coverage

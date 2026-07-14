@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import types
 
+import pytest
+
 # Model registries - shared by all tests
 CAUSAL_LM_MODELS = {
     # hf_gpt2.py
@@ -333,6 +335,20 @@ VISION_MODELS = {
         "adapter": "hf_granite_vision_mm.py",
         "kind": "vlm",  # multimodal: image + text -> generated text
     },
+    # hf_pixtral_vision.py — Pixtral vision tower of Mistral3 Vision models
+    "mistral3_vision_pixtral": {
+        "name": "Mistral-Small-3.1-24B-Instruct-2503 (Pixtral tower)",
+        "path": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+        "adapter": "hf_pixtral_vision.py",
+        "kind": "tower",  # bare vision tower: pixel_values -> patch hidden states
+    },
+    # hf_mistral3_vision_mm.py — combined two-tower (Pixtral + Mistral text) forward
+    "mistral3_vision_mm": {
+        "name": "Mistral-Small-3.1-24B-Instruct-2503 (both towers)",
+        "path": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+        "adapter": "hf_mistral3_vision_mm.py",
+        "kind": "vlm",  # multimodal: image + text -> generated text
+    },
 }
 
 
@@ -424,3 +440,38 @@ CAUSAL_PATHS, EMBED_PATHS = _select_representative_models()
 VISION_PATHS: list[str] = [
     v["path"] for v in VISION_MODELS.values() if v.get("kind") == "vlm"
 ]
+
+# Causal-LM models that just went green on torchs-spyre but aren't yet proven stable
+# across repeated runs. Kept as a non-blocking signal (xfail, non-strict) for
+# a trial period; remove an entry once it's been stably green so its Spyre
+# tests go back to gating CI normally.
+
+NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = {
+    CAUSAL_LM_MODELS[key]["path"]: (
+        f"{key}: newly green on Spyre, non-blocking signal for a trial "
+        "period before promoting to a blocking test"
+    )
+    for key in ("qwen3", "olmo2_1b", "gemma3_unsloth", "ministral8b")
+}
+
+
+def xfail_non_blocking(paths: list[str]) -> list[object]:
+    """Wrap entries of ``paths`` found in NON_BLOCKING_CAUSAL_MODELS with xfail.
+
+    The test still runs and its outcome (PASS/FAIL) is visible in the report,
+    but a failure won't fail the pytest run or block CI.
+    """
+    return [
+        (
+            pytest.param(
+                path,
+                marks=pytest.mark.xfail(
+                    reason=NON_BLOCKING_CAUSAL_MODELS[path], strict=False
+                ),
+                id=path,
+            )
+            if path in NON_BLOCKING_CAUSAL_MODELS
+            else path
+        )
+        for path in paths
+    ]
