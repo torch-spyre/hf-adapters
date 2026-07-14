@@ -571,9 +571,11 @@ def main(argv: list[str] | None = None) -> None:
                 else:
                     print(f"    sink: row skipped for '{model_path}' (guard rejected)")
 
-                # Cache cleanup: weights absent at start -> delete downloaded.
-                if not had_weights_map.get(model_path, False):
-                    freed = _delete_repo_weights(model_path)
+            # Cache cleanup: delete weights downloaded during this batch,
+            # regardless of whether the worker processed each model.
+            for path in batch_paths:
+                if not had_weights_map.get(path, False):
+                    freed = _delete_repo_weights(path)
                     total_freed += freed
                     if freed:
                         print(
