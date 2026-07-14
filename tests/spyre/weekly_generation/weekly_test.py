@@ -92,9 +92,7 @@ def _repos_with_weights():
 def _get_adapter_dates() -> dict[str, str | None]:
     """Map adapter module name (e.g. 'hf_qwen3') -> ISO date it was first added.
 
-    Derived from the git add-date of each hf_adapters/hf_*.py file. Computed
-    once per run in the parent and passed to workers, rather than re-running
-    ~200 git subprocess calls (one per model).
+    Derived from the git add-date of each hf_adapters/hf_*.py file.
     """
     dates: dict[str, str | None] = {}
     adapter_dir: Path = _REPO_ROOT / "hf_adapters"
