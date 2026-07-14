@@ -25,11 +25,10 @@ it in ``sys.modules`` under the canonical name, then synthesize an
 The defensive ``assert`` below fails loudly if anything imported ``hf_adapters``
 before pytest reached us — which would lock in the un-patched DEVICE and
 silently break CPU tests.
-
-Spyre-targeted runs (``pytest tests/spyre/...``) are detected via ``sys.argv``
-and skip the CPU-patching block entirely; the Spyre lane imports
-``hf_adapters`` normally with the real ``DEVICE="spyre"``, so no separate
-``tests/spyre/conftest.py`` is needed.
+Only the CPU lane (``pytest tests/cpu/...``) opts into the
+``DEVICE="cpu"`` patch, detected via ``sys.argv``. Ambiguous invocations fall
+through to the real ``DEVICE="spyre"``, which fails loudly off-pod rather than
+silently running a Spyre probe on CPU.
 
 ``model_registry`` populates ``CAUSAL_KEYS`` / ``EMBED_KEYS`` itself at import
 time off ``hf_adapters.auto_spyre_model.CONFIG_TO_ADAPTER_MODULE_MAPPING``. In
@@ -71,10 +70,15 @@ _TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 
-# Spyre-targeted runs (`pytest tests/spyre/...`) need the unpatched hf_adapters
-# with DEVICE="spyre". Detect that here and skip the CPU patching block.
-_TARGETS_SPYRE = any(
-    "tests/spyre" in a or a.rstrip("/").endswith("tests/spyre") for a in sys.argv
+# Spyre is the default target: the unpatched hf_adapters ships DEVICE="spyre",
+# so a spyre run needs no setup. Only the CPU lane (`pytest tests/cpu/...`)
+# requires the destructive DEVICE="cpu" patch below, and it must opt in by
+# having `tests/cpu` in an argv entry. Anything ambiguous (a bare
+# `python probe.py` importing tests/, `pytest -k ...` from the tests/ root)
+# falls through to the real DEVICE="spyre" — which fails LOUDLY off-pod rather
+# than silently masquerading a spyre probe on CPU.
+_TARGETS_CPU = any(
+    "tests/cpu" in a or a.rstrip("/").endswith("tests/cpu") for a in sys.argv
 )
 
 # This module body may execute more than once: pytest first imports it as the
@@ -87,7 +91,7 @@ _ALREADY_PATCHED = (
     getattr(sys.modules.get("hf_adapters.hf_common"), "DEVICE", None) == "cpu"
 )
 
-if not _TARGETS_SPYRE and not _ALREADY_PATCHED:
+if _TARGETS_CPU and not _ALREADY_PATCHED:
     assert "hf_adapters.hf_common" not in sys.modules, (
         "hf_adapters.hf_common was imported before tests/conftest.py ran; "
         "the DEVICE='cpu' patch will not apply. Check for plugins or other "
@@ -122,8 +126,9 @@ if not _TARGETS_SPYRE and not _ALREADY_PATCHED:
     import model_registry  # noqa: E402, F401
 
 elif not _ALREADY_PATCHED:
-    # Spyre lane: hf_adapters is imported normally (real DEVICE="spyre").
-    # model_registry populates CAUSAL_PATHS / EMBED_PATHS at import time.
+    # Default (spyre) lane: hf_adapters is imported normally (real
+    # DEVICE="spyre"). model_registry populates CAUSAL_PATHS / EMBED_PATHS at
+    # import time.
     pass  # noqa: E402
 
 # When _ALREADY_PATCHED (benign re-import via ``from tests.conftest import ...``)
