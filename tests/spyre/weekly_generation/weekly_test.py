@@ -444,7 +444,7 @@ def main(argv: list[str] | None = None) -> None:
         )
     else:
         sink = ClickHouseResultSink(today=snapshot_date, embedding_generative=mode)
-
+    print("argsv = {}\n".format(args))
     total = len(to_process_list)
     processed = 0
     overall_start = time.monotonic()
@@ -456,6 +456,7 @@ def main(argv: list[str] | None = None) -> None:
     # batching. That keeps batch sizes uniform relative to real work.
     prefiltered: list[dict] = []
     early_skipped: int = 0
+    print(f"Will process {len(to_process_list)} models in total.")
     for row in to_process_list:
         model_path: str = str(row["model_id"])
         if not sink.should_insert_row(model_path):
