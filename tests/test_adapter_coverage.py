@@ -21,8 +21,12 @@ entry in either CAUSAL_LM_MODELS or EMBEDDING_MODELS dictionaries.
 
 from pathlib import Path
 
-from tests.model_registry import CAUSAL_LM_MODELS, EMBEDDING_MODELS, RERANKER_MODELS, VISION_MODELS
-
+from tests.model_registry import (
+    CAUSAL_LM_MODELS,
+    EMBEDDING_MODELS,
+    RERANKER_MODELS,
+    VISION_MODELS,
+)
 
 def get_adapter_files():
     """

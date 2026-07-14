@@ -221,7 +221,7 @@ def prepare_for_spyre(model):
     model._spyre_compiled_blocks = [
         _make_compiled_encoder_block(layer) for layer in backbone.encoder.layer
     ]
-        # The classification head has out_proj: Linear(hidden, 1).  Output dim=1
+    # The classification head has out_proj: Linear(hidden, 1).  Output dim=1
     # is not stick-aligned (must be a multiple of BLOCK_SIZE=64), so the Spyre
     # compiler cannot lower it.  Keep the entire head on CPU — prefill_reranker
     # already moves hidden states to CPU before calling it.

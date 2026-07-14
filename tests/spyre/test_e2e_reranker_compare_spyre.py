@@ -50,7 +50,10 @@ PAIRS: list[tuple[str, str]] = [
     ("What is the capital of France?", "London is the capital of the United Kingdom."),
     ("How do transformers work?", "Transformers use self-attention mechanisms."),
     ("How do transformers work?", "A recipe for chocolate cake with frosting."),
-    ("What is RAG?", "Retrieval-Augmented Generation combines retrieval with generation."),
+    (
+        "What is RAG?",
+        "Retrieval-Augmented Generation combines retrieval with generation.",
+    ),
 ]
 
 # Absolute score tolerance. Spyre fp16 introduces small numerical differences

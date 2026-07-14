@@ -89,7 +89,7 @@ def format_for_github_actions(matrices):
         "vision_matrix": json.dumps(matrices["vision"]),
         "combined_matrix": json.dumps(matrices["combined"]),
         "reranker_matrix": json.dumps(matrices["reranker"]),
-        }
+    }
 
 
 def write_github_output(outputs):

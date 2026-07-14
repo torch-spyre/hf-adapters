@@ -2371,6 +2371,7 @@ def prefill_encoder(
 
     return h
 
+
 # ---------------------------------------------------------------------------
 # Cross-encoder reranker prefill driver (XLM-RoBERTa / BGE reranker family)
 # ---------------------------------------------------------------------------

@@ -260,6 +260,7 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
 
         return model
 
+
 class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
     """Load an XLM-RoBERTa cross-encoder reranker and prepare it for Spyre.
 

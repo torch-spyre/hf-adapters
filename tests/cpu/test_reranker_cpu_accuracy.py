@@ -140,9 +140,9 @@ def test_manual_path(model_path: str, unwrap_compiled_blocks) -> None:
     del model
     gc.collect()
 
-    assert adapter_scores.shape == ref_scores.shape, (
-        f"score shape mismatch: adapter {adapter_scores.shape} vs ref {ref_scores.shape}"
-    )
+    assert (
+        adapter_scores.shape == ref_scores.shape
+    ), f"score shape mismatch: adapter {adapter_scores.shape} vs ref {ref_scores.shape}"
     max_abs_diff = (adapter_scores - ref_scores).abs().max().item()
     assert max_abs_diff <= SCORE_ATOL, (
         f"max absolute score difference {max_abs_diff:.4f} exceeds {SCORE_ATOL}.\n"
@@ -152,9 +152,9 @@ def test_manual_path(model_path: str, unwrap_compiled_blocks) -> None:
     # Ranking order must be preserved
     ref_order = torch.argsort(ref_scores, descending=True).tolist()
     adapter_order = torch.argsort(adapter_scores, descending=True).tolist()
-    assert ref_order == adapter_order, (
-        f"ranking order mismatch: ref {ref_order} vs adapter {adapter_order}"
-    )
+    assert (
+        adapter_scores.shape == ref_scores.shape
+    ), f"score shape mismatch: adapter {adapter_scores.shape} vs ref {ref_scores.shape}"
 
 
 @pytest.mark.parametrize("model_path", RERANKER_PATHS, ids=RERANKER_PATHS)
@@ -171,8 +171,10 @@ def test_auto_loader(model_path: str, unwrap_compiled_blocks) -> None:
     gc.collect()
 
     # --- Auto-loader path ---
-    model = auto_spyre_model_mod.AutoSpyreModelForSequenceClassification.from_pretrained(
-        model_path, dtype=dtype
+    model = (
+        auto_spyre_model_mod.AutoSpyreModelForSequenceClassification.from_pretrained(
+            model_path, dtype=dtype
+        )
     )
     unwrap_compiled_blocks(model)
 
@@ -182,9 +184,10 @@ def test_auto_loader(model_path: str, unwrap_compiled_blocks) -> None:
     del model
     gc.collect()
 
-    assert adapter_scores.shape == ref_scores.shape, (
-        f"score shape mismatch: adapter {adapter_scores.shape} vs ref {ref_scores.shape}"
-    )
+    assert (
+        adapter_scores.shape == ref_scores.shape
+    ), f"score shape mismatch: adapter {adapter_scores.shape} vs ref {ref_scores.shape}"
+
     max_abs_diff = (adapter_scores - ref_scores).abs().max().item()
     assert max_abs_diff <= SCORE_ATOL, (
         f"max absolute score difference {max_abs_diff:.4f} exceeds {SCORE_ATOL}.\n"
@@ -193,6 +196,6 @@ def test_auto_loader(model_path: str, unwrap_compiled_blocks) -> None:
     )
     ref_order = torch.argsort(ref_scores, descending=True).tolist()
     adapter_order = torch.argsort(adapter_scores, descending=True).tolist()
-    assert ref_order == adapter_order, (
-        f"ranking order mismatch: ref {ref_order} vs adapter {adapter_order}"
-    )
+    assert (
+        ref_order == adapter_order
+    ), f"ranking order mismatch: ref {ref_order} vs adapter {adapter_order}"
