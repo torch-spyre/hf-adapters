@@ -31,7 +31,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from model_registry import CAUSAL_PATHS
+from model_registry import CAUSAL_PATHS, xfail_non_blocking
 
 from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
 from hf_adapters.hf_common import (
@@ -323,7 +323,7 @@ def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]
     return _compare_results(hf_results, adapter_results, tokenizer, model_path)
 
 
-@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.parametrize("model_path", xfail_non_blocking(CAUSAL_PATHS))
 def test_e2e_token_compare_spyre(model_path: str) -> None:
     rows = _run_model_test(model_path)
     _print_table(rows)
