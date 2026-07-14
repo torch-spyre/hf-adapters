@@ -90,6 +90,7 @@ from hf_adapters import (
     hf_ministral,
     hf_mistral,
     hf_mistral3,
+    hf_mistral3_vision_mm,
     hf_modernbert,
     hf_mpnet,
     hf_olmo,
@@ -144,9 +145,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
 # (used by AutoSpyreModelForCausalLM). The auto class selects which.
 IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     type[PretrainedConfig], ModuleType
-] = {
-    Granite4VisionConfig: hf_granite_vision_mm,
-}
+] = {Granite4VisionConfig: hf_granite_vision_mm, Mistral3Config: hf_mistral3_vision_mm}
 
 MODEL_PATH_TO_TORCH_DTYPE: dict[str, torch.dtype] = {
     "mistralai/Ministral-3-14B-Instruct-2512": torch.bfloat16,

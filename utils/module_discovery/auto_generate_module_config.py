@@ -775,6 +775,7 @@ def generate_unified_yaml_config(
                 "supported_dtypes": [
                     {"name": "float16", "precision": {"atol": 0.005, "rtol": 0.005}},
                     {"name": "float32", "precision": {"atol": 0.001, "rtol": 0.001}},
+                    {"name": "bfloat16", "precision": {"atol": 0.005, "rtol": 0.005}},
                 ],
                 "input_config": {"seed": 123},
             },

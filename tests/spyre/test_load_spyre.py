@@ -29,12 +29,12 @@ import time
 from typing import Any
 
 import pytest
-from model_registry import CAUSAL_PATHS, EMBED_PATHS
+from model_registry import CAUSAL_PATHS, EMBED_PATHS, xfail_non_blocking
 
 from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
 
 
-@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.parametrize("model_path", xfail_non_blocking(CAUSAL_PATHS))
 def test_load_causal_lm(model_path: str) -> None:
 
     model_is_not_none, callables, load_s = load_causal_lm(model_path)

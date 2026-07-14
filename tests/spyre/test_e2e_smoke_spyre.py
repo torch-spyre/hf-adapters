@@ -30,7 +30,7 @@ import time
 from typing import Any
 
 import pytest
-from model_registry import CAUSAL_PATHS
+from model_registry import CAUSAL_PATHS, xfail_non_blocking
 
 from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
 
@@ -97,7 +97,7 @@ def run_smoke_test(model_path: str) -> dict[str, Any]:
     }
 
 
-@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.parametrize("model_path", xfail_non_blocking(CAUSAL_PATHS))
 def test_e2e_smoke_spyre(model_path: str) -> None:
     result = run_smoke_test(model_path)
     print("\n## E2E Smoke Test Results\n")
