@@ -153,8 +153,8 @@ def test_manual_path(model_path: str, unwrap_compiled_blocks) -> None:
     ref_order = torch.argsort(ref_scores, descending=True).tolist()
     adapter_order = torch.argsort(adapter_scores, descending=True).tolist()
     assert (
-        adapter_scores.shape == ref_scores.shape
-    ), f"score shape mismatch: adapter {adapter_scores.shape} vs ref {ref_scores.shape}"
+        ref_order == adapter_order
+    ), f"ranking order mismatch: ref {ref_order} vs adapter {adapter_order}"
 
 
 @pytest.mark.parametrize("model_path", RERANKER_PATHS, ids=RERANKER_PATHS)

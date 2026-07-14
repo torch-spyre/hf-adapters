@@ -28,6 +28,7 @@ from tests.model_registry import (
     VISION_MODELS,
 )
 
+
 def get_adapter_files():
     """
     Collect all hf_*.py adapter files from the hf_adapters directory.
