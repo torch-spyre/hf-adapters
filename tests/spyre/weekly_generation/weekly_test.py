@@ -363,24 +363,27 @@ def _process_batch(
     os._exit(0)
 
 
-def _delete_repo_weights(repo_id):
-    """Delete cached weight files (and their blobs) for a repo. Keep configs.
+def _delete_repo_weights(repo_id_list: list[str]) -> int:
+    """Delete cached weight files (and their blobs) for a list of repos. Keep configs.
 
-    Returns bytes freed. Only touches files under the HF cache whose name ends
-    in a weight suffix; resolves each snapshot symlink to its blob and unlinks
-    both. Never touches datasets-- repos.
+    Returns bytes freed. Calls scan_cache_dir once for the entire list.
+    Only touches files under the HF cache whose name ends in a weight suffix;
+    resolves each snapshot symlink to its blob and unlinks both.
+    Never touches datasets repos.
     """
     from huggingface_hub import scan_cache_dir
+    from huggingface_hub.utils import CacheNotFound
 
-    if repo_id is None:
+    repo_id_set: set[str] = set(repo_id_list)
+    if not repo_id_set:
         return 0
     freed = 0
     try:
         cache = scan_cache_dir()
-    except Exception:
+    except CacheNotFound:
         return 0
     for repo in cache.repos:
-        if repo.repo_id != repo_id or repo.repo_type != "model":
+        if repo.repo_id not in repo_id_set or repo.repo_type != "model":
             continue
         for rev in repo.revisions:
             for fobj in rev.files:
@@ -397,7 +400,7 @@ def _delete_repo_weights(repo_id):
                         snap.unlink()
                 except FileNotFoundError:
                     pass
-                except Exception as e:
+                except OSError as e:
                     print(f"    warn: could not delete {snap}: {e}")
     return freed
 
@@ -411,15 +414,13 @@ def _cleanup_batch_weights(
 
     Returns the updated total_freed byte count.
     """
-    for path in batch_paths:
-        if not had_weights_map.get(path, False):
-            freed = _delete_repo_weights(path)
-            total_freed += freed
-            if freed:
-                print(
-                    f"    freed {_human_bytes(freed)} "
-                    f"(total {_human_bytes(total_freed)})"
-                )
+    to_delete: list[str] = [
+        path for path in batch_paths if not had_weights_map.get(path, False)
+    ]
+    freed = _delete_repo_weights(to_delete)
+    total_freed += freed
+    if freed:
+        print(f"    freed {_human_bytes(freed)} (total {_human_bytes(total_freed)})")
     return total_freed
 
 
