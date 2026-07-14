@@ -193,11 +193,14 @@ def eval_generative(model_id: str, adapter, random_run: bool = False) -> dict:
     """Load and compare token outputs for one generative model. Returns a metrics dict."""
     try:
         if adapter is not None:
-            model_on_cpu = _load_on_cpu(
-                model_path=model_id, mode=EmbeddingGenerativeMode.GENERATIVE
-            )
-            load_on_cpu = model_on_cpu is not None
-
+            if random_run:
+                load_on_cpu = _temp_random_bool()
+            else:
+                model_on_cpu = _load_on_cpu(
+                    model_path=model_id, mode=EmbeddingGenerativeMode.GENERATIVE
+                )
+                load_on_cpu = model_on_cpu is not None
+                del model_on_cpu
             if load_on_cpu:
                 if random_run:
                     run_smoke_status = _temp_random_bool()
@@ -230,11 +233,14 @@ def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
     try:
         if adapter is not None:
             # First we check that it is loadable on cpu:
-            model_on_cpu = _load_on_cpu(
-                model_path=model_id, mode=EmbeddingGenerativeMode.EMBEDDING
-            )
-            load_on_cpu = model_on_cpu is not None
-            del model_on_cpu
+            if random_run:
+                load_on_cpu = _temp_random_bool()
+            else:
+                model_on_cpu = _load_on_cpu(
+                    model_path=model_id, mode=EmbeddingGenerativeMode.EMBEDDING
+                )
+                load_on_cpu = model_on_cpu is not None
+                del model_on_cpu
 
             if load_on_cpu:
                 if random_run:
