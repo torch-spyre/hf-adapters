@@ -135,7 +135,9 @@ def prepare_for_spyre(model):
     # MistralRMSNorm.  Checking the live instance avoids hard-coding the
     # text_config.model_type string and mirrors hf_mistral3.prepare_for_spyre.
     first_norm = get_backbone(model).layers[0].input_layernorm
-    rmsnorm_cls = MistralRMSNorm if isinstance(first_norm, MistralRMSNorm) else Ministral3RMSNorm
+    rmsnorm_cls = (
+        MistralRMSNorm if isinstance(first_norm, MistralRMSNorm) else Ministral3RMSNorm
+    )
     patch_rmsnorm(rmsnorm_cls)
 
     pad_lm_head(model)
