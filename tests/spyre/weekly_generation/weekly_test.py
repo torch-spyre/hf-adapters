@@ -150,7 +150,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _temp_random_bool() -> bool:
-    time.sleep(random.uniform(0.5, 1.0))
+    time.sleep(random.uniform(0.25, 0.5))
     return random.choice([True, False])
 
 
