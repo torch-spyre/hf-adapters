@@ -17,6 +17,7 @@ import random
 import subprocess
 import sys
 import time
+import traceback as _traceback
 from asyncio import Queue
 from datetime import date
 from pathlib import Path
@@ -149,6 +150,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _temp_random_bool() -> bool:
+    time.sleep(random.uniform(0.5, 1.0))
     return random.choice([True, False])
 
 
@@ -186,6 +188,7 @@ def eval_generative(model_id: str, adapter, random_run: bool = False) -> dict:
     load_on_cpu = False
     run_smoke_status = False
     mismatches = True
+    result = {"error": ""}
 
     """Load and compare token outputs for one generative model. Returns a metrics dict."""
     try:
@@ -206,12 +209,14 @@ def eval_generative(model_id: str, adapter, random_run: bool = False) -> dict:
                     mismatches, _ = token_compare_spyre(model_id)
 
     except Exception as e:
-        print(f"eval_generative exception - {e}")
+        result["error"] = (
+            f"{type(e).__name__}: {e}\n"
+            f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
+        )
     finally:
-        return {
-            "correct": run_smoke_status and not mismatches,
-            "load": load_on_cpu,
-        }
+        result["correct"] = run_smoke_status and not mismatches
+        result["load"] = load_on_cpu
+        return result
 
 
 def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
@@ -219,6 +224,7 @@ def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
 
     load_on_cpu = False
     mismatches = True
+    result = {"error": ""}
 
     """Load and compare embeddings for one model. Returns a metrics dict."""
     try:
@@ -236,12 +242,14 @@ def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
                 else:
                     mismatches, _ = embed_compare_spyre(model_id)
     except Exception as e:
-        print(f"eval_embedding exception - {e}")
+        result["error"] = (
+            f"{type(e).__name__}: {e}\n"
+            f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
+        )
     finally:
-        return {
-            "correct": not mismatches,
-            "load": load_on_cpu,
-        }
+        result["correct"] = not mismatches
+        result["load"] = load_on_cpu
+        return result
 
 
 def _process_batch(
@@ -285,8 +293,6 @@ def _process_batch(
         flush=True,
     )
 
-    import traceback as _traceback
-
     from tests.conftest import resolve_adapter_module_for_test
 
     results: list[dict] = []
@@ -328,6 +334,7 @@ def _process_batch(
             metrics = eval_fn(model_path, adapter_module, random_run=random_run)
             rec["verified_on_cpu"] = bool(metrics.get("load", False))
             rec["verified_on_spyre"] = bool(metrics.get("correct", False))
+            rec["error"] = metrics.get("error") or None
         except Exception as e:
             rec["error"] = (
                 f"{type(e).__name__}: {e}\n"
@@ -339,7 +346,7 @@ def _process_batch(
             f"{len(results)}/{len(batch)}: {model_path!r}  "
             f"(verified_on_cpu={rec['verified_on_cpu']}, "
             f"verified_on_spyre={rec['verified_on_spyre']}, "
-            f"error={bool(rec['error'])})",
+            f"error={rec['error']})",
             flush=True,
         )
 
