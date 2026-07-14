@@ -117,7 +117,7 @@ def _get_adapter_dates() -> dict[str, str | None]:
             )
             iso: list[str] = out.stdout.strip().splitlines()
             dates[module_name] = iso[-1][:10] if iso else None
-        except Exception:
+        except OSError:
             dates[module_name] = None
     return dates
 
