@@ -349,6 +349,14 @@ VISION_MODELS = {
         "adapter": "hf_mistral3_vision_mm.py",
         "kind": "vlm",  # multimodal: image + text -> generated text
     },
+    # hf_mistral3_vision_mm.py — Ministral-3 14B (ministral3 text backbone variant)
+    "ministral3_vision_mm": {
+        "name": "Ministral-3-14B-Instruct-2512 (both towers)",
+        "path": "mistralai/Ministral-3-14B-Instruct-2512",
+        "adapter": "hf_mistral3_vision_mm.py",
+        "kind": "vlm",  # multimodal: image + text -> generated text
+        "dtype": "bfloat16",  # blocked-FP8 checkpoint, dequantized to bf16
+    },
 }
 
 
