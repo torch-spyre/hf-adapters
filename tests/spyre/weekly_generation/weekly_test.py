@@ -447,12 +447,11 @@ def main(argv: list[str] | None = None) -> None:
         )
     else:
         sink = ClickHouseResultSink(today=snapshot_date, embedding_generative=mode)
+        print("DB mode: results will be appended to the DB.\n")
     print("argsv = {}\n".format(args))
     total = len(to_process_list)
     processed = 0
     overall_start = time.monotonic()
-
-    ctx = multiprocessing.get_context("spawn")
 
     # Early-stop guard runs in the parent (fast: dict lookup for CSV,
     # single SELECT for CH), so we drop already-recent models BEFORE
@@ -481,6 +480,8 @@ def main(argv: list[str] | None = None) -> None:
         prefiltered, number_of_model_per_process
     )
     total_batches: int = len(batches)
+
+    ctx = multiprocessing.get_context("spawn")
 
     try:
         for batch_idx, batch in enumerate(batches, start=1):
@@ -511,14 +512,7 @@ def main(argv: list[str] | None = None) -> None:
                     snapshot_date,
                 ),
             )
-            t_spawn_start = time.monotonic()
             proc.start()
-            t_spawn = time.monotonic() - t_spawn_start
-            print(
-                f"      parent: proc.start() returned pid={proc.pid} "
-                f"after {t_spawn*1000:.1f}ms",
-                flush=True,
-            )
 
             t_join_start: float = time.monotonic()
             proc.join()
