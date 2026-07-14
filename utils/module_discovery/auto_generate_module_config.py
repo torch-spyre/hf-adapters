@@ -756,6 +756,7 @@ def generate_unified_yaml_config(
                     "tests": [
                         {
                             "names": [
+                                "*TestModuleCustom*::test_with_cpu",
                                 "*TestModuleCustom*::test_eager_vs_compile",
                                 "*TestModuleCustom*::test_layout_stride",
                             ],

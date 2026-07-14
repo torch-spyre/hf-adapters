@@ -434,6 +434,7 @@ test_suite_config:
       unlisted_test_mode: skip
       tests:
         - names:
+            - '*TestModuleCustom*::test_with_cpu'
             - '*TestModuleCustom*::test_eager_vs_compile'
             - '*TestModuleCustom*::test_layout_stride'
           mode: xfail

@@ -2,12 +2,17 @@
 Custom module tests for torch-spyre.
 
 This file contains additional test methods for modules defined in YAML configs:
-- test_eager_vs_compile: Compare eager and compile mode outputs (CPU vs Spyre eager vs Spyre compiled)
+- test_eager_vs_compile: Cross-check that Spyre eager and Spyre compiled agree with
+  each other and with CPU (all three run in a single pass)
+- test_with_cpu: Use CPU as the golden reference and compare device output against it;
+  which device mode(s) to run (compile and/or eager) is selectable via env vars
 - test_layout_stride: Validate real YAML-specified SpyreTensorLayouts and strides (CPU vs Spyre)
 
 All tests use pytree for robust handling of nested input/output structures and test only
 real model configurations from YAML without artificial modifications.
 """
+
+import os
 
 import torch
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
@@ -39,6 +44,58 @@ def _extract_all_tensors(output):
 
     tree_map(collect_tensors, output)
     return tensors
+
+
+def _construct_module(
+    module_info, module_input, *, dtype=None, device=None, training=False
+):
+    """Construct a module from a module_input's constructor args/kwargs.
+
+    Optionally casts to ``dtype`` and/or moves to ``device``, then sets train/eval
+    mode. All of ``dtype``/``device``/``training`` are optional so every test method
+    can reuse this regardless of whether it casts dtype or only calls ``.eval()``.
+    """
+    module = module_info.module_cls(
+        *module_input.constructor_input.args,
+        **module_input.constructor_input.kwargs,
+    )
+    if dtype is not None:
+        module = module.to(dtype)
+    if device is not None:
+        module = module.to(device)
+    module.train(training)
+    return module
+
+
+def _move_inputs(module_input, *, dtype=None, device=None):
+    """Move a module_input's forward args/kwargs to ``dtype`` and/or ``device``.
+
+    Both ``dtype`` and ``device`` are optional so callers that only relocate to a
+    device (no dtype cast) can reuse this too. Uses pytree so nested input
+    structures (tuples, lists, dicts) are handled. Returns an ``(args, kwargs)`` tuple.
+    """
+
+    def move(x):
+        if not isinstance(x, torch.Tensor):
+            return x
+        if device is not None and dtype is not None:
+            return x.to(device, dtype)
+        if device is not None:
+            return x.to(device)
+        if dtype is not None:
+            return x.to(dtype)
+        return x
+
+    args = tree_map(move, module_input.forward_input.args)
+    kwargs = tree_map(move, module_input.forward_input.kwargs)
+    return args, kwargs
+
+
+def _run_forward(module, args, kwargs):
+    """Run a no-grad forward pass and return the flattened list of output tensors."""
+    with torch.no_grad():
+        output = module(*args, **kwargs)
+    return _extract_all_tensors(output)
 
 
 class TestModuleCustom(TestCase):
@@ -165,6 +222,102 @@ class TestModuleCustom(TestCase):
                     rtol=self.rel_tol,
                     msg=f"{module_info.name}: Spyre eager vs Spyre compile mismatch (tensor {i})",
                 )
+
+    @modules(module_db)
+    def test_with_cpu(self, device, dtype, module_info, training):
+        """Use CPU output as the golden reference and compare device output against it.
+
+        Unlike test_eager_vs_compile (which cross-checks Spyre eager vs Spyre compiled
+        in a single pass), this test treats the CPU forward as ground truth and validates
+        the device against it. The device mode being validated is selectable, so this test
+        can exercise device-compile-vs-CPU and device-eager-vs-CPU independently.
+
+        For every module input this test:
+        1. Instantiates the module on CPU and runs a forward pass (the golden reference).
+        2. Instantiates the same module on the device with the SAME weights and runs a
+           forward pass in the selected device mode(s).
+        3. Compares every output tensor (CPU vs device).
+
+        Which device mode(s) run is controlled by environment variables (torch.compile
+        defaults to enabled):
+        - TEST_COMPILE_WITH_CPU=1 -> run torch.compile on device
+        - TEST_EAGER_WITH_CPU=1   -> run eager on device
+        """
+        run_compile = os.getenv("TEST_COMPILE_WITH_CPU", "1") == "1"
+        run_eager = os.getenv("TEST_EAGER_WITH_CPU", "0") == "1"
+        module_inputs = module_info.module_inputs_func(
+            module_info,
+            device=device,
+            dtype=dtype,
+            requires_grad=False,
+            training=training,
+        )
+
+        modes = [
+            name
+            for name, run in [("compiled", run_compile), ("eager", run_eager)]
+            if run
+        ]
+        if not modes:
+            raise ValueError("At least one of run_compile or run_eager must be True")
+
+        for mode in modes:
+            for module_input in module_inputs:  # iterate over prefill and decode
+                if module_input.forward_input is None:
+                    continue
+
+                # === Instantiate the module on CPU (eager). ===
+                torch._dynamo.reset_code_caches()
+                torch._inductor.codecache.FxGraphCache.clear()
+                module_cpu = _construct_module(
+                    module_info, module_input, dtype=dtype, training=training
+                )
+                # Capture the CPU module's (randomly-initialized) weights so the
+                # device module below can be given the SAME weights. Without this
+                # the two modules have different random weights and outputs never match.
+                cpu_state_dict = module_cpu.state_dict()
+
+                # === CPU forward pass. ===
+                args_cpu, kwargs_cpu = _move_inputs(module_input, dtype=dtype)
+                cpu_tensors = _run_forward(module_cpu, args_cpu, kwargs_cpu)
+
+                # === Instantiate the module on device with the same weights. ===
+                torch._dynamo.reset_code_caches()
+                torch._inductor.codecache.FxGraphCache.clear()
+                module_device = _construct_module(
+                    module_info,
+                    module_input,
+                    dtype=dtype,
+                    device=device,
+                    training=training,
+                )
+                module_device.load_state_dict(cpu_state_dict)
+                if mode == "compiled":
+                    module_device = torch.compile(module_device)
+
+                # === Device forward pass. ===
+                # Move inputs to device using pytree to handle nested structures.
+                args_device, kwargs_device = _move_inputs(
+                    module_input, dtype=dtype, device=device
+                )
+                # Outputs may be a bare tensor, a tuple/list, or a dict (e.g.
+                # attention/decoder layers return hidden_states + attn weights +
+                # cache). Flatten both sides with pytree and compare every tensor,
+                # moving device tensors back to CPU for the comparison.
+                device_tensors = _run_forward(module_device, args_device, kwargs_device)
+
+                if len(cpu_tensors) != len(device_tensors):
+                    self.fail(
+                        f"{module_info.name}: output tensor count mismatch ({mode}) - "
+                        f"CPU: {len(cpu_tensors)}, device: {len(device_tensors)}"
+                    )
+
+                for i, (cpu_t, device_t) in enumerate(zip(cpu_tensors, device_tensors)):
+                    self.assertEqual(
+                        cpu_t,
+                        device_t.cpu(),
+                        msg=f"{module_info.name}: CPU vs device mismatch ({mode}, tensor {i})",
+                    )
 
     @modules(module_db)
     def test_layout_stride(self, device, dtype, module_info, training):
