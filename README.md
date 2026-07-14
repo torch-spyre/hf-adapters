@@ -1,6 +1,6 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-23-blue)
+![adapters](https://img.shields.io/badge/adapters-25-blue)
 ![verified](https://img.shields.io/badge/verified_checkpoints-38-green)
 ![compatible](https://img.shields.io/badge/compatible_models-100%2B-orange)
 
@@ -14,12 +14,12 @@ from `transformers`.
 
 ## Supported Models
 
-**23 adapters · 38 verified checkpoints · 100+ compatible models**
+**25 adapters · 38 verified checkpoints · 100+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
 and **vision-language** (image→text) models — from Llama / Qwen / Granite / Mistral /
 Phi / Gemma / OLMo / GPT decoders to BERT / XLM-RoBERTa / MPNet / ModernBERT
-encoders and the Granite Vision 4.1 multimodal VLM (SigLIP tower + Granite text).
+encoders and the Granite Vision 4.1 (SigLIP tower + Granite text) and Mistral3 Vision multimodal VLMs.
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. The **canonical, per-adapter model lists** — verified
@@ -87,6 +87,7 @@ from hf_adapters import AutoSpyreModelForImageTextToText
 from transformers import AutoProcessor
 from PIL import Image
 
+# --- Granite Vision 4.1 ---
 model = AutoSpyreModelForImageTextToText.from_pretrained("ibm-granite/granite-vision-4.1-4b")
 processor = AutoProcessor.from_pretrained("ibm-granite/granite-vision-4.1-4b")
 processor.tokenizer.padding_side = "left"  # matches the decode loop's right-aligned prompts
@@ -109,12 +110,14 @@ texts = model.generate(
     max_new_tokens=64,
 )
 print(texts[0])
+
 ```
 
 A multimodal checkpoint's config is registered under both auto classes:
 `AutoSpyreModelForCausalLM` selects the text-only adapter (vision tower
 discarded), while `AutoSpyreModelForImageTextToText` selects the combined
-two-tower adapter.
+two-tower adapter. This works for both Granite Vision (`Granite4VisionConfig`)
+and Mistral3 Vision (`Mistral3Config`).
 
 ## Repo Structure
 
@@ -139,7 +142,9 @@ hf_adapters/
 ├── hf_llama.py                 Llama adapter (Llama 1/2/3, Code Llama, Yi, Falcon 3)
 ├── hf_qwen2.py                 Qwen2 adapter (Qwen2, Qwen2.5, Coder, Math)
 ├── hf_mistral.py               Mistral adapter (Mistral 7B v0.1–v0.3)
-├── hf_mistral3.py              Mistral3 adapter (Mistral 3 24B)
+├── hf_mistral3.py              Mistral3 adapter (Mistral-Small-3.2 24B, Ministral-3 14B — text-only)
+├── hf_mistral3_vision_mm.py    Mistral3 Vision multimodal adapter (Pixtral tower + Mistral text)
+├── hf_pixtral_vision.py        Pixtral vision tower adapter (used by the VLM adapter)
 ├── hf_phi3.py                  Phi-4 / Phi-3 adapter
 ├── hf_olmo.py                  OLMo adapter (OLMo 1B, 7B)
 ├── hf_olmo2.py                 OLMo2 adapter (OLMo 2 1B, 7B)
