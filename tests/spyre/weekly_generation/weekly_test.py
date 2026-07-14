@@ -37,18 +37,6 @@ for _p in (_SPYRE_TESTS_DIR, _TESTS_DIR, _UTILS_DIR, _REPO_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from tests.conftest import get_dtype_for_cpu  # noqa: E402
-from tests.spyre.test_e2e_embed_compare_spyre import embed_compare_spyre  # noqa: E402
-from tests.spyre.test_e2e_smoke_spyre import run_smoke_test  # noqa: E402
-from tests.spyre.test_e2e_token_compare_spyre import token_compare_spyre  # noqa: E402
-from tests.spyre.weekly_generation.result_sink import (  # noqa: E402
-    ClickHouseResultSink,
-    CsvResultSink,
-    ResultSink,
-)
-from utils.fetch_top_embedding_models import fetch_top_embedding_models  # noqa: E402
-from utils.fetch_top_generative_models import fetch_top_generative_models  # noqa: E402
-
 # Weight-file suffixes. A repo with at least one of these cached "has weights";
 # a repo with only config/tokenizer files does not, so its later-downloaded
 # weights are eligible for deletion.
@@ -168,6 +156,7 @@ def _load_on_cpu(model_path: str, mode: EmbeddingGenerativeMode) -> bool:
     import hf_adapters.hf_common as _hf_common
     from hf_adapters import AutoSpyreModelForCausalLM
     from hf_adapters.auto_spyre_model import AutoSpyreModel
+    from tests.conftest import get_dtype_for_cpu
 
     _orig_device = _hf_common.DEVICE  # save
     _hf_common.DEVICE = "cpu"  # patch
@@ -191,6 +180,9 @@ def _load_on_cpu(model_path: str, mode: EmbeddingGenerativeMode) -> bool:
 
 
 def eval_generative(model_id: str, adapter, random_run: bool = False) -> dict:
+    from tests.spyre.test_e2e_smoke_spyre import run_smoke_test
+    from tests.spyre.test_e2e_token_compare_spyre import token_compare_spyre
+
     load_on_cpu = False
     run_smoke_status = False
     mismatches = True
@@ -223,6 +215,8 @@ def eval_generative(model_id: str, adapter, random_run: bool = False) -> dict:
 
 
 def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
+    from tests.spyre.test_e2e_embed_compare_spyre import embed_compare_spyre
+
     load_on_cpu = False
     mismatches = True
 
@@ -444,6 +438,14 @@ def _chunk_into_batches(rows: list[dict], batch_size: int) -> list[list[dict]]:
 
 
 def main(argv: list[str] | None = None) -> None:
+    from tests.spyre.weekly_generation.result_sink import (
+        ClickHouseResultSink,
+        CsvResultSink,
+        ResultSink,
+    )
+    from utils.fetch_top_embedding_models import fetch_top_embedding_models
+    from utils.fetch_top_generative_models import fetch_top_generative_models
+
     args = _parse_args(argv)
     preexisting: set = _repos_with_weights()
     total_freed: int = 0
