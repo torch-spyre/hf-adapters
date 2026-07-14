@@ -8,6 +8,7 @@ columns* it wants on top of the shared schema.
 """
 
 import csv
+import logging
 import re
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +20,9 @@ from transformers import AutoConfig
 
 # Import the mapping to get supported config classes dynamically
 from hf_adapters.auto_spyre_model import CONFIG_TO_ADAPTER_MODULE_MAPPING
+
+logging.getLogger("transformers").setLevel(logging.ERROR)
+
 
 # Get the resources directory (parent of resources/__init__.py)
 RESOURCES_DIR: Path = Path(__file__).resolve().parent.parent / "resources"
@@ -247,7 +251,15 @@ def build_catalog(
     candidates: list[ModelInfo] = list(fetch_fn(limit))
     print(f"Retrieved {len(candidates)} raw {label} candidates.")
 
-    models: list[ModelInfo] = [m for m in candidates if filter_fn(m)]
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        keep_flags: list[bool] = list(
+            tqdm(
+                ex.map(filter_fn, candidates),
+                total=len(candidates),
+                desc="Filtering candidates",
+            )
+        )
+    models: list[ModelInfo] = [m for m, keep in zip(candidates, keep_flags) if keep]
     print(f"Kept {len(models)} {label} models after filtering.")
 
     models = models[:limit]
