@@ -98,6 +98,111 @@ def _run_forward(module, args, kwargs):
     return _extract_all_tensors(output)
 
 
+def _granite_decoder_layer_adapter_forward(module_cpu, module_device, module_input, dtype, device):
+    """Run GraniteDecoderLayer through the real hf_granite compiled block.
+
+    A bare ``torch.compile(module_device)`` on the stock HF module bypasses
+    everything the adapter actually does on Spyre (matmul-form RoPE, the
+    pre-allocated KV cache, the fused attn+MLP block) -- that combination is
+    what makes attention work on this backend, and it's why raw-module
+    compilation fails with runtime errors like "D2H data conversion failed"
+    instead of producing comparable output. This builds the same inputs
+    ``hf_granite._make_compiled_block`` expects (a rotation-matrix
+    ``selected_freqs`` instead of HF's native cos/sin, a prefill causal mask,
+    empty KV caches) and calls the adapter's block directly.
+
+    The YAML's ``position_embeddings`` forward-input is a placeholder (random
+    values, not valid cos/sin), so it's ignored here in favor of a real
+    ``GraniteRotaryEmbedding`` run on both sides from the YAML's
+    ``position_ids`` -- CPU gets the native (cos, sin) tuple, device gets the
+    matching rotation-matrix form, so the two paths are actually comparable.
+    """
+    from transformers.models.granite.modeling_granite import GraniteRotaryEmbedding
+
+    from hf_adapters.hf_common import PrecomputedRotaryEmbedding, build_prefill_mask
+    from hf_adapters.hf_granite import _make_compiled_block
+
+    config = module_input.constructor_input.args[0]
+    hidden_states_cpu = module_input.forward_input.args[0].to("cpu", dtype)
+    position_ids_cpu = module_input.forward_input.kwargs["position_ids"].to("cpu")
+    hidden_states_device = hidden_states_cpu.to(device, dtype)
+    position_ids_device = position_ids_cpu.to(device)
+
+    rotary = GraniteRotaryEmbedding(config)
+    cos_cpu, sin_cpu = rotary(hidden_states_cpu, position_ids_cpu)
+    precomputed_rope = PrecomputedRotaryEmbedding(rotary)
+    # PrecomputedRotaryEmbedding defaults its frequency cache to fp16; without
+    # this the matmul-form RoPE below silently promotes bf16 q/k to fp32
+    # (mixed bf16 x fp16 multiply), which SDPA then rejects as a dtype
+    # mismatch against the bf16 KV cache. prepare_for_spyre's real flow does
+    # this via set_rope_dtype(model, dtype).
+    precomputed_rope.set_dtype(dtype)
+    selected_freqs = precomputed_rope(hidden_states_device, position_ids_device)
+
+    bsz, seq_len, _ = hidden_states_device.shape
+    attn_mask = build_prefill_mask(
+        bsz, seq_len, seq_len, prompt_offsets=0, dtype=dtype
+    ).to(device)
+
+    num_kv_heads = config.num_key_value_heads
+    head_dim = getattr(config, "head_dim", None) or (
+        config.hidden_size // config.num_attention_heads
+    )
+    key_cache = torch.zeros(
+        bsz, num_kv_heads, seq_len, head_dim, dtype=dtype, device=device
+    )
+    value_cache = torch.zeros(
+        bsz, num_kv_heads, seq_len, head_dim, dtype=dtype, device=device
+    )
+
+    with torch.no_grad():
+        cpu_out = module_cpu(
+            hidden_states_cpu,
+            position_ids=position_ids_cpu,
+            position_embeddings=(cos_cpu, sin_cpu),
+        )
+        compiled_block = _make_compiled_block(module_device)
+        device_h, _, _ = compiled_block(
+            hidden_states_device,
+            selected_freqs,
+            attn_mask,
+            key_cache,
+            value_cache,
+            False,  # is_filling: single-shot prefill, not an incremental decode step
+            0,  # token_index: unused when is_filling is False
+            0,  # cache_position: write the KV cache starting at position 0
+        )
+
+    return _extract_all_tensors(cpu_out), [device_h]
+
+
+# Decoder-layer-granularity modules that have a real hf_adapters compiled
+# block. test_with_cpu's "compiled" mode routes these through the adapter's
+# actual fused block instead of compiling the stock HF module directly, since
+# the stock module's eager/SDPA forward is not what runs on Spyre in
+# production. Modules not listed here (MLP, RMSNorm, standalone Attention,
+# RotaryEmbedding, ...) keep going through the generic torch.compile path.
+#
+# Status for GraniteDecoderLayer, verified on Spyre hardware: this closes the
+# crash this test used to hit ("D2H data conversion failed" from compiling
+# the raw stock module -- see the module docstring above). It still XFAILs
+# under the module-test YAML's `mode: xfail`, but now for a real numeric
+# reason: ~2-3% of output elements differ from the CPU reference by up to
+# ~5x the configured atol=0.005/rtol=0.005. A standalone repro showed the
+# divergence spread evenly across every sequence position at a consistent
+# magnitude, not concentrated at any boundary -- i.e. not an off-by-one
+# masking/RoPE bug, but accumulated bf16 rounding drift between two
+# independently-implemented compute paths (CPU eager rotate_half RoPE + CPU
+# SDPA vs. Spyre's matmul-form RoPE + Spyre SDPA), compounded across a full
+# fused attention+MLP layer. Left as (non-strict) xfail rather than loosening
+# the tolerance, since picking a layer-granularity tolerance is a testing-
+# policy call, not a bug fix -- worth reconsidering if this becomes a
+# priority to get real pass/fail signal from module-level attention tests.
+_ADAPTER_DECODER_LAYER_FORWARD = {
+    "GraniteDecoderLayer": _granite_decoder_layer_adapter_forward,
+}
+
+
 class TestModuleCustom(TestCase):
     """Custom test cases for module validation with different execution modes and layouts."""
 
@@ -277,12 +382,6 @@ class TestModuleCustom(TestCase):
                 # the two modules have different random weights and outputs never match.
                 cpu_state_dict = module_cpu.state_dict()
 
-                # === CPU forward pass. ===
-                args_cpu, kwargs_cpu = _move_inputs(
-                    module_input, dtype=dtype, device="cpu"
-                )
-                cpu_tensors = _run_forward(module_cpu, args_cpu, kwargs_cpu)
-
                 # === Instantiate the module on device with the same weights. ===
                 torch._dynamo.reset_code_caches()
                 torch._inductor.codecache.FxGraphCache.clear()
@@ -294,19 +393,39 @@ class TestModuleCustom(TestCase):
                     training=training,
                 )
                 module_device.load_state_dict(cpu_state_dict)
-                if mode == "compiled":
-                    module_device = torch.compile(module_device)
 
-                # === Device forward pass. ===
-                # Move inputs to device using pytree to handle nested structures.
-                args_device, kwargs_device = _move_inputs(
-                    module_input, dtype=dtype, device=device
+                adapter_forward = _ADAPTER_DECODER_LAYER_FORWARD.get(
+                    type(module_cpu).__name__
                 )
-                # Outputs may be a bare tensor, a tuple/list, or a dict (e.g.
-                # attention/decoder layers return hidden_states + attn weights +
-                # cache). Flatten both sides with pytree and compare every tensor,
-                # moving device tensors back to CPU for the comparison.
-                device_tensors = _run_forward(module_device, args_device, kwargs_device)
+                if mode == "compiled" and adapter_forward is not None:
+                    # Route through the real hf_adapters compiled block
+                    # instead of a bare torch.compile of the stock HF module
+                    # -- see _ADAPTER_DECODER_LAYER_FORWARD above.
+                    cpu_tensors, device_tensors = adapter_forward(
+                        module_cpu, module_device, module_input, dtype, device
+                    )
+                else:
+                    # === CPU forward pass. ===
+                    args_cpu, kwargs_cpu = _move_inputs(
+                        module_input, dtype=dtype, device="cpu"
+                    )
+                    cpu_tensors = _run_forward(module_cpu, args_cpu, kwargs_cpu)
+
+                    if mode == "compiled":
+                        module_device = torch.compile(module_device)
+
+                    # === Device forward pass. ===
+                    # Move inputs to device using pytree to handle nested structures.
+                    args_device, kwargs_device = _move_inputs(
+                        module_input, dtype=dtype, device=device
+                    )
+                    # Outputs may be a bare tensor, a tuple/list, or a dict (e.g.
+                    # attention/decoder layers return hidden_states + attn weights +
+                    # cache). Flatten both sides with pytree and compare every tensor,
+                    # moving device tensors back to CPU for the comparison.
+                    device_tensors = _run_forward(
+                        module_device, args_device, kwargs_device
+                    )
 
                 if len(cpu_tensors) != len(device_tensors):
                     self.fail(
