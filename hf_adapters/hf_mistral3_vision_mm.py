@@ -34,6 +34,19 @@ image→text pipeline. It is the adapter behind
                        ▼
                      logits
 
+Covers two text-backbone variants of ``Mistral3ForConditionalGeneration``,
+both sharing the Pixtral vision tower but distinguished by their
+``text_config.model_type``:
+
+- ``"mistral"``     — e.g. ``mistralai/Mistral-Small-3.1-24B-Instruct-2503``
+  and ``mistralai/Mistral-Small-3.2-24B-Instruct-2506`` (uses ``MistralRMSNorm``)
+- ``"ministral3"``  — e.g. ``mistralai/Ministral-3-14B-Instruct-2512``
+  (blocked-FP8 checkpoint, dequantized on load; uses ``Ministral3RMSNorm``)
+
+``prepare_for_spyre`` auto-detects the RMSNorm class by inspecting the first
+decoder layer — the same strategy used by ``hf_mistral3.prepare_for_spyre``
+for the text-only path.
+
 Mistral3 uses a **flat single-injection** pattern (contrast with Granite
 Vision's deepstack multi-layer injection):
 
@@ -51,7 +64,8 @@ Vision's deepstack multi-layer injection):
 Decode steps are pure text (no image re-encoding).
 
 Verified on CPU to match stock ``Mistral3ForConditionalGeneration.generate``
-(token-exact, greedy) and ``forward`` (first-token logits cosine ≥ 0.999).
+(token-exact, greedy) and ``forward`` (first-token logits cosine ≥ 0.999)
+for both ``mistral`` and ``ministral3`` text-backbone variants.
 """
 
 import math
@@ -90,7 +104,12 @@ def prepare_for_spyre(model):
     Text decoder → standard-GQA RoPE/head prep + compiled Mistral blocks +
     padded LM head, mirroring ``hf_mistral3.prepare_for_spyre`` but applied
     against the VLM's nested text backbone.
+
+    The RMSNorm class is auto-detected from the first decoder layer to cover
+    both the ``mistral`` variant (``MistralRMSNorm``) and the ``ministral3``
+    variant (``Ministral3RMSNorm``, e.g. Ministral-3-14B-Instruct-2512).
     """
+    from transformers.models.ministral3.modeling_ministral3 import Ministral3RMSNorm
     from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
     # --- Vision tower ---
@@ -110,7 +129,17 @@ def prepare_for_spyre(model):
     # does: call the constituent parts individually and store text blocks in
     # model._spyre_text_blocks.
     prepare_rope_and_heads(model)
-    patch_rmsnorm(MistralRMSNorm)
+
+    # Detect the correct RMSNorm class from the first decoder layer's norm.
+    # Ministral3 text backbone uses Ministral3RMSNorm; Mistral-Small uses
+    # MistralRMSNorm.  Checking the live instance avoids hard-coding the
+    # text_config.model_type string and mirrors hf_mistral3.prepare_for_spyre.
+    first_norm = get_backbone(model).layers[0].input_layernorm
+    rmsnorm_cls = (
+        MistralRMSNorm if isinstance(first_norm, MistralRMSNorm) else Ministral3RMSNorm
+    )
+    patch_rmsnorm(rmsnorm_cls)
+
     pad_lm_head(model)
 
     backbone = get_backbone(model)

@@ -52,7 +52,8 @@ CPU (see Multimodal VLM Path below).
 | Model | model\_type | Towers | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
 |-------|-----------|--------|-----------|--------------|-------------|---------------|-----------|
 | Granite Vision 4.1 4B | granite4\_vision | SigLIP vision + Granite text | Yes (padded) | Yes | Yes | Yes |
-| Mistral-Small-3.1-24B-Instruct-2503 | mistral3 | Pixtral + Mistral text | Yes (single pre-decoder) | Yes (padded) | Yes | Yes | Yes |
+| Mistral-Small-3.1-24B-Instruct-2503 | mistral3 | Pixtral + Mistral text | Yes (padded) | Yes | Yes | Yes |
+| Ministral-3-14B-Instruct-2512 (bf16) | mistral3 | Pixtral + Ministral3 text | Yes (padded) | Yes | Yes | Yes |
 
 **CPU Accurate** = adapter `generate` matches stock `model.generate` token-for-token on CPU (`test_vlm_e2e_cpu.py`).
 **Spyre Runs** = `test_vlm_e2e_spyre.py` drives the adapter teacher-forced on stock's tokens and asserts per-step logit cosine ≥ 0.999 vs the CPU reference over prefill + decode steps (top-1 agreement is reported, not asserted — an open-ended caption hits near-ties where the fp16-substrate winner is numerically arbitrary; see Multimodal VLM Path). granite-vision-4.1 holds cosine ≥ 0.99991 at every step and produces a correct, coherent caption.
@@ -107,13 +108,15 @@ single-token decode path (seq_len=1), not an adapter issue.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 25 adapters · 38 verified checkpoints · 100+ compatible models.
-The 38 verified rows are 24 generative + 13 embedding + 1 vision-language (see the
+**Coverage:** 25 adapters · 39 verified checkpoints · 100+ compatible models.
+The 39 verified rows are 24 generative + 13 embedding + 2 vision-language (see the
 Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are
 vision-tower components used by VLM adapters rather than standalone model adapters.
-Granite Vision 4.1 is verified both as a text backbone (generative) and as a full VLM;
-Mistral3 Vision is registered and the two-tower adapter is implemented — CPU and Spyre
-verification is pending.
+Granite Vision 4.1 is verified both as a text backbone (generative) and as a full VLM.
+`hf_mistral3_vision_mm` covers both the ``mistral`` text-backbone variant
+(Mistral-Small-3.1/3.2) and the ``ministral3`` variant (Ministral-3-14B-Instruct-2512,
+blocked-FP8, bf16) — both share the Pixtral vision tower; CPU and Spyre verified
+(token-exact on CPU, 5/5 top-1 match on Spyre).
 
 Each adapter handles a HuggingFace `model_type`. Once verified with
 one checkpoint, all size variants and fine-tunes of that architecture
@@ -142,7 +145,7 @@ pattern, norms, and weight layout.
 | hf\_granite\_vision.py | granite (text) | 1 | — |
 | hf\_granite\_vision\_mm.py | granite4\_vision (multimodal) | 1 | — |
 | hf\_siglip\_vision.py | SigLIP vision tower | 1 | SigLIP towers of other VLMs (extracted as a bare `SiglipVisionModel`) |
-| hf\_mistral3\_vision\_mm.py | mistral3 (multimodal) | 1 | Mistral-Small-3.1 Vision  |
+| hf\_mistral3\_vision\_mm.py | mistral3 (multimodal) | 2 | Mistral-Small-3.1/3.2 Vision; Ministral-3-14B-Instruct-2512 (ministral3 text backbone, bf16) |
 | hf\_pixtral\_vision.py | Pixtral vision tower | 1 | Pixtral towers of Mistral3 Vision checkpoints |
 | hf\_bert.py | bert | 2 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants |
 | hf\_xlm\_roberta.py | xlm-roberta | 1 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes |
