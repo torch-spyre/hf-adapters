@@ -1,12 +1,20 @@
-"""Weekly Spyre test suite.
+"""Weekly Spyre evaluation suite.
 
-The first step is *not* a pytest: it refreshes the top-k embedding model
-catalog by invoking ``utils/fetch_top_embedding_models.py``. Subsequent
-pytests in this file consume the resulting CSV.
+Evaluates the top-k generative or embedding models against Spyre hardware.
+Run directly with a required ``--mode`` argument::
 
-Run directly to perform the fetch step::
+    python tests/spyre/weekly_generation/weekly_test.py --mode generative [--top-k 200]
+    python tests/spyre/weekly_generation/weekly_test.py --mode embedding  [--top-k 200]
 
-    python tests/spyre/weekly_generation/weekly_test.py --top-k 200
+``--mode generative`` fetches top causal-LM models and runs the CPU-load +
+token-compare pipeline.  ``--mode embedding`` fetches top embedding models
+and runs the CPU-load + cosine-compare pipeline.
+
+Additional flags:
+
+* ``--top-k N``        Number of top models to fetch by download count (default: 200).
+* ``--write-to-csv F`` Write results to a CSV file instead of ClickHouse.
+* ``--random-run``     Stub out Spyre calls with random booleans (dry-run).
 """
 
 import argparse
@@ -203,11 +211,9 @@ def eval_generative(model_id: str, adapter, random_run: bool = False) -> dict:
             if random_run:
                 load_on_cpu = _temp_random_bool()
             else:
-                model_on_cpu = _load_on_cpu(
+                load_on_cpu = _load_on_cpu(
                     model_path=model_id, mode=EmbeddingGenerativeMode.GENERATIVE
                 )
-                load_on_cpu = model_on_cpu is not None
-                del model_on_cpu
             if load_on_cpu:
                 if random_run:
                     run_smoke_status = _temp_random_bool()
@@ -246,11 +252,9 @@ def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
             if random_run:
                 load_on_cpu = _temp_random_bool()
             else:
-                model_on_cpu = _load_on_cpu(
+                load_on_cpu = _load_on_cpu(
                     model_path=model_id, mode=EmbeddingGenerativeMode.EMBEDDING
                 )
-                load_on_cpu = model_on_cpu is not None
-                del model_on_cpu
 
             if load_on_cpu:
                 if random_run:
@@ -582,7 +586,7 @@ def main(argv: list[str] | None = None) -> None:
                     args.random_run,
                     adapter_dates,
                     result_queue,
-                    args.mode,
+                    mode,
                     snapshot_date,
                 ),
             )
