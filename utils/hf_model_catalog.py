@@ -248,13 +248,20 @@ def build_catalog(
     """
     extra_columns = extra_columns or []
 
+    def _safe_filter(model: ModelInfo) -> bool:
+        try:
+            return filter_fn(model)
+        except Exception as e:
+            logging.warning("filter_fn failed for %s: %s", model.id, e)
+            return False
+
     candidates: list[ModelInfo] = list(fetch_fn(limit))
     print(f"Retrieved {len(candidates)} raw {label} candidates.")
 
     with ThreadPoolExecutor(max_workers=16) as ex:
         keep_flags: list[bool] = list(
             tqdm(
-                ex.map(filter_fn, candidates),
+                ex.map(_safe_filter, candidates),
                 total=len(candidates),
                 desc="Filtering candidates",
             )
