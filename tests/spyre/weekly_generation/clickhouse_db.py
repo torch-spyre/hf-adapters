@@ -168,3 +168,116 @@ def insert_model_row(
         column_names=list(TABLE_COLUMNS),
     )
     return True
+
+
+def _parse_bool(value: str) -> bool:
+    return value.strip().lower() in ("1", "true", "yes")
+
+
+def _parse_nullable_date(value: str) -> date | None:
+    v = value.strip()
+    return date.fromisoformat(v) if v else None
+
+
+def _parse_nullable_str(value: str) -> str | None:
+    v = value.strip()
+    return v if v else None
+
+
+def import_csv(sink, csv_path: str) -> tuple[int, int]:
+    """Read *csv_path* and insert rows into *sink*, respecting its dedup guard.
+
+    Uses ``sink.add_entry()`` so ``should_insert_row`` is applied for every row.
+    Returns a ``(inserted, skipped)`` tuple.
+    """
+    import csv
+
+    inserted = skipped = 0
+    with open(csv_path, newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            written = sink.add_entry(
+                model_name=row["model_name"].strip(),
+                config_class=row["config_class"].strip(),
+                adapter_name=row["adapter_name"].strip(),
+                added_date=_parse_nullable_date(row["added_date"]),
+                snapshot_date=date.fromisoformat(row["snapshot_date"].strip()),
+                verified_on_cpu=_parse_bool(row["verified_on_cpu"]),
+                verified_on_gpu=_parse_bool(row["verified_on_gpu"]),
+                verified_on_spyre=_parse_bool(row["verified_on_spyre"]),
+                num_downloads=int(row["num_downloads"].strip()),
+                family=row["family"].strip(),
+                architecture=row["architecture"].strip(),
+                parameters_number=int(row["parameters_number"].strip()),
+                failure_category=_parse_nullable_str(row["failure_category"]),
+            )
+            if written:
+                inserted += 1
+            else:
+                skipped += 1
+    return inserted, skipped
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="ClickHouse table management utility.")
+    parser.add_argument(
+        "--drop",
+        metavar="TABLE_NAME",
+        help="Drop the specified table after confirmation.",
+    )
+
+    add_csv_group = parser.add_argument_group("import CSV")
+    add_csv_group.add_argument(
+        "--add_csv", metavar="CSV_FILE", help="CSV file to import into the table."
+    )
+    add_csv_group.add_argument(
+        "--table_name", metavar="TABLE_NAME", help="Target table for --add_csv."
+    )
+
+    args = parser.parse_args()
+
+    if args.add_csv or args.table_name:
+        if not args.add_csv or not args.table_name:
+            parser.error("--add_csv and --table_name must be used together.")
+        csv_file = args.add_csv
+        table = args.table_name
+        # Lazy import to avoid a circular dependency (result_sink imports from this module).
+        from tests.spyre.weekly_generation.result_sink import (
+            ClickHouseResultSink,
+            EmbeddingGenerativeMode,
+        )
+
+        if table == EMBEDDING_TABLE_NAME:
+            mode = EmbeddingGenerativeMode.EMBEDDING
+        elif table == GENERATIVE_TABLE_NAME:
+            mode = EmbeddingGenerativeMode.GENERATIVE
+        else:
+            parser.error(
+                f"Unknown table '{table}'. Expected one of: "
+                f"{EMBEDDING_TABLE_NAME}, {GENERATIVE_TABLE_NAME}."
+            )
+        with ClickHouseResultSink(mode) as sink:
+            inserted, skipped = import_csv(sink, csv_file)
+        print(
+            f"Inserted {inserted} row(s) into '{DATABASE}.{table}' ({skipped} skipped by dedup guard)."
+        )
+    elif args.drop:
+        table = args.drop
+        answer = (
+            input(f"Are you sure you want to drop table '{DATABASE}.{table}'? [y/N] ")
+            .strip()
+            .lower()
+        )
+        if answer == "y":
+            client = get_client()
+            if not table_exists(client, table):
+                print(f"Table '{DATABASE}.{table}' does not exist.")
+            else:
+                client.command(f"DROP TABLE {DATABASE}.{table}")
+                print(f"Table '{DATABASE}.{table}' dropped.")
+        else:
+            print("Aborted.")
+    else:
+        parser.print_help()
