@@ -98,7 +98,9 @@ def _run_forward(module, args, kwargs):
     return _extract_all_tensors(output)
 
 
-def _granite_decoder_layer_adapter_forward(module_cpu, module_device, module_input, dtype, device):
+def _granite_decoder_layer_adapter_forward(
+    module_cpu, module_device, module_input, dtype, device
+):
     """Run GraniteDecoderLayer through the real hf_granite compiled block.
 
     A bare ``torch.compile(module_device)`` on the stock HF module bypasses
