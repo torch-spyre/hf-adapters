@@ -125,7 +125,7 @@ def contains_remote_code(model: ModelInfo) -> bool:
     try:
         AutoConfig.from_pretrained(model.id, trust_remote_code=False)
         return False
-    except Exception:
+    except (ValueError, OSError):
         return True
 
 
