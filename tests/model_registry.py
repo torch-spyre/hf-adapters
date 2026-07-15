@@ -211,7 +211,6 @@ CAUSAL_LM_MODELS = {
         "name": "Gemma 4 12B",
         "path": "google/gemma-4-12B-it",
         "adapter": "hf_gemma4.py",
-        "is_gated": True,
         "size": "12b",
     },
 }
@@ -376,7 +375,6 @@ VISION_MODELS = {
         "path": "google/gemma-4-12B-it",
         "adapter": "hf_gemma4_mm.py",
         "kind": "vlm",  # multimodal: image + text -> generated text
-        "is_gated": True,
     },
 }
 
@@ -484,7 +482,7 @@ NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = {
         f"{key}: newly green on Spyre, non-blocking signal for a trial "
         "period before promoting to a blocking test"
     )
-    for key in ("qwen3", "olmo2_1b", "gemma3_unsloth", "ministral8b")
+    for key in ("qwen3", "olmo2_1b", "gemma3_unsloth", "ministral8b", "gemma4_google")
 }
 
 
