@@ -153,6 +153,8 @@ IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
 }
 
 MODEL_PATH_TO_TORCH_DTYPE: dict[str, torch.dtype] = {
+    "mistralai/Ministral-3-3B-Instruct-2512": torch.bfloat16,
+    "mistralai/Ministral-3-8B-Instruct-2512": torch.bfloat16,
     "mistralai/Ministral-3-14B-Instruct-2512": torch.bfloat16,
     "google/embeddinggemma-300m": torch.bfloat16,
     "google/gemma-4-12B-it": torch.bfloat16,
