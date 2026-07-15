@@ -29,10 +29,9 @@ import sys
 
 import pytest
 import torch
-from conftest import resolve_adapter_module_for_test
 from transformers import AutoTokenizer
 
-from tests.conftest import load_ref_model
+from tests.conftest import load_ref_model, resolve_adapter_module_for_test
 from tests.cpu.conftest import _unwrap_compiled_blocks
 from tests.model_registry import CAUSAL_PATHS
 

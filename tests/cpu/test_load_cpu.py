@@ -54,7 +54,6 @@ def test_load_embedding(model_path):
     model = load_embedding(model_path=model_path)
     assert model is not None
     assert callable(getattr(model, "generate", None))
-    assert model is not None
     del model
     gc.collect()
 
