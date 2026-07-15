@@ -45,7 +45,11 @@ from hf_adapters.auto_spyre_model import (
     IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
     resolve_adapter_module,
 )
-from tests._vision_helpers import build_vlm_batch, stock_vlm_generate
+from tests._vision_helpers import (
+    build_vlm_batch,
+    extra_image_inputs,
+    stock_vlm_generate,
+)
 from tests.conftest import get_dtype_for_cpu, load_ref_model
 from tests.cpu.conftest import _set_rope_dtype, _unwrap_compiled_blocks
 from tests.model_registry import VISION_PATHS
@@ -63,9 +67,10 @@ def _adapter_generate(
 ) -> list[str]:
     """Drive an adapter's multimodal ``generate`` from a processor batch.
 
-    Adapters take image inputs positionally (``input_ids, attention_mask,
-    pixel_values, image_sizes``); map the batch onto that signature here so the
-    shared harness stays signature-agnostic.
+    Adapters take ``input_ids, attention_mask, pixel_values`` positionally and
+    then whatever extra multimodal inputs their model needs; ``extra_image_inputs``
+    forwards those by keyword so this harness stays signature-agnostic across VLM
+    adapters (see ``tests/_vision_helpers``).
     """
     return adapter.generate(
         model,
@@ -73,9 +78,9 @@ def _adapter_generate(
         batch["input_ids"],
         batch["attention_mask"],
         batch["pixel_values"],
-        batch["image_sizes"],
         max_new_tokens=max_new_tokens,
         do_sample=False,
+        **extra_image_inputs(adapter.generate, batch),
     )
 
 

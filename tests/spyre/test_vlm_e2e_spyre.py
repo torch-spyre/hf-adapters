@@ -65,6 +65,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from _vision_helpers import (
     build_vlm_batch,
+    extra_image_inputs,
     stock_vlm_generate,
 )
 from model_registry import VISION_PATHS
@@ -111,9 +112,9 @@ def _adapter_generate(
         batch["input_ids"],
         batch["attention_mask"],
         batch["pixel_values"],
-        batch["image_sizes"],
         max_new_tokens=max_new_tokens,
         do_sample=False,
+        **extra_image_inputs(adapter.generate, batch),
     )
 
 
@@ -139,7 +140,9 @@ def _adapter_teacher_forced_steps(
     input_ids = batch["input_ids"]
     attention_mask = batch["attention_mask"]
     pixel_values = batch["pixel_values"]
-    image_sizes = batch["image_sizes"]
+    # Extra image inputs vary by adapter (Granite/Mistral: image_sizes; Gemma 4:
+    # image_position_ids + mm_token_type_ids); matched against _prefill_forward.
+    extra_inputs = extra_image_inputs(adapter._prefill_forward, batch)
 
     model_d_type = get_model_dtype(model)
     backbone = adapter.get_backbone(model)
@@ -179,7 +182,10 @@ def _adapter_teacher_forced_steps(
         grab = (BLOCK_SIZE - tokens_in_block) if tokens_in_block > 0 else BLOCK_SIZE
         result[:, -grab] = tok_id
 
-    # --- Step 0: deepstack prefill ---
+    # --- Step 0: multimodal prefill ---
+    # Adapters differ in how many image inputs _prefill_forward takes before the
+    # KV caches (Granite/Mistral: image_sizes; Gemma 4: image_position_ids +
+    # mm_token_type_ids), so pass those + the caches by keyword.
     logits = adapter._prefill_forward(
         model,
         padded_ids,
@@ -187,10 +193,10 @@ def _adapter_teacher_forced_steps(
         prompt_offsets,
         position_ids,
         pixel_values,
-        image_sizes,
-        key_caches,
-        value_caches,
-        max_cache_len,
+        **extra_inputs,
+        key_caches=key_caches,
+        value_caches=value_caches,
+        max_cache_len=max_cache_len,
     )
     per_step_logits.append(logits.to("cpu")[0, -1, :].float())
     decode_pos = torch.zeros((batch_size, BLOCK_SIZE), dtype=torch.long)

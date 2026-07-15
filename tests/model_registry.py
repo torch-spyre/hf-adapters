@@ -357,6 +357,14 @@ VISION_MODELS = {
         "kind": "vlm",  # multimodal: image + text -> generated text
         "dtype": "bfloat16",  # blocked-FP8 checkpoint, dequantized to bf16
     },
+    # hf_gemma4_mm.py — unified encoder-free VLM (image + text -> text)
+    "gemma4_mm": {
+        "name": "Gemma 4 12B (unified VLM)",
+        "path": "google/gemma-4-12B-it",
+        "adapter": "hf_gemma4_mm.py",
+        "kind": "vlm",  # multimodal: image + text -> generated text
+        "is_gated": True,
+    },
 }
 
 
