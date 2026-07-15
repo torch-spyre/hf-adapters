@@ -21,7 +21,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from tests.spyre.weekly_generation.create_model_spyre_table import (
+from tests.spyre.weekly_generation.clickhouse_db import (
     CREATE_TABLE_SQL,
     DATABASE,
     EMBEDDING_TABLE_NAME,

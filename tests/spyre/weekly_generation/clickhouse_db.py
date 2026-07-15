@@ -33,7 +33,7 @@ import clickhouse_connect
 from dotenv import load_dotenv
 
 # Locate the repo root (.env lives two directories above this script:
-#   repo_root/.github/scripts/create_model_spyre_table.py)
+#   repo_root/.github/scripts/clickhouse_db.py)
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 load_dotenv(_REPO_ROOT / ".env")
 
