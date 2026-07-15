@@ -25,9 +25,22 @@ automatically cover them by selecting one representative model per adapter.
 
 from __future__ import annotations
 
+import os
 import types
 
 import pytest
+
+
+def _include_gated() -> bool:
+    """Whether gated models should be included in the parametrized test lists.
+
+    Gated models (Llama, google/gemma-*, some Mistral repos) require HF auth.
+    They are excluded by default so runs in environments without auth don't fail
+    on collection. Set ``SPYRE_INCLUDE_GATED=1`` (e.g. on the Spyre pod, where the
+    HF token is configured) to opt them in.
+    """
+    return os.getenv("SPYRE_INCLUDE_GATED", "0") == "1"
+
 
 # Model registries - shared by all tests
 CAUSAL_LM_MODELS = {
@@ -198,7 +211,6 @@ CAUSAL_LM_MODELS = {
         "name": "Gemma 4 12B",
         "path": "google/gemma-4-12B-it",
         "adapter": "hf_gemma4.py",
-        "is_gated": True,
         "size": "12b",
     },
 }
@@ -357,6 +369,13 @@ VISION_MODELS = {
         "kind": "vlm",  # multimodal: image + text -> generated text
         "dtype": "bfloat16",  # blocked-FP8 checkpoint, dequantized to bf16
     },
+    # hf_gemma4_mm.py — unified encoder-free VLM (image + text -> text)
+    "gemma4_mm": {
+        "name": "Gemma 4 12B (unified VLM)",
+        "path": "google/gemma-4-12B-it",
+        "adapter": "hf_gemma4_mm.py",
+        "kind": "vlm",  # multimodal: image + text -> generated text
+    },
 }
 
 
@@ -392,9 +411,11 @@ def _select_representative_models() -> tuple[list[str], list[str]]:
     adapter_to_causal_keys: dict[str, list[str]] = {}
     adapter_to_embed_keys: dict[str, list[str]] = {}
 
+    include_gated = _include_gated()
+
     # Group causal LM models by adapter
     for key, info in CAUSAL_LM_MODELS.items():
-        if info.get("is_gated", False):
+        if info.get("is_gated", False) and not include_gated:
             continue
         adapter = info["adapter"].replace(".py", "")
         if adapter not in adapter_to_causal_keys:
@@ -403,7 +424,7 @@ def _select_representative_models() -> tuple[list[str], list[str]]:
 
     # Group embedding models by adapter
     for key, info in EMBEDDING_MODELS.items():
-        if info.get("is_gated", False):
+        if info.get("is_gated", False) and not include_gated:
             continue
         adapter = info["adapter"].replace(".py", "")
         if adapter not in adapter_to_embed_keys:
@@ -446,7 +467,9 @@ def _select_representative_models() -> tuple[list[str], list[str]]:
 CAUSAL_PATHS, EMBED_PATHS = _select_representative_models()
 
 VISION_PATHS: list[str] = [
-    v["path"] for v in VISION_MODELS.values() if v.get("kind") == "vlm"
+    v["path"]
+    for v in VISION_MODELS.values()
+    if v.get("kind") == "vlm" and (_include_gated() or not v.get("is_gated", False))
 ]
 
 # Causal-LM models that just went green on torchs-spyre but aren't yet proven stable
@@ -459,7 +482,7 @@ NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = {
         f"{key}: newly green on Spyre, non-blocking signal for a trial "
         "period before promoting to a blocking test"
     )
-    for key in ("qwen3", "olmo2_1b", "gemma3_unsloth", "ministral8b")
+    for key in ("qwen3", "olmo2_1b", "gemma3_unsloth", "ministral8b", "gemma4_google")
 }
 
 

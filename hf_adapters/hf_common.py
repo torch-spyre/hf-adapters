@@ -294,6 +294,11 @@ class InvFreqShim(nn.Module):
 def apply_rope_matmul(x, selected_freqs):
     """Apply RoPE via matmul with [2,2,D/2] rotation matrix. No slicing.
 
+    The stock-HF form ``x*cos + rotate_half(x)*sin`` slices along head_dim;
+    that slice form COMPILES on Spyre but mis-lowers to wrong numbers in fp16
+    (tracked upstream: torch-spyre/torch-spyre#3133). This matmul form avoids
+    the head-dim slice entirely and lowers correctly.
+
     Args:
         x: [B, H, L, D] — query or key tensor
         selected_freqs: [B, L, 2, 2, D/2] — rotation matrices
@@ -627,7 +632,8 @@ def pad_attention_heads_simple(
 
 
 def patch_rmsnorm(rmsnorm_cls):
-    """Patch any RMSNorm class to stay in fp16 (Spyre has no dtype conversion).
+    """Patch any RMSNorm class: variance reduction at input dtype on Spyre, fp32
+    on CPU (to match stock HF).
 
     Args:
         rmsnorm_cls: The RMSNorm class to patch (e.g. GraniteRMSNorm, Qwen3RMSNorm).
@@ -635,7 +641,7 @@ def patch_rmsnorm(rmsnorm_cls):
 
     def _forward_fp16(self, hidden_states):
         if hidden_states.device.type == "spyre":
-            # Spyre path: no dtype conversion, stay in fp16
+            # Spyre path: variance reduction at input dtype (see the note above).
             variance = (hidden_states * hidden_states).mean(-1, keepdim=True)
             return self.weight * (
                 hidden_states * torch.rsqrt(variance + self.variance_epsilon)
@@ -648,6 +654,51 @@ def patch_rmsnorm(rmsnorm_cls):
             return self.weight * xf.to(hidden_states.dtype)
 
     rmsnorm_cls.forward = _forward_fp16
+
+
+def patch_layernorm(*layernorms):
+    """Patch ``nn.LayerNorm`` *instances* to a manual decomposition on Spyre.
+
+    The fused ``F.layer_norm`` lowering can produce **NaN** on Spyre for some
+    models (small-variance / near-constant rows).
+    The Spyre path recomputes LayerNorm as explicit ops with the mean/variance
+    reduction in **fp32** (matching CPU's hidden fp32 accumulate), normalizing
+    back in the input dtype. CPU keeps stock ``F.layer_norm``.
+
+    Patches the given **instances** (binds a new ``forward``), not the
+    ``nn.LayerNorm`` class, so it never perturbs LayerNorms in other adapters.
+
+    Args:
+        *layernorms: ``nn.LayerNorm`` instances to patch (skips ``None``).
+    """
+    import types as _types
+
+    def _forward(self, x):
+        if x.device.type == "spyre":
+            # Reduction in fp32 (matches CPU's hidden fp32 accumulate); the
+            # normalize + affine run back in the input dtype.
+            xf = x.float()
+            mean = xf.mean(-1, keepdim=True)
+            d = xf - mean
+            variance = (d * d).mean(-1, keepdim=True)
+            inv = torch.rsqrt(variance + self.eps).to(x.dtype)
+            h = (x - mean.to(x.dtype)) * inv
+            if self.weight is not None:
+                h = h * self.weight
+            if self.bias is not None:
+                h = h + self.bias
+            return h
+        return torch.nn.functional.layer_norm(
+            x, self.normalized_shape, self.weight, self.bias, self.eps
+        )
+
+    for ln in layernorms:
+        if ln is None:
+            continue
+        assert isinstance(
+            ln, torch.nn.LayerNorm
+        ), f"patch_layernorm expects nn.LayerNorm instances, got {type(ln)}"
+        ln.forward = _types.MethodType(_forward, ln)
 
 
 _GELU_TANH_COEFF = math.sqrt(2.0 / math.pi)

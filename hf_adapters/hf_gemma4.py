@@ -109,8 +109,8 @@ def _patch_gemma4_rmsnorm(rmsnorm_cls):
       - computes ``x * pow(meansq + eps, -0.5)`` (equivalent to
         ``rsqrt(meansq + eps)``).
 
-    On Spyre we stay in fp16; on CPU we upcast to fp32 to match stock HF.
-    ``rmsnorm_cls`` is the concrete class the loaded model uses
+    On Spyre we keep the reduction at input dtype; on CPU we upcast to fp32 to
+    match stock HF. ``rmsnorm_cls`` is the concrete class the loaded model uses
     (``Gemma4RMSNorm`` or ``Gemma4UnifiedRMSNorm``) so the patch lands on the
     type the instances actually dispatch through.
     """
@@ -264,9 +264,42 @@ def _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v)
     return torch.compile(block_forward, dynamic=False)
 
 
-def _run_backbone_forward(
+def _build_layer_masks(
     model,
-    input_ids,
+    attn_mask,
+    seq_len,
+    batch_size,
+    token_index,
+    cache_position,
+):
+    """Build the text-only per-layer-type mask dict {full_attention, sliding_attention}.
+
+    ``attn_mask`` is the base causal mask the caller built (column index = cache
+    slot). Global ("full_attention") layers use it as-is (plain causal). Sliding
+    ("sliding_attention") layers intersect it with a causal sliding-window band
+    using each query row's cache coordinate ``block_base + j`` where
+    ``block_base = cache_position - token_index`` (see
+    ``add_causal_sliding_window_band``).
+
+    This is the text-decoder mask policy. The unified VLM adapter
+    (``hf_gemma4_mm``) needs a bidirectional vision overlay OR-ed into both mask
+    types, so it builds its own mask dict and passes it to
+    ``_run_blocks_over_embeds(..., masks=...)`` rather than calling this.
+    """
+    cfg = text_config(model.config)
+    block_base = cache_position - token_index
+    query_coords = (torch.arange(seq_len)[None, :] + block_base).expand(
+        batch_size, seq_len
+    )
+    sliding_mask = add_causal_sliding_window_band(
+        attn_mask, query_coords, cfg.sliding_window
+    )
+    return {"full_attention": attn_mask, "sliding_attention": sliding_mask}
+
+
+def _run_blocks_over_embeds(
+    model,
+    h,
     position_ids,
     attn_mask,
     key_caches,
@@ -274,19 +307,23 @@ def _run_backbone_forward(
     is_filling,
     token_index,
     cache_position,
+    masks=None,
 ):
-    """Gemma 4 backbone: scaled embedding, per-type RoPE + masks, blocks, norm.
+    """Run the compiled Gemma 4 decoder blocks over precomputed embeddings.
 
-    The base ``attn_mask`` is the causal mask the caller built (column index =
-    cache slot). Sliding layers intersect it with a causal sliding-window band
-    using each query row's cache coordinate ``block_base + j`` where
-    ``block_base = cache_position - token_index`` (see the module docstring /
-    ``add_causal_sliding_window_band``). Global layers use the base mask as-is.
+    Shared by the text-only causal LM (``_run_backbone_forward``) and the VLM
+    adapter (``hf_gemma4_mm``, which drives the decoder from image-scattered
+    ``inputs_embeds``). Builds per-type RoPE freqs, then runs the blocks under a
+    per-layer-type mask dict and applies the final norm.
+
+    ``masks`` (optional ``{layer_type: mask}``) lets a caller supply its own
+    per-type masks — the VLM passes masks with the bidirectional vision overlay
+    OR-ed in. When ``None``, the text-only causal + sliding masks are built from
+    ``attn_mask`` via ``_build_layer_masks`` (``attn_mask`` is ignored when
+    ``masks`` is given).
     """
     backbone = _gemma4_backbone(model)
     cfg = text_config(model.config)
-
-    h = backbone.embed_tokens(input_ids)
 
     # Per-layer-type RoPE freqs (sliding theta vs global proportional theta).
     freqs = {
@@ -294,17 +331,11 @@ def _run_backbone_forward(
         for layer_type, rope in model._spyre_rope.items()
     }
 
-    # Sliding mask: base causal mask restricted to a backward window. Query row
-    # j occupies cache coordinate block_base + j. Built on CPU (int arange +
-    # scalar offset); add_causal_sliding_window_band keeps the int/bool work off
-    # Spyre and returns a float additive mask on attn_mask's device.
-    bsz, seq_len = input_ids.shape[0], input_ids.shape[1]
-    block_base = cache_position - token_index
-    query_coords = (torch.arange(seq_len)[None, :] + block_base).expand(bsz, seq_len)
-    sliding_mask = add_causal_sliding_window_band(
-        attn_mask, query_coords, cfg.sliding_window
-    )
-    masks = {"full_attention": attn_mask, "sliding_attention": sliding_mask}
+    if masks is None:
+        bsz, seq_len = h.shape[0], h.shape[1]
+        masks = _build_layer_masks(
+            model, attn_mask, seq_len, bsz, token_index, cache_position
+        )
 
     backbone_layers = backbone.layers
     for i, compiled_block in enumerate(model._spyre_compiled_blocks):
@@ -327,6 +358,37 @@ def _run_backbone_forward(
 
     h = backbone.norm(h)
     return h
+
+
+def _run_backbone_forward(
+    model,
+    input_ids,
+    position_ids,
+    attn_mask,
+    key_caches,
+    value_caches,
+    is_filling,
+    token_index,
+    cache_position,
+):
+    """Gemma 4 backbone: scaled embedding, per-type RoPE + masks, blocks, norm.
+
+    Text-only path: embed the ids (scaled word embedding) then delegate to
+    ``_run_blocks_over_embeds`` (no blockwise vision band).
+    """
+    backbone = _gemma4_backbone(model)
+    h = backbone.embed_tokens(input_ids)
+    return _run_blocks_over_embeds(
+        model,
+        h,
+        position_ids,
+        attn_mask,
+        key_caches,
+        value_caches,
+        is_filling,
+        token_index,
+        cache_position,
+    )
 
 
 def _run_forward(
@@ -363,8 +425,8 @@ def _run_forward(
     return logits
 
 
-def prepare_for_spyre(model):
-    """Apply Spyre adaptations to a dense Gemma 4 causal-LM model in-place.
+def prepare_text_decoder_for_spyre(model):
+    """Prepare ONLY the Gemma 4 text decoder for Spyre (in-place).
 
     1. Assert the unsupported (E2B / MoE) features are absent.
     2. Patch ``Gemma4RMSNorm`` for the fp16 Spyre path.
@@ -455,3 +517,8 @@ def prepare_for_spyre(model):
         )
         for i, layer in enumerate(backbone.layers)
     ]
+
+
+def prepare_for_spyre(model):
+    """Apply Spyre adaptations to a dense Gemma 4 causal-LM model in-place."""
+    prepare_text_decoder_for_spyre(model)

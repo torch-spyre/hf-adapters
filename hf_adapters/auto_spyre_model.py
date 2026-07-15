@@ -79,6 +79,7 @@ from hf_adapters import (
     hf_bert,
     hf_gemma3,
     hf_gemma4,
+    hf_gemma4_mm,
     hf_gpt2,
     hf_gpt_neo,
     hf_gpt_neox,
@@ -145,11 +146,16 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
 # (used by AutoSpyreModelForCausalLM). The auto class selects which.
 IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     type[PretrainedConfig], ModuleType
-] = {Granite4VisionConfig: hf_granite_vision_mm, Mistral3Config: hf_mistral3_vision_mm}
+] = {
+    Gemma4UnifiedConfig: hf_gemma4_mm,
+    Granite4VisionConfig: hf_granite_vision_mm,
+    Mistral3Config: hf_mistral3_vision_mm,
+}
 
 MODEL_PATH_TO_TORCH_DTYPE: dict[str, torch.dtype] = {
     "mistralai/Ministral-3-14B-Instruct-2512": torch.bfloat16,
     "google/embeddinggemma-300m": torch.bfloat16,
+    "google/gemma-4-12B-it": torch.bfloat16,
     "ibm-granite/granite-4.0-1b-base": torch.float32,
 }
 
@@ -273,10 +279,14 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
             input_ids: torch.Tensor,
             attention_mask: torch.Tensor,
             pixel_values: torch.Tensor,
-            image_sizes: torch.Tensor,
+            **kwargs: Any,
         ):
+            # Extra multimodal inputs vary by model: Granite Vision needs
+            # ``image_sizes`` (anyres tiling); Gemma 4 unified needs
+            # ``image_position_ids`` + ``mm_token_type_ids``. Forward whatever
+            # the processor produced as keyword args so each adapter takes its own.
             return module.prefill_logits(
-                self, input_ids, attention_mask, pixel_values, image_sizes
+                self, input_ids, attention_mask, pixel_values, **kwargs
             )
 
         def model_generate(
@@ -285,7 +295,6 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
             input_ids: torch.Tensor,
             attention_mask: torch.Tensor,
             pixel_values: torch.Tensor,
-            image_sizes: torch.Tensor,
             **kwargs: Any,
         ):
             return module.generate(
@@ -294,7 +303,6 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
                 input_ids,
                 attention_mask,
                 pixel_values,
-                image_sizes,
                 **kwargs,
             )
 

@@ -107,19 +107,31 @@ def _unwrap_compiled_blocks(model: types.ModuleType) -> None:
 
     Covers every block list an adapter may attach: ``_spyre_compiled_blocks``
     (the common case) plus ``_spyre_text_blocks`` for two-tower VLMs like Granite
-    Vision, whose text decoder is compiled separately from the vision tower.
+    Vision, whose text decoder is compiled separately from the vision tower. Also
+    unwraps single compiled callables (not lists), e.g. Gemma 4 unified's
+    ``_spyre_vision_core`` (the attention-free vision projection).
     """
+
+    def _orig(cb):
+        return getattr(cb, "_orig_mod", getattr(cb, "_torchdynamo_orig_callable", None))
+
     for attr in ("_spyre_compiled_blocks", "_spyre_text_blocks"):
         blocks = getattr(model, attr, None)
         if blocks is None:
             continue
         unwrapped = []
         for cb in blocks:
-            orig = getattr(
-                cb, "_orig_mod", getattr(cb, "_torchdynamo_orig_callable", None)
-            )
+            orig = _orig(cb)
             unwrapped.append(orig if orig is not None else cb)
         setattr(model, attr, unwrapped)
+
+    for attr in ("_spyre_vision_core",):
+        cb = getattr(model, attr, None)
+        if cb is None:
+            continue
+        orig = _orig(cb)
+        if orig is not None:
+            setattr(model, attr, orig)
 
 
 def _set_rope_dtype(model: types.ModuleType, dtype: torch.dtype) -> None:

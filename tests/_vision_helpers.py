@@ -24,6 +24,8 @@ fully deterministic across runs.
 
 from __future__ import annotations
 
+import inspect
+
 import torch
 from huggingface_hub import hf_hub_download
 from PIL import Image
@@ -57,6 +59,26 @@ def _load_sample_image() -> Image.Image:
     """
     path = hf_hub_download(**SAMPLE_IMAGE)
     return Image.open(path).convert("RGB")
+
+
+def extra_image_inputs(fn, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Batch tensors, beyond the standard three, that ``fn`` declares as params.
+
+    VLM adapters take ``input_ids, attention_mask, pixel_values`` and then
+    whatever extra image inputs their model needs — Granite Vision / Mistral 3:
+    ``image_sizes``; Gemma 4 unified: ``image_position_ids`` +
+    ``mm_token_type_ids``. Matching a processor ``batch`` against the callee's
+    signature (``adapter.generate`` / ``adapter._prefill_forward``) keeps the CPU
+    and Spyre e2e harnesses signature-agnostic across those adapters; the extra
+    tensors are forwarded by keyword.
+    """
+    accepted = set(inspect.signature(fn).parameters)
+    standard = {"input_ids", "attention_mask", "pixel_values"}
+    return {
+        k: v
+        for k, v in batch.items()
+        if k in accepted and k not in standard and isinstance(v, torch.Tensor)
+    }
 
 
 def build_vlm_batch(
