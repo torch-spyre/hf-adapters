@@ -239,7 +239,9 @@ def _process_pytree_structure(value: Any, name: str) -> Dict[str, Any] | None:
 class ModuleInfoCapture:
     """Captures module information during forward pass using hooks."""
 
-    def __init__(self, config_source: str = CONFIG_SOURCE_KWARGS, model_id: str | None = None):
+    def __init__(
+        self, config_source: str = CONFIG_SOURCE_KWARGS, model_id: str | None = None
+    ):
         if config_source not in CONFIG_SOURCES:
             raise ValueError(
                 f"config_source must be one of {CONFIG_SOURCES}, got {config_source!r}"
@@ -284,9 +286,7 @@ class ModuleInfoCapture:
 
             if config is not None:
                 constructor_args.append(
-                    _build_config_arg_spec(
-                        config, self.config_source, self.model_id
-                    )
+                    _build_config_arg_spec(config, self.config_source, self.model_id)
                 )
 
                 # Decoder layers typically need layer_idx as kwarg
