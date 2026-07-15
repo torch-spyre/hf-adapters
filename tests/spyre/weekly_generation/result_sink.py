@@ -77,13 +77,6 @@ def _require_non_empty(value: str, field_name: str) -> str:
     return stripped
 
 
-def _require_model_name(rec: dict[str, Any]) -> str:
-    raw: object = rec.get("model_name")
-    if raw is None:
-        raise ValueError("rec is missing required key 'model_name'")
-    return _require_non_empty(str(raw), "model_name")
-
-
 class ResultSink(ABC):
     """Abstract destination for weekly-test result rows.
 
@@ -123,22 +116,61 @@ class ResultSink(ABC):
         """
 
     @abstractmethod
-    def _insert_entry(self, rec: dict[str, Any]) -> None:
-        """Storage-specific write of *rec*. Called by ``add_entry`` after the
-        skip guard has passed. Subclasses must not perform any deduplication
-        here — that is the responsibility of ``should_insert_row``.
+    def _insert_entry(
+        self,
+        *,
+        model_name: str,
+        config_class: str,
+        adapter_name: str,
+        added_date: date | None,
+        snapshot_date: date,
+        verified_on_cpu: bool,
+        verified_on_gpu: bool,
+        verified_on_spyre: bool,
+        num_downloads: int,
+        failure_category: str | None,
+    ) -> None:
+        """Storage-specific write of one row's normalized fields.
+
+        Called by ``add_entry`` after the skip guard has passed. Subclasses must
+        not perform any deduplication here — that is the responsibility of
+        ``should_insert_row``.
         """
 
-    def add_entry(self, rec: dict[str, Any]) -> bool:
-        """Persist *rec* when the skip guard allows it.
+    def add_entry(
+        self,
+        *,
+        model_name: str,
+        config_class: str,
+        adapter_name: str,
+        added_date: date | None,
+        snapshot_date: date,
+        verified_on_cpu: bool,
+        verified_on_gpu: bool,
+        verified_on_spyre: bool,
+        num_downloads: int,
+        failure_category: str | None,
+    ) -> bool:
+        """Persist one row when the skip guard allows it.
 
         Returns True if the row was written, False if ``should_insert_row``
         rejected it. Idempotent to call for every row in the driver loop.
         """
-        model_name: str = _require_model_name(rec)
+        model_name = _require_non_empty(model_name, "model_name")
         if not self.should_insert_row(model_name):
             return False
-        self._insert_entry(rec)
+        self._insert_entry(
+            model_name=model_name,
+            config_class=config_class,
+            adapter_name=adapter_name,
+            added_date=added_date,
+            snapshot_date=snapshot_date,
+            verified_on_cpu=verified_on_cpu,
+            verified_on_gpu=verified_on_gpu,
+            verified_on_spyre=verified_on_spyre,
+            num_downloads=num_downloads,
+            failure_category=failure_category,
+        )
         return True
 
     def should_insert_row(self, model_name: str) -> bool:
@@ -225,10 +257,34 @@ class CsvResultSink(ResultSink):
             result.append(best)
         return result
 
-    def _insert_entry(self, rec: dict[str, Any]) -> None:
+    def _insert_entry(
+        self,
+        *,
+        model_name: str,
+        config_class: str,
+        adapter_name: str,
+        added_date: date | None,
+        snapshot_date: date,
+        verified_on_cpu: bool,
+        verified_on_gpu: bool,
+        verified_on_spyre: bool,
+        num_downloads: int,
+        failure_category: str | None,
+    ) -> None:
+        rec: dict[str, Any] = {
+            "model_name": model_name,
+            "config_class": config_class,
+            "adapter_name": adapter_name,
+            "added_date": added_date,
+            "snapshot_date": snapshot_date,
+            "verified_on_cpu": verified_on_cpu,
+            "verified_on_gpu": verified_on_gpu,
+            "verified_on_spyre": verified_on_spyre,
+            "num_downloads": num_downloads,
+            "failure_category": failure_category,
+        }
         self._writer.writerow(rec)
         self._fh.flush()
-        model_name: str = _require_model_name(rec)
         self._rows_by_model.setdefault(model_name, []).append(dict(rec))
 
     def close(self) -> None:
@@ -290,20 +346,33 @@ class ClickHouseResultSink(ResultSink):
         )
         return [dict(zip(TABLE_COLUMNS, row)) for row in result.result_rows]
 
-    def _insert_entry(self, rec: dict[str, Any]) -> None:
+    def _insert_entry(
+        self,
+        *,
+        model_name: str,
+        config_class: str,
+        adapter_name: str,
+        added_date: date | None,
+        snapshot_date: date,
+        verified_on_cpu: bool,
+        verified_on_gpu: bool,
+        verified_on_spyre: bool,
+        num_downloads: int,
+        failure_category: str | None,
+    ) -> None:
         insert_model_row(
             self._client,
             table_name=self._table_name,
-            model_name=rec["model_name"],
-            config_class=rec["config_class"],
-            adapter_name=rec["adapter_name"],
-            added_date=rec["added_date"],
-            snapshot_date=rec["snapshot_date"],
-            verified_on_cpu=rec["verified_on_cpu"],
-            verified_on_gpu=rec["verified_on_gpu"],
-            verified_on_spyre=rec["verified_on_spyre"],
-            num_downloads=rec["num_downloads"],
-            failure_category=rec.get("failure_category"),
+            model_name=model_name,
+            config_class=config_class,
+            adapter_name=adapter_name,
+            added_date=added_date,
+            snapshot_date=snapshot_date,
+            verified_on_cpu=verified_on_cpu,
+            verified_on_gpu=verified_on_gpu,
+            verified_on_spyre=verified_on_spyre,
+            num_downloads=num_downloads,
+            failure_category=failure_category,
         )
 
 

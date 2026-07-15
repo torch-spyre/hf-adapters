@@ -630,8 +630,22 @@ def main(argv: list[str] | None = None) -> None:
                         rec["added_date"] = None
 
                 # Sink writes: don't store the `error` field.
-                sink_rec: dict = {k: v for k, v in rec.items() if k != "error"}
-                if sink.add_entry(sink_rec):
+                if sink.add_entry(
+                    model_name=str(rec["model_name"]),
+                    config_class=str(rec["config_class"]),
+                    adapter_name=str(rec["adapter_name"]),
+                    added_date=rec["added_date"],
+                    snapshot_date=rec["snapshot_date"],
+                    verified_on_cpu=bool(rec["verified_on_cpu"]),
+                    verified_on_gpu=bool(rec["verified_on_gpu"]),
+                    verified_on_spyre=bool(rec["verified_on_spyre"]),
+                    num_downloads=int(rec["num_downloads"]),
+                    failure_category=(
+                        None
+                        if rec.get("failure_category") is None
+                        else str(rec["failure_category"])
+                    ),
+                ):
                     print(
                         f"    sink: row written for '{model_path}' "
                         f"(verified_on_cpu={rec.get('verified_on_cpu')}, "
