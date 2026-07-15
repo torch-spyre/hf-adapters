@@ -1,7 +1,7 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-25-blue)
-![verified](https://img.shields.io/badge/verified_checkpoints-38-green)
+![adapters](https://img.shields.io/badge/adapters-27-blue)
+![verified](https://img.shields.io/badge/verified_checkpoints-43-green)
 ![compatible](https://img.shields.io/badge/compatible_models-100%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -14,12 +14,13 @@ from `transformers`.
 
 ## Supported Models
 
-**25 adapters · 38 verified checkpoints · 100+ compatible models**
+**27 adapters · 43 verified checkpoints · 100+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
 and **vision-language** (image→text) models — from Llama / Qwen / Granite / Mistral /
 Phi / Gemma / OLMo / GPT decoders to BERT / XLM-RoBERTa / MPNet / ModernBERT
-encoders and the Granite Vision 4.1 (SigLIP tower + Granite text) and Mistral3 Vision multimodal VLMs.
+encoders and the Granite Vision 4.1 (SigLIP tower + Granite text), Mistral3 Vision
+(Pixtral tower + Mistral text), and Gemma 4 (encoder-free) multimodal VLMs.
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. The **canonical, per-adapter model lists** — verified
@@ -116,8 +117,9 @@ print(texts[0])
 A multimodal checkpoint's config is registered under both auto classes:
 `AutoSpyreModelForCausalLM` selects the text-only adapter (vision tower
 discarded), while `AutoSpyreModelForImageTextToText` selects the combined
-two-tower adapter. This works for both Granite Vision (`Granite4VisionConfig`)
-and Mistral3 Vision (`Mistral3Config`).
+multimodal adapter. This works for Granite Vision (`Granite4VisionConfig`),
+Mistral3 Vision (`Mistral3Config`), and Gemma 4 (`Gemma4UnifiedConfig`, an
+encoder-free VLM — no vision tower; see [ARCHITECTURE.md](ARCHITECTURE.md#multimodal-vlm-path-vision-tower--text-decoder)).
 
 ## Repo Structure
 
@@ -131,32 +133,9 @@ hf_adapters/
 │                               RMSNorm patching, LM head padding,
 │                               head-dim padding, mask builders,
 │                               KV cache helpers, generate loop
-├── hf_bert.py                  BERT-family encoder adapter (BGE, MiniLM)
-├── hf_granite.py               Granite 3.3 adapter
-├── hf_granite_vision.py        Granite Vision 4.1 text backbone adapter (text-only)
-├── hf_granite_vision_mm.py     Granite Vision 4.1 multimodal adapter (vision + text)
-├── hf_siglip_vision.py         SigLIP vision tower adapter (used by the VLM adapter)
-├── hf_qwen3.py                 Qwen3 adapter
-├── hf_granitemoehybrid.py      Granite 4.0 dense adapter
-├── hf_smollm3.py               SmolLM3 adapter
-├── hf_llama.py                 Llama adapter (Llama 1/2/3, Code Llama, Yi, Falcon 3)
-├── hf_qwen2.py                 Qwen2 adapter (Qwen2, Qwen2.5, Coder, Math)
-├── hf_mistral.py               Mistral adapter (Mistral 7B v0.1–v0.3)
-├── hf_mistral3.py              Mistral3 adapter (Mistral-Small-3.2 24B, Ministral-3 14B — text-only)
-├── hf_mistral3_vision_mm.py    Mistral3 Vision multimodal adapter (Pixtral tower + Mistral text)
-├── hf_pixtral_vision.py        Pixtral vision tower adapter (used by the VLM adapter)
-├── hf_phi3.py                  Phi-4 / Phi-3 adapter
-├── hf_olmo.py                  OLMo adapter (OLMo 1B, 7B)
-├── hf_olmo2.py                 OLMo2 adapter (OLMo 2 1B, 7B)
-├── hf_gemma3.py                Gemma 3 adapter (Gemma 3 text, EmbeddingGemma)
-├── hf_gemma4.py                Gemma 4 adapter (unified text backbone)
-├── hf_gpt2.py                  GPT-2 adapter (learned abs pos, LayerNorm, Conv1D)
-├── hf_gpt_neo.py               GPT-Neo adapter (learned abs pos, LayerNorm, nn.Linear)
-├── hf_gpt_neox.py              GPT-NeoX adapter (partial RoPE, parallel residual, fused QKV)
-├── hf_xlm_roberta.py           XLM-RoBERTa encoder adapter (BGE-M3, multilingual-e5)
-├── hf_mpnet.py                 MPNet encoder adapter (all-mpnet-base-v2 and variants)
-├── hf_modernbert.py            ModernBERT encoder adapter (RoPE, GeGLU, local/global attention)
-├── st_backend.py               sentence-transformers Spyre backend (all decoder adapters)
+├── hf_*.py                    One adapter per model family (see the Model Family
+│                               Coverage table in ARCHITECTURE.md for the full list)
+├── st_backend.py               sentence-transformers `backend="spyre"` integration for embedding models
 └── __init__.py
 
 tests/                                 CPU tests (no Spyre required)
