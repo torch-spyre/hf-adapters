@@ -57,7 +57,7 @@ _WEIGHT_SUFFIXES = (
 # across more work. Lower values reduce the blast radius when the Spyre
 # driver/state gets into a bad shape mid-batch.
 GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS: int = 25
-EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS: int = 25
+EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS: int = 90 
 
 
 def _repos_with_weights():
