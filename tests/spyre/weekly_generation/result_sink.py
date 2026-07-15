@@ -132,6 +132,7 @@ class ResultSink(ABC):
         architecture: str,
         parameters_number: int,
         failure_category: str | None,
+        error: str | None,
     ) -> None:
         """Storage-specific write of one row's normalized fields.
 
@@ -156,6 +157,7 @@ class ResultSink(ABC):
         architecture: str,
         parameters_number: int,
         failure_category: str | None,
+        error: str | None,
     ) -> bool:
         """Persist one row when the skip guard allows it.
 
@@ -179,6 +181,7 @@ class ResultSink(ABC):
             architecture=architecture,
             parameters_number=parameters_number,
             failure_category=failure_category,
+            error=error,
         )
         return True
 
@@ -282,6 +285,7 @@ class CsvResultSink(ResultSink):
         architecture: str,
         parameters_number: int,
         failure_category: str | None,
+        error: str | None,
     ) -> None:
         rec: dict[str, Any] = {
             "model_name": model_name,
@@ -297,6 +301,7 @@ class CsvResultSink(ResultSink):
             "architecture": architecture,
             "parameters_number": parameters_number,
             "failure_category": failure_category,
+            "error": error,
         }
         self._writer.writerow(rec)
         self._fh.flush()
@@ -377,6 +382,7 @@ class ClickHouseResultSink(ResultSink):
         architecture: str,
         parameters_number: int,
         failure_category: str | None,
+        error: str | None,
     ) -> None:
         insert_model_row(
             self._client,
@@ -394,6 +400,7 @@ class ClickHouseResultSink(ResultSink):
             architecture=architecture,
             parameters_number=parameters_number,
             failure_category=failure_category,
+            error=error,
         )
 
 

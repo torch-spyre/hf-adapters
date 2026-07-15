@@ -642,7 +642,6 @@ def main(argv: list[str] | None = None) -> None:
                     except ValueError:
                         rec["added_date"] = None
 
-                # Sink writes: don't store the `error` field.
                 if sink.add_entry(
                     model_name=str(rec["model_name"]),
                     config_class=str(rec["config_class"]),
@@ -661,6 +660,7 @@ def main(argv: list[str] | None = None) -> None:
                         if rec.get("failure_category") is None
                         else str(rec["failure_category"])
                     ),
+                    error=(None if rec.get("error") is None else str(rec["error"])),
                 ):
                     print(
                         f"    sink: row written for '{model_path}' "

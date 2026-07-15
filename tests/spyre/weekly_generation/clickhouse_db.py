@@ -16,6 +16,7 @@ Columns:
   - architecture       (String)   – model architecture reported by the catalog
   - parameters_number  (UInt64)   – number of model parameters
   - failure_category   (String?)  – classification for failures (optional - None if model passed)
+  - error              (String?)  – error message if the model failed (optional - None if model passed)
 
 Credentials are loaded from a .env file at the repo root (two levels above this
 script), then fall back to environment variables already set in the shell.
@@ -70,6 +71,7 @@ TABLE_COLUMNS: tuple[str, ...] = (
     "architecture",
     "parameters_number",
     "failure_category",
+    "error",
 )
 
 
@@ -89,7 +91,8 @@ CREATE TABLE IF NOT EXISTS {DATABASE}.{table_name}
     family            String,
     architecture      String,
     parameters_number UInt64,
-    failure_category  Nullable(String)
+    failure_category  Nullable(String),
+    error             Nullable(String)
 )
 ENGINE = ReplacingMergeTree(snapshot_date)
 ORDER BY (model_name, snapshot_date)
@@ -140,6 +143,7 @@ def insert_model_row(
     architecture: str,
     parameters_number: int,
     failure_category: str | None,
+    error: str | None,
 ) -> bool:
     """Insert a single row into the given table.
 
@@ -163,6 +167,7 @@ def insert_model_row(
                 architecture,
                 parameters_number,
                 failure_category,
+                error,
             ]
         ],
         column_names=list(TABLE_COLUMNS),
@@ -210,6 +215,7 @@ def import_csv(sink, csv_path: str) -> tuple[int, int]:
                 architecture=row["architecture"].strip(),
                 parameters_number=int(row["parameters_number"].strip()),
                 failure_category=_parse_nullable_str(row["failure_category"]),
+                error=_parse_nullable_str(row.get("error", "")),
             )
             if written:
                 inserted += 1
