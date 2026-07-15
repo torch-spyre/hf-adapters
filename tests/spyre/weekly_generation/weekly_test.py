@@ -30,6 +30,13 @@ logging.getLogger("transformers").setLevel(logging.ERROR)
 
 MAX_NUMBER_PARAMS = 60_000_000_000
 
+FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER = "not-implemented-adapter"
+FAILURE_CATEGORY_MODEL_TOO_LARGE = "model_too_large"
+FAILURE_CATEGORY_CPU_LOAD_FAILED = "cpu_load_failed"
+FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION = "test_execution_exception"
+FAILURE_CATEGORY_VERIFICATION_FAILED = "verification_failed"
+FAILURE_CATEGORY_WORKER_CRASHED = "worker_crashed"
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SPYRE_TESTS_DIR = _REPO_ROOT / "tests" / "spyre"
 _TESTS_DIR = _REPO_ROOT / "tests"
@@ -188,7 +195,7 @@ def eval_generative(model_id: str, adapter, random_run: bool = False) -> dict:
     load_on_cpu = False
     run_smoke_status = False
     mismatches = True
-    result = {"error": ""}
+    result = {"error": "", "failure_category": None}
 
     """Load and compare token outputs for one generative model. Returns a metrics dict."""
     try:
@@ -216,9 +223,12 @@ def eval_generative(model_id: str, adapter, random_run: bool = False) -> dict:
             f"{type(e).__name__}: {e}\n"
             f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
         )
+        result["failure_category"] = FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
     finally:
         result["correct"] = run_smoke_status and not mismatches
         result["load"] = load_on_cpu
+        if result["failure_category"] is None and load_on_cpu and not result["correct"]:
+            result["failure_category"] = FAILURE_CATEGORY_VERIFICATION_FAILED
         return result
 
 
@@ -227,7 +237,7 @@ def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
 
     load_on_cpu = False
     mismatches = True
-    result = {"error": ""}
+    result = {"error": "", "failure_category": None}
 
     """Load and compare embeddings for one model. Returns a metrics dict."""
     try:
@@ -252,9 +262,12 @@ def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
             f"{type(e).__name__}: {e}\n"
             f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
         )
+        result["failure_category"] = FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
     finally:
         result["correct"] = not mismatches
         result["load"] = load_on_cpu
+        if result["failure_category"] is None and load_on_cpu and not result["correct"]:
+            result["failure_category"] = FAILURE_CATEGORY_VERIFICATION_FAILED
         return result
 
 
@@ -289,6 +302,7 @@ def _process_batch(
             "verified_on_spyre": bool,
             "num_downloads":    int,
             "error":            None or str,
+            "failure_category": None or str,
         }
     """
     import time as _t
@@ -315,17 +329,23 @@ def _process_batch(
             "verified_on_spyre": False,
             "num_downloads": int(row.get("downloads") or 0),
             "error": None,
+            "failure_category": None,
         }
         try:
             # Reject models too large to bring up on Spyre before evaluating.
             params = row.get("parameters")
             if params not in (None, "") and int(params) > MAX_NUMBER_PARAMS:
+                rec["failure_category"] = FAILURE_CATEGORY_MODEL_TOO_LARGE
                 raise Exception(
                     f"Model {model_path} has {int(params):,} parameters, "
                     f"exceeding the 60B limit for Spyre bring-up."
                 )
 
-            adapter_module = resolve_adapter_module_for_test(model_path)
+            try:
+                adapter_module = resolve_adapter_module_for_test(model_path)
+            except Exception:
+                rec["failure_category"] = FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER
+                raise
             adapter_name: str = os.path.splitext(
                 os.path.basename(adapter_module.__file__)
             )[0]
@@ -341,11 +361,16 @@ def _process_batch(
             rec["verified_on_cpu"] = bool(metrics.get("load", False))
             rec["verified_on_spyre"] = bool(metrics.get("correct", False))
             rec["error"] = metrics.get("error") or None
+            rec["failure_category"] = metrics.get("failure_category") or None
+            if not rec["verified_on_cpu"] and rec["failure_category"] is None:
+                rec["failure_category"] = FAILURE_CATEGORY_CPU_LOAD_FAILED
         except Exception as e:
             rec["error"] = (
                 f"{type(e).__name__}: {e}\n"
                 f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
             )
+            if rec["failure_category"] is None:
+                rec["failure_category"] = FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
         results.append(rec)
         print(
             f"      child[{os.getpid()}] finished model "
@@ -580,6 +605,7 @@ def main(argv: list[str] | None = None) -> None:
                         "verified_on_spyre": False,
                         "num_downloads": int(row.get("downloads") or 0),
                         "error": f"worker died (exitcode={proc.exitcode})",
+                        "failure_category": FAILURE_CATEGORY_WORKER_CRASHED,
                     }
                     for row, path in zip(batch, batch_paths)
                 ]

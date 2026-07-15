@@ -3,15 +3,16 @@
 Creates or drops the model_spyre_support table in ClickHouse.
 
 Columns:
-  - model_name         (String)  – unique model identifier
-  - config_class       (String)  – model config_class (e.g. BertConfig, Qwen3Config)
-  - adapter_name       (String)  – adapter name (e.g. hf_bert, hf_gemma4)
-  - added_date         (Date?)   – date the adapter was added to the git repo (optional - None if not existing)
-  - snapshot_date      (Date)    – date this weekly snapshot was taken
-  - verified_on_cpu    (Bool)    – passes on CPU
-  - verified_on_gpu    (Bool)    – passes on GPU
-  - verified_on_spyre  (Bool)    – passes on Spyre
-  - num_downloads      (UInt64)  – number of downloads
+  - model_name         (String)   – unique model identifier
+  - config_class       (String)   – model config_class (e.g. BertConfig, Qwen3Config)
+  - adapter_name       (String)   – adapter name (e.g. hf_bert, hf_gemma4)
+  - added_date         (Date?)    – date the adapter was added to the git repo (optional - None if not existing)
+  - snapshot_date      (Date)     – date this weekly snapshot was taken
+  - verified_on_cpu    (Bool)     – passes on CPU
+  - verified_on_gpu    (Bool)     – passes on GPU
+  - verified_on_spyre  (Bool)     – passes on Spyre
+  - num_downloads      (UInt64)   – number of downloads
+  - failure_category   (String?)  – classification for failures (optional - None if model passed)
 
 Credentials are loaded from a .env file at the repo root (two levels above this
 script), then fall back to environment variables already set in the shell.
@@ -62,6 +63,7 @@ TABLE_COLUMNS: tuple[str, ...] = (
     "verified_on_gpu",
     "verified_on_spyre",
     "num_downloads",
+    "failure_category",
 )
 
 
@@ -77,7 +79,8 @@ CREATE TABLE IF NOT EXISTS {DATABASE}.{table_name}
     verified_on_cpu   Bool,
     verified_on_gpu   Bool,
     verified_on_spyre Bool,
-    num_downloads     UInt64
+    num_downloads     UInt64,
+    failure_category  Nullable(String)
 )
 ENGINE = ReplacingMergeTree(snapshot_date)
 ORDER BY (model_name, snapshot_date)
@@ -124,6 +127,7 @@ def insert_model_row(
     verified_on_gpu: bool,
     verified_on_spyre: bool,
     num_downloads: int,
+    failure_category: str | None,
 ) -> bool:
     """Insert a single row into the given table.
 
@@ -143,6 +147,7 @@ def insert_model_row(
                 verified_on_gpu,
                 verified_on_spyre,
                 num_downloads,
+                failure_category,
             ]
         ],
         column_names=list(TABLE_COLUMNS),

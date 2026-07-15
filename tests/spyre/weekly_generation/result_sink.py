@@ -303,6 +303,7 @@ class ClickHouseResultSink(ResultSink):
             verified_on_gpu=rec["verified_on_gpu"],
             verified_on_spyre=rec["verified_on_spyre"],
             num_downloads=rec["num_downloads"],
+            failure_category=rec.get("failure_category"),
         )
 
 
