@@ -278,7 +278,9 @@ class TestModuleCustom(TestCase):
                 cpu_state_dict = module_cpu.state_dict()
 
                 # === CPU forward pass. ===
-                args_cpu, kwargs_cpu = _move_inputs(module_input, dtype=dtype)
+                args_cpu, kwargs_cpu = _move_inputs(
+                    module_input, dtype=dtype, device="cpu"
+                )
                 cpu_tensors = _run_forward(module_cpu, args_cpu, kwargs_cpu)
 
                 # === Instantiate the module on device with the same weights. ===
