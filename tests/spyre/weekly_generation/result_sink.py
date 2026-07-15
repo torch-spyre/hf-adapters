@@ -128,6 +128,9 @@ class ResultSink(ABC):
         verified_on_gpu: bool,
         verified_on_spyre: bool,
         num_downloads: int,
+        family: str,
+        architecture: str,
+        parameters_number: int,
         failure_category: str | None,
     ) -> None:
         """Storage-specific write of one row's normalized fields.
@@ -149,6 +152,9 @@ class ResultSink(ABC):
         verified_on_gpu: bool,
         verified_on_spyre: bool,
         num_downloads: int,
+        family: str,
+        architecture: str,
+        parameters_number: int,
         failure_category: str | None,
     ) -> bool:
         """Persist one row when the skip guard allows it.
@@ -169,6 +175,9 @@ class ResultSink(ABC):
             verified_on_gpu=verified_on_gpu,
             verified_on_spyre=verified_on_spyre,
             num_downloads=num_downloads,
+            family=family,
+            architecture=architecture,
+            parameters_number=parameters_number,
             failure_category=failure_category,
         )
         return True
@@ -269,6 +278,9 @@ class CsvResultSink(ResultSink):
         verified_on_gpu: bool,
         verified_on_spyre: bool,
         num_downloads: int,
+        family: str,
+        architecture: str,
+        parameters_number: int,
         failure_category: str | None,
     ) -> None:
         rec: dict[str, Any] = {
@@ -281,6 +293,9 @@ class CsvResultSink(ResultSink):
             "verified_on_gpu": verified_on_gpu,
             "verified_on_spyre": verified_on_spyre,
             "num_downloads": num_downloads,
+            "family": family,
+            "architecture": architecture,
+            "parameters_number": parameters_number,
             "failure_category": failure_category,
         }
         self._writer.writerow(rec)
@@ -358,6 +373,9 @@ class ClickHouseResultSink(ResultSink):
         verified_on_gpu: bool,
         verified_on_spyre: bool,
         num_downloads: int,
+        family: str,
+        architecture: str,
+        parameters_number: int,
         failure_category: str | None,
     ) -> None:
         insert_model_row(
@@ -372,6 +390,9 @@ class ClickHouseResultSink(ResultSink):
             verified_on_gpu=verified_on_gpu,
             verified_on_spyre=verified_on_spyre,
             num_downloads=num_downloads,
+            family=family,
+            architecture=architecture,
+            parameters_number=parameters_number,
             failure_category=failure_category,
         )
 

@@ -301,6 +301,9 @@ def _process_batch(
             "verified_on_gpu":  False,
             "verified_on_spyre": bool,
             "num_downloads":    int,
+            "family":           str,
+            "architecture":     str,
+            "parameters_number": int,
             "error":            None or str,
             "failure_category": None or str,
         }
@@ -328,6 +331,9 @@ def _process_batch(
             "verified_on_gpu": False,
             "verified_on_spyre": False,
             "num_downloads": int(row.get("downloads") or 0),
+            "family": str(row.get("model_type") or ""),
+            "architecture": str(row.get("architectures") or ""),
+            "parameters_number": int(row.get("parameters") or 0),
             "error": None,
             "failure_category": None,
         }
@@ -604,6 +610,9 @@ def main(argv: list[str] | None = None) -> None:
                         "verified_on_gpu": False,
                         "verified_on_spyre": False,
                         "num_downloads": int(row.get("downloads") or 0),
+                        "family": str(row.get("model_type") or ""),
+                        "architecture": str(row.get("architectures") or ""),
+                        "parameters_number": int(row.get("parameters") or 0),
                         "error": f"worker died (exitcode={proc.exitcode})",
                         "failure_category": FAILURE_CATEGORY_WORKER_CRASHED,
                     }
@@ -640,6 +649,9 @@ def main(argv: list[str] | None = None) -> None:
                     verified_on_gpu=bool(rec["verified_on_gpu"]),
                     verified_on_spyre=bool(rec["verified_on_spyre"]),
                     num_downloads=int(rec["num_downloads"]),
+                    family=str(rec["family"]),
+                    architecture=str(rec["architecture"]),
+                    parameters_number=int(rec["parameters_number"]),
                     failure_category=(
                         None
                         if rec.get("failure_category") is None

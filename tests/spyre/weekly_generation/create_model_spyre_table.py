@@ -12,6 +12,9 @@ Columns:
   - verified_on_gpu    (Bool)     – passes on GPU
   - verified_on_spyre  (Bool)     – passes on Spyre
   - num_downloads      (UInt64)   – number of downloads
+  - family             (String)   – model family reported by the catalog
+  - architecture       (String)   – model architecture reported by the catalog
+  - parameters_number  (UInt64)   – number of model parameters
   - failure_category   (String?)  – classification for failures (optional - None if model passed)
 
 Credentials are loaded from a .env file at the repo root (two levels above this
@@ -63,6 +66,9 @@ TABLE_COLUMNS: tuple[str, ...] = (
     "verified_on_gpu",
     "verified_on_spyre",
     "num_downloads",
+    "family",
+    "architecture",
+    "parameters_number",
     "failure_category",
 )
 
@@ -80,6 +86,9 @@ CREATE TABLE IF NOT EXISTS {DATABASE}.{table_name}
     verified_on_gpu   Bool,
     verified_on_spyre Bool,
     num_downloads     UInt64,
+    family            String,
+    architecture      String,
+    parameters_number UInt64,
     failure_category  Nullable(String)
 )
 ENGINE = ReplacingMergeTree(snapshot_date)
@@ -127,6 +136,9 @@ def insert_model_row(
     verified_on_gpu: bool,
     verified_on_spyre: bool,
     num_downloads: int,
+    family: str,
+    architecture: str,
+    parameters_number: int,
     failure_category: str | None,
 ) -> bool:
     """Insert a single row into the given table.
@@ -147,6 +159,9 @@ def insert_model_row(
                 verified_on_gpu,
                 verified_on_spyre,
                 num_downloads,
+                family,
+                architecture,
+                parameters_number,
                 failure_category,
             ]
         ],
