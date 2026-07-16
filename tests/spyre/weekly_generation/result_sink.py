@@ -453,7 +453,7 @@ class ClickHouseResultSink(ResultSink):
         """
         if not self._pending:
             return
-        print(f"ClickHouse: flushing {len(self._pending)} buffered row(s)…")
+        print(f"ClickHouse: flushing {len(self._pending)} buffered row(s)…", flush=True)
         self._client.insert(
             self._table_name,
             self._pending,
