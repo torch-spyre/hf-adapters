@@ -421,6 +421,7 @@ def _process_batch(
             f"{len(results)}/{len(batch)}: {model_path!r}  "
             f"(verified_on_cpu={rec['verified_on_cpu']}, "
             f"verified_on_spyre={rec['verified_on_spyre']}, "
+            f"failure_category={rec['failure_category']}, "
             f"error={rec['error']})",
             flush=True,
         )
