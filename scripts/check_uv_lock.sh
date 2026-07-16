@@ -9,7 +9,7 @@ if git diff --cached --name-only | grep -q "^pyproject\.toml$"; then
         echo ""
         echo "  ✗ pyproject.toml was modified but uv.lock was not updated."
         echo ""
-        echo "  Run:  USE_SPYRE_CCL=0 uv lock"
+        echo "  Run: uv lock"
         echo "  Then: git add uv.lock"
         echo ""
         exit 1
