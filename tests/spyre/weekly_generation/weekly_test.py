@@ -30,6 +30,8 @@ from asyncio import Queue
 from datetime import date
 from pathlib import Path
 
+from huggingface_hub.errors import HfHubHTTPError
+
 from tests.spyre.weekly_generation.result_sink import (
     EmbeddingGenerativeMode,
 )
@@ -189,6 +191,11 @@ def _load_on_cpu(model_path: str, mode: EmbeddingGenerativeMode) -> bool:
                 )
 
         return model is not None
+    except HfHubHTTPError as e:
+        if e.response is not None and e.response.status_code >= 500:
+            raise
+        print(f"_load_embedding_on_cpu exception - {e}")
+        return False
     except Exception as e:
         print(f"_load_embedding_on_cpu exception - {e}")
         return False
@@ -682,6 +689,11 @@ def main(argv: list[str] | None = None) -> None:
                 f"{len(worker_results)} model(s) in {batch_elapsed:.1f}s  "
                 f"(per-model avg: {batch_elapsed / max(1, len(worker_results)):.1f}s)"
             )
+
+            # Durability boundary: flush accumulated rows now so a hard parent
+            # crash before the next batch loses at most this batch, not the
+            # whole run. No-op for sinks that write per-row (CSV).
+            sink.flush()
     except KeyboardInterrupt:
         print("\nInterrupted — results so far are saved; rerun to resume.")
     finally:

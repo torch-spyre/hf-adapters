@@ -101,7 +101,7 @@ ORDER BY (model_name, snapshot_date)
 
 # The column names and order below MUST match ``TABLE_COLUMNS`` above.
 # When adding/removing/renaming a column, update both in the same change.
-CREATE_TABLE_SQL = _make_create_table_sql(EMBEDDING_TABLE_NAME)
+EMBEDDING_CREATE_TABLE_SQL = _make_create_table_sql(EMBEDDING_TABLE_NAME)
 GENERATIVE_CREATE_TABLE_SQL = _make_create_table_sql(GENERATIVE_TABLE_NAME)
 
 
@@ -179,13 +179,13 @@ def _parse_bool(value: str) -> bool:
     return value.strip().lower() in ("1", "true", "yes")
 
 
-def _parse_nullable_date(value: str) -> date | None:
-    v = value.strip()
+def _parse_nullable_date(value: str | None) -> date | None:
+    v = (value or "").strip()
     return date.fromisoformat(v) if v else None
 
 
-def _parse_nullable_str(value: str) -> str | None:
-    v = value.strip()
+def _parse_nullable_str(value: str | None) -> str | None:
+    v = (value or "").strip()
     return v if v else None
 
 
@@ -197,30 +197,55 @@ def import_csv(sink, csv_path: str) -> tuple[int, int]:
     """
     import csv
 
-    inserted = skipped = 0
+    inserted = skipped = malformed = 0
     with open(csv_path, newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
+            snapshot_raw: str = (row.get("snapshot_date") or "").strip()
+            model_name: str = (row.get("model_name") or "").strip()
+            if not snapshot_raw or not model_name:
+                malformed += 1
+                print(
+                    f"    warn: skipping CSV row {reader.line_num} "
+                    f"(model_name={model_name!r}, snapshot_date={snapshot_raw!r}): "
+                    "missing required field"
+                )
+                continue
+            try:
+                snapshot_date_val: date = date.fromisoformat(snapshot_raw)
+            except ValueError:
+                malformed += 1
+                print(
+                    f"    warn: skipping CSV row {reader.line_num} "
+                    f"(model_name={model_name!r}): "
+                    f"invalid snapshot_date={snapshot_raw!r}"
+                )
+                continue
             written = sink.add_entry(
-                model_name=row["model_name"].strip(),
-                config_class=row["config_class"].strip(),
-                adapter_name=row["adapter_name"].strip(),
-                added_date=_parse_nullable_date(row["added_date"]),
-                snapshot_date=date.fromisoformat(row["snapshot_date"].strip()),
-                verified_on_cpu=_parse_bool(row["verified_on_cpu"]),
-                verified_on_gpu=_parse_bool(row["verified_on_gpu"]),
-                verified_on_spyre=_parse_bool(row["verified_on_spyre"]),
-                num_downloads=int(row["num_downloads"].strip()),
-                family=row["family"].strip(),
-                architecture=row["architecture"].strip(),
-                parameters_number=int(row["parameters_number"].strip()),
-                failure_category=_parse_nullable_str(row["failure_category"]),
-                error=_parse_nullable_str(row.get("error", "")),
+                model_name=model_name,
+                config_class=(row.get("config_class") or "").strip(),
+                adapter_name=(row.get("adapter_name") or "").strip(),
+                added_date=_parse_nullable_date(row.get("added_date")),
+                snapshot_date=snapshot_date_val,
+                verified_on_cpu=_parse_bool(row.get("verified_on_cpu") or ""),
+                verified_on_gpu=_parse_bool(row.get("verified_on_gpu") or ""),
+                verified_on_spyre=_parse_bool(row.get("verified_on_spyre") or ""),
+                num_downloads=int((row.get("num_downloads") or "0").strip() or "0"),
+                family=(row.get("family") or "").strip(),
+                architecture=(row.get("architecture") or "").strip(),
+                parameters_number=int(
+                    (row.get("parameters_number") or "0").strip() or "0"
+                ),
+                failure_category=_parse_nullable_str(row.get("failure_category")),
+                error=_parse_nullable_str(row.get("error")),
             )
             if written:
                 inserted += 1
             else:
                 skipped += 1
+
+    if malformed:
+        print(f"    import_csv: {malformed} malformed row(s) skipped.")
     return inserted, skipped
 
 

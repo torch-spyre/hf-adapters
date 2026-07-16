@@ -4,7 +4,8 @@ Two implementations:
 - ``CsvResultSink`` — appends rows to a CSV file; loads existing rows once so
   the skip guard is O(1) per call.
 - ``ClickHouseResultSink`` — inserts rows into ClickHouse; the skip guard runs
-  a single SELECT per model.
+  a single bulk SELECT on construction so all per-row checks are O(1), and rows
+  are buffered in memory then flushed in a single bulk INSERT on ``close()``.
 
 Skip rule (both sinks):
     Skip when an existing entry for ``model_name`` has ``snapshot_date`` within
@@ -22,14 +23,13 @@ from pathlib import Path
 from typing import Any
 
 from tests.spyre.weekly_generation.clickhouse_db import (
-    CREATE_TABLE_SQL,
     DATABASE,
+    EMBEDDING_CREATE_TABLE_SQL,
     EMBEDDING_TABLE_NAME,
     GENERATIVE_CREATE_TABLE_SQL,
     GENERATIVE_TABLE_NAME,
     TABLE_COLUMNS,
     get_client,
-    insert_model_row,
     table_exists,
 )
 
@@ -200,6 +200,15 @@ class ResultSink(ABC):
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         self.close()
 
+    def flush(self) -> None:
+        """Persist any rows buffered in memory. Default is a no-op.
+
+        Subclasses that buffer rows (e.g. ``ClickHouseResultSink``) override
+        this so callers can force a durable write at safe checkpoints — for
+        example, between batches in the weekly-test driver, so a hard crash
+        of the parent loses at most one batch instead of the whole run.
+        """
+
     def close(self) -> None:
         """Release resources. Default is a no-op; subclasses override."""
 
@@ -313,7 +322,17 @@ class CsvResultSink(ResultSink):
 
 
 class ClickHouseResultSink(ResultSink):
-    """Insert rows into ClickHouse. Table is created on construction if missing."""
+    """Insert rows into ClickHouse.
+
+    On construction the table is created if missing, and a single bulk SELECT
+    pre-fetches every recently-CPU-verified model name so that all subsequent
+    ``should_insert_row`` calls are O(1) with no network I/O.
+
+    Rows accepted by the skip guard are accumulated in ``_pending`` and flushed
+    to ClickHouse in one bulk INSERT on ``close()`` (or ``__exit__``), so the
+    total network round-trips for N rows is 2 (one SELECT, one INSERT) instead
+    of 2 × N.
+    """
 
     def __init__(
         self, embedding_generative: EmbeddingGenerativeMode, today: date | None = None
@@ -322,7 +341,7 @@ class ClickHouseResultSink(ResultSink):
         self._embedding_generative = embedding_generative
         if embedding_generative is EmbeddingGenerativeMode.EMBEDDING:
             self._table_name = EMBEDDING_TABLE_NAME
-            create_sql = CREATE_TABLE_SQL
+            create_sql = EMBEDDING_CREATE_TABLE_SQL
         else:
             self._table_name = GENERATIVE_TABLE_NAME
             create_sql = GENERATIVE_CREATE_TABLE_SQL
@@ -333,25 +352,46 @@ class ClickHouseResultSink(ResultSink):
         else:
             print(f"ClickHouse: table '{self._table_name}' already exists.\n")
 
-    def get_recent_cpu_verified_entries(self, model_name: str) -> list[dict[str, Any]]:
-        key: str = _require_non_empty(model_name, "model_name")
+        # Bulk pre-fetch: model names that already have a CPU-verified entry
+        # within the skip window. Populated once here; used by
+        # get_recent_cpu_verified_entries() for O(1) per-row checks.
+        self._skip_model_names: set[str] = self._fetch_recently_verified_names()
+        print(
+            f"ClickHouse: {len(self._skip_model_names)} model(s) already "
+            f"CPU-verified within the last {_SKIP_WINDOW_DAYS} days — will be skipped.\n"
+        )
+
+        # Rows waiting to be flushed; each entry is a list matching TABLE_COLUMNS order.
+        self._pending: list[list[Any]] = []
+
+    def _fetch_recently_verified_names(self) -> set[str]:
+        """One SELECT to get all model names that pass the skip-window guard."""
         cutoff: date = self._today - timedelta(days=_SKIP_WINDOW_DAYS - 1)
-        columns_sql: str = ", ".join(TABLE_COLUMNS)
         result = self._client.query(
-            f"SELECT {columns_sql} "
+            "SELECT DISTINCT model_name "
             "FROM {db:Identifier}.{tbl:Identifier} "
-            "WHERE model_name = {model:String} "
-            "AND verified_on_cpu = 1 "
-            "AND snapshot_date >= {cutoff:Date} "
-            "ORDER BY snapshot_date DESC",
+            "WHERE verified_on_cpu = 1 "
+            "AND snapshot_date >= {cutoff:Date}",
             parameters={
                 "db": DATABASE,
                 "tbl": self._table_name,
-                "model": key,
                 "cutoff": cutoff,
             },
         )
-        return [dict(zip(TABLE_COLUMNS, row)) for row in result.result_rows]
+        return {row[0] for row in result.result_rows}
+
+    def get_recent_cpu_verified_entries(self, model_name: str) -> list[dict[str, Any]]:
+        """Return a non-empty sentinel list when *model_name* is in the skip set.
+
+        The actual row data is not needed by the caller — it only tests
+        ``bool(result)`` — so we return a lightweight placeholder instead of
+        re-querying ClickHouse.
+        """
+        key: str = _require_non_empty(model_name, "model_name")
+        if key in self._skip_model_names:
+            # Return a truthy non-empty list so should_insert_row returns False.
+            return [{"model_name": key}]
+        return []
 
     def get_all_models(self) -> list[dict[str, Any]]:
         columns_sql: str = ", ".join(
@@ -384,24 +424,47 @@ class ClickHouseResultSink(ResultSink):
         failure_category: str | None,
         error: str | None,
     ) -> None:
-        insert_model_row(
-            self._client,
-            table_name=self._table_name,
-            model_name=model_name,
-            config_class=config_class,
-            adapter_name=adapter_name,
-            added_date=added_date,
-            snapshot_date=snapshot_date,
-            verified_on_cpu=verified_on_cpu,
-            verified_on_gpu=verified_on_gpu,
-            verified_on_spyre=verified_on_spyre,
-            num_downloads=num_downloads,
-            family=family,
-            architecture=architecture,
-            parameters_number=parameters_number,
-            failure_category=failure_category,
-            error=error,
+        """Buffer the row; the actual INSERT happens in ``close()``."""
+        self._pending.append(
+            [
+                model_name,
+                config_class,
+                adapter_name,
+                added_date,
+                snapshot_date,
+                verified_on_cpu,
+                verified_on_gpu,
+                verified_on_spyre,
+                num_downloads,
+                family,
+                architecture,
+                parameters_number,
+                failure_category,
+                error,
+            ]
         )
+
+    def flush(self) -> None:
+        """Flush all buffered rows to ClickHouse in a single bulk INSERT.
+
+        Safe to call repeatedly; a no-op when the buffer is empty. The driver
+        loop calls this after every batch so a hard parent crash loses at most
+        one batch of rows rather than the entire run.
+        """
+        if not self._pending:
+            return
+        print(f"ClickHouse: flushing {len(self._pending)} buffered row(s)…")
+        self._client.insert(
+            self._table_name,
+            self._pending,
+            column_names=list(TABLE_COLUMNS),
+        )
+        print("ClickHouse: bulk insert complete.")
+        self._pending.clear()
+
+    def close(self) -> None:
+        """Flush any remaining buffered rows on shutdown."""
+        self.flush()
 
 
 class EmbeddingGenerativeMode(str, Enum):
