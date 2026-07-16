@@ -171,7 +171,16 @@ def _temp_random_bool() -> bool:
     return random.choice([True, False])
 
 
-def _load_on_cpu(model_path: str, mode: EmbeddingGenerativeMode) -> bool:
+def _load_on_cpu(
+    model_path: str, mode: EmbeddingGenerativeMode
+) -> tuple[bool, str | None]:
+    """Try to load *model_path* on CPU. Returns ``(loaded, error_message)``.
+
+    ``error_message`` is ``None`` on success. On failure it carries a
+    ``"ExcType: message\\n<tail traceback>"`` string that the caller can
+    stash into the row's ``error`` field. Transient HF 5xx propagate — the
+    driver retries at a higher level.
+    """
     import hf_adapters.hf_common as _hf_common
     from hf_adapters import AutoSpyreModelForCausalLM
     from hf_adapters.auto_spyre_model import AutoSpyreModel
@@ -190,15 +199,23 @@ def _load_on_cpu(model_path: str, mode: EmbeddingGenerativeMode) -> bool:
                     model_path, dtype=dtype
                 )
 
-        return model is not None
+        return model is not None, None
     except HfHubHTTPError as e:
         if e.response is not None and e.response.status_code >= 500:
             raise
-        print(f"_load_embedding_on_cpu exception - {e}")
-        return False
+        err: str = (
+            f"{type(e).__name__}: {e}\n"
+            f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
+        )
+        print(f"_load_on_cpu exception - {e}")
+        return False, err
     except Exception as e:
-        print(f"_load_embedding_on_cpu exception - {e}")
-        return False
+        err = (
+            f"{type(e).__name__}: {e}\n"
+            f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
+        )
+        print(f"_load_on_cpu exception - {e}")
+        return False, err
     finally:
         _hf_common.DEVICE = _orig_device  # restore
 
@@ -218,9 +235,11 @@ def eval_generative(model_id: str, adapter, random_run: bool = False) -> dict:
             if random_run:
                 load_on_cpu = _temp_random_bool()
             else:
-                load_on_cpu = _load_on_cpu(
+                load_on_cpu, load_error = _load_on_cpu(
                     model_path=model_id, mode=EmbeddingGenerativeMode.GENERATIVE
                 )
+                if load_error and not result["error"]:
+                    result["error"] = load_error
             if load_on_cpu:
                 if random_run:
                     run_smoke_status = _temp_random_bool()
@@ -259,9 +278,11 @@ def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
             if random_run:
                 load_on_cpu = _temp_random_bool()
             else:
-                load_on_cpu = _load_on_cpu(
+                load_on_cpu, load_error = _load_on_cpu(
                     model_path=model_id, mode=EmbeddingGenerativeMode.EMBEDDING
                 )
+                if load_error and not result["error"]:
+                    result["error"] = load_error
 
             if load_on_cpu:
                 if random_run:
