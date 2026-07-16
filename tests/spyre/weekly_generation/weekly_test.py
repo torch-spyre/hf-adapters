@@ -382,10 +382,16 @@ def _process_batch(
             if not rec["verified_on_cpu"] and rec["failure_category"] is None:
                 rec["failure_category"] = FAILURE_CATEGORY_CPU_LOAD_FAILED
         except Exception as e:
-            rec["error"] = (
-                f"{type(e).__name__}: {e}\n"
-                f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
-            )
+            # Skip the error/traceback for shallow failure categories where the
+            # failure_category itself is fully self-describing.
+            if rec["failure_category"] not in (
+                FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
+                FAILURE_CATEGORY_MODEL_TOO_LARGE,
+            ):
+                rec["error"] = (
+                    f"{type(e).__name__}: {e}\n"
+                    f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
+                )
             if rec["failure_category"] is None:
                 rec["failure_category"] = FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
         results.append(rec)
