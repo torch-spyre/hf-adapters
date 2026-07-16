@@ -13,20 +13,26 @@ from utils.hf_model_catalog import (
     build_catalog,
     contains_remote_code,
     is_baseline_keep,
+    with_transient_retry,
 )
 
 
 def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
     """Top text-generation models by downloads (over-fetched to absorb the
-    GGUF/MLX entries dropped by the filter)."""
+    GGUF/MLX entries dropped by the filter).
+
+    Retries transient 5xx gateway errors with exponential backoff via
+    ``with_transient_retry``; permanent failures propagate.
+    """
     print(f"Fetching top {limit} text-generation models by downloads...")
-    return list(
-        api.list_models(
+    return with_transient_retry(
+        lambda: api.list_models(
             pipeline_tag="text-generation",
             sort="downloads",
             limit=int(limit * 2),
             expand=EXPAND_FIELDS,
-        )
+        ),
+        description="list_models[text-generation]",
     )
 
 

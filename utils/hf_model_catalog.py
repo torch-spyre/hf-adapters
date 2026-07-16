@@ -10,10 +10,13 @@ columns* it wants on top of the shared schema.
 import csv
 import logging
 import re
-from collections.abc import Callable, Iterable
+import time
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import TypeVar
 
+from huggingface_hub.errors import HfHubHTTPError
 from huggingface_hub.hf_api import ModelInfo
 from tqdm import tqdm
 from transformers import AutoConfig
@@ -38,6 +41,51 @@ EXPAND_FIELDS: list[str] = [
     "library_name",
     "tags",
 ]
+
+# HF-API gateway 5xx statuses. Anything outside this set (400/401/403/404/...)
+# is a permanent failure and must not be retried.
+_TRANSIENT_HTTP_STATUSES: frozenset[int] = frozenset({500, 502, 503, 504})
+_MAX_FETCH_ATTEMPTS: int = 5
+_MAX_BACKOFF_SECONDS: float = 60.0
+
+_T = TypeVar("_T")
+
+
+def with_transient_retry(
+    call: Callable[[], Iterator[_T] | Iterable[_T]],
+    description: str,
+) -> list[_T]:
+    """Materialize an HF paginated call, retrying transient 5xx failures.
+
+    *call* is expected to return an iterable of ``ModelInfo`` (or similar)
+    from a ``huggingface_hub`` API method. It is fully consumed into a list
+    on each attempt because the pagination endpoint's failure mode is a
+    mid-stream 504, and there is no way to resume — the whole traversal has
+    to restart. Transient statuses (500/502/503/504) trigger up to
+    ``_MAX_FETCH_ATTEMPTS`` retries with exponential backoff capped at
+    ``_MAX_BACKOFF_SECONDS``; any other error propagates immediately.
+    """
+    last_error: HfHubHTTPError | None = None
+    for attempt in range(1, _MAX_FETCH_ATTEMPTS + 1):
+        try:
+            return list(call())
+        except HfHubHTTPError as e:
+            status: int | None = (
+                e.response.status_code if e.response is not None else None
+            )
+            if status not in _TRANSIENT_HTTP_STATUSES:
+                raise
+            last_error = e
+            backoff: float = min(_MAX_BACKOFF_SECONDS, 2.0**attempt)
+            print(
+                f"    {description}: HF API returned {status} "
+                f"(attempt {attempt}/{_MAX_FETCH_ATTEMPTS}); "
+                f"retrying in {backoff:.0f}s..."
+            )
+            time.sleep(backoff)
+    assert last_error is not None
+    raise last_error
+
 
 MOE_MODEL_TYPES: set[str] = {
     "mixtral",

@@ -33,6 +33,7 @@ from utils.hf_model_catalog import (
     contains_remote_code,
     is_baseline_keep,
     tags,
+    with_transient_retry,
 )
 
 # Pipeline tags that embedding models are filed under. They are mutually
@@ -116,17 +117,25 @@ def _is_multimodal(model: ModelInfo, _config_class: str | None = None) -> bool:
 def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
     """Query both embedding pipeline tags and return a deduplicated list,
     sorted by downloads descending. Over-fetched (x2) to absorb the noise +
-    rerankers + GGUF/MLX entries removed by the filter."""
+    rerankers + GGUF/MLX entries removed by the filter.
+
+    Each per-tag call is wrapped in ``with_transient_retry`` so a mid-fetch
+    504 from the HF gateway does not abort the run.
+    """
     per_tag_limit: int = int(limit * 2)
     by_id: dict[str, ModelInfo] = {}
     for tag in EMBEDDING_PIPELINE_TAGS:
         print(f"Fetching up to {per_tag_limit} '{tag}' models by downloads...")
-        for m in api.list_models(
-            pipeline_tag=tag,
-            sort="downloads",
-            limit=per_tag_limit,
-            expand=EXPAND_FIELDS,
-        ):
+        models: list[ModelInfo] = with_transient_retry(
+            lambda t=tag: api.list_models(
+                pipeline_tag=t,
+                sort="downloads",
+                limit=per_tag_limit,
+                expand=EXPAND_FIELDS,
+            ),
+            description=f"list_models[{tag}]",
+        )
+        for m in models:
             # First tag wins on dupes; they carry identical metadata anyway.
             by_id.setdefault(m.id, m)
 
