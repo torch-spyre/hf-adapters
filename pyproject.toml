@@ -97,7 +97,7 @@ models-ops = [
     "regex",
 ]
 test = [
-    "pytest",
+    "pytest>=8.1",
     "Pillow",
     "torchvision~=0.26.0",
 ]

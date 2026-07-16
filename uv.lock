@@ -780,7 +780,7 @@ oot = [{ name = "oot-framework", git = "https://github.com/torch-spyre/torch-spy
 spyre = [{ name = "torch-spyre", git = "https://github.com/torch-spyre/torch-spyre?rev=main" }]
 test = [
     { name = "pillow" },
-    { name = "pytest" },
+    { name = "pytest", specifier = ">=8.1" },
     { name = "torchvision", specifier = "~=0.26.0", index = "https://download.pytorch.org/whl/cpu" },
 ]
 
