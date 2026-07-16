@@ -75,14 +75,19 @@ def _move_inputs(module_input, *, dtype=None, device=None):
     structures (tuples, lists, dicts) are handled. Returns an ``(args, kwargs)`` tuple.
     """
 
+    def is_interesting_dtype(dtype):
+        if dtype is None:
+            return False
+        return str(dtype) in ("torch.float16", "torch.float32", "torch.bfloat16")
+
     def move(x):
         if not isinstance(x, torch.Tensor):
             return x
-        if device is not None and dtype is not None:
+        if device is not None and is_interesting_dtype(x.dtype):
             return x.to(device, dtype)
         if device is not None:
             return x.to(device)
-        if dtype is not None:
+        if is_interesting_dtype(x.dtype):
             return x.to(dtype)
         return x
 
