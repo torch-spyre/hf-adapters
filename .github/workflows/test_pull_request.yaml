@@ -187,6 +187,27 @@ jobs:
           python -m pytest -v --noconftest tests/test_adapter_coverage.py
           echo "Adapter coverage check passed."
 
+  check-uv-lock:
+    name: check uv.lock
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python 3.12
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          ignore-nothing-to-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+
+      - name: Check root uv.lock is up to date
+        run: uv lock --check
+
 #  cpu-tests:
 #    name: CPU tests (${{ matrix.test_file }})
 #    runs-on:
@@ -555,6 +576,7 @@ jobs:
       - pre-commit
       - generate-matrix
       - adapter-coverage
+      - check-uv-lock
 #      - cpu-tests
       - spyre-load-tests
       - spyre-smoke-tests
@@ -574,6 +596,7 @@ jobs:
           if ${{ contains(needs.pre-commit.result, 'failure') || contains(needs.pre-commit.result, 'cancelled') ||
                  contains(needs.generate-matrix.result, 'failure') || contains(needs.generate-matrix.result, 'cancelled') ||
                  contains(needs.adapter-coverage.result, 'failure') || contains(needs.adapter-coverage.result, 'cancelled') ||
+                 contains(needs.check-uv-lock.result, 'failure') || contains(needs.check-uv-lock.result, 'cancelled') ||
                  contains(needs.spyre-load-tests.result, 'failure') || contains(needs.spyre-load-tests.result, 'cancelled') ||
                  contains(needs.spyre-smoke-tests.result, 'failure') || contains(needs.spyre-smoke-tests.result, 'cancelled') ||
                  contains(needs.spyre-token-compare-tests.result, 'failure') || contains(needs.spyre-token-compare-tests.result, 'cancelled') ||
