@@ -15,7 +15,7 @@
 /hf_adapters/ @BenjSz @arielgera
 
 # --- Tests ---
-/tests/ @BenjSz @arielgera @ishizaki-k
+/tests/ @BenjSz @arielgera @kiszk
 
 # --- CI / GitHub Actions ---
 /.github/ @BenjSz @mehant-kammakomati2
