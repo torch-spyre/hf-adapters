@@ -13,15 +13,6 @@ name: Test matrix (reusable)
 on:
   workflow_call:
     inputs:
-      # Retained for caller compatibility only. Callers still pass
-      # `runner_label: linux`, so this input must stay declared (a reusable
-      # workflow rejects undeclared inputs). It is no longer used in any
-      # `runs-on` — image selection is done entirely via `image_label` below.
-      runner_label:
-        description: Deprecated/unused in runs-on; kept so callers passing it don't error. Image selection uses image_label.
-        required: true
-        type: string
-
       # IMAGE selector label — the LAST entry of every job's `runs-on`, alongside
       # the fixed labels [x86_64, spyre_pf_x1, linux]. This is what pins jobs to a
       # single homogeneous scaleSet. Normal runs use the standing set (default

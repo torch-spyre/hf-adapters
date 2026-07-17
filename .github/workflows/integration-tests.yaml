@@ -103,7 +103,6 @@ jobs:
     needs: provenance
     uses: ./.github/workflows/_test_matrix.yaml
     with:
-      runner_label: linux
       image_label: ${{ inputs.runner_label || 'image_torch_spyre_pinned' }}
       extra_test_flags: -vvv -s
       ref: ${{ inputs.ref || '' }}
