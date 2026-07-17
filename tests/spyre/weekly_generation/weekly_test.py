@@ -27,7 +27,7 @@ import sys
 import time
 import traceback as _traceback
 from asyncio import Queue
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from huggingface_hub.errors import HfHubHTTPError
@@ -35,6 +35,12 @@ from huggingface_hub.errors import HfHubHTTPError
 from tests.spyre.weekly_generation.result_sink import (
     EmbeddingGenerativeMode,
 )
+
+
+def _ts() -> str:
+    """Local-time timestamp prefix, e.g. '[2026-07-17 14:32:05]'."""
+    return datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+
 
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
@@ -344,7 +350,7 @@ def _process_batch(
 
     _child_entered: float = _t.monotonic()
     print(
-        f"      child[{os.getpid()}] entered _process_batch with {len(batch)} model(s)",
+        f"{_ts()}       child[{os.getpid()}] entered _process_batch with {len(batch)} model(s)",
         flush=True,
     )
 
@@ -417,7 +423,7 @@ def _process_batch(
                 rec["failure_category"] = FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
         results.append(rec)
         print(
-            f"      child[{os.getpid()}] finished model "
+            f"{_ts()}       child[{os.getpid()}] finished model "
             f"{len(results)}/{len(batch)}: {model_path!r}  "
             f"(verified_on_cpu={rec['verified_on_cpu']}, "
             f"verified_on_spyre={rec['verified_on_spyre']}, "
@@ -428,7 +434,7 @@ def _process_batch(
 
     result_queue.put(results)
     print(
-        f"      child[{os.getpid()}] done in "
+        f"{_ts()}       child[{os.getpid()}] done in "
         f"{_t.monotonic() - _child_entered:.2f}s ({len(results)} results)",
         flush=True,
     )
@@ -568,13 +574,13 @@ def main(argv: list[str] | None = None) -> None:
     # batching. That keeps batch sizes uniform relative to real work.
     prefiltered: list[dict] = []
     early_skipped: int = 0
-    print(f"Will process {len(to_process_list)} models in total.")
+    print(f"{_ts()} Will process {len(to_process_list)} models in total.")
     for row in to_process_list:
         model_path: str = str(row["model_id"])
         if not sink.should_insert_row(model_path):
             early_skipped += 1
             print(
-                f"    sink: '{model_path}' skipped early — "
+                f"{_ts()}     sink: '{model_path}' skipped early — "
                 f"recent snapshot exists within the "
                 f"{sink.__class__.__name__} skip window"
             )
@@ -582,7 +588,7 @@ def main(argv: list[str] | None = None) -> None:
         prefiltered.append(row)
     if early_skipped:
         print(
-            f"\nEarly-skip: {early_skipped}/{total} models already have a "
+            f"\n{_ts()} Early-skip: {early_skipped}/{total} models already have a "
             f"recent snapshot; {len(prefiltered)} left to evaluate.\n"
         )
 
@@ -603,11 +609,11 @@ def main(argv: list[str] | None = None) -> None:
             batch_start = time.monotonic()
             batch_paths = [str(r["model_id"]) for r in batch]
             print(
-                f"\n[batch {batch_idx}/{total_batches}] {len(batch)} model(s) "
+                f"\n{_ts()} [batch {batch_idx}/{total_batches}] {len(batch)} model(s) "
                 f"(overall elapsed: {batch_start - overall_start:.0f}s)"
             )
             for path in batch_paths:
-                print(f"    - {path}")
+                print(f"{_ts()}     - {path}")
 
             # Track which weights existed BEFORE this batch ran, so we can
             # decide per-model whether to delete after.
@@ -634,7 +640,7 @@ def main(argv: list[str] | None = None) -> None:
             # returns instantly, and an empty one signals a crash.
             if result_queue.empty():
                 print(
-                    f"    batch: worker exited code {proc.exitcode} "
+                    f"{_ts()}     batch: worker exited code {proc.exitcode} "
                     f"and returned no results — marking all {len(batch)} "
                     f"models as failed"
                 )
@@ -666,7 +672,7 @@ def main(argv: list[str] | None = None) -> None:
                 processed += 1
 
                 if rec.get("error"):
-                    print(f"    [{model_path}] error: {rec['error']}")
+                    print(f"{_ts()}     [{model_path}] error: {rec['error']}")
 
                 # Coerce added_date from ISO string (as the worker wrote it)
                 # to a date object for the sink.
@@ -698,12 +704,14 @@ def main(argv: list[str] | None = None) -> None:
                     error=(None if rec.get("error") is None else str(rec["error"])),
                 ):
                     print(
-                        f"    sink: row written for '{model_path}' "
+                        f"{_ts()}     sink: row written for '{model_path}' "
                         f"(verified_on_cpu={rec.get('verified_on_cpu')}, "
                         f"verified_on_spyre={rec.get('verified_on_spyre')})"
                     )
                 else:
-                    print(f"    sink: row skipped for '{model_path}' (guard rejected)")
+                    print(
+                        f"{_ts()}     sink: row skipped for '{model_path}' (guard rejected)"
+                    )
 
             # Cache cleanup: delete weights downloaded during this batch,
             # regardless of whether the worker processed each model.
@@ -713,7 +721,7 @@ def main(argv: list[str] | None = None) -> None:
 
             batch_elapsed = time.monotonic() - batch_start
             print(
-                f"    batch {batch_idx}/{total_batches} done: "
+                f"{_ts()}     batch {batch_idx}/{total_batches} done: "
                 f"{len(worker_results)} model(s) in {batch_elapsed:.1f}s  "
                 f"(per-model avg: {batch_elapsed / max(1, len(worker_results)):.1f}s)"
             )
@@ -723,25 +731,27 @@ def main(argv: list[str] | None = None) -> None:
             # whole run. No-op for sinks that write per-row (CSV).
             sink.flush()
     except KeyboardInterrupt:
-        print("\nInterrupted — results so far are saved; rerun to resume.")
+        print(f"\n{_ts()} Interrupted — results so far are saved; rerun to resume.")
     finally:
         # Clean up weights for the in-flight batch if interrupted mid-run.
         _ = _cleanup_batch_weights(batch_paths, had_weights_map, total_freed)
 
         sink.close()
         if args.write_to_csv:
-            print(f"\nCSV: '{args.write_to_csv}' closed ({processed} rows processed).")
+            print(
+                f"\n{_ts()} CSV: '{args.write_to_csv}' closed ({processed} rows processed)."
+            )
 
         overall_elapsed = time.monotonic() - overall_start
         mins, secs = divmod(int(overall_elapsed), 60)
         print(
             f"\n{'='*60}\n"
-            f"Processed {processed}/{total} models  |  "
+            f"{_ts()} Processed {processed}/{total} models  |  "
             f"Total time: {mins}m {secs:02d}s\n"
             f"{'='*60}"
         )
 
 
 if __name__ == "__main__":
-    print("Starting weekly generation...", flush=True)
+    print(f"{_ts()} Starting weekly generation...", flush=True)
     main()
