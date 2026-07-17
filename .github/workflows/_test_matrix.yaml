@@ -40,11 +40,11 @@ on:
         type: string
         default: ''
 
-      # pytest CLI flags for the multi-card (x2/x4) test jobs. Reserved: no
-      # multi-spyre job consumes this yet. Wire it into the pytest call of any
-      # x2/x4 job added below, mirroring extra_test_flags on the x1 jobs.
+      # pytest CLI flags for the multi-card (x2/x4) test jobs. Consumed by the
+      # spyre-vlm-e2e-tests-x2 job (gemma-4-12B on the 2-card runner). Callers
+      # pass "-vvv -s" to match the x1 jobs' verbosity.
       extra_test_flags_multi_spyre:
-        description: Extra flags passed to pytest for the multi-card (x2/x4) test jobs (e.g. "-v")
+        description: Extra flags passed to pytest for the multi-card (x2/x4) test jobs (e.g. "-vvv -s")
         required: false
         type: string
         default: ''
@@ -480,6 +480,60 @@ jobs:
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_vlm_e2e_spyre.py for ${{ matrix.model_key }}..."
           uv run pytest ${{ inputs.extra_test_flags }} tests/spyre/test_vlm_e2e_spyre.py -k "${{ matrix.model_key }}"
+          echo "tests done"
+
+  # Dedicated 2-card (x2) VLM job for the heaviest model. google/gemma-4-12B-it
+  # OOMs the 1-card runner (~71 GiB) — it "loses communication" ~27-34 min in
+  # (see PR #182), so it stays in the generate-matrix --exclude (kept off the x1
+  # spyre-vlm-e2e-tests vision_matrix, no duplicate) and runs ONLY here on the
+  # 2-card set (x8664-cards2-torchspyrepinned, 2 cards / ~143 GiB). Card count is
+  # pure runner placement via the spyre_pf_x2 label — the test needs no flag/env.
+  # NON-BLOCKING trial: continue-on-error, and intentionally NOT in the
+  # run-spyre-unit-tests gate — a failure/OOM here won't block merges. Promote to
+  # blocking (drop continue-on-error + add to the gate) once stably green.
+  spyre-vlm-e2e-tests-x2:
+    name: Spyre VLM e2e x2 (${{ matrix.model_key }})
+    needs: [generate-matrix]
+    continue-on-error: true
+    runs-on:
+      - x86_64
+      - spyre_pf_x2
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        model_key:
+          - google/gemma-4-12B-it
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+
+      - name: Run test_vlm_e2e_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_vlm_e2e_spyre.py for ${{ matrix.model_key }} on x2..."
+          uv run pytest ${{ inputs.extra_test_flags_multi_spyre }} tests/spyre/test_vlm_e2e_spyre.py -k "${{ matrix.model_key }}"
           echo "tests done"
 
   spyre-model-module-tests:

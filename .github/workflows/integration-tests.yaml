@@ -105,6 +105,7 @@ jobs:
     with:
       image_label: ${{ inputs.runner_label || 'image_torch_spyre_pinned' }}
       extra_test_flags: -vvv -s
+      extra_test_flags_multi_spyre: -vvv -s
       ref: ${{ inputs.ref || '' }}
       repository: ${{ inputs.repository || '' }}
       test_type: ${{ inputs.test_type || 'full' }}
