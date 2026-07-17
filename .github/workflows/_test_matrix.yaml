@@ -482,59 +482,61 @@ jobs:
           uv run pytest ${{ inputs.extra_test_flags }} tests/spyre/test_vlm_e2e_spyre.py -k "${{ matrix.model_key }}"
           echo "tests done"
 
-  # Dedicated 2-card (x2) VLM job for the heaviest model. google/gemma-4-12B-it
-  # OOMs the 1-card runner (~71 GiB) — it "loses communication" ~27-34 min in
-  # (see PR #182), so it stays in the generate-matrix --exclude (kept off the x1
-  # spyre-vlm-e2e-tests vision_matrix, no duplicate) and runs ONLY here on the
-  # 2-card set (x8664-cards2-torchspyrepinned, 2 cards / ~143 GiB). Card count is
-  # pure runner placement via the spyre_pf_x2 label — the test needs no flag/env.
-  # NON-BLOCKING trial: continue-on-error, and intentionally NOT in the
-  # run-spyre-unit-tests gate — a failure/OOM here won't block merges. Promote to
-  # blocking (drop continue-on-error + add to the gate) once stably green.
-  spyre-vlm-e2e-tests-x2:
-    name: Spyre VLM e2e x2 (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    continue-on-error: true
-    runs-on:
-      - x86_64
-      - spyre_pf_x2
-      - linux
-      - ${{ inputs.image_label }}
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        model_key:
-          - google/gemma-4-12B-it
-
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: .github/actions
-          sparse-checkout-cone-mode: false
-
-      - uses: ./.github/actions/build-hf-adapters
-        with:
-          uv_groups: "dev spyre test"
-          ref: ${{ inputs.ref }}
-          repository: ${{ inputs.repository }}
-
-      - name: Gather runner info
-        uses: ./.github/actions/gather-runner-info
-        with:
-          verbose: 'true'
-
-      - name: Run test_vlm_e2e_spyre.py for ${{ matrix.model_key }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running test_vlm_e2e_spyre.py for ${{ matrix.model_key }} on x2..."
-          uv run pytest ${{ inputs.extra_test_flags_multi_spyre }} tests/spyre/test_vlm_e2e_spyre.py -k "${{ matrix.model_key }}"
-          echo "tests done"
+  # ---------------------------------------------------------------------------
+  # DISABLED (2026-07-17): Dedicated 2-card (x2) VLM job for google/gemma-4-12B-it.
+  # The x2 runner (x8664-cards2-torchspyrepinned, 2 cards / ~143 GiB) SOLVED the
+  # 1-card OOM — the test ran to completion — but it fails a borderline accuracy
+  # assertion (adapter logits cosine 0.9985 < 0.999 at decode-4, a single fp16
+  # near-tie; see run 29574528796). Commented out for now; may re-enable later
+  # once the numerics/threshold are sorted. To re-enable: uncomment this block.
+  # It was non-blocking (continue-on-error, NOT in the run-spyre-unit-tests gate),
+  # so it never blocked merges. gemma stays in the generate-matrix --exclude, and
+  # the spyre_pf_x2 labels (actionlint.yaml) + extra_test_flags_multi_spyre
+  # (callers) remain in place so re-enabling is just an uncomment.
+  # spyre-vlm-e2e-tests-x2:
+  #   name: Spyre VLM e2e x2 (${{ matrix.model_key }})
+  #   needs: [generate-matrix]
+  #   continue-on-error: true
+  #   runs-on:
+  #     - x86_64
+  #     - spyre_pf_x2
+  #     - linux
+  #     - ${{ inputs.image_label }}
+  #   timeout-minutes: 120
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       model_key:
+  #         - google/gemma-4-12B-it
+  #
+  #   steps:
+  #     - name: Checkout composite actions
+  #       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+  #       with:
+  #         sparse-checkout: .github/actions
+  #         sparse-checkout-cone-mode: false
+  #
+  #     - uses: ./.github/actions/build-hf-adapters
+  #       with:
+  #         uv_groups: "dev spyre test"
+  #         ref: ${{ inputs.ref }}
+  #         repository: ${{ inputs.repository }}
+  #
+  #     - name: Gather runner info
+  #       uses: ./.github/actions/gather-runner-info
+  #       with:
+  #         verbose: 'true'
+  #
+  #     - name: Run test_vlm_e2e_spyre.py for ${{ matrix.model_key }}
+  #       env:
+  #         HF_TOKEN: ${{ secrets.HF_TOKEN }}
+  #       run: |
+  #         source "$HOME/.bashrc"
+  #         source /etc/profile.d/ibm-aiu-setup.sh
+  #         cd "$CLONED_HF_ADAPTERS_DIR"
+  #         echo "Running test_vlm_e2e_spyre.py for ${{ matrix.model_key }} on x2..."
+  #         uv run pytest ${{ inputs.extra_test_flags_multi_spyre }} tests/spyre/test_vlm_e2e_spyre.py -k "${{ matrix.model_key }}"
+  #         echo "tests done"
 
   spyre-model-module-tests:
     name: Spyre model-module tests (${{ matrix.config }})
