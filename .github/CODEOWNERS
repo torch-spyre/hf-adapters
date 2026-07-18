@@ -20,7 +20,7 @@
 
 # --- Tests ---
 /tests/ @BenjSz @arielgera @kiszk
-/tests/configs/ @BenjSz @arielgera @kiszk @anubhavjana
+/tests/configs/ @kiszk @anubhavjana
 
 # --- CI / GitHub Actions ---
 /.github/ @BenjSz @mehant-kammakomati2
@@ -31,4 +31,4 @@
 
 # --- Project configuration ---
 pyproject.toml @BenjSz @arielgera
-uv.lock @BenjSz @arielgera @anubhav-jana
+uv.lock @BenjSz @arielgera @anubhavjana
