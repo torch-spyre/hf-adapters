@@ -14,8 +14,13 @@
 # --- Core adapter library ---
 /hf_adapters/ @BenjSz @arielgera
 
+# --- Utilities ---
+/utils/ @BenjSz @arielgera @kiszk @anubhavjana
+
+
 # --- Tests ---
 /tests/ @BenjSz @arielgera @kiszk
+/tests/configs/ @BenjSz @arielgera @kiszk @anubhavjana
 
 # --- CI / GitHub Actions ---
 /.github/ @BenjSz @mehant-kammakomati2
