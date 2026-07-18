@@ -1010,7 +1010,7 @@ def write_module_config(
         output_path = output
     else:
         # Use tests/configs directory for unified format
-        output_path = f"./tests/configs/{model_name_normalized}_spyre.yaml"
+        output_path = f"./tests/configs/module_tests/{model_name_normalized}_spyre.yaml"
 
     # Write unified YAML file
     output_file = Path(output_path)

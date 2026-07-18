@@ -43,14 +43,17 @@ from transformers import AutoModelForImageTextToText
 
 from hf_adapters.auto_spyre_model import (
     IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
-    resolve_adapter_module,
 )
 from tests._vision_helpers import (
     build_vlm_batch,
     extra_image_inputs,
     stock_vlm_generate,
 )
-from tests.conftest import get_dtype_for_cpu, load_ref_model
+from tests.conftest import (
+    get_dtype_for_cpu,
+    load_ref_model,
+    resolve_adapter_module_for_test,
+)
 from tests.cpu.conftest import _set_rope_dtype, _unwrap_compiled_blocks
 from tests.model_registry import VISION_PATHS
 
@@ -86,7 +89,7 @@ def _adapter_generate(
 
 @pytest.mark.parametrize("model_path", VISION_PATHS, ids=VISION_PATHS)
 def test_vlm_generate(model_path: str) -> None:
-    adapter = resolve_adapter_module(
+    adapter = resolve_adapter_module_for_test(
         model_path, mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING
     )
     dtype = get_dtype_for_cpu(model_path=model_path)

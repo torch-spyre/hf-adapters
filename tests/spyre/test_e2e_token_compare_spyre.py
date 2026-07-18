@@ -40,7 +40,7 @@ from hf_adapters.hf_common import (
     get_model_dtype,
     move_model_to_spyre,
 )
-from tests.conftest import load_ref_model
+from tests.conftest import load_ref_model, resolve_adapter_module_for_test
 
 
 def hf_greedy_steps(
@@ -289,9 +289,7 @@ def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]
     """Full comparison for one model. Returns the list of comparison rows."""
     from transformers import AutoTokenizer
 
-    from hf_adapters.auto_spyre_model import resolve_adapter_module
-
-    adapter = resolve_adapter_module(model_path)
+    adapter = resolve_adapter_module_for_test(model_path)
 
     print(f"\n{'=' * 70}")
     print(f"  {model_path}")
@@ -323,11 +321,17 @@ def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]
     return _compare_results(hf_results, adapter_results, tokenizer, model_path)
 
 
+def token_compare_spyre(
+    model_path: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rows = _run_model_test(model_path)
+    mismatches = [r for r in rows if not r["top1_match"]]
+    return mismatches, rows
+
+
 @pytest.mark.parametrize("model_path", xfail_non_blocking(CAUSAL_PATHS))
 def test_e2e_token_compare_spyre(model_path: str) -> None:
-    rows = _run_model_test(model_path)
-    _print_table(rows)
+    mismatches, rows = token_compare_spyre(model_path)
     n_match = sum(1 for r in rows if r["top1_match"])
     print(f"\nTop-1 agreement: {n_match}/{len(rows)} steps")
-    mismatches = [r for r in rows if not r["top1_match"]]
     assert not mismatches, mismatches

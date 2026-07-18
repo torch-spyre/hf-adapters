@@ -38,10 +38,11 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 
-from hf_adapters.auto_spyre_model import (
-    resolve_adapter_module,
+from tests.conftest import (
+    get_dtype_for_cpu,
+    load_ref_model,
+    resolve_adapter_module_for_test,
 )
-from tests.conftest import get_dtype_for_cpu, load_ref_model
 from tests.cpu.conftest import _unwrap_compiled_blocks
 from tests.model_registry import CAUSAL_PATHS
 
@@ -179,7 +180,7 @@ def test_auto_loader(model_path):
     gc.collect()
 
     # Phase 2: HF reference (fresh)
-    adapter_mod = resolve_adapter_module(model_path)
+    adapter_mod = resolve_adapter_module_for_test(model_path)
     hf_model = load_ref_model(model_path, adapter_mod)
     encoded = tokenizer(PROMPT, return_tensors="pt")
     with torch.no_grad():

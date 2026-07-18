@@ -276,7 +276,7 @@ GENERATIVE_MODE = ViewMode(
     key="generative",
     label="Generative Models",
     icon="🤗",
-    csv_path=RESOURCES_DIR / "top_generative_models.csv",
+    csv_path=RESOURCES_DIR / "top_generative_models_DEPRECATED.csv",
     header_gradient="bg-gradient-to-r from-blue-600 to-purple-600",
     accent="blue",
 )
@@ -285,7 +285,7 @@ EMBEDDING_MODE = ViewMode(
     key="embedding",
     label="Embedding Models",
     icon="🧬",
-    csv_path=RESOURCES_DIR / "top_embedding_models.csv",
+    csv_path=RESOURCES_DIR / "top_embedding_models_DEPRECATED.csv",
     header_gradient="bg-gradient-to-r from-teal-600 to-emerald-600",
     accent="teal",
     extra_filters=(("is_multimodal", "Multimodal"),),

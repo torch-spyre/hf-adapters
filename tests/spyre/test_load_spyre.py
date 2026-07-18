@@ -26,6 +26,7 @@ Usage (on Spyre pod)::
 """
 
 import time
+from typing import Any
 
 import pytest
 from model_registry import CAUSAL_PATHS, EMBED_PATHS, xfail_non_blocking
@@ -35,6 +36,21 @@ from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
 
 @pytest.mark.parametrize("model_path", xfail_non_blocking(CAUSAL_PATHS))
 def test_load_causal_lm(model_path: str) -> None:
+
+    model_is_not_none, callables, load_s = load_causal_lm(model_path)
+
+    print(f"  [{model_path}] causal-LM load time: {load_s:.1f}s")
+    print("\n## Spyre Load Test Results\n")
+    print("| Path | Kind | Status | Load (s) |")
+    print("|------|------|--------|----------|")
+    print(f"| {model_path} | causal-LM | PASS | {load_s:.1f} |")
+    assert model_is_not_none, f"{model_path}: from_pretrained returned None"
+    assert (
+        callables
+    ), f"{model_path}: AutoSpyreModelForCausalLM did not attach generate()"
+
+
+def load_causal_lm(model_path: str) -> tuple[Any, Any, float]:
     from hf_adapters import AutoSpyreModelForCausalLM
 
     dtype = torch_dtype_for_model_path(model_path)
@@ -43,19 +59,13 @@ def test_load_causal_lm(model_path: str) -> None:
     model = AutoSpyreModelForCausalLM.from_pretrained(model_path, dtype=dtype)
     load_s = time.time() - t0
 
-    assert model is not None, f"{model_path}: from_pretrained returned None"
-    assert callable(
-        getattr(model, "generate", None)
-    ), f"{model_path}: AutoSpyreModelForCausalLM did not attach generate()"
-    print(f"  [{model_path}] causal-LM load time: {load_s:.1f}s")
-    print("\n## Spyre Load Test Results\n")
-    print("| Path | Kind | Status | Load (s) |")
-    print("|------|------|--------|----------|")
-    print(f"| {model_path} | causal-LM | PASS | {load_s:.1f} |")
+    model_is_not_none = model is not None
+
+    callables = callable(getattr(model, "generate", None))
+    return model_is_not_none, callables, load_s
 
 
-@pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
-def test_load_embedding(model_path: str) -> None:
+def load_embedding(model_path: str) -> tuple[Any, float]:
     from hf_adapters import AutoSpyreModel
 
     dtype = torch_dtype_for_model_path(model_path)
@@ -63,8 +73,14 @@ def test_load_embedding(model_path: str) -> None:
     t0 = time.time()
     model = AutoSpyreModel.from_pretrained(model_path, dtype=dtype)
     load_s = time.time() - t0
+    return model is not None, load_s
 
-    assert model is not None, f"{model_path}: from_pretrained returned None"
+
+@pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
+def test_load_embedding(model_path: str) -> None:
+
+    model_loaded, load_s = load_embedding(model_path)
+    assert model_loaded, f"{model_path}: from_pretrained returned None"
     print(f"  [{model_path}] embedding load time: {load_s:.1f}s")
     print("\n## Spyre Load Test Results\n")
     print("| Path | Kind | Status | Load (s) |")

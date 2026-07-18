@@ -44,8 +44,7 @@ from transformers import (
 )
 
 from hf_adapters import AutoSpyreModelForCausalLM
-from hf_adapters.auto_spyre_model import resolve_adapter_module
-from tests.conftest import load_ref_model
+from tests.conftest import load_ref_model, resolve_adapter_module_for_test
 
 
 def _load_spyre_model(model_path: str) -> Module:
@@ -61,7 +60,7 @@ def _setup(
     need_ref: bool,
 ):
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    adapter = resolve_adapter_module(model_path)
+    adapter = resolve_adapter_module_for_test(model_path)
 
     ref_model = load_ref_model(model_path, adapter_mod=adapter) if need_ref else None
     spyre_model = _load_spyre_model(model_path)

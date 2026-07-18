@@ -167,8 +167,12 @@ def resolve_adapter_module(
     mapping: dict[
         type[PretrainedConfig], ModuleType
     ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
+    trust_remote_code: bool | None = None,
 ) -> ModuleType:
-    model_config: PretrainedConfig = AutoConfig.from_pretrained(model_name_or_path)
+    model_config: PretrainedConfig = AutoConfig.from_pretrained(
+        model_name_or_path, trust_remote_code=trust_remote_code
+    )
+
     if type(model_config) not in mapping:
         raise SpyreNoAdapterError(
             f"Model {model_name_or_path} of type {type(model_config)} "

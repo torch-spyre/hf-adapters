@@ -8,6 +8,7 @@ columns* it wants on top of the shared schema.
 """
 
 import csv
+import logging
 import re
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +20,9 @@ from transformers import AutoConfig
 
 # Import the mapping to get supported config classes dynamically
 from hf_adapters.auto_spyre_model import CONFIG_TO_ADAPTER_MODULE_MAPPING
+
+logging.getLogger("transformers").setLevel(logging.ERROR)
+
 
 # Get the resources directory (parent of resources/__init__.py)
 RESOURCES_DIR: Path = Path(__file__).resolve().parent.parent / "resources"
@@ -116,6 +120,15 @@ def is_baseline_keep(model: ModelInfo) -> bool:
     return True
 
 
+def contains_remote_code(model: ModelInfo) -> bool:
+    """Return False if the model requires trust_remote_code=True to load its config."""
+    try:
+        AutoConfig.from_pretrained(model.id, trust_remote_code=False)
+        return False
+    except (ValueError, OSError):
+        return True
+
+
 def format_number_to_billions_smart(num: int | float) -> str:
     """Smart formatting that adjusts precision based on magnitude."""
     billions: float = num / 1_000_000_000
@@ -178,7 +191,7 @@ def get_param_count(model: ModelInfo) -> int | None:
 def get_config_type(model_id: str, token: str | bool) -> str | None:
     try:
         model_config = AutoConfig.from_pretrained(
-            model_id, token=token, trust_remote_code=True
+            model_id, token=token, trust_remote_code=False
         )
         return type(model_config).__name__
     except Exception:
@@ -209,37 +222,47 @@ def build_catalog(
     fetch_fn: Callable[[int], Iterable[ModelInfo]],
     filter_fn: Callable[[ModelInfo], bool],
     limit: int,
-    output_csv: Path | str,
+    output_csv: Path | str | None,
     label: str,
     extra_columns: (
         list[tuple[str, Callable[[ModelInfo, str | None], object]]] | None
     ) = None,
     allow_millions: bool = False,
     token: str | bool,
-) -> None:
-    """Fetch → filter → enrich → write a ranked model catalog CSV.
+) -> list[dict[str, object]]:
+    """Fetch → filter → enrich → return a ranked model catalog as a list of dicts.
 
     Args:
         fetch_fn: callable(limit) -> list of raw model objects (over-fetched).
         filter_fn: callable(model) -> bool, keep the model if True.
         limit: number of rows to write after filtering.
-        output_csv: destination path.
+        output_csv: destination path, or None to skip writing.
         label: human-readable noun for log lines (e.g. "generative").
         extra_columns: optional list of (header, value_fn) where
             value_fn(model, config_class) -> cell. Inserted before config_class.
         allow_millions: pass-through to the size-name extractor.
         token: HF token (or True) for AutoConfig downloads.
+
+    Returns:
+        List of dicts, one per model, keyed by column name.
     """
     extra_columns = extra_columns or []
 
     candidates: list[ModelInfo] = list(fetch_fn(limit))
     print(f"Retrieved {len(candidates)} raw {label} candidates.")
 
-    models: list[ModelInfo] = [m for m in candidates if filter_fn(m)]
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        keep_flags: list[bool] = list(
+            tqdm(
+                ex.map(filter_fn, candidates),
+                total=len(candidates),
+                desc="Filtering candidates",
+            )
+        )
+    models: list[ModelInfo] = [m for m, keep in zip(candidates, keep_flags) if keep]
     print(f"Kept {len(models)} {label} models after filtering.")
 
     models = models[:limit]
-    print(f"Writing top {len(models)} to {output_csv}")
 
     base_head: list[str] = [
         "rank",
@@ -251,51 +274,59 @@ def build_catalog(
         "parameters (str)",
         "parameters",
         "library",
-        "is_gated",
-        "is_moe",
+        # "is_gated",
+        # "is_moe",
     ]
     extra_head: list[str] = [h for h, _ in extra_columns]
     tail_head: list[str] = ["is_custom_code", "config_class", "is_supported", "Year"]
+    header: list[str] = base_head + extra_head + tail_head
 
-    with open(output_csv, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(base_head + extra_head + tail_head)
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        config_classes: list[str | None] = list(
+            tqdm(
+                ex.map(lambda m: get_config_type(m.id, token), models),
+                total=len(models),
+                desc="Fetching config classes",
+            )
+        )
 
-        with ThreadPoolExecutor(max_workers=16) as ex:
-            config_classes: list[str | None] = list(
-                tqdm(
-                    ex.map(lambda m: get_config_type(m.id, token), models),
-                    total=len(models),
-                    desc="Fetching config classes",
+    rows: list[dict[str, object]] = []
+    for rank, (m, config_class) in enumerate(zip(models, config_classes), start=1):
+        architectures: list[str] | None = (m.config or {}).get("architectures")
+        arch_str: str | None = ";".join(architectures) if architectures else None
+        param_str, param_int = _resolve_param_columns(m, allow_millions)
+        extra_vals: list[object] = [fn(m, config_class) for _, fn in extra_columns]
+        rows.append(
+            dict(
+                zip(
+                    header,
+                    [
+                        rank,
+                        m.id,
+                        m.downloads,
+                        m.likes,
+                        (m.config or {}).get("model_type"),
+                        arch_str,
+                        param_str,
+                        param_int,
+                        m.library_name,
+                        # bool(m.gated),
+                        # is_moe(m),
+                        *extra_vals,
+                        is_custom_code(m),
+                        config_class,
+                        is_supported_config(config_class),
+                        m.created_at.year if m.created_at else None,
+                    ],
                 )
             )
+        )
 
-        for rank, (m, config_class) in enumerate(zip(models, config_classes), start=1):
-            architectures: list[str] | None = (m.config or {}).get("architectures")
-            arch_str: str | None = ";".join(architectures) if architectures else None
-            param_str, param_int = _resolve_param_columns(m, allow_millions)
-            extra_vals: list[object] = [fn(m, config_class) for _, fn in extra_columns]
-            writer.writerow(
-                [
-                    rank,
-                    m.id,
-                    m.downloads,
-                    m.likes,
-                    (m.config or {}).get("model_type"),
-                    arch_str,
-                    param_str,
-                    param_int,
-                    m.library_name,
-                    bool(m.gated),
-                    is_moe(m),
-                    *extra_vals,
-                    is_custom_code(m),
-                    config_class,
-                    is_supported_config(config_class),
-                    m.created_at.year if m.created_at else None,
-                ]
-            )
+    if output_csv is not None:
+        print(f"Writing top {len(rows)} to {output_csv}")
+        with open(output_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=header)
+            writer.writeheader()
+            writer.writerows(rows)
 
-    print(f"Done. Top 5 {label} models:")
-    for i, m in enumerate(models[:5], start=1):
-        print(f"  {i}. {m.id} — {m.downloads:,} downloads")
+    return rows

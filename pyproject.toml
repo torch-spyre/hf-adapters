@@ -84,7 +84,10 @@ dev = [
     "ruff>=0.15.6",
     "mypy>=1.14.0,<2",
     "typing-extensions",
-    "nicegui"
+    "nicegui",
+    "clickhouse-connect>=1.4.1",
+    "lxml",
+    "clickhouse-driver"
 ]
 models-ops = [
     "huggingface_hub",
