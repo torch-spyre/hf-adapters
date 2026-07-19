@@ -162,9 +162,9 @@ def block_forward(
 
 Typical structure:
 1. `prepare_rope_and_heads(model)` — checks head_dim, pads if needed, creates `PrecomputedRotaryEmbedding`
-2. `patch_rmsnorm(ModelRMSNorm)`
-3. `pad_lm_head(model)`
-4. Compile blocks: `model._spyre_compiled_blocks = [_make_compiled_block(l) for l in get_backbone(model).layers]`
+2. `pad_lm_head(model)`
+3. Compile blocks: `model._spyre_compiled_blocks = [_make_compiled_block(l) for l in get_backbone(model).layers]`
+4. Compile the final norm: `model._spyre_compiled_norm = torch.compile(get_backbone(model).norm, dynamic=False)`
 
 Loading and generation are handled by `AutoSpyreModelForCausalLM`
 — adapters no longer need `load_model`/`generate` wrappers.
