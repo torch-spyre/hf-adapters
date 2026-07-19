@@ -171,6 +171,8 @@ def is_baseline_keep(model: ModelInfo) -> bool:
     model_id_lower: str = model.id.lower()
     if any(sub in model_id_lower for sub in NON_NATIVE_ID_SUBSTRINGS):
         return False
+    if "nsfw" in tags(model):
+        return False
     return True
 
 
