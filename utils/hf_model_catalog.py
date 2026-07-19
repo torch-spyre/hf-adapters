@@ -452,4 +452,11 @@ def build_catalog(
             writer.writeheader()
             writer.writerows(rows)
 
+    # Attach the source ModelInfo to each row AFTER the CSV write. It is a
+    # runtime-only field (not serializable, and never part of the schema),
+    # useful for callers that need metadata the row dict does not expose —
+    # e.g. safetensors.parameters, gated, sha, siblings.
+    for row, m in zip(rows, models):
+        row["model_info"] = m
+
     return rows

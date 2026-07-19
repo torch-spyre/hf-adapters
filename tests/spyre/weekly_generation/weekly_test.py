@@ -52,6 +52,7 @@ FAILURE_CATEGORY_HARDWARE_EXCEPTION = "hardware_exception"
 FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION = "test_execution_exception"
 FAILURE_CATEGORY_VERIFICATION_FAILED = "verification_failed"
 FAILURE_CATEGORY_WORKER_CRASHED = "worker_crashed"
+FAILURE_CATEGORY_MOE = "moe"
 
 
 def _classify_failure(err: str, default: str) -> str:
@@ -518,6 +519,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     from utils.fetch_top_embedding_models import fetch_top_embedding_models
     from utils.fetch_top_generative_models import fetch_top_generative_models
+    from utils.hf_model_catalog import is_moe
 
     args = _parse_args(argv)
     preexisting: set = _repos_with_weights()
@@ -554,9 +556,10 @@ def main(argv: list[str] | None = None) -> None:
     # batching. That keeps batch sizes uniform relative to real work.
     prefiltered: list[dict] = []
     early_skipped: int = 0
+    moe_skipped: int = 0
     print(f"{_ts()} Will process {len(to_process_list)} models in total.")
     for row in to_process_list:
-        model_path: str = str(row["model_id"])
+        model_path = str(row["model_id"])
         if not sink.should_insert_row(model_path):
             early_skipped += 1
             print(
@@ -565,11 +568,39 @@ def main(argv: list[str] | None = None) -> None:
                 f"{sink.__class__.__name__} skip window"
             )
             continue
+        # MoE models aren't supported on Spyre yet — write the row up-front
+        # with failure_category=moe and don't send it to the workers.
+        model_info = row.get("model_info")
+        if model_info is not None and is_moe(model_info):
+            moe_skipped += 1
+            sink.add_entry(
+                model_name=model_path,
+                config_class=str(row.get("config_class") or ""),
+                adapter_name="",
+                added_date=None,
+                snapshot_date=snapshot_date,
+                verified_on_cpu=False,
+                verified_on_gpu=False,
+                verified_on_spyre=False,
+                num_downloads=int(row.get("downloads") or 0),
+                family=str(row.get("model_type") or ""),
+                architecture=str(row.get("architectures") or ""),
+                parameters_number=int(row.get("parameters") or 0),
+                failure_category=FAILURE_CATEGORY_MOE,
+                error=None,
+            )
+            print(f"{_ts()}     sink: '{model_path}' skipped early — MoE model")
+            continue
         prefiltered.append(row)
     if early_skipped:
         print(
             f"\n{_ts()} Early-skip: {early_skipped}/{total} models already have a "
             f"recent snapshot; {len(prefiltered)} left to evaluate.\n"
+        )
+    if moe_skipped:
+        print(
+            f"{_ts()} MoE-skip: {moe_skipped}/{total} models tagged as moe and "
+            f"written directly to the sink.\n"
         )
 
     batches: list[list[dict]] = _chunk_into_batches(
