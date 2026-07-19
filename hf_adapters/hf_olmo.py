@@ -29,6 +29,7 @@ Usage::
     outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
+import torch
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
@@ -45,10 +46,9 @@ _run_backbone_forward = standard_gqa_backbone_forward
 
 
 def _patch_olmo_layernorm(layernorm_cls):
-    """Patch OlmoLayerNorm to stay in fp16 on Spyre (no dtype conversion).
+    """Patch OlmoLayerNorm: LayerNorm at input dtype on Spyre, fp32 on CPU.
 
-    OlmoLayerNorm has no learnable weight — it's just functional layer_norm
-    with eps=1e-5. The stock HF code casts to float32 which Spyre can't do.
+    OlmoLayerNorm has no learnable weight — just functional layer_norm, eps=1e-5.
     """
 
     def _forward_fp16(self, hidden_states):
@@ -84,3 +84,4 @@ def prepare_for_spyre(model):
     model._spyre_compiled_blocks = [
         make_standard_gqa_block(layer) for layer in get_backbone(model).layers
     ]
+    model._spyre_compiled_norm = torch.compile(get_backbone(model).norm, dynamic=False)

@@ -126,3 +126,4 @@ def prepare_for_spyre(model):
         if no_rope is not None and idx < len(no_rope):
             use_rope = bool(no_rope[idx])
         model._spyre_compiled_blocks.append(_make_compiled_block(layer, use_rope))
+    model._spyre_compiled_norm = torch.compile(get_backbone(model).norm, dynamic=False)

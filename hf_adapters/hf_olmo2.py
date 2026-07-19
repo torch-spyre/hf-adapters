@@ -123,3 +123,4 @@ def prepare_for_spyre(model):
     model._spyre_compiled_blocks = [
         _make_compiled_block(layer) for layer in get_backbone(model).layers
     ]
+    model._spyre_compiled_norm = torch.compile(get_backbone(model).norm, dynamic=False)
