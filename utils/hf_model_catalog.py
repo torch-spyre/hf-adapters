@@ -152,6 +152,12 @@ def is_custom_code(model: ModelInfo) -> bool:
     return bool(config.get("auto_map"))
 
 
+def is_nsfw(model: ModelInfo) -> bool:
+    if "nsfw" in tags(model):
+        return True
+    return False
+
+
 # Repo-id substrings marking non-native conversions (ONNX/GGUF/MLX), dropped.
 NON_NATIVE_ID_SUBSTRINGS: tuple[str, ...] = ("onnx", "gguf", "mlx")
 

@@ -32,6 +32,7 @@ from utils.hf_model_catalog import (
     build_catalog,
     contains_remote_code,
     is_baseline_keep,
+    is_nsfw,
     tags,
     with_transient_retry,
 )
@@ -150,6 +151,8 @@ def _keep(model: ModelInfo) -> bool:
     if _is_reranker(model):
         return False
     if model.gated:
+        return False
+    if is_nsfw(model):
         return False
     if contains_remote_code(model):
         return False
