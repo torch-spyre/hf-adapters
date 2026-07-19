@@ -229,29 +229,43 @@ def _load_on_cpu(
         _hf_common.DEVICE = _orig_device  # restore
 
 
-def eval_generative(model_id: str, adapter) -> dict:
-    from tests.spyre.test_e2e_smoke_spyre import run_smoke_test
-    from tests.spyre.test_e2e_token_compare_spyre import token_compare_spyre
+def eval_model(model_id: str, adapter, mode: EmbeddingGenerativeMode) -> dict:
+    """Load *model_id* on CPU then run the mode's verification pipeline.
 
+    Returns a metrics dict with keys ``load``, ``correct``, ``error``,
+    ``failure_category``. Generative mode runs smoke + token-compare;
+    embedding mode runs the cosine-compare. ``correct`` is
+    ``smoke_passed and not mismatches`` — in embedding mode there is no smoke
+    step, so ``smoke_passed`` is treated as True and the outcome reduces to
+    ``not mismatches``.
+    """
     load_on_cpu = False
-    run_smoke_status = False
+    smoke_passed = mode == EmbeddingGenerativeMode.EMBEDDING
     mismatches = True
-    result = {"error": "", "failure_category": None}
+    result: dict = {"error": "", "failure_category": None}
 
-    """Load and compare token outputs for one generative model. Returns a metrics dict."""
     try:
         if adapter is not None:
-            load_on_cpu, load_error = _load_on_cpu(
-                model_path=model_id, mode=EmbeddingGenerativeMode.GENERATIVE
-            )
+            load_on_cpu, load_error = _load_on_cpu(model_path=model_id, mode=mode)
             if load_error and not result["error"]:
                 result["error"] = load_error
             if load_on_cpu:
-                run_smoke_status = (
-                    run_smoke_test(model_path=model_id)["status"] == "PASS"
-                )
-                mismatches, _ = token_compare_spyre(model_id)
+                if mode == EmbeddingGenerativeMode.GENERATIVE:
+                    from tests.spyre.test_e2e_smoke_spyre import run_smoke_test
+                    from tests.spyre.test_e2e_token_compare_spyre import (
+                        token_compare_spyre,
+                    )
 
+                    smoke_passed = (
+                        run_smoke_test(model_path=model_id)["status"] == "PASS"
+                    )
+                    mismatches, _ = token_compare_spyre(model_id)
+                else:
+                    from tests.spyre.test_e2e_embed_compare_spyre import (
+                        embed_compare_spyre,
+                    )
+
+                    mismatches, _ = embed_compare_spyre(model_id)
     except Exception as e:
         err: str = (
             f"{type(e).__name__}: {e}\n"
@@ -262,43 +276,7 @@ def eval_generative(model_id: str, adapter) -> dict:
             err, FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
         )
     finally:
-        result["correct"] = run_smoke_status and not mismatches
-        result["load"] = load_on_cpu
-        if result["failure_category"] is None and load_on_cpu and not result["correct"]:
-            result["failure_category"] = FAILURE_CATEGORY_VERIFICATION_FAILED
-        return result
-
-
-def eval_embedding(model_id: str, adapter) -> dict:
-    from tests.spyre.test_e2e_embed_compare_spyre import embed_compare_spyre
-
-    load_on_cpu = False
-    mismatches = True
-    result = {"error": "", "failure_category": None}
-
-    """Load and compare embeddings for one model. Returns a metrics dict."""
-    try:
-        if adapter is not None:
-            # First we check that it is loadable on cpu:
-            load_on_cpu, load_error = _load_on_cpu(
-                model_path=model_id, mode=EmbeddingGenerativeMode.EMBEDDING
-            )
-            if load_error and not result["error"]:
-                result["error"] = load_error
-
-            if load_on_cpu:
-                mismatches, _ = embed_compare_spyre(model_id)
-    except Exception as e:
-        err: str = (
-            f"{type(e).__name__}: {e}\n"
-            f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
-        )
-        result["error"] = err
-        result["failure_category"] = _classify_failure(
-            err, FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
-        )
-    finally:
-        result["correct"] = not mismatches
+        result["correct"] = smoke_passed and not mismatches
         result["load"] = load_on_cpu
         if result["failure_category"] is None and load_on_cpu and not result["correct"]:
             result["failure_category"] = FAILURE_CATEGORY_VERIFICATION_FAILED
@@ -391,12 +369,7 @@ def _process_batch(
             rec["adapter_name"] = adapter_name
             rec["added_date"] = adapter_dates.get(adapter_name)
 
-            match mode:
-                case EmbeddingGenerativeMode.EMBEDDING:
-                    eval_fn = eval_embedding
-                case EmbeddingGenerativeMode.GENERATIVE:
-                    eval_fn = eval_generative
-            metrics = eval_fn(model_path, adapter_module)
+            metrics = eval_model(model_path, adapter_module, mode)
             rec["verified_on_cpu"] = bool(metrics.get("load", False))
             rec["verified_on_spyre"] = bool(metrics.get("correct", False))
             rec["error"] = metrics.get("error") or None
