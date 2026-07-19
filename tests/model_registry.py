@@ -346,6 +346,7 @@ VISION_MODELS = {
         "path": "ibm-granite/granite-vision-4.1-4b",
         "adapter": "hf_granite_vision_mm.py",
         "kind": "vlm",  # multimodal: image + text -> generated text
+        "size": "4b",
     },
     # hf_pixtral_vision.py — Pixtral vision tower of Mistral3 Vision models
     "mistral3_vision_pixtral": {
@@ -360,6 +361,7 @@ VISION_MODELS = {
         "path": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
         "adapter": "hf_mistral3_vision_mm.py",
         "kind": "vlm",  # multimodal: image + text -> generated text
+        "size": "24b",
     },
     # hf_mistral3_vision_mm.py — Ministral-3 14B (ministral3 text backbone variant)
     "ministral3_vision_mm": {
@@ -368,6 +370,16 @@ VISION_MODELS = {
         "adapter": "hf_mistral3_vision_mm.py",
         "kind": "vlm",  # multimodal: image + text -> generated text
         "dtype": "bfloat16",  # blocked-FP8 checkpoint, dequantized to bf16
+        "size": "14b",
+    },
+    # hf_mistral3_vision_mm.py — Ministral-3 3B (smallest ministral3 vision variant)
+    "ministral3_3b_vision_mm": {
+        "name": "Ministral-3-3B-Instruct-2512 (both towers)",
+        "path": "mistralai/Ministral-3-3B-Instruct-2512",
+        "adapter": "hf_mistral3_vision_mm.py",
+        "kind": "vlm",  # multimodal: image + text -> generated text
+        "dtype": "bfloat16",  # blocked-FP8 checkpoint, dequantized to bf16
+        "size": "3b",
     },
     # hf_gemma4_mm.py — unified encoder-free VLM (image + text -> text)
     "gemma4_mm": {
@@ -375,6 +387,7 @@ VISION_MODELS = {
         "path": "google/gemma-4-12B-it",
         "adapter": "hf_gemma4_mm.py",
         "kind": "vlm",  # multimodal: image + text -> generated text
+        "size": "12b",
     },
 }
 
@@ -398,79 +411,56 @@ def _parse_size(size_str: str) -> float:
     return float(size_str.lower().rstrip("b"))
 
 
-def _select_representative_models() -> tuple[list[str], list[str]]:
+def _select_representative_paths(
+    models: dict[str, dict],
+    *,
+    include_gated: bool,
+    predicate=None,
+) -> list[str]:
+    """Select one representative model path per adapter module.
+
+    Groups ``models`` by adapter and picks the smallest (by ``size``) model in
+    each group, breaking ties by key name for determinism. Gated models are
+    skipped unless ``include_gated``. An optional ``predicate(info) -> bool``
+    filters which entries are eligible (e.g. ``kind == "vlm"`` for vision).
     """
-    Programmatically select one representative model per adapter module.
-    Prefers smaller models for faster test execution.
-
-    Returns:
-        tuple: (causal_paths, embed_paths) where each is a list of model keys
-    """
-
-    # Map adapter module names to model keys
-    adapter_to_causal_keys: dict[str, list[str]] = {}
-    adapter_to_embed_keys: dict[str, list[str]] = {}
-
-    include_gated = _include_gated()
-
-    # Group causal LM models by adapter
-    for key, info in CAUSAL_LM_MODELS.items():
+    adapter_to_keys: dict[str, list[str]] = {}
+    for key, info in models.items():
         if info.get("is_gated", False) and not include_gated:
             continue
-        adapter = info["adapter"].replace(".py", "")
-        if adapter not in adapter_to_causal_keys:
-            adapter_to_causal_keys[adapter] = []
-        adapter_to_causal_keys[adapter].append(key)
-
-    # Group embedding models by adapter
-    for key, info in EMBEDDING_MODELS.items():
-        if info.get("is_gated", False) and not include_gated:
+        if predicate is not None and not predicate(info):
             continue
         adapter = info["adapter"].replace(".py", "")
-        if adapter not in adapter_to_embed_keys:
-            adapter_to_embed_keys[adapter] = []
-        adapter_to_embed_keys[adapter].append(key)
+        adapter_to_keys.setdefault(adapter, []).append(key)
 
-    # Select one representative per adapter for causal LM
-    # Prefer smaller models (by size field) for faster tests
-    causal_paths: list[str] = []
-    for adapter in adapter_to_causal_keys:
-        keys = adapter_to_causal_keys[adapter]
-        # Sort by size field (smallest first), then by key name for consistency
+    paths: list[str] = []
+    for keys in adapter_to_keys.values():
+        # Prefer smaller models (by size field) for faster tests; tie-break on
+        # key name for consistency across runs.
         sorted_keys = sorted(
             keys,
-            key=lambda k: (
-                _parse_size(CAUSAL_LM_MODELS[k]["size"]),  # Sort by size
-                k,  # Then by key name for consistency
-            ),
+            key=lambda k: (_parse_size(models[k]["size"]), k),
         )
-        causal_paths.append(CAUSAL_LM_MODELS[sorted_keys[0]]["path"])
-
-    # Select one representative per adapter for embeddings
-    # Prefer smaller models (by size field) for faster tests
-    embed_paths: list[str] = []
-    for adapter in adapter_to_embed_keys:
-        keys = adapter_to_embed_keys[adapter]
-        # Sort by size field (smallest first), then by key name for consistency
-        sorted_keys = sorted(
-            keys,
-            key=lambda k: (
-                _parse_size(EMBEDDING_MODELS[k]["size"]),  # Sort by size
-                k,  # Then by key name for consistency
-            ),
-        )
-        embed_paths.append(EMBEDDING_MODELS[sorted_keys[0]]["path"])
-
-    return causal_paths, embed_paths
+        paths.append(models[sorted_keys[0]]["path"])
+    return paths
 
 
-CAUSAL_PATHS, EMBED_PATHS = _select_representative_models()
+# One representative model per adapter module (smallest by size), so tests
+# automatically cover new adapters. A single ``_include_gated()`` snapshot is
+# shared across all three selections. ``kind == "vlm"`` excludes bare vision towers.
+_include_gated_flag = _include_gated()
 
-VISION_PATHS: list[str] = [
-    v["path"]
-    for v in VISION_MODELS.values()
-    if v.get("kind") == "vlm" and (_include_gated() or not v.get("is_gated", False))
-]
+CAUSAL_PATHS: list[str] = _select_representative_paths(
+    CAUSAL_LM_MODELS, include_gated=_include_gated_flag
+)
+EMBED_PATHS: list[str] = _select_representative_paths(
+    EMBEDDING_MODELS, include_gated=_include_gated_flag
+)
+VISION_PATHS: list[str] = _select_representative_paths(
+    VISION_MODELS,
+    include_gated=_include_gated_flag,
+    predicate=lambda info: info.get("kind") == "vlm",
+)
 
 # Causal-LM models that just went green on torchs-spyre but aren't yet proven stable
 # across repeated runs. Kept as a non-blocking signal (xfail, non-strict) for
