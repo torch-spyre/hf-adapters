@@ -14,14 +14,12 @@ Additional flags:
 
 * ``--top-k N``        Number of top models to fetch by download count (default: 200).
 * ``--write-to-csv F`` Write results to a CSV file instead of ClickHouse.
-* ``--random-run``     Stub out Spyre calls with random booleans (dry-run).
 """
 
 import argparse
 import logging
 import multiprocessing
 import os
-import random
 import subprocess
 import sys
 import time
@@ -160,21 +158,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "into ClickHouse. No DB connection is made when this flag is set."
         ),
     )
-    parser.add_argument(
-        "--random-run",
-        action="store_true",
-        default=False,
-        help=(
-            "Replace Spyre evaluation calls with random boolean stubs "
-            "(_temp_random_bool). Useful for dry-runs without Spyre hardware."
-        ),
-    )
     return parser.parse_args(argv)
-
-
-def _temp_random_bool() -> bool:
-    time.sleep(random.uniform(0.25, 0.5))
-    return random.choice([True, False])
 
 
 def _load_on_cpu(
@@ -226,7 +210,7 @@ def _load_on_cpu(
         _hf_common.DEVICE = _orig_device  # restore
 
 
-def eval_generative(model_id: str, adapter, random_run: bool = False) -> dict:
+def eval_generative(model_id: str, adapter) -> dict:
     from tests.spyre.test_e2e_smoke_spyre import run_smoke_test
     from tests.spyre.test_e2e_token_compare_spyre import token_compare_spyre
 
@@ -238,23 +222,16 @@ def eval_generative(model_id: str, adapter, random_run: bool = False) -> dict:
     """Load and compare token outputs for one generative model. Returns a metrics dict."""
     try:
         if adapter is not None:
-            if random_run:
-                load_on_cpu = _temp_random_bool()
-            else:
-                load_on_cpu, load_error = _load_on_cpu(
-                    model_path=model_id, mode=EmbeddingGenerativeMode.GENERATIVE
-                )
-                if load_error and not result["error"]:
-                    result["error"] = load_error
+            load_on_cpu, load_error = _load_on_cpu(
+                model_path=model_id, mode=EmbeddingGenerativeMode.GENERATIVE
+            )
+            if load_error and not result["error"]:
+                result["error"] = load_error
             if load_on_cpu:
-                if random_run:
-                    run_smoke_status = _temp_random_bool()
-                    mismatches = _temp_random_bool()
-                else:
-                    run_smoke_status = (
-                        run_smoke_test(model_path=model_id)["status"] == "PASS"
-                    )
-                    mismatches, _ = token_compare_spyre(model_id)
+                run_smoke_status = (
+                    run_smoke_test(model_path=model_id)["status"] == "PASS"
+                )
+                mismatches, _ = token_compare_spyre(model_id)
 
     except Exception as e:
         result["error"] = (
@@ -270,7 +247,7 @@ def eval_generative(model_id: str, adapter, random_run: bool = False) -> dict:
         return result
 
 
-def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
+def eval_embedding(model_id: str, adapter) -> dict:
     from tests.spyre.test_e2e_embed_compare_spyre import embed_compare_spyre
 
     load_on_cpu = False
@@ -281,20 +258,14 @@ def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
     try:
         if adapter is not None:
             # First we check that it is loadable on cpu:
-            if random_run:
-                load_on_cpu = _temp_random_bool()
-            else:
-                load_on_cpu, load_error = _load_on_cpu(
-                    model_path=model_id, mode=EmbeddingGenerativeMode.EMBEDDING
-                )
-                if load_error and not result["error"]:
-                    result["error"] = load_error
+            load_on_cpu, load_error = _load_on_cpu(
+                model_path=model_id, mode=EmbeddingGenerativeMode.EMBEDDING
+            )
+            if load_error and not result["error"]:
+                result["error"] = load_error
 
             if load_on_cpu:
-                if random_run:
-                    mismatches = _temp_random_bool()
-                else:
-                    mismatches, _ = embed_compare_spyre(model_id)
+                mismatches, _ = embed_compare_spyre(model_id)
     except Exception as e:
         result["error"] = (
             f"{type(e).__name__}: {e}\n"
@@ -311,7 +282,6 @@ def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
 
 def _process_batch(
     batch: list[dict],
-    random_run: bool,
     adapter_dates: dict[str, str | None],
     result_queue: Queue,
     mode: EmbeddingGenerativeMode,
@@ -401,7 +371,7 @@ def _process_batch(
                     eval_fn = eval_embedding
                 case EmbeddingGenerativeMode.GENERATIVE:
                     eval_fn = eval_generative
-            metrics = eval_fn(model_path, adapter_module, random_run=random_run)
+            metrics = eval_fn(model_path, adapter_module)
             rec["verified_on_cpu"] = bool(metrics.get("load", False))
             rec["verified_on_spyre"] = bool(metrics.get("correct", False))
             rec["error"] = metrics.get("error") or None
@@ -624,7 +594,6 @@ def main(argv: list[str] | None = None) -> None:
                 target=_process_batch,
                 args=(
                     batch,
-                    args.random_run,
                     adapter_dates,
                     result_queue,
                     mode,
