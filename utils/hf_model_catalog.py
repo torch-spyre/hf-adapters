@@ -152,12 +152,6 @@ def is_custom_code(model: ModelInfo) -> bool:
     return bool(config.get("auto_map"))
 
 
-def is_nsfw(model: ModelInfo) -> bool:
-    if "nsfw" in tags(model):
-        return True
-    return False
-
-
 # Repo-id substrings marking non-native conversions (ONNX/GGUF/MLX), dropped.
 NON_NATIVE_ID_SUBSTRINGS: tuple[str, ...] = ("onnx", "gguf", "mlx")
 
@@ -170,6 +164,8 @@ def is_baseline_keep(model: ModelInfo) -> bool:
         return False
     model_id_lower: str = model.id.lower()
     if any(sub in model_id_lower for sub in NON_NATIVE_ID_SUBSTRINGS):
+        return False
+    if "nsfw" in tags(model):
         return False
     return True
 
