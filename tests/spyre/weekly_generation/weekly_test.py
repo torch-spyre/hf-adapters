@@ -48,6 +48,7 @@ FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER = "not-implemented-adapter"
 FAILURE_CATEGORY_MODEL_TOO_LARGE = "model_too_large"
 FAILURE_CATEGORY_CPU_LOAD_FAILED = "cpu_load_failed"
 FAILURE_CATEGORY_QUANTIZED_MODEL = "quantized_model"
+FAILURE_CATEGORY_HARDWARE_EXCEPTION = "hardware_exception"
 FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION = "test_execution_exception"
 FAILURE_CATEGORY_VERIFICATION_FAILED = "verification_failed"
 FAILURE_CATEGORY_WORKER_CRASHED = "worker_crashed"
@@ -56,14 +57,23 @@ FAILURE_CATEGORY_WORKER_CRASHED = "worker_crashed"
 def _classify_failure(err: str, default: str) -> str:
     """Bucket a raw error/traceback string into a failure_category.
 
-    Runtime signal for quantized checkpoints — bitsandbytes / AWQ / GPTQ error
-    text almost always contains 'quantiz', and 'optimum' catches the
-    optimum-quanto / optimum-neuron loaders. Anything unrecognised falls
-    through to *default* (usually the surrounding context's fallback:
-    cpu_load_failed at load time, test_execution_exception at eval time).
+    Signals in order of specificity:
+
+    * ``"Failed to open the IBM Spyre VFIO device"`` — the accelerator itself
+      is unreachable (driver, permissions, another process holding it, …);
+      the model under test is not to blame, so tag as hardware_exception.
+    * ``"quantiz"`` / ``"optimum"`` — bitsandbytes / AWQ / GPTQ error text
+      almost always contains ``quantiz``, and ``optimum`` catches the
+      optimum-quanto / optimum-neuron loaders.
+
+    Anything unrecognised falls through to *default* (usually the surrounding
+    context's fallback: cpu_load_failed at load time, test_execution_exception
+    at eval time).
     """
     if not err:
         return default
+    if "Failed to open the IBM Spyre VFIO device" in err:
+        return FAILURE_CATEGORY_HARDWARE_EXCEPTION
     lowered: str = err.lower()
     if "quantiz" in lowered or "optimum" in lowered:
         return FAILURE_CATEGORY_QUANTIZED_MODEL
