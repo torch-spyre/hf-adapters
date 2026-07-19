@@ -79,7 +79,7 @@ _WEIGHT_SUFFIXES = (
 # amortize per-child spawn + import + kernel-teardown cost (~15 s currently)
 # across more work. Lower values reduce the blast radius when the Spyre
 # driver/state gets into a bad shape mid-batch.
-GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS: int = 25
+GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS: int = 2
 EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS: int = 90
 
 
