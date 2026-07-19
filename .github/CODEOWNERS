@@ -12,10 +12,10 @@
 * @BenjSz @arielgera
 
 # --- Core adapter library ---
-/hf_adapters/ @BenjSz @arielgera
+/hf_adapters/ @BenjSz @arielgera @Mohini-Shrivastava
 
 # --- Utilities ---
-/utils/ @BenjSz @arielgera @kiszk @anubhavjana
+/utils/ @kiszk @anubhavjana
 
 
 # --- Tests ---
@@ -23,7 +23,7 @@
 /tests/configs/ @kiszk @anubhavjana
 
 # --- CI / GitHub Actions ---
-/.github/ @BenjSz @mehant-kammakomati2
+/.github/ @BenjSz @kmehant
 
 # --- Documentation ---
 /docs/ @BenjSz @arielgera
@@ -31,4 +31,4 @@
 
 # --- Project configuration ---
 pyproject.toml @BenjSz @arielgera
-uv.lock @BenjSz @arielgera @anubhavjana
+uv.lock @BenjSz @anubhavjana
