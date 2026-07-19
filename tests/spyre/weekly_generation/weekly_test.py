@@ -47,6 +47,7 @@ MAX_NUMBER_PARAMS = 60_000_000_000
 FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER = "not-implemented-adapter"
 FAILURE_CATEGORY_MODEL_TOO_LARGE = "model_too_large"
 FAILURE_CATEGORY_CPU_LOAD_FAILED = "cpu_load_failed"
+FAILURE_CATEGORY_CPU_GENERATE_FAILED = "cpu_generate_failed"
 FAILURE_CATEGORY_QUANTIZED_MODEL = "quantized_model"
 FAILURE_CATEGORY_HARDWARE_EXCEPTION = "hardware_exception"
 FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION = "test_execution_exception"
@@ -240,15 +241,61 @@ def _load_on_cpu(
         _hf_common.DEVICE = _orig_device  # restore
 
 
+def _cpu_generate(model_path: str) -> tuple[bool, str | None]:
+    """Run a single-prompt HF ``generate()`` on CPU for *model_path*.
+
+    Separate from ``_load_on_cpu``: load succeeding tells us the checkpoint
+    is well-formed, generate succeeding tells us the forward pass runs
+    end-to-end (catches lazy shape errors, tokenizer/config mismatches, and
+    custom-code bugs that don't surface at ``from_pretrained`` time).
+
+    Returns ``(ok, error_message)`` with the same convention as
+    ``_load_on_cpu``.
+    """
+    import hf_adapters.hf_common as _hf_common
+    from tests.cpu._generate_helpers import simple_generate
+
+    _orig_device = _hf_common.DEVICE
+    _hf_common.DEVICE = "cpu"
+    try:
+        simple_generate(model_path=model_path)
+        return True, None
+    except HfHubHTTPError as e:
+        if e.response is not None and e.response.status_code >= 500:
+            raise
+        err: str = (
+            f"{type(e).__name__}: {e}\n"
+            f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
+        )
+        print(f"_cpu_generate exception - {e}")
+        return False, err
+    except Exception as e:
+        err = (
+            f"{type(e).__name__}: {e}\n"
+            f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
+        )
+        print(f"_cpu_generate exception - {e}")
+        return False, err
+    finally:
+        _hf_common.DEVICE = _orig_device
+
+
 def eval_model(model_id: str, adapter, mode: EmbeddingGenerativeMode) -> dict:
     """Load *model_id* on CPU then run the mode's verification pipeline.
 
+    Generative mode: CPU-load → CPU-generate (single-prompt HF forward pass)
+    → Spyre smoke + token-compare. The intermediate CPU-generate step catches
+    lazy shape errors, tokenizer/config mismatches, and custom-code bugs that
+    don't surface at ``from_pretrained`` time; on failure the row is tagged
+    ``cpu_generate_failed`` and the Spyre steps are skipped.
+
+    Embedding mode: CPU-load → Spyre cosine-compare (no generate step —
+    embedders don't have a ``.generate()`` method).
+
     Returns a metrics dict with keys ``load``, ``correct``, ``error``,
-    ``failure_category``. Generative mode runs smoke + token-compare;
-    embedding mode runs the cosine-compare. ``correct`` is
-    ``smoke_passed and not mismatches`` — in embedding mode there is no smoke
-    step, so ``smoke_passed`` is treated as True and the outcome reduces to
-    ``not mismatches``.
+    ``failure_category``. ``correct`` is ``smoke_passed and not mismatches``
+    — in embedding mode there is no smoke step, so ``smoke_passed`` is
+    treated as True and the outcome reduces to ``not mismatches``.
     """
     load_on_cpu = False
     smoke_passed = mode == EmbeddingGenerativeMode.EMBEDDING
@@ -262,15 +309,27 @@ def eval_model(model_id: str, adapter, mode: EmbeddingGenerativeMode) -> dict:
                 result["error"] = load_error
             if load_on_cpu:
                 if mode == EmbeddingGenerativeMode.GENERATIVE:
-                    from tests.spyre.test_e2e_smoke_spyre import run_smoke_test
-                    from tests.spyre.test_e2e_token_compare_spyre import (
-                        token_compare_spyre,
-                    )
+                    # Extra CPU-generate step — a load that succeeds but crashes
+                    # here means the checkpoint is malformed in a way that only
+                    # surfaces during forward. Stop before we waste Spyre time.
+                    generate_ok, generate_error = _cpu_generate(model_path=model_id)
+                    if not generate_ok:
+                        if generate_error and not result["error"]:
+                            result["error"] = generate_error
+                        result["failure_category"] = _classify_failure(
+                            generate_error or "",
+                            FAILURE_CATEGORY_CPU_GENERATE_FAILED,
+                        )
+                    else:
+                        from tests.spyre.test_e2e_smoke_spyre import run_smoke_test
+                        from tests.spyre.test_e2e_token_compare_spyre import (
+                            token_compare_spyre,
+                        )
 
-                    smoke_passed = (
-                        run_smoke_test(model_path=model_id)["status"] == "PASS"
-                    )
-                    mismatches, _ = token_compare_spyre(model_id)
+                        smoke_passed = (
+                            run_smoke_test(model_path=model_id)["status"] == "PASS"
+                        )
+                        mismatches, _ = token_compare_spyre(model_id)
                 else:
                     from tests.spyre.test_e2e_embed_compare_spyre import (
                         embed_compare_spyre,
