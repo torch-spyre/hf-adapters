@@ -31,6 +31,7 @@ from utils.hf_model_catalog import (
     RESOURCES_DIR,
     build_catalog,
     contains_remote_code,
+    has_loadable_weights,
     is_baseline_keep,
     is_nsfw,
     tags,
@@ -143,20 +144,32 @@ def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
     return sorted(by_id.values(), key=lambda m: (m.downloads or 0), reverse=True)
 
 
-def _keep(model: ModelInfo) -> bool:
-    if not is_baseline_keep(model):
-        return False
-    if not _has_embedding_signal(model):
-        return False
-    if _is_reranker(model):
-        return False
-    if model.gated:
-        return False
-    if is_nsfw(model):
-        return False
-    if contains_remote_code(model):
-        return False
-    return True
+def _make_keep(token: str | bool):
+    """Build the _keep predicate with *token* bound.
+
+    Ordering matters: the cheap metadata-only checks run first so we only
+    spend the ``has_loadable_weights`` HTTP call on the ~1k candidates that
+    would otherwise survive.
+    """
+
+    def _keep(model: ModelInfo) -> bool:
+        if not is_baseline_keep(model):
+            return False
+        if not _has_embedding_signal(model):
+            return False
+        if _is_reranker(model):
+            return False
+        if model.gated:
+            return False
+        if is_nsfw(model):
+            return False
+        if contains_remote_code(model):
+            return False
+        if not has_loadable_weights(model, token):
+            return False
+        return True
+
+    return _keep
 
 
 def fetch_top_embedding_models(
@@ -166,7 +179,7 @@ def fetch_top_embedding_models(
     api: HfApi = HfApi(token=token)
     return build_catalog(
         fetch_fn=lambda lim: _fetch(api, lim),
-        filter_fn=_keep,
+        filter_fn=_make_keep(token),
         limit=limit,
         output_csv=output_csv,
         label="embedding",
