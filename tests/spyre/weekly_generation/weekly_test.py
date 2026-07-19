@@ -47,9 +47,28 @@ MAX_NUMBER_PARAMS = 60_000_000_000
 FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER = "not-implemented-adapter"
 FAILURE_CATEGORY_MODEL_TOO_LARGE = "model_too_large"
 FAILURE_CATEGORY_CPU_LOAD_FAILED = "cpu_load_failed"
+FAILURE_CATEGORY_QUANTIZED_MODEL = "quantized_model"
 FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION = "test_execution_exception"
 FAILURE_CATEGORY_VERIFICATION_FAILED = "verification_failed"
 FAILURE_CATEGORY_WORKER_CRASHED = "worker_crashed"
+
+
+def _classify_failure(err: str, default: str) -> str:
+    """Bucket a raw error/traceback string into a failure_category.
+
+    Runtime signal for quantized checkpoints — bitsandbytes / AWQ / GPTQ error
+    text almost always contains 'quantiz', and 'optimum' catches the
+    optimum-quanto / optimum-neuron loaders. Anything unrecognised falls
+    through to *default* (usually the surrounding context's fallback:
+    cpu_load_failed at load time, test_execution_exception at eval time).
+    """
+    if not err:
+        return default
+    lowered: str = err.lower()
+    if "quantiz" in lowered or "optimum" in lowered:
+        return FAILURE_CATEGORY_QUANTIZED_MODEL
+    return default
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SPYRE_TESTS_DIR = _REPO_ROOT / "tests" / "spyre"
@@ -234,11 +253,14 @@ def eval_generative(model_id: str, adapter) -> dict:
                 mismatches, _ = token_compare_spyre(model_id)
 
     except Exception as e:
-        result["error"] = (
+        err: str = (
             f"{type(e).__name__}: {e}\n"
             f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
         )
-        result["failure_category"] = FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
+        result["error"] = err
+        result["failure_category"] = _classify_failure(
+            err, FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
+        )
     finally:
         result["correct"] = run_smoke_status and not mismatches
         result["load"] = load_on_cpu
@@ -267,11 +289,14 @@ def eval_embedding(model_id: str, adapter) -> dict:
             if load_on_cpu:
                 mismatches, _ = embed_compare_spyre(model_id)
     except Exception as e:
-        result["error"] = (
+        err: str = (
             f"{type(e).__name__}: {e}\n"
             f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
         )
-        result["failure_category"] = FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
+        result["error"] = err
+        result["failure_category"] = _classify_failure(
+            err, FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
+        )
     finally:
         result["correct"] = not mismatches
         result["load"] = load_on_cpu
@@ -377,7 +402,9 @@ def _process_batch(
             rec["error"] = metrics.get("error") or None
             rec["failure_category"] = metrics.get("failure_category") or None
             if not rec["verified_on_cpu"] and rec["failure_category"] is None:
-                rec["failure_category"] = FAILURE_CATEGORY_CPU_LOAD_FAILED
+                rec["failure_category"] = _classify_failure(
+                    rec["error"] or "", FAILURE_CATEGORY_CPU_LOAD_FAILED
+                )
         except Exception as e:
             # Skip the error/traceback for shallow failure categories where the
             # failure_category itself is fully self-describing.
