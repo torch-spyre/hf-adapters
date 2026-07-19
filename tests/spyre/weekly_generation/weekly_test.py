@@ -360,15 +360,6 @@ def _process_batch(
             "failure_category": None,
         }
         try:
-            # Reject models too large to bring up on Spyre before evaluating.
-            params = row.get("parameters")
-            if params not in (None, "") and int(params) > MAX_NUMBER_PARAMS:
-                rec["failure_category"] = FAILURE_CATEGORY_MODEL_TOO_LARGE
-                raise Exception(
-                    f"Model {model_path} has {int(params):,} parameters, "
-                    f"exceeding the 60B limit for Spyre bring-up."
-                )
-
             try:
                 adapter_module = resolve_adapter_module_for_test(model_path)
             except Exception:
@@ -557,6 +548,7 @@ def main(argv: list[str] | None = None) -> None:
     prefiltered: list[dict] = []
     early_skipped: int = 0
     moe_skipped: int = 0
+    too_large_skipped: int = 0
     print(f"{_ts()} Will process {len(to_process_list)} models in total.")
     for row in to_process_list:
         model_path = str(row["model_id"])
@@ -566,6 +558,36 @@ def main(argv: list[str] | None = None) -> None:
                 f"{_ts()}     sink: '{model_path}' skipped early — "
                 f"recent snapshot exists within the "
                 f"{sink.__class__.__name__} skip window"
+            )
+            continue
+        # Reject models too large to bring up on Spyre BEFORE spawning a
+        # worker. Same intent as the in-worker guard in _process_batch, but
+        # catches everything the fetcher already sized so no worker time is
+        # wasted. _process_batch keeps its own check as a defensive backstop
+        # for rows where parameters were unknown at fetch time.
+        params = row.get("parameters")
+        if params not in (None, "") and int(params) > MAX_NUMBER_PARAMS:
+            too_large_skipped += 1
+            sink.add_entry(
+                model_name=model_path,
+                config_class=str(row.get("config_class") or ""),
+                adapter_name="",
+                added_date=None,
+                snapshot_date=snapshot_date,
+                verified_on_cpu=False,
+                verified_on_gpu=False,
+                verified_on_spyre=False,
+                num_downloads=int(row.get("downloads") or 0),
+                family=str(row.get("model_type") or ""),
+                architecture=str(row.get("architectures") or ""),
+                parameters_number=int(params),
+                failure_category=FAILURE_CATEGORY_MODEL_TOO_LARGE,
+                error=None,
+            )
+            print(
+                f"{_ts()}     sink: '{model_path}' skipped early — "
+                f"{int(params):,} parameters exceeds the "
+                f"{MAX_NUMBER_PARAMS:,} limit"
             )
             continue
         # MoE models aren't supported on Spyre yet — write the row up-front
@@ -596,6 +618,12 @@ def main(argv: list[str] | None = None) -> None:
         print(
             f"\n{_ts()} Early-skip: {early_skipped}/{total} models already have a "
             f"recent snapshot; {len(prefiltered)} left to evaluate.\n"
+        )
+    if too_large_skipped:
+        print(
+            f"{_ts()} Too-large-skip: {too_large_skipped}/{total} models exceed "
+            f"the {MAX_NUMBER_PARAMS:,} parameter limit and were written directly "
+            f"to the sink.\n"
         )
     if moe_skipped:
         print(
