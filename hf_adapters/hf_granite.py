@@ -34,7 +34,6 @@ from hf_adapters.hf_common import (
     get_backbone,
     kv_cache_update,
     pad_lm_head,
-    patch_rmsnorm,
     prepare_rope_and_heads,
 )
 
@@ -133,7 +132,7 @@ def _run_backbone_forward(
             cache_position,
         )
 
-    h = backbone.norm(h)
+    h = model._spyre_compiled_norm(h)
     return h
 
 
@@ -167,11 +166,9 @@ def _run_forward(
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to Granite 3.3 model in-place."""
-    from transformers.models.granite.modeling_granite import GraniteRMSNorm
-
     prepare_rope_and_heads(model)
-    patch_rmsnorm(GraniteRMSNorm)
     pad_lm_head(model)
     model._spyre_compiled_blocks = [
         _make_compiled_block(layer) for layer in get_backbone(model).layers
     ]
+    model._spyre_compiled_norm = torch.compile(get_backbone(model).norm, dynamic=False)

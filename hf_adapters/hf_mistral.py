@@ -40,6 +40,4 @@ _run_backbone_forward = standard_gqa_backbone_forward
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to Mistral model in-place."""
-    from transformers.models.mistral.modeling_mistral import MistralRMSNorm
-
-    prepare_standard_gqa(model, MistralRMSNorm)
+    prepare_standard_gqa(model)

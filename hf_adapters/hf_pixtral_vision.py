@@ -45,7 +45,6 @@ Spyre adaptations:
   patch embeddings are moved to Spyre before the compiled blocks run.
 - The block-diagonal attention mask (each image sees only its own patches) is
   built on CPU as an additive fp16 mask and moved to Spyre.
-- ``PixtralRMSNorm`` is patched via ``patch_rmsnorm`` (same as text decoders).
 
 Usage::
 
@@ -67,7 +66,6 @@ from hf_adapters.hf_common import (
     _pad_proj_output_simple,
     apply_rope_matmul,
     pad_qk_proj_for_rope,
-    patch_rmsnorm,
 )
 
 _is_vision_tower = True
@@ -273,7 +271,7 @@ def _make_compiled_pixtral_block(layer, num_heads, head_dim, scale):
     """Compiled pre-LN Pixtral encoder block (RMSNorm + RoPE SDPA + SwiGLU MLP).
 
     Unlike SigLIP (``make_vision_encoder_block``), Pixtral uses:
-    - RMSNorm instead of LayerNorm (patched by ``patch_rmsnorm``)
+    - RMSNorm instead of LayerNorm
     - 2D RoPE via ``apply_rope_matmul`` (``selected_freqs`` passed in)
     - SwiGLU MLP (``gate_proj``, ``up_proj``, ``down_proj``)
     - An additive attention mask (block-diagonal; passed in)
@@ -303,11 +301,17 @@ def _make_compiled_pixtral_block(layer, num_heads, head_dim, scale):
         v = v_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
 
         # Apply 2D RoPE via matmul (Spyre-safe: no slicing).
-        # .contiguous() is REQUIRED on Spyre: fusing apply_rope_matmul directly
-        # into the SDPA compiled graph selects a lowering that overflows fp16 to
-        # Inf for some blocks' activations (observed at the last tower block on
-        # the Mistral-Small-3.1 e2e image). Materializing the rope'd q/k at a
-        # buffer boundary breaks that fusion.
+        # .contiguous() breaks a Spyre graph-fusion lowering defect: fusing
+        # apply_rope_matmul into the SDPA graph selects a lowering that overflows
+        # fp16 -> Inf at a NON-stick-aligned patch length (observed at the last
+        # tower block on the Mistral-Small-3.1 e2e image, P=3500). Materializing
+        # the rope'd q/k at a buffer boundary forces SDPA to lower as its own
+        # region and stays finite. Tracked upstream on torch-spyre#3113 (same
+        # ragged-P root cause as the score-matmul mis-lowering; see the
+        # RoPE->SDPA-fusion comment there). Verified 2026-07-09 (one variant per
+        # process, real block-23 inputs): the Inf fires ONLY at the ragged P, so
+        # once the prefill_vision_tower stick-pad (P->3520) is in place this
+        # .contiguous() is redundant — kept as cheap, algebraically-inert insurance.
         q = apply_rope_matmul(q, selected_freqs).contiguous()
         k = apply_rope_matmul(k, selected_freqs).contiguous()
 
@@ -343,13 +347,11 @@ def _make_compiled_pixtral_block(layer, num_heads, head_dim, scale):
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to a Pixtral vision tower in-place.
 
-    Pads attention heads to a stick boundary (64 → 128), patches
-    ``PixtralRMSNorm``, builds the CPU patch-embed closure and the compiled
-    pre-LN encoder blocks, and stashes the 2D RoPE ``inv_freq`` table and
-    max-patch-count for per-image RoPE matrix construction.
+    Pads attention heads to a stick boundary (64 → 128), builds the CPU
+    patch-embed closure and the compiled pre-LN encoder blocks, and stashes the
+    2D RoPE ``inv_freq`` table and max-patch-count for per-image RoPE matrix
+    construction.
     """
-    from transformers.models.pixtral.modeling_pixtral import PixtralRMSNorm
-
     tower = _get_pixtral_tower(model)
     cfg = tower.config
 
@@ -362,7 +364,9 @@ def prepare_for_spyre(model):
     # Pad heads so that D/2 >= BLOCK_SIZE, i.e. head_dim >= 2*BLOCK_SIZE.
     # apply_rope_matmul reshapes to [B, L, H, 2, D/2]; the D/2 dimension must
     # be stick-aligned (>= BLOCK_SIZE = 64). A head_dim of 64 gives D/2 = 32
-    # which is sub-stick and triggers an InductorError on Spyre.
+    # which is sub-stick and triggers an InductorError on Spyre
+    # (Unexpected stick expression 32*d3 + d4; tracked upstream on
+    # torch-spyre#3138 — contingent on the rotate_half mis-lowering #3133).
     # Using 2*BLOCK_SIZE as the alignment target (same as prepare_rope_and_heads)
     # ensures D/2 = head_dim//2 >= BLOCK_SIZE. 64 → 128 for the default config.
     padded_head_dim = ((orig_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)) * (
@@ -371,9 +375,6 @@ def prepare_for_spyre(model):
     if padded_head_dim > orig_head_dim:
         _pad_pixtral_heads(layers, num_heads, orig_head_dim, padded_head_dim)
     head_dim = padded_head_dim
-
-    # Patch PixtralRMSNorm in-place (fp16 on Spyre, float32 on CPU).
-    patch_rmsnorm(PixtralRMSNorm)
 
     # Snapshot the CPU patch-embed closure (Conv2d + ln_pre; keeps working on
     # CPU after _move_to_spyre_with_layout relocates the tower's params).

@@ -38,7 +38,6 @@ from hf_adapters.hf_common import (
     get_backbone,
     kv_cache_update,
     pad_lm_head,
-    patch_rmsnorm,
     standard_gqa_backbone_forward,
     standard_gqa_forward,
 )
@@ -114,10 +113,7 @@ _run_backbone_forward = standard_gqa_backbone_forward
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to SmolLM3 model in-place."""
-    from transformers.models.smollm3.modeling_smollm3 import SmolLM3RMSNorm
-
     model._spyre_rope = PrecomputedRotaryEmbedding(get_backbone(model).rotary_emb)
-    patch_rmsnorm(SmolLM3RMSNorm)
     pad_lm_head(model)
 
     # Determine which layers use RoPE vs NoPE

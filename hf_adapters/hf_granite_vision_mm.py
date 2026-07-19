@@ -71,7 +71,6 @@ from hf_adapters.hf_common import (
     get_model_dtype,
     pad_and_position,
     pad_lm_head,
-    patch_rmsnorm,
     prepare_rope_and_heads,
     select_next_token,
 )
@@ -86,21 +85,17 @@ def prepare_for_spyre(model):
     prep + compiled Granite blocks + padded LM head, mirroring
     ``hf_granite.prepare_for_spyre`` but against the VLM's nested text backbone.
     """
-    from transformers.models.granite4_vision.modeling_granite4_vision import (
-        Granite4VisionTextRMSNorm,
-    )
-
     # --- Vision tower (resolves model.model.vision_tower) ---
     hf_siglip_vision.prepare_for_spyre(model)
 
     # --- Text decoder (model.model.language_model via get_backbone) ---
     prepare_rope_and_heads(model)
-    patch_rmsnorm(Granite4VisionTextRMSNorm)
     pad_lm_head(model)
     backbone = get_backbone(model)
     model._spyre_text_blocks = [
         _make_compiled_block(layer) for layer in backbone.layers
     ]
+    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
 
 
 def _embed_text(model, input_ids):
@@ -260,7 +255,6 @@ def _run_text_backbone(
     CPU (see ``_inject_deepstack``). Used at prefill only — decode steps pass
     ``deepstack=None``.
     """
-    backbone = get_backbone(model)
     h = inputs_embeds
     selected_freqs = model._spyre_rope(h, position_ids)
     for i, compiled_block in enumerate(model._spyre_text_blocks):
@@ -276,7 +270,7 @@ def _run_text_backbone(
             token_index,
             cache_position,
         )
-    return backbone.norm(h)
+    return model._spyre_compiled_norm(h)
 
 
 def _prefill_forward(

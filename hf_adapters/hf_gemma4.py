@@ -102,7 +102,9 @@ def _gemma4_backbone(model):
 def _patch_gemma4_rmsnorm(rmsnorm_cls):
     """Patch a Gemma4 ``RMSNorm`` class to stay in fp16 on Spyre.
 
-    Mirrors ``hf_common.patch_rmsnorm`` but for Gemma4's RMSNorm, which:
+    Unlike standard adapters (which leave RMSNorm as stock HF now that PR #2927
+    lowers the fp32-upcast pattern), Gemma4's RMSNorm needs a dedicated patch
+    because it:
       - uses ``self.eps`` (not ``variance_epsilon``),
       - is optionally scale-free (``with_scale=False`` for V-norm and a couple
         of MoE/router norms — those carry no ``weight``),

@@ -47,7 +47,6 @@ from hf_adapters.hf_common import (
     kv_cache_update,
     pad_lm_head,
     pad_qk_proj_for_rope,
-    patch_rmsnorm,
     permute_proj_for_rope,
     rope_dim_permutation,
     split_fused_linear,
@@ -186,7 +185,7 @@ def _run_backbone_forward(
             cache_position,
         )
 
-    h = backbone.norm(h)
+    h = model._spyre_compiled_norm(h)
     return h
 
 
@@ -219,8 +218,6 @@ def _run_forward(
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to Phi-3 model in-place."""
-    from transformers.models.phi3.modeling_phi3 import Phi3RMSNorm
-
     cfg = model.config
     hd = cfg.hidden_size // cfg.num_attention_heads
 
@@ -242,7 +239,6 @@ def prepare_for_spyre(model):
     model._spyre_rope = PrecomputedRotaryEmbedding(
         get_backbone(model).rotary_emb, padded_head_dim=work_hd
     )
-    patch_rmsnorm(Phi3RMSNorm)
 
     # LM head: smooth-padded to a stick-aligned vocab whose per-core span fits
     # the 256 MB EAR limit (see hf_common.pad_lm_head).
@@ -298,3 +294,4 @@ def prepare_for_spyre(model):
             model._spyre_up_projs,
         )
     ]
+    model._spyre_compiled_norm = torch.compile(get_backbone(model).norm, dynamic=False)
