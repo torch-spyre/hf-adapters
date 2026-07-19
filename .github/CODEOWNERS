@@ -9,26 +9,26 @@
 # Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
 # --- Default owners for everything in the repository ---
-* @BenjSz @arielgera
+* @BenjSz @arielge
 
 # --- Core adapter library ---
-/hf_adapters/ @BenjSz @arielgera @Mohini-Shrivastava
+/hf_adapters/ @BenjSz @arielge @Mohini-Shrivastava
 
 # --- Utilities ---
 /utils/ @kiszk @anubhavjana
 
 
 # --- Tests ---
-/tests/ @BenjSz @arielgera @kiszk
+/tests/ @BenjSz @arielge @kiszk
 /tests/configs/ @kiszk @anubhavjana
 
 # --- CI / GitHub Actions ---
 /.github/ @BenjSz @kmehant
 
 # --- Documentation ---
-/docs/ @BenjSz @arielgera
-*.md @BenjSz @arielgera
+/docs/ @BenjSz @arielge
+*.md @BenjSz @arielge
 
 # --- Project configuration ---
-pyproject.toml @BenjSz @arielgera
+pyproject.toml @BenjSz @arielge
 uv.lock @BenjSz @anubhavjana
