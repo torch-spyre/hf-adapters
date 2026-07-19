@@ -3,8 +3,10 @@ self-hosted-runner:
     - x86_64
     - spyre_pf_x0
     - spyre_pf_x1
+    - spyre_pf_x2
     - spyre_pf_x0__pvc_1tb_x1
     - spyre_pf_x1__pvc_1tb_x1
+    - spyre_pf_x2__pvc_1tb_x1
     - image_spyre_inference
     - image_torch_spyre
     - image_torch_spyre_pinned

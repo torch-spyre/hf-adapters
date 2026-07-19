@@ -1,0 +1,34 @@
+# CODEOWNERS
+#
+# Each line assigns code ownership to one or more GitHub users or teams.
+# The last matching pattern for a given file path takes precedence.
+# Owners are automatically added as reviewers when a pull request
+# modifies files they own.
+#
+# Syntax: <pattern> <@user-or-team> [<@user-or-team> ...]
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# --- Default owners for everything in the repository ---
+* @BenjSz @arielge
+
+# --- Core adapter library ---
+/hf_adapters/ @BenjSz @arielge @Mohini-Shrivastava
+
+# --- Utilities ---
+/utils/ @kiszk @anubhavjana
+
+
+# --- Tests ---
+/tests/ @BenjSz @arielge @kiszk
+/tests/configs/ @kiszk @anubhavjana
+
+# --- CI / GitHub Actions ---
+/.github/ @BenjSz @kmehant
+
+# --- Documentation ---
+/docs/ @BenjSz @arielge
+*.md @BenjSz @arielge
+
+# --- Project configuration ---
+pyproject.toml @BenjSz @arielge
+uv.lock @BenjSz @anubhavjana

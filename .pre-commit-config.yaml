@@ -32,6 +32,16 @@ repos:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
 
+  # Enforce that uv.lock is re-generated whenever pyproject.toml changes
+  - repo: local
+    hooks:
+      - id: uv-lock-sync
+        name: uv.lock up-to-date
+        entry: scripts/check_uv_lock.sh
+        language: script
+        pass_filenames: false
+        always_run: false
+
   # MyPy - Static type checker (uses project venv so torch/transformers stubs resolve)
   - repo: local
     hooks:

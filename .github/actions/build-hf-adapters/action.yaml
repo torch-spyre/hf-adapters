@@ -8,25 +8,6 @@ inputs:
     description: >
       Space-separated list of uv groups to install (e.g. "dev test" or "dev spyre test").
     required: true
-    type: string
-  rpm_names:
-    description: A space separated list of RPM names to download and install
-    required: true
-  rpm_location:
-    description: |
-      Full Artifactory URL to download RPMs from (e.g.
-      https://artifactory.example.com/path/to/rpms). When set, overrides the
-      ARTIFACTORY_BASE_URL + ARTIFACTORY_RPM_PATH secrets.
-    required: false
-    default: ''
-  output_dir:
-    description: Path to the download the RPMs to
-    required: false
-    default: rpms
-  torch_spyre_ref:
-    description: Branch, tag, or SHA of torch-spyre to check out and test
-    required: false
-    default: ''
   ref:
     description: >
       Branch, tag, or SHA of hf-adapters to check out. Empty = the PR/push head
@@ -38,22 +19,6 @@ inputs:
       Full clone URL of the hf-adapters fork to check out (e.g.
       https://github.com/myuser/hf-adapters.git). Empty = the base repo
       ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY). Set by the Test-With: flow.
-    required: false
-    default: ''
-  artifactory_user:
-    description: Artifactory username
-    required: false
-    default: ''
-  artifactory_api_key:
-    description: Artifactory API key
-    required: false
-    default: ''
-  artifactory_base_url:
-    description: Artifactory base URL
-    required: false
-    default: ''
-  artifactory_rpm_path:
-    description: Artifactory RPM path
     required: false
     default: ''
 outputs:
@@ -109,60 +74,10 @@ runs:
         git log -1 --oneline
         echo "target_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
 
-    - name: Download RPMs
-      if: ${{ inputs.rpm_names != '' }}
-      shell: bash
-      working-directory: /home/senuser
-      env:
-        ARTIFACTORY_USER: ${{ inputs.artifactory_user }}
-        ARTIFACTORY_API_KEY: ${{ inputs.artifactory_api_key }}
-        ARTIFACTORY_BASE_URL: ${{ inputs.artifactory_base_url }}
-        ARTIFACTORY_RPM_PATH: ${{ inputs.artifactory_rpm_path }}
-        ARTIFACTORY_LOCATION: ${{ inputs.rpm_location }}
-        DOWNLOAD_SCRIPT: .github/scripts/download_rpms.sh
-        RPM_NAMES: ${{ inputs.rpm_names }}
-        RPMS_DOWNLOAD_DIR: ${{ inputs.output_dir }}
-      run: |
-        source "$HOME/.bashrc"
-        source /etc/profile.d/ibm-aiu-setup.sh
-        cd /home/senuser/torch-spyre
-        ls -la "$DOWNLOAD_SCRIPT"
-        "$DOWNLOAD_SCRIPT"
-
-    - name: Install RPMs
-      if: ${{ inputs.rpm_names != '' }}
-      shell: bash
-      working-directory: /home/senuser
-      run: |
-        ls -la
-        ls -la rpms/
-        sudo dnf install -y rpms/*.rpm
-
     - name: Gather runner info
-      shell: bash
-      working-directory: /home/senuser
-      run: |
-        source "$HOME/.bashrc"
-        source /etc/profile.d/ibm-aiu-setup.sh
-        echo "================================="
-        date
-        pwd
-        whoami
-        id
-        echo "GHA_RUNNER_POD_NODE_NAME $GHA_RUNNER_POD_NODE_NAME"
-        echo "PATH $PATH"
-        echo "HOME $HOME"
-        echo "---------------------------------"
-        echo "Installed RPMs"
-        cat "$HOME/installed_rpms.txt"
-        echo "---------------------------------"
-        python3 --version
-        python3 -c 'import sys; print(sys.path)'
-        echo "--- env ---"
-        env | sort
-        echo "--- AIU env ---"
-        env | sort | grep AIU || true
-        echo "================================="
+      uses: ./.github/actions/gather-runner-info
+      with:
+        verbose: 'true'
 
 
     - name: Build hf-adapters
@@ -170,11 +85,34 @@ runs:
       working-directory: /home/senuser
       env:
         UV_GROUPS: "${{ inputs.uv_groups }}"
-        INPUT_REF: "${{ inputs.torch_spyre_ref }}"
+        INPUT_REF: ""
       run: |
         source "$HOME/.bashrc"
         source /etc/profile.d/ibm-aiu-setup.sh
         git config --global --add safe.directory '*'
+
+        # -------------------------------------------------------------------
+        # Diagnostics: `uv: command not found` (exit 127) has been observed
+        # intermittently here. The runner set is a single image/scaleSet, so
+        # runners MUST be identical -- if uv is present on some and not others,
+        # that divergence is a bug to find, not to paper over. These probes
+        # capture the exact environment that determines whether uv resolves,
+        # on every run (pass or fail), so a failing run is self-explanatory.
+        # All non-fatal (|| true) so the step's `-e` never aborts on a probe.
+        # -------------------------------------------------------------------
+        echo "::group::uv/PATH diagnostics"
+        echo "RUNNER_NAME=${RUNNER_NAME:-<unset>}  GHA_RUNNER_POD_NODE_NAME=${GHA_RUNNER_POD_NODE_NAME:-<unset>}  HOSTNAME=$(hostname)"
+        echo "whoami: $(id)"
+        echo "shell: $0  flags: $-"
+        echo "PATH=$PATH"
+        echo "command -v uv: $(command -v uv || echo '<not found>')"
+        echo "which -a uv:"; which -a uv || true
+        echo "ls -al \$HOME/.local/bin:"; ls -al "$HOME/.local/bin" || true
+        echo "ls -al of any uv on disk:"; ls -al "$HOME/.local/bin/uv" /usr/local/bin/uv /usr/bin/uv 2>/dev/null || true
+        echo "uv --version: $(uv --version 2>&1 || echo '<uv not runnable>')"
+        echo "head -40 \$HOME/.bashrc (does the non-interactive guard skip the PATH export?):"
+        head -40 "$HOME/.bashrc" || true
+        echo "::endgroup::"
 
         # Build group flags from space-separated list
         GROUP_FLAGS=""
