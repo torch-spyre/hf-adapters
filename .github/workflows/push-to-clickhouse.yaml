@@ -80,10 +80,10 @@ jobs:
         with:
           uv_groups: "dev spyre test models-ops"
 
-      # TEMPORARY — verifies the newly-added CLICKHOUSE_* secrets are wired
-      # up correctly. Never prints secret values, only presence/length and a
-      # live SELECT 1. Remove this step in a follow-up commit once confirmed.
-      - name: Verify ClickHouse secrets (temporary debug)
+      # Sanity check: fail fast (before burning hours of Spyre time on the
+      # scan below) if the CLICKHOUSE_* secrets are missing or wrong. Never
+      # prints secret values, only presence/length and a live SELECT 1.
+      - name: Verify ClickHouse connection
         run: |
           for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
             VAL="${!VAR}"
