@@ -11,7 +11,7 @@
 | 5 | hf\_qwen3.py | `qwen3` | 1 | 3+ |
 | 6 | hf\_mistral.py | `mistral` | 1 | 4+ |
 | 7 | hf\_phi3.py | `phi3` | 1 | 3+ |
-| 8 | hf\_granitemoehybrid.py | `granitemoehybrid` | 1 | 1+ |
+| 8 | hf\_granitemoehybrid.py | `granitemoehybrid` | 2 | 1+ |
 | 9 | hf\_smollm3.py | `smollm3` | 1 | — |
 | 10 | hf\_olmo.py | `olmo` | 1 | 1+ |
 | 11 | hf\_olmo2.py | `olmo2` | 1 | 1+ |
@@ -164,7 +164,8 @@ Vision-specific adapter; extracts and adapts the text backbone from Granite Visi
 
 | Checkpoint | head\_dim | Notes |
 |-----------|---------|-------|
-| Granite 4.0 1B | 128 | Dense variant only (`num_local_experts=1`, no Mamba) |
+| Granite 4.0 1B Base (`granite-4.0-1b-base`) | 128 | Dense variant only (`num_local_experts=1`, no Mamba) |
+| Granite 4.0 1B Instruct (`granite-4.0-1b`) | 128 | Dense variant only (`num_local_experts=1`, no Mamba) |
 
 ### Compatible Models
 
