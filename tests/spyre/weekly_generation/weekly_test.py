@@ -839,7 +839,8 @@ def main(argv: list[str] | None = None) -> None:
                     print(
                         f"{_ts()}     sink: row written for '{model_path}' "
                         f"(verified_on_cpu={rec.get('verified_on_cpu')}, "
-                        f"verified_on_spyre={rec.get('verified_on_spyre')})"
+                        f"verified_on_spyre={rec.get('verified_on_spyre')}, "
+                        f"failure_category={rec.get('failure_category')}, )"
                     )
                 else:
                     print(
