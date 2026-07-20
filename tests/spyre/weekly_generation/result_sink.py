@@ -34,7 +34,7 @@ from tests.spyre.weekly_generation.clickhouse_db import (
 )
 
 # Constant value
-_SKIP_WINDOW_DAYS: int = 7
+_SKIP_WINDOW_DAYS: int = 10
 
 
 def _rec_is_cpu_verified(rec: dict[str, Any]) -> bool:

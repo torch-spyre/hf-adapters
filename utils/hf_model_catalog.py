@@ -152,6 +152,12 @@ def is_custom_code(model: ModelInfo) -> bool:
     return bool(config.get("auto_map"))
 
 
+def is_nsfw(model: ModelInfo) -> bool:
+    if "nsfw" in tags(model):
+        return True
+    return False
+
+
 # Repo-id substrings marking non-native conversions (ONNX/GGUF/MLX), dropped.
 NON_NATIVE_ID_SUBSTRINGS: tuple[str, ...] = ("onnx", "gguf", "mlx")
 
@@ -177,6 +183,68 @@ def contains_remote_code(model: ModelInfo) -> bool:
         return False
     except (ValueError, OSError):
         return True
+
+
+# Session-scoped cache for _has_loadable_weights. Keyed by repo_id; values are
+# the bool result. The fetchers run twice a week in a fresh process, and repo
+# file lists rarely change within a single run, so a plain dict is enough — no
+# TTL or on-disk persistence needed.
+_LOADABLE_WEIGHTS_CACHE: dict[str, bool] = {}
+
+# Filenames transformers' AutoModel.from_pretrained recognizes as native
+# weights (single-file or sharded via the matching index.json).
+_NATIVE_WEIGHT_FILES: frozenset[str] = frozenset(
+    {
+        "pytorch_model.bin",
+        "model.safetensors",
+        "pytorch_model.bin.index.json",
+        "model.safetensors.index.json",
+    }
+)
+
+
+def has_loadable_weights(model: ModelInfo, token: str | bool) -> bool:
+    """True if the repo ships weights AutoModel.from_pretrained can consume.
+
+    Detects three unloadable classes without downloading any weight files
+    — one ``list_repo_files`` call per repo:
+
+    * adapter-only repos (LoRA/PEFT, `adapter_config.json` but no full model),
+    * GGUF/MLX/ONNX-only repos that slipped past the id-substring filter,
+    * abandoned uploads with a config but no weight files at all.
+
+    Cached in-process by repo_id: transformers repos are effectively immutable
+    within a fetcher run, and each fetcher process is short-lived.
+    """
+    from huggingface_hub import HfApi
+
+    cached = _LOADABLE_WEIGHTS_CACHE.get(model.id)
+    if cached is not None:
+        return cached
+
+    api: HfApi = HfApi(token=token)
+    try:
+        files: list[str] = with_transient_retry(
+            lambda: api.list_repo_files(model.id, token=token),
+            description=f"list_repo_files[{model.id}]",
+        )
+    except Exception:
+        # Any permanent failure (404, gated without token, ...) — treat as
+        # not loadable rather than raising into the fetcher's filter path.
+        _LOADABLE_WEIGHTS_CACHE[model.id] = False
+        return False
+
+    lower_files: set[str] = {f.lower() for f in files}
+
+    # Adapter-only repos ship adapter_config.json + adapter_model.safetensors
+    # and expect PeftModel.from_pretrained(base, ...), not AutoModel directly.
+    if "adapter_config.json" in lower_files:
+        _LOADABLE_WEIGHTS_CACHE[model.id] = False
+        return False
+
+    result: bool = any(name in lower_files for name in _NATIVE_WEIGHT_FILES)
+    _LOADABLE_WEIGHTS_CACHE[model.id] = result
+    return result
 
 
 def format_number_to_billions_smart(num: int | float) -> str:
@@ -385,5 +453,12 @@ def build_catalog(
             writer = csv.DictWriter(f, fieldnames=header)
             writer.writeheader()
             writer.writerows(rows)
+
+    # Attach the source ModelInfo to each row AFTER the CSV write. It is a
+    # runtime-only field (not serializable, and never part of the schema),
+    # useful for callers that need metadata the row dict does not expose —
+    # e.g. safetensors.parameters, gated, sha, siblings.
+    for row, m in zip(rows, models):
+        row["model_info"] = m
 
     return rows
