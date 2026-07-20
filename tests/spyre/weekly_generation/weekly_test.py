@@ -74,7 +74,7 @@ def _classify_failure(err: str, default: str) -> str:
     """
     if not err:
         return default
-    if "Failed to open the IBM Spyre VFIO device" in err:
+    if "Failed to open the IBM Spyre VFIO device" in err or "Replace card" in err:
         return FAILURE_CATEGORY_HARDWARE_EXCEPTION
     lowered: str = err.lower()
     if "quantiz" in lowered or "optimum" in lowered:
