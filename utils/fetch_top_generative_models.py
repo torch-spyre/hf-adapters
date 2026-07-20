@@ -37,26 +37,22 @@ def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
     )
 
 
-def _make_keep(token: str | bool):
-    """Build the _keep predicate with *token* bound.
+def keep(model: ModelInfo, token: str | bool) -> bool:
+    """Keep predicate for the generative fetcher.
 
     Ordering matters: the cheap metadata-only checks run first so we only
     spend the ``has_loadable_weights`` HTTP call on the ~1k candidates that
     would otherwise survive.
     """
-
-    def _keep(model: ModelInfo) -> bool:
-        if not is_baseline_keep(model):
-            return False
-        if model.gated:
-            return False
-        if contains_remote_code(model):
-            return False
-        if not has_loadable_weights(model, token):
-            return False
-        return True
-
-    return _keep
+    if not is_baseline_keep(model):
+        return False
+    if model.gated:
+        return False
+    if contains_remote_code(model):
+        return False
+    if not has_loadable_weights(model, token):
+        return False
+    return True
 
 
 def fetch_top_generative_models(
@@ -66,7 +62,7 @@ def fetch_top_generative_models(
     api: HfApi = HfApi(token=token)
     return build_catalog(
         fetch_fn=lambda lim: _fetch(api, lim),
-        filter_fn=_make_keep(token),
+        filter_fn=lambda m: keep(m, token),
         limit=limit,
         output_csv=output_csv,
         label="generative",
