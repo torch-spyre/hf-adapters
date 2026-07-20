@@ -51,6 +51,18 @@ FAILURE_CATEGORY_WORKER_CRASHED = "worker_crashed"
 FAILURE_CATEGORY_MOE = "moe"
 
 
+class HardwareExceptionAbortError(RuntimeError):
+    """Raised in main() when a batch reports a hardware_exception row.
+
+    The Spyre accelerator is unreachable and no subsequent work in this
+    process can succeed, so the run aborts. Bubbling this up to the
+    ``__main__`` block means the script exits with a non-zero code —
+    CI / GHA can alert on it, and a subsequent scheduled run picks the
+    aborted rows up automatically via the sink's retry-on-hardware_exception
+    skip rule.
+    """
+
+
 def _classify_failure(err: str, default: str) -> str:
     """Bucket a raw error/traceback string into a failure_category.
 
@@ -458,6 +470,18 @@ def _process_batch(
             f"error={rec['error']})",
             flush=True,
         )
+        # Bail out of the batch immediately on a hardware exception — the
+        # Spyre device is unreachable, so every remaining model in this
+        # batch would hit the same wall. The parent picks up the signal
+        # from the returned results and aborts the outer loop.
+        if rec["failure_category"] == FAILURE_CATEGORY_HARDWARE_EXCEPTION:
+            print(
+                f"{ts()}       child[{os.getpid()}] aborting batch — "
+                f"hardware_exception detected; "
+                f"{len(batch) - len(results)} model(s) not attempted",
+                flush=True,
+            )
+            break
 
     result_queue.put(results)
     print(
@@ -858,6 +882,28 @@ def main(
             # crash before the next batch loses at most this batch, not the
             # whole run. No-op for sinks that write per-row (CSV).
             sink.flush()
+
+            # Abort the whole run when any row in this batch reports a
+            # hardware exception — the Spyre accelerator is unreachable and
+            # every subsequent batch would waste worker time hitting the
+            # same wall. The `raise` unwinds through the `finally` clause
+            # below (cache cleanup, sink close, summary), then propagates
+            # out of main() so the script exits with a non-zero status.
+            if any(
+                rec.get("failure_category") == FAILURE_CATEGORY_HARDWARE_EXCEPTION
+                for rec in worker_results
+            ):
+                remaining: int = total_batches - batch_idx
+                print(
+                    f"\n{ts()} Aborting run — hardware_exception detected in "
+                    f"batch {batch_idx}/{total_batches}; skipping the remaining "
+                    f"{remaining} batch(es). Rerun once the accelerator is "
+                    f"available; those rows will be picked up automatically "
+                    f"by the sink's retry-on-hardware_exception rule."
+                )
+                raise HardwareExceptionAbortError(
+                    f"hardware_exception in batch {batch_idx}/{total_batches}"
+                )
     except KeyboardInterrupt:
         print(f"\n{ts()} Interrupted — results so far are saved; rerun to resume.")
     finally:
@@ -883,8 +929,14 @@ def main(
 if __name__ == "__main__":
     print(f"{ts()} Starting weekly generation...", flush=True)
     args = _parse_args()
-    main(
-        mode=EmbeddingGenerativeMode(args.mode),
-        write_to_csv=args.write_to_csv,
-        top_k=args.top_k,
-    )
+    try:
+        main(
+            mode=EmbeddingGenerativeMode(args.mode),
+            write_to_csv=args.write_to_csv,
+            top_k=args.top_k,
+        )
+    except HardwareExceptionAbortError as e:
+        # Non-zero exit so CI / GHA scheduled runs can alert. main()'s
+        # `finally` has already flushed the sink and cleaned the cache.
+        print(f"{ts()} Exiting with status 1 ({e}).")
+        sys.exit(1)
