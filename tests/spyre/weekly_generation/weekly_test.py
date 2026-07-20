@@ -608,6 +608,7 @@ def main(argv: list[str] | None = None) -> None:
     early_skipped: int = 0
     moe_skipped: int = 0
     too_large_skipped: int = 0
+    unsupported_skipped: int = 0
     print(f"{_ts()} Will process {len(to_process_list)} models in total.")
     for row in to_process_list:
         model_path = str(row["model_id"])
@@ -617,6 +618,35 @@ def main(argv: list[str] | None = None) -> None:
                 f"{_ts()}     sink: '{model_path}' skipped early — "
                 f"recent snapshot exists within the "
                 f"{sink.__class__.__name__} skip window"
+            )
+            continue
+        # No adapter registered for this model's config class — same terminal
+        # decision resolve_adapter_module_for_test would reach in the worker,
+        # but reached here without spawning one. Uses the fetcher-computed
+        # is_supported flag (True iff config_class is in the adapter mapping).
+
+        # TODO : Decide if we want to fill the DB first with all the non-supported models...
+        if row.get("is_supported") is False:
+            unsupported_skipped += 1
+            sink.add_entry(
+                model_name=model_path,
+                config_class=str(row.get("config_class") or ""),
+                adapter_name="",
+                added_date=None,
+                snapshot_date=snapshot_date,
+                verified_on_cpu=False,
+                verified_on_gpu=False,
+                verified_on_spyre=False,
+                num_downloads=int(row.get("downloads") or 0),
+                family=str(row.get("model_type") or ""),
+                architecture=str(row.get("architectures") or ""),
+                parameters_number=int(row.get("parameters") or 0),
+                failure_category=FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
+                error=None,
+            )
+            print(
+                f"{_ts()}     sink: '{model_path}' skipped early — "
+                f"no adapter for config_class={row.get('config_class')!r}"
             )
             continue
         # Reject models too large to bring up on Spyre BEFORE spawning a
@@ -677,6 +707,12 @@ def main(argv: list[str] | None = None) -> None:
         print(
             f"\n{_ts()} Early-skip: {early_skipped}/{total} models already have a "
             f"recent snapshot; {len(prefiltered)} left to evaluate.\n"
+        )
+    if unsupported_skipped:
+        print(
+            f"{_ts()} Unsupported-skip: {unsupported_skipped}/{total} models have "
+            f"no adapter for their config_class and were written directly to the "
+            f"sink.\n"
         )
     if too_large_skipped:
         print(
