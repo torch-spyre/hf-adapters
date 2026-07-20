@@ -80,6 +80,36 @@ jobs:
         with:
           uv_groups: "dev spyre test models-ops"
 
+      # TEMPORARY — verifies the newly-added CLICKHOUSE_* secrets are wired
+      # up correctly. Never prints secret values, only presence/length and a
+      # live SELECT 1. Remove this step in a follow-up commit once confirmed.
+      - name: Verify ClickHouse secrets (temporary debug)
+        run: |
+          for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
+            VAL="${!VAR}"
+            if [[ -n "$VAL" ]]; then
+              echo "$VAR: set (${#VAL} chars)"
+            else
+              echo "$VAR: NOT SET"
+            fi
+          done
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv run python - <<'PY'
+          import os
+          import clickhouse_connect
+
+          client = clickhouse_connect.get_client(
+              host=os.environ["CLICKHOUSE_HOST"],
+              port=int(os.environ.get("CLICKHOUSE_PORT", 443)),
+              user=os.environ.get("CLICKHOUSE_USER", "default"),
+              password=os.environ["CLICKHOUSE_PASS"],
+              database=os.environ.get("CLICKHOUSE_DB", "spyre"),
+              secure=True,
+          )
+          client.command("SELECT 1")
+          print("ClickHouse connectivity check: OK")
+          PY
+
       - name: Run weekly ${{ matrix.mode }} model scan
         run: |
           source "$HOME/.bashrc"
