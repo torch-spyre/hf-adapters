@@ -16,6 +16,7 @@ from utils.hf_model_catalog import (
     is_baseline_keep,
     with_transient_retry,
 )
+from utils.utilities import ts
 
 
 def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
@@ -25,7 +26,7 @@ def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
     Retries transient 5xx gateway errors with exponential backoff via
     ``with_transient_retry``; permanent failures propagate.
     """
-    print(f"Fetching top {limit} text-generation models by downloads...")
+    print(f"{ts()} Fetching top {limit} text-generation models by downloads...")
     return with_transient_retry(
         lambda: api.list_models(
             pipeline_tag="text-generation",

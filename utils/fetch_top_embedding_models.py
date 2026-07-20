@@ -36,6 +36,7 @@ from utils.hf_model_catalog import (
     tags,
     with_transient_retry,
 )
+from utils.utilities import ts
 
 # Pipeline tags that embedding models are filed under. They are mutually
 # exclusive (one primary tag per model), so we query both and union.
@@ -123,6 +124,7 @@ def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
     Each per-tag call is wrapped in ``with_transient_retry`` so a mid-fetch
     504 from the HF gateway does not abort the run.
     """
+    print(f"{ts()} Fetching top {limit} text-embedding models by downloads...")
     per_tag_limit: int = int(limit * 2)
     by_id: dict[str, ModelInfo] = {}
     for tag in EMBEDDING_PIPELINE_TAGS:
