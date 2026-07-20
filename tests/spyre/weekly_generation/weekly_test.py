@@ -167,6 +167,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         choices=["embedding", "generative"],
+        required=True,
         help=(
             "Which model class to evaluate: 'embedding' runs the "
             "embedding load + cosine-compare pipeline; 'generative' runs the "
@@ -561,7 +562,9 @@ def _chunk_into_batches(rows: list[dict], batch_size: int) -> list[list[dict]]:
     return [rows[i : i + batch_size] for i in range(0, len(rows), batch_size)]
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(
+    mode: EmbeddingGenerativeMode, write_to_csv: Path | str | None, top_k: int
+) -> None:
     from tests.spyre.weekly_generation.result_sink import (
         ClickHouseResultSink,
         CsvResultSink,
@@ -571,32 +574,28 @@ def main(argv: list[str] | None = None) -> None:
     from utils.fetch_top_generative_models import fetch_top_generative_models
     from utils.hf_model_catalog import is_moe
 
-    args = _parse_args(argv)
     preexisting: set = _repos_with_weights()
     total_freed: int = 0
     snapshot_date = date.today()
-    if args.mode == "generative":
-        mode = EmbeddingGenerativeMode.GENERATIVE
+    if mode == EmbeddingGenerativeMode.GENERATIVE:
         number_of_model_per_process = GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS
-        to_process_list = fetch_top_generative_models(limit=args.top_k)
-    elif args.mode == "embedding":
-        mode = EmbeddingGenerativeMode.EMBEDDING
+        to_process_list = fetch_top_generative_models(limit=top_k)
+    elif mode == EmbeddingGenerativeMode.EMBEDDING:
         number_of_model_per_process = EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS
-        to_process_list = fetch_top_embedding_models(limit=args.top_k)
+        to_process_list = fetch_top_embedding_models(limit=top_k)
     else:
-        raise Exception(f"Unknown mode: {args.mode}")
+        raise Exception(f"Unknown mode: {mode}")
     adapter_dates: dict[str, str | None] = _get_adapter_dates()
 
     sink: ResultSink
-    if args.write_to_csv:
-        sink = CsvResultSink(path=args.write_to_csv, today=snapshot_date)
+    if write_to_csv:
+        sink = CsvResultSink(path=write_to_csv, today=snapshot_date)
         print(
-            f"CSV mode: results will be appended to '{args.write_to_csv}' (no DB access).\n"
+            f"CSV mode: results will be appended to '{write_to_csv}' (no DB access).\n"
         )
     else:
         sink = ClickHouseResultSink(today=snapshot_date, embedding_generative=mode)
         print("DB mode: results will be appended to the DB.\n")
-    print("argsv = {}\n".format(args))
     total = len(to_process_list)
     processed = 0
     overall_start = time.monotonic()
@@ -625,7 +624,6 @@ def main(argv: list[str] | None = None) -> None:
         # but reached here without spawning one. Uses the fetcher-computed
         # is_supported flag (True iff config_class is in the adapter mapping).
 
-        # TODO : Decide if we want to fill the DB first with all the non-supported models...
         if row.get("is_supported") is False:
             unsupported_skipped += 1
             sink.add_entry(
@@ -871,9 +869,9 @@ def main(argv: list[str] | None = None) -> None:
         _ = _cleanup_batch_weights(batch_paths, had_weights_map, total_freed)
 
         sink.close()
-        if args.write_to_csv:
+        if write_to_csv:
             print(
-                f"\n{_ts()} CSV: '{args.write_to_csv}' closed ({processed} rows processed)."
+                f"\n{_ts()} CSV: '{write_to_csv}' closed ({processed} rows processed)."
             )
 
         overall_elapsed = time.monotonic() - overall_start
@@ -888,4 +886,9 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     print(f"{_ts()} Starting weekly generation...", flush=True)
-    main()
+    args = _parse_args()
+    main(
+        mode=EmbeddingGenerativeMode(args.mode),
+        write_to_csv=args.write_to_csv,
+        top_k=args.top_k,
+    )
