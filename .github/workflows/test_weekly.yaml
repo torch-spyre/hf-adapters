@@ -1,0 +1,88 @@
+# =============================================================================
+# Weekly Spyre model-support scan
+#
+# Runs the top-K HuggingFace Hub generative and embedding models through the
+# CPU-load -> Spyre-verify pipeline (tests/spyre/weekly_generation/weekly_test.py)
+# and records the outcome directly in ClickHouse (see result_sink.py). Each
+# mode's ClickHouseResultSink also consults ClickHouse itself for the
+# skip-window guard (don't re-test a model verified in the last 10 days), so
+# the DB round-trip happens in-process on the Spyre runner rather than via a
+# separate post-hoc ingest step.
+# =============================================================================
+name: test_weekly
+
+on:
+  schedule:
+    # Saturday 22:00 UTC
+    - cron: "0 22 * * 6"
+  workflow_dispatch:
+    inputs:
+      top_k:
+        description: Number of top models to fetch (by downloads)
+        required: false
+        type: string
+        default: "200"
+
+concurrency:
+  # One weekly scan at a time. Queue (don't cancel) a re-trigger — a run can
+  # take many hours and losing progress to a duplicate dispatch is wasteful.
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: /home/senuser
+
+env:
+  # See test_daily.yaml for why CI must be blanked out here.
+  CI: ""
+  CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
+  STORAGE_1_DIR: /storage-1/hf-adapters
+  HF_HOME: /storage-1/hf-adapters/.cache/huggingface
+
+jobs:
+  weekly-model-scan:
+    name: Weekly model scan (${{ matrix.mode }})
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - image_torch_spyre_pinned
+    # A full top-K catalog scan can run for many hours; the cadence is
+    # weekly so a generous ceiling is safe.
+    timeout-minutes: 4320
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [generative, embedding]
+    env:
+      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
+      CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
+      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+      CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
+      CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test models-ops"
+
+      - name: Run weekly ${{ matrix.mode }} model scan
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv run python tests/spyre/weekly_generation/weekly_test.py \
+            --mode ${{ matrix.mode }} \
+            --top-k ${{ inputs.top_k || '200' }}
+          echo "weekly ${{ matrix.mode }} scan done"
