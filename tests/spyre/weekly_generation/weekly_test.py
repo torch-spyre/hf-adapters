@@ -25,7 +25,7 @@ import sys
 import time
 import traceback as _traceback
 from asyncio import Queue
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 from huggingface_hub.errors import HfHubHTTPError
@@ -33,12 +33,7 @@ from huggingface_hub.errors import HfHubHTTPError
 from tests.spyre.weekly_generation.result_sink import (
     EmbeddingGenerativeMode,
 )
-
-
-def _ts() -> str:
-    """Local-time timestamp prefix, e.g. '[2026-07-17 14:32:05]'."""
-    return datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
-
+from utils.utilities import ts
 
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
@@ -394,7 +389,7 @@ def _process_batch(
 
     _child_entered: float = _t.monotonic()
     print(
-        f"{_ts()}       child[{os.getpid()}] entered _process_batch with {len(batch)} model(s)",
+        f"{ts()}       child[{os.getpid()}] entered _process_batch with {len(batch)} model(s)",
         flush=True,
     )
 
@@ -455,7 +450,7 @@ def _process_batch(
                 rec["failure_category"] = FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
         results.append(rec)
         print(
-            f"{_ts()}       child[{os.getpid()}] finished model "
+            f"{ts()}       child[{os.getpid()}] finished model "
             f"{len(results)}/{len(batch)}: {model_path!r}  "
             f"(verified_on_cpu={rec['verified_on_cpu']}, "
             f"verified_on_spyre={rec['verified_on_spyre']}, "
@@ -466,7 +461,7 @@ def _process_batch(
 
     result_queue.put(results)
     print(
-        f"{_ts()}       child[{os.getpid()}] done in "
+        f"{ts()}       child[{os.getpid()}] done in "
         f"{_t.monotonic() - _child_entered:.2f}s ({len(results)} results)",
         flush=True,
     )
@@ -574,6 +569,7 @@ def main(
     from utils.fetch_top_generative_models import fetch_top_generative_models
     from utils.hf_model_catalog import is_moe
 
+    print(f"{ts()} Starting main.")
     preexisting: set = _repos_with_weights()
     total_freed: int = 0
     snapshot_date = date.today()
@@ -608,13 +604,13 @@ def main(
     moe_skipped: int = 0
     too_large_skipped: int = 0
     unsupported_skipped: int = 0
-    print(f"{_ts()} Will process {len(to_process_list)} models in total.")
+    print(f"{ts()} Will process {len(to_process_list)} models in total.")
     for row in to_process_list:
         model_path = str(row["model_id"])
         if not sink.should_insert_row(model_path):
             early_skipped += 1
             print(
-                f"{_ts()}     sink: '{model_path}' skipped early — "
+                f"{ts()}     sink: '{model_path}' skipped early — "
                 f"recent snapshot exists within the "
                 f"{sink.__class__.__name__} skip window"
             )
@@ -643,7 +639,7 @@ def main(
                 error=None,
             )
             print(
-                f"{_ts()}     sink: '{model_path}' skipped early — "
+                f"{ts()}     sink: '{model_path}' skipped early — "
                 f"no adapter for config_class={row.get('config_class')!r}"
             )
             continue
@@ -672,7 +668,7 @@ def main(
                 error=None,
             )
             print(
-                f"{_ts()}     sink: '{model_path}' skipped early — "
+                f"{ts()}     sink: '{model_path}' skipped early — "
                 f"{int(params):,} parameters exceeds the "
                 f"{MAX_NUMBER_PARAMS:,} limit"
             )
@@ -698,29 +694,29 @@ def main(
                 failure_category=FAILURE_CATEGORY_MOE,
                 error=None,
             )
-            print(f"{_ts()}     sink: '{model_path}' skipped early — MoE model")
+            print(f"{ts()}     sink: '{model_path}' skipped early — MoE model")
             continue
         prefiltered.append(row)
     if early_skipped:
         print(
-            f"\n{_ts()} Early-skip: {early_skipped}/{total} models already have a "
+            f"\n{ts()} Early-skip: {early_skipped}/{total} models already have a "
             f"recent snapshot; {len(prefiltered)} left to evaluate.\n"
         )
     if unsupported_skipped:
         print(
-            f"{_ts()} Unsupported-skip: {unsupported_skipped}/{total} models have "
+            f"{ts()} Unsupported-skip: {unsupported_skipped}/{total} models have "
             f"no adapter for their config_class and were written directly to the "
             f"sink.\n"
         )
     if too_large_skipped:
         print(
-            f"{_ts()} Too-large-skip: {too_large_skipped}/{total} models exceed "
+            f"{ts()} Too-large-skip: {too_large_skipped}/{total} models exceed "
             f"the {MAX_NUMBER_PARAMS:,} parameter limit and were written directly "
             f"to the sink.\n"
         )
     if moe_skipped:
         print(
-            f"{_ts()} MoE-skip: {moe_skipped}/{total} models tagged as moe and "
+            f"{ts()} MoE-skip: {moe_skipped}/{total} models tagged as moe and "
             f"written directly to the sink.\n"
         )
 
@@ -741,11 +737,11 @@ def main(
             batch_start = time.monotonic()
             batch_paths = [str(r["model_id"]) for r in batch]
             print(
-                f"\n{_ts()} [batch {batch_idx}/{total_batches}] {len(batch)} model(s) "
+                f"\n{ts()} [batch {batch_idx}/{total_batches}] {len(batch)} model(s) "
                 f"(overall elapsed: {batch_start - overall_start:.0f}s)"
             )
             for path in batch_paths:
-                print(f"{_ts()}     - {path}")
+                print(f"{ts()}     - {path}")
 
             # Track which weights existed BEFORE this batch ran, so we can
             # decide per-model whether to delete after.
@@ -771,7 +767,7 @@ def main(
             # returns instantly, and an empty one signals a crash.
             if result_queue.empty():
                 print(
-                    f"{_ts()}     batch: worker exited code {proc.exitcode} "
+                    f"{ts()}     batch: worker exited code {proc.exitcode} "
                     f"and returned no results — marking all {len(batch)} "
                     f"models as failed"
                 )
@@ -803,7 +799,7 @@ def main(
                 processed += 1
 
                 if rec.get("error"):
-                    print(f"{_ts()}     [{model_path}] error: {rec['error']}")
+                    print(f"{ts()}     [{model_path}] error: {rec['error']}")
 
                 # Coerce added_date from ISO string (as the worker wrote it)
                 # to a date object for the sink.
@@ -835,14 +831,14 @@ def main(
                     error=(None if rec.get("error") is None else str(rec["error"])),
                 ):
                     print(
-                        f"{_ts()}     sink: row written for '{model_path}' "
+                        f"{ts()}     sink: row written for '{model_path}' "
                         f"(verified_on_cpu={rec.get('verified_on_cpu')}, "
                         f"verified_on_spyre={rec.get('verified_on_spyre')}, "
                         f"failure_category={rec.get('failure_category')}, )"
                     )
                 else:
                     print(
-                        f"{_ts()}     sink: row skipped for '{model_path}' (guard rejected)"
+                        f"{ts()}     sink: row skipped for '{model_path}' (guard rejected)"
                     )
 
             # Cache cleanup: delete weights downloaded during this batch,
@@ -853,7 +849,7 @@ def main(
 
             batch_elapsed = time.monotonic() - batch_start
             print(
-                f"{_ts()}     batch {batch_idx}/{total_batches} done: "
+                f"{ts()}     batch {batch_idx}/{total_batches} done: "
                 f"{len(worker_results)} model(s) in {batch_elapsed:.1f}s  "
                 f"(per-model avg: {batch_elapsed / max(1, len(worker_results)):.1f}s)"
             )
@@ -863,7 +859,7 @@ def main(
             # whole run. No-op for sinks that write per-row (CSV).
             sink.flush()
     except KeyboardInterrupt:
-        print(f"\n{_ts()} Interrupted — results so far are saved; rerun to resume.")
+        print(f"\n{ts()} Interrupted — results so far are saved; rerun to resume.")
     finally:
         # Clean up weights for the in-flight batch if interrupted mid-run.
         _ = _cleanup_batch_weights(batch_paths, had_weights_map, total_freed)
@@ -871,21 +867,21 @@ def main(
         sink.close()
         if write_to_csv:
             print(
-                f"\n{_ts()} CSV: '{write_to_csv}' closed ({processed} rows processed)."
+                f"\n{ts()} CSV: '{write_to_csv}' closed ({processed} rows processed)."
             )
 
         overall_elapsed = time.monotonic() - overall_start
         mins, secs = divmod(int(overall_elapsed), 60)
         print(
             f"\n{'='*60}\n"
-            f"{_ts()} Processed {processed}/{total} models  |  "
+            f"{ts()} Processed {processed}/{total} models  |  "
             f"Total time: {mins}m {secs:02d}s\n"
             f"{'='*60}"
         )
 
 
 if __name__ == "__main__":
-    print(f"{_ts()} Starting weekly generation...", flush=True)
+    print(f"{ts()} Starting weekly generation...", flush=True)
     args = _parse_args()
     main(
         mode=EmbeddingGenerativeMode(args.mode),
