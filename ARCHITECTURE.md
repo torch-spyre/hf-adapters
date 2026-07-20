@@ -400,7 +400,7 @@ modification:
 | Fused MLP split | No | No | No | Yes | No | No | No | No | Yes | No | No | No | No |
 | NoPE layers | No | No | No | No | Yes | No | No | No | No | No | No | No | No |
 | Partial RoPE | No | No | No | No | No | No | No | No | Yes | No | No | No | Yes (global layers) |
-| Head-dim padding | 2B only | Yes (64→128) | No | No | No | TinyLlama | No | No | No | No | No | No | No |
+| Head-dim padding | 2B only | Yes (64→128) | No | Micro only (64→128) | No | TinyLlama | No | No | No | No | No | No | No |
 | Custom model loading | No | Yes (safetensor remap) | No | No | No | No | No | No | No | No | No | No | No |
 | Attention scaling | `config.attention_multiplier` | `config.attention_multiplier` | `head_dim**-0.5` | `config.attention_multiplier` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `query_pre_attn_scalar**-0.5` | `1.0` (unscaled) |
 | Norm type | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | LayerNorm (pre, no weight) | RMSNorm (post) | RMSNorm (sandwich) | RMSNorm (sandwich) |
@@ -423,10 +423,13 @@ cost of chunking. Kept as the escape hatch for future models.
 into separate linears at prepare time. Avoids stickify non-zero
 offset assertions.
 
-**Head-dim padding** (Granite 2B, TinyLlama, Granite Vision): `pad_attention_heads()`
+**Head-dim padding** (Granite 2B, TinyLlama, Granite Vision, Granite 4.0 Micro): `pad_attention_heads()`
 zero-pads Q/K/V/O projections and RoPE freqs from 64→128 so
 D/2 = 64 (one stick). Q/K use interleaved padding per RoPE
-`[2, D/2]` group; V/O use simple end-padding.
+`[2, D/2]` group; V/O use simple end-padding. Granite 4.0 Micro has
+`hidden_size=2560` / `num_attention_heads=40` → `head_dim=64`, which requires
+the same 64→128 padding as the other sub-stick models; the 1B variant
+(`head_dim=128`) needs no padding.
 
 **Custom model loading** (Granite Vision): The text backbone weights
 are extracted from a multimodal checkpoint (vision+text) via safetensor
