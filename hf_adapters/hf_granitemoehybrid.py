@@ -29,8 +29,14 @@ Usage::
     from hf_adapters import AutoSpyreModelForCausalLM
     from transformers import AutoTokenizer
 
+    # Base variant
     model = AutoSpyreModelForCausalLM.from_pretrained("ibm-granite/granite-4.0-1b-base")
     tokenizer = AutoTokenizer.from_pretrained("ibm-granite/granite-4.0-1b-base")
+    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+
+    # Instruct variant
+    model = AutoSpyreModelForCausalLM.from_pretrained("ibm-granite/granite-4.0-1b")
+    tokenizer = AutoTokenizer.from_pretrained("ibm-granite/granite-4.0-1b")
     outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
