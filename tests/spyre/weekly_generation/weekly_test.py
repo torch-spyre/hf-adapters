@@ -789,7 +789,7 @@ def main(
                 ),
             )
             proc.start()
-            timeout = 5 * 60 * number_of_model_per_process
+            timeout = 10 * 60 * number_of_model_per_process
 
             proc.join(timeout=timeout)
 
