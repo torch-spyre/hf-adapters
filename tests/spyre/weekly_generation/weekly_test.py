@@ -12,11 +12,15 @@ and runs the CPU-load + cosine-compare pipeline.
 
 Additional flags:
 
-* ``--top-k N``        Number of top models to fetch by download count (default: 200).
-* ``--write-to-csv F`` Write results to a CSV file instead of ClickHouse.
+* ``--top-k N``           Number of top models to fetch by download count (default: 200).
+* ``--write-to-csv F``    Write results to a CSV file instead of ClickHouse.
+* ``--model-list-file F`` Load the model list from this JSON file (as produced by
+  ``.github/scripts/generate_weekly_shards.py``) instead of fetching it. Used by the
+  sharded CI workflow, where the top-K list is fetched once and split across parallel jobs.
 """
 
 import argparse
+import json
 import logging
 import multiprocessing
 import os
@@ -201,6 +205,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Write evaluation results to this CSV file instead of inserting "
             "into ClickHouse. No DB connection is made when this flag is set."
+        ),
+    )
+    parser.add_argument(
+        "--model-list-file",
+        type=Path,
+        default=None,
+        metavar="MODEL_LIST_JSON",
+        help=(
+            "Load the model list from this JSON file instead of calling "
+            "fetch_top_generative_models/fetch_top_embedding_models. --top-k is "
+            "ignored when this is set. Used by the sharded CI workflow."
         ),
     )
     return parser.parse_args(argv)
@@ -588,7 +603,10 @@ def _chunk_into_batches(rows: list[dict], batch_size: int) -> list[list[dict]]:
 
 
 def main(
-    mode: EmbeddingGenerativeMode, write_to_csv: Path | str | None, top_k: int
+    mode: EmbeddingGenerativeMode,
+    write_to_csv: Path | str | None,
+    top_k: int,
+    model_list_file: Path | None = None,
 ) -> None:
     from tests.spyre.weekly_generation.result_sink import (
         ClickHouseResultSink,
@@ -597,7 +615,6 @@ def main(
     )
     from utils.fetch_top_embedding_models import fetch_top_embedding_models
     from utils.fetch_top_generative_models import fetch_top_generative_models
-    from utils.hf_model_catalog import is_moe
 
     print(f"{ts()} Starting main.")
     preexisting: set = _repos_with_weights()
@@ -605,12 +622,18 @@ def main(
     snapshot_date = date.today()
     if mode == EmbeddingGenerativeMode.GENERATIVE:
         number_of_model_per_process = GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS
-        to_process_list = fetch_top_generative_models(limit=top_k)
     elif mode == EmbeddingGenerativeMode.EMBEDDING:
         number_of_model_per_process = EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS
-        to_process_list = fetch_top_embedding_models(limit=top_k)
     else:
         raise Exception(f"Unknown mode: {mode}")
+
+    if model_list_file is not None:
+        print(f"{ts()} Loading model list from '{model_list_file}' (--top-k ignored).")
+        to_process_list = json.loads(model_list_file.read_text())
+    elif mode == EmbeddingGenerativeMode.GENERATIVE:
+        to_process_list = fetch_top_generative_models(limit=top_k)
+    else:
+        to_process_list = fetch_top_embedding_models(limit=top_k)
     adapter_dates: dict[str, str | None] = _get_adapter_dates()
 
     sink: ResultSink
@@ -705,8 +728,10 @@ def main(
             continue
         # MoE models aren't supported on Spyre yet — write the row up-front
         # with failure_category=moe and don't send it to the workers.
-        model_info = row.get("model_info")
-        if model_info is not None and is_moe(model_info):
+        # is_moe is precomputed at fetch time (utils/hf_model_catalog.py) so
+        # it survives a JSON round-trip through --model-list-file, unlike the
+        # raw (non-serializable) model_info object.
+        if row.get("is_moe"):
             moe_skipped += 1
             sink.add_entry(
                 model_name=model_path,
@@ -982,6 +1007,7 @@ if __name__ == "__main__":
             mode=EmbeddingGenerativeMode(args.mode),
             write_to_csv=args.write_to_csv,
             top_k=args.top_k,
+            model_list_file=args.model_list_file,
         )
     except HardwareExceptionAbortError as e:
         # Non-zero exit so CI / GHA scheduled runs can alert. main()'s
