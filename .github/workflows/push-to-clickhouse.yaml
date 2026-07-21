@@ -81,7 +81,10 @@ jobs:
   generate-matrix:
     name: Generate weekly shards
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # At top_k=10000+, fetching 2x oversampled raw candidates per mode (each
+    # requiring a has_loadable_weights/contains_remote_code network call) is
+    # genuinely slow — 30 min wasn't enough and the job was cancelled mid-run.
+    timeout-minutes: 120
     # Overrides the workflow-level default of /home/senuser (test_daily.yaml's
     # own generate-matrix job does the same) — that path only exists on the
     # Spyre-pod runner image, not on ubuntu-latest.
