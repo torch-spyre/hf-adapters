@@ -45,6 +45,7 @@ FAILURE_CATEGORY_CPU_LOAD_FAILED = "cpu_load_failed"
 FAILURE_CATEGORY_CPU_GENERATE_FAILED = "cpu_generate_failed"
 FAILURE_CATEGORY_QUANTIZED_MODEL = "quantized_model"
 FAILURE_CATEGORY_HARDWARE_EXCEPTION = "hardware_exception"
+FAILURE_CATEGORY_MISFORMED_HF_FAILED = "misformed_hf_failed"
 FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION = "test_execution_exception"
 FAILURE_CATEGORY_VERIFICATION_FAILED = "verification_failed"
 FAILURE_CATEGORY_WORKER_CRASHED = "worker_crashed"
@@ -89,6 +90,8 @@ def _classify_failure(err: str, default: str) -> str:
         return default
     if "Failed to open the IBM Spyre VFIO device" in err or "Replace card" in err:
         return FAILURE_CATEGORY_HARDWARE_EXCEPTION
+    if "does not appear to have files named ('model" in err:
+        return FAILURE_CATEGORY_MISFORMED_HF_FAILED
     lowered: str = err.lower()
     if "quantiz" in lowered or "optimum" in lowered:
         return FAILURE_CATEGORY_QUANTIZED_MODEL

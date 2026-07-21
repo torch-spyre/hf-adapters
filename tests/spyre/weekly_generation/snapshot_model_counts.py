@@ -376,11 +376,11 @@ def _plot_3(summary: pd.DataFrame, filename: str) -> None:
     pct_adapter = summary["cumulative_with_adapter"] / total * 100
     pct_spyre = summary["cumulative_verified_on_spyre"] / total * 100
 
-    fig, (ax_top, ax_mid, ax_bot) = plt.subplots(
-        3,
+    fig, (ax_top, ax_mid) = plt.subplots(
+        2,
         1,
         figsize=(13, 12),
-        gridspec_kw={"height_ratios": [3, 3, 1]},
+        gridspec_kw={"height_ratios": [3, 3]},
     )
     mode: str = "embedding" if "embedding" in filename else "generative"
     fig.suptitle(
@@ -511,32 +511,32 @@ def _plot_3(summary: pd.DataFrame, filename: str) -> None:
             )
 
     # ── Bottom panel: horizontal funnel bar ──────────────────────────────────
-    labels = ["Total models", "With adapter", "Green test on Spyre"]
-    values = [total_final, n_adapter, n_spyre_final]
-    colors = [COLOR_TOTAL, COLOR_ADAPTER, COLOR_SPYRE]
+    # labels = ["Total models", "With adapter", "Green test on Spyre"]
+    # values = [total_final, n_adapter, n_spyre_final]
+    # colors = [COLOR_TOTAL, COLOR_ADAPTER, COLOR_SPYRE]
+    #
+    # bars_h = ax_bot.barh([2, 1, 0], values, color=colors, height=0.5)
+    # ax_bot.set_yticks([2, 1, 0])
+    # ax_bot.set_yticklabels(labels)
+    # ax_bot.set_xlabel("Distinct model count")
+    # ax_bot.set_title(
+    #     f"Funnel at final snapshot ({final['snapshot_date'].strftime('%Y-%m-%d')})",
+    #     fontsize=10,
+    #     color="#57606a",
+    # )
+    # ax_bot.set_xlim(0, total_final * 1.15)
+    # ax_bot.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+    # ax_bot.grid(axis="x", linestyle=":", linewidth=0.6, alpha=0.6)
 
-    bars_h = ax_bot.barh([2, 1, 0], values, color=colors, height=0.5)
-    ax_bot.set_yticks([2, 1, 0])
-    ax_bot.set_yticklabels(labels)
-    ax_bot.set_xlabel("Distinct model count")
-    ax_bot.set_title(
-        f"Funnel at final snapshot ({final['snapshot_date'].strftime('%Y-%m-%d')})",
-        fontsize=10,
-        color="#57606a",
-    )
-    ax_bot.set_xlim(0, total_final * 1.15)
-    ax_bot.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-    ax_bot.grid(axis="x", linestyle=":", linewidth=0.6, alpha=0.6)
-
-    for bar, val in zip(bars_h, values):
-        pct = val / total_final * 100
-        ax_bot.text(
-            val + total_final * 0.01,
-            bar.get_y() + bar.get_height() / 2,
-            f"{val:,}  ({pct:.1f}%)",
-            va="center",
-            fontsize=9,
-        )
+    # for bar, val in zip(bars_h, values):
+    #     pct = val / total_final * 100
+    #     ax_bot.text(
+    #         val + total_final * 0.01,
+    #         bar.get_y() + bar.get_height() / 2,
+    #         f"{val:,}  ({pct:.1f}%)",
+    #         va="center",
+    #         fontsize=9,
+    #     )
 
     plt.tight_layout()
     output_file_name = filename.replace(".csv", ".png")
