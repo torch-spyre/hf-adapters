@@ -272,7 +272,11 @@ def _capture_ctor_args(module) -> Dict[str, Any] | None:
 
         # Only keep plain, picklable scalar/list values (skip tensors, modules,
         # dtypes, config objects, etc. -- they are not YAML-representable here).
-        if isinstance(value, bool) or isinstance(value, (int, float, str)) or value is None:
+        if (
+            isinstance(value, bool)
+            or isinstance(value, (int, float, str))
+            or value is None
+        ):
             kwargs[pname] = value
         elif isinstance(value, (list, tuple)) and all(
             isinstance(v, (int, float, str, bool)) for v in value
@@ -377,13 +381,19 @@ def _config_constructor_arg(
     ``{config_path, model_id, config_overrides}`` and the OOT framework resolves
     it to a live HF config via ``AutoConfig.from_pretrained(model_id)``.
     """
-    spec: Dict[str, Any] = {"type": "config", "config_path": config_path, "model_id": model_id}
+    spec: Dict[str, Any] = {
+        "type": "config",
+        "config_path": config_path,
+        "model_id": model_id,
+    }
     if config_overrides:
         spec["config_overrides"] = config_overrides
     return spec
 
 
-def _dedup_invocations(invocations: List[List[Dict[str, Any]]]) -> List[List[Dict[str, Any]]]:
+def _dedup_invocations(
+    invocations: List[List[Dict[str, Any]]],
+) -> List[List[Dict[str, Any]]]:
     """Drop invocations whose input pattern (shape/dtype) repeats."""
     seen = set()
     unique = []
@@ -561,7 +571,9 @@ def write_module_config(
     if output:
         output_path = output
     else:
-        output_path = f"./tests/configs/module_tests/{model_name_normalized}_vllm_spyre.yaml"
+        output_path = (
+            f"./tests/configs/module_tests/{model_name_normalized}_vllm_spyre.yaml"
+        )
 
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -585,7 +597,10 @@ def parse_args():
         help="HuggingFace model path/id (e.g. ibm-granite/granite-3.3-2b-instruct)",
     )
     parser.add_argument(
-        "--seq-len", type=int, default=128, help="Prefill sequence length (default: 128)"
+        "--seq-len",
+        type=int,
+        default=128,
+        help="Prefill sequence length (default: 128)",
     )
     parser.add_argument(
         "--dtype",
@@ -644,7 +659,9 @@ def main():
         config_overrides={},
     )
 
-    model_name = args.model.rstrip("/").split("/")[-1].replace("-", "_").replace(".", "_")
+    model_name = (
+        args.model.rstrip("/").split("/")[-1].replace("-", "_").replace(".", "_")
+    )
     yaml_content = generate_unified_yaml_config_vllm(
         captured_modules, model_name, dtype=args.dtype
     )

@@ -599,9 +599,7 @@ def _tensor_info_to_spec(tensor_info: Dict[str, Any], name: str) -> Dict[str, An
     # raises NotImplementedError for integer dtypes. Use randint for any integer
     # dtype, and also for the name-based special tensors (position/mask/ids),
     # which may be captured under a generic name like "arg_0".
-    is_int_dtype = any(
-        t in dtype for t in ("int", "uint", "long", "short", "bool")
-    )
+    is_int_dtype = any(t in dtype for t in ("int", "uint", "long", "short", "bool"))
     if is_int_dtype or _is_special_tensor(name):
         init = "randint"
         # Use the smallest dimension of the tensor's own shape as the exclusive
