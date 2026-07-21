@@ -448,6 +448,10 @@ class ClickHouseResultSink(ResultSink):
         error: str | None,
     ) -> None:
         """Buffer the row; the actual INSERT happens in ``close()``."""
+        # failure_category/error are non-nullable in the live table (String/
+        # LowCardinality(String) DEFAULT '') — None must become '' here, or
+        # clickhouse_connect raises DataError on the bulk insert for any
+        # fully-passing row (which always has both fields as None).
         self._pending.append(
             [
                 model_name,
@@ -462,8 +466,8 @@ class ClickHouseResultSink(ResultSink):
                 family,
                 architecture,
                 parameters_number,
-                failure_category,
-                error,
+                failure_category or "",
+                error or "",
             ]
         )
 
