@@ -108,24 +108,44 @@ jobs:
           pip install -e .
           pip install huggingface_hub tqdm transformers
 
-      # TEMPORARY debug step: confirms HF_TOKEN actually reaches this job as
-      # a working credential. Never prints the token itself, only presence/
-      # length and the result of an authenticated whoami() call. Remove once
-      # the 0-kept-models issue is root-caused.
+      # TEMPORARY debug step: confirms HF_TOKEN actually reaches this job as a
+      # working credential, and re-runs the real keep()-filter checks against
+      # one known-public model WITHOUT swallowing exceptions, since
+      # has_loadable_weights()/contains_remote_code() both catch everything
+      # and return a plain bool by design. Never prints the token itself.
+      # Remove once the 0-kept-models issue is root-caused.
       - name: Verify HF Hub authentication
         run: |
+          python -m pip freeze | grep -iE "^(huggingface-hub|transformers)==" || true
           python - <<'PY'
           import os
           from huggingface_hub import HfApi
+          from transformers import AutoConfig
 
           tok = os.environ.get("HF_TOKEN") or ""
           print(f"HF_TOKEN: {'set (' + str(len(tok)) + ' chars)' if tok else 'NOT SET / empty'}")
+          token = tok or False
 
           try:
-              info = HfApi(token=(tok or False)).whoami()
+              info = HfApi(token=token).whoami()
               print(f"whoami() OK: {info.get('name', info)!r}")
           except Exception as e:
               print(f"whoami() FAILED: {type(e).__name__}: {e}")
+
+          probe_id = "openai-community/gpt2"
+          print(f"\n--- probing keep()-equivalent checks against {probe_id!r} ---")
+
+          try:
+              files = HfApi(token=token).list_repo_files(probe_id, token=token)
+              print(f"list_repo_files() OK: {len(files)} files, e.g. {files[:5]}")
+          except Exception as e:
+              print(f"list_repo_files() FAILED: {type(e).__name__}: {e}")
+
+          try:
+              cfg = AutoConfig.from_pretrained(probe_id, trust_remote_code=False)
+              print(f"AutoConfig.from_pretrained() OK: {type(cfg).__name__}")
+          except Exception as e:
+              print(f"AutoConfig.from_pretrained() FAILED: {type(e).__name__}: {e}")
           PY
 
       - name: Generate shards
