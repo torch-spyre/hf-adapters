@@ -97,7 +97,7 @@ def _classify_failure(err: str, default: str) -> str:
         return FAILURE_CATEGORY_HARDWARE_EXCEPTION
     if "does not appear to have files named ('model" in err:
         return FAILURE_CATEGORY_MISFORMED_HF_FAILED
-    if "buf19 (Pointwise)" in err:
+    if "(Pointwise): no mechanism to resolve stick incompatibility" in err:
         return FAILURE_PYTORCH
     lowered: str = err.lower()
     if "quantiz" in lowered or "optimum" in lowered:
