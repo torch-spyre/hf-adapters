@@ -225,7 +225,7 @@ _CONFIG_ATTR_FOR_PARAM = {
 }
 
 
-class _SkipModule(Exception):
+class _SkipModuleError(Exception):
     """Raised when a composite module's constructor cannot be resolved from config."""
 
 
@@ -237,7 +237,7 @@ def build_ctor_kwargs_from_config(module_cls, hf_config) -> dict:
     attribute by default). ``quant_config`` -> None, ``prefix`` -> a label, and a
     ``config`` param receives the config object itself (GraniteAttention /
     GraniteDecoderLayer take a config; GraniteMLP takes scalars derived here).
-    A required param that cannot be resolved raises ``_SkipModule``.
+    A required param that cannot be resolved raises ``_SkipModuleError``.
     """
     import inspect
 
@@ -272,7 +272,7 @@ def build_ctor_kwargs_from_config(module_cls, hf_config) -> dict:
             unresolved.append(pname)
 
     if unresolved:
-        raise _SkipModule(
+        raise _SkipModuleError(
             f"{module_cls.__name__}: cannot resolve required ctor params "
             f"{unresolved} from HF config"
         )
@@ -684,7 +684,11 @@ class TestModuleCustom(TestCase):
             )
 
         module_inputs = module_info.module_inputs_func(
-            module_info, device=device, dtype=dtype, requires_grad=False, training=training
+            module_info,
+            device=device,
+            dtype=dtype,
+            requires_grad=False,
+            training=training,
         )
 
         for module_input in module_inputs:
@@ -705,18 +709,19 @@ class TestModuleCustom(TestCase):
             # --- Reference: CPU eager ---
             # Each build init's a distributed group; always tear it down (even on
             # skip/error) so the next parametrized variant can init a fresh group.
-            # A _SkipModule raised inside the build happens after _setup_distributed,
+            # A _SkipModuleError raised inside the build happens after _setup_distributed,
             # so teardown must run before we skip -- the finally guarantees that.
             skip_reason = None
             try:
                 ref = _build_vllm_module(
-                    module_info.module_cls, module_input.constructor_input,
+                    module_info.module_cls,
+                    module_input.constructor_input,
                     device="cpu",
                 )
                 randomize_weights_xavier(ref, seed=0)
                 ref.to(dtype).eval()
                 cpu_tensors = _run_forward(ref, args_cpu, kwargs_cpu)
-            except _SkipModule as exc:
+            except _SkipModuleError as exc:
                 skip_reason = str(exc)
             finally:
                 _teardown_distributed()
@@ -728,7 +733,8 @@ class TestModuleCustom(TestCase):
             torch._inductor.codecache.FxGraphCache.clear()
             try:
                 dev = _build_vllm_module(
-                    module_info.module_cls, module_input.constructor_input,
+                    module_info.module_cls,
+                    module_input.constructor_input,
                     device=None,
                 )
                 randomize_weights_xavier(dev, seed=0)  # same seed => same weights
