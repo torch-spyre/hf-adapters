@@ -39,14 +39,14 @@ on:
         description: Number of top models to fetch (by downloads)
         required: false
         type: string
-        # TEMPORARY: shrunk from 10000 to 50 so the push-triggered test runs
-        # finish in minutes rather than hours. 50 was picked over an even
-        # smaller number (3 produced 0 kept models after filtering — the very
-        # top-ranked models by downloads skew gated/remote-code/no-weights —
-        # which starved the matrix and silently skipped weekly-model-scan
-        # entirely). Restore to 10000 alongside removing the push trigger
-        # above once testing is done.
-        default: "50"
+        # TEMPORARY: 11000, not the real 10000 default — ~9144 models already
+        # have a snapshot within the 10-day skip window from prior manual/dev
+        # runs, so top_k=10000 would land entirely within already-covered
+        # territory and skip every model (0 processed), same as we saw at
+        # top_k=50/200. Going slightly past 10000 forces the pipeline to
+        # actually process the not-yet-tested tail. Restore to 10000 alongside
+        # removing the push trigger above once testing is done.
+        default: "11000"
 
 concurrency:
   # One weekly scan at a time. Queue (don't cancel) a re-trigger — a run can
@@ -157,21 +157,19 @@ jobs:
       - name: Generate shards
         id: generate
         run: |
-          # TEMPORARY: '50' is the push-trigger fallback since the `inputs`
-          # context is empty on non-workflow_dispatch events (the input
-          # schema's default above only applies to the manual "Run workflow"
-          # form). Restore to '10000' here too once the push trigger and the
-          # temporarily-shrunk top_k default are removed post-testing.
+          # TEMPORARY: '11000' is the push-trigger fallback since the
+          # `inputs` context is empty on non-workflow_dispatch events (the
+          # input schema's default above only applies to the manual "Run
+          # workflow" form). Restore to '10000' here too once the push
+          # trigger and the temporarily-bumped top_k default are removed
+          # post-testing.
           #
-          # TEMPORARY: shard sizes shrunk to 10 (from the real defaults of
-          # 250/500) so this test run produces several shards per mode
-          # instead of the degenerate 0-or-1-shard case, actually exercising
-          # matrix fan-out. Drop --shard-size-* entirely (falls back to the
-          # script's real defaults) once testing is done.
+          # Shard sizes now use the script's real defaults (250 generative /
+          # 500 embedding, ~44+22=66 shards at this top_k) — the earlier
+          # --shard-size-* 10 override would produce over 1000 shards per
+          # mode at this scale, well past GitHub's 256-jobs-per-matrix cap.
           python .github/scripts/generate_weekly_shards.py \
-            --top-k ${{ inputs.top_k || '50' }} \
-            --shard-size-generative 10 \
-            --shard-size-embedding 10 \
+            --top-k ${{ inputs.top_k || '11000' }} \
             --output-dir shards
 
       - name: Upload shard artifacts
