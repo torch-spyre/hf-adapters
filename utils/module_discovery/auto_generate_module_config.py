@@ -594,8 +594,15 @@ def _tensor_info_to_spec(tensor_info: Dict[str, Any], name: str) -> Dict[str, An
     init = "randn" if is_random else "zeros"
     init_args = {}
 
-    # Special handling for position/id tensors
-    if _is_special_tensor(name):
+    # An integer tensor (e.g. token ids for an embedding, position ids, masks)
+    # must not use randn -- torch.randn ("normal_kernel_cpu") is float-only and
+    # raises NotImplementedError for integer dtypes. Use randint for any integer
+    # dtype, and also for the name-based special tensors (position/mask/ids),
+    # which may be captured under a generic name like "arg_0".
+    is_int_dtype = any(
+        t in dtype for t in ("int", "uint", "long", "short", "bool")
+    )
+    if is_int_dtype or _is_special_tensor(name):
         init = "randint"
         # Use the smallest dimension of the tensor's own shape as the exclusive
         # upper bound (e.g. shape (64, 32, 128) -> high=32). This keeps generated
