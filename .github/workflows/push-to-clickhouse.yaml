@@ -108,6 +108,26 @@ jobs:
           pip install -e .
           pip install huggingface_hub tqdm transformers
 
+      # TEMPORARY debug step: confirms HF_TOKEN actually reaches this job as
+      # a working credential. Never prints the token itself, only presence/
+      # length and the result of an authenticated whoami() call. Remove once
+      # the 0-kept-models issue is root-caused.
+      - name: Verify HF Hub authentication
+        run: |
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+
+          tok = os.environ.get("HF_TOKEN") or ""
+          print(f"HF_TOKEN: {'set (' + str(len(tok)) + ' chars)' if tok else 'NOT SET / empty'}")
+
+          try:
+              info = HfApi(token=(tok or False)).whoami()
+              print(f"whoami() OK: {info.get('name', info)!r}")
+          except Exception as e:
+              print(f"whoami() FAILED: {type(e).__name__}: {e}")
+          PY
+
       - name: Generate shards
         id: generate
         run: |
