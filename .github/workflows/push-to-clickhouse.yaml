@@ -92,6 +92,12 @@ jobs:
       matrix: ${{ steps.generate.outputs.matrix }}
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      # Overrides the workflow-level HF_HOME (/storage-1/... — a Spyre-pod-only
+      # mount). Every AutoConfig.from_pretrained() call was failing with a
+      # PermissionError trying to write there, which contains_remote_code()
+      # silently caught and treated as "yes, remote code" — filtering out
+      # every single model regardless of top_k.
+      HF_HOME: ${{ github.workspace }}/.cache/huggingface
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
