@@ -9,8 +9,15 @@
 # Unlike torch-spyre's push-to-clickhouse.yaml, this is not a post-hoc ingest
 # of a separate test run's artifact: weekly_test.py's skip-window dedup guard
 # (don't re-test a model verified in the last 10 days) needs to read
-# ClickHouse live during the scan, so fetch + test + push all happen in this
-# one job rather than being split across a test workflow and an ingest one.
+# ClickHouse live during the scan, so fetch + test + push both happen in the
+# weekly-model-scan job below rather than being split across a test workflow
+# and a separate ingest one.
+#
+# At top_k=10000 per mode, a single job processing the whole list serially
+# would take far too long, so the fetch itself IS split out: generate-matrix
+# fetches the top-K list once (no Spyre hardware needed), shards it, and
+# weekly-model-scan fans out over those shards in parallel (mirrors
+# torch-spyre's generate_matrix -> matrix job pattern).
 # =============================================================================
 name: push-to-clickhouse
 
@@ -32,10 +39,14 @@ on:
         description: Number of top models to fetch (by downloads)
         required: false
         type: string
-        # TEMPORARY: shrunk from 200 to 3 so the push-triggered test runs
-        # finish in minutes rather than hours. Restore to 200 alongside
+        # TEMPORARY: 11000, not the real 10000 default — ~9144 models already
+        # have a snapshot within the 10-day skip window from prior manual/dev
+        # runs, so top_k=10000 would land entirely within already-covered
+        # territory and skip every model (0 processed), same as we saw at
+        # top_k=50/200. Going slightly past 10000 forces the pipeline to
+        # actually process the not-yet-tested tail. Restore to 10000 alongside
         # removing the push trigger above once testing is done.
-        default: "3"
+        default: "11000"
 
 concurrency:
   # One weekly scan at a time. Queue (don't cancel) a re-trigger — a run can
@@ -59,20 +70,133 @@ env:
   HF_HOME: /storage-1/hf-adapters/.cache/huggingface
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Fetch the top-K list once per mode and shard it for the parallel matrix
+  # job below. No Spyre hardware needed — utils/hf_model_catalog.py's import
+  # chain (via hf_adapters/auto_spyre_model.py) has no module-level
+  # torch_spyre dependency; it's lazily imported inside a device-guarded
+  # function body in hf_common.py. The now-deprecated test_weekly_DEPRECATED
+  # .yaml is existing proof this exact fetch path runs fine on ubuntu-latest.
+  # ---------------------------------------------------------------------------
+  generate-matrix:
+    name: Generate weekly shards
+    runs-on: ubuntu-latest
+    # At top_k=10000+, fetching 2x oversampled raw candidates per mode (each
+    # requiring a has_loadable_weights/contains_remote_code network call) is
+    # genuinely slow — 30 min wasn't enough and the job was cancelled mid-run.
+    timeout-minutes: 120
+    # Overrides the workflow-level default of /home/senuser (test_daily.yaml's
+    # own generate-matrix job does the same) — that path only exists on the
+    # Spyre-pod runner image, not on ubuntu-latest.
+    defaults:
+      run:
+        working-directory: .
+    outputs:
+      matrix: ${{ steps.generate.outputs.matrix }}
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      # Overrides the workflow-level HF_HOME (/storage-1/... — a Spyre-pod-only
+      # mount). Every AutoConfig.from_pretrained() call was failing with a
+      # PermissionError trying to write there, which contains_remote_code()
+      # silently caught and treated as "yes, remote code" — filtering out
+      # every single model regardless of top_k.
+      HF_HOME: ${{ github.workspace }}/.cache/huggingface
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install huggingface_hub tqdm transformers
+
+      # TEMPORARY debug step: confirms HF_TOKEN actually reaches this job as a
+      # working credential, and re-runs the real keep()-filter checks against
+      # one known-public model WITHOUT swallowing exceptions, since
+      # has_loadable_weights()/contains_remote_code() both catch everything
+      # and return a plain bool by design. Never prints the token itself.
+      # Remove once the 0-kept-models issue is root-caused.
+      - name: Verify HF Hub authentication
+        run: |
+          python -m pip freeze | grep -iE "^(huggingface-hub|transformers)==" || true
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+          from transformers import AutoConfig
+
+          tok = os.environ.get("HF_TOKEN") or ""
+          print(f"HF_TOKEN: {'set (' + str(len(tok)) + ' chars)' if tok else 'NOT SET / empty'}")
+          token = tok or False
+
+          try:
+              info = HfApi(token=token).whoami()
+              print(f"whoami() OK: {info.get('name', info)!r}")
+          except Exception as e:
+              print(f"whoami() FAILED: {type(e).__name__}: {e}")
+
+          probe_id = "openai-community/gpt2"
+          print(f"\n--- probing keep()-equivalent checks against {probe_id!r} ---")
+
+          try:
+              files = HfApi(token=token).list_repo_files(probe_id, token=token)
+              print(f"list_repo_files() OK: {len(files)} files, e.g. {files[:5]}")
+          except Exception as e:
+              print(f"list_repo_files() FAILED: {type(e).__name__}: {e}")
+
+          try:
+              cfg = AutoConfig.from_pretrained(probe_id, trust_remote_code=False)
+              print(f"AutoConfig.from_pretrained() OK: {type(cfg).__name__}")
+          except Exception as e:
+              print(f"AutoConfig.from_pretrained() FAILED: {type(e).__name__}: {e}")
+          PY
+
+      - name: Generate shards
+        id: generate
+        run: |
+          # TEMPORARY: '11000' is the push-trigger fallback since the
+          # `inputs` context is empty on non-workflow_dispatch events (the
+          # input schema's default above only applies to the manual "Run
+          # workflow" form). Restore to '10000' here too once the push
+          # trigger and the temporarily-bumped top_k default are removed
+          # post-testing.
+          #
+          # Shard sizes now use the script's real defaults (250 generative /
+          # 500 embedding, ~44+22=66 shards at this top_k) — the earlier
+          # --shard-size-* 10 override would produce over 1000 shards per
+          # mode at this scale, well past GitHub's 256-jobs-per-matrix cap.
+          python .github/scripts/generate_weekly_shards.py \
+            --top-k ${{ inputs.top_k || '11000' }} \
+            --output-dir shards
+
+      - name: Upload shard artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: weekly-shards
+          path: shards/
+          retention-days: 1
+
   weekly-model-scan:
-    name: Weekly model scan (${{ matrix.mode }})
+    name: Weekly model scan (${{ matrix.mode }} shard ${{ matrix.shard_index }})
+    needs: generate-matrix
     runs-on:
       - x86_64
       - spyre_pf_x1
       - linux
       - image_torch_spyre_pinned
-    # A full top-K catalog scan can run for many hours; the cadence is
+    # A shard can still run for a while depending on its size; the cadence is
     # weekly so a generous ceiling is safe.
     timeout-minutes: 4320
     strategy:
       fail-fast: false
       matrix:
-        mode: [generative, embedding]
+        include: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
     env:
       CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
       CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
@@ -90,6 +214,12 @@ jobs:
       - uses: ./.github/actions/build-hf-adapters
         with:
           uv_groups: "dev spyre test models-ops"
+
+      - name: Download shard
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: weekly-shards
+          path: shards
 
       # Sanity check: fail fast (before burning hours of Spyre time on the
       # scan below) if the CLICKHOUSE_* secrets are missing or wrong. Never
@@ -121,12 +251,12 @@ jobs:
           print("ClickHouse connectivity check: OK")
           PY
 
-      - name: Run weekly ${{ matrix.mode }} model scan
+      - name: Run weekly ${{ matrix.mode }} model scan (shard ${{ matrix.shard_index }})
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           uv run python tests/spyre/weekly_generation/weekly_test.py \
             --mode ${{ matrix.mode }} \
-            --top-k ${{ inputs.top_k || '200' }}
-          echo "weekly ${{ matrix.mode }} scan done"
+            --model-list-file shards/${{ matrix.shard_file }}
+          echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"

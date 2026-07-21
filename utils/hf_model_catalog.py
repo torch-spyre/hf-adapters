@@ -458,7 +458,12 @@ def build_catalog(
     # runtime-only field (not serializable, and never part of the schema),
     # useful for callers that need metadata the row dict does not expose —
     # e.g. safetensors.parameters, gated, sha, siblings.
+    #
+    # is_moe is precomputed here (a pure function of data already fetched —
+    # tags, config.model_type, config.architectures) so callers that need it
+    # don't have to carry the non-serializable ModelInfo object forward.
     for row, m in zip(rows, models):
         row["model_info"] = m
+        row["is_moe"] = is_moe(m)
 
     return rows
