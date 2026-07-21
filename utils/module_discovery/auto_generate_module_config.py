@@ -597,7 +597,14 @@ def _tensor_info_to_spec(tensor_info: Dict[str, Any], name: str) -> Dict[str, An
     # Special handling for position/id tensors
     if _is_special_tensor(name):
         init = "randint"
-        init_args = {"high": 10000}
+        # Use the smallest dimension of the tensor's own shape as the exclusive
+        # upper bound (e.g. shape (64, 32, 128) -> high=32). This keeps generated
+        # index/position values in range for that tensor rather than using a
+        # fixed, possibly out-of-range constant. Guard against empty shapes and
+        # zero/one-sized dims (randint needs high >= 1).
+        shape = tensor_info.get("shape") or []
+        high = min(shape) if shape else 1
+        init_args = {"high": max(int(high), 1)}
 
     tensor_spec = {
         "shape": tensor_info["shape"],

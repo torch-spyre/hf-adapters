@@ -7,6 +7,8 @@ This file contains additional test methods for modules defined in YAML configs:
 - test_with_cpu: Use CPU as the golden reference and compare device output against it;
   which device mode(s) to run (compile and/or eager) is selectable via env vars
 - test_layout_stride: Validate real YAML-specified SpyreTensorLayouts and strides (CPU vs Spyre)
+- test_vllm: Standalone-run a vLLM-native module (built from AutoConfig under a VllmConfig +
+  TP=1 distributed group, NOT via LLM()) and compare CPU eager vs device compile
 
 All tests use pytree for robust handling of nested input/output structures and test only
 real model configurations from YAML without artificial modifications.
@@ -101,6 +103,214 @@ def _run_forward(module, args, kwargs):
     with torch.no_grad():
         output = module(*args, **kwargs)
     return _extract_all_tensors(output)
+
+
+# ---------------------------------------------------------------------------
+# vLLM standalone-module helpers (used by test_vllm)
+# ---------------------------------------------------------------------------
+#
+# test_vllm rebuilds a vLLM-native module WITHOUT constructing an LLM(). It uses
+# the same recipe as the standalone reproduction script: set a current VllmConfig,
+# init a TP=1 distributed group (required even at TP=1 because vLLM's parallel
+# layers query the group), construct the module directly, then tear the group
+# down. The module's constructor args come from AutoConfig via per-class adapters.
+
+
+def _setup_distributed(backend: str = "gloo") -> None:
+    """Init a single-rank distributed environment for vLLM parallel layers."""
+    from vllm.distributed import (
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ.setdefault("MASTER_PORT", "29500")
+    os.environ.setdefault("RANK", "0")
+    os.environ.setdefault("WORLD_SIZE", "1")
+    os.environ.setdefault("LOCAL_RANK", "0")
+
+    init_distributed_environment(
+        world_size=1,
+        rank=0,
+        local_rank=0,
+        distributed_init_method="env://",
+        backend=backend,
+    )
+    initialize_model_parallel(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        backend=backend,
+    )
+
+
+def _teardown_distributed() -> None:
+    """Tear down the distributed group so a later init can run in-process.
+
+    Tolerant of being called when nothing was initialized (e.g. a build failed
+    before setup completed) so it is safe to call unconditionally from a finally.
+    """
+    from vllm.distributed import (
+        destroy_distributed_environment,
+        destroy_model_parallel,
+    )
+
+    try:
+        destroy_model_parallel()
+    except Exception:
+        pass
+    try:
+        destroy_distributed_environment()
+    except Exception:
+        pass
+
+
+def _resolve_hf_config(constructor_input):
+    """Return the HF config for a vLLM module from its YAML constructor arg, or None.
+
+    The vLLM YAML records the model config as a config-type constructor arg.
+    Resolution order (any one is enough):
+
+    1. Already a live ``PretrainedConfig`` (the OOT framework resolved it, e.g.
+       via ``model_id`` on feat/oot-config-from-pretrained).
+    2. A raw dict with ``model_id`` -> ``AutoConfig.from_pretrained(model_id)``
+       (+ ``config_overrides``). The faithful, full config.
+    3. A raw dict with ``config_path`` (+ optional ``config_kwargs``) -> import
+       the config class and build it. This is what the current generator emits
+       when no model_id is embedded; ``config_kwargs`` may be empty (library
+       defaults), which is acceptable for shape-only standalone runs.
+
+    Returns ``None`` when no config can be resolved -- the caller decides whether
+    to skip (e.g. the module needs a config but none was provided).
+    """
+    import importlib
+
+    from transformers import AutoConfig
+    from transformers.configuration_utils import PretrainedConfig
+
+    if not constructor_input.args:
+        return None
+    arg0 = constructor_input.args[0]
+
+    if isinstance(arg0, PretrainedConfig):
+        return arg0
+
+    if not isinstance(arg0, dict):
+        return None
+
+    if arg0.get("model_id"):
+        config = AutoConfig.from_pretrained(arg0["model_id"])
+        for key, value in arg0.get("config_overrides", {}).items():
+            setattr(config, key, value)
+        return config
+
+    if arg0.get("config_path"):
+        module_path, _, cls_name = arg0["config_path"].rpartition(".")
+        config_cls = getattr(importlib.import_module(module_path), cls_name)
+        return config_cls(**(arg0.get("config_kwargs") or {}))
+
+    return None
+
+
+# Attributes on the HF config that map to common vLLM constructor kwarg names.
+_CONFIG_ATTR_FOR_PARAM = {
+    "hidden_size": ("hidden_size",),
+    "intermediate_size": ("intermediate_size",),
+    "hidden_act": ("hidden_act",),
+    "eps": ("rms_norm_eps", "layer_norm_eps"),
+    "bias": ("mlp_bias", "attention_bias"),
+}
+
+
+class _SkipModule(Exception):
+    """Raised by build_ctor_kwargs when a module cannot be constructed this phase."""
+
+
+def build_ctor_kwargs(module_cls, hf_config) -> dict:
+    """Build constructor kwargs for a vLLM module from an HF config.
+
+    Generic: inspect the module's __init__ signature and fill each parameter
+    from the HF config using the name map above; always supply quant_config=None
+    and a prefix. Parameters that cannot be resolved and have no default cause
+    the caller to skip the module (unsupported this phase).
+    """
+    import inspect
+
+    sig = inspect.signature(module_cls.__init__)
+    kwargs: dict = {}
+    unresolved: list[str] = []
+
+    for pname, param in sig.parameters.items():
+        if pname in ("self",):
+            continue
+        if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+            continue
+
+        if pname == "quant_config":
+            kwargs[pname] = None
+            continue
+        if pname == "prefix":
+            kwargs[pname] = module_cls.__name__.lower()
+            continue
+        if pname == "config":
+            # Some vLLM modules take the HF config object directly.
+            kwargs[pname] = hf_config
+            continue
+
+        resolved = False
+        for attr in _CONFIG_ATTR_FOR_PARAM.get(pname, (pname,)):
+            if hasattr(hf_config, attr):
+                kwargs[pname] = getattr(hf_config, attr)
+                resolved = True
+                break
+
+        if not resolved and param.default is inspect.Parameter.empty:
+            unresolved.append(pname)
+
+    if unresolved:
+        raise _SkipModule(
+            f"{module_cls.__name__}: cannot resolve required ctor params "
+            f"{unresolved} from HF config"
+        )
+    return kwargs
+
+
+def randomize_weights_xavier(module: torch.nn.Module, seed: int = 0) -> None:
+    """Deterministically initialize a module's parameters with xavier-uniform.
+
+    >=2-D params get xavier_uniform_. For 1-D params (biases, norm weights),
+    xavier is undefined, so they get a deterministic uniform ``rand`` init
+    instead. Iterating sorted(named_parameters()) with a fixed generator makes
+    the result reproducible, so two independently-built copies (CPU ref and
+    device) get identical weights.
+    """
+    gen = torch.Generator(device="cpu").manual_seed(seed)
+    with torch.no_grad():
+        for _, p in sorted(module.named_parameters()):
+            tmp = torch.empty(p.shape, dtype=torch.float32)
+            if p.dim() >= 2:
+                torch.nn.init.xavier_uniform_(tmp, generator=gen)
+            else:
+                # xavier is undefined for 1-D params -> deterministic rand.
+                tmp.uniform_(0.0, 1.0, generator=gen)
+            p.copy_(tmp.to(p.dtype))
+
+
+def _build_vllm_module(module_cls, hf_config, *, device):
+    """Construct a vLLM module under a VllmConfig + distributed group.
+
+    Caller is responsible for calling _teardown_distributed() after running the
+    forward pass (mirrors the init -> build -> run -> destroy segment structure
+    of the standalone reproduction script).
+    """
+    from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
+
+    vllm_config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    with set_current_vllm_config(vllm_config):
+        _setup_distributed()
+        module = module_cls(**build_ctor_kwargs(module_cls, hf_config))
+    if device is not None:
+        module = module.to(device)
+    return module
 
 
 class TestModuleCustom(TestCase):
@@ -401,6 +611,124 @@ class TestModuleCustom(TestCase):
                     atol=self.precision,
                     rtol=self.rel_tol,
                     msg=f"{module_info.name}: layout/stride mismatch on real inputs (tensor {i})",
+                )
+
+    @modules(module_db)
+    def test_vllm(self, device, dtype, module_info, training):
+        """Standalone-run a vLLM-native module and compare CPU eager vs device compile.
+
+        Unlike the other tests, this does NOT construct the module from the YAML
+        ``constructor_input`` (vLLM modules need a VllmConfig + distributed group
+        and take dimension kwargs, not a config object). Instead it:
+
+        1. Resolves the HF config from the YAML config-arg (which carries the
+           model id) -- see _resolve_hf_config.
+        2. Builds the module twice with build_ctor_kwargs under a VllmConfig +
+           TP=1 distributed group (see _build_vllm_module), once for the CPU eager
+           reference and once for the device (spyre) + torch.compile path.
+        3. Initializes both copies with the SAME deterministic xavier weights.
+        4. Compares the outputs.
+
+        Forward-context-dependent modules (Attention / DecoderLayer) are skipped
+        this phase -- their forward needs a global vLLM forward context.
+        """
+        # Skip cleanly where vLLM is unavailable (e.g. CPU-only dev boxes).
+        try:
+            import vllm  # noqa: F401
+        except ImportError as exc:
+            self.skipTest(f"vLLM not available: {exc}")
+
+        # Only vLLM-native modules are standalone targets here. @modules(module_db)
+        # fans this test out over every registered module, including PyTorch
+        # standard modules (nn.GroupNorm, ...) and any transformers.* modules from
+        # HF-generated YAMLs -- those are not vLLM standalone targets. Identify a
+        # vLLM module by its class's module path (robust, independent of whether
+        # the YAML embedded a model_id).
+        module_qualpath = getattr(module_info.module_cls, "__module__", "")
+        if not module_qualpath.startswith("vllm."):
+            self.skipTest(
+                f"{module_info.name}: not a vLLM-native module "
+                f"({module_qualpath or '?'}); test_vllm targets vllm.* modules only"
+            )
+
+        cls_name = module_info.module_cls.__name__
+        if cls_name.endswith("Attention") or cls_name.endswith("DecoderLayer"):
+            self.skipTest(
+                f"{cls_name}: forward-context-dependent module, deferred to a later phase"
+            )
+
+        module_inputs = module_info.module_inputs_func(
+            module_info, device=device, dtype=dtype, requires_grad=False, training=training
+        )
+
+        for module_input in module_inputs:
+            if module_input.forward_input is None:
+                continue
+
+            hf_config = _resolve_hf_config(module_input.constructor_input)
+            if hf_config is None:
+                # This is a vLLM module (checked above) but its YAML entry carries
+                # no resolvable config arg (no model_id, no config_path). Cannot
+                # build the module without the model config -- skip.
+                self.skipTest(
+                    f"{module_info.name}: no resolvable config arg "
+                    f"(model_id / config_path) in constructor_inputs"
+                )
+
+            # forward_input tensors are already on `device` (see note in
+            # test_layout_stride); build a genuine CPU copy for the reference.
+            args_device = module_input.forward_input.args
+            kwargs_device = module_input.forward_input.kwargs
+            args_cpu = tree_map(
+                lambda x: x.cpu() if isinstance(x, torch.Tensor) else x, args_device
+            )
+            kwargs_cpu = tree_map(
+                lambda x: x.cpu() if isinstance(x, torch.Tensor) else x, kwargs_device
+            )
+
+            # --- Reference: CPU eager ---
+            # Each build init's a distributed group; always tear it down (even on
+            # skip/error) so the next parametrized variant can init a fresh group.
+            # A _SkipModule raised inside the build happens after _setup_distributed,
+            # so teardown must run before we skip -- the finally guarantees that.
+            skip_reason = None
+            try:
+                ref = _build_vllm_module(module_info.module_cls, hf_config, device="cpu")
+                randomize_weights_xavier(ref, seed=0)
+                ref.to(dtype).eval()
+                cpu_tensors = _run_forward(ref, args_cpu, kwargs_cpu)
+            except _SkipModule as exc:
+                skip_reason = str(exc)
+            finally:
+                _teardown_distributed()
+            if skip_reason is not None:
+                self.skipTest(skip_reason)
+
+            # --- Under test: device (spyre) + torch.compile ---
+            torch._dynamo.reset_code_caches()
+            torch._inductor.codecache.FxGraphCache.clear()
+            try:
+                dev = _build_vllm_module(module_info.module_cls, hf_config, device=None)
+                randomize_weights_xavier(dev, seed=0)  # same seed => same weights
+                dev.to(device).to(dtype).eval()
+                dev_compiled = torch.compile(dev)
+                device_tensors = _run_forward(dev_compiled, args_device, kwargs_device)
+            finally:
+                _teardown_distributed()
+
+            if len(cpu_tensors) != len(device_tensors):
+                self.fail(
+                    f"{module_info.name}: Output tensor count mismatch - "
+                    f"CPU: {len(cpu_tensors)}, device: {len(device_tensors)}"
+                )
+
+            for i, (cpu_t, device_t) in enumerate(zip(cpu_tensors, device_tensors)):
+                self.assertEqual(
+                    cpu_t,
+                    device_t.cpu(),
+                    atol=self.precision,
+                    rtol=self.rel_tol,
+                    msg=f"{module_info.name}: CPU eager vs device compile mismatch (tensor {i})",
                 )
 
 
