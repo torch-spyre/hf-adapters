@@ -48,7 +48,13 @@ FAILURE_CATEGORY_HARDWARE_EXCEPTION = "hardware_exception"
 FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION = "test_execution_exception"
 FAILURE_CATEGORY_VERIFICATION_FAILED = "verification_failed"
 FAILURE_CATEGORY_WORKER_CRASHED = "worker_crashed"
+FAILURE_CATEGORY_WORKER_TIMEOUT = "worker_timeout"
 FAILURE_CATEGORY_MOE = "moe"
+
+# Hard wall-clock cap for a single worker process (in seconds). If a batch
+# takes longer than this, the parent kills the child, marks the entire batch
+# as failed with FAILURE_CATEGORY_WORKER_TIMEOUT, and moves on. Prevents a
+# single hung model from stalling the whole run indefinitely.
 
 
 class HardwareExceptionAbortError(RuntimeError):
@@ -783,19 +789,61 @@ def main(
                 ),
             )
             proc.start()
+            timeout = 5 * 60 * number_of_model_per_process
 
-            proc.join()
+            proc.join(timeout=timeout)
+
+            # Timeout guard: if the child is still alive after the deadline,
+            # kill it, drop any partial results, and synthesise timeout rows
+            # so the outer loop can proceed to the next batch.
+            timed_out: bool = proc.is_alive()
+            if timed_out:
+                print(
+                    f"{ts()}     batch: worker exceeded "
+                    f"{timeout}s timeout — terminating "
+                    f"pid={proc.pid} and marking {len(batch)} model(s) as "
+                    f"failed with {FAILURE_CATEGORY_WORKER_TIMEOUT}"
+                )
+                proc.terminate()
+                proc.join(timeout=30)
+                if proc.is_alive():
+                    print(
+                        f"{ts()}     batch: worker pid={proc.pid} did not "
+                        f"exit after SIGTERM — sending SIGKILL"
+                    )
+                    proc.kill()
+                    proc.join(timeout=30)
 
             # Drain the queue. SimpleQueue.get() blocks if empty, so probe
             # first; the child has already exited so a non-empty queue
             # returns instantly, and an empty one signals a crash.
-            if result_queue.empty():
+            if timed_out:
+                worker_results: list[dict] = [
+                    {
+                        "model_name": path,
+                        "config_class": row.get("config_class"),
+                        "adapter_name": "",
+                        "added_date": None,
+                        "snapshot_date": snapshot_date,
+                        "verified_on_cpu": False,
+                        "verified_on_gpu": False,
+                        "verified_on_spyre": False,
+                        "num_downloads": int(row.get("downloads") or 0),
+                        "family": str(row.get("model_type") or ""),
+                        "architecture": str(row.get("architectures") or ""),
+                        "parameters_number": int(row.get("parameters") or 0),
+                        "error": (f"worker exceeded " f"{timeout}s timeout"),
+                        "failure_category": FAILURE_CATEGORY_WORKER_TIMEOUT,
+                    }
+                    for row, path in zip(batch, batch_paths)
+                ]
+            elif result_queue.empty():
                 print(
                     f"{ts()}     batch: worker exited code {proc.exitcode} "
                     f"and returned no results — marking all {len(batch)} "
                     f"models as failed"
                 )
-                worker_results: list[dict] = [
+                worker_results = [
                     {
                         "model_name": path,
                         "config_class": row.get("config_class"),
