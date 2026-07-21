@@ -170,7 +170,11 @@ def keep(model: ModelInfo, token: str | bool) -> bool:
 def fetch_top_embedding_models(
     limit: int, output_csv: Path | str | None = None
 ) -> list[dict[str, object]]:
-    token: str | bool = os.environ.get("HF_TOKEN", True)
+    # `or True` (not `.get(..., True)`): GHA sets HF_TOKEN to an empty string
+    # rather than omitting it when the secret doesn't exist, so `.get` alone
+    # would return "" and send a malformed auth header on every request,
+    # causing has_loadable_weights() to 401 (and thus filter out) every model.
+    token: str | bool = os.environ.get("HF_TOKEN") or True
     api: HfApi = HfApi(token=token)
     return build_catalog(
         fetch_fn=lambda lim: _fetch(api, lim),
