@@ -212,6 +212,10 @@ def _resolve_hf_config(constructor_input):
 
 
 # Attributes on the HF config that map to common vLLM constructor kwarg names.
+# Used only for COMPOSITE modules (vllm.model_executor.models.*), whose scalar
+# constructor args are derived from the model config (Option C). Atomic library
+# layers carry their constructor kwargs explicitly in the YAML (captured from the
+# live instance at generation time), so they need no config derivation.
 _CONFIG_ATTR_FOR_PARAM = {
     "hidden_size": ("hidden_size",),
     "intermediate_size": ("intermediate_size",),
@@ -222,16 +226,18 @@ _CONFIG_ATTR_FOR_PARAM = {
 
 
 class _SkipModule(Exception):
-    """Raised by build_ctor_kwargs when a module cannot be constructed this phase."""
+    """Raised when a composite module's constructor cannot be resolved from config."""
 
 
-def build_ctor_kwargs(module_cls, hf_config) -> dict:
-    """Build constructor kwargs for a vLLM module from an HF config.
+def build_ctor_kwargs_from_config(module_cls, hf_config) -> dict:
+    """Derive a COMPOSITE vLLM module's constructor kwargs from the HF config.
 
-    Generic: inspect the module's __init__ signature and fill each parameter
-    from the HF config using the name map above; always supply quant_config=None
-    and a prefix. Parameters that cannot be resolved and have no default cause
-    the caller to skip the module (unsupported this phase).
+    Generic (not per-class): inspect ``module_cls.__init__`` and fill each
+    parameter from the HF config using ``_CONFIG_ATTR_FOR_PARAM`` (same-named
+    attribute by default). ``quant_config`` -> None, ``prefix`` -> a label, and a
+    ``config`` param receives the config object itself (GraniteAttention /
+    GraniteDecoderLayer take a config; GraniteMLP takes scalars derived here).
+    A required param that cannot be resolved raises ``_SkipModule``.
     """
     import inspect
 
@@ -240,7 +246,7 @@ def build_ctor_kwargs(module_cls, hf_config) -> dict:
     unresolved: list[str] = []
 
     for pname, param in sig.parameters.items():
-        if pname in ("self",):
+        if pname == "self":
             continue
         if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
             continue
@@ -252,7 +258,6 @@ def build_ctor_kwargs(module_cls, hf_config) -> dict:
             kwargs[pname] = module_cls.__name__.lower()
             continue
         if pname == "config":
-            # Some vLLM modules take the HF config object directly.
             kwargs[pname] = hf_config
             continue
 
@@ -295,19 +300,39 @@ def randomize_weights_xavier(module: torch.nn.Module, seed: int = 0) -> None:
             p.copy_(tmp.to(p.dtype))
 
 
-def _build_vllm_module(module_cls, hf_config, *, device):
+def _build_vllm_module(module_cls, constructor_input, *, device):
     """Construct a vLLM module under a VllmConfig + distributed group.
 
+    Constructor args come from the YAML-resolved ``constructor_input``:
+
+    - **Atomic** library layers carry explicit captured kwargs (ints/lists/etc.),
+      so the module is built generically as ``module_cls(*args, **kwargs)`` -- no
+      HF config, no per-class adapter.
+    - **Composite** model modules carry a single config arg, which the OOT
+      framework already resolved to a live ``PretrainedConfig`` as ``args[0]``.
+      Its scalar constructor args are derived from that config via the generic
+      ``build_ctor_kwargs_from_config`` (Option C).
+
     Caller is responsible for calling _teardown_distributed() after running the
-    forward pass (mirrors the init -> build -> run -> destroy segment structure
-    of the standalone reproduction script).
+    forward pass (mirrors the init -> build -> run -> destroy segment structure of
+    the standalone reproduction script).
     """
     from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
+
+    args = list(constructor_input.args)
+    kwargs = dict(constructor_input.kwargs)
+    hf_config = _resolve_hf_config(constructor_input)
 
     vllm_config = VllmConfig(device_config=DeviceConfig(device="cpu"))
     with set_current_vllm_config(vllm_config):
         _setup_distributed()
-        module = module_cls(**build_ctor_kwargs(module_cls, hf_config))
+        if hf_config is not None:
+            # Composite (Option C): derive scalar ctor args from the config,
+            # ignoring the raw config arg itself.
+            module = module_cls(**build_ctor_kwargs_from_config(module_cls, hf_config))
+        else:
+            # Atomic: explicit captured args/kwargs from the YAML.
+            module = module_cls(*args, **kwargs)
     if device is not None:
         module = module.to(device)
     return module
@@ -617,17 +642,18 @@ class TestModuleCustom(TestCase):
     def test_vllm(self, device, dtype, module_info, training):
         """Standalone-run a vLLM-native module and compare CPU eager vs device compile.
 
-        Unlike the other tests, this does NOT construct the module from the YAML
-        ``constructor_input`` (vLLM modules need a VllmConfig + distributed group
-        and take dimension kwargs, not a config object). Instead it:
+        Unlike the other tests, vLLM modules need a VllmConfig + TP=1 distributed
+        group at construction, so this builds them via ``_build_vllm_module``:
 
-        1. Resolves the HF config from the YAML config-arg (which carries the
-           model id) -- see _resolve_hf_config.
-        2. Builds the module twice with build_ctor_kwargs under a VllmConfig +
-           TP=1 distributed group (see _build_vllm_module), once for the CPU eager
-           reference and once for the device (spyre) + torch.compile path.
-        3. Initializes both copies with the SAME deterministic xavier weights.
-        4. Compares the outputs.
+        1. Atomic library layers (vllm.model_executor.layers.*) are built from the
+           explicit constructor kwargs captured into the YAML at generation time
+           -- ``module_cls(*args, **kwargs)``, no HF config, no per-class adapter.
+        2. Composite model modules (vllm.model_executor.models.*) carry a config
+           arg; their scalar ctor args are derived from that config via the generic
+           ``build_ctor_kwargs_from_config`` (Option C).
+        3. Both a CPU-eager reference and a device (spyre) + torch.compile copy are
+           built, initialized with the SAME deterministic xavier weights, and their
+           outputs compared.
 
         Forward-context-dependent modules (Attention / DecoderLayer) are skipped
         this phase -- their forward needs a global vLLM forward context.
@@ -665,16 +691,6 @@ class TestModuleCustom(TestCase):
             if module_input.forward_input is None:
                 continue
 
-            hf_config = _resolve_hf_config(module_input.constructor_input)
-            if hf_config is None:
-                # This is a vLLM module (checked above) but its YAML entry carries
-                # no resolvable config arg (no model_id, no config_path). Cannot
-                # build the module without the model config -- skip.
-                self.skipTest(
-                    f"{module_info.name}: no resolvable config arg "
-                    f"(model_id / config_path) in constructor_inputs"
-                )
-
             # forward_input tensors are already on `device` (see note in
             # test_layout_stride); build a genuine CPU copy for the reference.
             args_device = module_input.forward_input.args
@@ -693,7 +709,10 @@ class TestModuleCustom(TestCase):
             # so teardown must run before we skip -- the finally guarantees that.
             skip_reason = None
             try:
-                ref = _build_vllm_module(module_info.module_cls, hf_config, device="cpu")
+                ref = _build_vllm_module(
+                    module_info.module_cls, module_input.constructor_input,
+                    device="cpu",
+                )
                 randomize_weights_xavier(ref, seed=0)
                 ref.to(dtype).eval()
                 cpu_tensors = _run_forward(ref, args_cpu, kwargs_cpu)
@@ -708,7 +727,10 @@ class TestModuleCustom(TestCase):
             torch._dynamo.reset_code_caches()
             torch._inductor.codecache.FxGraphCache.clear()
             try:
-                dev = _build_vllm_module(module_info.module_cls, hf_config, device=None)
+                dev = _build_vllm_module(
+                    module_info.module_cls, module_input.constructor_input,
+                    device=None,
+                )
                 randomize_weights_xavier(dev, seed=0)  # same seed => same weights
                 dev.to(device).to(dtype).eval()
                 dev_compiled = torch.compile(dev)

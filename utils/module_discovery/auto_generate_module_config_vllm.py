@@ -209,19 +209,105 @@ def register_hooks(model) -> Dict[str, str]:
     return resolved
 
 
-def collect_captures(model) -> Dict[str, Dict[str, Any]]:
-    """Collect captured invocations from every target module and remove hooks.
+# A module is an atomic vLLM library layer (constructor args recoverable from
+# instance attributes) vs. a model-specific composite module (built from a
+# PretrainedConfig -- handled via the config arg / Option C in the test).
+_ATOMIC_PREFIX = "vllm.model_executor.layers."
+_COMPOSITE_PREFIX = "vllm.model_executor.models."
 
-    Runs inside the worker. Returns
-    ``{module_name: {"module_path": str, "invocations": [...]}}`` (plain data).
+# Constructor params that are never captured as values: they are supplied by the
+# test at construction time (quant_config=None, a prefix, dtype/config/cache
+# come from the vLLM context) rather than recorded in the YAML.
+_CTOR_SKIP_PARAMS = frozenset(
+    {"self", "quant_config", "prefix", "params_dtype", "config", "cache_config"}
+)
+
+# __init__ param name -> instance attribute name(s) to read it back from, for
+# the few vLLM layers where the attribute name differs from the param name.
+_CTOR_ATTR_ALIASES = {
+    "bias": ("has_bias",),
+    "eps": ("variance_epsilon",),
+    "output_sizes": ("output_sizes",),
+    "org_num_embeddings": ("org_vocab_size",),
+}
+
+
+def _capture_ctor_args(module) -> Dict[str, Any] | None:
+    """Read an atomic module's constructor kwargs back from instance attributes.
+
+    Runs inside the worker on a constructed module. Uses the class __init__
+    signature: for each non-skipped param, read the same-named attribute (or an
+    alias). A param that has no default and cannot be read back makes capture
+    fail (return None) so the caller falls back to the config arg. Returns a
+    dict of ``{param_name: scalar_value}`` (only plain/picklable values are
+    kept). ``SiluAndMul`` and similar zero-arg layers yield ``{}``.
+    """
+    import inspect
+
+    try:
+        sig = inspect.signature(type(module).__init__)
+    except (ValueError, TypeError):
+        return None
+
+    kwargs: Dict[str, Any] = {}
+    for pname, param in sig.parameters.items():
+        if pname in _CTOR_SKIP_PARAMS:
+            continue
+        if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+            continue
+
+        value = None
+        found = False
+        for attr in _CTOR_ATTR_ALIASES.get(pname, (pname,)):
+            if hasattr(module, attr):
+                value = getattr(module, attr)
+                found = True
+                break
+
+        if not found:
+            if param.default is inspect.Parameter.empty:
+                # A required param we cannot recover -> capture unusable.
+                return None
+            continue  # optional and absent: rely on the default
+
+        # Only keep plain, picklable scalar/list values (skip tensors, modules,
+        # dtypes, config objects, etc. -- they are not YAML-representable here).
+        if isinstance(value, bool) or isinstance(value, (int, float, str)) or value is None:
+            kwargs[pname] = value
+        elif isinstance(value, (list, tuple)) and all(
+            isinstance(v, (int, float, str, bool)) for v in value
+        ):
+            kwargs[pname] = list(value)
+        else:
+            # Non-scalar (e.g. torch.dtype) required value we cannot represent.
+            if param.default is inspect.Parameter.empty:
+                return None
+            # optional: drop it, the default applies
+    return kwargs
+
+
+def collect_captures(model) -> Dict[str, Dict[str, Any]]:
+    """Collect captured invocations + constructor args, then remove hooks.
+
+    Runs inside the worker. Returns, per target module,
+    ``{module_path, invocations, ctor_kwargs}`` (plain data). ``ctor_kwargs`` is
+    a dict for atomic ``vllm.model_executor.layers.*`` modules whose constructor
+    args were recovered from instance attributes, or ``None`` for composite
+    ``vllm.model_executor.models.*`` modules (built from the model config in the
+    test) and for any atomic module whose args could not be fully recovered.
     """
     out: Dict[str, Dict[str, Any]] = {}
     for name, module in model.named_modules():
         if not is_target(name):
             continue
+        module_path = f"{module.__class__.__module__}.{module.__class__.__name__}"
+        ctor_kwargs = None
+        if module_path.startswith(_ATOMIC_PREFIX):
+            ctor_kwargs = _capture_ctor_args(module)
         out[name] = {
-            "module_path": f"{module.__class__.__module__}.{module.__class__.__name__}",
+            "module_path": module_path,
             "invocations": list(getattr(module, "_cap_invocations", [])),
+            "ctor_kwargs": ctor_kwargs,
         }
         handle = getattr(module, "_cap_handle", None)
         if handle is not None:
@@ -317,9 +403,22 @@ def build_captured_modules(
 ) -> List[Dict[str, Any]]:
     """Turn worker captures into ``_build_module_entry_dict`` input dicts.
 
-    Each module gets a single config-type constructor arg (carrying ``model_id``)
-    and its deduplicated forward invocations. Modules that captured no invocation
-    (never hit during the prefill) are skipped.
+    Constructor-arg strategy per module:
+
+    - **Atomic** ``vllm.model_executor.layers.*`` modules whose ctor args were
+      recovered from instance attributes (``ctor_kwargs`` is a dict): emit those
+      as explicit constructor kwargs (plain int/float/str/bool/list values). The
+      module is then built generically as ``module_cls(**kwargs)`` with no HF
+      config -- no per-class adapter needed.
+    - **Composite** ``vllm.model_executor.models.*`` modules (and any atomic
+      module whose args could not be recovered): fall back to a config-type
+      constructor arg carrying ``model_id`` (Option C), from which the test
+      derives the constructor args via the model config.
+
+    A ``_vllm_ctor_kwargs`` key carries the captured kwargs through to the YAML
+    emitter (which writes them into ``constructor_inputs.kwargs``); it is not
+    consumed by ``_build_module_entry_dict``. Modules that captured no
+    invocation (never hit during the prefill) are skipped.
     """
     captured_modules: List[Dict[str, Any]] = []
     for name, data in sorted(captures.items()):
@@ -329,17 +428,37 @@ def build_captured_modules(
             continue
 
         class_name = data["module_path"].rsplit(".", 1)[-1]
+        # Name each entry <ClassName>_<8-hex-hash>, matching the HF generator's
+        # convention. The OOT framework reduces an include name to the module
+        # class name via _extract_base_module_name, which only strips a trailing
+        # _<hexhash> / _<digits> / _layer<N> suffix; a <ClassName>_<hash> name
+        # reduces to <ClassName> and matches ModuleInfo.name (= the class name),
+        # so the module is injected into the @modules variant list. A descriptive
+        # suffix like "__model_layers_0_mlp" would NOT reduce and the module would
+        # be silently filtered out. The hash of the captured instance path keeps
+        # entries unique (layer 0 only, so no real collisions).
+        name_hash = hashlib.sha256(name.encode()).hexdigest()[:8]
+
+        ctor_kwargs = data.get("ctor_kwargs")
+        if ctor_kwargs is not None:
+            # Atomic module: explicit captured constructor kwargs, no config arg.
+            constructor_args: List[Dict[str, Any]] = []
+            vllm_ctor_kwargs = dict(ctor_kwargs)
+        else:
+            # Composite / unrecoverable: Option C -- carry the model config arg.
+            constructor_args = [
+                _config_constructor_arg(config_path, model_id, config_overrides)
+            ]
+            vllm_ctor_kwargs = {}
+
         captured_modules.append(
             {
-                # Represent one canonical entry per module path; the leaf name
-                # keeps it readable and unique (layer 0 only, so no collisions).
-                "name": f"{class_name}__{name.replace('.', '_')}",
+                "name": f"{class_name}_{name_hash}",
                 "module_path": data["module_path"],
                 "example_instance": name,
-                "constructor_args": [
-                    _config_constructor_arg(config_path, model_id, config_overrides)
-                ],
+                "constructor_args": constructor_args,
                 "constructor_kwargs": {},
+                "_vllm_ctor_kwargs": vllm_ctor_kwargs,
                 "invocations": invocations,
             }
         )
@@ -368,7 +487,25 @@ def generate_unified_yaml_config_vllm(
     the model was captured with.
     """
     precision = _DTYPE_PRECISION.get(dtype, {"atol": 0.005, "rtol": 0.005})
-    module_entries = [_build_module_entry_dict(m) for m in captured_modules]
+    module_entries = []
+    for m in captured_modules:
+        entry = _build_module_entry_dict(m)
+        # Append the captured module path (e.g. "model.layers.0.mlp") to the
+        # description so the YAML records which named_module each entry came
+        # from. _build_module_entry_dict only records the class path, and the
+        # entry `name` is a hashed class name, so this is the only place the
+        # human-readable instance path is preserved.
+        instance = m.get("example_instance")
+        if instance:
+            entry["description"] = f"{entry['description']} (path: {instance})"
+        # Inject captured constructor kwargs (atomic modules). _build_module_entry_dict
+        # only emits int-typed constructor_kwargs, so write the full captured dict
+        # (int/float/str/bool/list values) directly -- the OOT resolved_kwargs path
+        # passes these plain values through unchanged.
+        vllm_ctor_kwargs = m.get("_vllm_ctor_kwargs") or {}
+        if vllm_ctor_kwargs:
+            entry["constructor_inputs"]["kwargs"] = dict(vllm_ctor_kwargs)
+        module_entries.append(entry)
 
     config = {
         "test_suite_config": {
