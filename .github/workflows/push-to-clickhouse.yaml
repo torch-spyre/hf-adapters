@@ -78,6 +78,12 @@ jobs:
     name: Generate weekly shards
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Overrides the workflow-level default of /home/senuser (test_daily.yaml's
+    # own generate-matrix job does the same) — that path only exists on the
+    # Spyre-pod runner image, not on ubuntu-latest.
+    defaults:
+      run:
+        working-directory: .
     outputs:
       matrix: ${{ steps.generate.outputs.matrix }}
     env:
