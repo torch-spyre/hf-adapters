@@ -9,11 +9,20 @@ fetch/compute step and emits a JSON matrix via GITHUB_OUTPUT for a downstream
 under --output-dir; downstream jobs load their shard via
 `weekly_test.py --model-list-file`.
 
+Models at or above --large-model-threshold parameters are split into their
+own small shards and tagged runner="x2" (spyre_pf_x2 — more memory, 2 cards)
+instead of runner="x1" (spyre_pf_x1 — less memory, 1 card), so a shard that
+happens to contain several large models doesn't have to share a single-card
+runner's memory budget. See push-to-clickhouse.yaml's weekly-model-scan job
+for how `matrix.runner` selects the actual runs-on label.
+
 Usage (called by the GHA workflow):
     python .github/scripts/generate_weekly_shards.py \
         --top-k 10000 \
         --shard-size-generative 250 \
         --shard-size-embedding 500 \
+        --large-model-threshold 7000000000 \
+        --large-model-shard-size 2 \
         --output-dir shards
 """
 
@@ -40,11 +49,25 @@ def _chunk(rows: list[dict], shard_size: int) -> list[list[dict]]:
     return [rows[i : i + shard_size] for i in range(0, len(rows), shard_size)]
 
 
+def _is_large(row: dict, threshold: int) -> bool:
+    params = row.get("parameters")
+    return isinstance(params, (int, float)) and params >= threshold
+
+
 def generate_shards(
-    top_k: int, shard_size_generative: int, shard_size_embedding: int, output_dir: Path
+    top_k: int,
+    shard_size_generative: int,
+    shard_size_embedding: int,
+    large_model_threshold: int,
+    large_model_shard_size: int,
+    output_dir: Path,
 ) -> list[dict]:
     """Fetch both mode's top-K lists once, write shard JSON files, and return
-    the combined matrix (list of {mode, shard_index, shard_file} dicts).
+    the combined matrix (list of {mode, shard_index, shard_file, runner} dicts).
+
+    Within each mode, models are split into a "large" group (>= threshold
+    parameters, chunked small and tagged runner="x2") and everyone else
+    (chunked at the normal shard size, tagged runner="x1").
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     fetchers = {
@@ -61,17 +84,33 @@ def generate_shards(
         for row in rows:
             row.pop("model_info", None)
 
-        shards = _chunk(rows, shard_size)
-        print(
-            f"{mode}: fetched {len(rows)} model(s), split into {len(shards)} "
-            f"shard(s) of up to {shard_size} each"
+        large_rows = [r for r in rows if _is_large(r, large_model_threshold)]
+        small_rows = [r for r in rows if not _is_large(r, large_model_threshold)]
+
+        groups = (
+            (small_rows, shard_size, "x1"),
+            (large_rows, large_model_shard_size, "x2"),
         )
-        for shard_index, shard_rows in enumerate(shards):
-            shard_file = f"{mode}-shard-{shard_index:03d}.json"
-            (output_dir / shard_file).write_text(json.dumps(shard_rows))
-            matrix.append(
-                {"mode": mode, "shard_index": shard_index, "shard_file": shard_file}
+        mode_shard_count = 0
+        for group_rows, group_shard_size, runner in groups:
+            shards = _chunk(group_rows, group_shard_size)
+            mode_shard_count += len(shards)
+            print(
+                f"{mode} ({runner}): {len(group_rows)} model(s), split into "
+                f"{len(shards)} shard(s) of up to {group_shard_size} each"
             )
+            for shard_index, shard_rows in enumerate(shards):
+                shard_file = f"{mode}-{runner}-shard-{shard_index:03d}.json"
+                (output_dir / shard_file).write_text(json.dumps(shard_rows))
+                matrix.append(
+                    {
+                        "mode": mode,
+                        "shard_index": shard_index,
+                        "shard_file": shard_file,
+                        "runner": runner,
+                    }
+                )
+        print(f"{mode}: {len(rows)} model(s) total, {mode_shard_count} shard(s)")
 
     return matrix
 
@@ -110,6 +149,18 @@ def main() -> None:
         help="Models per embedding shard.",
     )
     parser.add_argument(
+        "--large-model-threshold",
+        type=int,
+        default=7_000_000_000,
+        help="Models with >= this many parameters are routed to spyre_pf_x2 shards instead of spyre_pf_x1.",
+    )
+    parser.add_argument(
+        "--large-model-shard-size",
+        type=int,
+        default=2,
+        help="Models per large-model (x2) shard.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("shards"),
@@ -121,6 +172,8 @@ def main() -> None:
         top_k=args.top_k,
         shard_size_generative=args.shard_size_generative,
         shard_size_embedding=args.shard_size_embedding,
+        large_model_threshold=args.large_model_threshold,
+        large_model_shard_size=args.large_model_shard_size,
         output_dir=args.output_dir,
     )
 
