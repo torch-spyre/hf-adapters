@@ -10,11 +10,19 @@ under --output-dir; downstream jobs load their shard via
 `weekly_test.py --model-list-file`.
 
 Models at or above --large-model-threshold parameters are split into their
-own small shards and tagged runner="x2" (spyre_pf_x2 — more memory, 2 cards)
-instead of runner="x1" (spyre_pf_x1 — less memory, 1 card), so a shard that
-happens to contain several large models doesn't have to share a single-card
-runner's memory budget. See push-to-clickhouse.yaml's weekly-model-scan job
-for how `matrix.runner` selects the actual runs-on label.
+own shards and tagged runner="x2" (spyre_pf_x2 — more memory, 2 cards)
+instead of runner="x1" (spyre_pf_x1 — less memory, 1 card), so they don't
+share a batch with (and inflate the memory footprint of) small models. See
+push-to-clickhouse.yaml's weekly-model-scan job for how `matrix.runner`
+selects the actual runs-on label.
+
+--large-model-shard-size does NOT need to be small: weekly_test.py already
+re-chunks whatever list it's given into fresh-OS-process batches of
+GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS/EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS
+regardless of shard size, which is what actually bounds how many models'
+memory can accumulate in one process before a clean restart. A tiny shard
+size buys no extra safety over a large one — it only multiplies GitHub
+Actions job count, and matrices are hard-capped at 256 jobs total.
 
 Usage (called by the GHA workflow):
     python .github/scripts/generate_weekly_shards.py \
@@ -22,7 +30,7 @@ Usage (called by the GHA workflow):
         --shard-size-generative 250 \
         --shard-size-embedding 500 \
         --large-model-threshold 7000000000 \
-        --large-model-shard-size 2 \
+        --large-model-shard-size 100 \
         --output-dir shards
 """
 
@@ -157,8 +165,13 @@ def main() -> None:
     parser.add_argument(
         "--large-model-shard-size",
         type=int,
-        default=2,
-        help="Models per large-model (x2) shard.",
+        default=100,
+        help=(
+            "Models per large-model (x2) shard. Doesn't need to be small — "
+            "weekly_test.py's own per-process batching already bounds memory "
+            "accumulation regardless of shard size; this just controls "
+            "GitHub Actions job count (matrices cap at 256 jobs total)."
+        ),
     )
     parser.add_argument(
         "--output-dir",
