@@ -49,10 +49,12 @@ on:
         default: "11000"
 
 concurrency:
-  # One weekly scan at a time. Queue (don't cancel) a re-trigger — a run can
-  # take many hours and losing progress to a duplicate dispatch is wasteful.
-  group: ${{ github.workflow }}
-  cancel-in-progress: false
+  # Scoped per-ref: a new commit on a given branch cancels and supersedes
+  # whatever's still running for that SAME branch, without touching a run
+  # in progress on a different ref (e.g. a PR-branch test push won't cancel
+  # the real production scan running against main).
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
