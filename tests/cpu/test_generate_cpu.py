@@ -41,7 +41,11 @@ from tests.cpu._generate_helpers import (
     hf_reference_outputs,
 )
 from tests.cpu.conftest import _set_rope_dtype, _unwrap_compiled_blocks
-from tests.model_registry import CAUSAL_PATHS, NON_BLOCKING_CAUSAL_MODELS, xfail_non_blocking
+from tests.model_registry import (
+    CAUSAL_PATHS,
+    NON_BLOCKING_CAUSAL_MODELS,
+    xfail_non_blocking,
+)
 
 
 @pytest.mark.parametrize("model_path", xfail_non_blocking(CAUSAL_PATHS))

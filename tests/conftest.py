@@ -114,7 +114,9 @@ if _TARGETS_CPU and not _ALREADY_PATCHED:
         )
         # Evict the entire hf_adapters package so all sub-modules re-import
         # cleanly from the patched hf_common, not from the installed copy.
-        for _key in [k for k in sys.modules if k == "hf_adapters" or k.startswith("hf_adapters.")]:
+        for _key in [
+            k for k in sys.modules if k == "hf_adapters" or k.startswith("hf_adapters.")
+        ]:
             del sys.modules[_key]
 
     _common_path = os.path.join(ADAPTERS_DIR, "hf_common.py")
