@@ -307,7 +307,9 @@ def randomize_weights_xavier(module: torch.nn.Module, seed: int = 0) -> None:
 # args. Registered by module class name.
 
 
-def _fwd_args_logits_processor(module, constructor_input, fwd_args, *, device, dtype, seed):
+def _fwd_args_logits_processor(
+    module, constructor_input, fwd_args, *, device, dtype, seed
+):
     """Prepend a constructed ``lm_head`` (ParallelLMHead) to LogitsProcessor's args.
 
     ``LogitsProcessor.forward(lm_head, hidden_states, embedding_bias=None)`` needs
@@ -393,7 +395,9 @@ def _run_vllm_module(
             _setup_distributed()
             if hf_config is not None:
                 # Composite (Option C): derive scalar ctor args from the config.
-                module = module_cls(**build_ctor_kwargs_from_config(module_cls, hf_config))
+                module = module_cls(
+                    **build_ctor_kwargs_from_config(module_cls, hf_config)
+                )
             else:
                 # Atomic: explicit captured args/kwargs from the YAML.
                 module = module_cls(*args, **kwargs)
@@ -413,8 +417,12 @@ def _run_vllm_module(
             builder = _FWD_ARGS_BUILDERS.get(module_cls.__name__)
             if builder is not None:
                 run_args = builder(
-                    module, constructor_input, fwd_args,
-                    device=device, dtype=dtype, seed=seed,
+                    module,
+                    constructor_input,
+                    fwd_args,
+                    device=device,
+                    dtype=dtype,
+                    seed=seed,
                 )
 
             runnable = torch.compile(module) if compile else module
@@ -837,8 +845,14 @@ class TestModuleCustom(TestCase):
                 )
 
             for i, (cpu_t, device_t) in enumerate(zip(cpu_tensors, device_tensors)):
-                print("###CPU in ", args_cpu[0].device, args_cpu[0].cpu().flatten()[:10])
-                print("###DEV in", args_device[0].device, args_device[0].cpu().flatten()[:10])
+                print(
+                    "###CPU in ", args_cpu[0].device, args_cpu[0].cpu().flatten()[:10]
+                )
+                print(
+                    "###DEV in",
+                    args_device[0].device,
+                    args_device[0].cpu().flatten()[:10],
+                )
                 print("###CPU out", cpu_t.device, cpu_t.cpu().flatten()[:10])
                 print("###DEV out", device_t.device, device_t.cpu().flatten()[:10])
                 self.assertEqual(
