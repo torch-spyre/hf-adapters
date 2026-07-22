@@ -110,21 +110,82 @@ jobs:
       repository: ${{ inputs.repository || '' }}
       test_type: ${{ inputs.test_type || 'full' }}
 
+  # ---------------------------------------------------------------------------
+  # Fixed 3-model smoke subset (Qwen3, Ministral, Granite 4.0) run directly in
+  # this workflow, independent of the dynamic matrix in _test_matrix.yaml.
+  # Hardcoded on purpose: this is a small fast sanity check, not meant to grow
+  # with the model registry.
+  # ---------------------------------------------------------------------------
+  spyre-smoke-subset-tests:
+    name: Spyre smoke subset (${{ matrix.model_key }})
+    needs: provenance
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.runner_label || 'image_torch_spyre_pinned' }}
+    timeout-minutes: 120
+    env:
+      CI: ""
+      CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: /home/senuser
+    strategy:
+      fail-fast: false
+      matrix:
+        model_key:
+          - qwen3      # Qwen/Qwen3-0.6B
+          - ministral   # ministral/Ministral-3B-Instruct
+          - granite4    # ibm-granite/granite-4.0-1b-base
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+
+      - name: Run test_e2e_smoke_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
+          uv run pytest -vvv -s tests/spyre/test_e2e_smoke_spyre.py -k "${{ matrix.model_key }}"
+          echo "tests done"
+
   # ----------------------------------------------------------------------------------
   # Fan-in gate job so callers can poll a single stable job name for pass/fail.
   # ----------------------------------------------------------------------------------
   integration-test-result:
     name: Integration test result
     runs-on: ubuntu-latest
-    needs: run-tests
+    needs: [run-tests, spyre-smoke-subset-tests]
     if: always()
     steps:
       - name: Evaluate test results
         run: |
           RESULT="${{ needs.run-tests.result }}"
+          SUBSET_RESULT="${{ needs.spyre-smoke-subset-tests.result }}"
           echo "run-tests result: ${RESULT}"
+          echo "spyre-smoke-subset-tests result: ${SUBSET_RESULT}"
 
-          if [[ "${RESULT}" == "success" ]]; then
+          if [[ "${RESULT}" == "success" && "${SUBSET_RESULT}" == "success" ]]; then
             echo "All integration test suites passed."
             exit 0
           fi
