@@ -242,24 +242,6 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
             if "slow" in item.keywords:
                 item.add_marker(skip_slow)
 
-    # When --model-path is used, pytest_generate_tests injects plain path strings
-    # (no xfail marks) because the original decorator's pytest.param objects are
-    # stripped. Re-apply xfail here, post-collection, for any item whose
-    # model_path callargs value appears in NON_BLOCKING_CAUSAL_MODELS.
-    if config.getoption("--model-path"):
-        from tests.model_registry import NON_BLOCKING_CAUSAL_MODELS
-
-        for item in items:
-            try:
-                path = item.callspec.params.get("model_path", "")
-            except AttributeError:
-                path = ""
-            if path in NON_BLOCKING_CAUSAL_MODELS and not item.get_closest_marker("xfail"):
-                item.add_marker(
-                    pytest.mark.xfail(
-                        reason=NON_BLOCKING_CAUSAL_MODELS[path], strict=False
-                    )
-                )
 
 
 def get_dtype_for_cpu(model_path: str) -> torch.dtype:
