@@ -491,7 +491,7 @@ NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = {
         f"{key}: newly green on Spyre, non-blocking signal for a trial "
         "period before promoting to a blocking test"
     )
-    for key in ("qwen3", "olmo2_1b", "gemma3_unsloth", "ministral8b", "gemma4_google")
+    for key in ("qwen3", "olmo2_1b", "gemma3_unsloth", "ministral8b", "gemma4_google", "gemma4_base")
 }
 
 
