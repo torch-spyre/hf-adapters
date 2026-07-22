@@ -83,6 +83,21 @@ def _is_special_tensor(name: str) -> bool:
 # config faithful to the runtime implementation.
 DEFAULT_ATTN_IMPLEMENTATION = "sdpa"
 
+# The dtype Spyre actually runs in. ``from_pretrained`` defaults to float32, but
+# Spyre executes in bfloat16, so both the capture path (``load_model_only``) and
+# the YAML emit path (``_tensor_info_to_spec``) default floating-point tensors to
+# bfloat16. This keeps the generated config faithful to the runtime dtype
+# regardless of the checkpoint's stored precision. Only floating-point dtypes are
+# remapped; integer/bool tensors (ids, masks, positions) keep their own dtype.
+DEFAULT_FLOAT_DTYPE = torch.bfloat16
+_FLOAT_DTYPE_ALIASES = ("float16", "float32", "float64", "float", "half", "double")
+
+# Special tensors (position/mask/ids -- see ``_is_special_tensor``) carry indices
+# rather than activations, so they are forced to this integer dtype regardless of
+# the dtype they were captured under. This makes their ``randint`` init consistent
+# (randint on a floating-point dtype is meaningless).
+DEFAULT_INT_DTYPE = torch.int64
+
 
 def _resolve_attn_implementation(config: Any) -> str:
     """Return the attention implementation the model actually used.
@@ -589,15 +604,49 @@ def _tensor_info_to_spec(tensor_info: Dict[str, Any], name: str) -> Dict[str, An
     if not dtype.startswith("torch."):
         dtype = f"torch.{dtype}"
 
+    # Default every floating-point tensor to bfloat16 (the dtype Spyre runs in),
+    # regardless of the precision the checkpoint was captured in. A model loaded
+    # in float32 would otherwise emit float32 specs; normalizing here guarantees
+    # the "default is bfloat16" contract even when the capture path did not (or
+    # could not) load the model in bfloat16. Integer/bool tensors are left alone.
+    bare_dtype = dtype.replace("torch.", "")
+    if bare_dtype in _FLOAT_DTYPE_ALIASES:
+        dtype = str(DEFAULT_FLOAT_DTYPE)
+
     # Determine init strategy based on tensor characteristics
     is_random = tensor_info.get("is_random", True)
     init = "randn" if is_random else "zeros"
     init_args = {}
 
-    # Special handling for position/id tensors
-    if _is_special_tensor(name):
+    # An integer tensor (e.g. token ids for an embedding, position ids, masks)
+    # must not use randn -- torch.randn ("normal_kernel_cpu") is float-only and
+    # raises NotImplementedError for integer dtypes. Use randint for any integer
+    # dtype, and also for the name-based special tensors (position/mask/ids),
+    # which may be captured under a generic name like "arg_0".
+    is_int_dtype = any(t in dtype for t in ("int", "uint", "long", "short", "bool"))
+    if is_int_dtype or _is_special_tensor(name):
         init = "randint"
-        init_args = {"high": 10000}
+        # A special tensor (position/mask/ids) holds indices, not activations,
+        # so force it to an integer dtype. This keeps the randint init consistent
+        # even when the tensor was captured under a floating-point dtype (e.g. a
+        # "position_embeddings" tensor captured as bfloat16): randint on a float
+        # dtype is meaningless, so it becomes torch.int64 here.
+        if _is_special_tensor(name):
+            dtype = str(DEFAULT_INT_DTYPE)
+        # Use the smallest dimension of the tensor's own shape as the exclusive
+        # upper bound (e.g. shape (64, 32, 128) -> high=32). This keeps generated
+        # index/position values in range for that tensor rather than using a
+        # fixed, possibly out-of-range constant. Guard against empty shapes and
+        # zero/one-sized dims (randint needs high >= 1).
+        shape = tensor_info.get("shape") or []
+        high = min(shape) if shape else 1
+        init_args = {"high": max(int(high), 1)}
+    elif init in ("randn", "rand"):
+        # Float random tensors use xavier init. xavier is undefined for <2-D
+        # shapes (the OOT framework rejects it), so 1-D float tensors fall back
+        # to randn.
+        shape = tensor_info.get("shape") or []
+        init = "xavier" if len(shape) >= 2 else "randn"
 
     tensor_spec = {
         "shape": tensor_info["shape"],
@@ -940,11 +989,17 @@ def load_model_only(
             ``Mistral3ForConditionalGeneration`` for VLMs.
         **from_pretrained_kwargs: Extra kwargs forwarded to
             ``from_pretrained`` (e.g. ``torch_dtype``, ``device_map``,
-            ``quantization_config``, ``trust_remote_code``).
+            ``quantization_config``, ``trust_remote_code``). ``torch_dtype``
+            defaults to :data:`DEFAULT_FLOAT_DTYPE` (bfloat16, the dtype Spyre
+            runs in) rather than ``from_pretrained``'s float32; pass it
+            explicitly to override.
 
     Returns:
         The loaded, ``.eval()``-mode model.
     """
+    # Capture in bfloat16 by default so the recorded floating-point tensors match
+    # the dtype Spyre executes in. Callers may still override torch_dtype.
+    from_pretrained_kwargs.setdefault("torch_dtype", DEFAULT_FLOAT_DTYPE)
     logger.info(f"Loading model: {model_path} via {model_cls.__name__}")
     return model_cls.from_pretrained(model_path, **from_pretrained_kwargs).eval()
 
