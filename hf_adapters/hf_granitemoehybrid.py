@@ -29,8 +29,14 @@ Usage::
     from hf_adapters import AutoSpyreModelForCausalLM
     from transformers import AutoTokenizer
 
+    # Base variant
     model = AutoSpyreModelForCausalLM.from_pretrained("ibm-granite/granite-4.0-1b-base")
     tokenizer = AutoTokenizer.from_pretrained("ibm-granite/granite-4.0-1b-base")
+    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+
+    # Instruct variant
+    model = AutoSpyreModelForCausalLM.from_pretrained("ibm-granite/granite-4.0-1b")
+    tokenizer = AutoTokenizer.from_pretrained("ibm-granite/granite-4.0-1b")
     outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
@@ -39,11 +45,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
-    PrecomputedRotaryEmbedding,
     apply_rope_matmul,
     get_backbone,
     kv_cache_update,
     pad_lm_head,
+    prepare_rope_and_heads,
     split_fused_linear,
 )
 
@@ -184,7 +190,7 @@ def prepare_for_spyre(model):
         "Mamba SSM layers are not currently supported on Spyre."
     )
 
-    model._spyre_rope = PrecomputedRotaryEmbedding(get_backbone(model).rotary_emb)
+    prepare_rope_and_heads(model)
     pad_lm_head(model)
 
     res_mult = model.config.residual_multiplier

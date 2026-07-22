@@ -12,7 +12,8 @@ which models are supported on Spyre.
 | Qwen3 0.6B | qwen3 | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite 3.3 8B | granite | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite 3.3 2B | granite | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
-| Granite 4.0 1B | granitemoehybrid | 128 | 64 | Yes | Yes | Yes | Yes |
+| Granite 4.0 1B Base | granitemoehybrid | 128 | 64 | Yes | Yes | Yes | Yes |
+| Granite 4.0 1B Instruct | granitemoehybrid | 128 | 64 | Yes | Yes | Yes | Yes |
 | SmolLM3 3B | smollm3 | 128 | 64 | Yes | Yes | Yes | Yes |
 | Llama 3.2 3B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | TinyLlama 1.1B | llama | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
@@ -28,6 +29,7 @@ which models are supported on Spyre.
 | Yi 1.5 6B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite Vision 4.1 4B (text backbone) | granite (text) | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | Gemma 4 12B | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
+| Gemma 4 12B Base | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 3 1B | gemma3\_text | 256 | 128 | Yes | Yes | Yes | Yes |
 | GPT-2 124M | gpt2 | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
 | GPT-Neo 125M | gpt_neo | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
@@ -109,8 +111,8 @@ single-token decode path (seq_len=1), not an adapter issue.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 27 adapters · 43 verified checkpoints · 100+ compatible models.
-The 43 verified rows are 26 generative + 13 embedding + 4 vision-language (see the
+**Coverage:** 27 adapters · 45 verified checkpoints · 100+ compatible models.
+The 45 verified rows are 28 generative + 13 embedding + 4 vision-language (see the
 Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are
 vision-tower components used by VLM adapters rather than standalone model adapters.
 Granite Vision 4.1 is verified both as a text backbone (generative) and as a full VLM.
@@ -136,9 +138,9 @@ pattern, norms, and weight layout.
 | hf\_mistral3.py | mistral3 | 2 | Mistral-Small-3.2 24B, Ministral-3 14B (multimodal text decoder) |
 | hf\_ministral.py | ministral | 1 | Ministral-8B Instruct fine-tunes |
 | hf\_phi3.py | phi3 | 1 | Phi-3 mini 4k/128k, Phi-3 small 8k |
-| hf\_granitemoehybrid.py | granitemoehybrid | 1 | Granite 4.0 Micro |
+| hf\_granitemoehybrid.py | granitemoehybrid | 2 | Granite 4.0 Micro |
 | hf\_smollm3.py | smollm3 | 1 | — |
-| hf\_gemma4.py | gemma4\_unified / gemma4 (dense) | 1 | Gemma 4 31B (dense). Not E2B/E4B (PLE) or 26B-A4B (MoE). |
+| hf\_gemma4.py | gemma4\_unified / gemma4 (dense) | 2 | Gemma 4 31B (dense). Not E2B/E4B (PLE) or 26B-A4B (MoE). |
 | hf\_gemma4\_mm.py | gemma4\_unified (multimodal) | 1 | Gemma 4 31B (dense unified VLM). Not E2B/E4B (PLE) or 26B-A4B (MoE). |
 | hf\_gemma3.py | gemma3\_text / gemma3 (dense) | 2 | Gemma 3 4B/12B/27B (text decoder of the multimodal checkpoints); EmbeddingGemma (bidirectional embedder). Not Gemma 3n (PLE). |
 | hf\_olmo.py | olmo | 1 | OLMo 7B |
@@ -410,7 +412,7 @@ modification:
 | Fused MLP split | No | No | No | Yes | No | No | No | No | Yes | No | No | No | No |
 | NoPE layers | No | No | No | No | Yes | No | No | No | No | No | No | No | No |
 | Partial RoPE | No | No | No | No | No | No | No | No | Yes | No | No | No | Yes (global layers) |
-| Head-dim padding | 2B only | Yes (64→128) | No | No | No | TinyLlama | No | No | No | No | No | No | No |
+| Head-dim padding | 2B only | Yes (64→128) | No | Micro only (64→128) | No | TinyLlama | No | No | No | No | No | No | No |
 | Custom model loading | No | Yes (safetensor remap) | No | No | No | No | No | No | No | No | No | No | No |
 | Attention scaling | `config.attention_multiplier` | `config.attention_multiplier` | `head_dim**-0.5` | `config.attention_multiplier` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `query_pre_attn_scalar**-0.5` | `1.0` (unscaled) |
 | Norm type | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | LayerNorm (pre, no weight) | RMSNorm (post) | RMSNorm (sandwich) | RMSNorm (sandwich) |
@@ -433,10 +435,13 @@ cost of chunking. Kept as the escape hatch for future models.
 into separate linears at prepare time. Avoids stickify non-zero
 offset assertions.
 
-**Head-dim padding** (Granite 2B, TinyLlama, Granite Vision): `pad_attention_heads()`
+**Head-dim padding** (Granite 2B, TinyLlama, Granite Vision, Granite 4.0 Micro): `pad_attention_heads()`
 zero-pads Q/K/V/O projections and RoPE freqs from 64→128 so
 D/2 = 64 (one stick). Q/K use interleaved padding per RoPE
-`[2, D/2]` group; V/O use simple end-padding.
+`[2, D/2]` group; V/O use simple end-padding. Granite 4.0 Micro has
+`hidden_size=2560` / `num_attention_heads=40` → `head_dim=64`, which requires
+the same 64→128 padding as the other sub-stick models; the 1B variant
+(`head_dim=128`) needs no padding.
 
 **Custom model loading** (Granite Vision): The text backbone weights
 are extracted from a multimodal checkpoint (vision+text) via safetensor

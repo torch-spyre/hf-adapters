@@ -28,40 +28,23 @@ import gc
 import sys
 
 import pytest
-import torch
 from transformers import AutoTokenizer
 
-from tests.conftest import load_ref_model, resolve_adapter_module_for_test
-from tests.cpu.conftest import _unwrap_compiled_blocks
-from tests.model_registry import CAUSAL_PATHS
-
-PROMPTS: list[str] = [
-    "The capital of France is",
-    "The chemical formula for water is",
-]
-MAX_NEW_TOKENS: int = 8
-
-
-def _hf_reference_outputs(
-    model: torch.nn.Module,
-    tokenizer: AutoTokenizer,
-    prompts: list[str],
-    max_new_tokens: int,
-) -> list[str]:
-    """Run HF native generate() on each prompt individually."""
-    results: list[str] = []
-    for prompt in prompts:
-        encoded = tokenizer(prompt, return_tensors="pt")
-        with torch.no_grad():
-            out = model.generate(
-                **encoded, max_new_tokens=max_new_tokens, do_sample=False
-            )
-        new_ids = out[0][encoded["input_ids"].shape[1] :]
-        results.append(tokenizer.decode(new_ids, skip_special_tokens=True))
-    return results
+from tests.conftest import (
+    get_dtype_for_cpu,
+    load_ref_model,
+    resolve_adapter_module_for_test,
+)
+from tests.cpu._generate_helpers import (
+    MAX_NEW_TOKENS,
+    PROMPTS,
+    hf_reference_outputs,
+)
+from tests.cpu.conftest import _set_rope_dtype, _unwrap_compiled_blocks
+from tests.model_registry import CAUSAL_PATHS, xfail_non_blocking
 
 
-@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.parametrize("model_path", xfail_non_blocking(CAUSAL_PATHS))
 def test_multibatch(model_path: str) -> None:
     hf_common_mod = sys.modules["hf_adapters.hf_common"]
     adapter_mod = resolve_adapter_module_for_test(model_path)
@@ -70,7 +53,7 @@ def test_multibatch(model_path: str) -> None:
 
     # HF reference (per-prompt, BEFORE patching for cleanliness)
     model = load_ref_model(model_path, adapter_mod)
-    hf_outputs = _hf_reference_outputs(model, tokenizer, PROMPTS, MAX_NEW_TOKENS)
+    hf_outputs = hf_reference_outputs(model, tokenizer, PROMPTS, MAX_NEW_TOKENS)
     del model
     gc.collect()
 
@@ -78,6 +61,7 @@ def test_multibatch(model_path: str) -> None:
     model = load_ref_model(model_path, adapter_mod)
     adapter_mod.prepare_for_spyre(model)
     _unwrap_compiled_blocks(model)
+    _set_rope_dtype(model, get_dtype_for_cpu(model_path))
     adapter_outputs = hf_common_mod.generate(
         adapter_mod._run_forward,
         model,

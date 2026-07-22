@@ -10,10 +10,13 @@ columns* it wants on top of the shared schema.
 import csv
 import logging
 import re
-from collections.abc import Callable, Iterable
+import time
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import TypeVar
 
+from huggingface_hub.errors import HfHubHTTPError
 from huggingface_hub.hf_api import ModelInfo
 from tqdm import tqdm
 from transformers import AutoConfig
@@ -38,6 +41,51 @@ EXPAND_FIELDS: list[str] = [
     "library_name",
     "tags",
 ]
+
+# HF-API gateway 5xx statuses. Anything outside this set (400/401/403/404/...)
+# is a permanent failure and must not be retried.
+_TRANSIENT_HTTP_STATUSES: frozenset[int] = frozenset({500, 502, 503, 504})
+_MAX_FETCH_ATTEMPTS: int = 5
+_MAX_BACKOFF_SECONDS: float = 60.0
+
+_T = TypeVar("_T")
+
+
+def with_transient_retry(
+    call: Callable[[], Iterator[_T] | Iterable[_T]],
+    description: str,
+) -> list[_T]:
+    """Materialize an HF paginated call, retrying transient 5xx failures.
+
+    *call* is expected to return an iterable of ``ModelInfo`` (or similar)
+    from a ``huggingface_hub`` API method. It is fully consumed into a list
+    on each attempt because the pagination endpoint's failure mode is a
+    mid-stream 504, and there is no way to resume — the whole traversal has
+    to restart. Transient statuses (500/502/503/504) trigger up to
+    ``_MAX_FETCH_ATTEMPTS`` retries with exponential backoff capped at
+    ``_MAX_BACKOFF_SECONDS``; any other error propagates immediately.
+    """
+    last_error: HfHubHTTPError | None = None
+    for attempt in range(1, _MAX_FETCH_ATTEMPTS + 1):
+        try:
+            return list(call())
+        except HfHubHTTPError as e:
+            status: int | None = (
+                e.response.status_code if e.response is not None else None
+            )
+            if status not in _TRANSIENT_HTTP_STATUSES:
+                raise
+            last_error = e
+            backoff: float = min(_MAX_BACKOFF_SECONDS, 2.0**attempt)
+            print(
+                f"    {description}: HF API returned {status} "
+                f"(attempt {attempt}/{_MAX_FETCH_ATTEMPTS}); "
+                f"retrying in {backoff:.0f}s..."
+            )
+            time.sleep(backoff)
+    assert last_error is not None
+    raise last_error
+
 
 MOE_MODEL_TYPES: set[str] = {
     "mixtral",
@@ -104,6 +152,12 @@ def is_custom_code(model: ModelInfo) -> bool:
     return bool(config.get("auto_map"))
 
 
+def is_nsfw(model: ModelInfo) -> bool:
+    if "nsfw" in tags(model):
+        return True
+    return False
+
+
 # Repo-id substrings marking non-native conversions (ONNX/GGUF/MLX), dropped.
 NON_NATIVE_ID_SUBSTRINGS: tuple[str, ...] = ("onnx", "gguf", "mlx")
 
@@ -117,6 +171,8 @@ def is_baseline_keep(model: ModelInfo) -> bool:
     model_id_lower: str = model.id.lower()
     if any(sub in model_id_lower for sub in NON_NATIVE_ID_SUBSTRINGS):
         return False
+    if "nsfw" in tags(model):
+        return False
     return True
 
 
@@ -127,6 +183,68 @@ def contains_remote_code(model: ModelInfo) -> bool:
         return False
     except (ValueError, OSError):
         return True
+
+
+# Session-scoped cache for _has_loadable_weights. Keyed by repo_id; values are
+# the bool result. The fetchers run twice a week in a fresh process, and repo
+# file lists rarely change within a single run, so a plain dict is enough — no
+# TTL or on-disk persistence needed.
+_LOADABLE_WEIGHTS_CACHE: dict[str, bool] = {}
+
+# Filenames transformers' AutoModel.from_pretrained recognizes as native
+# weights (single-file or sharded via the matching index.json).
+_NATIVE_WEIGHT_FILES: frozenset[str] = frozenset(
+    {
+        "pytorch_model.bin",
+        "model.safetensors",
+        "pytorch_model.bin.index.json",
+        "model.safetensors.index.json",
+    }
+)
+
+
+def has_loadable_weights(model: ModelInfo, token: str | bool) -> bool:
+    """True if the repo ships weights AutoModel.from_pretrained can consume.
+
+    Detects three unloadable classes without downloading any weight files
+    — one ``list_repo_files`` call per repo:
+
+    * adapter-only repos (LoRA/PEFT, `adapter_config.json` but no full model),
+    * GGUF/MLX/ONNX-only repos that slipped past the id-substring filter,
+    * abandoned uploads with a config but no weight files at all.
+
+    Cached in-process by repo_id: transformers repos are effectively immutable
+    within a fetcher run, and each fetcher process is short-lived.
+    """
+    from huggingface_hub import HfApi
+
+    cached = _LOADABLE_WEIGHTS_CACHE.get(model.id)
+    if cached is not None:
+        return cached
+
+    api: HfApi = HfApi(token=token)
+    try:
+        files: list[str] = with_transient_retry(
+            lambda: api.list_repo_files(model.id, token=token),
+            description=f"list_repo_files[{model.id}]",
+        )
+    except Exception:
+        # Any permanent failure (404, gated without token, ...) — treat as
+        # not loadable rather than raising into the fetcher's filter path.
+        _LOADABLE_WEIGHTS_CACHE[model.id] = False
+        return False
+
+    lower_files: set[str] = {f.lower() for f in files}
+
+    # Adapter-only repos ship adapter_config.json + adapter_model.safetensors
+    # and expect PeftModel.from_pretrained(base, ...), not AutoModel directly.
+    if "adapter_config.json" in lower_files:
+        _LOADABLE_WEIGHTS_CACHE[model.id] = False
+        return False
+
+    result: bool = any(name in lower_files for name in _NATIVE_WEIGHT_FILES)
+    _LOADABLE_WEIGHTS_CACHE[model.id] = result
+    return result
 
 
 def format_number_to_billions_smart(num: int | float) -> str:
@@ -248,13 +366,20 @@ def build_catalog(
     """
     extra_columns = extra_columns or []
 
+    def _safe_filter(model: ModelInfo) -> bool:
+        try:
+            return filter_fn(model)
+        except Exception as e:
+            logging.warning("filter_fn failed for %s: %s", model.id, e)
+            return False
+
     candidates: list[ModelInfo] = list(fetch_fn(limit))
     print(f"Retrieved {len(candidates)} raw {label} candidates.")
 
     with ThreadPoolExecutor(max_workers=16) as ex:
         keep_flags: list[bool] = list(
             tqdm(
-                ex.map(filter_fn, candidates),
+                ex.map(_safe_filter, candidates),
                 total=len(candidates),
                 desc="Filtering candidates",
             )
@@ -328,5 +453,12 @@ def build_catalog(
             writer = csv.DictWriter(f, fieldnames=header)
             writer.writeheader()
             writer.writerows(rows)
+
+    # Attach the source ModelInfo to each row AFTER the CSV write. It is a
+    # runtime-only field (not serializable, and never part of the schema),
+    # useful for callers that need metadata the row dict does not expose —
+    # e.g. safetensors.parameters, gated, sha, siblings.
+    for row, m in zip(rows, models):
+        row["model_info"] = m
 
     return rows

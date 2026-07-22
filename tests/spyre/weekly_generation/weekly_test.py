@@ -14,25 +14,31 @@ Additional flags:
 
 * ``--top-k N``        Number of top models to fetch by download count (default: 200).
 * ``--write-to-csv F`` Write results to a CSV file instead of ClickHouse.
-* ``--random-run``     Stub out Spyre calls with random booleans (dry-run).
 """
 
 import argparse
 import logging
 import multiprocessing
 import os
-import random
 import subprocess
 import sys
 import time
 import traceback as _traceback
 from asyncio import Queue
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+
+from huggingface_hub.errors import HfHubHTTPError
 
 from tests.spyre.weekly_generation.result_sink import (
     EmbeddingGenerativeMode,
 )
+
+
+def _ts() -> str:
+    """Local-time timestamp prefix, e.g. '[2026-07-17 14:32:05]'."""
+    return datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+
 
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
@@ -41,9 +47,40 @@ MAX_NUMBER_PARAMS = 60_000_000_000
 FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER = "not-implemented-adapter"
 FAILURE_CATEGORY_MODEL_TOO_LARGE = "model_too_large"
 FAILURE_CATEGORY_CPU_LOAD_FAILED = "cpu_load_failed"
+FAILURE_CATEGORY_CPU_GENERATE_FAILED = "cpu_generate_failed"
+FAILURE_CATEGORY_QUANTIZED_MODEL = "quantized_model"
+FAILURE_CATEGORY_HARDWARE_EXCEPTION = "hardware_exception"
 FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION = "test_execution_exception"
 FAILURE_CATEGORY_VERIFICATION_FAILED = "verification_failed"
 FAILURE_CATEGORY_WORKER_CRASHED = "worker_crashed"
+FAILURE_CATEGORY_MOE = "moe"
+
+
+def _classify_failure(err: str, default: str) -> str:
+    """Bucket a raw error/traceback string into a failure_category.
+
+    Signals in order of specificity:
+
+    * ``"Failed to open the IBM Spyre VFIO device"`` — the accelerator itself
+      is unreachable (driver, permissions, another process holding it, …);
+      the model under test is not to blame, so tag as hardware_exception.
+    * ``"quantiz"`` / ``"optimum"`` — bitsandbytes / AWQ / GPTQ error text
+      almost always contains ``quantiz``, and ``optimum`` catches the
+      optimum-quanto / optimum-neuron loaders.
+
+    Anything unrecognised falls through to *default* (usually the surrounding
+    context's fallback: cpu_load_failed at load time, test_execution_exception
+    at eval time).
+    """
+    if not err:
+        return default
+    if "Failed to open the IBM Spyre VFIO device" in err or "Replace card" in err:
+        return FAILURE_CATEGORY_HARDWARE_EXCEPTION
+    lowered: str = err.lower()
+    if "quantiz" in lowered or "optimum" in lowered:
+        return FAILURE_CATEGORY_QUANTIZED_MODEL
+    return default
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SPYRE_TESTS_DIR = _REPO_ROOT / "tests" / "spyre"
@@ -71,7 +108,7 @@ _WEIGHT_SUFFIXES = (
 # amortize per-child spawn + import + kernel-teardown cost (~15 s currently)
 # across more work. Lower values reduce the blast radius when the Spyre
 # driver/state gets into a bad shape mid-batch.
-GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS: int = 25
+GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS: int = 2
 EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS: int = 90
 
 
@@ -152,24 +189,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "into ClickHouse. No DB connection is made when this flag is set."
         ),
     )
-    parser.add_argument(
-        "--random-run",
-        action="store_true",
-        default=False,
-        help=(
-            "Replace Spyre evaluation calls with random boolean stubs "
-            "(_temp_random_bool). Useful for dry-runs without Spyre hardware."
-        ),
-    )
     return parser.parse_args(argv)
 
 
-def _temp_random_bool() -> bool:
-    time.sleep(random.uniform(0.25, 0.5))
-    return random.choice([True, False])
+def _load_on_cpu(
+    model_path: str, mode: EmbeddingGenerativeMode
+) -> tuple[bool, str | None]:
+    """Try to load *model_path* on CPU. Returns ``(loaded, error_message)``.
 
-
-def _load_on_cpu(model_path: str, mode: EmbeddingGenerativeMode) -> bool:
+    ``error_message`` is ``None`` on success. On failure it carries a
+    ``"ExcType: message\\n<tail traceback>"`` string that the caller can
+    stash into the row's ``error`` field. Transient HF 5xx propagate — the
+    driver retries at a higher level.
+    """
     import hf_adapters.hf_common as _hf_common
     from hf_adapters import AutoSpyreModelForCausalLM
     from hf_adapters.auto_spyre_model import AutoSpyreModel
@@ -188,87 +220,133 @@ def _load_on_cpu(model_path: str, mode: EmbeddingGenerativeMode) -> bool:
                     model_path, dtype=dtype
                 )
 
-        return model is not None
+        return model is not None, None
+    except HfHubHTTPError as e:
+        if e.response is not None and e.response.status_code >= 500:
+            raise
+        err: str = (
+            f"{type(e).__name__}: {e}\n"
+            f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
+        )
+        print(f"_load_on_cpu exception - {e}")
+        return False, err
     except Exception as e:
-        print(f"_load_embedding_on_cpu exception - {e}")
-        return False
+        err = (
+            f"{type(e).__name__}: {e}\n"
+            f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
+        )
+        print(f"_load_on_cpu exception - {e}")
+        return False, err
     finally:
         _hf_common.DEVICE = _orig_device  # restore
 
 
-def eval_generative(model_id: str, adapter, random_run: bool = False) -> dict:
-    from tests.spyre.test_e2e_smoke_spyre import run_smoke_test
-    from tests.spyre.test_e2e_token_compare_spyre import token_compare_spyre
+def _cpu_generate(model_path: str) -> tuple[bool, str | None]:
+    """Run a single-prompt HF ``generate()`` on CPU for *model_path*.
 
-    load_on_cpu = False
-    run_smoke_status = False
-    mismatches = True
-    result = {"error": "", "failure_category": None}
+    Separate from ``_load_on_cpu``: load succeeding tells us the checkpoint
+    is well-formed, generate succeeding tells us the forward pass runs
+    end-to-end (catches lazy shape errors, tokenizer/config mismatches, and
+    custom-code bugs that don't surface at ``from_pretrained`` time).
 
-    """Load and compare token outputs for one generative model. Returns a metrics dict."""
+    Returns ``(ok, error_message)`` with the same convention as
+    ``_load_on_cpu``.
+    """
+    import hf_adapters.hf_common as _hf_common
+    from tests.cpu._generate_helpers import simple_generate
+
+    _orig_device = _hf_common.DEVICE
+    _hf_common.DEVICE = "cpu"
     try:
-        if adapter is not None:
-            if random_run:
-                load_on_cpu = _temp_random_bool()
-            else:
-                load_on_cpu = _load_on_cpu(
-                    model_path=model_id, mode=EmbeddingGenerativeMode.GENERATIVE
-                )
-            if load_on_cpu:
-                if random_run:
-                    run_smoke_status = _temp_random_bool()
-                    mismatches = _temp_random_bool()
-                else:
-                    run_smoke_status = (
-                        run_smoke_test(model_path=model_id)["status"] == "PASS"
-                    )
-                    mismatches, _ = token_compare_spyre(model_id)
-
-    except Exception as e:
-        result["error"] = (
+        simple_generate(model_path=model_path)
+        return True, None
+    except HfHubHTTPError as e:
+        if e.response is not None and e.response.status_code >= 500:
+            raise
+        err: str = (
             f"{type(e).__name__}: {e}\n"
             f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
         )
-        result["failure_category"] = FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
+        print(f"_cpu_generate exception - {e}")
+        return False, err
+    except Exception as e:
+        err = (
+            f"{type(e).__name__}: {e}\n"
+            f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
+        )
+        print(f"_cpu_generate exception - {e}")
+        return False, err
     finally:
-        result["correct"] = run_smoke_status and not mismatches
-        result["load"] = load_on_cpu
-        if result["failure_category"] is None and load_on_cpu and not result["correct"]:
-            result["failure_category"] = FAILURE_CATEGORY_VERIFICATION_FAILED
-        return result
+        _hf_common.DEVICE = _orig_device
 
 
-def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
-    from tests.spyre.test_e2e_embed_compare_spyre import embed_compare_spyre
+def eval_model(model_id: str, adapter, mode: EmbeddingGenerativeMode) -> dict:
+    """Load *model_id* on CPU then run the mode's verification pipeline.
 
+    Generative mode: CPU-load → CPU-generate (single-prompt HF forward pass)
+    → Spyre smoke + token-compare. The intermediate CPU-generate step catches
+    lazy shape errors, tokenizer/config mismatches, and custom-code bugs that
+    don't surface at ``from_pretrained`` time; on failure the row is tagged
+    ``cpu_generate_failed`` and the Spyre steps are skipped.
+
+    Embedding mode: CPU-load → Spyre cosine-compare (no generate step —
+    embedders don't have a ``.generate()`` method).
+
+    Returns a metrics dict with keys ``load``, ``correct``, ``error``,
+    ``failure_category``. ``correct`` is ``smoke_passed and not mismatches``
+    — in embedding mode there is no smoke step, so ``smoke_passed`` is
+    treated as True and the outcome reduces to ``not mismatches``.
+    """
     load_on_cpu = False
+    smoke_passed = mode == EmbeddingGenerativeMode.EMBEDDING
     mismatches = True
-    result = {"error": "", "failure_category": None}
+    result: dict = {"error": "", "failure_category": None}
 
-    """Load and compare embeddings for one model. Returns a metrics dict."""
     try:
         if adapter is not None:
-            # First we check that it is loadable on cpu:
-            if random_run:
-                load_on_cpu = _temp_random_bool()
-            else:
-                load_on_cpu = _load_on_cpu(
-                    model_path=model_id, mode=EmbeddingGenerativeMode.EMBEDDING
-                )
-
+            load_on_cpu, load_error = _load_on_cpu(model_path=model_id, mode=mode)
+            if load_error and not result["error"]:
+                result["error"] = load_error
             if load_on_cpu:
-                if random_run:
-                    mismatches = _temp_random_bool()
+                if mode == EmbeddingGenerativeMode.GENERATIVE:
+                    # Extra CPU-generate step — a load that succeeds but crashes
+                    # here means the checkpoint is malformed in a way that only
+                    # surfaces during forward. Stop before we waste Spyre time.
+                    generate_ok, generate_error = _cpu_generate(model_path=model_id)
+                    if not generate_ok:
+                        if generate_error and not result["error"]:
+                            result["error"] = generate_error
+                        result["failure_category"] = _classify_failure(
+                            generate_error or "",
+                            FAILURE_CATEGORY_CPU_GENERATE_FAILED,
+                        )
+                    else:
+                        from tests.spyre.test_e2e_smoke_spyre import run_smoke_test
+                        from tests.spyre.test_e2e_token_compare_spyre import (
+                            token_compare_spyre,
+                        )
+
+                        smoke_passed = (
+                            run_smoke_test(model_path=model_id)["status"] == "PASS"
+                        )
+                        mismatches, _ = token_compare_spyre(model_id)
                 else:
+                    from tests.spyre.test_e2e_embed_compare_spyre import (
+                        embed_compare_spyre,
+                    )
+
                     mismatches, _ = embed_compare_spyre(model_id)
     except Exception as e:
-        result["error"] = (
+        err: str = (
             f"{type(e).__name__}: {e}\n"
             f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
         )
-        result["failure_category"] = FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
+        result["error"] = err
+        result["failure_category"] = _classify_failure(
+            err, FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
+        )
     finally:
-        result["correct"] = not mismatches
+        result["correct"] = smoke_passed and not mismatches
         result["load"] = load_on_cpu
         if result["failure_category"] is None and load_on_cpu and not result["correct"]:
             result["failure_category"] = FAILURE_CATEGORY_VERIFICATION_FAILED
@@ -277,7 +355,6 @@ def eval_embedding(model_id: str, adapter, random_run: bool = False) -> dict:
 
 def _process_batch(
     batch: list[dict],
-    random_run: bool,
     adapter_dates: dict[str, str | None],
     result_queue: Queue,
     mode: EmbeddingGenerativeMode,
@@ -316,7 +393,7 @@ def _process_batch(
 
     _child_entered: float = _t.monotonic()
     print(
-        f"      child[{os.getpid()}] entered _process_batch with {len(batch)} model(s)",
+        f"{_ts()}       child[{os.getpid()}] entered _process_batch with {len(batch)} model(s)",
         flush=True,
     )
 
@@ -342,15 +419,6 @@ def _process_batch(
             "failure_category": None,
         }
         try:
-            # Reject models too large to bring up on Spyre before evaluating.
-            params = row.get("parameters")
-            if params not in (None, "") and int(params) > MAX_NUMBER_PARAMS:
-                rec["failure_category"] = FAILURE_CATEGORY_MODEL_TOO_LARGE
-                raise Exception(
-                    f"Model {model_path} has {int(params):,} parameters, "
-                    f"exceeding the 60B limit for Spyre bring-up."
-                )
-
             try:
                 adapter_module = resolve_adapter_module_for_test(model_path)
             except Exception:
@@ -362,38 +430,42 @@ def _process_batch(
             rec["adapter_name"] = adapter_name
             rec["added_date"] = adapter_dates.get(adapter_name)
 
-            match mode:
-                case EmbeddingGenerativeMode.EMBEDDING:
-                    eval_fn = eval_embedding
-                case EmbeddingGenerativeMode.GENERATIVE:
-                    eval_fn = eval_generative
-            metrics = eval_fn(model_path, adapter_module, random_run=random_run)
+            metrics = eval_model(model_path, adapter_module, mode)
             rec["verified_on_cpu"] = bool(metrics.get("load", False))
             rec["verified_on_spyre"] = bool(metrics.get("correct", False))
             rec["error"] = metrics.get("error") or None
             rec["failure_category"] = metrics.get("failure_category") or None
             if not rec["verified_on_cpu"] and rec["failure_category"] is None:
-                rec["failure_category"] = FAILURE_CATEGORY_CPU_LOAD_FAILED
+                rec["failure_category"] = _classify_failure(
+                    rec["error"] or "", FAILURE_CATEGORY_CPU_LOAD_FAILED
+                )
         except Exception as e:
-            rec["error"] = (
-                f"{type(e).__name__}: {e}\n"
-                f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
-            )
+            # Skip the error/traceback for shallow failure categories where the
+            # failure_category itself is fully self-describing.
+            if rec["failure_category"] not in (
+                FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
+                FAILURE_CATEGORY_MODEL_TOO_LARGE,
+            ):
+                rec["error"] = (
+                    f"{type(e).__name__}: {e}\n"
+                    f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
+                )
             if rec["failure_category"] is None:
                 rec["failure_category"] = FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
         results.append(rec)
         print(
-            f"      child[{os.getpid()}] finished model "
+            f"{_ts()}       child[{os.getpid()}] finished model "
             f"{len(results)}/{len(batch)}: {model_path!r}  "
             f"(verified_on_cpu={rec['verified_on_cpu']}, "
             f"verified_on_spyre={rec['verified_on_spyre']}, "
+            f"failure_category={rec['failure_category']}, "
             f"error={rec['error']})",
             flush=True,
         )
 
     result_queue.put(results)
     print(
-        f"      child[{os.getpid()}] done in "
+        f"{_ts()}       child[{os.getpid()}] done in "
         f"{_t.monotonic() - _child_entered:.2f}s ({len(results)} results)",
         flush=True,
     )
@@ -497,6 +569,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     from utils.fetch_top_embedding_models import fetch_top_embedding_models
     from utils.fetch_top_generative_models import fetch_top_generative_models
+    from utils.hf_model_catalog import is_moe
 
     args = _parse_args(argv)
     preexisting: set = _repos_with_weights()
@@ -533,22 +606,124 @@ def main(argv: list[str] | None = None) -> None:
     # batching. That keeps batch sizes uniform relative to real work.
     prefiltered: list[dict] = []
     early_skipped: int = 0
-    print(f"Will process {len(to_process_list)} models in total.")
+    moe_skipped: int = 0
+    too_large_skipped: int = 0
+    unsupported_skipped: int = 0
+    print(f"{_ts()} Will process {len(to_process_list)} models in total.")
     for row in to_process_list:
-        model_path: str = str(row["model_id"])
+        model_path = str(row["model_id"])
         if not sink.should_insert_row(model_path):
             early_skipped += 1
             print(
-                f"    sink: '{model_path}' skipped early — "
+                f"{_ts()}     sink: '{model_path}' skipped early — "
                 f"recent snapshot exists within the "
                 f"{sink.__class__.__name__} skip window"
             )
             continue
+        # No adapter registered for this model's config class — same terminal
+        # decision resolve_adapter_module_for_test would reach in the worker,
+        # but reached here without spawning one. Uses the fetcher-computed
+        # is_supported flag (True iff config_class is in the adapter mapping).
+
+        # TODO : Decide if we want to fill the DB first with all the non-supported models...
+        if row.get("is_supported") is False:
+            unsupported_skipped += 1
+            sink.add_entry(
+                model_name=model_path,
+                config_class=str(row.get("config_class") or ""),
+                adapter_name="",
+                added_date=None,
+                snapshot_date=snapshot_date,
+                verified_on_cpu=False,
+                verified_on_gpu=False,
+                verified_on_spyre=False,
+                num_downloads=int(row.get("downloads") or 0),
+                family=str(row.get("model_type") or ""),
+                architecture=str(row.get("architectures") or ""),
+                parameters_number=int(row.get("parameters") or 0),
+                failure_category=FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
+                error=None,
+            )
+            print(
+                f"{_ts()}     sink: '{model_path}' skipped early — "
+                f"no adapter for config_class={row.get('config_class')!r}"
+            )
+            continue
+        # Reject models too large to bring up on Spyre BEFORE spawning a
+        # worker. Same intent as the in-worker guard in _process_batch, but
+        # catches everything the fetcher already sized so no worker time is
+        # wasted. _process_batch keeps its own check as a defensive backstop
+        # for rows where parameters were unknown at fetch time.
+        params = row.get("parameters")
+        if params not in (None, "") and int(params) > MAX_NUMBER_PARAMS:
+            too_large_skipped += 1
+            sink.add_entry(
+                model_name=model_path,
+                config_class=str(row.get("config_class") or ""),
+                adapter_name="",
+                added_date=None,
+                snapshot_date=snapshot_date,
+                verified_on_cpu=False,
+                verified_on_gpu=False,
+                verified_on_spyre=False,
+                num_downloads=int(row.get("downloads") or 0),
+                family=str(row.get("model_type") or ""),
+                architecture=str(row.get("architectures") or ""),
+                parameters_number=int(params),
+                failure_category=FAILURE_CATEGORY_MODEL_TOO_LARGE,
+                error=None,
+            )
+            print(
+                f"{_ts()}     sink: '{model_path}' skipped early — "
+                f"{int(params):,} parameters exceeds the "
+                f"{MAX_NUMBER_PARAMS:,} limit"
+            )
+            continue
+        # MoE models aren't supported on Spyre yet — write the row up-front
+        # with failure_category=moe and don't send it to the workers.
+        model_info = row.get("model_info")
+        if model_info is not None and is_moe(model_info):
+            moe_skipped += 1
+            sink.add_entry(
+                model_name=model_path,
+                config_class=str(row.get("config_class") or ""),
+                adapter_name="",
+                added_date=None,
+                snapshot_date=snapshot_date,
+                verified_on_cpu=False,
+                verified_on_gpu=False,
+                verified_on_spyre=False,
+                num_downloads=int(row.get("downloads") or 0),
+                family=str(row.get("model_type") or ""),
+                architecture=str(row.get("architectures") or ""),
+                parameters_number=int(row.get("parameters") or 0),
+                failure_category=FAILURE_CATEGORY_MOE,
+                error=None,
+            )
+            print(f"{_ts()}     sink: '{model_path}' skipped early — MoE model")
+            continue
         prefiltered.append(row)
     if early_skipped:
         print(
-            f"\nEarly-skip: {early_skipped}/{total} models already have a "
+            f"\n{_ts()} Early-skip: {early_skipped}/{total} models already have a "
             f"recent snapshot; {len(prefiltered)} left to evaluate.\n"
+        )
+    if unsupported_skipped:
+        print(
+            f"{_ts()} Unsupported-skip: {unsupported_skipped}/{total} models have "
+            f"no adapter for their config_class and were written directly to the "
+            f"sink.\n"
+        )
+    if too_large_skipped:
+        print(
+            f"{_ts()} Too-large-skip: {too_large_skipped}/{total} models exceed "
+            f"the {MAX_NUMBER_PARAMS:,} parameter limit and were written directly "
+            f"to the sink.\n"
+        )
+    if moe_skipped:
+        print(
+            f"{_ts()} MoE-skip: {moe_skipped}/{total} models tagged as moe and "
+            f"written directly to the sink.\n"
         )
 
     batches: list[list[dict]] = _chunk_into_batches(
@@ -568,11 +743,11 @@ def main(argv: list[str] | None = None) -> None:
             batch_start = time.monotonic()
             batch_paths = [str(r["model_id"]) for r in batch]
             print(
-                f"\n[batch {batch_idx}/{total_batches}] {len(batch)} model(s) "
+                f"\n{_ts()} [batch {batch_idx}/{total_batches}] {len(batch)} model(s) "
                 f"(overall elapsed: {batch_start - overall_start:.0f}s)"
             )
             for path in batch_paths:
-                print(f"    - {path}")
+                print(f"{_ts()}     - {path}")
 
             # Track which weights existed BEFORE this batch ran, so we can
             # decide per-model whether to delete after.
@@ -583,7 +758,6 @@ def main(argv: list[str] | None = None) -> None:
                 target=_process_batch,
                 args=(
                     batch,
-                    args.random_run,
                     adapter_dates,
                     result_queue,
                     mode,
@@ -599,7 +773,7 @@ def main(argv: list[str] | None = None) -> None:
             # returns instantly, and an empty one signals a crash.
             if result_queue.empty():
                 print(
-                    f"    batch: worker exited code {proc.exitcode} "
+                    f"{_ts()}     batch: worker exited code {proc.exitcode} "
                     f"and returned no results — marking all {len(batch)} "
                     f"models as failed"
                 )
@@ -631,7 +805,7 @@ def main(argv: list[str] | None = None) -> None:
                 processed += 1
 
                 if rec.get("error"):
-                    print(f"    [{model_path}] error: {rec['error']}")
+                    print(f"{_ts()}     [{model_path}] error: {rec['error']}")
 
                 # Coerce added_date from ISO string (as the worker wrote it)
                 # to a date object for the sink.
@@ -642,7 +816,6 @@ def main(argv: list[str] | None = None) -> None:
                     except ValueError:
                         rec["added_date"] = None
 
-                # Sink writes: don't store the `error` field.
                 if sink.add_entry(
                     model_name=str(rec["model_name"]),
                     config_class=str(rec["config_class"]),
@@ -661,14 +834,18 @@ def main(argv: list[str] | None = None) -> None:
                         if rec.get("failure_category") is None
                         else str(rec["failure_category"])
                     ),
+                    error=(None if rec.get("error") is None else str(rec["error"])),
                 ):
                     print(
-                        f"    sink: row written for '{model_path}' "
+                        f"{_ts()}     sink: row written for '{model_path}' "
                         f"(verified_on_cpu={rec.get('verified_on_cpu')}, "
-                        f"verified_on_spyre={rec.get('verified_on_spyre')})"
+                        f"verified_on_spyre={rec.get('verified_on_spyre')}, "
+                        f"failure_category={rec.get('failure_category')}, )"
                     )
                 else:
-                    print(f"    sink: row skipped for '{model_path}' (guard rejected)")
+                    print(
+                        f"{_ts()}     sink: row skipped for '{model_path}' (guard rejected)"
+                    )
 
             # Cache cleanup: delete weights downloaded during this batch,
             # regardless of whether the worker processed each model.
@@ -678,30 +855,37 @@ def main(argv: list[str] | None = None) -> None:
 
             batch_elapsed = time.monotonic() - batch_start
             print(
-                f"    batch {batch_idx}/{total_batches} done: "
+                f"{_ts()}     batch {batch_idx}/{total_batches} done: "
                 f"{len(worker_results)} model(s) in {batch_elapsed:.1f}s  "
                 f"(per-model avg: {batch_elapsed / max(1, len(worker_results)):.1f}s)"
             )
+
+            # Durability boundary: flush accumulated rows now so a hard parent
+            # crash before the next batch loses at most this batch, not the
+            # whole run. No-op for sinks that write per-row (CSV).
+            sink.flush()
     except KeyboardInterrupt:
-        print("\nInterrupted — results so far are saved; rerun to resume.")
+        print(f"\n{_ts()} Interrupted — results so far are saved; rerun to resume.")
     finally:
         # Clean up weights for the in-flight batch if interrupted mid-run.
         _ = _cleanup_batch_weights(batch_paths, had_weights_map, total_freed)
 
         sink.close()
         if args.write_to_csv:
-            print(f"\nCSV: '{args.write_to_csv}' closed ({processed} rows processed).")
+            print(
+                f"\n{_ts()} CSV: '{args.write_to_csv}' closed ({processed} rows processed)."
+            )
 
         overall_elapsed = time.monotonic() - overall_start
         mins, secs = divmod(int(overall_elapsed), 60)
         print(
             f"\n{'='*60}\n"
-            f"Processed {processed}/{total} models  |  "
+            f"{_ts()} Processed {processed}/{total} models  |  "
             f"Total time: {mins}m {secs:02d}s\n"
             f"{'='*60}"
         )
 
 
 if __name__ == "__main__":
-    print("Starting weekly generation...", flush=True)
+    print(f"{_ts()} Starting weekly generation...", flush=True)
     main()

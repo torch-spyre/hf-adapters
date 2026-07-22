@@ -3,6 +3,7 @@ models:
   - ibm-granite/granite-3.3-8b-instruct                         # granite
   - ibm-granite/granite-3.3-2b-instruct                         # granite2b
   - ibm-granite/granite-4.0-1b-base                             # granite4
+  - ibm-granite/granite-4.0-1b                                  # granite4_instruct
   # Embedding models
   - BAAI/bge-base-en-v1.5                                       # bge_base (embed-compare)
   - BAAI/bge-m3                                                 # bge_m3 (load)

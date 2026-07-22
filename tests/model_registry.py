@@ -85,6 +85,18 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_granitemoehybrid.py",
         "size": "1b",
     },
+    "granite4_instruct": {
+        "name": "Granite 4.0 1B Instruct",
+        "path": "ibm-granite/granite-4.0-1b",
+        "adapter": "hf_granitemoehybrid.py",
+        "size": "1b",
+    },
+    "granite4_micro": {
+        "name": "Granite 4.0 Micro",
+        "path": "ibm-granite/granite-4.0-micro",
+        "adapter": "hf_granitemoehybrid.py",
+        "size": "3b",
+    },
     # hf_granite_vision.py
     "granite-vision": {
         "name": "Granite Vision 4.1 4B",
@@ -207,6 +219,13 @@ CAUSAL_LM_MODELS = {
         "size": "1b",
     },
     # hf_gemma4
+    "gemma4_base": {
+        "name": "Gemma 4 12B Base",
+        "path": "google/gemma-4-12b",
+        "adapter": "hf_gemma4.py",
+        "size": "12b",
+        "dtype": "bfloat16",
+    },
     "gemma4_google": {
         "name": "Gemma 4 12B",
         "path": "google/gemma-4-12B-it",
@@ -472,7 +491,14 @@ NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = {
         f"{key}: newly green on Spyre, non-blocking signal for a trial "
         "period before promoting to a blocking test"
     )
-    for key in ("qwen3", "olmo2_1b", "gemma3_unsloth", "ministral8b", "gemma4_google")
+    for key in (
+        "qwen3",
+        "olmo2_1b",
+        "gemma3_unsloth",
+        "ministral8b",
+        "gemma4_google",
+        "gemma4_base",
+    )
 }
 
 

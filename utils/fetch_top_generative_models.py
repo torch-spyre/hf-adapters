@@ -12,30 +12,45 @@ from utils.hf_model_catalog import (
     RESOURCES_DIR,
     build_catalog,
     contains_remote_code,
+    has_loadable_weights,
     is_baseline_keep,
+    with_transient_retry,
 )
 
 
 def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
     """Top text-generation models by downloads (over-fetched to absorb the
-    GGUF/MLX entries dropped by the filter)."""
+    GGUF/MLX entries dropped by the filter).
+
+    Retries transient 5xx gateway errors with exponential backoff via
+    ``with_transient_retry``; permanent failures propagate.
+    """
     print(f"Fetching top {limit} text-generation models by downloads...")
-    return list(
-        api.list_models(
+    return with_transient_retry(
+        lambda: api.list_models(
             pipeline_tag="text-generation",
             sort="downloads",
             limit=int(limit * 2),
             expand=EXPAND_FIELDS,
-        )
+        ),
+        description="list_models[text-generation]",
     )
 
 
-def _keep(model: ModelInfo) -> bool:
+def keep(model: ModelInfo, token: str | bool) -> bool:
+    """Keep predicate for the generative fetcher.
+
+    Ordering matters: the cheap metadata-only checks run first so we only
+    spend the ``has_loadable_weights`` HTTP call on the ~1k candidates that
+    would otherwise survive.
+    """
     if not is_baseline_keep(model):
         return False
     if model.gated:
         return False
     if contains_remote_code(model):
+        return False
+    if not has_loadable_weights(model, token):
         return False
     return True
 
@@ -47,7 +62,7 @@ def fetch_top_generative_models(
     api: HfApi = HfApi(token=token)
     return build_catalog(
         fetch_fn=lambda lim: _fetch(api, lim),
-        filter_fn=_keep,
+        filter_fn=lambda m: keep(m, token),
         limit=limit,
         output_csv=output_csv,
         label="generative",
