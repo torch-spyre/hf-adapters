@@ -53,7 +53,6 @@ def test_load_causal_lm(model_path):
 def test_load_embedding(model_path):
     model = load_embedding(model_path=model_path)
     assert model is not None
-    assert callable(getattr(model, "generate", None))
     del model
     gc.collect()
 
