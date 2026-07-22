@@ -845,16 +845,6 @@ class TestModuleCustom(TestCase):
                 )
 
             for i, (cpu_t, device_t) in enumerate(zip(cpu_tensors, device_tensors)):
-                print(
-                    "###CPU in ", args_cpu[0].device, args_cpu[0].cpu().flatten()[:10]
-                )
-                print(
-                    "###DEV in",
-                    args_device[0].device,
-                    args_device[0].cpu().flatten()[:10],
-                )
-                print("###CPU out", cpu_t.device, cpu_t.cpu().flatten()[:10])
-                print("###DEV out", device_t.device, device_t.cpu().flatten()[:10])
                 self.assertEqual(
                     cpu_t,
                     device_t.cpu(),
