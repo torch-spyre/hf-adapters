@@ -610,6 +610,12 @@ def _tensor_info_to_spec(tensor_info: Dict[str, Any], name: str) -> Dict[str, An
         shape = tensor_info.get("shape") or []
         high = min(shape) if shape else 1
         init_args = {"high": max(int(high), 1)}
+    elif init in ("randn", "rand"):
+        # Float random tensors use xavier init. xavier is undefined for <2-D
+        # shapes (the OOT framework rejects it), so 1-D float tensors fall back
+        # to randn.
+        shape = tensor_info.get("shape") or []
+        init = "xavier" if len(shape) >= 2 else "randn"
 
     tensor_spec = {
         "shape": tensor_info["shape"],
