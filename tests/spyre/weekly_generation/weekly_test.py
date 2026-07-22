@@ -49,7 +49,6 @@ FAILURE_CATEGORY_CPU_LOAD_FAILED = "cpu_load_failed"
 FAILURE_CATEGORY_CPU_GENERATE_FAILED = "cpu_generate_failed"
 FAILURE_CATEGORY_QUANTIZED_MODEL = "quantized_model"
 FAILURE_CATEGORY_HARDWARE_EXCEPTION = "hardware_exception"
-FAILURE_PYTORCH = "failyre_pytorch"
 FAILURE_CATEGORY_MISFORMED_HF_FAILED = "misformed_hf_failed"
 FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION = "test_execution_exception"
 FAILURE_CATEGORY_VERIFICATION_FAILED = "verification_failed"
@@ -97,8 +96,6 @@ def _classify_failure(err: str, default: str) -> str:
         return FAILURE_CATEGORY_HARDWARE_EXCEPTION
     if "does not appear to have files named ('model" in err:
         return FAILURE_CATEGORY_MISFORMED_HF_FAILED
-    if "(Pointwise): no mechanism to resolve stick incompatibility" in err:
-        return FAILURE_PYTORCH
     lowered: str = err.lower()
     if "quantiz" in lowered or "optimum" in lowered:
         return FAILURE_CATEGORY_QUANTIZED_MODEL
@@ -131,7 +128,7 @@ _WEIGHT_SUFFIXES = (
 # amortize per-child spawn + import + kernel-teardown cost (~15 s currently)
 # across more work. Lower values reduce the blast radius when the Spyre
 # driver/state gets into a bad shape mid-batch.
-GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS: int = 4
+GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS: int = 10
 EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS: int = 90
 
 
