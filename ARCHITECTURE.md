@@ -29,7 +29,7 @@ which models are supported on Spyre.
 | Yi 1.5 6B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite Vision 4.1 4B (text backbone) | granite (text) | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | Gemma 4 12B | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
-| Gemma 4 12B Base | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | — | — |
+| Gemma 4 12B Base | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 3 1B | gemma3\_text | 256 | 128 | Yes | Yes | Yes | Yes |
 | GPT-2 124M | gpt2 | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
 | GPT-Neo 125M | gpt_neo | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
