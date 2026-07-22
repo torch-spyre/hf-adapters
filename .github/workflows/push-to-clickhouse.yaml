@@ -185,13 +185,12 @@ jobs:
           retention-days: 1
 
   weekly-model-scan:
-    name: Weekly model scan (${{ matrix.mode }} shard ${{ matrix.shard_index }})
+    name: Weekly model scan (${{ matrix.mode }} ${{ matrix.runner }} shard ${{ matrix.shard_index }})
     needs: generate-matrix
-    runs-on:
-      - x86_64
-      - spyre_pf_x1
-      - linux
-      - image_torch_spyre_pinned
+    # matrix.runner is "x1" or "x2" (generate_weekly_shards.py routes models
+    # >= --large-model-threshold parameters to x2, which has more memory but
+    # 2 cards instead of 1). Both labels are in .github/actionlint.yaml.
+    runs-on: ${{ fromJSON(format('["x86_64","{0}","linux","image_torch_spyre_pinned"]', matrix.runner == 'x2' && 'spyre_pf_x2' || 'spyre_pf_x1')) }}
     # A shard can still run for a while depending on its size; the cadence is
     # weekly so a generous ceiling is safe.
     timeout-minutes: 4320
