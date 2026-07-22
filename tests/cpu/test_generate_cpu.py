@@ -41,11 +41,7 @@ from tests.cpu._generate_helpers import (
     hf_reference_outputs,
 )
 from tests.cpu.conftest import _set_rope_dtype, _unwrap_compiled_blocks
-from tests.model_registry import (
-    CAUSAL_PATHS,
-    NON_BLOCKING_CAUSAL_MODELS,
-    xfail_non_blocking,
-)
+from tests.model_registry import CAUSAL_PATHS, xfail_non_blocking
 
 
 @pytest.mark.parametrize("model_path", xfail_non_blocking(CAUSAL_PATHS))
@@ -80,8 +76,6 @@ def test_multibatch(model_path: str) -> None:
     for i, (prompt, hf_out, adapter_out) in enumerate(
         zip(PROMPTS, hf_outputs, adapter_outputs)
     ):
-        if hf_out.strip() != adapter_out.strip():
-            msg = f"prompt[{i}] {prompt!r}: HF {hf_out!r} != adapter {adapter_out!r}"
-            if model_path in NON_BLOCKING_CAUSAL_MODELS:
-                pytest.xfail(msg)
-            pytest.fail(msg)
+        assert (
+            hf_out.strip() == adapter_out.strip()
+        ), f"prompt[{i}] {prompt!r}: HF {hf_out!r} != adapter {adapter_out!r}"

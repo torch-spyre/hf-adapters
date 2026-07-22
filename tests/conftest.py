@@ -22,9 +22,9 @@ it in ``sys.modules`` under the canonical name, then synthesize an
 ``hf_adapters`` package pointing at the source directory. Subsequent
 ``import hf_adapters.X`` calls find our patched version first.
 
-If ``hf_adapters`` is already in ``sys.modules`` when pytest reaches us (e.g.
-imported by an editable-install finder at interpreter startup), the block below
-evicts and re-patches it with ``DEVICE='cpu'`` rather than asserting.
+The defensive ``assert`` below fails loudly if anything imported ``hf_adapters``
+before pytest reached us — which would lock in the un-patched DEVICE and
+silently break CPU tests.
 Only the CPU lane (``pytest tests/cpu/...``) opts into the
 ``DEVICE="cpu"`` patch, detected via ``sys.argv``. Ambiguous invocations fall
 through to the real ``DEVICE="spyre"``, which fails loudly off-pod rather than
@@ -98,26 +98,11 @@ _ALREADY_PATCHED = (
 )
 
 if _TARGETS_CPU and not _ALREADY_PATCHED:
-    # hf_adapters.hf_common may already be in sys.modules when an editable
-    # install (e.g. torch-spyre's editable finder) imports hf_adapters at
-    # interpreter startup — before any conftest runs. The patch below
-    # unconditionally overwrites sys.modules["hf_adapters.hf_common"], so the
-    # pre-import is harmless: we just evict and reload with DEVICE="cpu".
-    if "hf_adapters.hf_common" in sys.modules:
-        import warnings
-
-        warnings.warn(
-            "hf_adapters.hf_common was already in sys.modules before "
-            "tests/conftest.py ran (likely imported by an editable-install "
-            "finder). Evicting and re-patching with DEVICE='cpu'.",
-            stacklevel=1,
-        )
-        # Evict the entire hf_adapters package so all sub-modules re-import
-        # cleanly from the patched hf_common, not from the installed copy.
-        for _key in [
-            k for k in sys.modules if k == "hf_adapters" or k.startswith("hf_adapters.")
-        ]:
-            del sys.modules[_key]
+    assert "hf_adapters.hf_common" not in sys.modules, (
+        "hf_adapters.hf_common was imported before tests/conftest.py ran; "
+        "the DEVICE='cpu' patch will not apply. Check for plugins or other "
+        "conftests that import hf_adapters at collection time."
+    )
 
     _common_path = os.path.join(ADAPTERS_DIR, "hf_common.py")
     _common_spec = importlib.util.spec_from_file_location(
