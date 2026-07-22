@@ -213,7 +213,24 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
         m for m in metafunc.definition.own_markers if m.name != "parametrize"
     ] + kept
 
-    metafunc.parametrize("model_path", overrides, ids=overrides)
+    # Re-apply xfail for paths that are in NON_BLOCKING_CAUSAL_MODELS so that
+    # ``--model-path <path>`` preserves the non-blocking signal even though the
+    # original decorator's pytest.param marks were stripped above.
+    from tests.model_registry import NON_BLOCKING_CAUSAL_MODELS
+
+    params = [
+        pytest.param(
+            path,
+            marks=pytest.mark.xfail(
+                reason=NON_BLOCKING_CAUSAL_MODELS[path], strict=False
+            ),
+            id=path,
+        )
+        if path in NON_BLOCKING_CAUSAL_MODELS
+        else path
+        for path in overrides
+    ]
+    metafunc.parametrize("model_path", params)
 
 
 def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
