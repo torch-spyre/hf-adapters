@@ -98,11 +98,24 @@ _ALREADY_PATCHED = (
 )
 
 if _TARGETS_CPU and not _ALREADY_PATCHED:
-    assert "hf_adapters.hf_common" not in sys.modules, (
-        "hf_adapters.hf_common was imported before tests/conftest.py ran; "
-        "the DEVICE='cpu' patch will not apply. Check for plugins or other "
-        "conftests that import hf_adapters at collection time."
-    )
+    # hf_adapters.hf_common may already be in sys.modules when an editable
+    # install (e.g. torch-spyre's editable finder) imports hf_adapters at
+    # interpreter startup — before any conftest runs. The patch below
+    # unconditionally overwrites sys.modules["hf_adapters.hf_common"], so the
+    # pre-import is harmless: we just evict and reload with DEVICE="cpu".
+    if "hf_adapters.hf_common" in sys.modules:
+        import warnings
+
+        warnings.warn(
+            "hf_adapters.hf_common was already in sys.modules before "
+            "tests/conftest.py ran (likely imported by an editable-install "
+            "finder). Evicting and re-patching with DEVICE='cpu'.",
+            stacklevel=1,
+        )
+        # Evict the entire hf_adapters package so all sub-modules re-import
+        # cleanly from the patched hf_common, not from the installed copy.
+        for _key in [k for k in sys.modules if k == "hf_adapters" or k.startswith("hf_adapters.")]:
+            del sys.modules[_key]
 
     _common_path = os.path.join(ADAPTERS_DIR, "hf_common.py")
     _common_spec = importlib.util.spec_from_file_location(
