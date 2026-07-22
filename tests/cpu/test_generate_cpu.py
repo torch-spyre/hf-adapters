@@ -30,13 +30,13 @@ import sys
 import pytest
 from transformers import AutoTokenizer
 
-from tests.conftest import load_ref_model, resolve_adapter_module_for_test
+from tests.conftest import get_dtype_for_cpu, load_ref_model, resolve_adapter_module_for_test
 from tests.cpu._generate_helpers import (
     MAX_NEW_TOKENS,
     PROMPTS,
     hf_reference_outputs,
 )
-from tests.cpu.conftest import _unwrap_compiled_blocks
+from tests.cpu.conftest import _set_rope_dtype, _unwrap_compiled_blocks
 from tests.model_registry import CAUSAL_PATHS
 
 
@@ -57,6 +57,10 @@ def test_multibatch(model_path: str) -> None:
     model = load_ref_model(model_path, adapter_mod)
     adapter_mod.prepare_for_spyre(model)
     _unwrap_compiled_blocks(model)
+    # Propagate the model's weight dtype to the RoPE freq cache so that
+    # bfloat16 models (e.g. Gemma 4) don't get a float16 freq cache that
+    # promotes q to float32 and mismatches the bfloat16 key/value caches.
+    _set_rope_dtype(model, get_dtype_for_cpu(model_path))
     adapter_outputs = hf_common_mod.generate(
         adapter_mod._run_forward,
         model,
