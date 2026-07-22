@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import os
 from types import MethodType, ModuleType
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 import torch
 from transformers import (
@@ -202,6 +202,7 @@ class AutoSpyreModel:
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype = torch.float16,
+        tp_plan: Optional[Union[dict, str]] = None,
     ) -> torch.nn.Module:
         module: ModuleType = resolve_adapter_module(
             model_name_or_path=model_name_or_path, mapping=cls._module_mapping
@@ -212,6 +213,7 @@ class AutoSpyreModel:
             module,
             dtype,
             auto_model_cls=cls._auto_model_cls,
+            tp_plan=tp_plan,
         )
         move_model_to_spyre(model, module, dtype)
         return model
@@ -231,10 +233,11 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype = torch.float16,
+        tp_plan: Optional[Union[dict, str]] = None,
     ) -> torch.nn.Module:
         module: ModuleType = resolve_adapter_module(model_name_or_path)
         model: torch.nn.Module = super().from_pretrained(
-            model_name_or_path, dtype=dtype
+            model_name_or_path, dtype=dtype, tp_plan=tp_plan
         )
 
         def model_generate(
@@ -268,13 +271,14 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype = torch.float16,
+        tp_plan: Optional[Union[dict, str]] = None,
     ):
         module: ModuleType = resolve_adapter_module(
             model_name_or_path,
             mapping=cls._module_mapping,
         )
         model: torch.nn.Module = super().from_pretrained(
-            model_name_or_path, dtype=dtype
+            model_name_or_path, dtype=dtype, tp_plan=tp_plan
         )
 
         def model_prefill_logits(

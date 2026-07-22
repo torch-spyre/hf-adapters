@@ -22,6 +22,7 @@ compiled block functions.
 """
 
 import math
+import os
 import time
 from typing import Callable, Optional
 
@@ -30,7 +31,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from sympy import factorint
 
-DEVICE = "spyre"
+# Rank-aware device for multi-Spyre (tensor-parallel) runs. torchrun sets RANK
+# in the environment before this module is imported, so each process binds to
+# its own AIU (spyre:0, spyre:1, ...). Single-device runs get spyre:0.
+# The conftest CPU-patch overwrites this to "cpu" for CPU tests.
+DEVICE = torch.device(f"spyre:{os.getenv('RANK', '0')}")
 BLOCK_SIZE = 64  # Spyre stick size at fp16 (128 bytes / 2 bytes per element)
 
 
@@ -1049,12 +1054,17 @@ def kv_cache_shapes(model):
 
     cfg = text_config(model.config)
     num_layers = cfg.num_hidden_layers
-    num_kv_heads = cfg.num_key_value_heads
     head_dim = (
         getattr(model, "_spyre_head_dim", None)
         or getattr(cfg, "head_dim", None)
         or cfg.hidden_size // cfg.num_attention_heads
     )
+    k_proj = getattr(get_backbone(model).layers[0].self_attn, "k_proj", None)
+    if k_proj is not None:
+        # Under tensor parallelism, this will differ from the config count
+        num_kv_heads = k_proj.weight.shape[0] // head_dim
+    else:
+        num_kv_heads = cfg.num_key_value_heads
     v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
     return [(num_kv_heads, head_dim, v_head_dim) for _ in range(num_layers)]
 
@@ -1160,7 +1170,11 @@ def untie_embedding_and_lm_head(model):
     if embed is None:
         return
     if embed.weight.data_ptr() == head.weight.data_ptr():
-        head.weight = nn.Parameter(head.weight.detach().clone(), requires_grad=False)
+        # Under TP the weights are already on Spyre after ``from_pretrained``;
+        # leave the clone on CPU and let ``_move_to_spyre_with_layout``
+        # place it, as on the single-device path.
+        cloned = head.weight.detach().to("cpu").clone()
+        head.weight = nn.Parameter(cloned, requires_grad=False)
         if hasattr(model, "config"):
             model.config.tie_word_embeddings = False
 
@@ -1222,7 +1236,11 @@ def _move_to_spyre_with_layout(model, dtype):
             device_layout=stl,
             dtype=dtype,
         )
-        new.copy_(t.to(dtype))
+        # Stage through CPU: under TP, HF's ``from_pretrained(tp_plan=...)``
+        # places sharded weights on-device at load, so a direct Spyre->Spyre
+        # ``copy_`` here recurses in ``_copy_from`` (RecursionError). ``.to("cpu")``
+        # is a no-op in all other cases.
+        new.copy_(t.to("cpu").to(dtype))
         return new
 
     for name, param in list(model.named_parameters()):
@@ -1239,7 +1257,44 @@ def _move_to_spyre_with_layout(model, dtype):
         owner.register_buffer(attr, new, persistent=persistent)
 
 
-def load_model_common(model_path, module, dtype=torch.float16, auto_model_cls=None):
+def _resolve_tp_plan(model_path, auto_model_cls, tp_plan):
+    """Resolve a caller's ``tp_plan`` into a dict HF can shard on Spyre.
+
+    ``tp_plan="auto"`` expands (via the model's ``base_model_tp_plan`` +
+    class ``_tp_plan``) to a plan that shards attention/MLP **and** the
+    ``lm_head`` with ``colwise_gather_output``. On Spyre we keep the ``lm_head``
+    replicated instead:
+
+    - HF's ``validate_module`` rejects ``colwise_gather_output`` when
+      ``vocab_size`` isn't divisible by the rank count (e.g. granite-3.3-8b's
+      49159), which would fail at load before the model ever runs.
+    - Our ``pad_lm_head`` pads the vocab to a Spyre stick boundary *after* load,
+      so sharding the head upstream fights that layout pass.
+
+    Dropping ``lm_head`` from the plan leaves it unmatched, which HF treats as
+    replicated (full head on every rank). We resolve the fully-namespaced plan
+    by instantiating the model on the ``meta`` device (no weights allocated) and
+    reading its ``.tp_plan`` — this uses HF's own namespacing rather than
+    reconstructing it, so it stays correct across model families.
+
+    A dict ``tp_plan`` is returned unchanged (the caller is explicit).
+    """
+    if tp_plan != "auto":
+        return tp_plan
+
+    from transformers import AutoConfig
+
+    cfg = AutoConfig.from_pretrained(model_path)
+    with torch.device("meta"):
+        probe = auto_model_cls.from_config(cfg)
+    plan = dict(probe.tp_plan or {})
+    plan.pop("lm_head", None)
+    return plan
+
+
+def load_model_common(
+    model_path, module, dtype=torch.float16, auto_model_cls=None, tp_plan=None
+):
     """Load an HF model.
 
     Args:
@@ -1248,6 +1303,11 @@ def load_model_common(model_path, module, dtype=torch.float16, auto_model_cls=No
         dtype: Weight dtype (default fp16).
         auto_model_cls: HF auto-model class to use (e.g. ``AutoModel``,
             ``AutoModelForCausalLM``). Defaults to ``AutoModel``.
+        tp_plan: Optional tensor-parallel plan forwarded to HF
+            ``from_pretrained`` (e.g. ``"auto"``). When set, HF shards the model
+            across the ``torchrun`` process group; ``device_map`` is omitted so
+            HF's TP placement is authoritative. ``"auto"`` is resolved to a plan
+            that keeps ``lm_head`` replicated (see ``_resolve_tp_plan``).
     """
     if auto_model_cls is None:
         from transformers import AutoModel
@@ -1256,6 +1316,12 @@ def load_model_common(model_path, module, dtype=torch.float16, auto_model_cls=No
 
     if hasattr(module, "load_hf_model"):
         model = module.load_hf_model(model_path, dtype)
+    elif tp_plan is not None:
+        model = auto_model_cls.from_pretrained(
+            model_path,
+            dtype=dtype,
+            tp_plan=_resolve_tp_plan(model_path, auto_model_cls, tp_plan),
+        )
     else:
         model = auto_model_cls.from_pretrained(
             model_path,
