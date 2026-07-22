@@ -36,32 +36,36 @@ test_suite_config:
                             shape: [1, 128, 4096]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.float32
+                            dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                         - tensor:
                             shape: [1, 128]
                             stride: null
                             storage_offset: 0
                             dtype: torch.int64
                             device: spyre
-                            init: randn
+                            init: randint
+                            init_args:
+                              high: 1
                       kwargs: {}
                     - args:
                         - tensor:
                             shape: [1, 1, 4096]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.float32
+                            dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                         - tensor:
                             shape: [1, 1]
                             stride: null
                             storage_offset: 0
                             dtype: torch.int64
                             device: spyre
-                            init: randn
+                            init: randint
+                            init_args:
+                              high: 1
                       kwargs: {}
                 - name: GraniteDecoderLayer_layer0
                   module_path: transformers.models.granite.modeling_granite.GraniteDecoderLayer
@@ -84,9 +88,9 @@ test_suite_config:
                             shape: [1, 128, 4096]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.float32
+                            dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                       kwargs:
                         position_ids:
                           tensor:
@@ -97,7 +101,7 @@ test_suite_config:
                             device: spyre
                             init: randint
                             init_args:
-                              high: 10000
+                              high: 1
                         cache_position:
                           tensor:
                             shape: [128]
@@ -107,33 +111,33 @@ test_suite_config:
                             device: spyre
                             init: randint
                             init_args:
-                              high: 10000
+                              high: 128
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 128, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.float32
+                              dtype: torch.int64
                               device: spyre
                               init: randint
                               init_args:
-                                high: 10000
+                                high: 1
                             - shape: [1, 128, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.float32
+                              dtype: torch.int64
                               device: spyre
                               init: randint
                               init_args:
-                                high: 10000
+                                high: 1
                     - args:
                         - tensor:
                             shape: [1, 1, 4096]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.float32
+                            dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                       kwargs:
                         position_ids:
                           tensor:
@@ -144,7 +148,7 @@ test_suite_config:
                             device: spyre
                             init: randint
                             init_args:
-                              high: 10000
+                              high: 1
                         cache_position:
                           tensor:
                             shape: [1]
@@ -154,25 +158,25 @@ test_suite_config:
                             device: spyre
                             init: randint
                             init_args:
-                              high: 10000
+                              high: 1
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 1, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.float32
+                              dtype: torch.int64
                               device: spyre
                               init: randint
                               init_args:
-                                high: 10000
+                                high: 1
                             - shape: [1, 1, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.float32
+                              dtype: torch.int64
                               device: spyre
                               init: randint
                               init_args:
-                                high: 10000
+                                high: 1
                 - name: GraniteRMSNorm_4096
                   module_path: transformers.models.granite.modeling_granite.GraniteRMSNorm
                   description: 'Module: transformers.models.granite.modeling_granite.GraniteRMSNorm'
@@ -186,18 +190,18 @@ test_suite_config:
                             shape: [1, 128, 4096]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.float32
+                            dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                       kwargs: {}
                     - args:
                         - tensor:
                             shape: [1, 1, 4096]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.float32
+                            dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                       kwargs: {}
                 - name: GraniteAttention_layer0
                   module_path: transformers.models.granite.modeling_granite.GraniteAttention
@@ -222,9 +226,9 @@ test_suite_config:
                             shape: [1, 128, 4096]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.float32
+                            dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                         position_ids:
                           tensor:
                             shape: [1, 128]
@@ -234,7 +238,7 @@ test_suite_config:
                             device: spyre
                             init: randint
                             init_args:
-                              high: 10000
+                              high: 1
                         cache_position:
                           tensor:
                             shape: [128]
@@ -244,25 +248,25 @@ test_suite_config:
                             device: spyre
                             init: randint
                             init_args:
-                              high: 10000
+                              high: 128
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 128, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.float32
+                              dtype: torch.int64
                               device: spyre
                               init: randint
                               init_args:
-                                high: 10000
+                                high: 1
                             - shape: [1, 128, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.float32
+                              dtype: torch.int64
                               device: spyre
                               init: randint
                               init_args:
-                                high: 10000
+                                high: 1
                     - args: []
                       kwargs:
                         hidden_states:
@@ -270,9 +274,9 @@ test_suite_config:
                             shape: [1, 1, 4096]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.float32
+                            dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                         position_ids:
                           tensor:
                             shape: [1, 1]
@@ -282,7 +286,7 @@ test_suite_config:
                             device: spyre
                             init: randint
                             init_args:
-                              high: 10000
+                              high: 1
                         cache_position:
                           tensor:
                             shape: [1]
@@ -292,25 +296,25 @@ test_suite_config:
                             device: spyre
                             init: randint
                             init_args:
-                              high: 10000
+                              high: 1
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 1, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.float32
+                              dtype: torch.int64
                               device: spyre
                               init: randint
                               init_args:
-                                high: 10000
+                                high: 1
                             - shape: [1, 1, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.float32
+                              dtype: torch.int64
                               device: spyre
                               init: randint
                               init_args:
-                                high: 10000
+                                high: 1
                 - name: GraniteMLP_77d2613c
                   module_path: transformers.models.granite.modeling_granite.GraniteMLP
                   description: 'Module: transformers.models.granite.modeling_granite.GraniteMLP'
@@ -331,18 +335,18 @@ test_suite_config:
                             shape: [1, 128, 4096]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.float32
+                            dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                       kwargs: {}
                     - args:
                         - tensor:
                             shape: [1, 1, 4096]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.float32
+                            dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                       kwargs: {}
                 - name: SiLUActivation_d2f532e9
                   module_path: transformers.activations.SiLUActivation
@@ -356,18 +360,18 @@ test_suite_config:
                             shape: [1, 128, 12800]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.float32
+                            dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                       kwargs: {}
                     - args:
                         - tensor:
                             shape: [1, 1, 12800]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.float32
+                            dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                       kwargs: {}
     - path: ${TORCH_DEVICE_ROOT}/tests/test_modules_custom.py
       unlisted_test_mode: skip
