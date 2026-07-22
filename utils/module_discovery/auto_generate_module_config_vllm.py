@@ -43,6 +43,7 @@ from typing import Any, Dict, List
 os.environ.setdefault("VLLM_USE_V1", "1")
 os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
+import torch  # noqa: E402  (needed for torch.dtype checks in _capture_ctor_args)
 import yaml
 
 # Reuse the device/backend-independent helpers from the HF generator.
@@ -270,9 +271,15 @@ def _capture_ctor_args(module) -> Dict[str, Any] | None:
                 return None
             continue  # optional and absent: rely on the default
 
-        # Only keep plain, picklable scalar/list values (skip tensors, modules,
-        # dtypes, config objects, etc. -- they are not YAML-representable here).
-        if (
+        # Keep plain, picklable scalar/list values. torch.dtype is recorded as
+        # its string form ("torch.bfloat16"): the OOT resolved_kwargs path turns
+        # a dtype string kwarg back into a real torch.dtype, so required dtype
+        # ctor params (e.g. RotaryEmbedding.dtype) round-trip through the YAML.
+        # Anything else non-representable (tensors, modules, config objects) makes
+        # capture fail only if the param is required.
+        if isinstance(value, torch.dtype):
+            kwargs[pname] = str(value)  # e.g. "torch.bfloat16"
+        elif (
             isinstance(value, bool)
             or isinstance(value, (int, float, str))
             or value is None
@@ -283,7 +290,7 @@ def _capture_ctor_args(module) -> Dict[str, Any] | None:
         ):
             kwargs[pname] = list(value)
         else:
-            # Non-scalar (e.g. torch.dtype) required value we cannot represent.
+            # Non-representable (e.g. a tensor/module) value.
             if param.default is inspect.Parameter.empty:
                 return None
             # optional: drop it, the default applies

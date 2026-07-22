@@ -300,22 +300,86 @@ def randomize_weights_xavier(module: torch.nn.Module, seed: int = 0) -> None:
             p.copy_(tmp.to(p.dtype))
 
 
-def _build_vllm_module(module_cls, constructor_input, *, device):
-    """Construct a vLLM module under a VllmConfig + distributed group.
+# Some vLLM modules take a non-activation object (e.g. a weight-carrying layer)
+# as a forward argument that the generator cannot capture as a tensor. These
+# builders synthesize that extra argument inside the vLLM context (so layers that
+# read the TP group can be constructed) and return the full positional forward
+# args. Registered by module class name.
+
+
+def _fwd_args_logits_processor(module, constructor_input, fwd_args, *, device, dtype, seed):
+    """Prepend a constructed ``lm_head`` (ParallelLMHead) to LogitsProcessor's args.
+
+    ``LogitsProcessor.forward(lm_head, hidden_states, embedding_bias=None)`` needs
+    a real ParallelLMHead (with weights + quant_method), not a plain tensor. Build
+    it from the captured ``vocab_size`` and the hidden_states' feature dim, init it
+    with the same deterministic xavier weights as everything else, and place it on
+    the same device/dtype as the captured hidden_states.
+    """
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+
+    if not fwd_args or not isinstance(fwd_args[0], torch.Tensor):
+        raise _SkipModuleError("LogitsProcessor: no captured hidden_states tensor")
+    hidden_states = fwd_args[0]
+    embedding_dim = int(hidden_states.shape[-1])
+    ctor_kwargs = dict(constructor_input.kwargs)
+    vocab_size = ctor_kwargs.get("vocab_size")
+    if vocab_size is None:
+        raise _SkipModuleError("LogitsProcessor: no vocab_size in constructor_inputs")
+
+    lm_head = ParallelLMHead(
+        num_embeddings=int(vocab_size),
+        embedding_dim=embedding_dim,
+        org_num_embeddings=ctor_kwargs.get("org_vocab_size"),
+    )
+    randomize_weights_xavier(lm_head, seed=seed)
+    if dtype is not None:
+        lm_head = lm_head.to(dtype)
+    lm_head.eval()
+    if device is not None:
+        lm_head = lm_head.to(device)
+    # forward(lm_head, hidden_states, ...) -- lm_head is the first positional arg.
+    return [lm_head, *fwd_args]
+
+
+_FWD_ARGS_BUILDERS = {
+    "LogitsProcessor": _fwd_args_logits_processor,
+}
+
+
+def _run_vllm_module(
+    module_cls,
+    constructor_input,
+    fwd_args,
+    fwd_kwargs,
+    *,
+    device,
+    compile,
+    dtype=None,
+    seed=0,
+):
+    """Build a vLLM module, init its weights, and run one forward -- all inside
+    the vLLM context -- and return the flattened output tensors.
+
+    Everything that touches vLLM state (construction, ``torch.compile``, and the
+    forward pass itself) runs inside a single ``set_current_vllm_config(...)`` +
+    TP=1 distributed group, then the group is torn down. This mirrors the
+    init -> build -> run -> destroy structure of the standalone reproduction
+    script: the current vLLM config is a thread-local that is restored when the
+    ``with`` block exits, and vLLM's compile path reads it, so the forward must
+    not run outside the block.
 
     Constructor args come from the YAML-resolved ``constructor_input``:
 
     - **Atomic** library layers carry explicit captured kwargs (ints/lists/etc.),
       so the module is built generically as ``module_cls(*args, **kwargs)`` -- no
       HF config, no per-class adapter.
-    - **Composite** model modules carry a single config arg, which the OOT
-      framework already resolved to a live ``PretrainedConfig`` as ``args[0]``.
-      Its scalar constructor args are derived from that config via the generic
-      ``build_ctor_kwargs_from_config`` (Option C).
+    - **Composite** model modules carry a single config arg (resolved to a live
+      ``PretrainedConfig``); their scalar ctor args are derived from it via the
+      generic ``build_ctor_kwargs_from_config`` (Option C).
 
-    Caller is responsible for calling _teardown_distributed() after running the
-    forward pass (mirrors the init -> build -> run -> destroy segment structure of
-    the standalone reproduction script).
+    ``fwd_args``/``fwd_kwargs`` must already be on the target device. Raises
+    ``_SkipModuleError`` if a composite's ctor cannot be resolved from config.
     """
     from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
 
@@ -324,18 +388,42 @@ def _build_vllm_module(module_cls, constructor_input, *, device):
     hf_config = _resolve_hf_config(constructor_input)
 
     vllm_config = VllmConfig(device_config=DeviceConfig(device="cpu"))
-    with set_current_vllm_config(vllm_config):
-        _setup_distributed()
-        if hf_config is not None:
-            # Composite (Option C): derive scalar ctor args from the config,
-            # ignoring the raw config arg itself.
-            module = module_cls(**build_ctor_kwargs_from_config(module_cls, hf_config))
-        else:
-            # Atomic: explicit captured args/kwargs from the YAML.
-            module = module_cls(*args, **kwargs)
-    if device is not None:
-        module = module.to(device)
-    return module
+    try:
+        with set_current_vllm_config(vllm_config):
+            _setup_distributed()
+            if hf_config is not None:
+                # Composite (Option C): derive scalar ctor args from the config.
+                module = module_cls(**build_ctor_kwargs_from_config(module_cls, hf_config))
+            else:
+                # Atomic: explicit captured args/kwargs from the YAML.
+                module = module_cls(*args, **kwargs)
+
+            # Same seed on both the CPU-ref and device runs => identical weights.
+            randomize_weights_xavier(module, seed=seed)
+            if dtype is not None:
+                module = module.to(dtype)
+            module.eval()
+            if device is not None:
+                module = module.to(device)
+
+            # Synthesize any non-tensor forward argument the generator could not
+            # capture (e.g. LogitsProcessor's lm_head layer). Built here so it is
+            # inside the vLLM context/TP group, with the same device/dtype/seed.
+            run_args = fwd_args
+            builder = _FWD_ARGS_BUILDERS.get(module_cls.__name__)
+            if builder is not None:
+                run_args = builder(
+                    module, constructor_input, fwd_args,
+                    device=device, dtype=dtype, seed=seed,
+                )
+
+            runnable = torch.compile(module) if compile else module
+            # Run forward INSIDE the context: vLLM's compile/dispatch path reads
+            # the current vLLM config, so it must be active during the forward.
+            out_tensors = _run_forward(runnable, run_args, fwd_kwargs)
+    finally:
+        _teardown_distributed()
+    return out_tensors
 
 
 class TestModuleCustom(TestCase):
@@ -643,7 +731,9 @@ class TestModuleCustom(TestCase):
         """Standalone-run a vLLM-native module and compare CPU eager vs device compile.
 
         Unlike the other tests, vLLM modules need a VllmConfig + TP=1 distributed
-        group at construction, so this builds them via ``_build_vllm_module``:
+        group, so ``_run_vllm_module`` builds, initializes, and runs each module
+        entirely inside that context (vLLM's compile/dispatch path reads the
+        current config, so the forward must run inside it too, not just the build):
 
         1. Atomic library layers (vllm.model_executor.layers.*) are built from the
            explicit constructor kwargs captured into the YAML at generation time
@@ -651,9 +741,9 @@ class TestModuleCustom(TestCase):
         2. Composite model modules (vllm.model_executor.models.*) carry a config
            arg; their scalar ctor args are derived from that config via the generic
            ``build_ctor_kwargs_from_config`` (Option C).
-        3. Both a CPU-eager reference and a device (spyre) + torch.compile copy are
-           built, initialized with the SAME deterministic xavier weights, and their
-           outputs compared.
+        3. A CPU-eager reference and a device (spyre) + torch.compile run use the
+           SAME deterministic xavier weights (same seed), and their outputs are
+           compared.
 
         Forward-context-dependent modules (Attention / DecoderLayer) are skipped
         this phase -- their forward needs a global vLLM forward context.
@@ -707,42 +797,38 @@ class TestModuleCustom(TestCase):
             )
 
             # --- Reference: CPU eager ---
-            # Each build init's a distributed group; always tear it down (even on
-            # skip/error) so the next parametrized variant can init a fresh group.
-            # A _SkipModuleError raised inside the build happens after _setup_distributed,
-            # so teardown must run before we skip -- the finally guarantees that.
-            skip_reason = None
+            # Build + init + forward all happen inside _run_vllm_module's
+            # set_current_vllm_config context (vLLM's compile/dispatch reads the
+            # current config, so the forward must run inside it); the distributed
+            # group is torn down there too. A _SkipModuleError is raised for a
+            # composite whose ctor cannot be resolved from config.
             try:
-                ref = _build_vllm_module(
+                cpu_tensors = _run_vllm_module(
                     module_info.module_cls,
                     module_input.constructor_input,
+                    args_cpu,
+                    kwargs_cpu,
                     device="cpu",
+                    compile=False,
+                    dtype=dtype,
+                    seed=0,
                 )
-                randomize_weights_xavier(ref, seed=0)
-                ref.to(dtype).eval()
-                cpu_tensors = _run_forward(ref, args_cpu, kwargs_cpu)
             except _SkipModuleError as exc:
-                skip_reason = str(exc)
-            finally:
-                _teardown_distributed()
-            if skip_reason is not None:
-                self.skipTest(skip_reason)
+                self.skipTest(str(exc))
 
             # --- Under test: device (spyre) + torch.compile ---
             torch._dynamo.reset_code_caches()
             torch._inductor.codecache.FxGraphCache.clear()
-            try:
-                dev = _build_vllm_module(
-                    module_info.module_cls,
-                    module_input.constructor_input,
-                    device=None,
-                )
-                randomize_weights_xavier(dev, seed=0)  # same seed => same weights
-                dev.to(device).to(dtype).eval()
-                dev_compiled = torch.compile(dev)
-                device_tensors = _run_forward(dev_compiled, args_device, kwargs_device)
-            finally:
-                _teardown_distributed()
+            device_tensors = _run_vllm_module(
+                module_info.module_cls,
+                module_input.constructor_input,
+                args_device,
+                kwargs_device,
+                device=device,
+                compile=True,
+                dtype=dtype,
+                seed=0,  # same seed => same weights as the CPU reference
+            )
 
             if len(cpu_tensors) != len(device_tensors):
                 self.fail(
@@ -751,6 +837,10 @@ class TestModuleCustom(TestCase):
                 )
 
             for i, (cpu_t, device_t) in enumerate(zip(cpu_tensors, device_tensors)):
+                print("###CPU in ", args_cpu[0].device, args_cpu[0].cpu().flatten()[:10])
+                print("###DEV in", args_device[0].device, args_device[0].cpu().flatten()[:10])
+                print("###CPU out", cpu_t.device, cpu_t.cpu().flatten()[:10])
+                print("###DEV out", device_t.device, device_t.cpu().flatten()[:10])
                 self.assertEqual(
                     cpu_t,
                     device_t.cpu(),
