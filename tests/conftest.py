@@ -250,7 +250,10 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
         from tests.model_registry import NON_BLOCKING_CAUSAL_MODELS
 
         for item in items:
-            path = item.callargs.get("model_path", "") if hasattr(item, "callargs") else ""
+            try:
+                path = item.callspec.params.get("model_path", "")
+            except AttributeError:
+                path = ""
             if path in NON_BLOCKING_CAUSAL_MODELS and not item.get_closest_marker("xfail"):
                 item.add_marker(
                     pytest.mark.xfail(
