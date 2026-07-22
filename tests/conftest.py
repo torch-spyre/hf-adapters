@@ -22,9 +22,9 @@ it in ``sys.modules`` under the canonical name, then synthesize an
 ``hf_adapters`` package pointing at the source directory. Subsequent
 ``import hf_adapters.X`` calls find our patched version first.
 
-The defensive ``assert`` below fails loudly if anything imported ``hf_adapters``
-before pytest reached us — which would lock in the un-patched DEVICE and
-silently break CPU tests.
+If ``hf_adapters`` is already in ``sys.modules`` when pytest reaches us (e.g.
+imported by an editable-install finder at interpreter startup), the block below
+evicts and re-patches it with ``DEVICE='cpu'`` rather than asserting.
 Only the CPU lane (``pytest tests/cpu/...``) opts into the
 ``DEVICE="cpu"`` patch, detected via ``sys.argv``. Ambiguous invocations fall
 through to the real ``DEVICE="spyre"``, which fails loudly off-pod rather than
@@ -241,7 +241,6 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
         for item in items:
             if "slow" in item.keywords:
                 item.add_marker(skip_slow)
-
 
 
 def get_dtype_for_cpu(model_path: str) -> torch.dtype:

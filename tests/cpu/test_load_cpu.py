@@ -53,8 +53,6 @@ def test_load_causal_lm(model_path):
 def test_load_embedding(model_path):
     model = load_embedding(model_path=model_path)
     assert model is not None
-    # AutoSpyreModel (bare backbone) does not attach generate — only
-    # AutoSpyreModelForCausalLM does.
     del model
     gc.collect()
 
