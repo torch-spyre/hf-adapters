@@ -213,24 +213,7 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
         m for m in metafunc.definition.own_markers if m.name != "parametrize"
     ] + kept
 
-    # Re-apply xfail for paths that are in NON_BLOCKING_CAUSAL_MODELS so that
-    # ``--model-path <path>`` preserves the non-blocking signal even though the
-    # original decorator's pytest.param marks were stripped above.
-    from tests.model_registry import NON_BLOCKING_CAUSAL_MODELS
-
-    params = [
-        pytest.param(
-            path,
-            marks=pytest.mark.xfail(
-                reason=NON_BLOCKING_CAUSAL_MODELS[path], strict=False
-            ),
-            id=path,
-        )
-        if path in NON_BLOCKING_CAUSAL_MODELS
-        else path
-        for path in overrides
-    ]
-    metafunc.parametrize("model_path", params)
+    metafunc.parametrize("model_path", overrides, ids=overrides)
 
 
 def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
@@ -258,6 +241,22 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
         for item in items:
             if "slow" in item.keywords:
                 item.add_marker(skip_slow)
+
+    # When --model-path is used, pytest_generate_tests injects plain path strings
+    # (no xfail marks) because the original decorator's pytest.param objects are
+    # stripped. Re-apply xfail here, post-collection, for any item whose
+    # model_path callargs value appears in NON_BLOCKING_CAUSAL_MODELS.
+    if config.getoption("--model-path"):
+        from tests.model_registry import NON_BLOCKING_CAUSAL_MODELS
+
+        for item in items:
+            path = item.callargs.get("model_path", "") if hasattr(item, "callargs") else ""
+            if path in NON_BLOCKING_CAUSAL_MODELS and not item.get_closest_marker("xfail"):
+                item.add_marker(
+                    pytest.mark.xfail(
+                        reason=NON_BLOCKING_CAUSAL_MODELS[path], strict=False
+                    )
+                )
 
 
 def get_dtype_for_cpu(model_path: str) -> torch.dtype:
