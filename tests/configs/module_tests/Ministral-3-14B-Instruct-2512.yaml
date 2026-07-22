@@ -168,19 +168,15 @@ test_suite_config:
                             - shape: [1, 128, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.int64
+                              dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 128, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.int64
+                              dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                     - args:
                         - tensor:
                             shape: [1, 1, 4096]
@@ -205,19 +201,15 @@ test_suite_config:
                             - shape: [1, 1, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.int64
+                              dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 1, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.int64
+                              dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                 - name: Ministral3RMSNorm_4096
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3RMSNorm
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3RMSNorm'
@@ -285,19 +277,15 @@ test_suite_config:
                             - shape: [1, 128, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.int64
+                              dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 128, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.int64
+                              dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                     - args: []
                       kwargs:
                         hidden_states:
@@ -323,19 +311,15 @@ test_suite_config:
                             - shape: [1, 1, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.int64
+                              dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 1, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.int64
+                              dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                 - name: Ministral3MLP_eb806b7d
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3MLP
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3MLP'

@@ -72,7 +72,9 @@ class PrettyDumper(yaml.SafeDumper):
 
 def _is_special_tensor(name: str) -> bool:
     """Check if tensor name indicates it should not be random."""
-    return any(keyword in name.lower() for keyword in ["position", "mask", "ids"])
+    return "position_embedding" not in name.lower() and any(
+        keyword in name.lower() for keyword in ["position", "mask", "ids"]
+    )
 
 
 # Extracted from the loaded config so a standalone module rebuilt from the YAML

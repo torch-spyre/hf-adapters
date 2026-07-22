@@ -178,19 +178,15 @@ test_suite_config:
                             - shape: [1, 128, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.int64
+                              dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 128, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.int64
+                              dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                     - args:
                         - tensor:
                             shape: [1, 1, 4096]
@@ -225,19 +221,15 @@ test_suite_config:
                             - shape: [1, 1, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.int64
+                              dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 1, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.int64
+                              dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                 - name: MistralRMSNorm_4096
                   module_path: transformers.models.mistral.modeling_mistral.MistralRMSNorm
                   description: 'Module: transformers.models.mistral.modeling_mistral.MistralRMSNorm'
@@ -315,19 +307,15 @@ test_suite_config:
                             - shape: [1, 128, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.int64
+                              dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 128, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.int64
+                              dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                     - args: []
                       kwargs:
                         hidden_states:
@@ -363,19 +351,15 @@ test_suite_config:
                             - shape: [1, 1, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.int64
+                              dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 1, 128]
                               stride: null
                               storage_offset: 0
-                              dtype: torch.int64
+                              dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                 - name: MistralMLP_f82d9546
                   module_path: transformers.models.mistral.modeling_mistral.MistralMLP
                   description: 'Module: transformers.models.mistral.modeling_mistral.MistralMLP'
