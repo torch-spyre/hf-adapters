@@ -630,8 +630,8 @@ def _tensor_info_to_spec(tensor_info: Dict[str, Any], name: str) -> Dict[str, An
         init = "randint"
         # A special tensor (position/mask/ids) holds indices, not activations,
         # so force it to an integer dtype. This keeps the randint init consistent
-        # even when the tensor was captured under a floating-point dtype (e.g. a
-        # "position_embeddings" tensor captured as bfloat16): randint on a float
+        # even when the tensor was captured under a floating-point dtype
+        # tensor captured as bfloat16): randint on a float
         # dtype is meaningless, so it becomes torch.int64 here.
         if _is_special_tensor(name):
             dtype = str(DEFAULT_INT_DTYPE)
