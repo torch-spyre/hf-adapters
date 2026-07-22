@@ -219,6 +219,13 @@ CAUSAL_LM_MODELS = {
         "size": "1b",
     },
     # hf_gemma4
+    "gemma4_base": {
+        "name": "Gemma 4 12B Base",
+        "path": "google/gemma-4-12b",
+        "adapter": "hf_gemma4.py",
+        "size": "12b",
+        "dtype": "bfloat16",
+    },
     "gemma4_google": {
         "name": "Gemma 4 12B",
         "path": "google/gemma-4-12B-it",
