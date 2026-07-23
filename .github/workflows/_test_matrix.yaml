@@ -62,10 +62,10 @@ on:
         default: ''
       test_type:
         description: >-
-          Suite subset to run: smoke | core | full | suite_<group> | <label>.
-          Selects configs whose test_suite_config.labels array contains this
-          value, or (for suite_<group>) whose path sits under that directory.
-          Default: full (every config).
+          Suite subset to run: smoke | core | full (default). Selects the model
+          subset the matrix runs (see .github/scripts/generate_test_matrix.py):
+          smoke = 3 fixed causal models (~10 min); core = full for now; full =
+          every representative model. Same knob/vocabulary as the sibling repos.
         required: false
         type: string
         default: full
@@ -158,13 +158,24 @@ jobs:
       - name: Generate matrices
         id: generate
         run: |
+          # Reject an unrecognized test_type loudly. This reusable workflow_call
+          # path accepts any string (type: choice only guards workflow_dispatch),
+          # and an unknown value would emit empty matrices -> zero jobs -> a green
+          # run that tested nothing.
+          case "${{ inputs.test_type }}" in
+            smoke|core|full) ;;
+            *) echo "::error::Invalid test_type '${{ inputs.test_type }}'. Valid: smoke | core | full"; exit 1 ;;
+          esac
+
           # Manually exclude models here by adding them to --exclude
           # Example: python .github/scripts/generate_test_matrix.py --exclude ibm-granite/granite-vision-4.1-4b tiiuae/Falcon3-1B-Base
 
           # We exclude these models - See https://github.com/torch-spyre/hf-adapters/issues/89
           # google/gemma-4-12B-it: VLM e2e passes on the pod but OOMs the CI runner
           # (see PR #182); validated on-pod, excluded here to match upstream/main.
-          python .github/scripts/generate_test_matrix.py --exclude tiiuae/Falcon3-1B-Base mistralai/Mistral-Small-3.1-24B-Instruct-2503 google/gemma-4-12B-it
+          python .github/scripts/generate_test_matrix.py \
+            --test-type "${{ inputs.test_type }}" \
+            --exclude tiiuae/Falcon3-1B-Base mistralai/Mistral-Small-3.1-24B-Instruct-2503 google/gemma-4-12B-it
 
   adapter-coverage:
     name: adapter coverage
@@ -540,6 +551,10 @@ jobs:
 
   spyre-model-module-tests:
     name: Spyre model-module tests (${{ matrix.config }})
+    # Heavyweight 8B-24B module suites; skip on the smoke tier (contradicts its
+    # ~10-min goal). Skipped job -> result 'skipped' -> the fan-in gate stays
+    # green. Runs for core and full.
+    if: ${{ inputs.test_type != 'smoke' }}
     runs-on:
       - x86_64
       - spyre_pf_x1

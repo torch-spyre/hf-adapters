@@ -35,12 +35,14 @@ on:
         type: string
         default: ''
       test_type:
-        description: >-
-          Suite subset to run: smoke | core | full | suite_<group> | <label>.
-          Default: full (every config).
+        description: 'Test tier to run: smoke | core | full'
         required: false
-        type: string
+        type: choice
         default: full
+        options:
+          - full
+          - core
+          - smoke
 
 concurrency:
   group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.pull_request.html_url) || (github.event_name == 'workflow_dispatch'

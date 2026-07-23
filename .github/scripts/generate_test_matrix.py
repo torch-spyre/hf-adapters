@@ -24,28 +24,26 @@ sys.path.insert(0, str(project_root))
 import tests.model_registry  # noqa: E402
 
 
-def generate_matrices(exclude_models=None):
+def generate_matrices(exclude_models=None, test_type="full"):
     """
     Generate test matrices from the model registry.
 
     Args:
         exclude_models: List of model paths to exclude from all matrices
+        test_type: Test tier (smoke | core | full) selecting the model subset
 
     Returns:
         dict: Dictionary with 'causal', 'embed', 'vision', and 'combined' matrix lists
     """
     exclude_models = set(exclude_models or [])
 
+    # Select the tier's model paths (raises ValueError on an unknown tier).
+    tier = tests.model_registry.tier_paths(test_type)
+
     # Apply exclusions
-    causal_paths = [
-        k for k in tests.model_registry.CAUSAL_PATHS if k not in exclude_models
-    ]
-    embed_paths = [
-        k for k in tests.model_registry.EMBED_PATHS if k not in exclude_models
-    ]
-    vision_paths = [
-        k for k in tests.model_registry.VISION_PATHS if k not in exclude_models
-    ]
+    causal_paths = [k for k in tier["causal"] if k not in exclude_models]
+    embed_paths = [k for k in tier["embed"] if k not in exclude_models]
+    vision_paths = [k for k in tier["vision"] if k not in exclude_models]
 
     # Combine for jobs that test both types
     combined_paths = causal_paths + embed_paths
@@ -109,14 +107,25 @@ def main():
         default=[],
         help="Model keys to exclude from all matrices (e.g., granite-vision phi4)",
     )
+    parser.add_argument(
+        "--test-type",
+        default="full",
+        help="Test tier: smoke | core | full (default full)",
+    )
 
     args = parser.parse_args()
 
     # Generate matrices
-    matrices = generate_matrices(exclude_models=args.exclude)
+    try:
+        matrices = generate_matrices(
+            exclude_models=args.exclude, test_type=args.test_type
+        )
+    except ValueError as exc:
+        print(f"::error::{exc}", file=sys.stderr)
+        sys.exit(2)
 
     # Print summary for workflow logs
-    print("Generated test matrices:")
+    print(f"Generated test matrices for test_type={args.test_type}:")
     print(
         f"  Causal models ({len(matrices['causal'])}): {', '.join(matrices['causal'])}"
     )

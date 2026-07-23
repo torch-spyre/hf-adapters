@@ -481,6 +481,36 @@ VISION_PATHS: list[str] = _select_representative_paths(
     predicate=lambda info: info.get("kind") == "vlm",
 )
 
+# --- Test tiers (smoke | core | full) -------------------------------------
+# Uniform TEST_TYPE knob shared across the product repos (torch-spyre,
+# spyre-inference, hf-adapters). Here it maps to a subset of models.
+#   smoke — 3 fixed causal models, ~10 min total (no embed/vision)
+#   core  — same as full today (hf-adapters has no distinct heavier tier yet)
+#   full  — every representative model (default; today's behaviour)
+# SMOKE is declared by short key and resolved to its HF path against
+# CAUSAL_LM_MODELS, so a typo/rename raises KeyError at import rather than
+# silently emitting an empty matrix.
+SMOKE_CAUSAL_KEYS: tuple[str, ...] = ("qwen3", "ministral", "granite4")
+SMOKE_CAUSAL_PATHS: list[str] = [CAUSAL_LM_MODELS[k]["path"] for k in SMOKE_CAUSAL_KEYS]
+
+
+def tier_paths(test_type: str) -> dict[str, list[str]]:
+    """Return {'causal','embed','vision'} path lists for a test tier (pre-exclude).
+
+    ``full`` and ``core`` currently return the same representative selection;
+    ``smoke`` returns only the fixed smoke causal models.
+    """
+    if test_type in ("full", "core"):
+        return {
+            "causal": list(CAUSAL_PATHS),
+            "embed": list(EMBED_PATHS),
+            "vision": list(VISION_PATHS),
+        }
+    if test_type == "smoke":
+        return {"causal": list(SMOKE_CAUSAL_PATHS), "embed": [], "vision": []}
+    raise ValueError(f"Unknown test_type {test_type!r}; expected smoke | core | full")
+
+
 # Causal-LM models that just went green on torchs-spyre but aren't yet proven stable
 # across repeated runs. Kept as a non-blocking signal (xfail, non-strict) for
 # a trial period; remove an entry once it's been stably green so its Spyre
