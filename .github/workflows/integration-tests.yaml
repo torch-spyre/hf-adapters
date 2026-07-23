@@ -105,6 +105,10 @@ jobs:
   # ---------------------------------------------------------------------------
   run-tests:
     needs: provenance
+    # Skip the full matrix on pull_request events (see the temporary
+    # pull_request trigger above) -- PRs only need spyre-smoke-subset-tests.
+    # workflow_dispatch (the normal upstream-triggered path) still runs it.
+    if: github.event_name != 'pull_request'
     uses: ./.github/workflows/_test_matrix.yaml
     with:
       image_label: ${{ inputs.runner_label || 'image_torch_spyre_pinned' }}
@@ -189,7 +193,7 @@ jobs:
           echo "run-tests result: ${RESULT}"
           echo "spyre-smoke-subset-tests result: ${SUBSET_RESULT}"
 
-          if [[ "${RESULT}" == "success" && "${SUBSET_RESULT}" == "success" ]]; then
+          if [[ ( "${RESULT}" == "success" || "${RESULT}" == "skipped" ) && "${SUBSET_RESULT}" == "success" ]]; then
             echo "All integration test suites passed."
             exit 0
           fi
