@@ -100,25 +100,6 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
-  # Run the full test matrix currently same as "run-tests" job in
-  # torch_spyre_tests.yaml
-  # ---------------------------------------------------------------------------
-  run-tests:
-    needs: provenance
-    # Skip the full matrix on pull_request events (see the temporary
-    # pull_request trigger above) -- PRs only need spyre-smoke-subset-tests.
-    # workflow_dispatch (the normal upstream-triggered path) still runs it.
-    if: github.event_name != 'pull_request'
-    uses: ./.github/workflows/_test_matrix.yaml
-    with:
-      image_label: ${{ inputs.runner_label || 'image_torch_spyre_pinned' }}
-      extra_test_flags: -vvv -s
-      extra_test_flags_multi_spyre: -vvv -s
-      ref: ${{ inputs.ref || '' }}
-      repository: ${{ inputs.repository || '' }}
-      test_type: ${{ inputs.test_type || 'full' }}
-
-  # ---------------------------------------------------------------------------
   # Fixed 3-model smoke subset (Qwen3, Ministral, Granite 4.0) run directly in
   # this workflow, independent of the dynamic matrix in _test_matrix.yaml.
   # Hardcoded on purpose: this is a small fast sanity check, not meant to grow
@@ -186,7 +167,7 @@ jobs:
   integration-test-result:
     name: Integration test result
     runs-on: ubuntu-latest
-    needs: [run-tests, spyre-smoke-subset-tests]
+    needs: [spyre-smoke-subset-tests]
     if: always()
     steps:
       - name: Evaluate test results
