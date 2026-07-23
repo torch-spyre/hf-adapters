@@ -157,6 +157,7 @@ MODEL_PATH_TO_TORCH_DTYPE: dict[str, torch.dtype] = {
     "mistralai/Ministral-3-8B-Instruct-2512": torch.bfloat16,
     "mistralai/Ministral-3-14B-Instruct-2512": torch.bfloat16,
     "google/embeddinggemma-300m": torch.bfloat16,
+    "google/gemma-4-12b": torch.bfloat16,
     "google/gemma-4-12B-it": torch.bfloat16,
     "ibm-granite/granite-4.0-1b-base": torch.float32,
     "ibm-granite/granite-4.0-1b": torch.float32,
