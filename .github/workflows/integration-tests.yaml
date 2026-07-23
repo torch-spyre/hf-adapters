@@ -16,11 +16,6 @@ name: integration-tests
 #     -f pr_url_hash=$(echo -n "${{ github.event.pull_request.html_url }}" | sha256sum | cut -c1-16)
 # ---------------------------------------------------------------------------
 on:
-  # TODO(remove before merge): pull_request trigger added temporarily to
-  # exercise the new `models` filter (below) end-to-end via _test_matrix.yaml
-  # on this branch's PR.
-  pull_request:
-    branches: [main]
   workflow_dispatch:
     inputs:
       # ---- Upstream provenance ----------------
@@ -85,11 +80,12 @@ on:
           Space-separated list of model paths to restrict every matrix job
           (smoke/load/token-compare/embed-compare/vision) to, e.g.
           "Qwen/Qwen3-0.6B ministral/Ministral-3B-Instruct". Must match paths
-          exactly as they appear in tests/model_registry.py. Empty (default)
-          = run every model in the registry.
+          exactly as they appear in tests/model_registry.py. Leave empty
+          (default) to fall back to a fixed 3-model spot-check -- see
+          run-tests below.
         required: false
         type: string
-        default: ''
+        default: 'Qwen/Qwen3-0.6B ministral/Ministral-3B-Instruct ibm-granite/granite-4.0-1b-base'
 
 concurrency:
   group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.pull_request.html_url) || (github.event_name == 'workflow_dispatch'
@@ -123,11 +119,11 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Delegates to the same reusable _test_matrix.yaml used by "run-tests" in
-  # torch_spyre_tests.yaml. `test_type` defaults to "smoke" here (see
-  # workflow_dispatch inputs above) so upstream-triggered runs stay fast by
-  # default; `models` restricts every matrix job to a caller-chosen model
-  # subset instead of the full registry. Pass test_type: full for full
-  # coverage.
+  # torch_spyre_tests.yaml. `test_type` defaults to "smoke" and, if `models`
+  # is left empty, falls back to a fixed 3-model spot-check (Qwen3-0.6B,
+  # Ministral-3B-Instruct, granite-4.0-1b-base) -- so upstream-triggered runs
+  # stay fast by default. Pass test_type: full and/or an explicit models
+  # value for full coverage.
   # ---------------------------------------------------------------------------
   run-tests:
     needs: provenance
@@ -138,19 +134,8 @@ jobs:
       extra_test_flags_multi_spyre: -vvv -s
       ref: ${{ inputs.ref || '' }}
       repository: ${{ inputs.repository || '' }}
-      # workflow_dispatch always populates inputs.test_type (its own default
-      # is now 'smoke', matching upstream repos' expectation of a fast
-      # integration check), so this fallback only ever fires on the
-      # temporary pull_request trigger below, where inputs.* isn't set at all.
       test_type: ${{ inputs.test_type || 'smoke' }}
-      # TODO(remove before merge): models fallback exercises the filter on
-      # this branch's PR. Unlike test_type, this can't collapse to a plain
-      # `inputs.models || '...'` -- workflow_dispatch's own default for
-      # `models` IS '' (falsy), meaning "run every model in the registry".
-      # Dropping the explicit event_name check would wrongly substitute the
-      # 3-model subset for production workflow_dispatch calls that leave
-      # `models` unset expecting full registry coverage.
-      models: ${{ inputs.models || (github.event_name == 'pull_request' && 'Qwen/Qwen3-0.6B ministral/Ministral-3B-Instruct ibm-granite/granite-4.0-1b-base') || '' }}
+      models: ${{ inputs.models || 'Qwen/Qwen3-0.6B ministral/Ministral-3B-Instruct ibm-granite/granite-4.0-1b-base' }}
 
   # ----------------------------------------------------------------------------------
   # Fan-in gate job so callers can poll a single stable job name for pass/fail.
