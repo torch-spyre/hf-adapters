@@ -62,14 +62,17 @@ on:
         default: ''
       test_type:
         description: >-
-          Which Spyre suites to run. "full" (default) runs everything, same
-          as today. Any other value is a space-separated allowlist of suite
-          keys, matched against each matrix job's own `if:` (see the
-          "Suite key" comment above each spyre-*-tests job below), e.g.
-          "smoke" or "smoke token_compare". Current keys: load, smoke,
-          token_compare, embed_compare, vlm, model_module. Adding a new suite
-          later only means giving the new job its own key -- no existing job
-          needs to change.
+          Which Spyre suites to run. Three coarse tiers cover the common
+          cross-repo case (a caller like Jenkins that treats this workflow as
+          a blackbox): "smoke" runs only the smoke suite; "core" runs every
+          other suite (load, token_compare, embed_compare, vlm,
+          model_module); "full" (default) runs everything, i.e. smoke + core.
+          For finer control, any other value is a space-separated allowlist
+          of individual suite keys matched against each matrix job's own
+          `if:` (see the "Suite key" comment above each spyre-*-tests job
+          below), e.g. "smoke token_compare". Adding a new suite later means
+          giving the new job its own key and adding it to the "core" set --
+          no other job needs to change.
         required: false
         type: string
         default: full
@@ -283,10 +286,11 @@ jobs:
   spyre-load-tests:
     name: Spyre load (${{ matrix.model_key }})
     needs: [generate-matrix]
-    # Suite key: "load". Runs when test_type is "full" (default, run
-    # everything) or when "load" appears as a space-separated word in
-    # test_type (e.g. "smoke load"). See spyre-smoke-tests for the other keys.
-    if: inputs.test_type == 'full' || contains(format(' {0} ', inputs.test_type), ' load ')
+    # Suite key: "load". Runs on the "full" or "core" coarse tiers (core =
+    # every suite except smoke), or when "load" appears as a space-separated
+    # word in test_type (e.g. "smoke load") for fine-grained selection.
+    # See spyre-smoke-tests for the other keys.
+    if: inputs.test_type == 'full' || inputs.test_type == 'core' || contains(format(' {0} ', inputs.test_type), ' load ')
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -333,9 +337,10 @@ jobs:
   spyre-smoke-tests:
     name: Spyre smoke (${{ matrix.model_key }})
     needs: [generate-matrix]
-    # Suite key: "smoke". Same allowlist mechanism as spyre-load-tests above --
-    # to add a new suite later, give the new job its own key and copy this
-    # `if:` line with that key; no existing job needs to change.
+    # Suite key: "smoke", also the coarse "smoke" tier itself (this is the
+    # only job that tier runs). Same allowlist mechanism as spyre-load-tests
+    # above -- to add a new suite later, give the new job its own key and
+    # copy this `if:` line with that key; no existing job needs to change.
     if: inputs.test_type == 'full' || contains(format(' {0} ', inputs.test_type), ' smoke ')
     runs-on:
       - x86_64
@@ -382,8 +387,8 @@ jobs:
   spyre-token-compare-tests:
     name: Spyre token compare (${{ matrix.model_key }})
     needs: [generate-matrix]
-    # Suite key: "token_compare".
-    if: inputs.test_type == 'full' || contains(format(' {0} ', inputs.test_type), ' token_compare ')
+    # Suite key: "token_compare". Part of the "core" coarse tier.
+    if: inputs.test_type == 'full' || inputs.test_type == 'core' || contains(format(' {0} ', inputs.test_type), ' token_compare ')
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -429,8 +434,8 @@ jobs:
   spyre-embed-compare-tests:
     name: Spyre embed compare (${{ matrix.model_key }})
     needs: [generate-matrix]
-    # Suite key: "embed_compare".
-    if: inputs.test_type == 'full' || contains(format(' {0} ', inputs.test_type), ' embed_compare ')
+    # Suite key: "embed_compare". Part of the "core" coarse tier.
+    if: inputs.test_type == 'full' || inputs.test_type == 'core' || contains(format(' {0} ', inputs.test_type), ' embed_compare ')
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -476,8 +481,8 @@ jobs:
   spyre-vlm-e2e-tests:
     name: Spyre VLM e2e (${{ matrix.model_key }})
     needs: [generate-matrix]
-    # Suite key: "vlm".
-    if: inputs.test_type == 'full' || contains(format(' {0} ', inputs.test_type), ' vlm ')
+    # Suite key: "vlm". Part of the "core" coarse tier.
+    if: inputs.test_type == 'full' || inputs.test_type == 'core' || contains(format(' {0} ', inputs.test_type), ' vlm ')
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -579,8 +584,8 @@ jobs:
 
   spyre-model-module-tests:
     name: Spyre model-module tests (${{ matrix.config }})
-    # Suite key: "model_module".
-    if: inputs.test_type == 'full' || contains(format(' {0} ', inputs.test_type), ' model_module ')
+    # Suite key: "model_module". Part of the "core" coarse tier.
+    if: inputs.test_type == 'full' || inputs.test_type == 'core' || contains(format(' {0} ', inputs.test_type), ' model_module ')
     runs-on:
       - x86_64
       - spyre_pf_x1
