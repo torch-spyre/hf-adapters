@@ -36,11 +36,21 @@ on:
         default: ''
       test_type:
         description: >-
-          Suite subset to run: smoke | core | full | suite_<group> | <label>.
-          Default: full (every config).
+          Suite to run (matches a suite key in _test_matrix.yaml). "full"
+          runs everything; the dropdown offers one at a time, but this is
+          still a plain string underneath, so a caller using the API/gh CLI
+          can pass a space-separated combo (e.g. "smoke token_compare").
         required: false
-        type: string
+        type: choice
         default: full
+        options:
+          - full
+          - load
+          - smoke
+          - token_compare
+          - embed_compare
+          - vlm
+          - model_module
 
 concurrency:
   group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.pull_request.html_url) || (github.event_name == 'workflow_dispatch'
