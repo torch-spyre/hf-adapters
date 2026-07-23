@@ -20,8 +20,44 @@ from __future__ import annotations
 
 import argparse
 import csv
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
+
+# Accepted non-ISO formats, tried in order. ISO 8601 (``YYYY-MM-DD``) is
+# handled first via ``date.fromisoformat`` because it is the canonical form
+# and the fastest to parse. The rest cover the shapes we have seen in the
+# wild: European ``DD/MM/YYYY`` and ``DD-MM-YYYY``, US ``MM/DD/YYYY``, and
+# dotted variants. Two-digit years are intentionally not accepted — they
+# are ambiguous.
+_DATE_FALLBACK_FORMATS: tuple[str, ...] = (
+    "%d/%m/%Y",
+    "%m/%d/%Y",
+    "%d-%m-%Y",
+    "%d.%m.%Y",
+    "%Y/%m/%d",
+    "%Y.%m.%d",
+)
+
+
+def _parse_flexible_date(s: str) -> date | None:
+    """Parse *s* into a ``date``, tolerating a few non-ISO formats.
+
+    Returns ``None`` if *s* is empty or cannot be parsed by any accepted
+    format. Never raises — callers can treat ``None`` as "unknown date".
+    """
+    s = s.strip()
+    if not s:
+        return None
+    try:
+        return date.fromisoformat(s)
+    except ValueError:
+        pass
+    for fmt in _DATE_FALLBACK_FORMATS:
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -79,11 +115,11 @@ def main(argv: list[str] | None = None) -> None:
         s: str = (row.get("added_date") or "").strip()
         if not s:
             continue
-        try:
-            added_dates.append(date.fromisoformat(s))
-        except ValueError:
-            # Non-ISO date in the CSV — skip rather than crash.
+        parsed: date | None = _parse_flexible_date(s)
+        if parsed is None:
+            print(f"value error for {s}")
             continue
+        added_dates.append(parsed)
 
     if not added_dates:
         print("\nNo usable added_date found — skipping weekly-window walk.")
@@ -139,13 +175,7 @@ def main(argv: list[str] | None = None) -> None:
                 # later run.
                 added: str = (row.get("added_date") or "").strip()
                 if row.get("adapter_name") and added:
-                    try:
-                        row_added: date | None = date.fromisoformat(added)
-                    except ValueError:
-                        # Non-ISO date in the CSV — treat as "unknown, assume
-                        # not yet added" so we don't accidentally credit an
-                        # adapter that may not have existed.
-                        row_added = None
+                    row_added: date | None = _parse_flexible_date(added)
                     # Strictly-greater: the adapter DID exist on its own add-date.
                     if row_added is None or row_added > d:
                         new_row["adapter_name"] = ""
