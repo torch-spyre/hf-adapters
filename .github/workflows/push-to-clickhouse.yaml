@@ -187,10 +187,10 @@ jobs:
   weekly-model-scan:
     name: Weekly model scan (${{ matrix.mode }} ${{ matrix.runner }} shard ${{ matrix.shard_index }})
     needs: generate-matrix
-    # matrix.runner is "x1" or "x2" (generate_weekly_shards.py routes models
-    # >= --large-model-threshold parameters to x2, which has more memory but
-    # 2 cards instead of 1). Both labels are in .github/actionlint.yaml.
-    runs-on: ${{ fromJSON(format('["x86_64","{0}","linux","image_torch_spyre_pinned"]', matrix.runner == 'x2' && 'spyre_pf_x2' || 'spyre_pf_x1')) }}
+    # matrix.runner is "x1"/"x2"/"x4" (generate_weekly_shards.py routes models
+    # by parameter count: bigger models get more memory + more cards). All
+    # three labels must be in .github/actionlint.yaml.
+    runs-on: ${{ fromJSON(format('["x86_64","{0}","linux","image_torch_spyre_pinned"]', matrix.runner == 'x4' && 'spyre_pf_x4' || matrix.runner == 'x2' && 'spyre_pf_x2' || 'spyre_pf_x1')) }}
     # A shard can still run for a while depending on its size; the cadence is
     # weekly so a generous ceiling is safe.
     timeout-minutes: 4320
@@ -211,6 +211,10 @@ jobs:
         with:
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
 
       - uses: ./.github/actions/build-hf-adapters
         with:
