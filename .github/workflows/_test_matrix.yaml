@@ -69,6 +69,16 @@ on:
         required: false
         type: string
         default: full
+      models:
+        description: >-
+          Space-separated list of model paths to restrict every matrix job
+          (smoke/load/token-compare/embed-compare/vision) to, e.g.
+          "Qwen/Qwen3-0.6B ministral/Ministral-3B-Instruct". Must match paths
+          exactly as they appear in tests/model_registry.py. Empty (default)
+          = run every model in the registry.
+        required: false
+        type: string
+        default: ''
 
 defaults:
   run:
@@ -157,6 +167,10 @@ jobs:
 
       - name: Generate matrices
         id: generate
+        env:
+          # Piped through env (not interpolated directly into the script) since
+          # this is caller-supplied workflow_call input.
+          ONLY_MODELS: ${{ inputs.models }}
         run: |
           # Manually exclude models here by adding them to --exclude
           # Example: python .github/scripts/generate_test_matrix.py --exclude ibm-granite/granite-vision-4.1-4b tiiuae/Falcon3-1B-Base
@@ -164,7 +178,14 @@ jobs:
           # We exclude these models - See https://github.com/torch-spyre/hf-adapters/issues/89
           # google/gemma-4-12B-it: VLM e2e passes on the pod but OOMs the CI runner
           # (see PR #182); validated on-pod, excluded here to match upstream/main.
-          python .github/scripts/generate_test_matrix.py --exclude tiiuae/Falcon3-1B-Base mistralai/Mistral-Small-3.1-24B-Instruct-2503 google/gemma-4-12B-it
+          ONLY_ARGS=()
+          if [[ -n "$ONLY_MODELS" ]]; then
+            read -r -a ONLY_ARGS <<< "$ONLY_MODELS"
+            ONLY_ARGS=(--only "${ONLY_ARGS[@]}")
+          fi
+          python .github/scripts/generate_test_matrix.py \
+            --exclude tiiuae/Falcon3-1B-Base mistralai/Mistral-Small-3.1-24B-Instruct-2503 google/gemma-4-12B-it \
+            "${ONLY_ARGS[@]}"
 
   adapter-coverage:
     name: adapter coverage
