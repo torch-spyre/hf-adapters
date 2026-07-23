@@ -2233,37 +2233,9 @@ def prefill_embed(
     )
 
     # Throwaway KV caches sized to padded_len (no decode budget)
-    cfg = text_config(model.config)
-    num_layers = cfg.num_hidden_layers
-    num_kv_heads = cfg.num_key_value_heads
-    head_dim = (
-        getattr(model, "_spyre_head_dim", None)
-        or getattr(cfg, "head_dim", None)
-        or cfg.hidden_size // cfg.num_attention_heads
+    key_caches, value_caches = allocate_kv_caches(
+        model, bsz, padded_len, model_d_type, device=DEVICE
     )
-    v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
-    key_caches = [
-        torch.zeros(
-            bsz,
-            num_kv_heads,
-            padded_len,
-            head_dim,
-            dtype=model_d_type,
-            device=DEVICE,
-        )
-        for _ in range(num_layers)
-    ]
-    value_caches = [
-        torch.zeros(
-            bsz,
-            num_kv_heads,
-            padded_len,
-            v_head_dim,
-            dtype=model_d_type,
-            device=DEVICE,
-        )
-        for _ in range(num_layers)
-    ]
 
     h = run_backbone_forward_fn(
         model,
