@@ -144,9 +144,12 @@ jobs:
       fail-fast: false
       matrix:
         model_key:
-          - qwen3      # Qwen/Qwen3-0.6B
-          - ministral   # ministral/Ministral-3B-Instruct
-          - granite4    # ibm-granite/granite-4.0-1b-base
+          # test_e2e_smoke_spyre.py parametrizes on model_path (not the
+          # model_registry.py dict key), and -k matches that string --
+          # these must be the full HF paths, not registry keys like "qwen3".
+          - Qwen/Qwen3-0.6B
+          - ministral/Ministral-3B-Instruct
+          - ibm-granite/granite-4.0-1b-base
 
     steps:
       - name: Checkout composite actions
