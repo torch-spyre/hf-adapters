@@ -14,6 +14,10 @@ name: integration-tests
 #     -f pr_url_hash=$(echo -n "${{ github.event.pull_request.html_url }}" | sha256sum | cut -c1-16)
 # ---------------------------------------------------------------------------
 on:
+  # TODO(remove before merge): pull_request trigger added temporarily to test
+  # the spyre-smoke-subset-tests job on this branch's PR.
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       # ---- Upstream provenance ----------------
