@@ -335,6 +335,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
@@ -346,7 +347,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-load-${{ replace(matrix.model_key, '/', '-') }}
+          name: junit-load-${{ env.SAFE_MODEL_KEY }}
           path: junit-load-${{ matrix.model_key }}.xml
           retention-days: 14
 
@@ -393,6 +394,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
@@ -404,7 +406,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-smoke-${{ replace(matrix.model_key, '/', '-') }}
+          name: junit-smoke-${{ env.SAFE_MODEL_KEY }}
           path: junit-smoke-${{ matrix.model_key }}.xml
           retention-days: 14
 
@@ -448,6 +450,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
@@ -459,7 +462,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-token-compare-${{ replace(matrix.model_key, '/', '-') }}
+          name: junit-token-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-token-compare-${{ matrix.model_key }}.xml
           retention-days: 14
 
@@ -503,6 +506,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
@@ -514,7 +518,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-embed-compare-${{ replace(matrix.model_key, '/', '-') }}
+          name: junit-embed-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-embed-compare-${{ matrix.model_key }}.xml
           retention-days: 14
 
@@ -559,6 +563,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
@@ -570,7 +575,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-vlm-${{ replace(matrix.model_key, '/', '-') }}
+          name: junit-vlm-${{ env.SAFE_MODEL_KEY }}
           path: junit-vlm-${{ matrix.model_key }}.xml
           retention-days: 14
 
