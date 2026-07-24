@@ -55,11 +55,6 @@ from _pytest.nodes import Item
 from _pytest.python import Metafunc
 from transformers import AutoModelForCausalLM, PretrainedConfig
 
-from hf_adapters.auto_spyre_model import (
-    CONFIG_TO_ADAPTER_MODULE_MAPPING,
-    resolve_adapter_module,
-)
-
 # NOTE: do NOT import hf_adapters at module top level. The CPU patch block below
 # rebuilds ``hf_adapters.hf_common`` with ``DEVICE='cpu'`` and asserts that no
 # import has materialized it yet; a top-level import here would always trip that
@@ -135,7 +130,7 @@ elif not _ALREADY_PATCHED:
     # Default (spyre) lane: hf_adapters is imported normally (real
     # DEVICE="spyre"). model_registry populates CAUSAL_PATHS / EMBED_PATHS at
     # import time.
-    pass  # noqa: E402
+    pass
 
 # When _ALREADY_PATCHED (benign re-import via ``from tests.conftest import ...``)
 # both branches are skipped: hf_adapters is patched and the registry is
@@ -254,12 +249,17 @@ def load_ref_model(
     return ref_model
 
 
+from hf_adapters.auto_spyre_model import CONFIG_TO_ADAPTER_MODULE_MAPPING  # noqa: E402
+
+
 def resolve_adapter_module_for_test(
     model_name_or_path: Union[str, os.PathLike[str]],
     mapping: dict[
         type[PretrainedConfig], types.ModuleType
     ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
 ) -> types.ModuleType:
+    from hf_adapters.auto_spyre_model import resolve_adapter_module
+
     return resolve_adapter_module(
         model_name_or_path=model_name_or_path, mapping=mapping, trust_remote_code=False
     )
