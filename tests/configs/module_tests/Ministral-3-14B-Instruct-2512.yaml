@@ -46,7 +46,7 @@ test_suite_config:
                             device: spyre
                             init: randint
                             init_args:
-                              high: 10000
+                              high: 1
                         inputs_embeds:
                           tensor:
                             shape: [1, 128, 4096]
@@ -54,7 +54,7 @@ test_suite_config:
                             storage_offset: 0
                             dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                     - args: []
                       kwargs:
                         attention_mask:
@@ -66,7 +66,7 @@ test_suite_config:
                             device: spyre
                             init: randint
                             init_args:
-                              high: 10000
+                              high: 1
                         inputs_embeds:
                           tensor:
                             shape: [1, 1, 4096]
@@ -74,7 +74,7 @@ test_suite_config:
                             storage_offset: 0
                             dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                 - name: Ministral3RotaryEmbedding_483e0b9c
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3RotaryEmbedding
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3RotaryEmbedding'
@@ -97,7 +97,7 @@ test_suite_config:
                             storage_offset: 0
                             dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                       kwargs:
                         position_ids:
                           tensor:
@@ -108,7 +108,7 @@ test_suite_config:
                             device: spyre
                             init: randint
                             init_args:
-                              high: 10000
+                              high: 1
                     - args:
                         - tensor:
                             shape: [1, 1, 4096]
@@ -116,7 +116,7 @@ test_suite_config:
                             storage_offset: 0
                             dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                       kwargs:
                         position_ids:
                           tensor:
@@ -127,7 +127,7 @@ test_suite_config:
                             device: spyre
                             init: randint
                             init_args:
-                              high: 10000
+                              high: 1
                 - name: Ministral3DecoderLayer_layer0
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3DecoderLayer
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3DecoderLayer'
@@ -151,7 +151,7 @@ test_suite_config:
                             storage_offset: 0
                             dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                       kwargs:
                         position_ids:
                           tensor:
@@ -162,7 +162,7 @@ test_suite_config:
                             device: spyre
                             init: randint
                             init_args:
-                              high: 10000
+                              high: 1
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 128, 128]
@@ -170,17 +170,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 10000
+                              init: xavier
                             - shape: [1, 128, 128]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 10000
+                              init: xavier
                     - args:
                         - tensor:
                             shape: [1, 1, 4096]
@@ -188,7 +184,7 @@ test_suite_config:
                             storage_offset: 0
                             dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                       kwargs:
                         position_ids:
                           tensor:
@@ -199,7 +195,7 @@ test_suite_config:
                             device: spyre
                             init: randint
                             init_args:
-                              high: 10000
+                              high: 1
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 1, 128]
@@ -207,17 +203,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 10000
+                              init: xavier
                             - shape: [1, 1, 128]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 10000
+                              init: xavier
                 - name: Ministral3RMSNorm_4096
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3RMSNorm
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3RMSNorm'
@@ -233,7 +225,7 @@ test_suite_config:
                             storage_offset: 0
                             dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                       kwargs: {}
                     - args:
                         - tensor:
@@ -242,7 +234,7 @@ test_suite_config:
                             storage_offset: 0
                             dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                       kwargs: {}
                 - name: Ministral3Attention_layer0
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3Attention
@@ -269,7 +261,7 @@ test_suite_config:
                             storage_offset: 0
                             dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                         position_ids:
                           tensor:
                             shape: [1, 128]
@@ -279,7 +271,7 @@ test_suite_config:
                             device: spyre
                             init: randint
                             init_args:
-                              high: 10000
+                              high: 1
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 128, 128]
@@ -287,17 +279,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 10000
+                              init: xavier
                             - shape: [1, 128, 128]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 10000
+                              init: xavier
                     - args: []
                       kwargs:
                         hidden_states:
@@ -307,7 +295,7 @@ test_suite_config:
                             storage_offset: 0
                             dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                         position_ids:
                           tensor:
                             shape: [1, 1]
@@ -317,7 +305,7 @@ test_suite_config:
                             device: spyre
                             init: randint
                             init_args:
-                              high: 10000
+                              high: 1
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 1, 128]
@@ -325,17 +313,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 10000
+                              init: xavier
                             - shape: [1, 1, 128]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 10000
+                              init: xavier
                 - name: Ministral3MLP_eb806b7d
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3MLP
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3MLP'
@@ -358,7 +342,7 @@ test_suite_config:
                             storage_offset: 0
                             dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                       kwargs: {}
                     - args:
                         - tensor:
@@ -367,7 +351,7 @@ test_suite_config:
                             storage_offset: 0
                             dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                       kwargs: {}
                 - name: SiLUActivation_d2f532e9
                   module_path: transformers.activations.SiLUActivation
@@ -383,7 +367,7 @@ test_suite_config:
                             storage_offset: 0
                             dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                       kwargs: {}
                     - args:
                         - tensor:
@@ -392,7 +376,7 @@ test_suite_config:
                             storage_offset: 0
                             dtype: torch.bfloat16
                             device: spyre
-                            init: randn
+                            init: xavier
                       kwargs: {}
     - path: ${TORCH_DEVICE_ROOT}/tests/test_modules_custom.py
       unlisted_test_mode: skip
