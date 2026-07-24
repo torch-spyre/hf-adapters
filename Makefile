@@ -101,7 +101,7 @@ model-module-tests: ## Run oot_framework module tests (suite key: model_module; 
 # keys), each writing its own flat JUnit file into RESULTS_DIR so a caller can glob
 # the whole directory in one ClickHouse push. One failing suite doesn't skip the
 # rest; the aggregate's exit code still reflects any failure.
-test: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite)
+tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite)
 	case " $(TEST_TYPE) " in \
 	  *" full "*) suites="adapter_coverage smoke load token_compare embed_compare vlm model_module" ;; \
 	  *" core "*) suites="adapter_coverage load token_compare embed_compare vlm model_module" ;; \
@@ -125,4 +125,4 @@ test: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite)
 	done; \
 	exit $$rc
 
-tests: test  ## Alias for `test`.
+test: tests  ## Alias for `tests`, matching torch-spyre's Makefile target name.
