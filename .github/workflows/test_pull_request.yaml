@@ -442,7 +442,7 @@ jobs:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
       - linux
-      - ${{ inputs.runner_label || 'image_torch_spyre' }}
+      - ${{ inputs.runner_label || 'image_torch_spyre_pinned' }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
