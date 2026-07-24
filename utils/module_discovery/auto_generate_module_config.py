@@ -122,6 +122,58 @@ def _extract_config_kwargs(config: Any) -> Dict[str, Any]:
     return config_kwargs
 
 
+# Supported ways of supplying a module's ``PretrainedConfig`` constructor arg to
+# the framework.
+#   "kwargs":     rebuild the config from a handful of extracted dimensions
+#                 (``config_path`` + ``config_kwargs``). Library defaults fill in
+#                 everything else — the historical behaviour.
+#   "pretrained": record only the model id so the framework can load the full,
+#                 faithful config with ``AutoConfig.from_pretrained(model_id)``.
+CONFIG_SOURCE_KWARGS = "kwargs"
+CONFIG_SOURCE_PRETRAINED = "pretrained"
+CONFIG_SOURCES = (CONFIG_SOURCE_KWARGS, CONFIG_SOURCE_PRETRAINED)
+
+
+def _build_config_arg_spec(
+    config: Any, config_source: str, model_id: str | None
+) -> Dict[str, Any]:
+    """Build the captured config-arg spec for a module constructor.
+
+    Both branches record ``config_path`` so the spec stays self-describing; the
+    framework picks the reconstruction strategy from which of ``config_kwargs`` /
+    ``model_id`` is present.
+
+    - ``kwargs`` (default): emit ``config_kwargs`` with the extracted dimensions.
+    - ``pretrained``: emit ``model_id`` (so the framework can call
+      ``AutoConfig.from_pretrained``) plus a small ``config_overrides`` carrying
+      the resolved ``_attn_implementation`` (which ``from_pretrained`` may leave
+      as ``None``), keeping the standalone module on the same attention path used
+      at capture time.
+    """
+    config_class = type(config).__name__
+    config_module = type(config).__module__
+    spec: Dict[str, Any] = {
+        "type": "config",
+        "config_path": f"{config_module}.{config_class}",
+    }
+
+    if config_source == CONFIG_SOURCE_PRETRAINED:
+        if not model_id:
+            raise ValueError(
+                "config_source='pretrained' requires a model_id (the HuggingFace "
+                "path or local directory the model was loaded from)."
+            )
+        spec["model_id"] = model_id
+        if hasattr(config, "_attn_implementation"):
+            spec["config_overrides"] = {
+                "_attn_implementation": _resolve_attn_implementation(config)
+            }
+    else:
+        spec["config_kwargs"] = _extract_config_kwargs(config)
+
+    return spec
+
+
 def _extract_tensor_info(tensor: torch.Tensor, name: str) -> Dict[str, Any]:
     """Extract information from a single tensor."""
     return {
@@ -187,7 +239,20 @@ def _process_pytree_structure(value: Any, name: str) -> Dict[str, Any] | None:
 class ModuleInfoCapture:
     """Captures module information during forward pass using hooks."""
 
-    def __init__(self):
+    def __init__(
+        self, config_source: str = CONFIG_SOURCE_KWARGS, model_id: str | None = None
+    ):
+        if config_source not in CONFIG_SOURCES:
+            raise ValueError(
+                f"config_source must be one of {CONFIG_SOURCES}, got {config_source!r}"
+            )
+        # How a module's PretrainedConfig constructor arg is recorded in the YAML.
+        # "kwargs" rebuilds it from extracted dimensions; "pretrained" records the
+        # model_id so the framework can load the full config via
+        # AutoConfig.from_pretrained. See _build_config_arg_spec.
+        self.config_source = config_source
+        # The model path/id the model was loaded from; required for "pretrained".
+        self.model_id = model_id
         self.module_data: Dict[str, Dict[str, Any]] = {}
         self.seen_module_configs: Set[str] = (
             set()
@@ -220,18 +285,8 @@ class ModuleInfoCapture:
                 config = None
 
             if config is not None:
-                config_class = type(config).__name__
-                config_module = type(config).__module__
-
-                # Extract key config parameters
-                config_kwargs = _extract_config_kwargs(config)
-
                 constructor_args.append(
-                    {
-                        "type": "config",
-                        "config_path": f"{config_module}.{config_class}",
-                        "config_kwargs": config_kwargs,
-                    }
+                    _build_config_arg_spec(config, self.config_source, self.model_id)
                 )
 
                 # Decoder layers typically need layer_idx as kwarg
@@ -246,18 +301,8 @@ class ModuleInfoCapture:
         # Check if module has a config attribute (common in Transformers)
         elif hasattr(module, "config"):
             config = module.config
-            config_class = type(config).__name__
-            config_module = type(config).__module__
-
-            # Extract key config parameters
-            config_kwargs = _extract_config_kwargs(config)
-
             constructor_args.append(
-                {
-                    "type": "config",
-                    "config_path": f"{config_module}.{config_class}",
-                    "config_kwargs": config_kwargs,
-                }
+                _build_config_arg_spec(config, self.config_source, self.model_id)
             )
 
             # Check for layer_idx (common in decoder layers with config)
@@ -559,14 +604,25 @@ def _convert_constructor_arg_to_sample_input(
 ) -> Dict[str, Any]:
     """Convert constructor arg spec to sample_inputs_func format."""
     if arg_spec["type"] == "config":
-        # Emit a structured config arg carrying the captured model dimensions so
-        # the framework can rebuild the config (config_path + config_kwargs) with
-        # the right shapes instead of library defaults. Resolved by
-        # InputsEdits.build_cpu_args -> InputArgConfig in the OOT framework.
-        return {
-            "config_path": arg_spec["config_path"],
-            "config_kwargs": arg_spec.get("config_kwargs", {}),
-        }
+        # Emit a structured config arg the framework resolves to a PretrainedConfig
+        # (InputsEdits.build_cpu_args -> InputArgConfig in the OOT framework).
+        # Two shapes, distinguished by which key is present:
+        #   - "model_id": load the full, faithful config via
+        #     AutoConfig.from_pretrained(model_id), optionally overriding a few
+        #     fields (config_overrides). Preferred — carries every config field.
+        #     config_path is not needed to resolve this form (AutoConfig picks
+        #     the class) but is kept as a human-readable hint; the framework
+        #     accepts a model_id spec with or without config_path.
+        #   - "config_kwargs": rebuild from the captured dimensions only, with
+        #     library defaults for everything else (historical behaviour).
+        out: Dict[str, Any] = {"config_path": arg_spec["config_path"]}
+        if "model_id" in arg_spec:
+            out["model_id"] = arg_spec["model_id"]
+            if arg_spec.get("config_overrides"):
+                out["config_overrides"] = arg_spec["config_overrides"]
+        else:
+            out["config_kwargs"] = arg_spec.get("config_kwargs", {})
+        return out
     elif arg_spec["type"] == "int":
         return {"value": arg_spec["value"]}
     elif arg_spec["type"] == "float":
@@ -1083,6 +1139,20 @@ def parse_args():
         help="max_cache_len for the StaticCache (default: 2048). "
         "Ignored when --no_static_cache is set.",
     )
+    parser.add_argument(
+        "--config_source",
+        choices=CONFIG_SOURCES,
+        default=CONFIG_SOURCE_KWARGS,
+        help=(
+            "How to record a module's PretrainedConfig constructor arg "
+            f"(default: {CONFIG_SOURCE_KWARGS}). "
+            f"'{CONFIG_SOURCE_KWARGS}' rebuilds the config from a few extracted "
+            f"dimensions (config_path + config_kwargs). "
+            f"'{CONFIG_SOURCE_PRETRAINED}' records the model_id so the test "
+            "framework loads the full, faithful config via "
+            "AutoConfig.from_pretrained(model_id)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1100,7 +1170,9 @@ def main():
             config=model.config, max_cache_len=args.max_cache_len
         )
 
-    capture = ModuleInfoCapture()
+    capture = ModuleInfoCapture(
+        config_source=args.config_source, model_id=args.model_path
+    )
     capture_module_invocations(model, capture, inputs)
 
     write_module_config(capture, args.model_path, args.output)
