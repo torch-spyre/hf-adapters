@@ -87,7 +87,10 @@ model-module-tests: ## Run oot_framework module tests (suite key: model_module; 
 	for cfg in $$configs; do \
 	  junit_arg=""; \
 	  if [[ -n "$(JUNIT_XML)" ]]; then \
-	    junit_arg="--junit-xml=$(RESULTS_DIR)/model-module-$${cfg}.xml"; \
+	    # Must be absolute: run_test.sh cd's into each test file's own
+	    # directory before invoking pytest, so a relative --junit-xml path
+	    # would land under that directory instead of RESULTS_DIR.
+	    junit_arg="--junit-xml=$$(cd "$(RESULTS_DIR)" && pwd)/model-module-$${cfg}.xml"; \
 	  fi; \
 	  TORCH_DEVICE_ROOT="$$PWD" bash "$$_run_test" \
 	    "tests/configs/module_tests/$${cfg}" $(PYTEST_ARGS) $${junit_arg} || rc=1; \
