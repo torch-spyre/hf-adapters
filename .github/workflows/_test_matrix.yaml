@@ -346,7 +346,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-load-${{ matrix.model_key }}
+          name: junit-load-${{ replace(matrix.model_key, '/', '-') }}
           path: junit-load-${{ matrix.model_key }}.xml
           retention-days: 14
 
@@ -404,7 +404,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-smoke-${{ matrix.model_key }}
+          name: junit-smoke-${{ replace(matrix.model_key, '/', '-') }}
           path: junit-smoke-${{ matrix.model_key }}.xml
           retention-days: 14
 
@@ -459,7 +459,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-token-compare-${{ matrix.model_key }}
+          name: junit-token-compare-${{ replace(matrix.model_key, '/', '-') }}
           path: junit-token-compare-${{ matrix.model_key }}.xml
           retention-days: 14
 
@@ -514,7 +514,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-embed-compare-${{ matrix.model_key }}
+          name: junit-embed-compare-${{ replace(matrix.model_key, '/', '-') }}
           path: junit-embed-compare-${{ matrix.model_key }}.xml
           retention-days: 14
 
@@ -570,7 +570,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-vlm-${{ matrix.model_key }}
+          name: junit-vlm-${{ replace(matrix.model_key, '/', '-') }}
           path: junit-vlm-${{ matrix.model_key }}.xml
           retention-days: 14
 
