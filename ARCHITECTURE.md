@@ -250,7 +250,7 @@ hf_adapters/
 ├── hf_common.py          — shared utilities
 │   DEVICE, BLOCK_SIZE,
 │   PrecomputedRotaryEmbedding, apply_rope_matmul,
-│   pad_attention_heads, patch_rmsnorm, pad_lm_head,
+│   pad_attention_heads, pad_lm_head,
 │   kv_cache_update, build_prefill_mask,
 │   build_expansion_mask, load_model_common, generate
 ├── hf_*.py               — one adapter per model family (see the
@@ -294,17 +294,28 @@ hf_adapters/
 **Why:** Spyre has no `sin`/`cos` ops and `aten.slice.Tensor` falls
 back to CPU inside compiled graphs.
 
-#### 2. RMSNorm: Class-Level Patch
+#### 2. RMSNorm: Stock HF, Fully Compiled
+
+Standard RMSNorm is **left as stock HuggingFace** — no patching. torch-spyre PR #2927
+(`FP32_TO_DL16` ElementArrangement + layout propagation) lowers stock HF's fp32-upcast
+pattern (`x.float() → pow(2).mean(-1) → rsqrt → mul → weight * result.to(dtype)`)
+on-device, so the numerically-stable fp32 variance reduction that stock HF uses now runs
+on Spyre and matches HF exactly.
 
 | Stock HF | Adapter |
 |---|---|
-| Each model has its own RMSNorm class | `patch_rmsnorm(cls)` patches any RMSNorm class in-place |
-| Casts to float32 for variance | Spyre: stays fp16. CPU: float32 (matches HF) |
-| `hidden_states.pow(2).mean()` | Spyre: `(hidden_states * hidden_states).mean()`. CPU: same as HF |
-| Python float epsilon | Spyre: `torch.ops.spyre.full((1,), eps, ...)` tensor. CPU: Python float |
+| `RMSNorm` inside decoder layers | Unchanged; runs inside the compiled block (`_make_compiled_block`), so #2927's fp32-upcast lowering applies |
+| Final `backbone.norm` (applied eager in `_run_forward`) | Compiled at prep time into `model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)`; the forward calls that. #2927's EA propagation is **compile-time only**, so the final norm must be traced to get the same fp32 numerics |
 
-**Why:** Spyre does not support dtype conversion on-device. `pow(2)`
-is not well supported; element-wise multiply is native.
+**Why:** EA-propagated fp32 upcasting is a compile-time feature. Per-layer norms are
+already traced (they live in the compiled block); the previously-eager final norm is now
+also compiled so every RMSNorm gets the stock-HF fp32 path. This let us delete the old
+`patch_rmsnorm` (which did the variance reduction at input dtype — a numerical
+compromise from before #2927).
+
+**Exception — Gemma 3 / Gemma 4** keep their own `_patch_gemma{3,4}_rmsnorm`: Gemma's
+RMSNorm is unit-offset (`(1.0 + weight)`) and has known fp16/bf16 overflow sensitivity,
+so it is handled separately and not covered by this stock-HF path.
 
 #### 3. LM Head Weight: Padded
 
@@ -605,8 +616,10 @@ the SigLIP tower:
 - **SwiGLU MLP** (`gate_proj` × `up_proj` → `down_proj`), unlike SigLIP's GELU-tanh
   two-layer MLP. No MLP intermediate padding needed (`intermediate_size=4096` is a
   multiple of 64).
-- **`PixtralRMSNorm`** (pre-LN on both attention and MLP sub-layers) patched via
-  `patch_rmsnorm`, same as text decoders.
+- **`PixtralRMSNorm`** (pre-LN on both attention and MLP sub-layers) left as stock HF:
+  the per-block norms run inside the compiled blocks, where PR #2927 lowers the
+  fp32-upcast pattern (`ln_pre` runs on CPU in the patch-embed step; the tower has no
+  eager final norm).
 - **Head-dim padding 64→128** (`_pad_pixtral_heads`). Pixtral's default
   `head_dim = 1024/16 = 64` (`D/2 = 32 < 64`), below one stick. Q/K/V/O are
   zero-padded to 128 with the SDPA scale held at `1/sqrt(64)`.
@@ -661,8 +674,8 @@ covers them). Gemma4-specific Spyre adaptations:
   vision `nn.LayerNorm`s NaN on Spyre's fused lowering on near-constant (small but
   nonzero variance) rows — in **both** bf16 and fp16, so it's a genuine lowering
   defect, not a range issue. The fix is a device-conditional un-fused rewrite with
-  the mean/variance reduction promoted to fp32 (same doctrine as `patch_rmsnorm`'s
-  CPU branch), keeping the affine multiply in bf16. Without it the VLM logits are
+  the mean/variance reduction promoted to fp32 (the same fp32-reduction doctrine stock
+  HF RMSNorm uses), keeping the affine multiply in bf16. Without it the VLM logits are
   all-NaN (see docs/gemma4_mm_vision_layernorm_spyre.md).
 - **Bidirectional vision attention at prefill.** `use_bidirectional_attention ==
   "vision"`: within one image the soft-tokens attend bidirectionally. Stock OR-s a

@@ -39,7 +39,6 @@ from hf_adapters.hf_common import (
     get_backbone,
     kv_cache_update,
     pad_lm_head,
-    patch_rmsnorm,
     standard_gqa_backbone_forward,
     standard_gqa_forward,
 )
@@ -121,11 +120,9 @@ _run_backbone_forward = standard_gqa_backbone_forward
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to Qwen3 model in-place."""
-    from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
-
     model._spyre_rope = PrecomputedRotaryEmbedding(get_backbone(model).rotary_emb)
-    patch_rmsnorm(Qwen3RMSNorm)
     pad_lm_head(model)
     model._spyre_compiled_blocks = [
         _make_compiled_block(layer) for layer in get_backbone(model).layers
     ]
+    model._spyre_compiled_norm = torch.compile(get_backbone(model).norm, dynamic=False)

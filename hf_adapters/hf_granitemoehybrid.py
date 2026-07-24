@@ -49,7 +49,6 @@ from hf_adapters.hf_common import (
     get_backbone,
     kv_cache_update,
     pad_lm_head,
-    patch_rmsnorm,
     prepare_rope_and_heads,
     split_fused_linear,
 )
@@ -149,7 +148,7 @@ def _run_backbone_forward(
             cache_position,
         )
 
-    h = backbone.norm(h)
+    h = model._spyre_compiled_norm(h)
     return h
 
 
@@ -183,10 +182,6 @@ def _run_forward(
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to Granite 4.0 dense model in-place."""
-    from transformers.models.granitemoehybrid.modeling_granitemoehybrid import (
-        GraniteMoeHybridRMSNorm,
-    )
-
     layer_types = set(model.config.layer_types)
     assert "mamba" not in layer_types, (
         "hf_granitemoehybrid adapter only supports pure-attention dense models "
@@ -196,7 +191,6 @@ def prepare_for_spyre(model):
     )
 
     prepare_rope_and_heads(model)
-    patch_rmsnorm(GraniteMoeHybridRMSNorm)
     pad_lm_head(model)
 
     res_mult = model.config.residual_multiplier
@@ -217,3 +211,4 @@ def prepare_for_spyre(model):
             model._spyre_up_projs,
         )
     ]
+    model._spyre_compiled_norm = torch.compile(get_backbone(model).norm, dynamic=False)
