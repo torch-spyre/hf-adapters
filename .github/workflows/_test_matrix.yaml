@@ -213,8 +213,16 @@ jobs:
         run: |
           echo "Checking that all adapter files are registered in model_registry.py..."
           python -m pip install --quiet pytest
-          python -m pytest -v --noconftest tests/test_adapter_coverage.py
+          python -m pytest -v --noconftest tests/test_adapter_coverage.py --junitxml=junit-adapter-coverage.xml
           echo "Adapter coverage check passed."
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-adapter-coverage
+          path: junit-adapter-coverage.xml
+          retention-days: 14
 
   check-uv-lock:
     name: check uv.lock
@@ -331,8 +339,16 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_load_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest ${{ inputs.extra_test_flags }} tests/spyre/test_load_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest ${{ inputs.extra_test_flags }} tests/spyre/test_load_spyre.py -k "${{ matrix.model_key }}" --junitxml=junit-load-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-load-${{ matrix.model_key }}
+          path: junit-load-${{ matrix.model_key }}.xml
+          retention-days: 14
 
   spyre-smoke-tests:
     name: Spyre smoke (${{ matrix.model_key }})
@@ -381,8 +397,16 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest ${{ inputs.extra_test_flags }} tests/spyre/test_e2e_smoke_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest ${{ inputs.extra_test_flags }} tests/spyre/test_e2e_smoke_spyre.py -k "${{ matrix.model_key }}" --junitxml=junit-smoke-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-smoke-${{ matrix.model_key }}
+          path: junit-smoke-${{ matrix.model_key }}.xml
+          retention-days: 14
 
   spyre-token-compare-tests:
     name: Spyre token compare (${{ matrix.model_key }})
@@ -428,8 +452,16 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest ${{ inputs.extra_test_flags }} tests/spyre/test_e2e_token_compare_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest ${{ inputs.extra_test_flags }} tests/spyre/test_e2e_token_compare_spyre.py -k "${{ matrix.model_key }}" --junitxml=junit-token-compare-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-token-compare-${{ matrix.model_key }}
+          path: junit-token-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
 
   spyre-embed-compare-tests:
     name: Spyre embed compare (${{ matrix.model_key }})
@@ -475,8 +507,16 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest ${{ inputs.extra_test_flags }} tests/spyre/test_e2e_embed_compare_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest ${{ inputs.extra_test_flags }} tests/spyre/test_e2e_embed_compare_spyre.py -k "${{ matrix.model_key }}" --junitxml=junit-embed-compare-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-embed-compare-${{ matrix.model_key }}
+          path: junit-embed-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
 
   spyre-vlm-e2e-tests:
     name: Spyre VLM e2e (${{ matrix.model_key }})
@@ -523,8 +563,16 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_vlm_e2e_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest ${{ inputs.extra_test_flags }} tests/spyre/test_vlm_e2e_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest ${{ inputs.extra_test_flags }} tests/spyre/test_vlm_e2e_spyre.py -k "${{ matrix.model_key }}" --junitxml=junit-vlm-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-vlm-${{ matrix.model_key }}
+          path: junit-vlm-${{ matrix.model_key }}.xml
+          retention-days: 14
 
   # ---------------------------------------------------------------------------
   # DISABLED (2026-07-17): Dedicated 2-card (x2) VLM job for google/gemma-4-12B-it.
@@ -636,7 +684,16 @@ jobs:
           echo "Using oot-framework runner: $_run_test"
           bash "$_run_test" \
             "tests/configs/module_tests/${{ matrix.config }}" \
-            ${{ inputs.extra_test_flags }}
+            ${{ inputs.extra_test_flags }} \
+            --junit-xml=junit-model-module-${{ matrix.config }}.xml
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-model-module-${{ matrix.config }}
+          path: ${{ env.CLONED_HF_ADAPTERS_DIR }}/junit-model-module-${{ matrix.config }}.xml
+          retention-days: 14
 
   # ===========================================================================
   # Required check gate — fans in all matrix jobs so a single branch
