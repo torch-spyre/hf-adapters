@@ -68,6 +68,9 @@ vlm-tests: ## Run VLM e2e tests (suite key: vlm)
 # MODULE_CONFIG narrows model-module-tests to one YAML config (matrix-style
 # per-config CI jobs pass this); empty = run every config in tests/configs/module_tests.
 MODULE_CONFIG ?=
+# --junit-xml is resolved to an absolute path: run_test.sh cd's into each
+# test file's own directory before invoking pytest, so a relative path
+# would land under that directory instead of RESULTS_DIR.
 model-module-tests: ## Run oot_framework module tests (suite key: model_module; MODULE_CONFIG=<file>.yaml narrows to one)
 	# Env setup mirrors _test_matrix.yaml's "Run module tests" step: ibm-aiu-setup.sh
 	# ends with a chmod of root-owned /tmp/etc that fails on the Spyre image; env vars
@@ -87,9 +90,6 @@ model-module-tests: ## Run oot_framework module tests (suite key: model_module; 
 	for cfg in $$configs; do \
 	  junit_arg=""; \
 	  if [[ -n "$(JUNIT_XML)" ]]; then \
-	    # Must be absolute: run_test.sh cd's into each test file's own
-	    # directory before invoking pytest, so a relative --junit-xml path
-	    # would land under that directory instead of RESULTS_DIR.
 	    junit_arg="--junit-xml=$$(cd "$(RESULTS_DIR)" && pwd)/model-module-$${cfg}.xml"; \
 	  fi; \
 	  TORCH_DEVICE_ROOT="$$PWD" bash "$$_run_test" \
