@@ -213,7 +213,7 @@ jobs:
         run: |
           echo "Checking that all adapter files are registered in model_registry.py..."
           python -m pip install --quiet pytest
-          python -m pytest -v --noconftest tests/test_adapter_coverage.py --junitxml=junit-adapter-coverage.xml
+          make adapter-coverage-tests PYTEST="python -m pytest" JUNIT_XML=junit-adapter-coverage.xml
           echo "Adapter coverage check passed."
 
       - name: Upload JUnit results
@@ -339,7 +339,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_load_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest ${{ inputs.extra_test_flags }} tests/spyre/test_load_spyre.py -k "${{ matrix.model_key }}" --junitxml=junit-load-${{ matrix.model_key }}.xml
+          make load-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_KEY="${{ matrix.model_key }}" JUNIT_XML=junit-load-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -397,7 +397,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest ${{ inputs.extra_test_flags }} tests/spyre/test_e2e_smoke_spyre.py -k "${{ matrix.model_key }}" --junitxml=junit-smoke-${{ matrix.model_key }}.xml
+          make smoke-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_KEY="${{ matrix.model_key }}" JUNIT_XML=junit-smoke-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -452,7 +452,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest ${{ inputs.extra_test_flags }} tests/spyre/test_e2e_token_compare_spyre.py -k "${{ matrix.model_key }}" --junitxml=junit-token-compare-${{ matrix.model_key }}.xml
+          make token-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_KEY="${{ matrix.model_key }}" JUNIT_XML=junit-token-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -507,7 +507,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest ${{ inputs.extra_test_flags }} tests/spyre/test_e2e_embed_compare_spyre.py -k "${{ matrix.model_key }}" --junitxml=junit-embed-compare-${{ matrix.model_key }}.xml
+          make embed-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_KEY="${{ matrix.model_key }}" JUNIT_XML=junit-embed-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -563,7 +563,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_vlm_e2e_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest ${{ inputs.extra_test_flags }} tests/spyre/test_vlm_e2e_spyre.py -k "${{ matrix.model_key }}" --junitxml=junit-vlm-${{ matrix.model_key }}.xml
+          make vlm-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_KEY="${{ matrix.model_key }}" JUNIT_XML=junit-vlm-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -670,22 +670,12 @@ jobs:
       - name: Run module tests for ${{ matrix.config }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          # TORCH_DEVICE_ROOT must point to the hf-adapters repo root so that
-          # ${TORCH_DEVICE_ROOT}/tests/test_modules_custom.py in the YAML configs
-          # resolves to hf-adapters/tests/test_modules_custom.py (not torch-spyre).
-          TORCH_DEVICE_ROOT: ${{ env.CLONED_HF_ADAPTERS_DIR }}
         run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           source .venv/bin/activate
-          _run_test=$(python3 -c \
-            "import oot_framework, os; print(os.path.join(os.path.dirname(oot_framework.__file__), 'run_test.sh'))")
-          echo "Using oot-framework runner: $_run_test"
-          bash "$_run_test" \
-            "tests/configs/module_tests/${{ matrix.config }}" \
-            ${{ inputs.extra_test_flags }} \
-            --junit-xml=junit-model-module-${{ matrix.config }}.xml
+          make model-module-tests MODULE_CONFIG=${{ matrix.config }} PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
+            JUNIT_XML=1 RESULTS_DIR=.
+          mv "model-module-${{ matrix.config }}.xml" "junit-model-module-${{ matrix.config }}.xml"
 
       - name: Upload JUnit results
         if: always()
