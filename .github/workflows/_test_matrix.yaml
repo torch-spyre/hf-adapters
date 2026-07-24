@@ -6,7 +6,7 @@ name: Test matrix (reusable)
 #
 # All differences between callers are expressed as inputs:
 #   - image_label       : scaleSet selector, last label in every runs-on
-#                         (image_torch_spyre_pinned normally; ephemeral label per-PR)
+#                         (image_torch_spyre normally; ephemeral label per-PR)
 #   - extra_test_flags  : e.g. "-vvv -s"
 #   - ref / repository  : forwarded from workflow_dispatch inputs
 # ---------------------------------------------------------------------------
@@ -18,14 +18,14 @@ on:
       # single homogeneous scaleSet. Normal runs use the standing set (default
       # below); the per-PR ephemeral flow passes that PR's set label
       # (image_torch_spyre_pinned_pr_<component>_<sha12>) so jobs land on the per-PR image
-      # (the RPM is baked in -> no runtime sudo). Both callers send image_torch_spyre_pinned
+      # (the RPM is baked in -> no runtime sudo). Both callers send image_torch_spyre
       # (or the ephemeral label); the default below matches, and only applies if a
       # caller omits image_label entirely. Must be a label in .github/actionlint.yaml.
       image_label:
         description: Image scaleSetLabel to select (image_torch_spyre | image_torch_spyre_pinned | image_torch_spyre_pr_<KEY>)
         required: false
         type: string
-        default: image_torch_spyre_pinned
+        default: image_torch_spyre
 
       # pytest CLI flags for the single-card (spyre_pf_x1) test jobs. Passed
       # verbatim to every `pytest ...` call (and forwarded to pytest by the
