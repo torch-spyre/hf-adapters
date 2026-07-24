@@ -7,10 +7,18 @@ Two implementations:
   a single bulk SELECT on construction so all per-row checks are O(1), and rows
   are buffered in memory then flushed in a single bulk INSERT on ``close()``.
 
-Skip rule (both sinks):
-    Skip when an existing entry for ``model_name`` has ``snapshot_date`` within
-    the last 7 days AND ``verified_on_cpu`` is True. In other words: don't re-run
-    a model that was successfully CPU-verified less than a week ago.
+Skip rule (both sinks): insert a row for *model_name* when either
+
+    * no prior row for *model_name* exists, OR
+    * the most-recent prior row has ``failure_category == 'hardware_exception'``
+      (accelerator problem, worth retrying now) OR the snapshot is older than
+      ``_SKIP_WINDOW_DAYS`` days (long enough since last run).
+
+Rows with `hardware_exception` are always re-run because the accelerator's
+availability is a transient property — a failure yesterday says nothing about
+today. Everything else (verified success, non-implemented adapter, quantized
+model, moe, cpu load/generate failure, …) is treated as terminal for the
+window.
 """
 
 from __future__ import annotations
@@ -36,14 +44,10 @@ from tests.spyre.weekly_generation.clickhouse_db import (
 # Constant value
 _SKIP_WINDOW_DAYS: int = 10
 
-
-def _rec_is_cpu_verified(rec: dict[str, Any]) -> bool:
-    value: Any = rec.get("verified_on_cpu", False)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in ("true", "1", "yes")
-    return bool(value)
+# Duplicated (as a string literal) from weekly_test.FAILURE_CATEGORY_HARDWARE_EXCEPTION
+# to avoid a circular import: weekly_test already imports EmbeddingGenerativeMode
+# from this module. Keep the string values in sync.
+_HARDWARE_EXCEPTION_CATEGORY: str = "hardware_exception"
 
 
 def _within_skip_window(existing_snapshot: date, today: date) -> bool:
@@ -95,14 +99,19 @@ class ResultSink(ABC):
         self._today = today or date.today()
 
     @abstractmethod
-    def get_recent_cpu_verified_entries(self, model_name: str) -> list[dict[str, Any]]:
-        """Return prior CPU-verified rows for *model_name* within the skip window.
+    def get_recent_blocking_entries(self, model_name: str) -> list[dict[str, Any]]:
+        """Return prior rows for *model_name* that block a new insert.
 
-        Filters to entries where ``verified_on_cpu`` is True AND
-        ``today - snapshot_date < _SKIP_WINDOW_DAYS``. Sorted by
-        ``snapshot_date`` descending. Each row is a dict keyed by column name.
-        Empty list when no such prior entries exist — the caller can treat
-        empty as "no skip needed" without inspecting the rows further.
+        A row blocks re-insertion when BOTH:
+
+        * its ``snapshot_date`` is within the skip window
+          (``today - snapshot_date < _SKIP_WINDOW_DAYS``), AND
+        * its ``failure_category`` is NOT ``hardware_exception`` — hardware
+          failures are treated as transient and always re-run.
+
+        Sorted by ``snapshot_date`` descending. Each row is a dict keyed by
+        column name. Empty list when no blocking prior entry exists — the
+        caller can treat empty as "insert away" without inspecting the rows.
         """
 
     @abstractmethod
@@ -186,13 +195,14 @@ class ResultSink(ABC):
         return True
 
     def should_insert_row(self, model_name: str) -> bool:
-        """Return False when *model_name* has a CPU-verified entry in the window.
+        """Return True when *model_name* should be re-run.
 
-        Callers can invoke this directly to short-circuit expensive work when
-        the sink will reject the row anyway (see ``weekly_test.py``).
+        See module docstring for the full rule. In short: absent OR the most
+        recent prior row is a ``hardware_exception`` (retry) OR the prior
+        snapshot has aged past the skip window.
         """
         model_name: str = _require_non_empty(model_name, "model_name")
-        return not self.get_recent_cpu_verified_entries(model_name)
+        return not self.get_recent_blocking_entries(model_name)
 
     def __enter__(self) -> ResultSink:
         return self
@@ -252,12 +262,15 @@ class CsvResultSink(ResultSink):
             f"{len(self._rows_by_model)} model(s) from '{self._path}'"
         )
 
-    def get_recent_cpu_verified_entries(self, model_name: str) -> list[dict[str, Any]]:
+    def get_recent_blocking_entries(self, model_name: str) -> list[dict[str, Any]]:
         key: str = _require_non_empty(model_name, "model_name")
         rows: list[dict[str, Any]] = list(self._rows_by_model.get(key, ()))
         filtered: list[tuple[date, dict[str, Any]]] = []
         for row in rows:
-            if not _rec_is_cpu_verified(row):
+            # hardware_exception is transient — do NOT let it block a re-run.
+            if (
+                row.get("failure_category") or ""
+            ).strip() == _HARDWARE_EXCEPTION_CATEGORY:
                 continue
             snap: date | None = _coerce_snapshot(row.get("snapshot_date"))
             if snap is None:
@@ -325,7 +338,8 @@ class ClickHouseResultSink(ResultSink):
     """Insert rows into ClickHouse.
 
     On construction the table is created if missing, and a single bulk SELECT
-    pre-fetches every recently-CPU-verified model name so that all subsequent
+    pre-fetches every model name that currently blocks a re-run (see the
+    module docstring for the rule) so that all subsequent
     ``should_insert_row`` calls are O(1) with no network I/O.
 
     Rows accepted by the skip guard are accumulated in ``_pending`` and flushed
@@ -352,35 +366,44 @@ class ClickHouseResultSink(ResultSink):
         else:
             print(f"ClickHouse: table '{self._table_name}' already exists.\n")
 
-        # Bulk pre-fetch: model names that already have a CPU-verified entry
-        # within the skip window. Populated once here; used by
-        # get_recent_cpu_verified_entries() for O(1) per-row checks.
-        self._skip_model_names: set[str] = self._fetch_recently_verified_names()
+        # Bulk pre-fetch: model names whose most-recent-in-window row blocks a
+        # re-run. Populated once here; used by get_recent_blocking_entries()
+        # for O(1) per-row checks.
+        self._skip_model_names: set[str] = self._fetch_blocking_names()
         print(
-            f"ClickHouse: {len(self._skip_model_names)} model(s) already "
-            f"CPU-verified within the last {_SKIP_WINDOW_DAYS} days — will be skipped.\n"
+            f"ClickHouse: {len(self._skip_model_names)} model(s) already have a "
+            f"non-hardware-exception snapshot within the last "
+            f"{_SKIP_WINDOW_DAYS} days — will be skipped.\n"
         )
 
         # Rows waiting to be flushed; each entry is a list matching TABLE_COLUMNS order.
         self._pending: list[list[Any]] = []
 
-    def _fetch_recently_verified_names(self) -> set[str]:
-        """One SELECT to get all model names that pass the skip-window guard."""
+    def _fetch_blocking_names(self) -> set[str]:
+        """One SELECT to get all model names that block a re-run.
+
+        A model blocks iff it has any row in the skip window whose
+        ``failure_category`` is not ``hardware_exception`` — matching the
+        semantics of ``get_recent_blocking_entries``. Rows with
+        ``failure_category = 'hardware_exception'`` (including a lone row
+        older than the window) do NOT block.
+        """
         cutoff: date = self._today - timedelta(days=_SKIP_WINDOW_DAYS - 1)
         result = self._client.query(
             "SELECT DISTINCT model_name "
             "FROM {db:Identifier}.{tbl:Identifier} "
-            "WHERE verified_on_cpu = 1 "
-            "AND snapshot_date >= {cutoff:Date}",
+            "WHERE snapshot_date >= {cutoff:Date} "
+            "AND (failure_category IS NULL OR failure_category != {hw:String})",
             parameters={
                 "db": DATABASE,
                 "tbl": self._table_name,
                 "cutoff": cutoff,
+                "hw": _HARDWARE_EXCEPTION_CATEGORY,
             },
         )
         return {row[0] for row in result.result_rows}
 
-    def get_recent_cpu_verified_entries(self, model_name: str) -> list[dict[str, Any]]:
+    def get_recent_blocking_entries(self, model_name: str) -> list[dict[str, Any]]:
         """Return a non-empty sentinel list when *model_name* is in the skip set.
 
         The actual row data is not needed by the caller — it only tests
@@ -425,6 +448,10 @@ class ClickHouseResultSink(ResultSink):
         error: str | None,
     ) -> None:
         """Buffer the row; the actual INSERT happens in ``close()``."""
+        # failure_category/error are non-nullable in the live table (String/
+        # LowCardinality(String) DEFAULT '') — None must become '' here, or
+        # clickhouse_connect raises DataError on the bulk insert for any
+        # fully-passing row (which always has both fields as None).
         self._pending.append(
             [
                 model_name,
@@ -439,8 +466,8 @@ class ClickHouseResultSink(ResultSink):
                 family,
                 architecture,
                 parameters_number,
-                failure_category,
-                error,
+                failure_category or "",
+                error or "",
             ]
         )
 

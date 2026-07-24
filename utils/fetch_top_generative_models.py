@@ -16,6 +16,7 @@ from utils.hf_model_catalog import (
     is_baseline_keep,
     with_transient_retry,
 )
+from utils.utilities import ts
 
 
 def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
@@ -25,7 +26,7 @@ def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
     Retries transient 5xx gateway errors with exponential backoff via
     ``with_transient_retry``; permanent failures propagate.
     """
-    print(f"Fetching top {limit} text-generation models by downloads...")
+    print(f"{ts()} Fetching top {limit} text-generation models by downloads...")
     return with_transient_retry(
         lambda: api.list_models(
             pipeline_tag="text-generation",
@@ -58,7 +59,14 @@ def keep(model: ModelInfo, token: str | bool) -> bool:
 def fetch_top_generative_models(
     limit: int, output_csv: Path | str | None = None
 ) -> list[dict[str, object]]:
-    token: str | bool = os.environ.get("HF_TOKEN", True)
+    # Falls back to False (explicit anonymous access), not True: in
+    # huggingface_hub, token=True means "use the locally cached login token,
+    # and raise LocalTokenNotFoundError if none exists" — it does NOT mean
+    # "anonymous is fine". A CI runner with no `hf auth login` would raise on
+    # every call with that fallback. `or False` also covers GHA setting
+    # HF_TOKEN to an empty string (rather than omitting it) when the secret
+    # doesn't exist, which `.get(..., True)` alone would not catch.
+    token: str | bool = os.environ.get("HF_TOKEN") or False
     api: HfApi = HfApi(token=token)
     return build_catalog(
         fetch_fn=lambda lim: _fetch(api, lim),

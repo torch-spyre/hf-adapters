@@ -12,11 +12,15 @@ and runs the CPU-load + cosine-compare pipeline.
 
 Additional flags:
 
-* ``--top-k N``        Number of top models to fetch by download count (default: 200).
-* ``--write-to-csv F`` Write results to a CSV file instead of ClickHouse.
+* ``--top-k N``           Number of top models to fetch by download count (default: 200).
+* ``--write-to-csv F``    Write results to a CSV file instead of ClickHouse.
+* ``--model-list-file F`` Load the model list from this JSON file (as produced by
+  ``.github/scripts/generate_weekly_shards.py``) instead of fetching it. Used by the
+  sharded CI workflow, where the top-K list is fetched once and split across parallel jobs.
 """
 
 import argparse
+import json
 import logging
 import multiprocessing
 import os
@@ -25,7 +29,7 @@ import sys
 import time
 import traceback as _traceback
 from asyncio import Queue
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 from huggingface_hub.errors import HfHubHTTPError
@@ -33,12 +37,7 @@ from huggingface_hub.errors import HfHubHTTPError
 from tests.spyre.weekly_generation.result_sink import (
     EmbeddingGenerativeMode,
 )
-
-
-def _ts() -> str:
-    """Local-time timestamp prefix, e.g. '[2026-07-17 14:32:05]'."""
-    return datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
-
+from utils.utilities import ts
 
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
@@ -50,10 +49,29 @@ FAILURE_CATEGORY_CPU_LOAD_FAILED = "cpu_load_failed"
 FAILURE_CATEGORY_CPU_GENERATE_FAILED = "cpu_generate_failed"
 FAILURE_CATEGORY_QUANTIZED_MODEL = "quantized_model"
 FAILURE_CATEGORY_HARDWARE_EXCEPTION = "hardware_exception"
+FAILURE_CATEGORY_MISFORMED_HF_FAILED = "misformed_hf_failed"
 FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION = "test_execution_exception"
 FAILURE_CATEGORY_VERIFICATION_FAILED = "verification_failed"
 FAILURE_CATEGORY_WORKER_CRASHED = "worker_crashed"
+FAILURE_CATEGORY_WORKER_TIMEOUT = "worker_timeout"
 FAILURE_CATEGORY_MOE = "moe"
+
+# Hard wall-clock cap for a single worker process (in seconds). If a batch
+# takes longer than this, the parent kills the child, marks the entire batch
+# as failed with FAILURE_CATEGORY_WORKER_TIMEOUT, and moves on. Prevents a
+# single hung model from stalling the whole run indefinitely.
+
+
+class HardwareExceptionAbortError(RuntimeError):
+    """Raised in main() when a batch reports a hardware_exception row.
+
+    The Spyre accelerator is unreachable and no subsequent work in this
+    process can succeed, so the run aborts. Bubbling this up to the
+    ``__main__`` block means the script exits with a non-zero code —
+    CI / GHA can alert on it, and a subsequent scheduled run picks the
+    aborted rows up automatically via the sink's retry-on-hardware_exception
+    skip rule.
+    """
 
 
 def _classify_failure(err: str, default: str) -> str:
@@ -76,6 +94,8 @@ def _classify_failure(err: str, default: str) -> str:
         return default
     if "Failed to open the IBM Spyre VFIO device" in err or "Replace card" in err:
         return FAILURE_CATEGORY_HARDWARE_EXCEPTION
+    if "does not appear to have files named ('model" in err:
+        return FAILURE_CATEGORY_MISFORMED_HF_FAILED
     lowered: str = err.lower()
     if "quantiz" in lowered or "optimum" in lowered:
         return FAILURE_CATEGORY_QUANTIZED_MODEL
@@ -108,7 +128,7 @@ _WEIGHT_SUFFIXES = (
 # amortize per-child spawn + import + kernel-teardown cost (~15 s currently)
 # across more work. Lower values reduce the blast radius when the Spyre
 # driver/state gets into a bad shape mid-batch.
-GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS: int = 2
+GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS: int = 10
 EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS: int = 90
 
 
@@ -167,6 +187,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         choices=["embedding", "generative"],
+        required=True,
         help=(
             "Which model class to evaluate: 'embedding' runs the "
             "embedding load + cosine-compare pipeline; 'generative' runs the "
@@ -187,6 +208,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Write evaluation results to this CSV file instead of inserting "
             "into ClickHouse. No DB connection is made when this flag is set."
+        ),
+    )
+    parser.add_argument(
+        "--model-list-file",
+        type=Path,
+        default=None,
+        metavar="MODEL_LIST_JSON",
+        help=(
+            "Load the model list from this JSON file instead of calling "
+            "fetch_top_generative_models/fetch_top_embedding_models. --top-k is "
+            "ignored when this is set. Used by the sharded CI workflow."
         ),
     )
     return parser.parse_args(argv)
@@ -393,7 +425,7 @@ def _process_batch(
 
     _child_entered: float = _t.monotonic()
     print(
-        f"{_ts()}       child[{os.getpid()}] entered _process_batch with {len(batch)} model(s)",
+        f"{ts()}       child[{os.getpid()}] entered _process_batch with {len(batch)} model(s)",
         flush=True,
     )
 
@@ -454,7 +486,7 @@ def _process_batch(
                 rec["failure_category"] = FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
         results.append(rec)
         print(
-            f"{_ts()}       child[{os.getpid()}] finished model "
+            f"{ts()}       child[{os.getpid()}] finished model "
             f"{len(results)}/{len(batch)}: {model_path!r}  "
             f"(verified_on_cpu={rec['verified_on_cpu']}, "
             f"verified_on_spyre={rec['verified_on_spyre']}, "
@@ -462,10 +494,22 @@ def _process_batch(
             f"error={rec['error']})",
             flush=True,
         )
+        # Bail out of the batch immediately on a hardware exception — the
+        # Spyre device is unreachable, so every remaining model in this
+        # batch would hit the same wall. The parent picks up the signal
+        # from the returned results and aborts the outer loop.
+        if rec["failure_category"] == FAILURE_CATEGORY_HARDWARE_EXCEPTION:
+            print(
+                f"{ts()}       child[{os.getpid()}] aborting batch — "
+                f"hardware_exception detected; "
+                f"{len(batch) - len(results)} model(s) not attempted",
+                flush=True,
+            )
+            break
 
     result_queue.put(results)
     print(
-        f"{_ts()}       child[{os.getpid()}] done in "
+        f"{ts()}       child[{os.getpid()}] done in "
         f"{_t.monotonic() - _child_entered:.2f}s ({len(results)} results)",
         flush=True,
     )
@@ -561,7 +605,12 @@ def _chunk_into_batches(rows: list[dict], batch_size: int) -> list[list[dict]]:
     return [rows[i : i + batch_size] for i in range(0, len(rows), batch_size)]
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(
+    mode: EmbeddingGenerativeMode,
+    write_to_csv: Path | str | None,
+    top_k: int,
+    model_list_file: Path | None = None,
+) -> None:
     from tests.spyre.weekly_generation.result_sink import (
         ClickHouseResultSink,
         CsvResultSink,
@@ -569,34 +618,36 @@ def main(argv: list[str] | None = None) -> None:
     )
     from utils.fetch_top_embedding_models import fetch_top_embedding_models
     from utils.fetch_top_generative_models import fetch_top_generative_models
-    from utils.hf_model_catalog import is_moe
 
-    args = _parse_args(argv)
+    print(f"{ts()} Starting main.")
     preexisting: set = _repos_with_weights()
     total_freed: int = 0
     snapshot_date = date.today()
-    if args.mode == "generative":
-        mode = EmbeddingGenerativeMode.GENERATIVE
+    if mode == EmbeddingGenerativeMode.GENERATIVE:
         number_of_model_per_process = GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS
-        to_process_list = fetch_top_generative_models(limit=args.top_k)
-    elif args.mode == "embedding":
-        mode = EmbeddingGenerativeMode.EMBEDDING
+    elif mode == EmbeddingGenerativeMode.EMBEDDING:
         number_of_model_per_process = EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS
-        to_process_list = fetch_top_embedding_models(limit=args.top_k)
     else:
-        raise Exception(f"Unknown mode: {args.mode}")
+        raise Exception(f"Unknown mode: {mode}")
+
+    if model_list_file is not None:
+        print(f"{ts()} Loading model list from '{model_list_file}' (--top-k ignored).")
+        to_process_list = json.loads(model_list_file.read_text())
+    elif mode == EmbeddingGenerativeMode.GENERATIVE:
+        to_process_list = fetch_top_generative_models(limit=top_k)
+    else:
+        to_process_list = fetch_top_embedding_models(limit=top_k)
     adapter_dates: dict[str, str | None] = _get_adapter_dates()
 
     sink: ResultSink
-    if args.write_to_csv:
-        sink = CsvResultSink(path=args.write_to_csv, today=snapshot_date)
+    if write_to_csv:
+        sink = CsvResultSink(path=write_to_csv, today=snapshot_date)
         print(
-            f"CSV mode: results will be appended to '{args.write_to_csv}' (no DB access).\n"
+            f"CSV mode: results will be appended to '{write_to_csv}' (no DB access).\n"
         )
     else:
         sink = ClickHouseResultSink(today=snapshot_date, embedding_generative=mode)
         print("DB mode: results will be appended to the DB.\n")
-    print("argsv = {}\n".format(args))
     total = len(to_process_list)
     processed = 0
     overall_start = time.monotonic()
@@ -609,13 +660,13 @@ def main(argv: list[str] | None = None) -> None:
     moe_skipped: int = 0
     too_large_skipped: int = 0
     unsupported_skipped: int = 0
-    print(f"{_ts()} Will process {len(to_process_list)} models in total.")
+    print(f"{ts()} Will process {len(to_process_list)} models in total.")
     for row in to_process_list:
         model_path = str(row["model_id"])
         if not sink.should_insert_row(model_path):
             early_skipped += 1
             print(
-                f"{_ts()}     sink: '{model_path}' skipped early — "
+                f"{ts()}     sink: '{model_path}' skipped early — "
                 f"recent snapshot exists within the "
                 f"{sink.__class__.__name__} skip window"
             )
@@ -625,7 +676,6 @@ def main(argv: list[str] | None = None) -> None:
         # but reached here without spawning one. Uses the fetcher-computed
         # is_supported flag (True iff config_class is in the adapter mapping).
 
-        # TODO : Decide if we want to fill the DB first with all the non-supported models...
         if row.get("is_supported") is False:
             unsupported_skipped += 1
             sink.add_entry(
@@ -645,7 +695,7 @@ def main(argv: list[str] | None = None) -> None:
                 error=None,
             )
             print(
-                f"{_ts()}     sink: '{model_path}' skipped early — "
+                f"{ts()}     sink: '{model_path}' skipped early — "
                 f"no adapter for config_class={row.get('config_class')!r}"
             )
             continue
@@ -674,15 +724,17 @@ def main(argv: list[str] | None = None) -> None:
                 error=None,
             )
             print(
-                f"{_ts()}     sink: '{model_path}' skipped early — "
+                f"{ts()}     sink: '{model_path}' skipped early — "
                 f"{int(params):,} parameters exceeds the "
                 f"{MAX_NUMBER_PARAMS:,} limit"
             )
             continue
         # MoE models aren't supported on Spyre yet — write the row up-front
         # with failure_category=moe and don't send it to the workers.
-        model_info = row.get("model_info")
-        if model_info is not None and is_moe(model_info):
+        # is_moe is precomputed at fetch time (utils/hf_model_catalog.py) so
+        # it survives a JSON round-trip through --model-list-file, unlike the
+        # raw (non-serializable) model_info object.
+        if row.get("is_moe"):
             moe_skipped += 1
             sink.add_entry(
                 model_name=model_path,
@@ -700,29 +752,29 @@ def main(argv: list[str] | None = None) -> None:
                 failure_category=FAILURE_CATEGORY_MOE,
                 error=None,
             )
-            print(f"{_ts()}     sink: '{model_path}' skipped early — MoE model")
+            print(f"{ts()}     sink: '{model_path}' skipped early — MoE model")
             continue
         prefiltered.append(row)
     if early_skipped:
         print(
-            f"\n{_ts()} Early-skip: {early_skipped}/{total} models already have a "
+            f"\n{ts()} Early-skip: {early_skipped}/{total} models already have a "
             f"recent snapshot; {len(prefiltered)} left to evaluate.\n"
         )
     if unsupported_skipped:
         print(
-            f"{_ts()} Unsupported-skip: {unsupported_skipped}/{total} models have "
+            f"{ts()} Unsupported-skip: {unsupported_skipped}/{total} models have "
             f"no adapter for their config_class and were written directly to the "
             f"sink.\n"
         )
     if too_large_skipped:
         print(
-            f"{_ts()} Too-large-skip: {too_large_skipped}/{total} models exceed "
+            f"{ts()} Too-large-skip: {too_large_skipped}/{total} models exceed "
             f"the {MAX_NUMBER_PARAMS:,} parameter limit and were written directly "
             f"to the sink.\n"
         )
     if moe_skipped:
         print(
-            f"{_ts()} MoE-skip: {moe_skipped}/{total} models tagged as moe and "
+            f"{ts()} MoE-skip: {moe_skipped}/{total} models tagged as moe and "
             f"written directly to the sink.\n"
         )
 
@@ -743,11 +795,11 @@ def main(argv: list[str] | None = None) -> None:
             batch_start = time.monotonic()
             batch_paths = [str(r["model_id"]) for r in batch]
             print(
-                f"\n{_ts()} [batch {batch_idx}/{total_batches}] {len(batch)} model(s) "
+                f"\n{ts()} [batch {batch_idx}/{total_batches}] {len(batch)} model(s) "
                 f"(overall elapsed: {batch_start - overall_start:.0f}s)"
             )
             for path in batch_paths:
-                print(f"{_ts()}     - {path}")
+                print(f"{ts()}     - {path}")
 
             # Track which weights existed BEFORE this batch ran, so we can
             # decide per-model whether to delete after.
@@ -765,19 +817,61 @@ def main(argv: list[str] | None = None) -> None:
                 ),
             )
             proc.start()
+            timeout = 10 * 60 * number_of_model_per_process
 
-            proc.join()
+            proc.join(timeout=timeout)
+
+            # Timeout guard: if the child is still alive after the deadline,
+            # kill it, drop any partial results, and synthesise timeout rows
+            # so the outer loop can proceed to the next batch.
+            timed_out: bool = proc.is_alive()
+            if timed_out:
+                print(
+                    f"{ts()}     batch: worker exceeded "
+                    f"{timeout}s timeout — terminating "
+                    f"pid={proc.pid} and marking {len(batch)} model(s) as "
+                    f"failed with {FAILURE_CATEGORY_WORKER_TIMEOUT}"
+                )
+                proc.terminate()
+                proc.join(timeout=30)
+                if proc.is_alive():
+                    print(
+                        f"{ts()}     batch: worker pid={proc.pid} did not "
+                        f"exit after SIGTERM — sending SIGKILL"
+                    )
+                    proc.kill()
+                    proc.join(timeout=30)
 
             # Drain the queue. SimpleQueue.get() blocks if empty, so probe
             # first; the child has already exited so a non-empty queue
             # returns instantly, and an empty one signals a crash.
-            if result_queue.empty():
+            if timed_out:
+                worker_results: list[dict] = [
+                    {
+                        "model_name": path,
+                        "config_class": row.get("config_class"),
+                        "adapter_name": "",
+                        "added_date": None,
+                        "snapshot_date": snapshot_date,
+                        "verified_on_cpu": False,
+                        "verified_on_gpu": False,
+                        "verified_on_spyre": False,
+                        "num_downloads": int(row.get("downloads") or 0),
+                        "family": str(row.get("model_type") or ""),
+                        "architecture": str(row.get("architectures") or ""),
+                        "parameters_number": int(row.get("parameters") or 0),
+                        "error": (f"worker exceeded " f"{timeout}s timeout"),
+                        "failure_category": FAILURE_CATEGORY_WORKER_TIMEOUT,
+                    }
+                    for row, path in zip(batch, batch_paths)
+                ]
+            elif result_queue.empty():
                 print(
-                    f"{_ts()}     batch: worker exited code {proc.exitcode} "
+                    f"{ts()}     batch: worker exited code {proc.exitcode} "
                     f"and returned no results — marking all {len(batch)} "
                     f"models as failed"
                 )
-                worker_results: list[dict] = [
+                worker_results = [
                     {
                         "model_name": path,
                         "config_class": row.get("config_class"),
@@ -805,7 +899,7 @@ def main(argv: list[str] | None = None) -> None:
                 processed += 1
 
                 if rec.get("error"):
-                    print(f"{_ts()}     [{model_path}] error: {rec['error']}")
+                    print(f"{ts()}     [{model_path}] error: {rec['error']}")
 
                 # Coerce added_date from ISO string (as the worker wrote it)
                 # to a date object for the sink.
@@ -837,14 +931,14 @@ def main(argv: list[str] | None = None) -> None:
                     error=(None if rec.get("error") is None else str(rec["error"])),
                 ):
                     print(
-                        f"{_ts()}     sink: row written for '{model_path}' "
+                        f"{ts()}     sink: row written for '{model_path}' "
                         f"(verified_on_cpu={rec.get('verified_on_cpu')}, "
                         f"verified_on_spyre={rec.get('verified_on_spyre')}, "
                         f"failure_category={rec.get('failure_category')}, )"
                     )
                 else:
                     print(
-                        f"{_ts()}     sink: row skipped for '{model_path}' (guard rejected)"
+                        f"{ts()}     sink: row skipped for '{model_path}' (guard rejected)"
                     )
 
             # Cache cleanup: delete weights downloaded during this batch,
@@ -855,7 +949,7 @@ def main(argv: list[str] | None = None) -> None:
 
             batch_elapsed = time.monotonic() - batch_start
             print(
-                f"{_ts()}     batch {batch_idx}/{total_batches} done: "
+                f"{ts()}     batch {batch_idx}/{total_batches} done: "
                 f"{len(worker_results)} model(s) in {batch_elapsed:.1f}s  "
                 f"(per-model avg: {batch_elapsed / max(1, len(worker_results)):.1f}s)"
             )
@@ -864,28 +958,62 @@ def main(argv: list[str] | None = None) -> None:
             # crash before the next batch loses at most this batch, not the
             # whole run. No-op for sinks that write per-row (CSV).
             sink.flush()
+
+            # Abort the whole run when any row in this batch reports a
+            # hardware exception — the Spyre accelerator is unreachable and
+            # every subsequent batch would waste worker time hitting the
+            # same wall. The `raise` unwinds through the `finally` clause
+            # below (cache cleanup, sink close, summary), then propagates
+            # out of main() so the script exits with a non-zero status.
+            if any(
+                rec.get("failure_category") == FAILURE_CATEGORY_HARDWARE_EXCEPTION
+                for rec in worker_results
+            ):
+                remaining: int = total_batches - batch_idx
+                print(
+                    f"\n{ts()} Aborting run — hardware_exception detected in "
+                    f"batch {batch_idx}/{total_batches}; skipping the remaining "
+                    f"{remaining} batch(es). Rerun once the accelerator is "
+                    f"available; those rows will be picked up automatically "
+                    f"by the sink's retry-on-hardware_exception rule."
+                )
+                raise HardwareExceptionAbortError(
+                    f"hardware_exception in batch {batch_idx}/{total_batches}"
+                )
     except KeyboardInterrupt:
-        print(f"\n{_ts()} Interrupted — results so far are saved; rerun to resume.")
+        print(f"\n{ts()} Interrupted — results so far are saved; rerun to resume.")
     finally:
         # Clean up weights for the in-flight batch if interrupted mid-run.
         _ = _cleanup_batch_weights(batch_paths, had_weights_map, total_freed)
 
         sink.close()
-        if args.write_to_csv:
+        if write_to_csv:
             print(
-                f"\n{_ts()} CSV: '{args.write_to_csv}' closed ({processed} rows processed)."
+                f"\n{ts()} CSV: '{write_to_csv}' closed ({processed} rows processed)."
             )
 
         overall_elapsed = time.monotonic() - overall_start
         mins, secs = divmod(int(overall_elapsed), 60)
         print(
             f"\n{'='*60}\n"
-            f"{_ts()} Processed {processed}/{total} models  |  "
+            f"{ts()} Processed {processed}/{total} models  |  "
             f"Total time: {mins}m {secs:02d}s\n"
             f"{'='*60}"
         )
 
 
 if __name__ == "__main__":
-    print(f"{_ts()} Starting weekly generation...", flush=True)
-    main()
+    print(f"{ts()} Starting weekly generation...", flush=True)
+    args = _parse_args()
+    try:
+        main(
+            mode=EmbeddingGenerativeMode(args.mode),
+            write_to_csv=args.write_to_csv,
+            top_k=args.top_k,
+            model_list_file=args.model_list_file,
+        )
+    except HardwareExceptionAbortError as e:
+        # Non-zero exit so CI / GHA scheduled runs can alert. main()'s
+        # `finally` has already flushed the sink and cleaned the cache.
+        print(f"{ts()} Exiting with status 1 ({e}).")
+        sys.exit(1)
