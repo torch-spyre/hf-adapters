@@ -2384,9 +2384,9 @@ def prefill_reranker(
     attention_mask,
     token_type_ids=None,
 ):
-    """One-shot prefill for cross-encoder reranker models (e.g. BGE Reranker v2 M3).
+    """One-shot prefill for cross-encoder reranker models.
 
-    Runs the XLM-RoBERTa encoder backbone on Spyre via ``prefill_encoder``,
+    Runs the encoder backbone on Spyre via ``prefill_encoder``,
     then applies the classification head (``model.classifier``) to produce a
     scalar relevance score per query-document pair.
 
@@ -2414,16 +2414,15 @@ def prefill_reranker(
         token_type_ids=token_type_ids,
     )
 
-    # Move the full hidden state to CPU to avoid aten.slice on Spyre.
-    # XLMRobertaClassificationHead does its own [:, 0, :] CLS extraction
-    # internally — pass the full [B, L, H] tensor, not a pre-sliced [B, H].
-    hidden_cpu = last_hidden_state.to("cpu")  # [B, L, H]
+    # Pass the full [B, L, H] hidden state to the classifier; .to(cls_device)
+    # moves it off Spyre to avoid aten.slice. The classification head does its
+    # own [:, 0, :] CLS extraction internally.
 
     # Run the classification head on the same device it lives on
     # (CPU — kept off Spyre via _spyre_cpu_submodules in prepare_for_spyre).
     classifier = model.classifier
     cls_device = next(classifier.parameters()).device
-    scores = classifier(hidden_cpu.to(cls_device))  # [B, 1]
+    scores = classifier(last_hidden_state.to(cls_device))  # [B, 1]
 
     return scores[:, 0].to("cpu")  # [B] raw logits on CPU
 

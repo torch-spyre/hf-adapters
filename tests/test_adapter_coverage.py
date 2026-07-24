@@ -153,6 +153,7 @@ def test_adapter_coverage_details():
         list(CAUSAL_LM_MODELS.values())
         + list(EMBEDDING_MODELS.values())
         + list(VISION_MODELS.values())
+        + list(RERANKER_MODELS.values())
     ):
         adapter = model_info.get("adapter")
         if adapter:

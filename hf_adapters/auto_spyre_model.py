@@ -78,7 +78,6 @@ from transformers.models.mistral3.configuration_mistral3 import Mistral3Config
 
 from hf_adapters import (
     hf_bert,
-    hf_bge_reranker,
     hf_gemma3,
     hf_gemma4,
     hf_gemma4_mm,
@@ -159,8 +158,8 @@ IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
 SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     type[PretrainedConfig], ModuleType
 ] = {
-    XLMRobertaConfig: hf_bge_reranker,
-    RobertaConfig: hf_bge_reranker,
+    XLMRobertaConfig: hf_xlm_roberta,
+    RobertaConfig: hf_xlm_roberta,
 }
 
 MODEL_PATH_TO_TORCH_DTYPE: dict[str, torch.dtype] = {

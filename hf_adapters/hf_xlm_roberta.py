@@ -70,6 +70,7 @@ def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_
 
 
 _is_encoder_only = True
+_is_reranker = True
 
 
 def prepare_for_spyre(model):
@@ -94,6 +95,9 @@ def prepare_for_spyre(model):
             stick_aligned_head_dim,
             cfg.num_attention_heads,
         )
+
+    if hasattr(model, "classifier"):
+        model._spyre_cpu_submodules = ["classifier"]
 
     model._spyre_compiled_blocks = [
         _make_compiled_encoder_block(layer) for layer in backbone.encoder.layer

@@ -525,11 +525,11 @@ def xfail_non_blocking(paths: list[str]) -> list[object]:
 
 
 RERANKER_MODELS = {
-    # hf_bge_reranker.py
+    # hf_xlm_roberta.py
     "bge_reranker_v2_m3": {
         "name": "BGE Reranker v2 M3",
         "path": "BAAI/bge-reranker-v2-m3",
-        "adapter": "hf_bge_reranker.py",
+        "adapter": "hf_xlm_roberta.py",
         "size": "0.5b",
     },
 }

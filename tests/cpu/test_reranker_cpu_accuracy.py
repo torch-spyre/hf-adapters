@@ -34,7 +34,7 @@ Two parametrised cases per registered reranker:
     ``model.rerank()`` method.  Exercises the full end-to-end auto-loading path.
 
 DEVICE is patched to ``"cpu"`` by ``tests/conftest.py``; torch.compile is
-unwrapped by the ``unwrap_compiled_blocks`` fixture so blocks run eagerly.
+unwrapped by ``_unwrap_compiled_blocks`` so blocks run eagerly.
 """
 
 import gc
@@ -49,6 +49,7 @@ from hf_adapters.auto_spyre_model import (
 )
 from hf_adapters.hf_common import prefill_reranker
 from tests.conftest import get_dtype_for_cpu, load_ref_model
+from tests.cpu.conftest import _unwrap_compiled_blocks
 from tests.model_registry import RERANKER_PATHS
 
 # Query-document pairs that cover a range of relevance (positive + negative)
@@ -98,7 +99,7 @@ def _hf_reference_scores(
 
 
 @pytest.mark.parametrize("model_path", RERANKER_PATHS, ids=RERANKER_PATHS)
-def test_manual_path(model_path: str, unwrap_compiled_blocks) -> None:
+def test_manual_path(model_path: str) -> None:
     """Adapter scores via prepare_for_spyre + prefill_reranker match HF reference."""
     dtype = get_dtype_for_cpu(model_path)
     adapter_module = resolve_adapter_module(
@@ -116,9 +117,8 @@ def test_manual_path(model_path: str, unwrap_compiled_blocks) -> None:
         model_path=model_path,
         auto_model_cls=AutoModelForSequenceClassification,
     )
-    model.eval()
     adapter_module.prepare_for_spyre(model)
-    unwrap_compiled_blocks(model)
+    _unwrap_compiled_blocks(model)
 
     encoded = tokenizer(
         PAIRS,
@@ -158,7 +158,7 @@ def test_manual_path(model_path: str, unwrap_compiled_blocks) -> None:
 
 
 @pytest.mark.parametrize("model_path", RERANKER_PATHS, ids=RERANKER_PATHS)
-def test_auto_loader(model_path: str, unwrap_compiled_blocks) -> None:
+def test_auto_loader(model_path: str) -> None:
     """Scores via AutoSpyreModelForSequenceClassification.rerank() match HF reference."""
     import sys
 
@@ -176,7 +176,7 @@ def test_auto_loader(model_path: str, unwrap_compiled_blocks) -> None:
             model_path, dtype=dtype
         )
     )
-    unwrap_compiled_blocks(model)
+    _unwrap_compiled_blocks(model)
 
     with torch.no_grad():
         adapter_scores = model.rerank(tokenizer, PAIRS).float()
