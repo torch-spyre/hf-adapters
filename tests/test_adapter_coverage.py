@@ -21,7 +21,12 @@ entry in either CAUSAL_LM_MODELS or EMBEDDING_MODELS dictionaries.
 
 from pathlib import Path
 
-from tests.model_registry import CAUSAL_LM_MODELS, EMBEDDING_MODELS, VISION_MODELS
+from tests.model_registry import (
+    CAUSAL_LM_MODELS,
+    EMBEDDING_MODELS,
+    RERANKER_MODELS,
+    VISION_MODELS,
+)
 
 
 def get_adapter_files():
@@ -69,6 +74,12 @@ def get_registered_adapters():
 
     # Collect adapters from VISION_MODELS (vision towers + multimodal VLMs)
     for model_info in VISION_MODELS.values():
+        adapter = model_info.get("adapter")
+        if adapter:
+            registered_adapters.add(adapter)
+
+    # Collect adapters from RERANKER_MODELS
+    for model_info in RERANKER_MODELS.values():
         adapter = model_info.get("adapter")
         if adapter:
             registered_adapters.add(adapter)
@@ -142,6 +153,7 @@ def test_adapter_coverage_details():
         list(CAUSAL_LM_MODELS.values())
         + list(EMBEDDING_MODELS.values())
         + list(VISION_MODELS.values())
+        + list(RERANKER_MODELS.values())
     ):
         adapter = model_info.get("adapter")
         if adapter:

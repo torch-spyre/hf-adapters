@@ -522,3 +522,16 @@ def xfail_non_blocking(paths: list[str]) -> list[object]:
         )
         for path in paths
     ]
+
+
+RERANKER_MODELS = {
+    # hf_xlm_roberta.py
+    "bge_reranker_v2_m3": {
+        "name": "BGE Reranker v2 M3",
+        "path": "BAAI/bge-reranker-v2-m3",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.5b",
+    },
+}
+
+RERANKER_PATHS: list[str] = [m["path"] for m in RERANKER_MODELS.values()]

@@ -45,6 +45,7 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
+    AutoModelForSequenceClassification,
     BertConfig,
     Gemma3Config,
     Gemma3TextConfig,
@@ -152,6 +153,15 @@ IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     Mistral3Config: hf_mistral3_vision_mm,
 }
 
+# Sequence-classification (cross-encoder reranker) mapping — used by
+# ``AutoSpyreModelForSequenceClassification``.
+SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
+    type[PretrainedConfig], ModuleType
+] = {
+    XLMRobertaConfig: hf_xlm_roberta,
+    RobertaConfig: hf_xlm_roberta,
+}
+
 MODEL_PATH_TO_TORCH_DTYPE: dict[str, torch.dtype] = {
     "mistralai/Ministral-3-3B-Instruct-2512": torch.bfloat16,
     "mistralai/Ministral-3-8B-Instruct-2512": torch.bfloat16,
@@ -247,6 +257,72 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
 
         model.generate = MethodType(model_generate, model)  # type: ignore[assignment]
 
+        return model
+
+
+class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
+    """Load an XLM-RoBERTa cross-encoder reranker and prepare it for Spyre.
+
+    Loads via ``AutoModelForSequenceClassification``, compiles the encoder
+    backbone on Spyre, and attaches a ``rerank`` method that tokenizes
+    query-document pairs and returns raw relevance logits.
+
+    Example::
+
+        model = AutoSpyreModelForSequenceClassification.from_pretrained(
+            "BAAI/bge-reranker-v2-m3"
+        )
+        tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-reranker-v2-m3")
+        pairs = [("query text", "document text")]
+        scores = model.rerank(tokenizer, pairs)          # raw logits
+        probs  = torch.sigmoid(scores)                   # [0, 1] relevance
+    """
+
+    _auto_model_cls = AutoModelForSequenceClassification  # type: ignore[assignment]
+    _module_mapping: dict[type[PretrainedConfig], ModuleType] = (
+        SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING
+    )
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_name_or_path: Union[str, os.PathLike[str]],
+        dtype: torch.dtype = torch.float16,
+    ) -> torch.nn.Module:
+        module: ModuleType = resolve_adapter_module(
+            model_name_or_path, mapping=cls._module_mapping
+        )
+        model: torch.nn.Module = super().from_pretrained(
+            model_name_or_path, dtype=dtype
+        )
+
+        def model_rerank(
+            self: torch.nn.Module,
+            tokenizer: Any,
+            pairs: list[tuple[str, str]],
+            **kwargs: Any,
+        ):
+            from hf_adapters.hf_common import prefill_reranker
+
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            encoded = tokenizer(
+                pairs,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                padding_side="right",
+                return_attention_mask=True,
+            )
+            return prefill_reranker(
+                module._run_backbone_forward,
+                self,
+                encoded["input_ids"],
+                encoded["attention_mask"],
+                token_type_ids=encoded.get("token_type_ids", None),
+            )
+
+        model.rerank = MethodType(model_rerank, model)  # type: ignore[assignment]
         return model
 
 
