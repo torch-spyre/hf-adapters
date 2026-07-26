@@ -35,7 +35,7 @@ from sympy import factorint
 # in the environment before this module is imported, so each process binds to
 # its own AIU (spyre:0, spyre:1, ...). Single-device runs get spyre:0.
 # The conftest CPU-patch overwrites this to "cpu" for CPU tests.
-DEVICE = torch.device(f"spyre:{os.getenv('RANK', '0')}")
+DEVICE = f"spyre:{os.getenv('RANK', '0')}"
 BLOCK_SIZE = 64  # Spyre stick size at fp16 (128 bytes / 2 bytes per element)
 
 
