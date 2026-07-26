@@ -322,12 +322,13 @@ class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype = torch.float16,
+        tp_plan: Optional[Union[dict, str]] = None,
     ) -> torch.nn.Module:
         module: ModuleType = resolve_adapter_module(
             model_name_or_path, mapping=cls._module_mapping
         )
         model: torch.nn.Module = super().from_pretrained(
-            model_name_or_path, dtype=dtype
+            model_name_or_path, dtype=dtype, tp_plan=tp_plan
         )
 
         def model_rerank(
