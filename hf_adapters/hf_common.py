@@ -1954,20 +1954,27 @@ def make_encoder_block(
     def block_forward(hidden_states, attn_mask):
         bsz, seq_len, _ = hidden_states.shape
 
+        # ``.contiguous()`` after the transpose is REQUIRED on Spyre: the fused
+        # lowering of ``transpose(1, 2) -> scaled_dot_product_attention`` reads
+        # the non-contiguous (transposed) q/k/v with the wrong stick layout and
+        # returns garbage (per-token cosine ~0 vs CPU). No-op on CPU.
         q = (
             q_proj(hidden_states)
             .view(bsz, seq_len, num_heads, head_dim)
             .transpose(1, 2)
+            .contiguous()
         )
         k = (
             k_proj(hidden_states)
             .view(bsz, seq_len, num_heads, head_dim)
             .transpose(1, 2)
+            .contiguous()
         )
         v = (
             v_proj(hidden_states)
             .view(bsz, seq_len, num_heads, head_dim)
             .transpose(1, 2)
+            .contiguous()
         )
 
         attn_out = F.scaled_dot_product_attention(
