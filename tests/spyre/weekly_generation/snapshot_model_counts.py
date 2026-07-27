@@ -37,6 +37,13 @@ def main(argv: list[str] | None = None) -> None:
 
     df = pd.read_csv(args.csv_file)
 
+    # snapshot_date is written as DD/MM/YYYY. Convert to canonical
+    # YYYY-MM-DD strings so lexicographic sort matches chronological order
+    # (used by the cumulative walk below) and _plot_3 can parse it cleanly.
+    df["snapshot_date"] = pd.to_datetime(
+        df["snapshot_date"], format="%d/%m/%Y", errors="raise"
+    ).dt.strftime("%Y-%m-%d")
+
     # Boolean masks
     has_adapter = df["adapter_name"].notna() & (df["adapter_name"].str.strip() != "")
     passes_spyre = df["verified_on_spyre"].astype(str).str.strip().str.lower() == "true"
