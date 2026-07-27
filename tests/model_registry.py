@@ -492,8 +492,7 @@ NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = {
         "period before promoting to a blocking test"
     )
     for key in (
-        "qwen3",
-        "olmo2_1b",
+        "smollm3",
         "gemma3_unsloth",
         "ministral8b",
         "gemma4_google",
