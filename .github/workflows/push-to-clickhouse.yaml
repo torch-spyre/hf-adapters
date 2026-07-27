@@ -22,14 +22,6 @@
 name: push-to-clickhouse
 
 on:
-  # TEMPORARY, remove before merging to main: workflow_dispatch and the
-  # Actions "Run workflow" button both require the workflow file to already
-  # be on the default branch, so there's no way to manually trigger this
-  # from the UI/API while it only lives on this PR branch. This push
-  # trigger lets us test end-to-end by just pushing a commit.
-  push:
-    branches:
-      - benjams/weekly_test_to_gha
   schedule:
     # Saturday 22:00 UTC
     - cron: "0 22 * * 6"
@@ -39,14 +31,7 @@ on:
         description: Number of top models to fetch (by downloads)
         required: false
         type: string
-        # TEMPORARY: 11000, not the real 10000 default — ~9144 models already
-        # have a snapshot within the 10-day skip window from prior manual/dev
-        # runs, so top_k=10000 would land entirely within already-covered
-        # territory and skip every model (0 processed), same as we saw at
-        # top_k=50/200. Going slightly past 10000 forces the pipeline to
-        # actually process the not-yet-tested tail. Restore to 10000 alongside
-        # removing the push trigger above once testing is done.
-        default: "11000"
+        default: "10000"
 
 concurrency:
   # Scoped per-ref: a new commit on a given branch cancels and supersedes
@@ -162,19 +147,15 @@ jobs:
       - name: Generate shards
         id: generate
         run: |
-          # TEMPORARY: '11000' is the push-trigger fallback since the
-          # `inputs` context is empty on non-workflow_dispatch events (the
+          # '10000' is the fallback for schedule-triggered runs, since the
+          # `inputs` context is only populated for workflow_dispatch (the
           # input schema's default above only applies to the manual "Run
-          # workflow" form). Restore to '10000' here too once the push
-          # trigger and the temporarily-bumped top_k default are removed
-          # post-testing.
+          # workflow" form).
           #
-          # Shard sizes now use the script's real defaults (250 generative /
-          # 500 embedding, ~44+22=66 shards at this top_k) — the earlier
-          # --shard-size-* 10 override would produce over 1000 shards per
-          # mode at this scale, well past GitHub's 256-jobs-per-matrix cap.
+          # Shard sizes use the script's real defaults (250/500 for the
+          # x1 tier, 100/50 for the x2/x4 tiers by parameter count).
           python .github/scripts/generate_weekly_shards.py \
-            --top-k ${{ inputs.top_k || '11000' }} \
+            --top-k ${{ inputs.top_k || '10000' }} \
             --output-dir shards
 
       - name: Upload shard artifacts
@@ -185,13 +166,12 @@ jobs:
           retention-days: 1
 
   weekly-model-scan:
-    name: Weekly model scan (${{ matrix.mode }} shard ${{ matrix.shard_index }})
+    name: Weekly model scan (${{ matrix.mode }} ${{ matrix.runner }} shard ${{ matrix.shard_index }})
     needs: generate-matrix
-    runs-on:
-      - x86_64
-      - spyre_pf_x1
-      - linux
-      - image_torch_spyre_pinned
+    # matrix.runner is "x1"/"x2"/"x4" (generate_weekly_shards.py routes models
+    # by parameter count: bigger models get more memory + more cards). All
+    # three labels must be in .github/actionlint.yaml.
+    runs-on: ${{ fromJSON(format('["x86_64","{0}","linux","image_torch_spyre_pinned"]', matrix.runner == 'x4' && 'spyre_pf_x4' || matrix.runner == 'x2' && 'spyre_pf_x2' || 'spyre_pf_x1')) }}
     # A shard can still run for a while depending on its size; the cadence is
     # weekly so a generous ceiling is safe.
     timeout-minutes: 4320
@@ -212,6 +192,10 @@ jobs:
         with:
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
 
       - uses: ./.github/actions/build-hf-adapters
         with:

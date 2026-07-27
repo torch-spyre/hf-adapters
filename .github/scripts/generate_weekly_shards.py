@@ -9,11 +9,34 @@ fetch/compute step and emits a JSON matrix via GITHUB_OUTPUT for a downstream
 under --output-dir; downstream jobs load their shard via
 `weekly_test.py --model-list-file`.
 
+Models are routed to one of three runner tiers by parameter count, each with
+more memory (and more cards) than the last:
+
+  - runner="x1" (spyre_pf_x1, 1 card):  parameters <  --x1-max-params
+  - runner="x2" (spyre_pf_x2, 2 cards): --x1-max-params <= parameters <= --x2-max-params
+  - runner="x4" (spyre_pf_x4, 4 cards): parameters >  --x2-max-params
+
+so a model doesn't share a batch with (and inflate the memory footprint
+of) much smaller ones. See push-to-clickhouse.yaml's weekly-model-scan job
+for how `matrix.runner` selects the actual runs-on label.
+
+Per-tier shard sizes do NOT need to be small: weekly_test.py already
+re-chunks whatever list it's given into fresh-OS-process batches of
+GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS/EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS
+regardless of shard size, which is what actually bounds how many models'
+memory can accumulate in one process before a clean restart. A tiny shard
+size buys no extra safety over a large one — it only multiplies GitHub
+Actions job count, and matrices are hard-capped at 256 jobs total.
+
 Usage (called by the GHA workflow):
     python .github/scripts/generate_weekly_shards.py \
         --top-k 10000 \
         --shard-size-generative 250 \
         --shard-size-embedding 500 \
+        --x1-max-params 7000000000 \
+        --x2-max-params 12000000000 \
+        --x2-shard-size 100 \
+        --x4-shard-size 50 \
         --output-dir shards
 """
 
@@ -40,11 +63,38 @@ def _chunk(rows: list[dict], shard_size: int) -> list[list[dict]]:
     return [rows[i : i + shard_size] for i in range(0, len(rows), shard_size)]
 
 
+def _tier_for(row: dict, x1_max_params: int, x2_max_params: int) -> str:
+    """Return "x1"/"x2"/"x4" for *row* by parameter count.
+
+    Unknown/non-numeric parameter counts default to "x1" (the smallest,
+    least risky tier) rather than being treated as large.
+    """
+    params = row.get("parameters")
+    if not isinstance(params, (int, float)):
+        return "x1"
+    if params < x1_max_params:
+        return "x1"
+    if params <= x2_max_params:
+        return "x2"
+    return "x4"
+
+
 def generate_shards(
-    top_k: int, shard_size_generative: int, shard_size_embedding: int, output_dir: Path
+    top_k: int,
+    shard_size_generative: int,
+    shard_size_embedding: int,
+    x1_max_params: int,
+    x2_max_params: int,
+    x2_shard_size: int,
+    x4_shard_size: int,
+    output_dir: Path,
 ) -> list[dict]:
     """Fetch both mode's top-K lists once, write shard JSON files, and return
-    the combined matrix (list of {mode, shard_index, shard_file} dicts).
+    the combined matrix (list of {mode, shard_index, shard_file, runner} dicts).
+
+    Within each mode, models are split into three parameter-count tiers (see
+    module docstring), each chunked at its own shard size and tagged with
+    the runner ("x1"/"x2"/"x4") that ends up handling it.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     fetchers = {
@@ -61,17 +111,32 @@ def generate_shards(
         for row in rows:
             row.pop("model_info", None)
 
-        shards = _chunk(rows, shard_size)
-        print(
-            f"{mode}: fetched {len(rows)} model(s), split into {len(shards)} "
-            f"shard(s) of up to {shard_size} each"
-        )
-        for shard_index, shard_rows in enumerate(shards):
-            shard_file = f"{mode}-shard-{shard_index:03d}.json"
-            (output_dir / shard_file).write_text(json.dumps(shard_rows))
-            matrix.append(
-                {"mode": mode, "shard_index": shard_index, "shard_file": shard_file}
+        by_tier: dict[str, list[dict]] = {"x1": [], "x2": [], "x4": []}
+        for row in rows:
+            by_tier[_tier_for(row, x1_max_params, x2_max_params)].append(row)
+
+        tier_shard_sizes = {"x1": shard_size, "x2": x2_shard_size, "x4": x4_shard_size}
+        mode_shard_count = 0
+        for runner, group_rows in by_tier.items():
+            group_shard_size = tier_shard_sizes[runner]
+            shards = _chunk(group_rows, group_shard_size)
+            mode_shard_count += len(shards)
+            print(
+                f"{mode} ({runner}): {len(group_rows)} model(s), split into "
+                f"{len(shards)} shard(s) of up to {group_shard_size} each"
             )
+            for shard_index, shard_rows in enumerate(shards):
+                shard_file = f"{mode}-{runner}-shard-{shard_index:03d}.json"
+                (output_dir / shard_file).write_text(json.dumps(shard_rows))
+                matrix.append(
+                    {
+                        "mode": mode,
+                        "shard_index": shard_index,
+                        "shard_file": shard_file,
+                        "runner": runner,
+                    }
+                )
+        print(f"{mode}: {len(rows)} model(s) total, {mode_shard_count} shard(s)")
 
     return matrix
 
@@ -110,6 +175,38 @@ def main() -> None:
         help="Models per embedding shard.",
     )
     parser.add_argument(
+        "--x1-max-params",
+        type=int,
+        default=7_000_000_000,
+        help="Models with < this many parameters stay on spyre_pf_x1 (1 card).",
+    )
+    parser.add_argument(
+        "--x2-max-params",
+        type=int,
+        default=12_000_000_000,
+        help=(
+            "Models with parameters in [--x1-max-params, --x2-max-params] go "
+            "to spyre_pf_x2 (2 cards); above this go to spyre_pf_x4 (4 cards)."
+        ),
+    )
+    parser.add_argument(
+        "--x2-shard-size",
+        type=int,
+        default=100,
+        help=(
+            "Models per x2-tier shard. Doesn't need to be small — "
+            "weekly_test.py's own per-process batching already bounds memory "
+            "accumulation regardless of shard size; this just controls "
+            "GitHub Actions job count (matrices cap at 256 jobs total)."
+        ),
+    )
+    parser.add_argument(
+        "--x4-shard-size",
+        type=int,
+        default=50,
+        help="Models per x4-tier shard.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("shards"),
@@ -121,6 +218,10 @@ def main() -> None:
         top_k=args.top_k,
         shard_size_generative=args.shard_size_generative,
         shard_size_embedding=args.shard_size_embedding,
+        x1_max_params=args.x1_max_params,
+        x2_max_params=args.x2_max_params,
+        x2_shard_size=args.x2_shard_size,
+        x4_shard_size=args.x4_shard_size,
         output_dir=args.output_dir,
     )
 

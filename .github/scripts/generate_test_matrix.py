@@ -3,13 +3,15 @@
 Generate dynamic test matrices for GitHub Actions workflows.
 
 This script reads the model registry and generates JSON matrices for different
-test suites. It supports manual exclusions passed as command-line arguments.
+test suites. It supports manual exclusions and an allowlist filter passed as
+command-line arguments.
 
 Usage:
-    python generate_test_matrix.py [--exclude MODEL_KEY ...]
+    python generate_test_matrix.py [--exclude MODEL_PATH ...] [--only MODEL_PATH ...]
 
 Example:
     python generate_test_matrix.py --exclude granite-vision phi4
+    python generate_test_matrix.py --only Qwen/Qwen3-0.6B ministral/Ministral-3B-Instruct
 """
 
 import argparse
@@ -24,17 +26,20 @@ sys.path.insert(0, str(project_root))
 import tests.model_registry  # noqa: E402
 
 
-def generate_matrices(exclude_models=None):
+def generate_matrices(exclude_models=None, only_models=None):
     """
     Generate test matrices from the model registry.
 
     Args:
         exclude_models: List of model paths to exclude from all matrices
+        only_models: If non-empty, restrict all matrices to just these model
+            paths (applied after exclusions). Empty/None = no restriction.
 
     Returns:
         dict: Dictionary with 'causal', 'embed', 'vision', and 'combined' matrix lists
     """
     exclude_models = set(exclude_models or [])
+    only_models = set(only_models or [])
 
     # Apply exclusions
     causal_paths = [
@@ -46,6 +51,15 @@ def generate_matrices(exclude_models=None):
     vision_paths = [
         k for k in tests.model_registry.VISION_PATHS if k not in exclude_models
     ]
+    reranker_paths = [
+        k for k in tests.model_registry.RERANKER_PATHS if k not in exclude_models
+    ]
+
+    # Apply allowlist filter, if given
+    if only_models:
+        causal_paths = [k for k in causal_paths if k in only_models]
+        embed_paths = [k for k in embed_paths if k in only_models]
+        vision_paths = [k for k in vision_paths if k in only_models]
 
     # Combine for jobs that test both types
     combined_paths = causal_paths + embed_paths
@@ -55,6 +69,7 @@ def generate_matrices(exclude_models=None):
         "embed": embed_paths,
         "vision": vision_paths,
         "combined": combined_paths,
+        "reranker": reranker_paths,
     }
 
 
@@ -73,6 +88,7 @@ def format_for_github_actions(matrices):
         "embed_matrix": json.dumps(matrices["embed"]),
         "vision_matrix": json.dumps(matrices["vision"]),
         "combined_matrix": json.dumps(matrices["combined"]),
+        "reranker_matrix": json.dumps(matrices["reranker"]),
     }
 
 
@@ -109,11 +125,18 @@ def main():
         default=[],
         help="Model keys to exclude from all matrices (e.g., granite-vision phi4)",
     )
+    parser.add_argument(
+        "--only",
+        nargs="*",
+        default=[],
+        help="If given, restrict all matrices to just these model paths "
+        "(e.g., Qwen/Qwen3-0.6B ministral/Ministral-3B-Instruct)",
+    )
 
     args = parser.parse_args()
 
     # Generate matrices
-    matrices = generate_matrices(exclude_models=args.exclude)
+    matrices = generate_matrices(exclude_models=args.exclude, only_models=args.only)
 
     # Print summary for workflow logs
     print("Generated test matrices:")
@@ -129,9 +152,14 @@ def main():
     print(
         f"  Combined ({len(matrices['combined'])}): {', '.join(matrices['combined'])}"
     )
+    print(
+        f"  Reranker models ({len(matrices['reranker'])}): {', '.join(matrices['reranker'])}"
+    )
 
     if args.exclude:
         print(f"\nExcluded models: {', '.join(args.exclude)}")
+    if args.only:
+        print(f"\nRestricted to models: {', '.join(args.only)}")
 
     # Format for GitHub Actions
     outputs = format_for_github_actions(matrices)
