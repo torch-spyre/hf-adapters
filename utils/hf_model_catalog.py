@@ -30,6 +30,30 @@ logging.getLogger("transformers").setLevel(logging.ERROR)
 # Get the resources directory (parent of resources/__init__.py)
 RESOURCES_DIR: Path = Path(__file__).resolve().parent.parent / "resources"
 
+# Manually-maintained model-id lists (one id per line; '#' comments and blank
+# lines ignored). See load_curated_model_ids().
+CURATED_GENERATIVE_MODELS_FILE: Path = RESOURCES_DIR / "generative_models_curated.txt"
+CURATED_EMBEDDING_MODELS_FILE: Path = RESOURCES_DIR / "embedding_models_curated.txt"
+
+
+def load_curated_model_ids(path: Path) -> list[str]:
+    """Load Hugging Face model ids from a curated list file.
+
+    The file holds one model id per line. Blank lines and lines whose first
+    non-whitespace character is ``#`` are ignored, as is any inline ``#``
+    comment following an id. Surrounding whitespace is stripped. Order is
+    preserved and duplicates are dropped (first occurrence wins).
+    """
+    seen: set[str] = set()
+    model_ids: list[str] = []
+    for raw_line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line or line in seen:
+            continue
+        seen.add(line)
+        model_ids.append(line)
+    return model_ids
+
 # Metadata fields requested from list_models for every fetcher.
 EXPAND_FIELDS: list[str] = [
     "config",

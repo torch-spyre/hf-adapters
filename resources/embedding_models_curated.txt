@@ -1,0 +1,16 @@
+# Curated list of embedding (feature-extraction / sentence-similarity) Hugging Face model ids.
+# Maintained manually. One model id per line.
+# Lines starting with '#' and blank lines are ignored.
+
+
+# Granite Embedding
+ibm-granite/granite-embedding-small-english-r2
+ibm-granite/granite-embedding-english-r2
+ibm-granite/granite-embedding-97m-multilingual-r2
+ibm-granite/granite-embedding-311m-multilingual-r2
+
+ibm-granite/granite-embedding-30m-english
+ibm-granite/granite-embedding-125m-english
+ibm-granite/granite-embedding-107m-multilingual
+ibm-granite/granite-embedding-278m-multilingual
+
