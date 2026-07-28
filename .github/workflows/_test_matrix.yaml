@@ -25,7 +25,7 @@ on:
         description: Image scaleSetLabel to select (image_torch_spyre | image_torch_spyre_pinned | image_torch_spyre_pr_<KEY>)
         required: false
         type: string
-        default: image_torch_spyre
+        default: image_torch_spyre_shadow
 
       # pytest CLI flags for the single-card (spyre_pf_x1) test jobs. Passed
       # verbatim to every `pytest ...` call (and forwarded to pytest by the

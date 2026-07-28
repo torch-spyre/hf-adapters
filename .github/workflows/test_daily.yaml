@@ -1,6 +1,10 @@
 name: test_daily
 
 on:
+  # shadow-resource-validation only (DO NOT MERGE): fire on this PR (base main)
+  # so pushes exercise the /next-image shadow runner sets.
+  pull_request:
+    branches: [main]
   schedule:
     # Runs at 06:00 UTC every day
     - cron: "0 6 * * *"
@@ -116,7 +120,7 @@ jobs:
       - x86_64
       - spyre_pf_x1
       - linux
-      - ${{ inputs.runner_label || 'image_torch_spyre' }}
+      - ${{ inputs.runner_label || 'image_torch_spyre_shadow' }}
     timeout-minutes: 120
     strategy:
       fail-fast: false

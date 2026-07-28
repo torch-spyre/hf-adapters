@@ -9,3 +9,7 @@ self-hosted-runner:
     - spyre_pf_x2__pvc_1tb_x1
     - image_spyre_inference
     - image_torch_spyre
+    # shadow-resource-validation only (DO NOT MERGE): isolated shadow ARC
+    # runner-set label so this branch's suites land on the /next-image shadow
+    # sets instead of prod. Mirrors spyre-frameworks shadow-overlays.
+    - image_torch_spyre_shadow

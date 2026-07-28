@@ -16,6 +16,10 @@ name: integration-tests
 #     -f pr_url_hash=$(echo -n "${{ github.event.pull_request.html_url }}" | sha256sum | cut -c1-16)
 # ---------------------------------------------------------------------------
 on:
+  # shadow-resource-validation only (DO NOT MERGE): fire on this PR (base main)
+  # so pushes exercise the /next-image shadow runner sets.
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       # ---- Upstream provenance ----------------
@@ -129,7 +133,7 @@ jobs:
     needs: provenance
     uses: ./.github/workflows/_test_matrix.yaml
     with:
-      image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
+      image_label: ${{ inputs.runner_label || 'image_torch_spyre_shadow' }}
       extra_test_flags: -vvv -s
       extra_test_flags_multi_spyre: -vvv -s
       ref: ${{ inputs.ref || '' }}
