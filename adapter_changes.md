@@ -189,3 +189,31 @@ Every adapter applies the following transformations via shared utilities in `hf_
 | Post-norm architecture | — | — | — | — | — | — | — | — | — | — | ✓ |
 | Weight-free LayerNorm | — | — | — | — | — | — | — | — | — | ✓ | — |
 | Text backbone extraction | — | — | — | — | — | ✓ | — | — | — | — | — |
+
+---
+
+## DSpark Speculative-Decoding Drafters (`hf_dspark_qwen3`, `hf_dspark_gemma4`, `hf_dspark_granite`)
+
+DSpark drafters are EAGLE-3-style **block proposers**, not causal-LMs: given the
+target model's intermediate hidden states (concatenated over `target_layer_ids`)
+plus a masked noise block, they propose a whole block of tokens in one shot. The
+adapter's public forward is therefore `_run_draft_block` (context features + noise
+block → block hidden states), consumed by DeepSpec's `build_dspark_proposal`, not
+the token-by-token `generate` loop. Routing is by **architecture name**
+(`*DSparkModel`) via `ARCH_TO_ADAPTER_MODULE_MAPPING`, since drafters reuse their
+base model's config class.
+
+| Change | Stock DSpark drafter | Spyre adapter |
+|--------|----------------------|---------------|
+| **Attention** | `K`/`V` = concat of projected context K/V and noise-block K/V; non-causal within the block | Same, at a **fixed** stick-aligned `ctx_pad + block` width with a CPU-built additive `-inf` mask over the context zero-pad and kv tail (`build_ctx_block_mask`); no per-token KV cache |
+| **RoPE** | element-wise per layer | Precomputed rotation matrices applied by matmul (`apply_rope_matmul`), sliced on the sequence axis for the concat-KV window |
+| **Context projection `fc`** | `hidden_norm(fc(ctx))` on device | Run on CPU (fp32) — the wide reduction dim (`num_layers·hidden`) has no Spyre matmul layout for a non-canonical (e.g. cross-card) context tensor |
+| **LM head / markov `w2`** | full-vocab matmuls | Stick-padded (`pad_lm_head`); `compute_logits` sliced back to the true vocab and family softcap / logits-scaling reapplied |
+| **Markov head** | `sample_block_tokens` runs `markov_w1` (gather) on device | Sample loop on host; per-step bias via a CPU-snapshot `markov_w1` gather + the padded on-device `markov_w2` |
+| **Token embedding** | `nn.Embedding` on device | CPU gather against a weight snapshot, moved to device (with the family `embedding_multiplier`) |
+| **Confidence head** | trims the block to a confident prefix | Disabled at `confidence_threshold=0` (full block kept) — its path also runs the device `markov_w1` against CPU ids |
+
+Per-family specifics mirror the corresponding *target* adapters: Qwen 3 has
+per-head Q/K RMSNorm; Granite carries the attention / embedding / residual
+multipliers and logits scaling; Gemma 4 has its own four-LayerNorm block with a
+per-layer `layer_scalar`, scale-free V-norm, and `attention_k_eq_v` V-aliasing.
