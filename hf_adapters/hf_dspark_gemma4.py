@@ -49,11 +49,12 @@ from hf_adapters._dspark_common import (
 )
 from hf_adapters.hf_common import (
     DEVICE,
+    InvFreqShim,
     PrecomputedRotaryEmbedding,
     apply_rope_matmul,
     pad_lm_head,
-    patch_rmsnorm,
 )
+from hf_adapters.hf_gemma4 import _patch_gemma4_rmsnorm
 
 CTX_PAD = 56
 
@@ -69,7 +70,10 @@ def _make_gemma4_dspark_block(layer, *, kv_pad):
     head_dim = attn.head_dim
     q_norm = attn.q_norm
     k_norm = attn.k_norm
+    v_norm = attn.v_norm  # Gemma4 norms V too (with_scale=False)
     scaling = attn.scaling
+    # attention_k_eq_v: V is aliased from k_proj (no separate v_proj) on this model.
+    k_eq_v = attn.v_proj is None
     layer_scalar = float(layer.layer_scalar.item())
 
     def block_forward(hidden_states, target_hidden_states, selected_freqs, attn_mask):
@@ -82,14 +86,18 @@ def _make_gemma4_dspark_block(layer, *, kv_pad):
         q = attn.q_proj(h).view(bsz, q_len, -1, head_dim)
         k_ctx = attn.k_proj(target_hidden_states)
         k_noise = attn.k_proj(h)
-        v_ctx = attn.v_proj(target_hidden_states)
-        v_noise = attn.v_proj(h)
+        # attention_k_eq_v: alias V from k_proj; else use the separate v_proj.
+        if k_eq_v:
+            v_ctx, v_noise = k_ctx, k_noise
+        else:
+            v_ctx = attn.v_proj(target_hidden_states)
+            v_noise = attn.v_proj(h)
         k = torch.cat([k_ctx, k_noise], dim=1).view(bsz, ctx_len + q_len, -1, head_dim)
         v = torch.cat([v_ctx, v_noise], dim=1).view(bsz, ctx_len + q_len, -1, head_dim)
 
         q = q_norm(q).transpose(1, 2)
         k = k_norm(k).transpose(1, 2)
-        v = v.transpose(1, 2)
+        v = v_norm(v).transpose(1, 2)  # Gemma4 norms V (scale-free)
 
         kv_len = ctx_len + q_len
         q = apply_rope_matmul(q, selected_freqs[:, ctx_len:kv_len])
@@ -146,9 +154,22 @@ def prepare_for_spyre(model):
 
     block_size = int(model.block_size)
     kv_pad = ((CTX_PAD + block_size + 31) // 32) * 32
-    model._spyre_rope = PrecomputedRotaryEmbedding(model.rotary_emb)
+    # Gemma4's rotary registers its freqs per attention type
+    # (``full_attention_inv_freq`` / ``full_attention_attention_scaling``) rather
+    # than the bare ``inv_freq`` PrecomputedRotaryEmbedding reads, so wrap those
+    # buffers via InvFreqShim (the hf_gemma4 target-adapter pattern). The drafter
+    # uses a single full-attention rotary for all layers.
+    rope = model.rotary_emb
+    model._spyre_rope = PrecomputedRotaryEmbedding(
+        InvFreqShim(
+            rope.full_attention_inv_freq,
+            float(rope.full_attention_attention_scaling),
+        )
+    )
 
-    patch_rmsnorm(Gemma4RMSNorm)
+    # Gemma4RMSNorm uses ``.eps`` (not ``variance_epsilon``) and is optionally
+    # scale-free — use the Gemma4-specific patch, not the generic one.
+    _patch_gemma4_rmsnorm(Gemma4RMSNorm)
     pad_lm_head(model)
     _pad_markov_w2(model)
     snapshot_cpu_embeddings(model)
