@@ -47,7 +47,9 @@ from hf_adapters._dspark_common import (
     embed_noise_block,
     install_spyre_compute_logits,
     install_spyre_markov,
+    project_context,
     snapshot_cpu_embeddings,
+    snapshot_cpu_fc,
 )
 from hf_adapters.hf_common import (
     DEVICE,
@@ -134,7 +136,7 @@ def _run_draft_block(
     """Gemma4 DSpark block-propose forward (own block; shared ctx/mask/embed)."""
     spec = model._spyre_dspark
     ctx_pad, kv_pad, block_size = spec["ctx_pad"], spec["kv_pad"], spec["block_size"]
-    ctx = model.hidden_norm(model.fc(target_hidden_states))
+    ctx = project_context(model, target_hidden_states)
     h = embed_noise_block(model, draft_input_ids)
     q_len = h.shape[1]
     mask = build_ctx_block_mask(
@@ -175,6 +177,7 @@ def prepare_for_spyre(model):
     pad_lm_head(model)
     _pad_markov_w2(model)
     snapshot_cpu_embeddings(model)
+    snapshot_cpu_fc(model)
     install_spyre_compute_logits(model)
     install_spyre_markov(model)
     model.confidence_head = None  # unused at threshold 0; see _dspark_common

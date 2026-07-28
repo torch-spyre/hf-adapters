@@ -190,6 +190,7 @@ def prepare_dspark_common(model, rmsnorm_cls, *, ctx_pad, kv_pad, use_qk_norm):
     pad_lm_head(model)
     _pad_markov_w2(model)
     snapshot_cpu_embeddings(model)
+    snapshot_cpu_fc(model)
     install_spyre_compute_logits(model)
     install_spyre_markov(model)
     # Disable the confidence head: at confidence_threshold=0 the full block is
@@ -294,6 +295,60 @@ def markov_bias(model, prev_token_ids):
     return bias[..., :real_vocab]
 
 
+def snapshot_cpu_fc(model):
+    """Snapshot the context-projection ``fc`` + ``hidden_norm`` weights on CPU.
+
+    ``fc`` is ``Linear(num_layers*hidden -> hidden)`` applied once to the
+    concatenated target context. The reduction dim (num_layers*hidden, e.g.
+    12800/19200/20480) has no viable Spyre matmul layout when the context tensor
+    arrives with a non-canonical layout (e.g. a P2P-received buffer) —
+    ``aten.bmm: no supported output layout``. It's a one-shot projection on a tiny
+    tensor, off the autoregressive loop, so we run it on CPU (fp32, exact) and
+    return the result on device — the same host boundary spyre_draft.py used, and
+    analogous to the RoPE / embedding CPU fallbacks. Snapshot the weights here so
+    the projection is independent of where ``_move_to_spyre_with_layout`` leaves
+    ``fc``/``hidden_norm``.
+    """
+    fc = getattr(model, "fc", None)
+    hn = getattr(model, "hidden_norm", None)
+    if fc is None or hn is None:
+        return
+    model._spyre_fc_w_cpu = fc.weight.detach().to("cpu", torch.float32).contiguous()
+    model._spyre_fc_b_cpu = (
+        None if fc.bias is None else fc.bias.detach().to("cpu", torch.float32)
+    )
+    cfg = getattr(model, "config", None)
+    model._spyre_hn_eps = float(
+        getattr(hn, "eps", None)
+        or getattr(hn, "variance_epsilon", None)
+        or getattr(cfg, "rms_norm_eps", 1e-6)
+    )
+    model._spyre_hn_w_cpu = (
+        hn.weight.detach().to("cpu", torch.float32).contiguous()
+        if getattr(hn, "with_scale", True) and hasattr(hn, "weight")
+        else None
+    )
+
+
+def project_context(model, target_hidden_states):
+    """``hidden_norm(fc(ctx))`` — on CPU when snapshotted, else on device.
+
+    When ``snapshot_cpu_fc`` ran, compute the projection + RMSNorm on host (fp32)
+    against the CPU snapshots and return on device (dtype-matched). Otherwise fall
+    back to the model's on-device ``fc``/``hidden_norm``.
+    """
+    if not hasattr(model, "_spyre_fc_w_cpu"):
+        return model.hidden_norm(model.fc(target_hidden_states))
+    xf = target_hidden_states.to("cpu", torch.float32)
+    proj = torch.nn.functional.linear(xf, model._spyre_fc_w_cpu, model._spyre_fc_b_cpu)
+    var = (proj * proj).mean(-1, keepdim=True)
+    proj = proj * torch.rsqrt(var + model._spyre_hn_eps)
+    if model._spyre_hn_w_cpu is not None:
+        proj = proj * model._spyre_hn_w_cpu
+    dtype = model.embed_tokens.weight.dtype
+    return proj.to(DEVICE, dtype)
+
+
 def install_spyre_compute_logits(model):
     """Override ``compute_logits`` to trim the padded lm-head vocab + family scale.
 
@@ -386,9 +441,9 @@ def run_draft_block(
     spec = model._spyre_dspark
     ctx_pad, kv_pad, block_size = spec["ctx_pad"], spec["kv_pad"], spec["block_size"]
 
-    # Context projection fc + hidden_norm, once, on the [1, ctx_pad, n*hidden]
-    # concatenated target features. hidden_norm is the patched family RMSNorm.
-    ctx = model.hidden_norm(model.fc(target_hidden_states))
+    # Context projection fc + hidden_norm, once (CPU when snapshotted — the wide
+    # reduction dim has no Spyre matmul layout for a P2P-received ctx tensor).
+    ctx = project_context(model, target_hidden_states)
 
     h = embed_noise_block(model, draft_input_ids)  # [1, block, H] on device
     q_len = h.shape[1]
