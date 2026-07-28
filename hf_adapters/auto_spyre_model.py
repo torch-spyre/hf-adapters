@@ -78,6 +78,9 @@ from transformers.models.mistral3.configuration_mistral3 import Mistral3Config
 
 from hf_adapters import (
     hf_bert,
+    hf_dspark_gemma4,
+    hf_dspark_granite,
+    hf_dspark_qwen3,
     hf_gemma3,
     hf_gemma4,
     hf_gemma4_mm,
@@ -140,6 +143,19 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     XLMRobertaConfig: hf_xlm_roberta,
 }
 
+# Architecture-name mapping — consulted BEFORE the config-class map. DSpark
+# speculative-decoding *drafters* reuse their base model's config class
+# (``Qwen3Config`` / ``Gemma4TextConfig`` / ``GraniteConfig``) but carry a
+# distinct ``architectures`` entry (``*DSparkModel``). Config-class dispatch alone
+# would route them to the *target* adapter; keying on the architecture name sends
+# them to the drafter adapter instead. Normal targets have no entry here and fall
+# through to ``CONFIG_TO_ADAPTER_MODULE_MAPPING`` unchanged.
+ARCH_TO_ADAPTER_MODULE_MAPPING: dict[str, ModuleType] = {
+    "Qwen3DSparkModel": hf_dspark_qwen3,
+    "Gemma4DSparkModel": hf_dspark_gemma4,
+    "GraniteDSparkModel": hf_dspark_granite,
+}
+
 # Multimodal (image-text-to-text) mapping — used by
 # ``AutoSpyreModelForImageTextToText``. A multimodal checkpoint's config (e.g.
 # Granite4VisionConfig) appears here mapped to the *combined* two-tower adapter,
@@ -184,6 +200,14 @@ def resolve_adapter_module(
     model_config: PretrainedConfig = AutoConfig.from_pretrained(
         model_name_or_path, trust_remote_code=trust_remote_code
     )
+
+    # Architecture-name dispatch first: DSpark drafters share their base model's
+    # config class but carry a distinct ``*DSparkModel`` architecture, so route on
+    # the architecture name before falling through to config-class dispatch.
+    for arch in getattr(model_config, "architectures", None) or []:
+        if arch in ARCH_TO_ADAPTER_MODULE_MAPPING:
+            assert_spyre_dimensions(model_config, model_name=str(model_name_or_path))
+            return ARCH_TO_ADAPTER_MODULE_MAPPING[arch]
 
     if type(model_config) not in mapping:
         raise SpyreNoAdapterError(
