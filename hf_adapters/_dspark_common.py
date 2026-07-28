@@ -190,6 +190,13 @@ def prepare_dspark_common(model, rmsnorm_cls, *, ctx_pad, kv_pad, use_qk_norm):
     pad_lm_head(model)
     _pad_markov_w2(model)
     snapshot_cpu_embeddings(model)
+    install_spyre_compute_logits(model)
+    install_spyre_markov(model)
+    # Disable the confidence head: at confidence_threshold=0 the full block is
+    # always kept, so it is unused — and its _predict_confidence_logits path runs
+    # get_prev_embeddings (the Spyre markov_w1) against CPU ids, a device mix.
+    # Re-enable + route through markov_bias if a nonzero threshold is ever needed.
+    model.confidence_head = None
 
     cfg = model.config
     block_size = int(model.block_size)
@@ -285,6 +292,76 @@ def markov_bias(model, prev_token_ids):
     bias = mh.markov_w2(latent).to("cpu")
     real_vocab = getattr(mh, "_spyre_real_vocab", bias.shape[-1])
     return bias[..., :real_vocab]
+
+
+def install_spyre_compute_logits(model):
+    """Override ``compute_logits`` to trim the padded lm-head vocab + family scale.
+
+    ``pad_lm_head`` widens ``lm_head`` to a stick multiple, so the stock
+    ``compute_logits = lm_head(h)`` returns padded-vocab logits — which would let
+    the proposal index pad tokens and mismatches the real-vocab markov bias. Slice
+    back to the true vocab (``config.vocab_size``), apply the family
+    ``final_logit_softcapping`` (Gemma4) and ``logits_scaling`` divide (Granite);
+    Qwen3 has neither. Runs the head on-device, returns real-vocab logits on CPU
+    (where the markov loop + sampling live).
+    """
+    real_vocab = int(model.config.vocab_size)
+    softcap = getattr(model.config, "final_logit_softcapping", None)
+    softcap = float(softcap) if softcap is not None else None
+    logits_scaling = getattr(model, "logits_scaling", None)
+    logits_scaling = float(logits_scaling) if logits_scaling is not None else None
+    lm_head = model.lm_head
+
+    def compute_logits(hidden_states):
+        logits = lm_head(hidden_states).to("cpu")[..., :real_vocab]
+        if softcap is not None:
+            logits = torch.tanh(logits / softcap) * softcap
+        if logits_scaling is not None:
+            logits = logits / logits_scaling
+        return logits
+
+    model.compute_logits = compute_logits
+
+
+def install_spyre_markov(model):
+    """Override the markov head's ``sample_block_tokens`` for Spyre.
+
+    The stock loop calls ``markov_w1(prev)`` directly — but ``markov_w1`` is a
+    Spyre-device Embedding after the layout move, colliding with CPU token ids in
+    the (CPU-fallback) gather. Replace the loop with one that computes each step
+    bias via ``markov_bias`` (CPU-snapshot ``w1`` gather + stick-padded on-device
+    ``w2`` matmul, real vocab sliced back on CPU). ``base_logits`` already arrive on
+    CPU (from the padded lm-head + downstream slicing), so the whole per-block
+    correction runs on host with only the ``w2`` matmul on-device — no device mix.
+    No-op when the drafter has no markov head.
+    """
+    from deepspec.utils.sampling import sample_tokens
+
+    mh = getattr(model, "markov_head", None)
+    if mh is None or not hasattr(mh, "markov_w2"):
+        return
+
+    def sample_block_tokens(
+        base_logits, *, first_prev_token_ids, hidden_states, temperature=0.0
+    ):
+        base_logits = base_logits.to("cpu")
+        bsz, n, vocab = base_logits.shape
+        if n == 0:
+            return torch.empty(bsz, 0, dtype=torch.long), base_logits
+        corrected = torch.zeros(bsz, n, vocab, dtype=base_logits.dtype)
+        sampled = torch.zeros(bsz, n, dtype=torch.long)
+        prev = first_prev_token_ids.to("cpu").long()
+        for k in range(n):
+            step_logits = base_logits[:, k, :] + markov_bias(model, prev)
+            corrected[:, k, :] = step_logits
+            nxt = sample_tokens(
+                step_logits.unsqueeze(1), temperature=temperature
+            ).squeeze(1)
+            sampled[:, k] = nxt
+            prev = nxt
+        return sampled, corrected
+
+    mh.sample_block_tokens = sample_block_tokens
 
 
 def run_draft_block(

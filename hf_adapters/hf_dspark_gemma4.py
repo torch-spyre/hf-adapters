@@ -45,6 +45,8 @@ from hf_adapters._dspark_common import (
     _pad_markov_w2,
     build_ctx_block_mask,
     embed_noise_block,
+    install_spyre_compute_logits,
+    install_spyre_markov,
     snapshot_cpu_embeddings,
 )
 from hf_adapters.hf_common import (
@@ -173,6 +175,9 @@ def prepare_for_spyre(model):
     pad_lm_head(model)
     _pad_markov_w2(model)
     snapshot_cpu_embeddings(model)
+    install_spyre_compute_logits(model)
+    install_spyre_markov(model)
+    model.confidence_head = None  # unused at threshold 0; see _dspark_common
     model._spyre_dspark = {
         "ctx_pad": CTX_PAD,
         "kv_pad": kv_pad,
