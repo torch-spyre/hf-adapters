@@ -45,6 +45,7 @@ from hf_adapters._dspark_common import (
     _pad_markov_w2,
     build_ctx_block_mask,
     embed_noise_block,
+    snapshot_cpu_embeddings,
 )
 from hf_adapters.hf_common import (
     DEVICE,
@@ -90,8 +91,9 @@ def _make_gemma4_dspark_block(layer, *, kv_pad):
         k = k_norm(k).transpose(1, 2)
         v = v.transpose(1, 2)
 
-        q = apply_rope_matmul(q, selected_freqs[:, :, -q_len:])
-        k = apply_rope_matmul(k, selected_freqs)
+        kv_len = ctx_len + q_len
+        q = apply_rope_matmul(q, selected_freqs[:, ctx_len:kv_len])
+        k = apply_rope_matmul(k, selected_freqs[:, :kv_len])
 
         pad = kv_pad - k.shape[-2]
         if pad > 0:
@@ -149,6 +151,7 @@ def prepare_for_spyre(model):
     patch_rmsnorm(Gemma4RMSNorm)
     pad_lm_head(model)
     _pad_markov_w2(model)
+    snapshot_cpu_embeddings(model)
     model._spyre_dspark = {
         "ctx_pad": CTX_PAD,
         "kv_pad": kv_pad,

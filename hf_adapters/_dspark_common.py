@@ -137,11 +137,13 @@ def make_dspark_block(
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        # RoPE over the full ctx+block window (matmul form — the slice form
-        # mis-lowers in fp16 on Spyre). selected_freqs covers ctx_pad+block_size;
-        # the block queries take the trailing q_len rows.
-        q = apply_rope_matmul(q, selected_freqs[:, :, -q_len:])
-        k = apply_rope_matmul(k, selected_freqs)
+        # RoPE (matmul form — the slice form mis-lowers in fp16 on Spyre).
+        # selected_freqs is [B, L, 2, 2, D/2] over the ctx+block window; slice on
+        # the SEQUENCE axis (1) to match each tensor's length: K spans the whole
+        # ctx_len+q_len window, Q the trailing q_len (block) positions.
+        kv_len = ctx_len + q_len
+        q = apply_rope_matmul(q, selected_freqs[:, ctx_len:kv_len])
+        k = apply_rope_matmul(k, selected_freqs[:, :kv_len])
 
         # Pad K/V to the fixed kv_pad on the seq axis (mask handles the pad rows).
         pad = kv_pad - k.shape[-2]
@@ -187,6 +189,7 @@ def prepare_dspark_common(model, rmsnorm_cls, *, ctx_pad, kv_pad, use_qk_norm):
     patch_rmsnorm(rmsnorm_cls)
     pad_lm_head(model)
     _pad_markov_w2(model)
+    snapshot_cpu_embeddings(model)
 
     cfg = model.config
     block_size = int(model.block_size)
@@ -237,33 +240,48 @@ def _pad_markov_w2(model):
     mh._spyre_real_vocab = vocab
 
 
+def snapshot_cpu_embeddings(model):
+    """Keep CPU copies of the gather-only embedding weights.
+
+    ``nn.Embedding`` is a gather with no Spyre kernel (CPU fallback), so the
+    noise-block and markov ``w1`` lookups must run on CPU. But
+    ``_move_to_spyre_with_layout`` (which runs AFTER ``prepare_for_spyre``) moves
+    every parameter — including these embeddings — onto the Spyre device, which
+    would collide CPU ids with a Spyre weight. Snapshot the weights on CPU here so
+    the lookups are device-independent of where the move leaves the module; the
+    on-device matmuls (``markov_w2``, ``lm_head``, backbone) use the moved weights.
+    """
+    model._spyre_embed_w_cpu = model.embed_tokens.weight.detach().to("cpu")
+    mh = getattr(model, "markov_head", None)
+    if mh is not None and hasattr(mh, "markov_w1"):
+        model._spyre_markov_w1_cpu = mh.markov_w1.weight.detach().to("cpu")
+
+
 def embed_noise_block(model, draft_input_ids):
     """CPU embedding lookup for the noise block, returned on device.
 
-    ``nn.Embedding`` is a gather with no Spyre kernel (CPU fallback), so we look
-    up on CPU and move the result to the device — the same idiom the target
-    adapters use for embeddings. Applies the family ``embedding_multiplier`` (1.0
-    when the family has none) since the drafter's ``forward`` — which the block
-    path bypasses — is where that scale normally lives.
+    Gathers against the CPU weight snapshot (``snapshot_cpu_embeddings``) and moves
+    the result to the device. Applies the family ``embedding_multiplier`` (1.0 when
+    the family has none) since the drafter's ``forward`` — which the block path
+    bypasses — is where that scale normally lives.
     """
-    emb = model.embed_tokens(draft_input_ids.to("cpu"))
+    emb = F.embedding(draft_input_ids.to("cpu"), model._spyre_embed_w_cpu)
     mult = float(getattr(model, "embedding_multiplier", 1.0))
     if mult != 1.0:
         emb = emb * mult
-    return emb.to(DEVICE, model.embed_tokens.weight.dtype)
+    return emb.to(DEVICE, model._spyre_embed_w_cpu.dtype)
 
 
 def markov_bias(model, prev_token_ids):
     """One markov-head step bias ``markov_w2(markov_w1(prev))`` on device.
 
-    ``markov_w1`` is a CPU gather (like ``embed_noise_block``); ``markov_w2`` is
-    the stick-padded on-device matmul whose output is sliced back to the real
-    vocab on CPU (where the sample loop runs).
+    ``markov_w1`` is a CPU gather against the weight snapshot; ``markov_w2`` is the
+    stick-padded on-device matmul whose output is sliced back to the real vocab on
+    CPU (where the sample loop runs).
     """
     mh = model.markov_head
-    latent = mh.markov_w1(prev_token_ids.to("cpu")).to(
-        DEVICE, mh.markov_w2.weight.dtype
-    )
+    latent = F.embedding(prev_token_ids.to("cpu"), model._spyre_markov_w1_cpu)
+    latent = latent.to(DEVICE, mh.markov_w2.weight.dtype)
     bias = mh.markov_w2(latent).to("cpu")
     real_vocab = getattr(mh, "_spyre_real_vocab", bias.shape[-1])
     return bias[..., :real_vocab]
