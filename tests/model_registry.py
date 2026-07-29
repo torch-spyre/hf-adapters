@@ -232,6 +232,33 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_gemma4.py",
         "size": "12b",
     },
+    # DSpark speculative-decoding drafters (block proposers). kind="dspark_draft"
+    # keeps them out of the generate-based causal-LM harnesses (see CAUSAL_PATHS);
+    # tests/spyre/test_dspark_draft_spyre.py exercises the block-propose path.
+    # hf_dspark_qwen3.py
+    "dspark_qwen3": {
+        "name": "DSpark Qwen3 Drafter (block7)",
+        "path": "deepseek-ai/dspark_qwen3_4b_block7",
+        "adapter": "hf_dspark_qwen3.py",
+        "size": "0.6b",
+        "kind": "dspark_draft",
+    },
+    # hf_dspark_gemma4.py
+    "dspark_gemma4": {
+        "name": "DSpark Gemma 4 Drafter (block7)",
+        "path": "deepseek-ai/dspark_gemma4_12b_block7",
+        "adapter": "hf_dspark_gemma4.py",
+        "size": "1b",
+        "kind": "dspark_draft",
+    },
+    # hf_dspark_granite.py
+    "dspark_granite": {
+        "name": "DSpark Granite Drafter (block7)",
+        "path": "deepseek-ai/dspark_granite_4_1_8b_block7",
+        "adapter": "hf_dspark_granite.py",
+        "size": "1b",
+        "kind": "dspark_draft",
+    },
 }
 
 EMBEDDING_MODELS = {
@@ -469,8 +496,14 @@ def _select_representative_paths(
 # shared across all three selections. ``kind == "vlm"`` excludes bare vision towers.
 _include_gated_flag = _include_gated()
 
+# ``kind == "dspark_draft"`` entries are speculative-decoding drafters (block
+# proposers, driven by ``_run_draft_block`` — no ``generate``), so they are
+# registered for adapter-coverage but excluded from the generate-based CPU/Spyre
+# causal-LM harnesses; they are exercised by tests/spyre/test_dspark_draft_spyre.py.
 CAUSAL_PATHS: list[str] = _select_representative_paths(
-    CAUSAL_LM_MODELS, include_gated=_include_gated_flag
+    CAUSAL_LM_MODELS,
+    include_gated=_include_gated_flag,
+    predicate=lambda info: info.get("kind") != "dspark_draft",
 )
 EMBED_PATHS: list[str] = _select_representative_paths(
     EMBEDDING_MODELS, include_gated=_include_gated_flag

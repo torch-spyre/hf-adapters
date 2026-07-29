@@ -42,7 +42,6 @@ markov sample loop. The two things with no ready-made helper — the concat-KV
 non-causal block and the markov sample loop — live here.
 """
 
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
