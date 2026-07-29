@@ -65,9 +65,6 @@ markers = [
 [tool.uv.sources]
 torch-spyre = { git = "https://github.com/torch-spyre/torch-spyre", rev = "main" }
 oot-framework = { git = "https://github.com/torch-spyre/torch-spyre", subdirectory = "tests/oot_framework", rev = "main" }
-# The DSpark drafter modeling classes (and the sampling helper the draft adapters
-# call) live in DeepSpec, which isn't on PyPI — pull it from git for the test group.
-deepspec = { git = "https://github.com/deepseek-ai/DeepSpec.git", rev = "main" }
 # torch resolves to the +cpu build (via torch-spyre's index). torchvision must
 # come from the SAME PyTorch CPU index or PyPI hands us a CUDA-built wheel whose
 # C++ ops fail to register against +cpu torch.
@@ -103,5 +100,4 @@ test = [
     "pytest>=9.0,<9.1",
     "Pillow",
     "torchvision~=0.27.0",
-    "deepspec",
 ]
