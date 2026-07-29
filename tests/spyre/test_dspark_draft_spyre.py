@@ -21,41 +21,26 @@ its adapter, runs ``prepare_for_spyre`` + ``_run_draft_block`` on the Spyre card
 against a synthetic context, and asserts the block hidden states are finite with
 the expected shape.
 
-Skipped unless (a) DeepSpec (the drafter modeling classes) is importable and
-(b) a checkpoint path is provided per family via env:
-
-    DSPARK_DRAFT_QWEN3=<path> DSPARK_DRAFT_GRANITE=<path> DSPARK_DRAFT_GEMMA4=<path>
+The drafter checkpoints come from the model registry (``DSPARK_PATHS``), and the
+library resolves each path to its adapter (``resolve_adapter_module``) — no env
+vars needed. Skipped unless DeepSpec (the drafter modeling classes) is importable.
 
 Usage (on Spyre pod)::
 
-    DSPARK_DRAFT_QWEN3=deepseek-ai/dspark_qwen3_4b_block7 \
-      pytest -s -vvv tests/spyre/test_dspark_draft_spyre.py -k qwen3
+    pytest -s -vvv tests/spyre/test_dspark_draft_spyre.py
+    pytest -s -vvv tests/spyre/test_dspark_draft_spyre.py -k qwen3
 """
-
-import os
 
 import pytest
 import torch
+from model_registry import DSPARK_PATHS
 
 pytest.importorskip("deepspec", reason="DSpark drafter modeling requires DeepSpec")
 
-_FAMILIES = {
-    "qwen3": ("DSPARK_DRAFT_QWEN3", "hf_adapters.hf_dspark_qwen3"),
-    "granite": ("DSPARK_DRAFT_GRANITE", "hf_adapters.hf_dspark_granite"),
-    "gemma4": ("DSPARK_DRAFT_GEMMA4", "hf_adapters.hf_dspark_gemma4"),
-}
 
-
-@pytest.mark.parametrize("family", list(_FAMILIES))
-def test_dspark_draft_block(family):
+@pytest.mark.parametrize("ckpt", DSPARK_PATHS)
+def test_dspark_draft_block(ckpt):
     """prepare_for_spyre + _run_draft_block produce finite block hidden states."""
-    import importlib
-
-    env_var, module_name = _FAMILIES[family]
-    ckpt = os.environ.get(env_var)
-    if not ckpt:
-        pytest.skip(f"set {env_var}=<checkpoint> to run the {family} draft test")
-
     import torch_spyre  # noqa: F401
     from transformers import AutoConfig, AutoModelForCausalLM
 
@@ -66,12 +51,12 @@ def test_dspark_draft_block(family):
     dev = torch.device("spyre:0")
     hf_common.DEVICE = dev
 
-    # The adapter is selected by architecture (``*DSparkModel``); confirm the
-    # architecture-name dispatch routes this checkpoint to the expected module.
+    # The library resolves the checkpoint to its adapter by architecture
+    # (``*DSparkModel``); confirm it lands on a DSpark draft adapter module.
     resolved = resolve_adapter_module(ckpt)
-    assert resolved is importlib.import_module(
-        module_name
-    ), f"{ckpt} resolved to {resolved.__name__}, expected {module_name}"
+    assert resolved.__name__.rsplit(".", 1)[-1].startswith(
+        "hf_dspark_"
+    ), f"{ckpt} resolved to {resolved.__name__}, expected a DSpark draft adapter"
 
     arch = (AutoConfig.from_pretrained(ckpt).architectures or [""])[0]
     model = AutoModelForCausalLM.from_pretrained(

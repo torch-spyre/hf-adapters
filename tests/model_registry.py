@@ -505,6 +505,13 @@ CAUSAL_PATHS: list[str] = _select_representative_paths(
     include_gated=_include_gated_flag,
     predicate=lambda info: info.get("kind") != "dspark_draft",
 )
+# The DSpark drafter checkpoints (block proposers), one per adapter — exercised by
+# tests/spyre/test_dspark_draft_spyre.py via the block-propose ``_run_draft_block``.
+DSPARK_PATHS: list[str] = _select_representative_paths(
+    CAUSAL_LM_MODELS,
+    include_gated=_include_gated_flag,
+    predicate=lambda info: info.get("kind") == "dspark_draft",
+)
 EMBED_PATHS: list[str] = _select_representative_paths(
     EMBEDDING_MODELS, include_gated=_include_gated_flag
 )

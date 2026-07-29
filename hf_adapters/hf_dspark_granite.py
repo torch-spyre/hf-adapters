@@ -34,29 +34,22 @@ No per-head q/k RMSNorm (``use_qk_norm=False``).
 Usage: see ``hf_dspark_qwen3``.
 """
 
-from hf_adapters._dspark_common import prepare_dspark_common, run_draft_block
+# The block-propose forward is shared across families — reuse the common runner
+# under the adapter's public ``_run_draft_block`` name (see hf_dspark_qwen3).
+from hf_adapters._dspark_common import prepare_dspark_common
+from hf_adapters._dspark_common import (  # noqa: F401  (re-exported as the public forward)
+    run_draft_block as _run_draft_block,
+)
 
 CTX_PAD = 56
-
-
-def _run_draft_block(
-    model, draft_input_ids, target_hidden_states, selected_freqs, ctx_valid_len
-):
-    """DSpark block-propose forward — see ``_dspark_common.run_draft_block``."""
-    return run_draft_block(
-        model, draft_input_ids, target_hidden_states, selected_freqs, ctx_valid_len
-    )
 
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to the Granite DSpark drafter in-place."""
     from transformers.models.granite.modeling_granite import GraniteRMSNorm
 
-    from hf_adapters.hf_common import PrecomputedRotaryEmbedding
-
     block_size = int(model.block_size)
     kv_pad = ((CTX_PAD + block_size + 31) // 32) * 32
-    model._spyre_rope = PrecomputedRotaryEmbedding(model.rotary_emb)
     # Granite attention scale is the configured multiplier, not head_dim**-0.5.
     model._spyre_attn_scaling = float(model.config.attention_multiplier)
     prepare_dspark_common(

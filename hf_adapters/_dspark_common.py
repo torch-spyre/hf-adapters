@@ -48,6 +48,7 @@ import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
     DEVICE,
+    PrecomputedRotaryEmbedding,
     apply_rope_matmul,
     pad_lm_head,
     patch_rmsnorm,
@@ -182,8 +183,12 @@ def prepare_dspark_common(model, rmsnorm_cls, *, ctx_pad, kv_pad, use_qk_norm):
       full-vocab matmuls that would otherwise overflow the per-core EAR limit);
     - precompute RoPE and build the compiled concat-KV blocks.
 
-    The caller (family adapter) sets ``model._spyre_rope`` first (families differ
-    on the rotary source) and passes its RMSNorm class + attention scaling.
+    RoPE defaults to ``PrecomputedRotaryEmbedding(model.rotary_emb)`` (the standard
+    ``inv_freq`` rotary used by Qwen3/Granite). A family whose rotary source differs
+    may pre-set ``model._spyre_rope`` before calling this (e.g. Gemma4 wraps its
+    per-attention-type ``full_attention_inv_freq`` via ``InvFreqShim``); an already
+    set ``_spyre_rope`` is left untouched. The caller also passes its RMSNorm class
+    and may stash an attention-scaling override on ``model._spyre_attn_scaling``.
     """
     patch_rmsnorm(rmsnorm_cls)
     pad_lm_head(model)
@@ -197,6 +202,11 @@ def prepare_dspark_common(model, rmsnorm_cls, *, ctx_pad, kv_pad, use_qk_norm):
     # get_prev_embeddings (the Spyre markov_w1) against CPU ids, a device mix.
     # Re-enable + route through markov_bias if a nonzero threshold is ever needed.
     model.confidence_head = None
+
+    # Standard inv_freq rotary (Qwen3/Granite); a family with a different rotary
+    # source pre-sets ``_spyre_rope`` before calling (e.g. Gemma4's InvFreqShim).
+    if not hasattr(model, "_spyre_rope"):
+        model._spyre_rope = PrecomputedRotaryEmbedding(model.rotary_emb)
 
     cfg = model.config
     block_size = int(model.block_size)

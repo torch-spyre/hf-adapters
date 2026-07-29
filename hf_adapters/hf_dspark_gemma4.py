@@ -31,9 +31,10 @@ its own ``_make_compiled_block``):
 - ``final_logit_softcapping`` applied by the drafter's own ``compute_logits``
   downstream (not here).
 
-The concat-KV context handling, fixed ``ctx_pad``/``kv_pad`` widths, mask, RoPE
-(``apply_rope_matmul``), and CPU embedding/markov are shared with
-``_dspark_common``.
+The block-propose forward, concat-KV context handling, fixed ``ctx_pad``/``kv_pad``
+widths, mask, RoPE (``apply_rope_matmul``), and CPU embedding/markov are shared
+with ``_dspark_common`` — only the compiled decoder block below is Gemma4-specific
+(``run_draft_block`` loops whatever blocks ``prepare_for_spyre`` installs).
 
 Usage: see ``hf_dspark_qwen3``.
 """
@@ -43,16 +44,15 @@ import torch.nn.functional as F
 
 from hf_adapters._dspark_common import (
     _pad_markov_w2,
-    build_ctx_block_mask,
-    embed_noise_block,
     install_spyre_compute_logits,
     install_spyre_markov,
-    project_context,
     snapshot_cpu_embeddings,
     snapshot_cpu_fc,
 )
+from hf_adapters._dspark_common import (  # noqa: F401  (re-exported as the public forward)
+    run_draft_block as _run_draft_block,
+)
 from hf_adapters.hf_common import (
-    DEVICE,
     InvFreqShim,
     PrecomputedRotaryEmbedding,
     apply_rope_matmul,
@@ -128,28 +128,6 @@ def _make_gemma4_dspark_block(layer, *, kv_pad):
         return h * layer_scalar
 
     return torch.compile(block_forward, dynamic=False)
-
-
-def _run_draft_block(
-    model, draft_input_ids, target_hidden_states, selected_freqs, ctx_valid_len
-):
-    """Gemma4 DSpark block-propose forward (own block; shared ctx/mask/embed)."""
-    spec = model._spyre_dspark
-    ctx_pad, kv_pad, block_size = spec["ctx_pad"], spec["kv_pad"], spec["block_size"]
-    ctx = project_context(model, target_hidden_states)
-    h = embed_noise_block(model, draft_input_ids)
-    q_len = h.shape[1]
-    mask = build_ctx_block_mask(
-        ctx_valid_len,
-        ctx_pad,
-        block_size,
-        kv_pad,
-        q_len,
-        dtype=model.embed_tokens.weight.dtype,
-    ).to(DEVICE)
-    for compiled_block in model._spyre_compiled_blocks:
-        h = compiled_block(h, ctx, selected_freqs, mask)
-    return model.norm(h)
 
 
 def prepare_for_spyre(model):
