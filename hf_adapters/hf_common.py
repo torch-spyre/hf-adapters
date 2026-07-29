@@ -1711,7 +1711,7 @@ def make_standard_gqa_block(layer, is_res_mul: bool | None = None):
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
         attn_out = attn.o_proj(attn_out)
-        
+
         res_mult = None
         if not is_res_mul:
             h = residual + attn_out
