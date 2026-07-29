@@ -26,81 +26,13 @@ Usage::
     outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
-import torch
-import torch.nn.functional as F
-
 from hf_adapters.hf_common import (
-    apply_rope_matmul,
     get_backbone,
-    kv_cache_update,
+    make_standard_gqa_block,
     pad_lm_head,
     patch_rmsnorm,
     prepare_rope_and_heads,
 )
-
-
-def _make_compiled_block(layer):
-    """Compiled block for Granite 3.3: separate QKV, residual multiplier."""
-    attn = layer.self_attn
-    mlp = layer.mlp
-    input_ln = layer.input_layernorm
-    post_attn_ln = layer.post_attention_layernorm
-    res_mult = layer.residual_multiplier
-    v_head_dim = getattr(attn, "v_head_dim", attn.head_dim)
-
-    def block_forward(
-        hidden_states,
-        selected_freqs,
-        attn_mask,
-        key_cache,
-        value_cache,
-        is_filling,
-        token_index,
-        cache_position,
-    ):
-        residual = hidden_states
-        h = input_ln(hidden_states)
-
-        bsz, seq_len, _ = h.shape
-        q = attn.q_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
-        k = attn.k_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
-        v = attn.v_proj(h).view(bsz, seq_len, -1, v_head_dim).transpose(1, 2)
-
-        q = apply_rope_matmul(q, selected_freqs)
-        k = apply_rope_matmul(k, selected_freqs)
-
-        key_cache, value_cache = kv_cache_update(
-            k,
-            v,
-            key_cache,
-            value_cache,
-            is_filling,
-            token_index,
-            cache_position,
-        )
-
-        attn_out = F.scaled_dot_product_attention(
-            q,
-            key_cache,
-            value_cache,
-            attn_mask=attn_mask,
-            dropout_p=0.0,
-            scale=attn.scaling,
-            enable_gqa=True,
-        )
-        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
-        attn_out = attn.o_proj(attn_out)
-
-        h = residual + attn_out * res_mult
-
-        residual = h
-        h = post_attn_ln(h)
-        h = mlp(h)
-        h = residual + h * res_mult
-
-        return h, key_cache, value_cache
-
-    return torch.compile(block_forward, dynamic=False)
 
 
 def _run_backbone_forward(
@@ -173,5 +105,5 @@ def prepare_for_spyre(model):
     patch_rmsnorm(GraniteRMSNorm)
     pad_lm_head(model)
     model._spyre_compiled_blocks = [
-        _make_compiled_block(layer) for layer in get_backbone(model).layers
+        make_standard_gqa_block(layer, True) for layer in get_backbone(model).layers
     ]
