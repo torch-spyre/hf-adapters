@@ -544,6 +544,7 @@ NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = _non_blocking(
         "smollm3",
         "gemma3_unsloth",
         "ministral3",
+        "pythia_410m",
         "gemma4_google",
         "gemma4_base",
     ),
