@@ -2070,6 +2070,27 @@ def make_vision_encoder_block(
     return torch.compile(block_forward, dynamic=False)
 
 
+def add_token_type_embedding(h, emb, token_type_ids):
+    """Add the token-type embedding, special-casing a single-row table.
+
+    Checkpoints with ``type_vocab_size == 1`` (bge-m3, bge-reranker-v2-m3,
+    granite-embedding-125m/278m) carry a one-row ``token_type_embeddings``
+    table, so every index is 0 and the gather is really a broadcast-add of that
+    single row. Emitting it as a gather makes the Spyre Inductor backend lower
+    it as a Pointwise op whose two inputs demand incompatible stick layouts —
+    the ids stick along the sequence dim (int32) and the weight along hidden
+    (fp16), and the one output cannot satisfy both.
+
+    Indexing the row directly keeps it a plain broadcast and is numerically
+    identical. The row is not necessarily zero (bge-reranker-v2-m3's has absmax
+    0.205), so it cannot simply be skipped.
+    """
+    table = emb.token_type_embeddings
+    if table.num_embeddings == 1:
+        return h + table.weight[0]
+    return h + table(token_type_ids)
+
+
 def encoder_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_ids):
     """Encoder backbone forward: embedding table + LN + compiled encoder blocks.
 
@@ -2096,11 +2117,8 @@ def encoder_backbone_forward(model, input_ids, attn_mask, position_ids, token_ty
     """
     backbone = get_backbone(model)
     emb = backbone.embeddings
-    h = (
-        emb.word_embeddings(input_ids)
-        + emb.position_embeddings(position_ids)
-        + emb.token_type_embeddings(token_type_ids)
-    )
+    h = emb.word_embeddings(input_ids) + emb.position_embeddings(position_ids)
+    h = add_token_type_embedding(h, emb, token_type_ids)
     h = emb.LayerNorm(h)
     # Spyre layout workaround: BERT post-LN ends each block on a broadcast
     # against a 1D weight/bias. Spyre tensors produced this way read
