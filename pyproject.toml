@@ -99,5 +99,5 @@ models-ops = [
 test = [
     "pytest>=9.0,<9.1",
     "Pillow",
-    "torchvision~=0.27.0",
+    "torchvision~=0.28.0",
 ]
