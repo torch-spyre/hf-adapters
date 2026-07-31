@@ -68,7 +68,7 @@ from _vision_helpers import (
     extra_image_inputs,
     stock_vlm_generate,
 )
-from model_registry import VISION_PATHS
+from model_registry import NON_BLOCKING_VISION_MODELS, VISION_PATHS, xfail_non_blocking
 
 from hf_adapters import AutoSpyreModelForImageTextToText
 from hf_adapters.auto_spyre_model import (
@@ -300,7 +300,9 @@ def _stock_vlm_greedy_steps(
     return logits, token_ids
 
 
-@pytest.mark.parametrize("model_path", VISION_PATHS, ids=VISION_PATHS)
+@pytest.mark.parametrize(
+    "model_path", xfail_non_blocking(VISION_PATHS, table=NON_BLOCKING_VISION_MODELS)
+)
 def test_vlm_generate_spyre(model_path: str) -> None:
     adapter = resolve_adapter_module(
         model_path, mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING

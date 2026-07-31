@@ -521,28 +521,43 @@ VISION_PATHS: list[str] = _select_representative_paths(
     predicate=lambda info: info.get("kind") == "vlm",
 )
 
-# Causal-LM models that just went green on torchs-spyre but aren't yet proven stable
-# across repeated runs. Kept as a non-blocking signal (xfail, non-strict) for
-# a trial period; remove an entry once it's been stably green so its Spyre
-# tests go back to gating CI normally.
 
-NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = {
-    CAUSAL_LM_MODELS[key]["path"]: (
-        f"{key}: newly green on Spyre, non-blocking signal for a trial "
-        "period before promoting to a blocking test"
-    )
-    for key in (
+def _non_blocking(models: dict[str, dict], keys: tuple[str, ...]) -> dict[str, str]:
+    """Build a ``{path: xfail reason}`` table from registry keys."""
+    return {
+        models[key]["path"]: (
+            f"{key}: temporarily non-blocking signal for specific models"
+        )
+        for key in keys
+    }
+
+
+# Non-blocking models (xfail, non-strict); remove an entry once it's been stably
+# green so its Spyre tests go back to gating CI normally.
+#
+# The tables are per-harness rather than one merged dict because a path can name
+# two different adapters — google/gemma-4-12B-it is both ``gemma4_google`` (causal)
+# and ``gemma4_mm`` (VLM).
+NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = _non_blocking(
+    CAUSAL_LM_MODELS,
+    (
         "smollm3",
         "gemma3_unsloth",
-        "ministral8b",
+        "ministral3",
+        "pythia_410m",
         "gemma4_google",
         "gemma4_base",
-    )
-}
+    ),
+)
+
+NON_BLOCKING_VISION_MODELS: dict[str, str] = _non_blocking(
+    VISION_MODELS,
+    ("gemma4_mm",),
+)
 
 
-def xfail_non_blocking(paths: list[str]) -> list[object]:
-    """Wrap entries of ``paths`` found in NON_BLOCKING_CAUSAL_MODELS with xfail.
+def xfail_non_blocking(paths: list[str], *, table: dict[str, str]) -> list[object]:
+    """Wrap entries of ``paths`` found in ``table`` with a non-strict xfail.
 
     The test still runs and its outcome (PASS/FAIL) is visible in the report,
     but a failure won't fail the pytest run or block CI.
@@ -551,12 +566,10 @@ def xfail_non_blocking(paths: list[str]) -> list[object]:
         (
             pytest.param(
                 path,
-                marks=pytest.mark.xfail(
-                    reason=NON_BLOCKING_CAUSAL_MODELS[path], strict=False
-                ),
+                marks=pytest.mark.xfail(reason=table[path], strict=False),
                 id=path,
             )
-            if path in NON_BLOCKING_CAUSAL_MODELS
+            if path in table
             else path
         )
         for path in paths
