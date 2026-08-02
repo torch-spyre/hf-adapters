@@ -37,10 +37,12 @@ from tests.spyre.weekly_generation.failure_categories import (
 IsDueForScan = Callable[[str], bool]
 """``model_id -> bool``: False when a recent row already covers this model.
 
-A one-bit view of a ``ResultSink``'s skip-window rule, taken as a callable rather
-than the sink itself so this module needs no database imports — which is what
-lets it, and its unit tests, run with no ``clickhouse_connect`` installed. Pass
-``sink.should_insert_row``.
+In practice always ``sink.should_insert_row``. Taken as a callable rather than the
+sink itself because one bit per model is the entire dependency — a sink parameter
+would also type this module as able to call ``add_entry``/``flush``/``close``,
+none of which it should touch — and because it keeps ``model_prefilter`` free of
+database imports, so it and its unit tests run with no ``clickhouse_connect``
+installed.
 """
 
 
