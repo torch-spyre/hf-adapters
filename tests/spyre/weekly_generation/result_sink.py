@@ -20,12 +20,15 @@ today. Everything else (verified success, non-implemented adapter, quantized
 model, moe, cpu load/generate failure, …) is treated as terminal for the
 window.
 
-``add_entry`` applies that rule automatically unless the sink is constructed
-with ``dedup_guard=False``, which the weekly pipeline's producers do: they
-evaluate the same rule upstream while building the model list, so re-checking
-at write time could only discard a row they deliberately chose to write.
-``should_insert_row`` remains callable either way — that is how the producers
-consult the rule in the first place.
+``add_entry`` applies that rule automatically unless the sink is constructed with
+``dedup_guard=False``, which every stage of the weekly pipeline does. The rule is
+evaluated once, upstream, while the model list is built; from then on a write is
+the recorded outcome of a decision already taken, and re-checking could only
+discard a row the caller deliberately chose to write — leaving the run with fewer
+rows than the models it handled and no accounting for the difference.
+
+``should_insert_row`` remains callable with the guard off. That is how the
+producers consult the rule in the first place.
 """
 
 from __future__ import annotations
@@ -106,10 +109,16 @@ class ResultSink(ABC):
         ``should_insert_row`` before every write. It defaults to True, which is
         what ``clickhouse_db.import_csv`` relies on — that path has no upstream
         filter, and derives its ``(inserted, skipped)`` return from the guard's
-        verdict. Producers in the weekly pipeline pass False: they have already
-        applied the same skip-window decision while building the model list, so
-        a second check can only reject a row they deliberately chose to write,
-        silently and with no accounting.
+        verdict.
+
+        The weekly pipeline passes False throughout. The skip-window decision is
+        made once while the model list is built, so every later write records the
+        outcome of a decision already taken; a second check could only reject a
+        row the caller chose to write, silently and with no accounting. In
+        ``weekly_test`` specifically the guard would consult a skip set
+        snapshotted when that job started — newer than the producer's — so a row
+        written in between by a concurrent run would suppress a result the job was
+        asked to produce.
 
         Keyword-only, and positioned after *today*, because
         ``clickhouse_db.py`` constructs ``ClickHouseResultSink(mode)``

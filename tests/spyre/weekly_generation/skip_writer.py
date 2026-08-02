@@ -32,8 +32,8 @@ def write_skipped_rows(
 
     The return value can be lower than ``len(skipped)`` when *sink* was built
     with ``dedup_guard=True``, since ``add_entry`` then rejects rows inside the
-    skip window. Producers construct their sink with ``dedup_guard=False``
-    (they have already applied that rule), so for them the two match.
+    skip window. The weekly pipeline builds its sinks with ``dedup_guard=False``
+    (the rule is applied once, upstream), so for it the two always match.
     """
     written = 0
     for item in skipped:

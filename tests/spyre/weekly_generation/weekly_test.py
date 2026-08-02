@@ -636,14 +636,25 @@ def main(
     to_process_list: list[dict] = json.loads(model_list_file.read_text())
     adapter_dates: dict[str, str | None] = _get_adapter_dates()
 
+    # dedup_guard=False: write a row for every model in the list, unconditionally.
+    # The producer that built this list already applied the skip window, so the
+    # decision to evaluate these models has been made. Re-checking at write time
+    # would consult a skip set snapshotted when THIS job started — newer than the
+    # producer's — so a row written in between (a concurrent manual run, a
+    # re-dispatched shard) would suppress our write and leave the run reporting
+    # fewer rows than the models it was handed, with the shortfall explained only
+    # by a per-row log line. A duplicate is the better failure: ReplacingMergeTree
+    # (snapshot_date) collapses same-day duplicates on merge anyway.
     sink: ResultSink
     if write_to_csv:
-        sink = CsvResultSink(path=write_to_csv, today=snapshot_date)
+        sink = CsvResultSink(path=write_to_csv, today=snapshot_date, dedup_guard=False)
         print(
             f"CSV mode: results will be appended to '{write_to_csv}' (no DB access).\n"
         )
     else:
-        sink = ClickHouseResultSink(today=snapshot_date, embedding_generative=mode)
+        sink = ClickHouseResultSink(
+            today=snapshot_date, embedding_generative=mode, dedup_guard=False
+        )
         print("DB mode: results will be appended to the DB.\n")
     total = len(to_process_list)
     processed = 0
@@ -789,7 +800,10 @@ def main(
                     except ValueError:
                         rec["added_date"] = None
 
-                if sink.add_entry(
+                # The sink is built with dedup_guard=False, so this always
+                # writes and always returns True — one row per model in the
+                # list, so the run's row count matches what it was handed.
+                sink.add_entry(
                     model_name=str(rec["model_name"]),
                     config_class=str(rec["config_class"]),
                     adapter_name=str(rec["adapter_name"]),
@@ -808,17 +822,13 @@ def main(
                         else str(rec["failure_category"])
                     ),
                     error=(None if rec.get("error") is None else str(rec["error"])),
-                ):
-                    print(
-                        f"{ts()}     sink: row written for '{model_path}' "
-                        f"(verified_on_cpu={rec.get('verified_on_cpu')}, "
-                        f"verified_on_spyre={rec.get('verified_on_spyre')}, "
-                        f"failure_category={rec.get('failure_category')}, )"
-                    )
-                else:
-                    print(
-                        f"{ts()}     sink: row skipped for '{model_path}' (guard rejected)"
-                    )
+                )
+                print(
+                    f"{ts()}     sink: row written for '{model_path}' "
+                    f"(verified_on_cpu={rec.get('verified_on_cpu')}, "
+                    f"verified_on_spyre={rec.get('verified_on_spyre')}, "
+                    f"failure_category={rec.get('failure_category')}, )"
+                )
 
             # Cache cleanup: delete weights downloaded during this batch,
             # regardless of whether the worker processed each model.
