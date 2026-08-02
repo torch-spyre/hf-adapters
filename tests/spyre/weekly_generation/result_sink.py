@@ -19,6 +19,13 @@ availability is a transient property — a failure yesterday says nothing about
 today. Everything else (verified success, non-implemented adapter, quantized
 model, moe, cpu load/generate failure, …) is treated as terminal for the
 window.
+
+``add_entry`` applies that rule automatically unless the sink is constructed
+with ``dedup_guard=False``, which the weekly pipeline's producers do: they
+evaluate the same rule upstream while building the model list, so re-checking
+at write time could only discard a row they deliberately chose to write.
+``should_insert_row`` remains callable either way — that is how the producers
+consult the rule in the first place.
 """
 
 from __future__ import annotations
@@ -87,14 +94,29 @@ class ResultSink(ABC):
     """
 
     _today: date
+    _dedup_guard: bool
 
-    def __init__(self, today: date | None = None) -> None:
+    def __init__(self, today: date | None = None, *, dedup_guard: bool = True) -> None:
         """Store the reference *today* used by the skip-window guard.
 
         Subclasses must call ``super().__init__(today=today)`` before touching
         anything that depends on ``self._today``.
+
+        *dedup_guard* controls whether ``add_entry`` consults
+        ``should_insert_row`` before every write. It defaults to True, which is
+        what ``clickhouse_db.import_csv`` relies on — that path has no upstream
+        filter, and derives its ``(inserted, skipped)`` return from the guard's
+        verdict. Producers in the weekly pipeline pass False: they have already
+        applied the same skip-window decision while building the model list, so
+        a second check can only reject a row they deliberately chose to write,
+        silently and with no accounting.
+
+        Keyword-only, and positioned after *today*, because
+        ``clickhouse_db.py`` constructs ``ClickHouseResultSink(mode)``
+        positionally — a new positional parameter would misbind there.
         """
         self._today = today or date.today()
+        self._dedup_guard = dedup_guard
 
     @abstractmethod
     def get_recent_blocking_entries(self, model_name: str) -> list[dict[str, Any]]:
@@ -170,9 +192,12 @@ class ResultSink(ABC):
 
         Returns True if the row was written, False if ``should_insert_row``
         rejected it. Idempotent to call for every row in the driver loop.
+
+        When the sink was constructed with ``dedup_guard=False`` the check is
+        skipped entirely and every call writes, always returning True.
         """
         model_name = _require_non_empty(model_name, "model_name")
-        if not self.should_insert_row(model_name):
+        if self._dedup_guard and not self.should_insert_row(model_name):
             return False
         self._insert_entry(
             model_name=model_name,
@@ -228,8 +253,10 @@ class CsvResultSink(ResultSink):
     ``{model_name: list[dict]}`` so lookups are O(1).
     """
 
-    def __init__(self, path: Path, today: date | None = None) -> None:
-        super().__init__(today=today)
+    def __init__(
+        self, path: Path, today: date | None = None, *, dedup_guard: bool = True
+    ) -> None:
+        super().__init__(today=today, dedup_guard=dedup_guard)
         self._path: Path = path
         self._rows_by_model: dict[str, list[dict[str, Any]]] = {}
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -347,9 +374,13 @@ class ClickHouseResultSink(ResultSink):
     """
 
     def __init__(
-        self, embedding_generative: EmbeddingGenerativeMode, today: date | None = None
+        self,
+        embedding_generative: EmbeddingGenerativeMode,
+        today: date | None = None,
+        *,
+        dedup_guard: bool = True,
     ) -> None:
-        super().__init__(today=today)
+        super().__init__(today=today, dedup_guard=dedup_guard)
         self._embedding_generative = embedding_generative
         if embedding_generative is EmbeddingGenerativeMode.EMBEDDING:
             self._table_name = EMBEDDING_TABLE_NAME
