@@ -1,12 +1,12 @@
 """Abstract result sink for the weekly Spyre test suite.
 
 Two implementations:
-- ``ClickHouseResultSink`` — inserts rows into ClickHouse; the skip guard runs
-  a single bulk SELECT on construction so all per-row checks are O(1), and rows
-  are buffered in memory then flushed in a single bulk INSERT on ``close()``.
 - ``CsvResultSink`` — write-only, for runs with no database access. Writes one
   run's rows to a new file and never reads one back, so the skip rule below does
   not apply to it: it has no history to consult and reports nothing as blocking.
+- ``ClickHouseResultSink`` — inserts rows into ClickHouse; the skip guard runs
+  a single bulk SELECT on construction so all per-row checks are O(1), and rows
+  are buffered in memory then flushed in a single bulk INSERT on ``close()``.
 
 Skip rule (ClickHouse): insert a row for *model_name* when either
 
@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import csv
 from abc import ABC, abstractmethod
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -61,30 +61,6 @@ from tests.spyre.weekly_generation.failure_categories import (
 
 # Constant value
 _SKIP_WINDOW_DAYS: int = 10
-
-
-def _within_skip_window(existing_snapshot: date, today: date) -> bool:
-    return (today - existing_snapshot).days < _SKIP_WINDOW_DAYS
-
-
-_SNAPSHOT_DATE_FORMATS = (
-    "%Y-%m-%d",  # ISO 8601 — primary format written by this module
-    "%d/%m/%Y",  # DD/MM/YYYY
-    "%m/%d/%Y",  # MM/DD/YYYY
-    "%Y/%m/%d",  # YYYY/MM/DD
-)
-
-
-def _coerce_snapshot(value: object) -> date | None:
-    if isinstance(value, date):
-        return value
-    if isinstance(value, str) and value:
-        for fmt in _SNAPSHOT_DATE_FORMATS:
-            try:
-                return datetime.strptime(value.strip(), fmt).date()
-            except ValueError:
-                continue
-    return None
 
 
 def _require_non_empty(value: str, field_name: str) -> str:
@@ -110,24 +86,11 @@ class ResultSink(ABC):
         Subclasses must call ``super().__init__(today=today)`` before touching
         anything that depends on ``self._today``.
 
-        *dedup_guard* controls whether ``add_entry`` consults
-        ``should_insert_row`` before every write. It defaults to True, which is
-        what ``clickhouse_db.import_csv`` relies on — that path has no upstream
-        filter, and derives its ``(inserted, skipped)`` return from the guard's
-        verdict.
-
-        The weekly pipeline passes False throughout. The skip-window decision is
-        made once while the model list is built, so every later write records the
-        outcome of a decision already taken; a second check could only reject a
-        row the caller chose to write, silently and with no accounting. In
-        ``weekly_test`` specifically the guard would consult a skip set
-        snapshotted when that job started — newer than the producer's — so a row
-        written in between by a concurrent run would suppress a result the job was
-        asked to produce.
-
-        Keyword-only, and positioned after *today*, because
-        ``clickhouse_db.py`` constructs ``ClickHouseResultSink(mode)``
-        positionally — a new positional parameter would misbind there.
+        *dedup_guard* gates ``add_entry``'s automatic ``should_insert_row`` call;
+        see the module docstring for why the weekly pipeline turns it off. It is
+        keyword-only and positioned after *today* because ``clickhouse_db.py``
+        constructs ``ClickHouseResultSink(mode)`` positionally — a new positional
+        parameter would misbind there.
         """
         self._today = today or date.today()
         self._dedup_guard = dedup_guard
@@ -263,27 +226,15 @@ class ResultSink(ABC):
 class CsvResultSink(ResultSink):
     """Write rows to a fresh CSV file. Write-only, for no-database test runs.
 
-    Nothing is read back: the file must not already exist, so there is no prior
-    history to consult and every model is due for a run. That is what makes
-    ``get_recent_blocking_entries`` unconditionally empty here, rather than an
-    approximation of the ClickHouse behaviour.
-
-    The alternative — treating the CSV as its own skip-window index, as an earlier
-    version did — meant a run's row count could silently disagree with the models
-    it evaluated, and made the CSV and ClickHouse paths behave differently for the
-    same input. A single-run output file has neither problem.
+    Nothing is read back and the file must not already exist, so there is no prior
+    history to consult: ``get_recent_blocking_entries`` is unconditionally empty
+    and ``dedup_guard`` defaults to False.
     """
 
     def __init__(
         self, path: Path, today: date | None = None, *, dedup_guard: bool = False
     ) -> None:
-        """Open *path* for writing. Raises if it already exists and is non-empty.
-
-        *dedup_guard* defaults to False here — unlike the base class — because a
-        fresh file cannot contain a blocking row, so the guard would be pure
-        overhead. Passing True is accepted (``get_recent_blocking_entries``
-        returns empty, so it never rejects anything) but pointless.
-        """
+        """Open *path* for writing. Raises if it already exists and is non-empty."""
         super().__init__(today=today, dedup_guard=dedup_guard)
         self._path: Path = path
         if path.exists() and path.stat().st_size > 0:

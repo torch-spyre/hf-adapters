@@ -107,20 +107,10 @@ def _prefilter_for_mode(
 ) -> PrefilterResult:
     """Apply the four pre-filters to *rows* and record the terminal verdicts.
 
-    Filtering here rather than inside each worker is the point of the exercise:
-    the models that get dropped cluster heavily (config-class families cluster by
-    download count), so filtering after chunking left some shards nearly empty
-    and others full, which is why some CI jobs finished in minutes and others ran
-    for hours.
-
-    Writing the skipped rows is this script's job too. They are terminal facts —
-    a MoE model will not stop being MoE — so recording them here means the scan
-    jobs receive only work that needs a Spyre card.
-
-    The sink is opened per mode because it binds one table per instance, and with
-    ``dedup_guard=False`` because ``prefilter_models`` has already consulted the
-    very same skip set via ``should_insert_row``; a second check at write time
-    could only reject a row we deliberately chose to write.
+    See the module docstring for why this runs before chunking. The sink is opened
+    per mode because it binds one table per instance, and with
+    ``dedup_guard=False`` because ``prefilter_models`` has just consulted the same
+    skip set through ``should_insert_row``.
     """
     if dry_run:
         print(f"{mode}: dry run — skipping the ClickHouse skip-window check")

@@ -6,13 +6,15 @@
 # and records the outcome directly in ClickHouse (see result_sink.py), replacing
 # the manual dev-instance upload + periodic dev->prod migration.
 #
-# Unlike torch-spyre's push-to-clickhouse.yaml, this is not a post-hoc ingest of
-# a separate test run's artifact: the scan reads and writes ClickHouse directly.
+# Unlike torch-spyre's push-to-clickhouse.yaml, this is not a post-hoc ingest
+# of a separate test run's artifact: the scan reads and writes ClickHouse
+# directly.
 #
-# At top_k=10000 per mode, a single job processing the whole list serially would
-# take far too long, so generate-matrix fetches the top-K list once (no Spyre
-# hardware needed), shards it, and weekly-model-scan fans out over those shards
-# in parallel (mirrors torch-spyre's generate_matrix -> matrix job pattern).
+# At top_k=10000 per mode, a single job processing the whole list serially
+# would take far too long, so the fetch itself IS split out: generate-matrix
+# fetches the top-K list once (no Spyre hardware needed), shards it, and
+# weekly-model-scan fans out over those shards in parallel (mirrors
+# torch-spyre's generate_matrix -> matrix job pattern).
 #
 # generate-matrix also does all the FILTERING, which is why it needs ClickHouse
 # credentials of its own: it applies the skip window (don't re-test a model
@@ -240,13 +242,11 @@ jobs:
           retention-days: 1
 
   # Split by runner tier so max-parallel caps total cards held at once:
-  # 20*1 + 4*2 + 1*4 = 32 cards, so PR/daily CI isn't starved.
+  # 10*1 + 4*2 + 1*4 = 22 cards (~2 nodes), so PR/daily CI isn't starved.
   #
-  # The `if` guards an empty matrix. Now that generate-matrix filters before
-  # chunking, a tier can legitimately produce zero shards — a re-run inside the
-  # 10-day skip window is the common case, and it already showed up in testing as
-  # matrix_x4=[]. Skipping explicitly beats relying on how Actions treats a
-  # zero-length matrix.include.
+  # The `if` guards an empty matrix: now that generate-matrix filters before
+  # chunking, a tier can legitimately produce zero shards (a re-run inside the
+  # 10-day skip window), which showed up in testing as matrix_x4=[].
   weekly-model-scan-x1:
     name: Weekly model scan x1 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
     needs: generate-matrix
