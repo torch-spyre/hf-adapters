@@ -309,11 +309,8 @@ def _fake_sink_cls():
             self._blocking = blocking or set()
             self.written: list[str] = []
 
-        def get_recent_blocking_entries(self, model_name):
-            return [{"model_name": model_name}] if model_name in self._blocking else []
-
-        def get_all_models(self):
-            return []
+        def should_insert_row(self, model_name):
+            return model_name not in self._blocking
 
         def _insert_entry(self, *, model_name, **_rest) -> None:
             self.written.append(model_name)
@@ -443,8 +440,6 @@ class TestCsvSinkIsWriteOnly:
         sink = CsvResultSink(path=tmp_path / "o.csv")
         _add(sink, "org/x")
         assert sink.should_insert_row("org/x") is True
-        assert sink.get_recent_blocking_entries("org/x") == []
-        assert sink.get_all_models() == []
         sink.close()
 
     def test_writes_every_row_including_repeats(self, tmp_path) -> None:

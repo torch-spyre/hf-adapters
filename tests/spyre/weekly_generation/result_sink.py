@@ -96,29 +96,15 @@ class ResultSink(ABC):
         self._dedup_guard = dedup_guard
 
     @abstractmethod
-    def get_recent_blocking_entries(self, model_name: str) -> list[dict[str, Any]]:
-        """Return prior rows for *model_name* that block a new insert.
+    def should_insert_row(self, model_name: str) -> bool:
+        """Return True when *model_name* is due for a run.
 
-        A row blocks re-insertion when BOTH:
+        False only when a prior row blocks it, which requires BOTH:
 
         * its ``snapshot_date`` is within the skip window
           (``today - snapshot_date < _SKIP_WINDOW_DAYS``), AND
         * its ``failure_category`` is NOT ``hardware_exception`` — hardware
           failures are treated as transient and always re-run.
-
-        Sorted by ``snapshot_date`` descending. Each row is a dict keyed by
-        column name. Empty list when no blocking prior entry exists — the
-        caller can treat empty as "insert away" without inspecting the rows.
-        """
-
-    @abstractmethod
-    def get_all_models(self) -> list[dict[str, Any]]:
-        """Return one row per known ``model_name``, reflecting its most recent snapshot.
-
-        When a model appears in multiple rows (one per weekly run), only the row
-        with the greatest ``snapshot_date`` is returned. The result is a flat
-        list of dicts keyed by column name (same keys as ``TABLE_COLUMNS``), one
-        dict per distinct model, in no guaranteed order.
         """
 
     @abstractmethod
@@ -194,16 +180,6 @@ class ResultSink(ABC):
         )
         return True
 
-    def should_insert_row(self, model_name: str) -> bool:
-        """Return True when *model_name* should be re-run.
-
-        See module docstring for the full rule. In short: absent OR the most
-        recent prior row is a ``hardware_exception`` (retry) OR the prior
-        snapshot has aged past the skip window.
-        """
-        model_name: str = _require_non_empty(model_name, "model_name")
-        return not self.get_recent_blocking_entries(model_name)
-
     def __enter__(self) -> ResultSink:
         return self
 
@@ -227,7 +203,7 @@ class CsvResultSink(ResultSink):
     """Write rows to a fresh CSV file. Write-only, for no-database test runs.
 
     Nothing is read back and the file must not already exist, so there is no prior
-    history to consult: ``get_recent_blocking_entries`` is unconditionally empty
+    history to consult: ``should_insert_row`` is unconditionally True
     and ``dedup_guard`` defaults to False.
     """
 
@@ -249,14 +225,10 @@ class CsvResultSink(ResultSink):
         self._writer.writeheader()
         self._fh.flush()
 
-    def get_recent_blocking_entries(self, model_name: str) -> list[dict[str, Any]]:
-        """Always empty — a fresh output file has no prior rows to block on."""
+    def should_insert_row(self, model_name: str) -> bool:
+        """Always True — a fresh output file has no prior rows to block on."""
         _require_non_empty(model_name, "model_name")
-        return []
-
-    def get_all_models(self) -> list[dict[str, Any]]:
-        """Always empty — this sink does not read its file back."""
-        return []
+        return True
 
     def _insert_entry(
         self,
@@ -337,7 +309,7 @@ class ClickHouseResultSink(ResultSink):
             print(f"ClickHouse: table '{self._table_name}' already exists.\n")
 
         # Bulk pre-fetch: model names whose most-recent-in-window row blocks a
-        # re-run. Populated once here; used by get_recent_blocking_entries()
+        # re-run. Populated once here; used by should_insert_row()
         # for O(1) per-row checks.
         self._skip_model_names: set[str] = self._fetch_blocking_names()
         print(
@@ -354,7 +326,7 @@ class ClickHouseResultSink(ResultSink):
 
         A model blocks iff it has any row in the skip window whose
         ``failure_category`` is not ``hardware_exception`` — matching the
-        semantics of ``get_recent_blocking_entries``. Rows with
+        semantics of ``should_insert_row``. Rows with
         ``failure_category = 'hardware_exception'`` (including a lone row
         older than the window) do NOT block.
         """
@@ -373,31 +345,14 @@ class ClickHouseResultSink(ResultSink):
         )
         return {row[0] for row in result.result_rows}
 
-    def get_recent_blocking_entries(self, model_name: str) -> list[dict[str, Any]]:
-        """Return a non-empty sentinel list when *model_name* is in the skip set.
+    def should_insert_row(self, model_name: str) -> bool:
+        """Membership test against the skip set pre-fetched in ``__init__``.
 
-        The actual row data is not needed by the caller — it only tests
-        ``bool(result)`` — so we return a lightweight placeholder instead of
-        re-querying ClickHouse.
+        O(1) with no network I/O — the single bulk SELECT there already resolved
+        the skip-window rule for every model that currently blocks a re-run.
         """
         key: str = _require_non_empty(model_name, "model_name")
-        if key in self._skip_model_names:
-            # Return a truthy non-empty list so should_insert_row returns False.
-            return [{"model_name": key}]
-        return []
-
-    def get_all_models(self) -> list[dict[str, Any]]:
-        columns_sql: str = ", ".join(
-            f"argMax({col}, snapshot_date) AS {col}" if col != "model_name" else col
-            for col in TABLE_COLUMNS
-        )
-        result = self._client.query(
-            f"SELECT {columns_sql} "
-            "FROM {db:Identifier}.{tbl:Identifier} "
-            "GROUP BY model_name",
-            parameters={"db": DATABASE, "tbl": self._table_name},
-        )
-        return [dict(zip(TABLE_COLUMNS, row)) for row in result.result_rows]
+        return key not in self._skip_model_names
 
     def _insert_entry(
         self,
