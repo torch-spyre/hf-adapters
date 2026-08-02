@@ -189,7 +189,7 @@ jobs:
     timeout-minutes: 4320
     strategy:
       fail-fast: false
-      max-parallel: 10 # 10 shards x 1 card = 10 cards
+      max-parallel: 20 # 20 shards x 1 card = 20 cards
       matrix:
         include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x1) }}
     env:

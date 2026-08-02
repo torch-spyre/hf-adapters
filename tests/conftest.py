@@ -60,6 +60,9 @@ from transformers import AutoModelForCausalLM, PretrainedConfig
 # import has materialized it yet; a top-level import here would always trip that
 # assert. ``MODEL_PATH_TO_TORCH_DTYPE`` / ``MODEL_PATH_WITH_LOAD_FN`` are pulled
 # in lazily inside the helpers that use them.
+# CONFIG_TO_ADAPTER_MODULE_MAPPING / resolve_adapter_module are imported lazily
+# below (after the CPU patch) so the editable-install .pth cannot pre-load
+# hf_common before the patch runs.
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADAPTERS_DIR = os.path.join(REPO_ROOT, "hf_adapters")
@@ -135,6 +138,13 @@ elif not _ALREADY_PATCHED:
 # When _ALREADY_PATCHED (benign re-import via ``from tests.conftest import ...``)
 # both branches are skipped: hf_adapters is patched and the registry is
 # already populated from the first execution.
+
+# Lazy import: hf_common is now patched (CPU lane) or the real spyre version
+# (spyre lane). Either way hf_adapters is safe to import at this point.
+from hf_adapters.auto_spyre_model import (  # noqa: E402
+    CONFIG_TO_ADAPTER_MODULE_MAPPING,
+    resolve_adapter_module,
+)
 
 
 def pytest_configure(config: Config) -> None:
@@ -258,17 +268,12 @@ def load_ref_model(
     return ref_model
 
 
-from hf_adapters.auto_spyre_model import CONFIG_TO_ADAPTER_MODULE_MAPPING  # noqa: E402
-
-
 def resolve_adapter_module_for_test(
     model_name_or_path: Union[str, os.PathLike[str]],
     mapping: dict[
         type[PretrainedConfig], types.ModuleType
     ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
 ) -> types.ModuleType:
-    from hf_adapters.auto_spyre_model import resolve_adapter_module
-
     return resolve_adapter_module(
         model_name_or_path=model_name_or_path, mapping=mapping, trust_remote_code=False
     )

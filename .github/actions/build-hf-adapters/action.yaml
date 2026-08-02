@@ -48,6 +48,15 @@ runs:
         git config --global --add safe.directory '*'
         rm -fr "$CLONED_HF_ADAPTERS_DIR"
         CLONE_URL="${INPUT_REPOSITORY:-$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git}"
+        # Accept a bare "owner/repo" (the format callers like spyre-frameworks'
+        # run_integration_tests.py normalize to, matching actions/checkout's own
+        # convention) in addition to the documented full clone URL -- this step
+        # does a raw `git clone`, which treats a schemeless string as a local path
+        # ("fatal: repository 'owner/repo' does not exist") instead of resolving it
+        # against github.com.
+        if [[ -n "$INPUT_REPOSITORY" && "$CLONE_URL" != *"://"* ]]; then
+          CLONE_URL="$GITHUB_SERVER_URL/${CLONE_URL%.git}.git"
+        fi
         if [[ -n "$INPUT_REF" || -n "$INPUT_REPOSITORY" ]]; then
           git clone "$CLONE_URL" "$CLONED_HF_ADAPTERS_DIR"
         else

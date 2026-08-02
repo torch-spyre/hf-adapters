@@ -69,13 +69,13 @@ from hf_adapters.hf_common import (
     decode_block_walk,
     get_backbone,
     get_model_dtype,
+    make_standard_gqa_block,
     pad_and_position,
     pad_lm_head,
     patch_rmsnorm,
     prepare_rope_and_heads,
     select_next_token,
 )
-from hf_adapters.hf_granite import _make_compiled_block
 
 
 def prepare_for_spyre(model):
@@ -99,7 +99,7 @@ def prepare_for_spyre(model):
     pad_lm_head(model)
     backbone = get_backbone(model)
     model._spyre_text_blocks = [
-        _make_compiled_block(layer) for layer in backbone.layers
+        make_standard_gqa_block(layer, True) for layer in backbone.layers
     ]
 
 
