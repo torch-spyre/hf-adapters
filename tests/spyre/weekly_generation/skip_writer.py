@@ -29,17 +29,12 @@ def write_skipped_rows(
 
     Pass only ``PrefilterResult.skipped`` — never ``window_skipped``, whose
     members already have a recent row and are meant to produce no write.
-
-    The return value can be lower than ``len(skipped)`` when *sink* was built
-    with ``dedup_guard=True``, since ``add_entry`` then rejects rows inside the
-    skip window. The weekly pipeline builds its sinks with ``dedup_guard=False``
-    (the rule is applied once, upstream), so for it the two always match.
     """
     written = 0
     for item in skipped:
         row = item.row
         model_id = str(row["model_id"])
-        if sink.add_entry(
+        sink.add_entry(
             model_name=model_id,
             config_class=str(row.get("config_class") or ""),
             adapter_name="",
@@ -54,16 +49,11 @@ def write_skipped_rows(
             parameters_number=int(row.get("parameters") or 0),
             failure_category=item.failure_category,
             error=None,
-        ):
-            written += 1
-            if verbose:
-                print(
-                    f"    skip-row: '{model_id}' → {item.failure_category} "
-                    f"({item.reason})"
-                )
-        elif verbose:
+        )
+        written += 1
+        if verbose:
             print(
-                f"    skip-row: '{model_id}' not written — sink's dedup guard "
-                f"rejected it ({item.failure_category})"
+                f"    skip-row: '{model_id}' → {item.failure_category} "
+                f"({item.reason})"
             )
     return written

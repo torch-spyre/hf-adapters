@@ -21,19 +21,12 @@ today. Everything else (verified success, non-implemented adapter, quantized
 model, moe, cpu load/generate failure, …) is treated as terminal for the
 window.
 
-``add_entry`` applies that rule automatically unless the sink is constructed with
-``dedup_guard=False``, which every stage of the weekly pipeline does. The rule is
-evaluated once, upstream, while the model list is built; from then on a write is
-the recorded outcome of a decision already taken, and re-checking could only
-discard a row the caller deliberately chose to write — leaving the run with fewer
-rows than the models it handled and no accounting for the difference.
-
-``should_insert_row`` remains callable with the guard off. That is how the
-producers consult the rule in the first place.
-
-``clickhouse_db.import_csv`` is the one caller that wants the guard: it reads an
-arbitrary CSV with no upstream filter and derives its ``(inserted, skipped)``
-return from the guard's verdict. Hence the default is True.
+``should_insert_row`` is how the rule gets consulted, and the producers call it
+directly while building the model list. ``add_entry`` does NOT re-check it: the
+decision is made once, upstream, so every later write records an outcome already
+decided. Re-checking at write time would discard rows the caller chose to write —
+leaving a run with fewer rows than the models it handled, and no accounting for
+the difference.
 """
 
 from __future__ import annotations
@@ -78,22 +71,14 @@ class ResultSink(ABC):
     """
 
     _today: date
-    _dedup_guard: bool
 
-    def __init__(self, today: date | None = None, *, dedup_guard: bool = True) -> None:
-        """Store the reference *today* used by the skip-window guard.
+    def __init__(self, today: date | None = None) -> None:
+        """Store the reference *today* used by the skip-window rule.
 
         Subclasses must call ``super().__init__(today=today)`` before touching
         anything that depends on ``self._today``.
-
-        *dedup_guard* gates ``add_entry``'s automatic ``should_insert_row`` call;
-        see the module docstring for why the weekly pipeline turns it off. It is
-        keyword-only and positioned after *today* because ``clickhouse_db.py``
-        constructs ``ClickHouseResultSink(mode)`` positionally — a new positional
-        parameter would misbind there.
         """
         self._today = today or date.today()
-        self._dedup_guard = dedup_guard
 
     @abstractmethod
     def should_insert_row(self, model_name: str) -> bool:
@@ -150,18 +135,14 @@ class ResultSink(ABC):
         parameters_number: int,
         failure_category: str | None,
         error: str | None,
-    ) -> bool:
-        """Persist one row when the skip guard allows it.
+    ) -> None:
+        """Persist one row. Always writes.
 
-        Returns True if the row was written, False if ``should_insert_row``
-        rejected it. Idempotent to call for every row in the driver loop.
-
-        When the sink was constructed with ``dedup_guard=False`` the check is
-        skipped entirely and every call writes, always returning True.
+        The skip-window rule is applied upstream, when the model list is built
+        (see the module docstring), so a row reaching here is one the caller
+        decided to record.
         """
         model_name = _require_non_empty(model_name, "model_name")
-        if self._dedup_guard and not self.should_insert_row(model_name):
-            return False
         self._insert_entry(
             model_name=model_name,
             config_class=config_class,
@@ -178,7 +159,6 @@ class ResultSink(ABC):
             failure_category=failure_category,
             error=error,
         )
-        return True
 
     def __enter__(self) -> ResultSink:
         return self
@@ -203,15 +183,12 @@ class CsvResultSink(ResultSink):
     """Write rows to a fresh CSV file. Write-only, for no-database test runs.
 
     Nothing is read back and the file must not already exist, so there is no prior
-    history to consult: ``should_insert_row`` is unconditionally True
-    and ``dedup_guard`` defaults to False.
+    history to consult: ``should_insert_row`` is unconditionally True.
     """
 
-    def __init__(
-        self, path: Path, today: date | None = None, *, dedup_guard: bool = False
-    ) -> None:
+    def __init__(self, path: Path, today: date | None = None) -> None:
         """Open *path* for writing. Raises if it already exists and is non-empty."""
-        super().__init__(today=today, dedup_guard=dedup_guard)
+        super().__init__(today=today)
         self._path: Path = path
         if path.exists() and path.stat().st_size > 0:
             raise FileExistsError(
@@ -287,13 +264,9 @@ class ClickHouseResultSink(ResultSink):
     """
 
     def __init__(
-        self,
-        embedding_generative: EmbeddingGenerativeMode,
-        today: date | None = None,
-        *,
-        dedup_guard: bool = True,
+        self, embedding_generative: EmbeddingGenerativeMode, today: date | None = None
     ) -> None:
-        super().__init__(today=today, dedup_guard=dedup_guard)
+        super().__init__(today=today)
         self._embedding_generative = embedding_generative
         if embedding_generative is EmbeddingGenerativeMode.EMBEDDING:
             self._table_name = EMBEDDING_TABLE_NAME

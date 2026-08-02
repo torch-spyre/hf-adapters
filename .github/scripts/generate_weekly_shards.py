@@ -108,9 +108,7 @@ def _prefilter_for_mode(
     """Apply the four pre-filters to *rows* and record the terminal verdicts.
 
     See the module docstring for why this runs before chunking. The sink is opened
-    per mode because it binds one table per instance, and with
-    ``dedup_guard=False`` because ``prefilter_models`` has just consulted the same
-    skip set through ``should_insert_row``.
+    per mode because it binds one table per instance.
     """
     if dry_run:
         print(f"{mode}: dry run — skipping the ClickHouse skip-window check")
@@ -129,9 +127,7 @@ def _prefilter_for_mode(
     from tests.spyre.weekly_generation.skip_writer import write_skipped_rows
 
     with ClickHouseResultSink(
-        embedding_generative=EmbeddingGenerativeMode(mode),
-        today=snapshot_date,
-        dedup_guard=False,
+        embedding_generative=EmbeddingGenerativeMode(mode), today=snapshot_date
     ) as sink:
         result = prefilter_models(rows, should_scan=sink.should_insert_row)
         written = write_skipped_rows(sink, result.skipped, snapshot_date=snapshot_date)

@@ -43,15 +43,13 @@ Flags:
 
 Result rows
 -----------
-Both sinks are built with ``dedup_guard=False``, so one row is recorded per model
-handled and the run's row count never silently disagrees with its input. The
-skip-window rule was already applied when the list was built; re-checking it at
-write time would consult a *newer* snapshot (this job's, taken up to two hours
-after a shard producer's), so a row written in between by a concurrent run would
-suppress a result this job was asked to produce. A duplicate is the better
-failure — ``ReplacingMergeTree(snapshot_date)`` collapses same-day duplicates on
-merge. On the CSV path the file is new and never read back, so there is nothing
-to check against in the first place.
+One row is recorded per model handled, so a run's row count never silently
+disagrees with its input. The skip-window rule was already applied when the list
+was built; re-applying it at write time would consult a *newer* snapshot (this
+job's, taken up to two hours after a shard producer's), so a row written in
+between by a concurrent run would suppress a result this job was asked to
+produce. A duplicate is the better failure — ``ReplacingMergeTree(snapshot_date)``
+collapses same-day duplicates on merge.
 """
 
 import argparse
@@ -790,12 +788,7 @@ def main(
             f"CSV mode: results will be written to '{write_to_csv}' (no DB access).\n"
         )
     else:
-        # dedup_guard=False: record one row per model handled. See "Result rows"
-        # in the module docstring for why re-checking the skip window here would
-        # discard results this run was asked to produce.
-        sink = ClickHouseResultSink(
-            today=snapshot_date, embedding_generative=mode, dedup_guard=False
-        )
+        sink = ClickHouseResultSink(today=snapshot_date, embedding_generative=mode)
         print("DB mode: results will be appended to the DB.\n")
 
     to_process_list = _resolve_model_list(
@@ -946,9 +939,6 @@ def main(
                     except ValueError:
                         rec["added_date"] = None
 
-                # Always writes and always returns True — both sinks run with
-                # dedup_guard=False, so the run records one row per model it
-                # handled and the count never silently disagrees.
                 sink.add_entry(
                     model_name=str(rec["model_name"]),
                     config_class=str(rec["config_class"]),

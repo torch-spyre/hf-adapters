@@ -227,7 +227,7 @@ class TestWriteSkippedRows:
         result = prefilter_models(rows, should_scan=lambda _: True)
         today = date.today()
 
-        with CsvResultSink(path=csv_path, today=today, dedup_guard=False) as sink:
+        with CsvResultSink(path=csv_path, today=today) as sink:
             written = write_skipped_rows(
                 sink, result.skipped, snapshot_date=today, verbose=False
             )
@@ -261,7 +261,7 @@ class TestWriteSkippedRows:
             ],
             should_scan=lambda _: True,
         )
-        with CsvResultSink(path=csv_path, today=today, dedup_guard=False) as sink:
+        with CsvResultSink(path=csv_path, today=today) as sink:
             write_skipped_rows(sink, result.skipped, snapshot_date=today, verbose=False)
 
         written_row = next(iter(_csv.DictReader(csv_path.open())))
@@ -287,7 +287,7 @@ class TestWriteSkippedRows:
         from tests.spyre.weekly_generation.skip_writer import write_skipped_rows
 
         csv_path = tmp_path / "out.csv"
-        with CsvResultSink(path=csv_path, dedup_guard=False) as sink:
+        with CsvResultSink(path=csv_path) as sink:
             assert write_skipped_rows(sink, [], snapshot_date=date.today()) == 0
 
 
@@ -338,54 +338,58 @@ def _add(sink, name: str) -> bool:
 
 
 @requires_sink
-class TestDedupGuardFlag:
-    """The guard must stay opt-out, and stay keyword-only.
+class TestAddEntryAlwaysWrites:
+    """add_entry records every row it is handed.
 
-    ``clickhouse_db.py`` constructs ``ClickHouseResultSink(mode)`` positionally,
-    so a new positional parameter there would silently misbind to
-    ``embedding_generative``. None of this needs a DB connection.
+    The skip-window rule is applied once upstream while the model list is built,
+    so a row reaching add_entry is one the caller already decided to record.
+    Re-applying the rule here would silently drop results a run was asked to
+    produce, leaving its row count lower than its input with no accounting.
     """
 
     @pytest.fixture(autouse=True)
     def _bind(self):
         self.FakeSink = _fake_sink_cls()
 
-    def test_guard_on_rejects_a_blocked_model(self) -> None:
-        sink = self.FakeSink(blocking={"org/blocked"}, dedup_guard=True)
-        assert _add(sink, "org/blocked") is False
-        assert sink.written == []
-
-    def test_guard_off_writes_a_blocked_model_anyway(self) -> None:
-        """The weekly pipeline's behaviour: the decision was made upstream."""
-        sink = self.FakeSink(blocking={"org/blocked"}, dedup_guard=False)
-        assert _add(sink, "org/blocked") is True
+    def test_writes_even_when_should_insert_row_says_blocked(self) -> None:
+        sink = self.FakeSink(blocking={"org/blocked"})
+        _add(sink, "org/blocked")
         assert sink.written == ["org/blocked"]
 
-    def test_guard_on_allows_an_unblocked_model(self) -> None:
-        sink = self.FakeSink(dedup_guard=True)
-        assert _add(sink, "org/fresh") is True
+    def test_writes_an_unblocked_model(self) -> None:
+        sink = self.FakeSink()
+        _add(sink, "org/fresh")
         assert sink.written == ["org/fresh"]
 
-    def test_guard_defaults_to_on(self) -> None:
-        """clickhouse_db.import_csv depends on the default, so it must not drift."""
-        assert self.FakeSink()._dedup_guard is True
+    def test_repeated_writes_of_the_same_model_all_land(self) -> None:
+        """One row per call, so a run's count matches the models it handled."""
+        sink = self.FakeSink()
+        _add(sink, "org/dup")
+        _add(sink, "org/dup")
+        assert sink.written == ["org/dup", "org/dup"]
 
-    def test_should_insert_row_still_works_with_the_guard_off(self) -> None:
-        """Producers call it directly — turning the guard off must not break it."""
-        sink = self.FakeSink(blocking={"org/blocked"}, dedup_guard=False)
+    def test_should_insert_row_still_reports_blocks(self) -> None:
+        """The producers call it directly to build the filtered model list."""
+        sink = self.FakeSink(blocking={"org/blocked"})
         assert sink.should_insert_row("org/blocked") is False
         assert sink.should_insert_row("org/other") is True
 
+    def test_empty_model_name_is_still_rejected(self) -> None:
+        sink = self.FakeSink()
+        with pytest.raises(ValueError, match="model_name"):
+            _add(sink, "   ")
+
     @pytest.mark.parametrize(
-        "cls_name, expected_positional, expected_default",
+        "cls_name, expected_positional",
         [
-            ("CsvResultSink", ["path", "today"], False),
-            ("ClickHouseResultSink", ["embedding_generative", "today"], True),
+            ("CsvResultSink", ["path", "today"]),
+            ("ClickHouseResultSink", ["embedding_generative", "today"]),
         ],
     )
-    def test_dedup_guard_is_keyword_only(
-        self, cls_name: str, expected_positional: list[str], expected_default: bool
+    def test_constructor_signatures(
+        self, cls_name: str, expected_positional: list[str]
     ) -> None:
+        """No stray keyword-only params, and the positional order is unchanged."""
         import tests.spyre.weekly_generation.result_sink as rs
 
         params = inspect.signature(getattr(rs, cls_name).__init__).parameters
@@ -394,14 +398,8 @@ class TestDedupGuardFlag:
             for name, p in params.items()
             if name != "self" and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
         ]
-        assert positional == expected_positional, (
-            "positional parameters changed — clickhouse_db.py constructs "
-            "ClickHouseResultSink(mode) positionally and would misbind"
-        )
-        assert params["dedup_guard"].kind is inspect.Parameter.KEYWORD_ONLY
-        # CsvResultSink defaults to False: a fresh output file cannot hold a
-        # blocking row, so the guard would be pure overhead there.
-        assert params["dedup_guard"].default is expected_default
+        assert positional == expected_positional
+        assert [p for p in params.values() if p.kind is p.KEYWORD_ONLY] == []
 
 
 @requires_sink
@@ -449,7 +447,7 @@ class TestCsvSinkIsWriteOnly:
 
         path = tmp_path / "o.csv"
         sink = CsvResultSink(path=path)
-        assert _add(sink, "org/x") is True
-        assert _add(sink, "org/x") is True
+        _add(sink, "org/x")
+        _add(sink, "org/x")
         sink.close()
         assert len(list(_csv.DictReader(path.open()))) == 2
