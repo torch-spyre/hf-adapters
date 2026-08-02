@@ -6,18 +6,29 @@
 # and records the outcome directly in ClickHouse (see result_sink.py), replacing
 # the manual dev-instance upload + periodic dev->prod migration.
 #
-# Unlike torch-spyre's push-to-clickhouse.yaml, this is not a post-hoc ingest
-# of a separate test run's artifact: weekly_test.py's skip-window dedup guard
-# (don't re-test a model verified in the last 10 days) needs to read
-# ClickHouse live during the scan, so fetch + test + push both happen in the
-# weekly-model-scan job below rather than being split across a test workflow
-# and a separate ingest one.
+# Unlike torch-spyre's push-to-clickhouse.yaml, this is not a post-hoc ingest of
+# a separate test run's artifact: the scan reads and writes ClickHouse directly.
 #
-# At top_k=10000 per mode, a single job processing the whole list serially
-# would take far too long, so the fetch itself IS split out: generate-matrix
-# fetches the top-K list once (no Spyre hardware needed), shards it, and
-# weekly-model-scan fans out over those shards in parallel (mirrors
-# torch-spyre's generate_matrix -> matrix job pattern).
+# At top_k=10000 per mode, a single job processing the whole list serially would
+# take far too long, so generate-matrix fetches the top-K list once (no Spyre
+# hardware needed), shards it, and weekly-model-scan fans out over those shards
+# in parallel (mirrors torch-spyre's generate_matrix -> matrix job pattern).
+#
+# generate-matrix also does all the FILTERING, which is why it needs ClickHouse
+# credentials of its own: it applies the skip window (don't re-test a model
+# verified in the last 10 days) plus the no-adapter / too-large / MoE checks, and
+# writes those terminal verdict rows itself. weekly_test.py used to do this
+# inside each shard, but the dropped models cluster — config-class families
+# cluster by download count — so surviving counts per shard varied wildly and
+# some jobs finished in minutes while others ran for hours. Filtering before
+# chunking makes shard size a count of real evaluations.
+#
+# One consequence worth knowing: the terminal rows are written at fetch time, so
+# their 10-day skip window starts then. If a run is cancelled after
+# generate-matrix succeeds (cancel-in-progress below makes that routine), those
+# models read as "done" for 10 days even though no scan ran. They are terminal
+# properties of the checkpoint — a MoE model will not stop being MoE — so
+# re-deriving them weekly is wasted work anyway.
 # =============================================================================
 name: push-to-clickhouse
 
@@ -69,12 +80,16 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Fetch the top-K list once per mode and shard it for the parallel matrix
-  # job below. No Spyre hardware needed — utils/hf_model_catalog.py's import
-  # chain (via hf_adapters/auto_spyre_model.py) has no module-level
-  # torch_spyre dependency; it's lazily imported inside a device-guarded
-  # function body in hf_common.py. The now-deprecated test_weekly_DEPRECATED
-  # .yaml is existing proof this exact fetch path runs fine on ubuntu-latest.
+  # Fetch the top-K list once per mode, filter it, and shard the survivors for
+  # the parallel matrix job below. No Spyre hardware needed —
+  # utils/hf_model_catalog.py's import chain (via hf_adapters/auto_spyre_model
+  # .py) has no module-level torch_spyre dependency; it's lazily imported inside
+  # a device-guarded function body in hf_common.py. The now-deprecated
+  # test_weekly_DEPRECATED.yaml is existing proof this exact fetch path runs fine
+  # on ubuntu-latest.
+  #
+  # This job DOES need ClickHouse: it reads the skip window and writes the
+  # terminal verdict rows for everything it filters out. See the header comment.
   # ---------------------------------------------------------------------------
   generate-matrix:
     name: Generate weekly shards
@@ -95,6 +110,13 @@ jobs:
       matrix_x4: ${{ steps.generate.outputs.matrix_x4 }}
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      # Needed because this job applies the skip window and writes the terminal
+      # verdict rows for the models it filters out.
+      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
+      CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
+      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+      CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
+      CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
       # Overrides the workflow-level HF_HOME (/storage-1/... — a Spyre-pod-only
       # mount). Every AutoConfig.from_pretrained() call was failing with a
       # PermissionError trying to write there, which contains_remote_code()
@@ -115,7 +137,12 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install -e .
-          pip install huggingface_hub tqdm transformers
+          # clickhouse-connect and python-dotenv are named explicitly because
+          # `pip install -e .` does NOT pull them: they live in the `dev` and
+          # `models-ops` dependency groups respectively (pyproject.toml), and
+          # dependency groups are not installed by a plain editable install.
+          # Omitting them fails this job at import time on the sink.
+          pip install huggingface_hub tqdm transformers clickhouse-connect python-dotenv
 
       # TEMPORARY debug step: confirms HF_TOKEN actually reaches this job as a
       # working credential, and re-runs the real keep()-filter checks against
@@ -157,6 +184,38 @@ jobs:
               print(f"AutoConfig.from_pretrained() FAILED: {type(e).__name__}: {e}")
           PY
 
+      # Fail fast if ClickHouse secrets are missing/wrong: this job now reads the
+      # skip window and writes the terminal verdict rows, and the fetch below can
+      # take 90+ minutes before it would otherwise reach the sink. Never prints
+      # secret values, only presence/length and a live SELECT 1. Same check the
+      # scan jobs run, minus their `cd`/`uv run` wrapper — this job uses plain
+      # python with working-directory: '.'.
+      - name: Verify ClickHouse connection
+        run: |
+          for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
+            VAL="${!VAR}"
+            if [[ -n "$VAL" ]]; then
+              echo "$VAR: set (${#VAL} chars)"
+            else
+              echo "$VAR: NOT SET"
+            fi
+          done
+          python - <<'PY'
+          import os
+          import clickhouse_connect
+
+          client = clickhouse_connect.get_client(
+              host=os.environ["CLICKHOUSE_HOST"],
+              port=int(os.environ.get("CLICKHOUSE_PORT", 443)),
+              user=os.environ.get("CLICKHOUSE_USER", "default"),
+              password=os.environ["CLICKHOUSE_PASS"],
+              database=os.environ.get("CLICKHOUSE_DB", "spyre"),
+              secure=True,
+          )
+          client.command("SELECT 1")
+          print("ClickHouse connectivity check: OK")
+          PY
+
       - name: Generate shards
         id: generate
         run: |
@@ -181,10 +240,17 @@ jobs:
           retention-days: 1
 
   # Split by runner tier so max-parallel caps total cards held at once:
-  # 10*1 + 4*2 + 1*4 = 22 cards (~2 nodes), so PR/daily CI isn't starved.
+  # 20*1 + 4*2 + 1*4 = 32 cards, so PR/daily CI isn't starved.
+  #
+  # The `if` guards an empty matrix. Now that generate-matrix filters before
+  # chunking, a tier can legitimately produce zero shards — a re-run inside the
+  # 10-day skip window is the common case, and it already showed up in testing as
+  # matrix_x4=[]. Skipping explicitly beats relying on how Actions treats a
+  # zero-length matrix.include.
   weekly-model-scan-x1:
     name: Weekly model scan x1 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
     needs: generate-matrix
+    if: needs.generate-matrix.outputs.matrix_x1 != '[]'
     runs-on: [x86_64, spyre_pf_x1, linux, image_torch_spyre]
     timeout-minutes: 4320
     strategy:
@@ -262,6 +328,7 @@ jobs:
   weekly-model-scan-x2:
     name: Weekly model scan x2 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
     needs: generate-matrix
+    if: needs.generate-matrix.outputs.matrix_x2 != '[]'
     runs-on: [x86_64, spyre_pf_x2, linux, image_torch_spyre]
     timeout-minutes: 4320
     strategy:
@@ -339,6 +406,7 @@ jobs:
   weekly-model-scan-x4:
     name: Weekly model scan x4 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
     needs: generate-matrix
+    if: needs.generate-matrix.outputs.matrix_x4 != '[]'
     runs-on: [x86_64, spyre_pf_x4, linux, image_torch_spyre]
     timeout-minutes: 4320
     strategy:
