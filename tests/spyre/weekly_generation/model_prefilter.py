@@ -18,7 +18,7 @@ shard size maps to evaluations.
 both entry points share one definition of "worth handing to a Spyre worker".
 
 Deliberately free of database imports: the skip-window decision arrives as an
-injected *should_scan* callable rather than a sink, so this module (and its
+injected ``IsDueForScan`` callable rather than a sink, so this module (and its
 tests) import cleanly with no ``clickhouse_connect`` installed.
 """
 
@@ -34,6 +34,15 @@ from tests.spyre.weekly_generation.failure_categories import (
     MAX_NUMBER_PARAMS,
 )
 
+IsDueForScan = Callable[[str], bool]
+"""``model_id -> bool``: False when a recent row already covers this model.
+
+A one-bit view of a ``ResultSink``'s skip-window rule, taken as a callable rather
+than the sink itself so this module needs no database imports — which is what
+lets it, and its unit tests, run with no ``clickhouse_connect`` installed. Pass
+``sink.should_insert_row``.
+"""
+
 
 @dataclass(frozen=True)
 class SkippedModel:
@@ -47,7 +56,7 @@ class SkippedModel:
 
 @dataclass
 class PrefilterResult:
-    """Three-way partition of the fetched rows.
+    """Three-way partition of the fetched models.
 
     ``window_skipped`` is kept separate from ``skipped`` on purpose: those models
     already have a recent row, so writing another would either duplicate it or
@@ -96,22 +105,22 @@ def _parameter_count(row: dict) -> int | None:
 
 
 def prefilter_models(
-    rows: list[dict],
+    models: list[dict],
     *,
-    should_scan: Callable[[str], bool],
+    is_due_for_scan: IsDueForScan,
     max_params: int = MAX_NUMBER_PARAMS,
 ) -> PrefilterResult:
-    """Partition *rows* into work to do, verdicts to record, and rows to ignore.
+    """Partition *models* into work to do, verdicts to record, and models to skip.
 
     Args:
-        rows: catalog dicts from ``build_catalog``, keyed as the CSV header is
-            (``model_id``, ``downloads``, ``parameters``, ``is_supported``,
-            ``is_moe``, ``config_class``, ``model_type``, ``architectures``).
-            Callers should ``pop("model_info")`` first — the returned lists hold
-            the same dict objects, and that field is not JSON-serializable.
-        should_scan: ``model_id -> bool``, True when the model is due for a run.
-            Pass ``sink.should_insert_row`` for the real skip-window rule, or
-            ``lambda _: True`` to disable it (no-DB / dry-run paths).
+        models: one dict per model as fetched from the HuggingFace Hub by
+            ``build_catalog``, keyed as the catalog CSV header is (``model_id``,
+            ``downloads``, ``parameters``, ``is_supported``, ``is_moe``,
+            ``config_class``, ``model_type``, ``architectures``). Callers should
+            ``pop("model_info")`` first — the returned lists hold the same dict
+            objects, and that field is not JSON-serializable.
+        is_due_for_scan: see ``IsDueForScan``. In practice
+            ``sink.should_insert_row``.
         max_params: parameter ceiling above which a model cannot be brought up
             on Spyre.
 
@@ -121,14 +130,14 @@ def prefilter_models(
     """
     result = PrefilterResult()
 
-    for row in rows:
+    for row in models:
         model_id = str(row["model_id"])
 
         # Checked first: a recent row already exists, so this model needs
         # neither evaluation nor a new row. Must precede the terminal checks —
         # otherwise a model that is both unsupported and recently recorded would
         # get a duplicate not-implemented-adapter row every run.
-        if not should_scan(model_id):
+        if not is_due_for_scan(model_id):
             result.window_skipped.append(row)
             continue
 

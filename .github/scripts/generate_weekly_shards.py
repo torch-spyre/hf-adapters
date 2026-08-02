@@ -24,7 +24,7 @@ Each mode's list is PRE-FILTERED before any chunking: models already scanned
 inside the skip window, models with no adapter for their config class, models
 too large for Spyre, and MoE models are all removed here, and the terminal
 verdicts among those are written straight to ClickHouse (so this script needs
-the CLICKHOUSE_* env vars; use --dry-run to skip both the read and the writes).
+the CLICKHOUSE_* env vars, or --write-to-csv to record them in a file instead).
 
 That ordering is the point. The dropped models cluster heavily — config-class
 families cluster by download count — so filtering inside each worker, as
@@ -60,6 +60,7 @@ import os
 import sys
 from datetime import date
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 # Add the project root to the Python path so we can import from utils/ and from
 # tests/spyre/weekly_generation/ (both resolve as namespace packages from here).
@@ -72,6 +73,9 @@ from tests.spyre.weekly_generation.model_prefilter import (  # noqa: E402
 )
 from utils.fetch_top_embedding_models import fetch_top_embedding_models  # noqa: E402
 from utils.fetch_top_generative_models import fetch_top_generative_models  # noqa: E402
+
+if TYPE_CHECKING:  # pragma: no cover - annotation only, no runtime DB import
+    from tests.spyre.weekly_generation.result_sink import ResultSink
 
 MODEL_TYPES = ("generative", "embedding")
 
@@ -100,40 +104,49 @@ def _tier_for(row: dict, x1_max_params: int, x2_max_params: int) -> str:
 
 
 def _prefilter_for_mode(
-    rows: list[dict],
+    models: list[dict],
     mode: str,
     snapshot_date: date,
-    dry_run: bool,
+    write_to_csv: Path | None,
 ) -> PrefilterResult:
-    """Apply the four pre-filters to *rows* and record the terminal verdicts.
+    """Apply the four pre-filters to *models* and record the terminal verdicts.
 
-    See the module docstring for why this runs before chunking. The sink is opened
-    per mode because it binds one table per instance.
+    See the module docstring for why this runs before chunking. The sink is built
+    per mode because it binds one table (or one file) per instance.
+
+    With *write_to_csv* the verdicts go to a new CSV instead of ClickHouse, which
+    needs no credentials. That sink is write-only, so it reports nothing as
+    already-scanned and the emitted shards include every model that clears the
+    other three filters.
     """
-    if dry_run:
-        print(f"{mode}: dry run — skipping the ClickHouse skip-window check")
-        result = prefilter_models(rows, should_scan=lambda _model_id: True)
-        print(
-            f"{mode}: {len(rows)} fetched -> {len(result.keep)} to evaluate "
-            f"(no rows written) {result.counts}"
-        )
-        return result
-
-    # Imported lazily so --dry-run works with no database driver installed.
+    # Imported here, not at module scope, so --write-to-csv works on a host with
+    # no clickhouse_connect installed (result_sink pulls it in transitively).
     from tests.spyre.weekly_generation.result_sink import (
         ClickHouseResultSink,
+        CsvResultSink,
         EmbeddingGenerativeMode,
     )
     from tests.spyre.weekly_generation.skip_writer import write_skipped_rows
 
-    with ClickHouseResultSink(
-        embedding_generative=EmbeddingGenerativeMode(mode), today=snapshot_date
-    ) as sink:
-        result = prefilter_models(rows, should_scan=sink.should_insert_row)
+    sink: ResultSink
+    if write_to_csv is not None:
+        # One file per mode, since a single run covers both.
+        path = write_to_csv.with_name(
+            f"{write_to_csv.stem}-{mode}{write_to_csv.suffix}"
+        )
+        sink = CsvResultSink(path=path, today=snapshot_date)
+        print(f"{mode}: recording verdicts in '{path}' (no DB access)")
+    else:
+        sink = ClickHouseResultSink(
+            embedding_generative=EmbeddingGenerativeMode(mode), today=snapshot_date
+        )
+
+    with sink:
+        result = prefilter_models(models, is_due_for_scan=sink.should_insert_row)
         written = write_skipped_rows(sink, result.skipped, snapshot_date=snapshot_date)
 
     print(
-        f"{mode}: {len(rows)} fetched -> {len(result.keep)} to evaluate "
+        f"{mode}: {len(models)} fetched -> {len(result.keep)} to evaluate "
         f"({len(result.window_skipped)} already scanned within the skip window, "
         f"{written} terminal row(s) written) {result.counts}"
     )
@@ -151,7 +164,7 @@ def generate_shards(
     output_dir: Path,
     model_types: tuple[str, ...] = MODEL_TYPES,
     snapshot_date: date | None = None,
-    dry_run: bool = False,
+    write_to_csv: Path | None = None,
 ) -> list[dict]:
     """Fetch each requested mode's top-K list once, write shard JSON files,
     and return the combined matrix (list of {mode, shard_index, shard_file,
@@ -168,10 +181,10 @@ def generate_shards(
     embedding models (much quicker, less resource-hungry) without the
     schedule-triggered full scan having to change.
 
-    *dry_run* skips both the ClickHouse skip-window read and the skipped-row
-    writes, so the whole fetch → filter → route → chunk path can be exercised
-    without credentials. The emitted shards then include models that a real run
-    would have dropped as recently-scanned.
+    *write_to_csv* records the terminal verdicts in a new CSV (one per mode)
+    instead of ClickHouse, so the whole fetch → filter → route → chunk path can be
+    exercised without credentials. That sink is write-only, so the emitted shards
+    then include models a real run would have dropped as recently-scanned.
     """
     snapshot_date = snapshot_date or date.today()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -193,7 +206,7 @@ def generate_shards(
         # Filter BEFORE routing and chunking. Must stay after the pop above:
         # prefilter_models returns the same dict objects it was given, and a
         # surviving ModelInfo would break the shard JSON dump below.
-        rows = _prefilter_for_mode(rows, mode, snapshot_date, dry_run).keep
+        rows = _prefilter_for_mode(rows, mode, snapshot_date, write_to_csv).keep
 
         by_tier: dict[str, list[dict]] = {"x1": [], "x2": [], "x4": []}
         for row in rows:
@@ -297,14 +310,17 @@ def main() -> None:
         help="Directory to write shard JSON files into.",
     )
     parser.add_argument(
-        "--dry-run",
-        action="store_true",
+        "--write-to-csv",
+        type=Path,
+        default=None,
+        metavar="VERDICTS_CSV",
         help=(
-            "Skip the ClickHouse skip-window read and the skipped-row writes, so "
-            "the fetch/filter/route/chunk path can be exercised without "
-            "credentials. The emitted shards then include models a real run "
-            "would have dropped as recently scanned — do not feed them to a "
-            "production scan."
+            "Record the terminal verdicts in a new CSV per mode (suffixed "
+            "-generative / -embedding) instead of ClickHouse, so this script can "
+            "run without credentials. That sink is write-only, so no skip window "
+            "is applied and the emitted shards include models a real run would "
+            "have dropped as recently scanned — do not feed them to a production "
+            "scan."
         ),
     )
     parser.add_argument(
@@ -329,7 +345,7 @@ def main() -> None:
         x4_shard_size=args.x4_shard_size,
         output_dir=args.output_dir,
         model_types=model_types,
-        dry_run=args.dry_run,
+        write_to_csv=args.write_to_csv,
     )
 
     print(f"\nTotal shards across both model-types: {len(matrix)}")

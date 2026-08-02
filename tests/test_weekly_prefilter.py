@@ -60,14 +60,14 @@ def _row(model_id: str, **overrides: object) -> dict:
 
 class TestFilterBranches:
     def test_clean_row_is_kept(self) -> None:
-        result = prefilter_models([_row("org/ok")], should_scan=lambda _: True)
+        result = prefilter_models([_row("org/ok")], is_due_for_scan=lambda _: True)
         assert [r["model_id"] for r in result.keep] == ["org/ok"]
         assert result.skipped == []
         assert result.window_skipped == []
 
     def test_unsupported_config_class(self) -> None:
         result = prefilter_models(
-            [_row("org/unsup", is_supported=False)], should_scan=lambda _: True
+            [_row("org/unsup", is_supported=False)], is_due_for_scan=lambda _: True
         )
         assert result.keep == []
         assert len(result.skipped) == 1
@@ -78,7 +78,7 @@ class TestFilterBranches:
     def test_too_large(self) -> None:
         result = prefilter_models(
             [_row("org/huge", parameters=999)],
-            should_scan=lambda _: True,
+            is_due_for_scan=lambda _: True,
             max_params=100,
         )
         assert result.keep == []
@@ -88,20 +88,20 @@ class TestFilterBranches:
         """The guard is ``>`` not ``>=`` — a model exactly at the cap is fine."""
         result = prefilter_models(
             [_row("org/edge", parameters=100)],
-            should_scan=lambda _: True,
+            is_due_for_scan=lambda _: True,
             max_params=100,
         )
         assert [r["model_id"] for r in result.keep] == ["org/edge"]
 
     def test_moe(self) -> None:
         result = prefilter_models(
-            [_row("org/moe", is_moe=True)], should_scan=lambda _: True
+            [_row("org/moe", is_moe=True)], is_due_for_scan=lambda _: True
         )
         assert result.keep == []
         assert result.skipped[0].failure_category == FAILURE_CATEGORY_MOE
 
     def test_skip_window(self) -> None:
-        result = prefilter_models([_row("org/recent")], should_scan=lambda _: False)
+        result = prefilter_models([_row("org/recent")], is_due_for_scan=lambda _: False)
         assert result.keep == []
         assert result.skipped == [], "window skips must not produce a row to write"
         assert [r["model_id"] for r in result.window_skipped] == ["org/recent"]
@@ -119,7 +119,7 @@ class TestPrecedence:
             _row("org/moe-and-recent", is_moe=True),
             _row("org/huge-and-recent", parameters=10**15),
         ]
-        result = prefilter_models(rows, should_scan=lambda _: False)
+        result = prefilter_models(rows, is_due_for_scan=lambda _: False)
         assert result.skipped == []
         assert len(result.window_skipped) == 3
 
@@ -127,7 +127,7 @@ class TestPrecedence:
         """Both apply; the reported category is the first check that fires."""
         result = prefilter_models(
             [_row("org/both", is_supported=False, is_moe=True)],
-            should_scan=lambda _: True,
+            is_due_for_scan=lambda _: True,
         )
         assert result.skipped[0].failure_category == (
             FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER
@@ -148,7 +148,7 @@ class TestParameterCoercion:
         """
         result = prefilter_models(
             [_row("org/unknown", parameters=value)],
-            should_scan=lambda _: True,
+            is_due_for_scan=lambda _: True,
             max_params=100,
         )
         assert [r["model_id"] for r in result.keep] == ["org/unknown"]
@@ -157,7 +157,7 @@ class TestParameterCoercion:
         """A stringified count must not be compared lexicographically."""
         result = prefilter_models(
             [_row("org/str", parameters="999")],
-            should_scan=lambda _: True,
+            is_due_for_scan=lambda _: True,
             max_params=100,
         )
         assert result.keep == []
@@ -165,7 +165,7 @@ class TestParameterCoercion:
 
     def test_zero_parameters_is_kept(self) -> None:
         result = prefilter_models(
-            [_row("org/zero", parameters=0)], should_scan=lambda _: True
+            [_row("org/zero", parameters=0)], is_due_for_scan=lambda _: True
         )
         assert [r["model_id"] for r in result.keep] == ["org/zero"]
 
@@ -176,7 +176,7 @@ class TestOrderAndTallies:
         rows = [_row(f"org/m{i}", downloads=1000 - i) for i in range(20)]
         rows[3]["is_moe"] = True
         rows[11]["is_supported"] = False
-        result = prefilter_models(rows, should_scan=lambda m: m != "org/m7")
+        result = prefilter_models(rows, is_due_for_scan=lambda m: m != "org/m7")
 
         kept = [r["model_id"] for r in result.keep]
         assert kept == sorted(kept, key=lambda m: -(1000 - int(m.split("m")[1])))
@@ -192,7 +192,7 @@ class TestOrderAndTallies:
             _row("org/d", parameters=10**15),
             _row("org/e"),
         ]
-        result = prefilter_models(rows, should_scan=lambda m: m != "org/e")
+        result = prefilter_models(rows, is_due_for_scan=lambda m: m != "org/e")
         counts = result.counts
         assert counts["keep"] == 1
         assert counts["window_skipped"] == 1
@@ -202,14 +202,14 @@ class TestOrderAndTallies:
         assert sum(counts.values()) == len(rows)
 
     def test_empty_input(self) -> None:
-        result = prefilter_models([], should_scan=lambda _: True)
+        result = prefilter_models([], is_due_for_scan=lambda _: True)
         assert result.keep == []
         assert result.counts == {"keep": 0, "window_skipped": 0}
 
     def test_rows_are_returned_by_identity(self) -> None:
         """The same dict objects come back, so a caller's pop() still applies."""
         row = _row("org/same")
-        result = prefilter_models([row], should_scan=lambda _: True)
+        result = prefilter_models([row], is_due_for_scan=lambda _: True)
         assert result.keep[0] is row
 
 
@@ -224,7 +224,7 @@ class TestWriteSkippedRows:
             _row("org/unsup", is_supported=False),
             _row("org/moe", is_moe=True),
         ]
-        result = prefilter_models(rows, should_scan=lambda _: True)
+        result = prefilter_models(rows, is_due_for_scan=lambda _: True)
         today = date.today()
 
         with CsvResultSink(path=csv_path, today=today) as sink:
@@ -259,7 +259,7 @@ class TestWriteSkippedRows:
                     config_class="MistralConfig",
                 )
             ],
-            should_scan=lambda _: True,
+            is_due_for_scan=lambda _: True,
         )
         with CsvResultSink(path=csv_path, today=today) as sink:
             write_skipped_rows(sink, result.skipped, snapshot_date=today, verbose=False)

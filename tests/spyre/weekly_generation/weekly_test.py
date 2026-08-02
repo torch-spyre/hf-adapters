@@ -690,25 +690,25 @@ def _fetch_and_filter(
     if mode == EmbeddingGenerativeMode.GENERATIVE:
         from utils.fetch_top_generative_models import fetch_top_generative_models
 
-        rows: list[dict] = fetch_top_generative_models(limit=top_k)
+        models: list[dict] = fetch_top_generative_models(limit=top_k)
     else:
         from utils.fetch_top_embedding_models import fetch_top_embedding_models
 
-        rows = fetch_top_embedding_models(limit=top_k)
+        models = fetch_top_embedding_models(limit=top_k)
 
     # model_info is a live huggingface_hub.ModelInfo attached by build_catalog.
-    # Nothing downstream needs it (is_moe is precomputed onto each row), and it
+    # Nothing downstream needs it (is_moe is precomputed onto each model), and it
     # would not survive the spawn pickle into the worker.
-    for row in rows:
-        row.pop("model_info", None)
-    print(f"{ts()} Fetched {len(rows)} {mode.value} model(s).")
+    for model in models:
+        model.pop("model_info", None)
+    print(f"{ts()} Fetched {len(models)} {mode.value} model(s).")
 
     result = prefilter_models(
-        rows, should_scan=sink.should_insert_row, max_params=max_params
+        models, is_due_for_scan=sink.should_insert_row, max_params=max_params
     )
     written = write_skipped_rows(sink, result.skipped, snapshot_date=snapshot_date)
     print(
-        f"{ts()} {len(rows)} fetched -> {len(result.keep)} to evaluate "
+        f"{ts()} {len(models)} fetched -> {len(result.keep)} to evaluate "
         f"({len(result.window_skipped)} already scanned within the skip window, "
         f"{written} terminal row(s) recorded) {result.counts}"
     )
