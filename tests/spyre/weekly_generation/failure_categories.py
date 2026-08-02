@@ -4,8 +4,7 @@ Deliberately a leaf module: it imports nothing from this repo and nothing that
 pulls in a database driver. That is what lets ``model_prefilter`` — and its unit
 tests — be imported on a machine with no ``clickhouse_connect`` installed, while
 still sharing one definition of each category string with ``weekly_test``,
-``result_sink`` and the upstream producers (``generate_weekly_shards`` and
-``prepare_weekly_model_list``).
+``result_sink`` and the CI shard producer (``generate_weekly_shards``).
 
 The category strings are persisted verbatim in the ClickHouse
 ``failure_category`` column, so changing a value silently splits historical rows

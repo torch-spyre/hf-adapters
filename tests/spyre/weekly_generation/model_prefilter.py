@@ -6,14 +6,16 @@ in-process. Three of them are terminal properties of the checkpoint itself
 verdict; the fourth is the skip window, which produces no row because one
 already exists.
 
-Running this **upstream of sharding** is the point. The producers
-(``generate_weekly_shards`` for CI, ``prepare_weekly_model_list`` for manual
-runs) chunk a downloads-ordered list into fixed-size shards, and filtered-out
-models cluster heavily — config-class families cluster by download count, so a
-single unsupported family can hollow out one shard while leaving the next
-untouched. Filtering after chunking left shards with wildly different amounts of
-real work: some CI jobs finished in minutes, others ran for hours. Filtering
-first means shard size maps to evaluations.
+Running this **upstream of sharding** is the point. ``generate_weekly_shards``
+chunks a downloads-ordered list into fixed-size shards, and filtered-out models
+cluster heavily — config-class families cluster by download count, so a single
+unsupported family can hollow out one shard while leaving the next untouched.
+Filtering after chunking left shards with wildly different amounts of real work:
+some CI jobs finished in minutes, others ran for hours. Filtering first means
+shard size maps to evaluations.
+
+``weekly_test --fetch`` calls this too, for manual runs with no shard file, so
+both entry points share one definition of "worth handing to a Spyre worker".
 
 Deliberately free of database imports: the skip-window decision arrives as an
 injected *should_scan* callable rather than a sink, so this module (and its

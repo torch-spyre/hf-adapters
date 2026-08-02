@@ -1,33 +1,46 @@
 """Weekly Spyre evaluation suite.
 
-Evaluates a prepared list of models against Spyre hardware::
+Two ways to say which models to evaluate — exactly one is required::
 
+    # CI: evaluate a shard prepared upstream
     python tests/spyre/weekly_generation/weekly_test.py \\
         --mode generative --model-list-file shards/generative-x1-shard-000.json
 
-This script does not choose which models to run. The list is built upstream by
-``.github/scripts/generate_weekly_shards.py`` (CI, which also shards it across
-parallel jobs) or by ``prepare_weekly_model_list.py`` (manual pod runs). Both
-apply the pre-filters — skip window, no adapter for the config class, too large
-for Spyre, MoE — and record a terminal row for each model they drop, so
-everything reaching this script is expected to need a Spyre card. Filtering
-there rather than here is what keeps shard durations comparable: the dropped
-models cluster by download count, so filtering per-shard used to leave some jobs
-finishing in minutes and others running for hours.
+    # Manual: fetch, filter and evaluate in one pass
+    python tests/spyre/weekly_generation/weekly_test.py \\
+        --mode embedding --fetch --top-k 200
 
-``--mode`` still matters here, and selects four things: the per-process batch
-size, the model class loaded in ``_load_on_cpu``, the verification pipeline in
-``eval_model`` (token-compare for generative, cosine-compare for embedding), and
-which ClickHouse table the sink writes to.
+Either way the same four pre-filters apply — skip window, no adapter for the
+config class, too large for Spyre, MoE — and each dropped model gets a terminal
+row recording why. With ``--model-list-file`` that happened upstream in
+``.github/scripts/generate_weekly_shards.py``; with ``--fetch`` it happens here,
+through the same ``prefilter_models``. So everything that reaches the evaluation
+loop needs a Spyre card.
+
+Filtering before the list is sharded is what keeps shard durations comparable:
+the dropped models cluster by download count, so filtering per-shard used to
+leave some CI jobs finishing in minutes and others running for hours.
+
+``--mode`` selects four things: the per-process batch size, the model class
+loaded in ``_load_on_cpu``, the verification pipeline in ``eval_model``
+(token-compare for generative, cosine-compare for embedding), and which
+ClickHouse table the sink reads and writes. With ``--fetch`` it also picks the
+catalog to fetch.
 
 Flags:
 
 * ``--mode {generative,embedding}``  Required. See above.
-* ``--model-list-file F``            Required. JSON list of models to evaluate.
-* ``--write-to-csv F``               Write results to a CSV file instead of
-  ClickHouse. Note the producer will have written its terminal rows to whichever
-  destination it was pointed at, so pair this with a producer run that used the
-  same CSV if you want a self-consistent file.
+* ``--model-list-file F``            Evaluate this JSON list. Mutually exclusive
+  with ``--fetch``; one of the two is required.
+* ``--fetch``                        Fetch and filter here instead.
+* ``--top-k N``                      With ``--fetch``: how many to fetch
+  (default: 10000).
+* ``--max-params N``                 With ``--fetch``: parameter ceiling.
+* ``--write-to-csv F``               Record results in a CSV instead of
+  ClickHouse, and use it as the skip-window source. Unlike the ClickHouse path
+  this keeps the sink's dedup guard on, so a re-run against the same file skips
+  what it already holds rather than appending a second copy; anything dropped
+  that way is logged per row.
 """
 
 import argparse
@@ -57,6 +70,7 @@ from tests.spyre.weekly_generation.failure_categories import (
     FAILURE_CATEGORY_VERIFICATION_FAILED,
     FAILURE_CATEGORY_WORKER_CRASHED,
     FAILURE_CATEGORY_WORKER_TIMEOUT,
+    MAX_NUMBER_PARAMS,
 )
 from tests.spyre.weekly_generation.result_sink import (
     EmbeddingGenerativeMode,
@@ -213,20 +227,57 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "into ClickHouse. No DB connection is made when this flag is set."
         ),
     )
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
         "--model-list-file",
         type=Path,
-        required=True,
+        default=None,
         metavar="MODEL_LIST_JSON",
         help=(
-            "JSON list of models to evaluate, as produced by "
-            ".github/scripts/generate_weekly_shards.py (CI) or "
-            "prepare_weekly_model_list.py (manual runs). Both apply the "
-            "pre-filters and record a terminal row for each model they drop, so "
-            "everything in the file is expected to need a Spyre card."
+            "Evaluate the models in this JSON file, as produced by "
+            ".github/scripts/generate_weekly_shards.py. It applies the "
+            "pre-filters and records a terminal row for each model it drops, so "
+            "everything in the file is expected to need a Spyre card. This is "
+            "how CI runs: the list is fetched and filtered once, then sharded "
+            "across parallel jobs."
         ),
     )
-    return parser.parse_args(argv)
+    source.add_argument(
+        "--fetch",
+        action="store_true",
+        help=(
+            "Fetch the top --top-k models for --mode, apply the same "
+            "pre-filters, record the terminal rows, and evaluate the survivors — "
+            "all in one pass. For manual runs where there is no shard file."
+        ),
+    )
+    fetch_opts = parser.add_argument_group("--fetch options")
+    fetch_opts.add_argument(
+        "--top-k",
+        type=int,
+        default=10_000,
+        help=(
+            "With --fetch: how many top models to fetch by downloads "
+            "(default: 10000). Ignored with --model-list-file."
+        ),
+    )
+    fetch_opts.add_argument(
+        "--max-params",
+        type=int,
+        default=MAX_NUMBER_PARAMS,
+        help=(
+            "With --fetch: reject models above this parameter count "
+            f"(default: {MAX_NUMBER_PARAMS:,}). Ignored with --model-list-file, "
+            "whose producer applied its own limit."
+        ),
+    )
+    args = parser.parse_args(argv)
+    # Reject the silent no-op of passing a fetch tuning flag without --fetch.
+    if not args.fetch:
+        for flag, dest in (("--top-k", "top_k"), ("--max-params", "max_params")):
+            if getattr(args, dest) != parser.get_default(dest):
+                parser.error(f"{flag} only applies with --fetch")
+    return args
 
 
 def _load_on_cpu(
@@ -610,10 +661,58 @@ def _chunk_into_batches(rows: list[dict], batch_size: int) -> list[list[dict]]:
     return [rows[i : i + batch_size] for i in range(0, len(rows), batch_size)]
 
 
+def _fetch_and_filter(
+    mode: EmbeddingGenerativeMode,
+    sink,
+    snapshot_date: date,
+    top_k: int,
+    max_params: int,
+) -> list[dict]:
+    """Fetch the top-*top_k* models for *mode*, filter them, record the verdicts.
+
+    The ``--fetch`` counterpart to reading a shard file. Applies exactly the same
+    ``prefilter_models`` the CI producer applies, using *sink* for both the
+    skip-window read and the terminal-row writes, and returns the survivors for
+    evaluation.
+    """
+    from tests.spyre.weekly_generation.model_prefilter import prefilter_models
+    from tests.spyre.weekly_generation.skip_writer import write_skipped_rows
+
+    if mode == EmbeddingGenerativeMode.GENERATIVE:
+        from utils.fetch_top_generative_models import fetch_top_generative_models
+
+        rows: list[dict] = fetch_top_generative_models(limit=top_k)
+    else:
+        from utils.fetch_top_embedding_models import fetch_top_embedding_models
+
+        rows = fetch_top_embedding_models(limit=top_k)
+
+    # model_info is a live huggingface_hub.ModelInfo attached by build_catalog.
+    # Nothing downstream needs it (is_moe is precomputed onto each row), and it
+    # would not survive the spawn pickle into the worker.
+    for row in rows:
+        row.pop("model_info", None)
+    print(f"{ts()} Fetched {len(rows)} {mode.value} model(s).")
+
+    result = prefilter_models(
+        rows, should_scan=sink.should_insert_row, max_params=max_params
+    )
+    written = write_skipped_rows(sink, result.skipped, snapshot_date=snapshot_date)
+    print(
+        f"{ts()} {len(rows)} fetched -> {len(result.keep)} to evaluate "
+        f"({len(result.window_skipped)} already scanned within the skip window, "
+        f"{written} terminal row(s) recorded) {result.counts}"
+    )
+    return result.keep
+
+
 def main(
     mode: EmbeddingGenerativeMode,
-    model_list_file: Path,
+    model_list_file: Path | None = None,
     write_to_csv: Path | str | None = None,
+    fetch: bool = False,
+    top_k: int = 10_000,
+    max_params: int = MAX_NUMBER_PARAMS,
 ) -> None:
     from tests.spyre.weekly_generation.result_sink import (
         ClickHouseResultSink,
@@ -632,22 +731,27 @@ def main(
     else:
         raise Exception(f"Unknown mode: {mode}")
 
-    print(f"{ts()} Loading model list from '{model_list_file}'.")
-    to_process_list: list[dict] = json.loads(model_list_file.read_text())
     adapter_dates: dict[str, str | None] = _get_adapter_dates()
 
-    # dedup_guard=False: write a row for every model in the list, unconditionally.
-    # The producer that built this list already applied the skip window, so the
-    # decision to evaluate these models has been made. Re-checking at write time
-    # would consult a skip set snapshotted when THIS job started — newer than the
-    # producer's — so a row written in between (a concurrent manual run, a
-    # re-dispatched shard) would suppress our write and leave the run reporting
-    # fewer rows than the models it was handed, with the shortfall explained only
-    # by a per-row log line. A duplicate is the better failure: ReplacingMergeTree
-    # (snapshot_date) collapses same-day duplicates on merge anyway.
+    # The sink is built before the model list is resolved because --fetch needs it
+    # for the skip-window read.
+    #
+    # dedup_guard differs by backend, deliberately:
+    #
+    # * ClickHouse — OFF. Whoever built the list already applied the skip window,
+    #   so the decision to evaluate these models has been made and every result is
+    #   a fact about this run. Re-checking at write time would consult a skip set
+    #   snapshotted when THIS job started — newer than a shard producer's, two
+    #   hours earlier — so a row written in between by a concurrent run would
+    #   suppress a result we were asked to produce, leaving the run reporting
+    #   fewer rows than models handled. A duplicate is the better failure:
+    #   ReplacingMergeTree(snapshot_date) collapses same-day duplicates on merge.
+    # * CSV — ON. The file is its own skip-window index, so re-running against the
+    #   same CSV behaves like re-running against the database instead of appending
+    #   a second copy of every row. Rows it drops are logged explicitly below.
     sink: ResultSink
     if write_to_csv:
-        sink = CsvResultSink(path=write_to_csv, today=snapshot_date, dedup_guard=False)
+        sink = CsvResultSink(path=write_to_csv, today=snapshot_date)
         print(
             f"CSV mode: results will be appended to '{write_to_csv}' (no DB access).\n"
         )
@@ -656,17 +760,26 @@ def main(
             today=snapshot_date, embedding_generative=mode, dedup_guard=False
         )
         print("DB mode: results will be appended to the DB.\n")
+
+    if fetch:
+        to_process_list = _fetch_and_filter(
+            mode, sink, snapshot_date, top_k=top_k, max_params=max_params
+        )
+        source_desc = f"--fetch --top-k {top_k}"
+    else:
+        # The file arrives pre-filtered: generate_weekly_shards.py applied the
+        # skip window and dropped models with no adapter, models too large for
+        # Spyre, and MoE models, recording a terminal row for each. So everything
+        # here needs a Spyre card, and shard size is a count of real evaluations
+        # rather than of fetched candidates.
+        print(f"{ts()} Loading model list from '{model_list_file}'.")
+        to_process_list = json.loads(model_list_file.read_text())
+        source_desc = f"'{model_list_file}'"
+
     total = len(to_process_list)
     processed = 0
     overall_start = time.monotonic()
-
-    # The model list arrives pre-filtered: the producer that built it
-    # (generate_weekly_shards.py in CI, prepare_weekly_model_list.py for manual
-    # runs) already applied the skip window and dropped models with no adapter,
-    # models too large for Spyre, and MoE models — recording a terminal row for
-    # each. So everything here is work that needs a Spyre card, and shard size
-    # is a count of real evaluations rather than of fetched candidates.
-    print(f"{ts()} Will evaluate {total} model(s) from '{model_list_file}'.")
+    print(f"{ts()} Will evaluate {total} model(s) from {source_desc}.")
 
     batches: list[list[dict]] = _chunk_into_batches(
         to_process_list, number_of_model_per_process
@@ -800,10 +913,11 @@ def main(
                     except ValueError:
                         rec["added_date"] = None
 
-                # The sink is built with dedup_guard=False, so this always
-                # writes and always returns True — one row per model in the
-                # list, so the run's row count matches what it was handed.
-                sink.add_entry(
+                # Always True on the ClickHouse path (dedup_guard=False), so the
+                # row count matches the models handled. On the CSV path the guard
+                # is on and can decline a row already present in the file — logged
+                # explicitly below rather than left to be inferred from a count.
+                if sink.add_entry(
                     model_name=str(rec["model_name"]),
                     config_class=str(rec["config_class"]),
                     adapter_name=str(rec["adapter_name"]),
@@ -822,13 +936,20 @@ def main(
                         else str(rec["failure_category"])
                     ),
                     error=(None if rec.get("error") is None else str(rec["error"])),
-                )
-                print(
-                    f"{ts()}     sink: row written for '{model_path}' "
-                    f"(verified_on_cpu={rec.get('verified_on_cpu')}, "
-                    f"verified_on_spyre={rec.get('verified_on_spyre')}, "
-                    f"failure_category={rec.get('failure_category')}, )"
-                )
+                ):
+                    print(
+                        f"{ts()}     sink: row written for '{model_path}' "
+                        f"(verified_on_cpu={rec.get('verified_on_cpu')}, "
+                        f"verified_on_spyre={rec.get('verified_on_spyre')}, "
+                        f"failure_category={rec.get('failure_category')}, )"
+                    )
+                else:
+                    print(
+                        f"{ts()}     sink: row NOT written for '{model_path}' — "
+                        f"the CSV already holds a row for it inside the "
+                        f"{sink.__class__.__name__} skip window, so this "
+                        f"evaluation's result was discarded"
+                    )
 
             # Cache cleanup: delete weights downloaded during this batch,
             # regardless of whether the worker processed each model.
@@ -899,6 +1020,9 @@ if __name__ == "__main__":
             mode=EmbeddingGenerativeMode(args.mode),
             model_list_file=args.model_list_file,
             write_to_csv=args.write_to_csv,
+            fetch=args.fetch,
+            top_k=args.top_k,
+            max_params=args.max_params,
         )
     except HardwareExceptionAbortError as e:
         # Non-zero exit so CI / GHA scheduled runs can alert. main()'s
