@@ -137,8 +137,10 @@ class TestParameterCoercion:
     ) -> None:
         """Unsizable rows must NOT be treated as zero-parameter or as too large.
 
-        weekly_test keeps an in-worker too-large guard precisely for these, so
-        the right move here is to let them through rather than guess.
+        There is no worker-side size check to fall back on, so such a model is
+        judged by whether it actually loads. That matches the behaviour before
+        this filter moved upstream: the parent's guard skipped unsizable rows
+        too, and no in-worker check ever existed despite a comment claiming one.
         """
         result = prefilter_models(
             [_row("org/unknown", parameters=value)],

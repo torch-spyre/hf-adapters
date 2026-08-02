@@ -73,10 +73,16 @@ def _parameter_count(row: dict) -> int | None:
     """Parameter count for *row*, or None when the fetcher could not size it.
 
     Mirrors ``weekly_test``'s original guard, which tested
-    ``params not in (None, "")`` before coercing. An unknown count must NOT be
-    read as zero: that would let a genuinely oversized model through the
-    too-large check. Returning None instead leaves the decision to the in-worker
-    backstop, which is what handles rows whose size was unknown at fetch time.
+    ``params not in (None, "")`` before coercing, so an unsizable row is neither
+    treated as zero-parameter nor assumed oversized — it goes to a worker and is
+    judged by whether it actually loads.
+
+    Note there is no worker-side size check to fall back on. A comment in
+    ``weekly_test`` used to claim ``_process_batch`` kept one "as a defensive
+    backstop for rows where parameters were unknown at fetch time"; no such check
+    existed. An oversized model the fetcher could not size therefore surfaces as
+    cpu_load_failed or a worker timeout rather than model_too_large — which is
+    what happened before this filter moved upstream, too.
     """
     params = row.get("parameters")
     if params in (None, ""):

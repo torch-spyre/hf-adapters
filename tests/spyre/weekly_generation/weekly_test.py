@@ -1,22 +1,33 @@
 """Weekly Spyre evaluation suite.
 
-Evaluates the top-k generative or embedding models against Spyre hardware.
-Run directly with a required ``--mode`` argument::
+Evaluates a prepared list of models against Spyre hardware::
 
-    python tests/spyre/weekly_generation/weekly_test.py --mode generative [--top-k 200]
-    python tests/spyre/weekly_generation/weekly_test.py --mode embedding  [--top-k 200]
+    python tests/spyre/weekly_generation/weekly_test.py \\
+        --mode generative --model-list-file shards/generative-x1-shard-000.json
 
-``--mode generative`` fetches top causal-LM models and runs the CPU-load +
-token-compare pipeline.  ``--mode embedding`` fetches top embedding models
-and runs the CPU-load + cosine-compare pipeline.
+This script does not choose which models to run. The list is built upstream by
+``.github/scripts/generate_weekly_shards.py`` (CI, which also shards it across
+parallel jobs) or by ``prepare_weekly_model_list.py`` (manual pod runs). Both
+apply the pre-filters — skip window, no adapter for the config class, too large
+for Spyre, MoE — and record a terminal row for each model they drop, so
+everything reaching this script is expected to need a Spyre card. Filtering
+there rather than here is what keeps shard durations comparable: the dropped
+models cluster by download count, so filtering per-shard used to leave some jobs
+finishing in minutes and others running for hours.
 
-Additional flags:
+``--mode`` still matters here, and selects four things: the per-process batch
+size, the model class loaded in ``_load_on_cpu``, the verification pipeline in
+``eval_model`` (token-compare for generative, cosine-compare for embedding), and
+which ClickHouse table the sink writes to.
 
-* ``--top-k N``           Number of top models to fetch by download count (default: 200).
-* ``--write-to-csv F``    Write results to a CSV file instead of ClickHouse.
-* ``--model-list-file F`` Load the model list from this JSON file (as produced by
-  ``.github/scripts/generate_weekly_shards.py``) instead of fetching it. Used by the
-  sharded CI workflow, where the top-K list is fetched once and split across parallel jobs.
+Flags:
+
+* ``--mode {generative,embedding}``  Required. See above.
+* ``--model-list-file F``            Required. JSON list of models to evaluate.
+* ``--write-to-csv F``               Write results to a CSV file instead of
+  ClickHouse. Note the producer will have written its terminal rows to whichever
+  destination it was pointed at, so pair this with a producer run that used the
+  same CSV if you want a self-consistent file.
 """
 
 import argparse
@@ -40,14 +51,12 @@ from tests.spyre.weekly_generation.failure_categories import (
     FAILURE_CATEGORY_HARDWARE_EXCEPTION,
     FAILURE_CATEGORY_MISFORMED_HF_FAILED,
     FAILURE_CATEGORY_MODEL_TOO_LARGE,
-    FAILURE_CATEGORY_MOE,
     FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
     FAILURE_CATEGORY_QUANTIZED_MODEL,
     FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION,
     FAILURE_CATEGORY_VERIFICATION_FAILED,
     FAILURE_CATEGORY_WORKER_CRASHED,
     FAILURE_CATEGORY_WORKER_TIMEOUT,
-    MAX_NUMBER_PARAMS,
 )
 from tests.spyre.weekly_generation.result_sink import (
     EmbeddingGenerativeMode,
@@ -195,12 +204,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--top-k",
-        type=int,
-        default=200,
-        help="Number of top models to fetch (by downloads).",
-    )
-    parser.add_argument(
         "--write-to-csv",
         type=Path,
         default=None,
@@ -213,12 +216,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--model-list-file",
         type=Path,
-        default=None,
+        required=True,
         metavar="MODEL_LIST_JSON",
         help=(
-            "Load the model list from this JSON file instead of calling "
-            "fetch_top_generative_models/fetch_top_embedding_models. --top-k is "
-            "ignored when this is set. Used by the sharded CI workflow."
+            "JSON list of models to evaluate, as produced by "
+            ".github/scripts/generate_weekly_shards.py (CI) or "
+            "prepare_weekly_model_list.py (manual runs). Both apply the "
+            "pre-filters and record a terminal row for each model they drop, so "
+            "everything in the file is expected to need a Spyre card."
         ),
     )
     return parser.parse_args(argv)
@@ -607,17 +612,14 @@ def _chunk_into_batches(rows: list[dict], batch_size: int) -> list[list[dict]]:
 
 def main(
     mode: EmbeddingGenerativeMode,
-    write_to_csv: Path | str | None,
-    top_k: int,
-    model_list_file: Path | None = None,
+    model_list_file: Path,
+    write_to_csv: Path | str | None = None,
 ) -> None:
     from tests.spyre.weekly_generation.result_sink import (
         ClickHouseResultSink,
         CsvResultSink,
         ResultSink,
     )
-    from utils.fetch_top_embedding_models import fetch_top_embedding_models
-    from utils.fetch_top_generative_models import fetch_top_generative_models
 
     print(f"{ts()} Starting main.")
     preexisting: set = _repos_with_weights()
@@ -630,13 +632,8 @@ def main(
     else:
         raise Exception(f"Unknown mode: {mode}")
 
-    if model_list_file is not None:
-        print(f"{ts()} Loading model list from '{model_list_file}' (--top-k ignored).")
-        to_process_list = json.loads(model_list_file.read_text())
-    elif mode == EmbeddingGenerativeMode.GENERATIVE:
-        to_process_list = fetch_top_generative_models(limit=top_k)
-    else:
-        to_process_list = fetch_top_embedding_models(limit=top_k)
+    print(f"{ts()} Loading model list from '{model_list_file}'.")
+    to_process_list: list[dict] = json.loads(model_list_file.read_text())
     adapter_dates: dict[str, str | None] = _get_adapter_dates()
 
     sink: ResultSink
@@ -652,134 +649,16 @@ def main(
     processed = 0
     overall_start = time.monotonic()
 
-    # Early-stop guard runs in the parent (fast: dict lookup for CSV,
-    # single SELECT for CH), so we drop already-recent models BEFORE
-    # batching. That keeps batch sizes uniform relative to real work.
-    prefiltered: list[dict] = []
-    early_skipped: int = 0
-    moe_skipped: int = 0
-    too_large_skipped: int = 0
-    unsupported_skipped: int = 0
-    print(f"{ts()} Will process {len(to_process_list)} models in total.")
-    for row in to_process_list:
-        model_path = str(row["model_id"])
-        if not sink.should_insert_row(model_path):
-            early_skipped += 1
-            print(
-                f"{ts()}     sink: '{model_path}' skipped early — "
-                f"recent snapshot exists within the "
-                f"{sink.__class__.__name__} skip window"
-            )
-            continue
-        # No adapter registered for this model's config class — same terminal
-        # decision resolve_adapter_module_for_test would reach in the worker,
-        # but reached here without spawning one. Uses the fetcher-computed
-        # is_supported flag (True iff config_class is in the adapter mapping).
-
-        if row.get("is_supported") is False:
-            unsupported_skipped += 1
-            sink.add_entry(
-                model_name=model_path,
-                config_class=str(row.get("config_class") or ""),
-                adapter_name="",
-                added_date=None,
-                snapshot_date=snapshot_date,
-                verified_on_cpu=False,
-                verified_on_gpu=False,
-                verified_on_spyre=False,
-                num_downloads=int(row.get("downloads") or 0),
-                family=str(row.get("model_type") or ""),
-                architecture=str(row.get("architectures") or ""),
-                parameters_number=int(row.get("parameters") or 0),
-                failure_category=FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
-                error=None,
-            )
-            print(
-                f"{ts()}     sink: '{model_path}' skipped early — "
-                f"no adapter for config_class={row.get('config_class')!r}"
-            )
-            continue
-        # Reject models too large to bring up on Spyre BEFORE spawning a
-        # worker. Same intent as the in-worker guard in _process_batch, but
-        # catches everything the fetcher already sized so no worker time is
-        # wasted. _process_batch keeps its own check as a defensive backstop
-        # for rows where parameters were unknown at fetch time.
-        params = row.get("parameters")
-        if params not in (None, "") and int(params) > MAX_NUMBER_PARAMS:
-            too_large_skipped += 1
-            sink.add_entry(
-                model_name=model_path,
-                config_class=str(row.get("config_class") or ""),
-                adapter_name="",
-                added_date=None,
-                snapshot_date=snapshot_date,
-                verified_on_cpu=False,
-                verified_on_gpu=False,
-                verified_on_spyre=False,
-                num_downloads=int(row.get("downloads") or 0),
-                family=str(row.get("model_type") or ""),
-                architecture=str(row.get("architectures") or ""),
-                parameters_number=int(params),
-                failure_category=FAILURE_CATEGORY_MODEL_TOO_LARGE,
-                error=None,
-            )
-            print(
-                f"{ts()}     sink: '{model_path}' skipped early — "
-                f"{int(params):,} parameters exceeds the "
-                f"{MAX_NUMBER_PARAMS:,} limit"
-            )
-            continue
-        # MoE models aren't supported on Spyre yet — write the row up-front
-        # with failure_category=moe and don't send it to the workers.
-        # is_moe is precomputed at fetch time (utils/hf_model_catalog.py) so
-        # it survives a JSON round-trip through --model-list-file, unlike the
-        # raw (non-serializable) model_info object.
-        if row.get("is_moe"):
-            moe_skipped += 1
-            sink.add_entry(
-                model_name=model_path,
-                config_class=str(row.get("config_class") or ""),
-                adapter_name="",
-                added_date=None,
-                snapshot_date=snapshot_date,
-                verified_on_cpu=False,
-                verified_on_gpu=False,
-                verified_on_spyre=False,
-                num_downloads=int(row.get("downloads") or 0),
-                family=str(row.get("model_type") or ""),
-                architecture=str(row.get("architectures") or ""),
-                parameters_number=int(row.get("parameters") or 0),
-                failure_category=FAILURE_CATEGORY_MOE,
-                error=None,
-            )
-            print(f"{ts()}     sink: '{model_path}' skipped early — MoE model")
-            continue
-        prefiltered.append(row)
-    if early_skipped:
-        print(
-            f"\n{ts()} Early-skip: {early_skipped}/{total} models already have a "
-            f"recent snapshot; {len(prefiltered)} left to evaluate.\n"
-        )
-    if unsupported_skipped:
-        print(
-            f"{ts()} Unsupported-skip: {unsupported_skipped}/{total} models have "
-            f"no adapter for their config_class and were written directly to the "
-            f"sink.\n"
-        )
-    if too_large_skipped:
-        print(
-            f"{ts()} Too-large-skip: {too_large_skipped}/{total} models exceed "
-            f"the {MAX_NUMBER_PARAMS:,} parameter limit and were written directly "
-            f"to the sink.\n"
-        )
-    if moe_skipped:
-        print(
-            f"{ts()} MoE-skip: {moe_skipped}/{total} models tagged as moe and "
-            f"written directly to the sink.\n"
-        )
+    # The model list arrives pre-filtered: the producer that built it
+    # (generate_weekly_shards.py in CI, prepare_weekly_model_list.py for manual
+    # runs) already applied the skip window and dropped models with no adapter,
+    # models too large for Spyre, and MoE models — recording a terminal row for
+    # each. So everything here is work that needs a Spyre card, and shard size
+    # is a count of real evaluations rather than of fetched candidates.
+    print(f"{ts()} Will evaluate {total} model(s) from '{model_list_file}'.")
 
     batches: list[list[dict]] = _chunk_into_batches(
-        prefiltered, number_of_model_per_process
+        to_process_list, number_of_model_per_process
     )
     total_batches: int = len(batches)
 
@@ -1008,9 +887,8 @@ if __name__ == "__main__":
     try:
         main(
             mode=EmbeddingGenerativeMode(args.mode),
-            write_to_csv=args.write_to_csv,
-            top_k=args.top_k,
             model_list_file=args.model_list_file,
+            write_to_csv=args.write_to_csv,
         )
     except HardwareExceptionAbortError as e:
         # Non-zero exit so CI / GHA scheduled runs can alert. main()'s
