@@ -12,13 +12,17 @@ because ``result_sink`` imports ``clickhouse_db`` at module scope — they skip
 cleanly when it is absent, so the pure tests still run on a bare interpreter.
 That split is exactly what the ``failure_categories`` leaf module buys, and the
 skipping keeps it honest.
+
+The dedup-guard tests use a fake in-memory sink rather than ``CsvResultSink``:
+the guard belongs to the base class, and the CSV sink is write-only by design, so
+it reports nothing as blocking and cannot exercise a rejection.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import inspect
-from datetime import date, timedelta
+from datetime import date
 
 import pytest
 
@@ -287,122 +291,107 @@ class TestWriteSkippedRows:
             assert write_skipped_rows(sink, [], snapshot_date=date.today()) == 0
 
 
+def _fake_sink_cls():
+    """Build a minimal concrete ResultSink subclass, importing the base lazily.
+
+    The guard lives entirely in the base class's ``add_entry``, so testing it
+    needs a sink, not a *storage backend*. ``CsvResultSink`` used to serve here,
+    but it is now write-only by design and reports nothing as blocking, so it can
+    no longer exercise a rejection at all. This fake can — and defining it inside
+    a function keeps ``result_sink`` (and therefore ``clickhouse_connect``) out of
+    this module's import-time dependencies.
+    """
+    from tests.spyre.weekly_generation.result_sink import ResultSink
+
+    class _FakeSink(ResultSink):
+        def __init__(self, blocking: set[str] | None = None, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self._blocking = blocking or set()
+            self.written: list[str] = []
+
+        def get_recent_blocking_entries(self, model_name):
+            return [{"model_name": model_name}] if model_name in self._blocking else []
+
+        def get_all_models(self):
+            return []
+
+        def _insert_entry(self, *, model_name, **_rest) -> None:
+            self.written.append(model_name)
+
+    return _FakeSink
+
+
+def _add(sink, name: str) -> bool:
+    return sink.add_entry(
+        model_name=name,
+        config_class="LlamaConfig",
+        adapter_name="hf_llama",
+        added_date=None,
+        snapshot_date=date.today(),
+        verified_on_cpu=True,
+        verified_on_gpu=False,
+        verified_on_spyre=True,
+        num_downloads=1,
+        family="llama",
+        architecture="LlamaForCausalLM",
+        parameters_number=1,
+        failure_category=None,
+        error=None,
+    )
+
+
 @requires_sink
 class TestDedupGuardFlag:
     """The guard must stay opt-out, and stay keyword-only.
 
     ``clickhouse_db.py`` constructs ``ClickHouseResultSink(mode)`` positionally,
     so a new positional parameter there would silently misbind to
-    ``embedding_generative``. These tests need no DB connection.
+    ``embedding_generative``. None of this needs a DB connection.
     """
 
     @pytest.fixture(autouse=True)
-    def _sink_cls(self):
-        """Bind CsvResultSink lazily so collection works without a DB driver."""
-        from tests.spyre.weekly_generation.result_sink import CsvResultSink
+    def _bind(self):
+        self.FakeSink = _fake_sink_cls()
 
-        self.CsvResultSink = CsvResultSink
+    def test_guard_on_rejects_a_blocked_model(self) -> None:
+        sink = self.FakeSink(blocking={"org/blocked"}, dedup_guard=True)
+        assert _add(sink, "org/blocked") is False
+        assert sink.written == []
 
-    def _write_twice(self, csv_path, *, dedup_guard: bool) -> int:
-        CsvResultSink = self.CsvResultSink
-        today = date.today()
-        written = 0
-        for _ in range(2):
-            sink = CsvResultSink(path=csv_path, today=today, dedup_guard=dedup_guard)
-            if sink.add_entry(
-                model_name="org/dup",
-                config_class="LlamaConfig",
-                adapter_name="hf_llama",
-                added_date=None,
-                snapshot_date=today,
-                verified_on_cpu=True,
-                verified_on_gpu=False,
-                verified_on_spyre=True,
-                num_downloads=1,
-                family="llama",
-                architecture="LlamaForCausalLM",
-                parameters_number=1,
-                failure_category=None,
-                error=None,
-            ):
-                written += 1
-            sink.close()
-        return written
+    def test_guard_off_writes_a_blocked_model_anyway(self) -> None:
+        """The weekly pipeline's behaviour: the decision was made upstream."""
+        sink = self.FakeSink(blocking={"org/blocked"}, dedup_guard=False)
+        assert _add(sink, "org/blocked") is True
+        assert sink.written == ["org/blocked"]
 
-    def test_guard_on_rejects_a_same_window_duplicate(self, tmp_path) -> None:
-        assert self._write_twice(tmp_path / "g.csv", dedup_guard=True) == 1
+    def test_guard_on_allows_an_unblocked_model(self) -> None:
+        sink = self.FakeSink(dedup_guard=True)
+        assert _add(sink, "org/fresh") is True
+        assert sink.written == ["org/fresh"]
 
-    def test_guard_off_writes_both(self, tmp_path) -> None:
-        assert self._write_twice(tmp_path / "n.csv", dedup_guard=False) == 2
+    def test_guard_defaults_to_on(self) -> None:
+        """clickhouse_db.import_csv depends on the default, so it must not drift."""
+        assert self.FakeSink()._dedup_guard is True
 
-    def test_guard_defaults_to_on(self, tmp_path) -> None:
-        """import_csv depends on the default, so it must not drift."""
-        sink = self.CsvResultSink(path=tmp_path / "d.csv")
-        assert sink._dedup_guard is True
-
-    def test_should_insert_row_still_works_with_the_guard_off(self, tmp_path) -> None:
+    def test_should_insert_row_still_works_with_the_guard_off(self) -> None:
         """Producers call it directly — turning the guard off must not break it."""
-        today = date.today()
-        csv_path = tmp_path / "s.csv"
-        sink = self.CsvResultSink(path=csv_path, today=today, dedup_guard=False)
-        assert sink.should_insert_row("org/absent") is True
-        sink.add_entry(
-            model_name="org/present",
-            config_class="",
-            adapter_name="",
-            added_date=None,
-            snapshot_date=today,
-            verified_on_cpu=False,
-            verified_on_gpu=False,
-            verified_on_spyre=False,
-            num_downloads=0,
-            family="",
-            architecture="",
-            parameters_number=0,
-            failure_category=None,
-            error=None,
-        )
-        assert sink.should_insert_row("org/present") is False
-        sink.close()
-
-    def test_stale_row_outside_the_window_does_not_block(self, tmp_path) -> None:
-        today = date.today()
-        csv_path = tmp_path / "old.csv"
-        sink = self.CsvResultSink(path=csv_path, today=today - timedelta(days=40))
-        sink.add_entry(
-            model_name="org/stale",
-            config_class="",
-            adapter_name="",
-            added_date=None,
-            snapshot_date=today - timedelta(days=40),
-            verified_on_cpu=False,
-            verified_on_gpu=False,
-            verified_on_spyre=False,
-            num_downloads=0,
-            family="",
-            architecture="",
-            parameters_number=0,
-            failure_category=None,
-            error=None,
-        )
-        sink.close()
-        fresh = self.CsvResultSink(path=csv_path, today=today)
-        assert fresh.should_insert_row("org/stale") is True
-        fresh.close()
+        sink = self.FakeSink(blocking={"org/blocked"}, dedup_guard=False)
+        assert sink.should_insert_row("org/blocked") is False
+        assert sink.should_insert_row("org/other") is True
 
     @pytest.mark.parametrize(
-        "cls_path, expected_positional",
+        "cls_name, expected_positional, expected_default",
         [
-            ("CsvResultSink", ["path", "today"]),
-            ("ClickHouseResultSink", ["embedding_generative", "today"]),
+            ("CsvResultSink", ["path", "today"], False),
+            ("ClickHouseResultSink", ["embedding_generative", "today"], True),
         ],
     )
     def test_dedup_guard_is_keyword_only(
-        self, cls_path: str, expected_positional: list[str]
+        self, cls_name: str, expected_positional: list[str], expected_default: bool
     ) -> None:
         import tests.spyre.weekly_generation.result_sink as rs
 
-        params = inspect.signature(getattr(rs, cls_path).__init__).parameters
+        params = inspect.signature(getattr(rs, cls_name).__init__).parameters
         positional = [
             name
             for name, p in params.items()
@@ -413,4 +402,59 @@ class TestDedupGuardFlag:
             "ClickHouseResultSink(mode) positionally and would misbind"
         )
         assert params["dedup_guard"].kind is inspect.Parameter.KEYWORD_ONLY
-        assert params["dedup_guard"].default is True
+        # CsvResultSink defaults to False: a fresh output file cannot hold a
+        # blocking row, so the guard would be pure overhead there.
+        assert params["dedup_guard"].default is expected_default
+
+
+@requires_sink
+class TestCsvSinkIsWriteOnly:
+    """The CSV sink writes one run to a new file and never reads one back."""
+
+    def test_refuses_a_non_empty_existing_file(self, tmp_path) -> None:
+        from tests.spyre.weekly_generation.result_sink import CsvResultSink
+
+        existing = tmp_path / "already.csv"
+        existing.write_text("model_name\norg/x\n")
+        with pytest.raises(FileExistsError, match="already exists"):
+            CsvResultSink(path=existing)
+
+    def test_accepts_an_empty_existing_file(self, tmp_path) -> None:
+        """A zero-byte file is not a previous run's results."""
+        from tests.spyre.weekly_generation.result_sink import CsvResultSink
+
+        empty = tmp_path / "empty.csv"
+        empty.touch()
+        sink = CsvResultSink(path=empty)
+        sink.close()
+        assert "model_name" in empty.read_text()
+
+    def test_creates_parent_directories(self, tmp_path) -> None:
+        from tests.spyre.weekly_generation.result_sink import CsvResultSink
+
+        sink = CsvResultSink(path=tmp_path / "a" / "b" / "out.csv")
+        sink.close()
+        assert (tmp_path / "a" / "b" / "out.csv").exists()
+
+    def test_reports_nothing_as_blocking(self, tmp_path) -> None:
+        """So --fetch against a CSV evaluates every model that clears the rest."""
+        from tests.spyre.weekly_generation.result_sink import CsvResultSink
+
+        sink = CsvResultSink(path=tmp_path / "o.csv")
+        _add(sink, "org/x")
+        assert sink.should_insert_row("org/x") is True
+        assert sink.get_recent_blocking_entries("org/x") == []
+        assert sink.get_all_models() == []
+        sink.close()
+
+    def test_writes_every_row_including_repeats(self, tmp_path) -> None:
+        import csv as _csv
+
+        from tests.spyre.weekly_generation.result_sink import CsvResultSink
+
+        path = tmp_path / "o.csv"
+        sink = CsvResultSink(path=path)
+        assert _add(sink, "org/x") is True
+        assert _add(sink, "org/x") is True
+        sink.close()
+        assert len(list(_csv.DictReader(path.open()))) == 2

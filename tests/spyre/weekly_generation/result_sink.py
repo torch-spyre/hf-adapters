@@ -1,13 +1,14 @@
 """Abstract result sink for the weekly Spyre test suite.
 
 Two implementations:
-- ``CsvResultSink`` — appends rows to a CSV file; loads existing rows once so
-  the skip guard is O(1) per call.
 - ``ClickHouseResultSink`` — inserts rows into ClickHouse; the skip guard runs
   a single bulk SELECT on construction so all per-row checks are O(1), and rows
   are buffered in memory then flushed in a single bulk INSERT on ``close()``.
+- ``CsvResultSink`` — write-only, for runs with no database access. Writes one
+  run's rows to a new file and never reads one back, so the skip rule below does
+  not apply to it: it has no history to consult and reports nothing as blocking.
 
-Skip rule (both sinks): insert a row for *model_name* when either
+Skip rule (ClickHouse): insert a row for *model_name* when either
 
     * no prior row for *model_name* exists, OR
     * the most-recent prior row has ``failure_category == 'hardware_exception'``
@@ -29,6 +30,10 @@ rows than the models it handled and no accounting for the difference.
 
 ``should_insert_row`` remains callable with the guard off. That is how the
 producers consult the rule in the first place.
+
+``clickhouse_db.import_csv`` is the one caller that wants the guard: it reads an
+arbitrary CSV with no upstream filter and derives its ``(inserted, skipped)``
+return from the guard's verdict. Hence the default is True.
 """
 
 from __future__ import annotations
@@ -256,74 +261,51 @@ class ResultSink(ABC):
 
 
 class CsvResultSink(ResultSink):
-    """Append rows to a CSV file.
+    """Write rows to a fresh CSV file. Write-only, for no-database test runs.
 
-    On construction, any existing rows are read once into an in-memory index of
-    ``{model_name: list[dict]}`` so lookups are O(1).
+    Nothing is read back: the file must not already exist, so there is no prior
+    history to consult and every model is due for a run. That is what makes
+    ``get_recent_blocking_entries`` unconditionally empty here, rather than an
+    approximation of the ClickHouse behaviour.
+
+    The alternative — treating the CSV as its own skip-window index, as an earlier
+    version did — meant a run's row count could silently disagree with the models
+    it evaluated, and made the CSV and ClickHouse paths behave differently for the
+    same input. A single-run output file has neither problem.
     """
 
     def __init__(
-        self, path: Path, today: date | None = None, *, dedup_guard: bool = True
+        self, path: Path, today: date | None = None, *, dedup_guard: bool = False
     ) -> None:
+        """Open *path* for writing. Raises if it already exists and is non-empty.
+
+        *dedup_guard* defaults to False here — unlike the base class — because a
+        fresh file cannot contain a blocking row, so the guard would be pure
+        overhead. Passing True is accepted (``get_recent_blocking_entries``
+        returns empty, so it never rejects anything) but pointless.
+        """
         super().__init__(today=today, dedup_guard=dedup_guard)
         self._path: Path = path
-        self._rows_by_model: dict[str, list[dict[str, Any]]] = {}
+        if path.exists() and path.stat().st_size > 0:
+            raise FileExistsError(
+                f"'{path}' already exists and is not empty. This sink writes a "
+                f"single run's results to a new file and never reads one back; "
+                f"choose a different path or remove the existing file."
+            )
         path.parent.mkdir(parents=True, exist_ok=True)
-        file_exists: bool = path.exists() and path.stat().st_size > 0
-        if file_exists:
-            self._load_index()
-        self._fh = open(path, "a", newline="")
+        self._fh = open(path, "w", newline="")
         self._writer = csv.DictWriter(self._fh, fieldnames=list(TABLE_COLUMNS))
-        if not file_exists:
-            self._writer.writeheader()
-            self._fh.flush()
-
-    def _load_index(self) -> None:
-        with open(self._path, newline="") as fh:
-            reader = csv.DictReader(fh)
-            for raw_row in reader:
-                model_name: str = (raw_row.get("model_name") or "").strip()
-                if not model_name:
-                    print(
-                        f"    warn: skipping CSV row with empty model_name in "
-                        f"'{self._path}' (line {reader.line_num})"
-                    )
-                    continue
-                self._rows_by_model.setdefault(model_name, []).append(dict(raw_row))
-        loaded = sum(len(v) for v in self._rows_by_model.values())
-        print(
-            f"    index: loaded {loaded} row(s) for "
-            f"{len(self._rows_by_model)} model(s) from '{self._path}'"
-        )
+        self._writer.writeheader()
+        self._fh.flush()
 
     def get_recent_blocking_entries(self, model_name: str) -> list[dict[str, Any]]:
-        key: str = _require_non_empty(model_name, "model_name")
-        rows: list[dict[str, Any]] = list(self._rows_by_model.get(key, ()))
-        filtered: list[tuple[date, dict[str, Any]]] = []
-        for row in rows:
-            # hardware_exception is transient — do NOT let it block a re-run.
-            if (
-                row.get("failure_category") or ""
-            ).strip() == _HARDWARE_EXCEPTION_CATEGORY:
-                continue
-            snap: date | None = _coerce_snapshot(row.get("snapshot_date"))
-            if snap is None:
-                continue
-            if not _within_skip_window(snap, self._today):
-                continue
-            filtered.append((snap, row))
-        filtered.sort(key=lambda item: item[0], reverse=True)
-        return [row for _, row in filtered]
+        """Always empty — a fresh output file has no prior rows to block on."""
+        _require_non_empty(model_name, "model_name")
+        return []
 
     def get_all_models(self) -> list[dict[str, Any]]:
-        result: list[dict[str, Any]] = []
-        for rows in self._rows_by_model.values():
-            best: dict[str, Any] = max(
-                rows,
-                key=lambda r: _coerce_snapshot(r.get("snapshot_date")) or date.min,
-            )
-            result.append(best)
-        return result
+        """Always empty — this sink does not read its file back."""
+        return []
 
     def _insert_entry(
         self,
@@ -361,7 +343,6 @@ class CsvResultSink(ResultSink):
         }
         self._writer.writerow(rec)
         self._fh.flush()
-        self._rows_by_model.setdefault(model_name, []).append(dict(rec))
 
     def close(self) -> None:
         if self._fh is not None:

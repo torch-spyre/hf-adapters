@@ -36,11 +36,10 @@ Flags:
 * ``--top-k N``                      With ``--fetch``: how many to fetch
   (default: 10000).
 * ``--max-params N``                 With ``--fetch``: parameter ceiling.
-* ``--write-to-csv F``               Record results in a CSV instead of
-  ClickHouse, and use it as the skip-window source. Unlike the ClickHouse path
-  this keeps the sink's dedup guard on, so a re-run against the same file skips
-  what it already holds rather than appending a second copy; anything dropped
-  that way is logged per row.
+* ``--write-to-csv F``               Record results in a new CSV instead of
+  ClickHouse, for runs with no database access. Write-only: the file must not
+  already exist, and nothing is read back — so with ``--fetch`` the skip window
+  is not applied and every fetched model is evaluated.
 """
 
 import argparse
@@ -733,27 +732,23 @@ def main(
 
     adapter_dates: dict[str, str | None] = _get_adapter_dates()
 
-    # The sink is built before the model list is resolved because --fetch needs it
-    # for the skip-window read.
+    # Built before the model list is resolved because --fetch needs it for the
+    # skip-window read.
     #
-    # dedup_guard differs by backend, deliberately:
-    #
-    # * ClickHouse — OFF. Whoever built the list already applied the skip window,
-    #   so the decision to evaluate these models has been made and every result is
-    #   a fact about this run. Re-checking at write time would consult a skip set
-    #   snapshotted when THIS job started — newer than a shard producer's, two
-    #   hours earlier — so a row written in between by a concurrent run would
-    #   suppress a result we were asked to produce, leaving the run reporting
-    #   fewer rows than models handled. A duplicate is the better failure:
-    #   ReplacingMergeTree(snapshot_date) collapses same-day duplicates on merge.
-    # * CSV — ON. The file is its own skip-window index, so re-running against the
-    #   same CSV behaves like re-running against the database instead of appending
-    #   a second copy of every row. Rows it drops are logged explicitly below.
+    # Both backends run with dedup_guard=False, for the same reason by two routes:
+    # the skip-window decision is made once, when the list is built, so every
+    # result is a fact about this run and gets recorded. On the ClickHouse path a
+    # second check would consult a skip set snapshotted when THIS job started —
+    # newer than a shard producer's, two hours earlier — so a row written in
+    # between by a concurrent run would suppress a result we were asked to
+    # produce. (A duplicate is the better failure: ReplacingMergeTree
+    # (snapshot_date) collapses same-day duplicates on merge.) On the CSV path the
+    # file is new and never read back, so there is nothing to check against.
     sink: ResultSink
     if write_to_csv:
         sink = CsvResultSink(path=write_to_csv, today=snapshot_date)
         print(
-            f"CSV mode: results will be appended to '{write_to_csv}' (no DB access).\n"
+            f"CSV mode: results will be written to '{write_to_csv}' (no DB access).\n"
         )
     else:
         sink = ClickHouseResultSink(
@@ -762,6 +757,13 @@ def main(
         print("DB mode: results will be appended to the DB.\n")
 
     if fetch:
+        if write_to_csv:
+            print(
+                f"{ts()} NOTE: --fetch with --write-to-csv applies no skip "
+                f"window — the CSV sink is write-only, so every one of the "
+                f"top {top_k} models that clears the other filters will be "
+                f"evaluated, including any scanned recently.\n"
+            )
         to_process_list = _fetch_and_filter(
             mode, sink, snapshot_date, top_k=top_k, max_params=max_params
         )
@@ -913,11 +915,10 @@ def main(
                     except ValueError:
                         rec["added_date"] = None
 
-                # Always True on the ClickHouse path (dedup_guard=False), so the
-                # row count matches the models handled. On the CSV path the guard
-                # is on and can decline a row already present in the file — logged
-                # explicitly below rather than left to be inferred from a count.
-                if sink.add_entry(
+                # Always writes and always returns True — both sinks run with
+                # dedup_guard=False, so the run records one row per model it
+                # handled and the count never silently disagrees.
+                sink.add_entry(
                     model_name=str(rec["model_name"]),
                     config_class=str(rec["config_class"]),
                     adapter_name=str(rec["adapter_name"]),
@@ -936,20 +937,13 @@ def main(
                         else str(rec["failure_category"])
                     ),
                     error=(None if rec.get("error") is None else str(rec["error"])),
-                ):
-                    print(
-                        f"{ts()}     sink: row written for '{model_path}' "
-                        f"(verified_on_cpu={rec.get('verified_on_cpu')}, "
-                        f"verified_on_spyre={rec.get('verified_on_spyre')}, "
-                        f"failure_category={rec.get('failure_category')}, )"
-                    )
-                else:
-                    print(
-                        f"{ts()}     sink: row NOT written for '{model_path}' — "
-                        f"the CSV already holds a row for it inside the "
-                        f"{sink.__class__.__name__} skip window, so this "
-                        f"evaluation's result was discarded"
-                    )
+                )
+                print(
+                    f"{ts()}     sink: row written for '{model_path}' "
+                    f"(verified_on_cpu={rec.get('verified_on_cpu')}, "
+                    f"verified_on_spyre={rec.get('verified_on_spyre')}, "
+                    f"failure_category={rec.get('failure_category')}, )"
+                )
 
             # Cache cleanup: delete weights downloaded during this batch,
             # regardless of whether the worker processed each model.
