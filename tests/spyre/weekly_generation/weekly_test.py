@@ -40,6 +40,18 @@ Flags:
   ClickHouse, for runs with no database access. Write-only: the file must not
   already exist, and nothing is read back — so with ``--fetch`` the skip window
   is not applied and every fetched model is evaluated.
+
+Result rows
+-----------
+Both sinks are built with ``dedup_guard=False``, so one row is recorded per model
+handled and the run's row count never silently disagrees with its input. The
+skip-window rule was already applied when the list was built; re-checking it at
+write time would consult a *newer* snapshot (this job's, taken up to two hours
+after a shard producer's), so a row written in between by a concurrent run would
+suppress a result this job was asked to produce. A duplicate is the better
+failure — ``ReplacingMergeTree(snapshot_date)`` collapses same-day duplicates on
+merge. On the CSV path the file is new and never read back, so there is nothing
+to check against in the first place.
 """
 
 import argparse
@@ -705,6 +717,45 @@ def _fetch_and_filter(
     return result.keep
 
 
+def _resolve_model_list(
+    mode: EmbeddingGenerativeMode,
+    sink,
+    snapshot_date: date,
+    *,
+    model_list_file: Path | None,
+    write_to_csv: Path | str | None,
+    fetch: bool,
+    top_k: int,
+    max_params: int,
+) -> list[dict]:
+    """Return the models to evaluate, from ``--model-list-file`` or ``--fetch``.
+
+    Either way the same four pre-filters have been applied and a terminal row
+    recorded for each dropped model — upstream in
+    ``.github/scripts/generate_weekly_shards.py`` for a shard file, here via
+    ``_fetch_and_filter`` for ``--fetch``. So everything returned needs a Spyre
+    card, and a shard's size is a count of real evaluations rather than of fetched
+    candidates. That is what keeps shard durations comparable: the dropped models
+    cluster by download count, so filtering per-shard (as this script used to) left
+    some CI jobs finishing in minutes and others running for hours.
+    """
+    if not fetch:
+        assert model_list_file is not None  # argparse guarantees one of the two
+        print(f"{ts()} Loading model list from '{model_list_file}'.")
+        return json.loads(model_list_file.read_text())
+
+    if write_to_csv:
+        print(
+            f"{ts()} NOTE: --fetch with --write-to-csv applies no skip window — "
+            f"the CSV sink is write-only, so every one of the top {top_k} models "
+            f"that clears the other filters will be evaluated, including any "
+            f"scanned recently.\n"
+        )
+    return _fetch_and_filter(
+        mode, sink, snapshot_date, top_k=top_k, max_params=max_params
+    )
+
+
 def main(
     mode: EmbeddingGenerativeMode,
     model_list_file: Path | None = None,
@@ -732,18 +783,6 @@ def main(
 
     adapter_dates: dict[str, str | None] = _get_adapter_dates()
 
-    # Built before the model list is resolved because --fetch needs it for the
-    # skip-window read.
-    #
-    # Both backends run with dedup_guard=False, for the same reason by two routes:
-    # the skip-window decision is made once, when the list is built, so every
-    # result is a fact about this run and gets recorded. On the ClickHouse path a
-    # second check would consult a skip set snapshotted when THIS job started —
-    # newer than a shard producer's, two hours earlier — so a row written in
-    # between by a concurrent run would suppress a result we were asked to
-    # produce. (A duplicate is the better failure: ReplacingMergeTree
-    # (snapshot_date) collapses same-day duplicates on merge.) On the CSV path the
-    # file is new and never read back, so there is nothing to check against.
     sink: ResultSink
     if write_to_csv:
         sink = CsvResultSink(path=write_to_csv, today=snapshot_date)
@@ -751,37 +790,29 @@ def main(
             f"CSV mode: results will be written to '{write_to_csv}' (no DB access).\n"
         )
     else:
+        # dedup_guard=False: record one row per model handled. See "Result rows"
+        # in the module docstring for why re-checking the skip window here would
+        # discard results this run was asked to produce.
         sink = ClickHouseResultSink(
             today=snapshot_date, embedding_generative=mode, dedup_guard=False
         )
         print("DB mode: results will be appended to the DB.\n")
 
-    if fetch:
-        if write_to_csv:
-            print(
-                f"{ts()} NOTE: --fetch with --write-to-csv applies no skip "
-                f"window — the CSV sink is write-only, so every one of the "
-                f"top {top_k} models that clears the other filters will be "
-                f"evaluated, including any scanned recently.\n"
-            )
-        to_process_list = _fetch_and_filter(
-            mode, sink, snapshot_date, top_k=top_k, max_params=max_params
-        )
-        source_desc = f"--fetch --top-k {top_k}"
-    else:
-        # The file arrives pre-filtered: generate_weekly_shards.py applied the
-        # skip window and dropped models with no adapter, models too large for
-        # Spyre, and MoE models, recording a terminal row for each. So everything
-        # here needs a Spyre card, and shard size is a count of real evaluations
-        # rather than of fetched candidates.
-        print(f"{ts()} Loading model list from '{model_list_file}'.")
-        to_process_list = json.loads(model_list_file.read_text())
-        source_desc = f"'{model_list_file}'"
-
+    to_process_list = _resolve_model_list(
+        mode,
+        sink,
+        snapshot_date,
+        model_list_file=model_list_file,
+        write_to_csv=write_to_csv,
+        fetch=fetch,
+        top_k=top_k,
+        max_params=max_params,
+    )
     total = len(to_process_list)
     processed = 0
     overall_start = time.monotonic()
-    print(f"{ts()} Will evaluate {total} model(s) from {source_desc}.")
+
+    print(f"{ts()} Will evaluate {total} model(s).")
 
     batches: list[list[dict]] = _chunk_into_batches(
         to_process_list, number_of_model_per_process
