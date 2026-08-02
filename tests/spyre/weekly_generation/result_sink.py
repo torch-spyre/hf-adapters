@@ -40,14 +40,12 @@ from tests.spyre.weekly_generation.clickhouse_db import (
     get_client,
     table_exists,
 )
+from tests.spyre.weekly_generation.failure_categories import (
+    FAILURE_CATEGORY_HARDWARE_EXCEPTION as _HARDWARE_EXCEPTION_CATEGORY,
+)
 
 # Constant value
 _SKIP_WINDOW_DAYS: int = 10
-
-# Duplicated (as a string literal) from weekly_test.FAILURE_CATEGORY_HARDWARE_EXCEPTION
-# to avoid a circular import: weekly_test already imports EmbeddingGenerativeMode
-# from this module. Keep the string values in sync.
-_HARDWARE_EXCEPTION_CATEGORY: str = "hardware_exception"
 
 
 def _within_skip_window(existing_snapshot: date, today: date) -> bool:

@@ -34,27 +34,27 @@ from pathlib import Path
 
 from huggingface_hub.errors import HfHubHTTPError
 
+from tests.spyre.weekly_generation.failure_categories import (
+    FAILURE_CATEGORY_CPU_GENERATE_FAILED,
+    FAILURE_CATEGORY_CPU_LOAD_FAILED,
+    FAILURE_CATEGORY_HARDWARE_EXCEPTION,
+    FAILURE_CATEGORY_MISFORMED_HF_FAILED,
+    FAILURE_CATEGORY_MODEL_TOO_LARGE,
+    FAILURE_CATEGORY_MOE,
+    FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
+    FAILURE_CATEGORY_QUANTIZED_MODEL,
+    FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION,
+    FAILURE_CATEGORY_VERIFICATION_FAILED,
+    FAILURE_CATEGORY_WORKER_CRASHED,
+    FAILURE_CATEGORY_WORKER_TIMEOUT,
+    MAX_NUMBER_PARAMS,
+)
 from tests.spyre.weekly_generation.result_sink import (
     EmbeddingGenerativeMode,
 )
 from utils.utilities import ts
 
 logging.getLogger("transformers").setLevel(logging.ERROR)
-
-MAX_NUMBER_PARAMS = 60_000_000_000
-
-FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER = "not-implemented-adapter"
-FAILURE_CATEGORY_MODEL_TOO_LARGE = "model_too_large"
-FAILURE_CATEGORY_CPU_LOAD_FAILED = "cpu_load_failed"
-FAILURE_CATEGORY_CPU_GENERATE_FAILED = "cpu_generate_failed"
-FAILURE_CATEGORY_QUANTIZED_MODEL = "quantized_model"
-FAILURE_CATEGORY_HARDWARE_EXCEPTION = "hardware_exception"
-FAILURE_CATEGORY_MISFORMED_HF_FAILED = "misformed_hf_failed"
-FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION = "test_execution_exception"
-FAILURE_CATEGORY_VERIFICATION_FAILED = "verification_failed"
-FAILURE_CATEGORY_WORKER_CRASHED = "worker_crashed"
-FAILURE_CATEGORY_WORKER_TIMEOUT = "worker_timeout"
-FAILURE_CATEGORY_MOE = "moe"
 
 # Hard wall-clock cap for a single worker process (in seconds). If a batch
 # takes longer than this, the parent kills the child, marks the entire batch
