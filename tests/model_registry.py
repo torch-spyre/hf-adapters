@@ -436,8 +436,12 @@ VISION_MODELS = {
         "size": "3b",
     },
     # hf_gemma4_mm.py — unified encoder-free VLM (image + text -> text)
+    # Note: google/gemma-4-12b (base, no chat template) also resolves via this
+    # adapter (Gemma4UnifiedConfig -> hf_gemma4_mm) but is tested via the
+    # causal-LM path (gemma4_base in CAUSAL_LM_MODELS); the VLM harness requires
+    # apply_chat_template, which the base model does not provide.
     "gemma4_mm": {
-        "name": "Gemma 4 12B (unified VLM)",
+        "name": "Gemma 4 12B IT (unified VLM)",
         "path": "google/gemma-4-12B-it",
         "adapter": "hf_gemma4_mm.py",
         "kind": "vlm",  # multimodal: image + text -> generated text
@@ -554,13 +558,12 @@ NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = _non_blocking(
         "ministral3",
         "pythia_410m",
         "gemma4_google",
-        "gemma4_base",
     ),
 )
 
 NON_BLOCKING_VISION_MODELS: dict[str, str] = _non_blocking(
     VISION_MODELS,
-    ("gemma4_mm",),
+    (),
 )
 
 

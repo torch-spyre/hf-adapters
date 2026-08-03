@@ -15,6 +15,10 @@
 """
 Unified (encoder-free) HuggingFace adapter for Gemma 4 12B on Spyre — image→text.
 
+Supports both the base checkpoint (``google/gemma-4-12b``) and the instruction-tuned
+variant (``google/gemma-4-12B-it``); both use ``model_type=gemma4_unified`` and
+``Gemma4UnifiedForConditionalGeneration``.
+
 Where ``hf_gemma4`` runs only the text decoder (``AutoSpyreModelForCausalLM``),
 this module loads the full unified multimodal model
 (``Gemma4UnifiedForConditionalGeneration``, ``model_type=gemma4_unified``) via
