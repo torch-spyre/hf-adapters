@@ -15,13 +15,12 @@
 #
 # At top_k=10000 per mode, a single job processing the whole list serially
 # would take far too long, so the fetch is done once up-front and the actual
-# scan is fanned out: the generate-matrix job (misnamed — it's really a
-# sharding job; the "matrix" it emits is just an index into the uploaded
-# shard artifact) fetches the top-K list once on ubuntu-latest, splits it
-# into per-tier shard files, uploads them as the `weekly-shards` artifact,
-# and emits matrix_x1 / matrix_x2 / matrix_x4 JSON pointing at those shard
-# files. The three weekly-model-scan-x{1,2,4} jobs then fan out across the
-# Spyre runners, each downloading only its own shard.
+# scan is fanned out: the generate-shards job fetches the top-K list once
+# on ubuntu-latest, splits it into per-tier shard files, uploads them as
+# the `weekly-shards` artifact, and emits matrix_x1 / matrix_x2 / matrix_x4
+# JSON pointing at those shard files. The three weekly-model-scan-x{1,2,4}
+# jobs then fan out across the Spyre runners, each downloading only its
+# own shard.
 # =============================================================================
 name: push-to-clickhouse
 
@@ -79,7 +78,7 @@ jobs:
   # torch_spyre dependency; it's lazily imported inside a device-guarded
   # function body in hf_common.py.
   # ---------------------------------------------------------------------------
-  generate-matrix:
+  generate-shards:
     name: Generate weekly shards
     runs-on: ubuntu-latest
     # At top_k=10000+, fetching 2x oversampled raw candidates per mode (each
@@ -187,14 +186,14 @@ jobs:
   # 10*1 + 4*2 + 1*4 = 22 cards (~2 nodes), so PR/daily CI isn't starved.
   weekly-model-scan-x1:
     name: Weekly model scan x1 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
-    needs: generate-matrix
+    needs: generate-shards
     runs-on: [x86_64, spyre_pf_x1, linux, image_torch_spyre]
     timeout-minutes: 4320
     strategy:
       fail-fast: false
       max-parallel: 20 # 20 shards x 1 card = 20 cards
       matrix:
-        include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x1) }}
+        include: ${{ fromJSON(needs.generate-shards.outputs.matrix_x1) }}
     env:
       CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
       CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
@@ -264,14 +263,14 @@ jobs:
 
   weekly-model-scan-x2:
     name: Weekly model scan x2 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
-    needs: generate-matrix
+    needs: generate-shards
     runs-on: [x86_64, spyre_pf_x2, linux, image_torch_spyre]
     timeout-minutes: 4320
     strategy:
       fail-fast: false
       max-parallel: 4 # 4 shards x 2 cards = 8 cards
       matrix:
-        include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x2) }}
+        include: ${{ fromJSON(needs.generate-shards.outputs.matrix_x2) }}
     env:
       CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
       CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
@@ -341,14 +340,14 @@ jobs:
 
   weekly-model-scan-x4:
     name: Weekly model scan x4 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
-    needs: generate-matrix
+    needs: generate-shards
     runs-on: [x86_64, spyre_pf_x4, linux, image_torch_spyre]
     timeout-minutes: 4320
     strategy:
       fail-fast: false
       max-parallel: 1 # 1 shard x 4 cards = 4 cards
       matrix:
-        include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x4) }}
+        include: ${{ fromJSON(needs.generate-shards.outputs.matrix_x4) }}
     env:
       CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
       CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
