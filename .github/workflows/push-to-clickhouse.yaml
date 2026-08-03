@@ -14,10 +14,14 @@
 # and a separate ingest one.
 #
 # At top_k=10000 per mode, a single job processing the whole list serially
-# would take far too long, so the fetch itself IS split out: generate-matrix
-# fetches the top-K list once (no Spyre hardware needed), shards it, and
-# weekly-model-scan fans out over those shards in parallel (mirrors
-# torch-spyre's generate_matrix -> matrix job pattern).
+# would take far too long, so the fetch is done once up-front and the actual
+# scan is fanned out: the generate-matrix job (misnamed — it's really a
+# sharding job; the "matrix" it emits is just an index into the uploaded
+# shard artifact) fetches the top-K list once on ubuntu-latest, splits it
+# into per-tier shard files, uploads them as the `weekly-shards` artifact,
+# and emits matrix_x1 / matrix_x2 / matrix_x4 JSON pointing at those shard
+# files. The three weekly-model-scan-x{1,2,4} jobs then fan out across the
+# Spyre runners, each downloading only its own shard.
 # =============================================================================
 name: push-to-clickhouse
 
@@ -73,8 +77,7 @@ jobs:
   # job below. No Spyre hardware needed — utils/hf_model_catalog.py's import
   # chain (via hf_adapters/auto_spyre_model.py) has no module-level
   # torch_spyre dependency; it's lazily imported inside a device-guarded
-  # function body in hf_common.py. The now-deprecated test_weekly_DEPRECATED
-  # .yaml is existing proof this exact fetch path runs fine on ubuntu-latest.
+  # function body in hf_common.py.
   # ---------------------------------------------------------------------------
   generate-matrix:
     name: Generate weekly shards

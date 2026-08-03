@@ -27,7 +27,7 @@ Copy .env.example → .env and fill in the values before running.
 """
 
 import os
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import clickhouse_connect
@@ -179,9 +179,38 @@ def _parse_bool(value: str) -> bool:
     return value.strip().lower() in ("1", "true", "yes")
 
 
+# Accepted date input formats. ISO first (canonical), then European day-first
+# variants we've seen in exported CSVs. We deliberately do NOT accept ambiguous
+# US month-first strings — a slash-separated date is always day-first here.
+_DATE_INPUT_FORMATS: tuple[str, ...] = (
+    "%d/%m/%Y",
+    "%d-%m-%Y",
+    "%d.%m.%Y",
+)
+
+
+def _parse_date(value: str) -> date:
+    """Parse *value* into a ``date``, tolerating DD/MM/YYYY as well as ISO.
+
+    Raises ``ValueError`` if the input doesn't match any accepted format,
+    so import_csv's existing try/except still reports the row as malformed.
+    """
+    v = value.strip()
+    try:
+        return date.fromisoformat(v)
+    except ValueError:
+        pass
+    for fmt in _DATE_INPUT_FORMATS:
+        try:
+            return datetime.strptime(v, fmt).date()
+        except ValueError:
+            continue
+    raise ValueError(f"unrecognized date format: {value!r}")
+
+
 def _parse_nullable_date(value: str | None) -> date | None:
     v = (value or "").strip()
-    return date.fromisoformat(v) if v else None
+    return _parse_date(v) if v else None
 
 
 def _parse_nullable_str(value: str | None) -> str | None:
@@ -212,7 +241,7 @@ def import_csv(sink, csv_path: str) -> tuple[int, int]:
                 )
                 continue
             try:
-                snapshot_date_val: date = date.fromisoformat(snapshot_raw)
+                snapshot_date_val: date = _parse_date(snapshot_raw)
             except ValueError:
                 malformed += 1
                 print(
