@@ -26,13 +26,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import date
 
+from tests.spyre.weekly_generation import model_fetcher
 from tests.spyre.weekly_generation.failure_categories import (
     FAILURE_CATEGORY_MODEL_TOO_LARGE,
     FAILURE_CATEGORY_MOE,
     FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
-    MAX_NUMBER_PARAMS,
 )
+from tests.spyre.weekly_generation.model_type import ModelType
+from tests.spyre.weekly_generation.result_sink import ResultSink
 
 IsDueForScan = Callable[[str], bool]
 """``model_id -> bool``: False when a recent row already covers this model.
@@ -108,9 +111,8 @@ def _parameter_count(row: dict) -> int | None:
 
 def prefilter_models(
     models: list[dict],
-    *,
-    is_due_for_scan: IsDueForScan,
-    max_params: int = MAX_NUMBER_PARAMS,
+    sink: ResultSink,
+    max_params: int,
 ) -> PrefilterResult:
     """Partition *models* into work to do, verdicts to record, and models to skip.
 
@@ -121,8 +123,7 @@ def prefilter_models(
             ``config_class``, ``model_type``, ``architectures``). Callers should
             ``pop("model_info")`` first — the returned lists hold the same dict
             objects, and that field is not JSON-serializable.
-        is_due_for_scan: see ``IsDueForScan``. In practice
-            ``sink.should_insert_row``.
+        sink: a sink to use for checking if row should be inserted.
         max_params: parameter ceiling above which a model cannot be brought up
             on Spyre.
 
@@ -139,7 +140,7 @@ def prefilter_models(
         # neither evaluation nor a new row. Must precede the terminal checks —
         # otherwise a model that is both unsupported and recently recorded would
         # get a duplicate not-implemented-adapter row every run.
-        if not is_due_for_scan(model_id):
+        if not sink.should_insert_row(model_id):
             result.window_skipped.append(row)
             continue
 
@@ -185,3 +186,51 @@ def prefilter_models(
         result.keep.append(row)
 
     return result
+
+
+def _prefilter_for_mode(
+    models: list[dict],
+    model_type: ModelType,
+    snapshot_date: date,
+    sink: ResultSink,
+    max_params: int
+) -> PrefilterResult:
+    """Apply the four pre-filters to *models* and record the terminal verdicts.
+
+    See the module docstring for why this runs before chunking. The sink is built
+    per mode because it binds one table (or one file) per instance.
+
+    With *write_to_csv* the verdicts go to a new CSV instead of ClickHouse, which
+    needs no credentials. That sink is write-only, so it reports nothing as
+    already-scanned and the emitted shards include every model that clears the
+    other three filters.
+    """
+    # Imported here, not at module scope, so --write-to-csv works on a host with
+    # no clickhouse_connect installed (result_sink pulls it in transitively).
+    from tests.spyre.weekly_generation.skip_writer import write_skipped_rows
+
+    with sink:
+        result = prefilter_models(models, sink=sink, max_params=max_params)
+        written = write_skipped_rows(sink, result.skipped, snapshot_date=snapshot_date)
+
+    print(
+        f"{model_type}: {len(models)} fetched -> {len(result.keep)} to evaluate "
+        f"({len(result.window_skipped)} already scanned within the skip window, "
+        f"{written} terminal row(s) written) {result.counts}"
+    )
+    return result
+
+
+def fetch_and_filter(model_type: ModelType, snapshot_date, top_k: int, sink: ResultSink, max_params: int) -> list[dict]:
+    # fetch the models
+    models: list[dict] = model_fetcher.fetch(
+        model_type=model_type,
+        top_k=top_k)
+
+    # Filter BEFORE routing and chunking.
+    return _prefilter_for_mode(
+        models=models,
+        model_type=model_type,
+        snapshot_date=snapshot_date,
+        sink=sink,
+        max_params=max_params).keep

@@ -216,7 +216,7 @@ class TestOrderAndTallies:
 @requires_sink
 class TestWriteSkippedRows:
     def test_writes_one_row_per_skipped_model(self, tmp_path) -> None:
-        from tests.spyre.weekly_generation.result_sink import CsvResultSink
+        from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
         from tests.spyre.weekly_generation.skip_writer import write_skipped_rows
 
         csv_path = tmp_path / "out.csv"
@@ -242,7 +242,7 @@ class TestWriteSkippedRows:
         """Pin the 14 column values the three deleted branches used to write."""
         import csv as _csv
 
-        from tests.spyre.weekly_generation.result_sink import CsvResultSink
+        from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
         from tests.spyre.weekly_generation.skip_writer import write_skipped_rows
 
         csv_path = tmp_path / "out.csv"
@@ -283,7 +283,7 @@ class TestWriteSkippedRows:
         assert written_row["error"] == ""
 
     def test_empty_skipped_list_writes_nothing(self, tmp_path) -> None:
-        from tests.spyre.weekly_generation.result_sink import CsvResultSink
+        from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
         from tests.spyre.weekly_generation.skip_writer import write_skipped_rows
 
         csv_path = tmp_path / "out.csv"
@@ -407,7 +407,7 @@ class TestCsvSinkIsWriteOnly:
     """The CSV sink writes one run to a new file and never reads one back."""
 
     def test_refuses_a_non_empty_existing_file(self, tmp_path) -> None:
-        from tests.spyre.weekly_generation.result_sink import CsvResultSink
+        from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
 
         existing = tmp_path / "already.csv"
         existing.write_text("model_name\norg/x\n")
@@ -416,7 +416,7 @@ class TestCsvSinkIsWriteOnly:
 
     def test_accepts_an_empty_existing_file(self, tmp_path) -> None:
         """A zero-byte file is not a previous run's results."""
-        from tests.spyre.weekly_generation.result_sink import CsvResultSink
+        from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
 
         empty = tmp_path / "empty.csv"
         empty.touch()
@@ -425,7 +425,7 @@ class TestCsvSinkIsWriteOnly:
         assert "model_name" in empty.read_text()
 
     def test_creates_parent_directories(self, tmp_path) -> None:
-        from tests.spyre.weekly_generation.result_sink import CsvResultSink
+        from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
 
         sink = CsvResultSink(path=tmp_path / "a" / "b" / "out.csv")
         sink.close()
@@ -433,7 +433,7 @@ class TestCsvSinkIsWriteOnly:
 
     def test_reports_nothing_as_blocking(self, tmp_path) -> None:
         """So --fetch against a CSV evaluates every model that clears the rest."""
-        from tests.spyre.weekly_generation.result_sink import CsvResultSink
+        from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
 
         sink = CsvResultSink(path=tmp_path / "o.csv")
         _add(sink, "org/x")
@@ -443,7 +443,7 @@ class TestCsvSinkIsWriteOnly:
     def test_writes_every_row_including_repeats(self, tmp_path) -> None:
         import csv as _csv
 
-        from tests.spyre.weekly_generation.result_sink import CsvResultSink
+        from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
 
         path = tmp_path / "o.csv"
         sink = CsvResultSink(path=path)
