@@ -1,43 +1,25 @@
 """Abstract result sink for the weekly Spyre test suite.
 
-This module holds only the ABC and the skip rule it defines. The two concrete
-implementations live in the ``sink`` package, and callers build one through
-``sink.sink_factory.create_sink`` rather than importing them directly:
+This module holds only the ABC. The two concrete implementations live in the
+``sink`` package, and callers build one through ``sink.sink_factory.create_sink``
+rather than importing them directly:
 
 - ``sink.csv_sink.CsvResultSink`` — write-only, for runs with no database access.
-  Writes one run's rows to a new file and never reads one back, so the skip rule
-  below does not apply to it: it has no history to consult and reports nothing as
-  blocking.
+  Writes one run's rows to a new file and never reads one back.
 - ``sink.clickhouse_sink.ClickHouseResultSink`` — inserts rows into ClickHouse;
-  the skip guard runs a single bulk SELECT on construction so all per-row checks
-  are O(1), and rows are buffered in memory then flushed in a single bulk INSERT
-  on ``close()``.
+  rows are buffered in memory then flushed in a single bulk INSERT on ``close()``.
 
-Keeping the ABC here, apart from its subclasses, is what lets ``model_prefilter``
-type against ``ResultSink`` without dragging in a storage backend, and lets its
-tests substitute a stub. Together with ``table_schema`` holding the column list,
-it is also what makes ``--write-to-csv`` genuinely runnable on a host with no
-``clickhouse_connect`` installed: only ``clickhouse_sink`` reaches the driver.
+Keeping the ABC here, apart from its subclasses, is what lets callers type against
+``ResultSink`` without dragging in a storage backend. Together with
+``table_schema`` holding the column list, it is also what makes ``--write-to-csv``
+genuinely runnable on a host with no ``clickhouse_connect`` installed: only
+``clickhouse_sink`` reaches the driver.
 
-Skip rule (ClickHouse): insert a row for *model_name* when either
-
-    * no prior row for *model_name* exists, OR
-    * the most-recent prior row has ``failure_category == 'hardware_exception'``
-      (accelerator problem, worth retrying now) OR the snapshot is older than
-      ``_SKIP_WINDOW_DAYS`` days (long enough since last run).
-
-Rows with `hardware_exception` are always re-run because the accelerator's
-availability is a transient property — a failure yesterday says nothing about
-today. Everything else (verified success, non-implemented adapter, quantized
-model, moe, cpu load/generate failure, …) is treated as terminal for the
-window.
-
-``should_insert_row`` is how the rule gets consulted, and the producers call it
-directly while building the model list. ``add_entry`` does NOT re-check it: the
-decision is made once, upstream, so every later write records an outcome already
-decided. Re-checking at write time would discard rows the caller chose to write —
-leaving a run with fewer rows than the models it handled, and no accounting for
-the difference.
+A sink is write-only: every row handed to ``add_entry`` is recorded. Deciding
+*which* models to evaluate happens upstream, in ``model_prefilter``, so a row
+reaching here is one the caller already decided to record. Filtering at write
+time would discard rows the caller chose to write, leaving a run with fewer rows
+than the models it handled and no accounting for the difference.
 """
 
 from __future__ import annotations
@@ -90,9 +72,9 @@ class ResultSink(ABC):
     ) -> None:
         """Storage-specific write of one row's normalized fields.
 
-        Called by ``add_entry`` after the skip guard has passed. Subclasses must
-        not perform any deduplication here — that is the responsibility of
-        ``should_insert_row``.
+        Called by ``add_entry`` once *model_name* has been validated. Subclasses
+        must not deduplicate or drop rows here: a run's row count is meant to
+        match the models it handled.
         """
 
     def add_entry(
@@ -113,8 +95,7 @@ class ResultSink(ABC):
         failure_category: str | None,
         error: str | None,
     ) -> None:
-        """Persist one row. Always writes.
-        """
+        """Persist one row. Always writes; rejects an empty *model_name*."""
         model_name = _require_non_empty(model_name, "model_name")
         self._insert_entry(
             model_name=model_name,

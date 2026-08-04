@@ -17,20 +17,19 @@
 # torch-spyre's generate_matrix -> matrix job pattern).
 #
 # generate-matrix also does all the FILTERING, which is why it needs ClickHouse
-# credentials of its own: it applies the skip window (don't re-test a model
-# verified in the last 10 days) plus the no-adapter / too-large / MoE checks, and
+# credentials of its own: it applies the no-adapter / too-large / MoE checks and
 # writes those terminal verdict rows itself. weekly_test.py used to do this
 # inside each shard, but the dropped models cluster — config-class families
 # cluster by download count — so surviving counts per shard varied wildly and
 # some jobs finished in minutes while others ran for hours. Filtering before
 # chunking makes shard size a count of real evaluations.
 #
-# One consequence worth knowing: the terminal rows are written at fetch time, so
-# their 10-day skip window starts then. If a run is cancelled after
-# generate-matrix succeeds (cancel-in-progress below makes that routine), those
-# models read as "done" for 10 days even though no scan ran. They are terminal
-# properties of the checkpoint — a MoE model will not stop being MoE — so
-# re-deriving them weekly is wasted work anyway.
+# Every model that survives the filter is evaluated: there is no "recently
+# scanned" check, so a re-run repeats the full scan rather than resuming a
+# partial one. If a run is cancelled after generate-matrix succeeds
+# (cancel-in-progress below makes that routine), the terminal verdict rows it
+# already wrote stay — they are terminal properties of the checkpoint, so a
+# re-run simply overwrites them with the same values.
 # =============================================================================
 name: push-to-clickhouse
 
@@ -90,8 +89,8 @@ jobs:
   # test_weekly_DEPRECATED.yaml is existing proof this exact fetch path runs fine
   # on ubuntu-latest.
   #
-  # This job DOES need ClickHouse: it reads the skip window and writes the
-  # terminal verdict rows for everything it filters out. See the header comment.
+  # This job DOES need ClickHouse: it writes the terminal verdict rows for
+  # everything it filters out. See the header comment.
   # ---------------------------------------------------------------------------
   generate-matrix:
     name: Generate weekly shards
@@ -112,8 +111,8 @@ jobs:
       matrix_x4: ${{ steps.generate.outputs.matrix_x4 }}
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      # Needed because this job applies the skip window and writes the terminal
-      # verdict rows for the models it filters out.
+      # Needed because this job writes the terminal verdict rows for the models
+      # it filters out.
       CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
       CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
       CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
@@ -186,9 +185,9 @@ jobs:
               print(f"AutoConfig.from_pretrained() FAILED: {type(e).__name__}: {e}")
           PY
 
-      # Fail fast if ClickHouse secrets are missing/wrong: this job now reads the
-      # skip window and writes the terminal verdict rows, and the fetch below can
-      # take 90+ minutes before it would otherwise reach the sink. Never prints
+      # Fail fast if ClickHouse secrets are missing/wrong: this job now writes the
+      # terminal verdict rows, and the fetch below can take 90+ minutes before it
+      # would otherwise reach the sink. Never prints
       # secret values, only presence/length and a live SELECT 1. Same check the
       # scan jobs run, minus their `cd`/`uv run` wrapper — this job uses plain
       # python with working-directory: '.'.
@@ -245,8 +244,9 @@ jobs:
   # 10*1 + 4*2 + 1*4 = 22 cards (~2 nodes), so PR/daily CI isn't starved.
   #
   # The `if` guards an empty matrix: now that generate-matrix filters before
-  # chunking, a tier can legitimately produce zero shards (a re-run inside the
-  # 10-day skip window), which showed up in testing as matrix_x4=[].
+  # chunking, a tier can legitimately produce zero shards — no fetched model
+  # falls in its parameter range, or a --model-type run skipped it entirely.
+  # This showed up in testing as matrix_x4=[].
   weekly-model-scan-x1:
     name: Weekly model scan x1 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
     needs: generate-matrix

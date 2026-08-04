@@ -6,17 +6,11 @@ with ``pytest --noconftest`` so the torch-importing root conftest is bypassed an
 only ``pytest`` itself is needed. See test_pull_request.yaml's adapter-coverage
 job for the same pattern.
 
-``prefilter_models`` takes a ``ResultSink`` but only ever calls
-``should_insert_row`` on it, so these tests drive it with ``_StubSink`` — a
-duck-typed stand-in with no storage behind it. That is not just convenience:
-the concrete sinks import ``clickhouse_connect`` transitively, and the stub is
-what keeps the pre-filter tests runnable on an interpreter with no database
-driver. Tests that do need a real sink are gated on ``requires_sink`` and import
-one inside the test body.
-
-A fake is likewise the only way to test the ``add_entry`` guard at all:
-``CsvResultSink`` is write-only by design and reports nothing as blocking, so it
-cannot exercise a rejection. See ``_fake_sink_cls``.
+``prefilter_models`` takes no sink — it decides and writes nothing — so the
+pre-filter tests need no storage backend at all, which is what keeps them
+runnable on an interpreter with no database driver (the concrete sinks import
+``clickhouse_connect`` transitively). Tests that do need a real sink are gated on
+``requires_sink`` and import one inside the test body.
 """
 
 from __future__ import annotations
@@ -49,41 +43,13 @@ requires_sink = pytest.mark.skipif(
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-class _StubSink:
-    """The slice of ``ResultSink`` that ``prefilter_models`` actually uses.
-
-    Deliberately not a ``ResultSink`` subclass: importing the ABC would drag in
-    nothing here, but constructing one requires implementing ``_insert_entry``,
-    and duck-typing keeps this file's import graph free of ``result_sink``
-    entirely. ``prefilter_models`` only calls ``should_insert_row``, and this
-    records the calls so tests can assert it was consulted per model.
-    """
-
-    def __init__(self, blocking: set[str] | None = None) -> None:
-        self._blocking = blocking or set()
-        self.asked: list[str] = []
-
-    def should_insert_row(self, model_name: str) -> bool:
-        self.asked.append(model_name)
-        return model_name not in self._blocking
-
-
 def _filter(
     rows: list[dict],
     *,
-    blocking: set[str] | None = None,
     max_params: int = MAX_NUMBER_PARAMS,
 ):
-    """Run the pre-filter over *rows* with a stub sink.
-
-    *blocking* is the set of model_ids the sink reports as already-scanned
-    (i.e. ``should_insert_row`` returns False for them).
-    """
-    return prefilter_models(
-        rows,
-        sink=_StubSink(blocking),  # type: ignore[arg-type]  # duck-typed, see class
-        max_params=max_params,
-    )
+    """Run the pre-filter over *rows*."""
+    return prefilter_models(rows, max_params=max_params)
 
 
 def _row(model_id: str, **overrides: object) -> dict:
@@ -107,7 +73,6 @@ class TestFilterBranches:
         result = _filter([_row("org/ok")])
         assert [r["model_id"] for r in result.keep] == ["org/ok"]
         assert result.skipped == []
-        assert result.window_skipped == []
 
     def test_unsupported_config_class(self) -> None:
         result = _filter([_row("org/unsup", is_supported=False)])
@@ -145,51 +110,34 @@ class TestFilterBranches:
         assert result.keep == []
         assert result.skipped[0].failure_category == FAILURE_CATEGORY_MOE
 
-    def test_skip_window(self) -> None:
-        result = _filter([_row("org/recent")], blocking={"org/recent"})
-        assert result.keep == []
-        assert result.skipped == [], "window skips must not produce a row to write"
-        assert [r["model_id"] for r in result.window_skipped] == ["org/recent"]
 
-
-class TestSinkInteraction:
-    """The sink is consulted for the verdict and never written to here.
+class TestPrefilterIsPure:
+    """``prefilter_models`` decides and writes nothing.
 
     Recording the terminal rows is ``write_skipped_rows``' job, called separately
-    by ``fetch_and_filter``, so ``prefilter_models`` stays pure.
+    by ``fetch_and_filter``. That split is what lets this function be called with
+    no sink at all — and these tests run with no database driver installed.
     """
 
-    def test_every_model_is_checked_against_the_sink(self) -> None:
-        sink = _StubSink()
-        rows = [_row("org/a"), _row("org/b"), _row("org/c")]
-        prefilter_models(rows, sink=sink, max_params=MAX_NUMBER_PARAMS)  # type: ignore[arg-type]
-        assert sink.asked == ["org/a", "org/b", "org/c"]
+    def test_takes_no_sink(self) -> None:
+        """A sink parameter would reintroduce the dependency this split removed."""
+        params = inspect.signature(prefilter_models).parameters
+        assert "sink" not in params
+        assert set(params) == {"models", "max_params"}
 
-    def test_prefilter_does_not_write_to_the_sink(self) -> None:
-        """A stub with no ``add_entry`` at all must get through untouched."""
-        sink = _StubSink()
-        rows = [_row("org/unsup", is_supported=False), _row("org/moe", is_moe=True)]
-        result = prefilter_models(rows, sink=sink, max_params=MAX_NUMBER_PARAMS)  # type: ignore[arg-type]
-        assert len(result.skipped) == 2
-        assert not hasattr(sink, "written")
+    def test_every_model_lands_in_exactly_one_list(self) -> None:
+        rows = [
+            _row("org/a"),
+            _row("org/b", is_supported=False),
+            _row("org/c", is_moe=True),
+        ]
+        result = _filter(rows)
+        assert len(result.keep) + len(result.skipped) == len(rows)
+        assert [r["model_id"] for r in result.keep] == ["org/a"]
+        assert [s.row["model_id"] for s in result.skipped] == ["org/b", "org/c"]
 
 
 class TestPrecedence:
-    def test_window_skip_wins_over_terminal_categories(self) -> None:
-        """A model that is BOTH unsupported and recently recorded gets no new row.
-
-        Order matters here: if the terminal checks ran first, every weekly run
-        would append another not-implemented-adapter row for the same model.
-        """
-        rows = [
-            _row("org/unsup-and-recent", is_supported=False),
-            _row("org/moe-and-recent", is_moe=True),
-            _row("org/huge-and-recent", parameters=10**15),
-        ]
-        result = _filter(rows, blocking={r["model_id"] for r in rows})
-        assert result.skipped == []
-        assert len(result.window_skipped) == 3
-
     def test_unsupported_wins_over_moe(self) -> None:
         """Both apply; the reported category is the first check that fires."""
         result = _filter([_row("org/both", is_supported=False, is_moe=True)])
@@ -230,13 +178,12 @@ class TestOrderAndTallies:
         rows = [_row(f"org/m{i}", downloads=1000 - i) for i in range(20)]
         rows[3]["is_moe"] = True
         rows[11]["is_supported"] = False
-        result = _filter(rows, blocking={"org/m7"})
+        result = _filter(rows)
 
         kept = [r["model_id"] for r in result.keep]
         assert kept == sorted(kept, key=lambda m: -(1000 - int(m.split("m")[1])))
         assert "org/m3" not in kept and "org/m11" not in kept
-        assert "org/m7" not in kept
-        assert len(kept) == 17
+        assert len(kept) == 18
 
     def test_counts_reconcile_with_the_input(self) -> None:
         rows = [
@@ -246,10 +193,9 @@ class TestOrderAndTallies:
             _row("org/d", parameters=10**15),
             _row("org/e"),
         ]
-        result = _filter(rows, blocking={"org/e"})
+        result = _filter(rows)
         counts = result.counts
-        assert counts["keep"] == 1
-        assert counts["window_skipped"] == 1
+        assert counts["keep"] == 2
         assert counts[FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER] == 1
         assert counts[FAILURE_CATEGORY_MOE] == 1
         assert counts[FAILURE_CATEGORY_MODEL_TOO_LARGE] == 1
@@ -258,7 +204,7 @@ class TestOrderAndTallies:
     def test_empty_input(self) -> None:
         result = _filter([])
         assert result.keep == []
-        assert result.counts == {"keep": 0, "window_skipped": 0}
+        assert result.counts == {"keep": 0}
 
     def test_rows_are_returned_by_identity(self) -> None:
         """The same dict objects come back, so a caller's pop() still applies."""
@@ -312,7 +258,7 @@ class TestWriteSkippedRows:
         result = _filter(rows)
         today = date.today()
 
-        with CsvResultSink(path=csv_path, today=today) as sink:
+        with CsvResultSink(path=csv_path) as sink:
             written = write_skipped_rows(
                 sink, result.skipped, snapshot_date=today, verbose=False
             )
@@ -345,7 +291,7 @@ class TestWriteSkippedRows:
                 )
             ]
         )
-        with CsvResultSink(path=csv_path, today=today) as sink:
+        with CsvResultSink(path=csv_path) as sink:
             write_skipped_rows(sink, result.skipped, snapshot_date=today, verbose=False)
 
         written_row = next(iter(_csv.DictReader(csv_path.open())))
@@ -393,7 +339,7 @@ class TestFetchAndFilter:
         rows = [
             _row("org/keep"),
             _row("org/moe", is_moe=True),
-            _row("org/recent"),
+            _row("org/keep-too"),
         ]
 
         def _fake(limit: int, **_kw) -> list[dict]:
@@ -420,7 +366,7 @@ class TestFetchAndFilter:
 
         path = tmp_path / "out.csv"
         today = date.today()
-        sink = CsvResultSink(path=path, today=today)
+        sink = CsvResultSink(path=path)
 
         kept = fetch_and_filter(
             model_type=ModelType.GENERATIVE,
@@ -431,7 +377,7 @@ class TestFetchAndFilter:
         )
 
         # The MoE model is dropped and recorded; the other two survive.
-        assert [r["model_id"] for r in kept] == ["org/keep", "org/recent"]
+        assert [r["model_id"] for r in kept] == ["org/keep", "org/keep-too"]
 
         # The sink must still be writable — main() writes every evaluation
         # result through this same object after fetch_and_filter returns.
@@ -477,22 +423,19 @@ class TestFetchAndFilter:
         assert all("model_info" not in r for r in kept)
         json.dumps(kept)  # must not raise
 
-    def test_window_skipped_models_produce_no_row(
-        self, tmp_path, _stub_fetcher
-    ) -> None:
-        """A blocked model is neither evaluated nor re-recorded."""
+    def test_only_terminal_verdicts_get_a_row(self, tmp_path, _stub_fetcher) -> None:
+        """Models handed on for evaluation are not recorded here.
+
+        Their row comes later, from the evaluation loop, and writing one now would
+        double-count them.
+        """
         import csv as _csv
 
         from tests.spyre.weekly_generation.model_prefilter import fetch_and_filter
         from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
 
         path = tmp_path / "o.csv"
-
-        class _BlockingCsvSink(CsvResultSink):
-            def should_insert_row(self, model_name: str) -> bool:
-                return model_name != "org/recent"
-
-        with _BlockingCsvSink(path=path) as sink:
+        with CsvResultSink(path=path) as sink:
             kept = fetch_and_filter(
                 model_type=ModelType.GENERATIVE,
                 snapshot_date=date.today(),
@@ -501,8 +444,7 @@ class TestFetchAndFilter:
                 max_params=MAX_NUMBER_PARAMS,
             )
 
-        assert [r["model_id"] for r in kept] == ["org/keep"]
-        # Only the MoE verdict is written — nothing for org/recent.
+        assert [r["model_id"] for r in kept] == ["org/keep", "org/keep-too"]
         assert [r["model_name"] for r in _csv.DictReader(path.open())] == ["org/moe"]
 
     def test_max_params_is_honoured(self, tmp_path, _stub_fetcher) -> None:
@@ -523,22 +465,17 @@ class TestFetchAndFilter:
 def _fake_sink_cls():
     """Build a minimal concrete ResultSink subclass, importing the base lazily.
 
-    The guard lives entirely in the base class's ``add_entry``, so testing it
-    needs a sink, not a *storage backend*. ``CsvResultSink`` used to serve here,
-    but it is now write-only by design and reports nothing as blocking, so it can
-    no longer exercise a rejection. This fake can — and defining it inside a
-    function keeps ``result_sink`` out of this module's import-time dependencies.
+    ``add_entry``'s behaviour lives entirely in the base class, so testing it
+    needs a sink, not a *storage backend*. This fake records the ``_insert_entry``
+    calls it receives, which is exactly what the base class's contract is about,
+    and defining it inside a function keeps ``result_sink`` out of this module's
+    import-time dependencies.
     """
     from tests.spyre.weekly_generation.sink.result_sink import ResultSink
 
     class _FakeSink(ResultSink):
-        def __init__(self, blocking: set[str] | None = None, **kwargs) -> None:
-            super().__init__(**kwargs)
-            self._blocking = blocking or set()
+        def __init__(self) -> None:
             self.written: list[str] = []
-
-        def should_insert_row(self, model_name):
-            return model_name not in self._blocking
 
         def _insert_entry(self, *, model_name, **_rest) -> None:
             self.written.append(model_name)
@@ -569,22 +506,17 @@ def _add(sink, name: str) -> bool:
 class TestAddEntryAlwaysWrites:
     """add_entry records every row it is handed.
 
-    The skip-window rule is applied once upstream while the model list is built,
-    so a row reaching add_entry is one the caller already decided to record.
-    Re-applying the rule here would silently drop results a run was asked to
-    produce, leaving its row count lower than its input with no accounting.
+    Which models to evaluate is decided upstream, in ``model_prefilter``, so a row
+    reaching add_entry is one the caller already decided to record. Filtering here
+    would silently drop results a run was asked to produce, leaving its row count
+    lower than its input with no accounting.
     """
 
     @pytest.fixture(autouse=True)
     def _bind(self):
         self.FakeSink = _fake_sink_cls()
 
-    def test_writes_even_when_should_insert_row_says_blocked(self) -> None:
-        sink = self.FakeSink(blocking={"org/blocked"})
-        _add(sink, "org/blocked")
-        assert sink.written == ["org/blocked"]
-
-    def test_writes_an_unblocked_model(self) -> None:
+    def test_writes_the_row_it_is_handed(self) -> None:
         sink = self.FakeSink()
         _add(sink, "org/fresh")
         assert sink.written == ["org/fresh"]
@@ -596,11 +528,10 @@ class TestAddEntryAlwaysWrites:
         _add(sink, "org/dup")
         assert sink.written == ["org/dup", "org/dup"]
 
-    def test_should_insert_row_still_reports_blocks(self) -> None:
-        """The producers call it directly to build the filtered model list."""
-        sink = self.FakeSink(blocking={"org/blocked"})
-        assert sink.should_insert_row("org/blocked") is False
-        assert sink.should_insert_row("org/other") is True
+    def test_the_abc_exposes_no_filtering_hook(self) -> None:
+        """A sink decides nothing about which models to run."""
+        sink = self.FakeSink()
+        assert not hasattr(sink, "should_insert_row")
 
     def test_empty_model_name_is_still_rejected(self) -> None:
         sink = self.FakeSink()
@@ -624,12 +555,12 @@ class TestSinkConstructors:
             (
                 "tests.spyre.weekly_generation.sink.csv_sink",
                 "CsvResultSink",
-                ["path", "today"],
+                ["path"],
             ),
             (
                 "tests.spyre.weekly_generation.sink.clickhouse_sink",
                 "ClickHouseResultSink",
-                ["model_type", "today"],
+                ["model_type"],
             ),
         ],
     )
@@ -680,7 +611,6 @@ class TestSinkFactory:
         base = tmp_path / "verdicts.csv"
         with create_sink(
             model_type=ModelType.EMBEDDING,
-            snapshot_date=date.today(),
             write_to_csv=base,
         ) as sink:
             assert isinstance(sink, CsvResultSink)
@@ -706,7 +636,6 @@ class TestSinkFactory:
         expected = csv_path_for(base, ModelType.GENERATIVE)
         with create_sink(
             model_type=ModelType.GENERATIVE,
-            snapshot_date=date.today(),
             write_to_csv=base,
         ):
             pass
@@ -720,8 +649,7 @@ class TestSinkFactory:
         for model_type in ModelType:
             with create_sink(
                 model_type=model_type,
-                snapshot_date=date.today(),
-                write_to_csv=base,
+                    write_to_csv=base,
             ):
                 pass
         assert {p.name for p in tmp_path.iterdir()} == {
@@ -733,10 +661,10 @@ class TestSinkFactory:
         """Without --write-to-csv the factory must reach for ClickHouse.
 
         The constructor is stubbed out: instantiating the real one would connect
-        and read the skip set, and what is under test is the branch, not the
+        and create its table, and what is under test is the branch, not the
         driver. Patched on ``clickhouse_sink`` rather than on the factory,
         because the factory imports it lazily inside the function body — see
-        ``test_csv_branch_needs_no_clickhouse_driver`` for why.
+        ``test_csv_branch_runs_with_no_clickhouse_driver_installed`` for why.
         """
         import tests.spyre.weekly_generation.sink.clickhouse_sink as ch_module
         from tests.spyre.weekly_generation.sink.sink_factory import create_sink
@@ -744,17 +672,13 @@ class TestSinkFactory:
         seen: dict = {}
 
         class _FakeClickHouseSink:
-            def __init__(self, *, model_type, today) -> None:
+            def __init__(self, *, model_type) -> None:
                 seen["model_type"] = model_type
-                seen["today"] = today
 
         monkeypatch.setattr(ch_module, "ClickHouseResultSink", _FakeClickHouseSink)
-        today = date(2026, 8, 4)
-        sink = create_sink(
-            model_type=ModelType.GENERATIVE, snapshot_date=today, write_to_csv=None
-        )
+        sink = create_sink(model_type=ModelType.GENERATIVE, write_to_csv=None)
         assert isinstance(sink, _FakeClickHouseSink)
-        assert seen == {"model_type": ModelType.GENERATIVE, "today": today}
+        assert seen == {"model_type": ModelType.GENERATIVE}
 
     def test_csv_branch_does_not_connect_to_clickhouse(
         self, tmp_path, monkeypatch
@@ -775,10 +699,9 @@ class TestSinkFactory:
 
         with create_sink(
             model_type=ModelType.GENERATIVE,
-            snapshot_date=date.today(),
             write_to_csv=tmp_path / "v.csv",
         ) as sink:
-            assert sink.should_insert_row("org/x") is True
+            _add(sink, "org/x")
         assert (tmp_path / "v-generative.csv").exists()
 
     def test_csv_branch_runs_with_no_clickhouse_driver_installed(
@@ -821,7 +744,6 @@ class TestSinkFactory:
 
             with create_sink(
                 model_type=ModelType.GENERATIVE,
-                snapshot_date=date.today(),
                 write_to_csv=Path(sys.argv[1]) / "v.csv",
             ) as sink:
                 sink.add_entry(
@@ -877,15 +799,6 @@ class TestCsvSinkIsWriteOnly:
         sink = CsvResultSink(path=tmp_path / "a" / "b" / "out.csv")
         sink.close()
         assert (tmp_path / "a" / "b" / "out.csv").exists()
-
-    def test_reports_nothing_as_blocking(self, tmp_path) -> None:
-        """So --fetch against a CSV evaluates every model that clears the rest."""
-        from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
-
-        sink = CsvResultSink(path=tmp_path / "o.csv")
-        _add(sink, "org/x")
-        assert sink.should_insert_row("org/x") is True
-        sink.close()
 
     def test_writes_every_row_including_repeats(self, tmp_path) -> None:
         import csv as _csv

@@ -6,7 +6,6 @@ import a concrete sink — or know that importing one has a cost.
 
 from __future__ import annotations
 
-from datetime import date
 from pathlib import Path
 
 from tests.spyre.weekly_generation.model_type import ModelType
@@ -27,8 +26,6 @@ def csv_path_for(base: Path, model_type: ModelType) -> Path:
 
 def create_sink(
     model_type: ModelType,
-    snapshot_date: date,
-    recovery_run: bool,
     write_to_csv: Path | None,
 ) -> ResultSink:
     """Return the sink for a *model_type* run, keyed on whether a CSV was asked for.
@@ -38,14 +35,11 @@ def create_sink(
     than one overall.
 
     With *write_to_csv* the verdicts go to a new CSV instead of ClickHouse, which
-    needs no credentials. That sink is write-only and so reports nothing as
-    already-scanned: a ``--write-to-csv`` run evaluates every model that clears
-    the other three pre-filters, including ones a real run would have dropped as
-    recently-scanned. Its path gets a ``-<model_type>`` suffix, since a single
+    needs no credentials. Its path gets a ``-<model_type>`` suffix, since a single
     invocation can cover both types and each needs its own file.
 
-    Otherwise a ``ClickHouseResultSink`` is built, which connects and reads the
-    skip set during construction.
+    Otherwise a ``ClickHouseResultSink`` is built, which connects during
+    construction and creates its table if missing.
     """
     if write_to_csv is not None:
         path = csv_path_for(write_to_csv, model_type)

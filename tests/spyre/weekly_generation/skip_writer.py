@@ -27,8 +27,8 @@ def write_skipped_rows(
 ) -> int:
     """Write one terminal row per entry in *skipped*. Returns rows written.
 
-    Pass only ``PrefilterResult.skipped`` — never ``window_skipped``, whose
-    members already have a recent row and are meant to produce no write.
+    Takes ``PrefilterResult.skipped``; every entry there is a terminal verdict and
+    gets a row.
     """
     written = 0
     for item in skipped:

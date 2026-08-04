@@ -22,8 +22,8 @@ from tests.spyre.weekly_generation.table_schema import TABLE_COLUMNS
 class CsvResultSink(ResultSink):
     """Write rows to a fresh CSV file. Write-only, for no-database test runs.
 
-    Nothing is read back and the file must not already exist, so there is no prior
-    history to consult: ``should_insert_row`` is unconditionally True.
+    Nothing is read back, and the file must not already exist — so one file holds
+    exactly one run's rows.
     """
 
     def __init__(self, path: Path) -> None:

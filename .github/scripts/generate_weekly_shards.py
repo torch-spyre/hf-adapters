@@ -20,11 +20,11 @@ so a model doesn't share a batch with (and inflate the memory footprint
 of) much smaller ones. See push-to-clickhouse.yaml's weekly-model-scan job
 for how `matrix.runner` selects the actual runs-on label.
 
-Each model type's list is PRE-FILTERED before any chunking: models already
-scanned inside the skip window, models with no adapter for their config class,
-models too large for Spyre, and MoE models are all removed here, and the terminal
-verdicts among those are written straight to ClickHouse (so this script needs
-the CLICKHOUSE_* env vars, or --write-to-csv to record them in a file instead).
+Each model type's list is PRE-FILTERED before any chunking: models with no
+adapter for their config class, models too large for Spyre, and MoE models are
+all removed here, and a terminal verdict row for each is written straight to
+ClickHouse (so this script needs the CLICKHOUSE_* env vars, or --write-to-csv to
+record them in a file instead).
 
 That ordering is the point. The dropped models cluster heavily — config-class
 families cluster by download count — so filtering inside each worker, as
@@ -161,7 +161,6 @@ def generate_shards(
         # what flushes the ClickHouse sink's buffered verdict rows.
         sink: ResultSink = create_sink(
             model_type=model_type,
-            snapshot_date=snapshot_date,
             write_to_csv=write_to_csv,
         )
         with sink:
@@ -298,10 +297,7 @@ def main() -> None:
         help=(
             "Record the terminal verdicts in a new CSV per mode (suffixed "
             "-generative / -embedding) instead of ClickHouse, so this script can "
-            "run without credentials. That sink is write-only, so no skip window "
-            "is applied and the emitted shards include models a real run would "
-            "have dropped as recently scanned — do not feed them to a production "
-            "scan."
+            "run without credentials."
         ),
     )
     parser.add_argument(

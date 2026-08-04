@@ -1,9 +1,9 @@
 """Decide which fetched models are worth handing to a Spyre worker.
 
 Three checks, applied in the order ``weekly_test.main`` used to apply them
-in-process. These are terminal properties of the checkpoint itself
+in-process. All three are terminal properties of the checkpoint itself
 (no adapter, too large, mixture-of-experts) and produce a row recording that
-verdict.
+verdict, so a dropped model is never silently absent from a run's output.
 
 Running this **upstream of sharding** is the point. ``generate_weekly_shards``
 chunks a downloads-ordered list into fixed-size shards, and filtered-out models
@@ -15,7 +15,6 @@ shard size maps to evaluations.
 
 ``weekly_test --fetch`` calls this too, for manual runs with no shard file, so
 both entry points share one definition of "worth handing to a Spyre worker".
-
 """
 
 from __future__ import annotations
@@ -45,8 +44,10 @@ class SkippedModel:
 
 @dataclass
 class PrefilterResult:
-    """Two-way partition of the fetched models.
+    """Two-way partition of the fetched models: work to do, and verdicts to record.
 
+    Every fetched model lands in exactly one of the two lists, which is what lets
+    ``counts`` reconcile against the input length.
     """
 
     keep: list[dict] = field(default_factory=list)
@@ -91,11 +92,11 @@ def prefilter_models(
     models: list[dict],
     max_params: int,
 ) -> PrefilterResult:
-    """Partition *models* into work to do, verdicts to record, and models to skip.
+    """Partition *models* into work to do and verdicts to record.
 
-    Pure: reads *sink* but never writes to it. Recording the terminal verdicts is
-    ``write_skipped_rows``' job, so this function can be tested with a sink that
-    only answers ``should_insert_row``.
+    Pure: decides, and writes nothing. Recording the terminal verdicts is
+    ``write_skipped_rows``' job, so this needs no sink and its tests need no
+    storage backend.
 
     Args:
         models: one dict per model as fetched from the HuggingFace Hub by
@@ -196,6 +197,6 @@ def fetch_and_filter(
 
     print(
         f"{model_type}: {len(models)} fetched -> {len(result.keep)} to evaluate "
-        f"{written} terminal row(s) written for skipped models) {result.counts}"
+        f"({written} terminal row(s) written for skipped models) {result.counts}"
     )
     return result.keep

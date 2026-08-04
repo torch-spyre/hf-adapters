@@ -6,17 +6,11 @@ The only module in the weekly pipeline that reaches ``clickhouse_connect`` (via
 Note the two imports below are deliberately split — the client and credentials
 come from ``clickhouse_db``, the table shape from the dependency-free
 ``table_schema``, so a schema consumer never drags in the driver.
-
-``_SKIP_WINDOW_DAYS`` and ``_require_non_empty`` are imported from
-``result_sink`` despite the underscore. They are private to the sink layer as a
-whole, not to that module — the skip window is the rule the ABC documents and
-this class implements, so duplicating the constant here is how the two get to
-disagree.
 """
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 from tests.spyre.weekly_generation.clickhouse_db import get_client, table_exists
@@ -38,15 +32,12 @@ from tests.spyre.weekly_generation.table_schema import (
 class ClickHouseResultSink(ResultSink):
     """Insert rows into ClickHouse.
 
-    On construction the table is created if missing, and a single bulk SELECT
-    pre-fetches every model name that currently blocks a re-run (see the
-    module docstring for the rule) so that all subsequent
-    ``should_insert_row`` calls are O(1) with no network I/O.
+    On construction the table is created if it does not already exist.
 
-    Rows accepted by the skip guard are accumulated in ``_pending`` and flushed
-    to ClickHouse in one bulk INSERT on ``close()`` (or ``__exit__``), so the
-    total network round-trips for N rows is 2 (one SELECT, one INSERT) instead
-    of 2 × N.
+    Rows are accumulated in ``_pending`` and flushed to ClickHouse in one bulk
+    INSERT on ``close()`` (or ``__exit__``), so N rows cost one round-trip rather
+    than N. ``flush()`` forces that write early, which the weekly driver uses at
+    batch boundaries so a crash loses at most one batch.
     """
 
     def __init__(self, model_type: ModelType) -> None:
@@ -68,7 +59,15 @@ class ClickHouseResultSink(ResultSink):
         self._pending: list[list[Any]] = []
 
     def fetch_hw_failure_models(self, snapshot_date: date) -> set[str]:
-        """One SELECT to get all model names that had a hw failure in a previous run. This can help recoverying from a previous run by re-testing only the models that had a h/w failure like pod wenting down.
+        """Model names whose row on *snapshot_date* is a ``hardware_exception``.
+
+        Groundwork for recovery runs: when a scan aborts because the accelerator
+        went away (see ``weekly_test.HardwareExceptionAbortError``), the affected
+        models are the only ones worth re-testing — the failure says nothing about
+        the checkpoint, so every other verdict from that run still stands.
+
+        Not called yet. Nothing upstream exposes a recovery run, so this is
+        reachable only by hand until that is wired up.
         """
         result = self._client.query(
             "SELECT DISTINCT model_name "

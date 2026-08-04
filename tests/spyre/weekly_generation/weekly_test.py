@@ -10,9 +10,9 @@ Two ways to say which models to evaluate — exactly one is required::
     python tests/spyre/weekly_generation/weekly_test.py \\
         --mode embedding --fetch --top-k 200
 
-Either way the same four pre-filters apply — skip window, no adapter for the
-config class, too large for Spyre, MoE — and each dropped model gets a terminal
-row recording why. With ``--model-list-file`` that happened upstream in
+Either way the same three pre-filters apply — no adapter for the config class,
+too large for Spyre, MoE — and each dropped model gets a terminal row recording
+why. With ``--model-list-file`` that happened upstream in
 ``.github/scripts/generate_weekly_shards.py``; with ``--fetch`` it happens here,
 through the same ``fetch_and_filter``. So everything that reaches the evaluation
 loop needs a Spyre card.
@@ -45,18 +45,16 @@ Flags:
 * ``--max-params N``                 With ``--fetch``: parameter ceiling.
 * ``--write-to-csv F``               Record results in a new CSV instead of
   ClickHouse, for runs with no database access. Write-only: the file must not
-  already exist, and nothing is read back — so with ``--fetch`` the skip window
-  is not applied and every fetched model is evaluated.
+  already exist, and nothing is read back.
 
 Result rows
 -----------
 One row is recorded per model handled, so a run's row count never silently
-disagrees with its input. The skip-window rule was already applied when the list
-was built; re-applying it at write time would consult a *newer* snapshot (this
-job's, taken up to two hours after a shard producer's), so a row written in
-between by a concurrent run would suppress a result this job was asked to
-produce. A duplicate is the better failure — ``ReplacingMergeTree(snapshot_date)``
-collapses same-day duplicates on merge.
+disagrees with its input. Nothing is filtered at write time — a row reaching the
+sink is one the caller decided to record, and dropping it there would leave a run
+with fewer rows than the models it handled and no accounting for the difference.
+Same-day duplicates are collapsed on merge by
+``ReplacingMergeTree(snapshot_date)``.
 """
 
 import argparse
@@ -95,10 +93,14 @@ class HardwareExceptionAbortError(RuntimeError):
 
     The Spyre accelerator is unreachable and no subsequent work in this
     process can succeed, so the run aborts. Bubbling this up to the
-    ``__main__`` block means the script exits with a non-zero code —
-    CI / GHA can alert on it, and a subsequent scheduled run picks the
-    aborted rows up automatically via the sink's retry-on-hardware_exception
-    skip rule.
+    ``__main__`` block means the script exits with a non-zero code, so CI / GHA
+    can alert on it.
+
+    The aborted models are not picked up automatically: every model handed to a
+    run is evaluated, so the next scheduled scan re-evaluates the whole list
+    rather than just these. Re-running only the hardware-exception rows is what
+    ``ClickHouseResultSink.fetch_hw_failure_models`` is for, but nothing calls it
+    yet — a recovery run has to be driven by hand until that is wired up.
     """
 
 
@@ -368,7 +370,6 @@ def main(
 
     sink: ResultSink = create_sink(
         model_type=model_type,
-        snapshot_date=snapshot_date,
         write_to_csv=write_to_csv,
     )
 
