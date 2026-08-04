@@ -20,7 +20,10 @@ PYTEST_ARGS ?= -s -vvv
 # Pytest invocation. Override e.g. `make adapter-coverage-tests PYTEST="python -m pytest"`
 # for callers without a uv-managed venv (the adapter-coverage job runs on a bare
 # ubuntu-latest runner with only `pip install pytest`, no uv/project venv).
-PYTEST ?= uv run pytest
+# --active --no-sync targets the prebaked image venv ($VIRTUAL_ENV) and skips
+# re-resolution: the lockfile pins torch to a +cpu build that has no ppc64le wheel,
+# so any resolve fails there even though the venv already has a local torch build.
+PYTEST ?= uv run --active --no-sync pytest
 
 # When set, write JUnit XML here. Unset = no JUnit file (plain local run).
 JUNIT_XML ?=
@@ -80,7 +83,7 @@ model-module-tests: ## Run oot_framework module tests (suite key: model_module; 
 	source "$$HOME/.bashrc"; \
 	source /etc/profile.d/ibm-aiu-setup.sh; \
 	set -e; \
-	_run_test=$$(uv run python3 -c \
+	_run_test=$$(uv run --active --no-sync python3 -c \
 	  "import oot_framework, os; print(os.path.join(os.path.dirname(oot_framework.__file__), 'run_test.sh'))"); \
 	configs="$(MODULE_CONFIG)"; \
 	if [[ -z "$$configs" ]]; then \
