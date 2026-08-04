@@ -6,6 +6,9 @@ SHELL := /bin/bash
 #   smoke — fast per-op unit tests only
 #   core  — all spyre-native tests (excludes the heavy upstream suites)
 #   full  — everything (default)
+#   perf  — SCAFFOLD ONLY: no benchmark harness yet, writes a placeholder empty
+#           JUnit XML (no .benchmark classname, so ingest reads it as 0 rows).
+#           A real producer (like torch-spyre's spyre-perf-suite) is a follow-up.
 # Also accepts a space-separated list of individual suite keys (matches
 # _test_matrix.yaml's `test_type` semantics), e.g. TEST_TYPE="smoke load".
 TEST_TYPE ?= full
@@ -109,6 +112,7 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	  *" full "*) suites="adapter_coverage smoke load token_compare embed_compare vlm model_module" ;; \
 	  *" core "*) suites="adapter_coverage load token_compare embed_compare vlm model_module" ;; \
 	  " smoke ") suites="smoke" ;; \
+	  " perf ") suites="perf" ;; \
 	  *) suites="$(TEST_TYPE)" ;; \
 	esac; \
 	mkdir -p "$(RESULTS_DIR)"; \
@@ -123,7 +127,13 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	    embed_compare)    $(MAKE) embed-compare-tests     JUNIT_XML="$(RESULTS_DIR)/spyre-embed-compare-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
 	    vlm)              $(MAKE) vlm-tests               JUNIT_XML="$(RESULTS_DIR)/spyre-vlm-e2e-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
 	    model_module)     $(MAKE) model-module-tests      JUNIT_XML=1 RESULTS_DIR="$(RESULTS_DIR)" MODULE_CONFIG="$(MODULE_CONFIG)" || rc=1 ;; \
-	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare embed_compare vlm model_module"; rc=1 ;; \
+	    perf)             printf '%s\n' \
+	                        '<?xml version="1.0" encoding="utf-8"?>' \
+	                        '<testsuites name="hf-adapters-perf">' \
+	                        '  <testsuite name="hf-adapters-perf" tests="0" skipped="0" failures="0" errors="0"/>' \
+	                        '</testsuites>' > "$(RESULTS_DIR)/report.xml"; \
+	                      echo "hf-adapters has no perf harness yet (scaffold stub): wrote placeholder $(RESULTS_DIR)/report.xml" ;; \
+	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare embed_compare vlm model_module perf"; rc=1 ;; \
 	  esac; \
 	done; \
 	exit $$rc
