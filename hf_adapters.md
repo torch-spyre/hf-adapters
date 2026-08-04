@@ -12,9 +12,10 @@
 | 6 | hf\_mistral.py | `mistral` | 1 | 4+ |
 | 7 | hf\_phi3.py | `phi3` | 1 | 3+ |
 | 8 | hf\_granitemoehybrid.py | `granitemoehybrid` | 2 | 1+ |
-| 9 | hf\_smollm3.py | `smollm3` | 1 | — |
-| 10 | hf\_olmo.py | `olmo` | 1 | 1+ |
-| 11 | hf\_olmo2.py | `olmo2` | 1 | 1+ |
+| 9 | hf\_granite\_swa.py | `granite_swa` | 1 | 1+ |
+| 10 | hf\_smollm3.py | `smollm3` | 1 | — |
+| 11 | hf\_olmo.py | `olmo` | 1 | 1+ |
+| 12 | hf\_olmo2.py | `olmo2` | 1 | 1+ |
 
 ---
 
@@ -173,7 +174,28 @@ Vision-specific adapter; extracts and adapts the text backbone from Granite Visi
 
 ---
 
-## 9. hf\_smollm3.py
+## 9. hf\_granite\_swa.py
+
+**HF model\_type:** `granite_swa`
+
+Spyre adapter for `GraniteSWAForCausalLM`. Decoder layers alternate between full
+attention and sliding-window attention (`layer_type` on each `GraniteSWADecoderLayer`).
+Sliding-window layers restrict attention to a local `sliding_window`-wide band;
+full-attention layers use the standard causal mask.
+
+### Verified Checkpoints
+
+| Checkpoint | head\_dim | Notes |
+|-----------|---------|-------|
+| Granite 4.1 20B (`ibm-research/granite-4.1-20b`) | 128 | ibm-research org; bfloat16 |
+
+### Compatible Models
+
+- Granite 4.1 8B / 20B variants
+
+---
+
+## 10. hf\_smollm3.py
 
 **HF model\_type:** `smollm3`
 
@@ -189,7 +211,7 @@ No additional compatible models listed.
 
 ---
 
-## 10. hf\_olmo.py
+## 11. hf\_olmo.py
 
 **HF model\_type:** `olmo`
 
@@ -205,7 +227,7 @@ No additional compatible models listed.
 
 ---
 
-## 11. hf\_olmo2.py
+## 12. hf\_olmo2.py
 
 **HF model\_type:** `olmo2`
 

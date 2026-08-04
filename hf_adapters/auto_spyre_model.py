@@ -45,7 +45,6 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
-    AutoModelForSequenceClassification,
     BertConfig,
     Gemma3Config,
     Gemma3TextConfig,
@@ -59,6 +58,7 @@ from transformers import (
     Granite4VisionConfig,
     GraniteConfig,
     GraniteMoeHybridConfig,
+    GraniteSWAConfig,
     LlamaConfig,
     MistralConfig,
     ModernBertConfig,
@@ -78,9 +78,6 @@ from transformers.models.mistral3.configuration_mistral3 import Mistral3Config
 
 from hf_adapters import (
     hf_bert,
-    hf_dspark_gemma4,
-    hf_dspark_granite,
-    hf_dspark_qwen3,
     hf_gemma3,
     hf_gemma4,
     hf_gemma4_mm,
@@ -88,6 +85,7 @@ from hf_adapters import (
     hf_gpt_neo,
     hf_gpt_neox,
     hf_granite,
+    hf_granite_swa,
     hf_granite_vision,
     hf_granite_vision_mm,
     hf_granitemoehybrid,
@@ -108,7 +106,6 @@ from hf_adapters import (
 )
 from hf_adapters.hf_common import (
     SpyreNoAdapterError,
-    SpyreUnsupportedModelError,
     assert_spyre_dimensions,
     load_model_common,
     move_model_to_spyre,
@@ -128,6 +125,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     Granite4VisionConfig: hf_granite_vision,
     GraniteConfig: hf_granite,
     GraniteMoeHybridConfig: hf_granitemoehybrid,
+    GraniteSWAConfig: hf_granite_swa,
     LlamaConfig: hf_llama,
     MistralConfig: hf_mistral,
     MinistralConfig: hf_ministral,
@@ -144,19 +142,6 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     XLMRobertaConfig: hf_xlm_roberta,
 }
 
-# Architecture-name mapping — consulted BEFORE the config-class map. DSpark
-# speculative-decoding *drafters* reuse their base model's config class
-# (``Qwen3Config`` / ``Gemma4TextConfig`` / ``GraniteConfig``) but carry a
-# distinct ``architectures`` entry (``*DSparkModel``). Config-class dispatch alone
-# would route them to the *target* adapter; keying on the architecture name sends
-# them to the drafter adapter instead. Normal targets have no entry here and fall
-# through to ``CONFIG_TO_ADAPTER_MODULE_MAPPING`` unchanged.
-ARCH_TO_ADAPTER_MODULE_MAPPING: dict[str, ModuleType] = {
-    "Qwen3DSparkModel": hf_dspark_qwen3,
-    "Gemma4DSparkModel": hf_dspark_gemma4,
-    "GraniteDSparkModel": hf_dspark_granite,
-}
-
 # Multimodal (image-text-to-text) mapping — used by
 # ``AutoSpyreModelForImageTextToText``. A multimodal checkpoint's config (e.g.
 # Granite4VisionConfig) appears here mapped to the *combined* two-tower adapter,
@@ -170,25 +155,15 @@ IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     Mistral3Config: hf_mistral3_vision_mm,
 }
 
-# Sequence-classification (cross-encoder reranker) mapping — used by
-# ``AutoSpyreModelForSequenceClassification``.
-SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
-    type[PretrainedConfig], ModuleType
-] = {
-    XLMRobertaConfig: hf_xlm_roberta,
-    RobertaConfig: hf_xlm_roberta,
-}
-
 MODEL_PATH_TO_TORCH_DTYPE: dict[str, torch.dtype] = {
     "mistralai/Ministral-3-3B-Instruct-2512": torch.bfloat16,
     "mistralai/Ministral-3-8B-Instruct-2512": torch.bfloat16,
     "mistralai/Ministral-3-14B-Instruct-2512": torch.bfloat16,
     "google/embeddinggemma-300m": torch.bfloat16,
-    "google/gemma-4-12b": torch.bfloat16,
     "google/gemma-4-12B-it": torch.bfloat16,
-    "google/gemma-4-31b": torch.bfloat16,
     "ibm-granite/granite-4.0-1b-base": torch.float32,
     "ibm-granite/granite-4.0-1b": torch.float32,
+    "ibm-research/granite-4.1-20b": torch.bfloat16,
 }
 
 
@@ -202,14 +177,6 @@ def resolve_adapter_module(
     model_config: PretrainedConfig = AutoConfig.from_pretrained(
         model_name_or_path, trust_remote_code=trust_remote_code
     )
-
-    # Architecture-name dispatch first: DSpark drafters share their base model's
-    # config class but carry a distinct ``*DSparkModel`` architecture, so route on
-    # the architecture name before falling through to config-class dispatch.
-    for arch in getattr(model_config, "architectures", None) or []:
-        if arch in ARCH_TO_ADAPTER_MODULE_MAPPING:
-            assert_spyre_dimensions(model_config, model_name=str(model_name_or_path))
-            return ARCH_TO_ADAPTER_MODULE_MAPPING[arch]
 
     if type(model_config) not in mapping:
         raise SpyreNoAdapterError(
@@ -270,11 +237,6 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
         dtype: torch.dtype = torch.float16,
     ) -> torch.nn.Module:
         module: ModuleType = resolve_adapter_module(model_name_or_path)
-        if getattr(module, "_is_encoder_only", False):
-            raise SpyreUnsupportedModelError(
-                "Generation is not currently supported for encoder-only architectures"
-            )
-
         model: torch.nn.Module = super().from_pretrained(
             model_name_or_path, dtype=dtype
         )
@@ -288,72 +250,6 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
 
         model.generate = MethodType(model_generate, model)  # type: ignore[assignment]
 
-        return model
-
-
-class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
-    """Load an XLM-RoBERTa cross-encoder reranker and prepare it for Spyre.
-
-    Loads via ``AutoModelForSequenceClassification``, compiles the encoder
-    backbone on Spyre, and attaches a ``rerank`` method that tokenizes
-    query-document pairs and returns raw relevance logits.
-
-    Example::
-
-        model = AutoSpyreModelForSequenceClassification.from_pretrained(
-            "BAAI/bge-reranker-v2-m3"
-        )
-        tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-reranker-v2-m3")
-        pairs = [("query text", "document text")]
-        scores = model.rerank(tokenizer, pairs)          # raw logits
-        probs  = torch.sigmoid(scores)                   # [0, 1] relevance
-    """
-
-    _auto_model_cls = AutoModelForSequenceClassification  # type: ignore[assignment]
-    _module_mapping: dict[type[PretrainedConfig], ModuleType] = (
-        SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING
-    )
-
-    @classmethod
-    def from_pretrained(
-        cls,
-        model_name_or_path: Union[str, os.PathLike[str]],
-        dtype: torch.dtype = torch.float16,
-    ) -> torch.nn.Module:
-        module: ModuleType = resolve_adapter_module(
-            model_name_or_path, mapping=cls._module_mapping
-        )
-        model: torch.nn.Module = super().from_pretrained(
-            model_name_or_path, dtype=dtype
-        )
-
-        def model_rerank(
-            self: torch.nn.Module,
-            tokenizer: Any,
-            pairs: list[tuple[str, str]],
-            **kwargs: Any,
-        ):
-            from hf_adapters.hf_common import prefill_reranker
-
-            if tokenizer.pad_token is None:
-                tokenizer.pad_token = tokenizer.eos_token
-            encoded = tokenizer(
-                pairs,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                padding_side="right",
-                return_attention_mask=True,
-            )
-            return prefill_reranker(
-                module._run_backbone_forward,
-                self,
-                encoded["input_ids"],
-                encoded["attention_mask"],
-                token_type_ids=encoded.get("token_type_ids", None),
-            )
-
-        model.rerank = MethodType(model_rerank, model)  # type: ignore[assignment]
         return model
 
 
