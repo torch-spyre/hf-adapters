@@ -45,9 +45,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import date
 
-# Constant value
-_SKIP_WINDOW_DAYS: int = 10
-
 
 def _require_non_empty(value: str, field_name: str) -> str:
     stripped: str = value.strip()
@@ -71,28 +68,6 @@ class ResultSink(ABC):
     is a live constraint rather than a hypothetical one. Use ``flush()`` for
     intermediate durability instead.
     """
-
-    _today: date
-
-    def __init__(self, today: date | None = None) -> None:
-        """Store the reference *today* used by the skip-window rule.
-
-        Subclasses must call ``super().__init__(today=today)`` before touching
-        anything that depends on ``self._today``.
-        """
-        self._today = today or date.today()
-
-    @abstractmethod
-    def should_insert_row(self, model_name: str) -> bool:
-        """Return True when *model_name* is due for a run.
-
-        False only when a prior row blocks it, which requires BOTH:
-
-        * its ``snapshot_date`` is within the skip window
-          (``today - snapshot_date < _SKIP_WINDOW_DAYS``), AND
-        * its ``failure_category`` is NOT ``hardware_exception`` — hardware
-          failures are treated as transient and always re-run.
-        """
 
     @abstractmethod
     def _insert_entry(
@@ -139,10 +114,6 @@ class ResultSink(ABC):
         error: str | None,
     ) -> None:
         """Persist one row. Always writes.
-
-        The skip-window rule is applied upstream, when the model list is built
-        (see the module docstring), so a row reaching here is one the caller
-        decided to record.
         """
         model_name = _require_non_empty(model_name, "model_name")
         self._insert_entry(

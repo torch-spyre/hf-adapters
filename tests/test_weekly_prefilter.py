@@ -529,7 +529,7 @@ def _fake_sink_cls():
     no longer exercise a rejection. This fake can — and defining it inside a
     function keeps ``result_sink`` out of this module's import-time dependencies.
     """
-    from tests.spyre.weekly_generation.result_sink import ResultSink
+    from tests.spyre.weekly_generation.sink.result_sink import ResultSink
 
     class _FakeSink(ResultSink):
         def __init__(self, blocking: set[str] | None = None, **kwargs) -> None:
@@ -651,17 +651,17 @@ class TestSinkConstructors:
 
     def test_sinks_are_no_longer_exported_from_result_sink(self) -> None:
         """result_sink holds only the ABC now; the factory is the way in."""
-        import tests.spyre.weekly_generation.result_sink as rs
+        import tests.spyre.weekly_generation.sink.result_sink as rs
 
         assert not hasattr(rs, "CsvResultSink")
         assert not hasattr(rs, "ClickHouseResultSink")
 
     def test_both_sinks_implement_the_abc(self) -> None:
-        from tests.spyre.weekly_generation.result_sink import ResultSink
         from tests.spyre.weekly_generation.sink.clickhouse_sink import (
             ClickHouseResultSink,
         )
         from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
+        from tests.spyre.weekly_generation.sink.result_sink import ResultSink
 
         assert issubclass(CsvResultSink, ResultSink)
         assert issubclass(ClickHouseResultSink, ResultSink)

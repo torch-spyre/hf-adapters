@@ -352,7 +352,7 @@ def main(
         HardwareExceptionAbortError: a batch reported ``hardware_exception``, so
             the accelerator is unreachable and the remaining batches are skipped.
     """
-    from tests.spyre.weekly_generation.result_sink import ResultSink
+    from tests.spyre.weekly_generation.sink.result_sink import ResultSink
 
     print(f"{ts()} Starting main.")
     preexisting: set = _repos_with_weights()

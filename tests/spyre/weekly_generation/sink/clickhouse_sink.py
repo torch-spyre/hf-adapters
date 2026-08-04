@@ -24,11 +24,7 @@ from tests.spyre.weekly_generation.failure_categories import (
     FAILURE_CATEGORY_HARDWARE_EXCEPTION as _HARDWARE_EXCEPTION_CATEGORY,
 )
 from tests.spyre.weekly_generation.model_type import ModelType
-from tests.spyre.weekly_generation.result_sink import (
-    _SKIP_WINDOW_DAYS,
-    ResultSink,
-    _require_non_empty,
-)
+from tests.spyre.weekly_generation.sink.result_sink import ResultSink
 from tests.spyre.weekly_generation.table_schema import (
     DATABASE,
     EMBEDDING_CREATE_TABLE_SQL,
@@ -53,8 +49,7 @@ class ClickHouseResultSink(ResultSink):
     of 2 × N.
     """
 
-    def __init__(self, model_type: ModelType, today: date | None = None) -> None:
-        super().__init__(today=today)
+    def __init__(self, model_type: ModelType) -> None:
         self._model_type = model_type
         if model_type is ModelType.EMBEDDING:
             self._table_name = EMBEDDING_TABLE_NAME
@@ -69,51 +64,25 @@ class ClickHouseResultSink(ResultSink):
         else:
             print(f"ClickHouse: table '{self._table_name}' already exists.\n")
 
-        # Bulk pre-fetch: model names whose most-recent-in-window row blocks a
-        # re-run. Populated once here; used by should_insert_row()
-        # for O(1) per-row checks.
-        self._skip_model_names: set[str] = self._fetch_blocking_names()
-        print(
-            f"ClickHouse: {len(self._skip_model_names)} model(s) already have a "
-            f"non-hardware-exception snapshot within the last "
-            f"{_SKIP_WINDOW_DAYS} days — will be skipped.\n"
-        )
-
         # Rows waiting to be flushed; each entry is a list matching TABLE_COLUMNS order.
         self._pending: list[list[Any]] = []
 
-    def _fetch_blocking_names(self) -> set[str]:
-        """One SELECT to get all model names that block a re-run.
-
-        A model blocks iff it has any row in the skip window whose
-        ``failure_category`` is not ``hardware_exception`` — matching the
-        semantics of ``should_insert_row``. Rows with
-        ``failure_category = 'hardware_exception'`` (including a lone row
-        older than the window) do NOT block.
+    def fetch_hw_failure_models(self, snapshot_date: date) -> set[str]:
+        """One SELECT to get all model names that had a hw failure in a previous run. This can help recoverying from a previous run by re-testing only the models that had a h/w failure like pod wenting down.
         """
-        cutoff: date = self._today - timedelta(days=_SKIP_WINDOW_DAYS - 1)
         result = self._client.query(
             "SELECT DISTINCT model_name "
             "FROM {db:Identifier}.{tbl:Identifier} "
-            "WHERE snapshot_date >= {cutoff:Date} "
-            "AND (failure_category IS NULL OR failure_category != {hw:String})",
+            "WHERE snapshot_date = {snapshot_date:Date} "
+            "AND (failure_category = {hw:String})",
             parameters={
                 "db": DATABASE,
                 "tbl": self._table_name,
-                "cutoff": cutoff,
+                "snapshot_date": snapshot_date,
                 "hw": _HARDWARE_EXCEPTION_CATEGORY,
             },
         )
         return {row[0] for row in result.result_rows}
-
-    def should_insert_row(self, model_name: str) -> bool:
-        """Membership test against the skip set pre-fetched in ``__init__``.
-
-        O(1) with no network I/O — the single bulk SELECT there already resolved
-        the skip-window rule for every model that currently blocks a re-run.
-        """
-        key: str = _require_non_empty(model_name, "model_name")
-        return key not in self._skip_model_names
 
     def _insert_entry(
         self,

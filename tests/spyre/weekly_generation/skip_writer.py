@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - import-cycle-free typing only
     from tests.spyre.weekly_generation.model_prefilter import SkippedModel
-    from tests.spyre.weekly_generation.result_sink import ResultSink
+    from tests.spyre.weekly_generation.sink.result_sink import ResultSink
 
 
 def write_skipped_rows(

@@ -10,8 +10,8 @@ from datetime import date
 from pathlib import Path
 
 from tests.spyre.weekly_generation.model_type import ModelType
-from tests.spyre.weekly_generation.result_sink import ResultSink
 from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
+from tests.spyre.weekly_generation.sink.result_sink import ResultSink
 
 
 def csv_path_for(base: Path, model_type: ModelType) -> Path:
@@ -28,6 +28,7 @@ def csv_path_for(base: Path, model_type: ModelType) -> Path:
 def create_sink(
     model_type: ModelType,
     snapshot_date: date,
+    recovery_run: bool,
     write_to_csv: Path | None,
 ) -> ResultSink:
     """Return the sink for a *model_type* run, keyed on whether a CSV was asked for.
@@ -49,7 +50,7 @@ def create_sink(
     if write_to_csv is not None:
         path = csv_path_for(write_to_csv, model_type)
         print(f"{model_type}: recording verdicts in '{path}' (no DB access)")
-        return CsvResultSink(path=path, today=snapshot_date)
+        return CsvResultSink(path=path)
 
     # Deferred, so reaching the CSV branch neither imports clickhouse_connect nor
     # reads .env. Together with csv_sink taking its column list from the
@@ -57,4 +58,4 @@ def create_sink(
     # with no driver installed at all.
     from tests.spyre.weekly_generation.sink.clickhouse_sink import ClickHouseResultSink
 
-    return ClickHouseResultSink(model_type=model_type, today=snapshot_date)
+    return ClickHouseResultSink(model_type=model_type)

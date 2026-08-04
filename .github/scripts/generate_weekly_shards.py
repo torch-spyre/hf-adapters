@@ -77,7 +77,7 @@ from tests.spyre.weekly_generation.model_prefilter import (  # noqa: E402
     fetch_and_filter,
 )
 from tests.spyre.weekly_generation.model_type import ModelType  # noqa: E402
-from tests.spyre.weekly_generation.result_sink import ResultSink  # noqa: E402
+from tests.spyre.weekly_generation.sink.result_sink import ResultSink  # noqa: E402
 from tests.spyre.weekly_generation.sink.sink_factory import create_sink  # noqa: E402
 
 

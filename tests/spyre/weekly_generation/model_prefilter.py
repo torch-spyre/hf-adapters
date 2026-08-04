@@ -1,10 +1,9 @@
 """Decide which fetched models are worth handing to a Spyre worker.
 
-Four checks, applied in the order ``weekly_test.main`` used to apply them
-in-process. Three of them are terminal properties of the checkpoint itself
+Three checks, applied in the order ``weekly_test.main`` used to apply them
+in-process. These are terminal properties of the checkpoint itself
 (no adapter, too large, mixture-of-experts) and produce a row recording that
-verdict; the fourth is the skip window, which produces no row because one
-already exists.
+verdict.
 
 Running this **upstream of sharding** is the point. ``generate_weekly_shards``
 chunks a downloads-ordered list into fixed-size shards, and filtered-out models
@@ -17,12 +16,6 @@ shard size maps to evaluations.
 ``weekly_test --fetch`` calls this too, for manual runs with no shard file, so
 both entry points share one definition of "worth handing to a Spyre worker".
 
-The skip-window verdict comes from the caller's ``ResultSink``, which is also
-where the terminal rows are recorded — one object, so the decision and the row
-that follows from it cannot drift apart. The concrete sink is never constructed
-here (see ``sink.sink_factory``), and ``prefilter_models`` calls nothing on it
-but ``should_insert_row``, so its tests drive it with a stub rather than a
-storage backend.
 """
 
 from __future__ import annotations
@@ -37,7 +30,7 @@ from tests.spyre.weekly_generation.failure_categories import (
     FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
 )
 from tests.spyre.weekly_generation.model_type import ModelType
-from tests.spyre.weekly_generation.result_sink import ResultSink
+from tests.spyre.weekly_generation.sink.result_sink import ResultSink
 
 
 @dataclass(frozen=True)
@@ -52,24 +45,18 @@ class SkippedModel:
 
 @dataclass
 class PrefilterResult:
-    """Three-way partition of the fetched models.
+    """Two-way partition of the fetched models.
 
-    ``window_skipped`` is kept separate from ``skipped`` on purpose: those models
-    already have a recent row, so writing another would either duplicate it or
-    be silently swallowed by the sink's own guard. Only ``skipped`` should be
-    handed to ``write_skipped_rows``.
     """
 
     keep: list[dict] = field(default_factory=list)
     skipped: list[SkippedModel] = field(default_factory=list)
-    window_skipped: list[dict] = field(default_factory=list)
 
     @property
     def counts(self) -> dict[str, int]:
         """Per-category tallies, for one-line run summaries."""
         tally: dict[str, int] = {
             "keep": len(self.keep),
-            "window_skipped": len(self.window_skipped),
         }
         for item in self.skipped:
             tally[item.failure_category] = tally.get(item.failure_category, 0) + 1
@@ -102,7 +89,6 @@ def _parameter_count(row: dict) -> int | None:
 
 def prefilter_models(
     models: list[dict],
-    sink: ResultSink,
     max_params: int,
 ) -> PrefilterResult:
     """Partition *models* into work to do, verdicts to record, and models to skip.
@@ -118,9 +104,6 @@ def prefilter_models(
             ``config_class``, ``model_type``, ``architectures``). Callers should
             ``pop("model_info")`` first — the returned lists hold the same dict
             objects, and that field is not JSON-serializable.
-        sink: consulted via ``should_insert_row`` for the skip-window verdict —
-            False when a recent row already covers that model. Nothing else on
-            the sink is touched here.
         max_params: parameter ceiling above which a model cannot be brought up
             on Spyre.
 
@@ -131,16 +114,6 @@ def prefilter_models(
     result = PrefilterResult()
 
     for row in models:
-        model_id = str(row["model_id"])
-
-        # Checked first: a recent row already exists, so this model needs
-        # neither evaluation nor a new row. Must precede the terminal checks —
-        # otherwise a model that is both unsupported and recently recorded would
-        # get a duplicate not-implemented-adapter row every run.
-        if not sink.should_insert_row(model_id):
-            result.window_skipped.append(row)
-            continue
-
         # No adapter registered for this config class — the same terminal
         # decision resolve_adapter_module_for_test would reach in the worker,
         # reached without spawning one. `is False` rather than falsy: a missing
@@ -201,7 +174,7 @@ def fetch_and_filter(
 
     Terminal verdicts are written to *sink* as they are decided, so a model
     dropped here still gets its row and is not silently absent from the run's
-    output. Models dropped by the skip window get no row — one already exists.
+    output.
 
     Does NOT close *sink*: the caller constructed it and keeps writing
     evaluation results to it afterwards. ``weekly_test.main`` in particular
@@ -218,12 +191,11 @@ def fetch_and_filter(
 
     models: list[dict] = model_fetcher.fetch(model_type=model_type, top_k=top_k)
 
-    result = prefilter_models(models, sink=sink, max_params=max_params)
-    written = write_skipped_rows(sink, result.skipped, snapshot_date=snapshot_date)
+    result: PrefilterResult = prefilter_models(models, max_params=max_params)
+    written: int = write_skipped_rows(sink, result.skipped, snapshot_date=snapshot_date)
 
     print(
         f"{model_type}: {len(models)} fetched -> {len(result.keep)} to evaluate "
-        f"({len(result.window_skipped)} already scanned within the skip window, "
-        f"{written} terminal row(s) written) {result.counts}"
+        f"{written} terminal row(s) written for skipped models) {result.counts}"
     )
     return result.keep

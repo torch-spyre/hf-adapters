@@ -15,7 +15,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from tests.spyre.weekly_generation.result_sink import ResultSink, _require_non_empty
+from tests.spyre.weekly_generation.sink.result_sink import ResultSink
 from tests.spyre.weekly_generation.table_schema import TABLE_COLUMNS
 
 
@@ -26,9 +26,8 @@ class CsvResultSink(ResultSink):
     history to consult: ``should_insert_row`` is unconditionally True.
     """
 
-    def __init__(self, path: Path, today: date | None = None) -> None:
+    def __init__(self, path: Path) -> None:
         """Open *path* for writing. Raises if it already exists and is non-empty."""
-        super().__init__(today=today)
         self._path: Path = path
         if path.exists() and path.stat().st_size > 0:
             raise FileExistsError(
@@ -41,11 +40,6 @@ class CsvResultSink(ResultSink):
         self._writer = csv.DictWriter(self._fh, fieldnames=list(TABLE_COLUMNS))
         self._writer.writeheader()
         self._fh.flush()
-
-    def should_insert_row(self, model_name: str) -> bool:
-        """Always True — a fresh output file has no prior rows to block on."""
-        _require_non_empty(model_name, "model_name")
-        return True
 
     def _insert_entry(
         self,
