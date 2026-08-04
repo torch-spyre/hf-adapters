@@ -1,8 +1,29 @@
+"""The child-process half of the weekly scan: evaluate models, report rows.
+
+Everything here runs in a ``multiprocessing`` "spawn" child started by
+``weekly_test.main``, one child per batch. Two consequences shape the module:
+
+* **Torch stays out of module scope.** The heavy imports (``hf_adapters``, the
+  Spyre test entry points, ``tests.conftest``) happen inside the functions that
+  need them, so the parent — which imports this module only to name
+  ``_process_batch`` as the process target — never pays for them.
+* **A failure is a row, not an exception.** One bad model must not cost the
+  other N-1 in its batch, so every model is evaluated inside its own
+  ``try``/``except`` and errors are recorded in the returned dict's
+  ``failure_category``/``error`` fields. The one exception is
+  ``hardware_exception``, which ends the batch early because the accelerator
+  itself is gone.
+
+The child never touches the sink. It returns plain dicts over the queue and the
+parent does all the writing, which keeps database credentials and connection
+state in one process.
+"""
+
 import os
 import sys
 import traceback as _traceback
-from asyncio import Queue
 from datetime import date
+from multiprocessing.queues import SimpleQueue
 
 from huggingface_hub.errors import HfHubHTTPError
 
@@ -24,18 +45,24 @@ from utils.utilities import ts
 def _process_batch(
     batch: list[dict],
     adapter_dates: dict[str, str | None],
-    result_queue: Queue,
+    result_queue: SimpleQueue,
     model_type: ModelType,
     snapshot_date: date,
 ) -> None:
-    """Worker target: evaluate up to ``NUMBER_OF_MODEL_PER_PROCESS`` models
-    in a single spawned child.
+    """Worker target: evaluate up to one batch of models in a single spawned child.
 
     Amortizes the per-child fixed cost (spawn + module imports + kernel
-    teardown on exit) across N models. Puts a ``list[dict]`` on the queue —
-    one full result dict per row, in the same order as *batch*. If a single
-    model errors, its ``error`` field is populated and the loop continues to
-    the next model; the child does NOT abort.
+    teardown on exit) across the batch; ``weekly_test``'s
+    ``{GENERATIVE,EMBEDDING}_NUMBER_OF_MODEL_PER_PROCESS`` set how many. Puts a
+    ``list[dict]`` on the queue — one full result dict per row, in the same order
+    as *batch*. If a single model errors, its ``error`` field is populated and
+    the loop continues to the next model; the child does NOT abort.
+
+    The queue is the ``multiprocessing.SimpleQueue`` the parent created via its
+    spawn context, not an ``asyncio`` one — nothing here is coroutine-based.
+
+    Exits via ``os._exit(0)`` rather than returning; see the comment at the end
+    for why skipping interpreter shutdown is what actually frees the card.
 
     Each returned dict has the same shape ``main`` expects for a rec plus an
     ``error`` field (str or None):
@@ -215,7 +242,9 @@ def eval_model(model_id: str, adapter, model_type: ModelType) -> dict:
 
     try:
         if adapter is not None:
-            load_on_cpu, load_error = _load_on_cpu(model_path=model_id, model_type=model_type)
+            load_on_cpu, load_error = _load_on_cpu(
+                model_path=model_id, model_type=model_type
+            )
             if load_error and not result["error"]:
                 result["error"] = load_error
             if load_on_cpu:
@@ -265,7 +294,8 @@ def eval_model(model_id: str, adapter, model_type: ModelType) -> dict:
 
 
 def _load_on_cpu(
-    model_path: str, model_type: ModelType,
+    model_path: str,
+    model_type: ModelType,
 ) -> tuple[bool, str | None]:
     """Try to load *model_path* on CPU. Returns ``(loaded, error_message)``.
 

@@ -17,14 +17,16 @@ shard size maps to evaluations.
 ``weekly_test --fetch`` calls this too, for manual runs with no shard file, so
 both entry points share one definition of "worth handing to a Spyre worker".
 
-Deliberately free of database imports: the skip-window decision arrives as an
-injected ``IsDueForScan`` callable rather than a sink, so this module (and its
-tests) import cleanly with no ``clickhouse_connect`` installed.
+The skip-window verdict comes from the caller's ``ResultSink``, which is also
+where the terminal rows are recorded — one object, so the decision and the row
+that follows from it cannot drift apart. The concrete sink is never constructed
+here (see ``sink.sink_factory``), and ``prefilter_models`` calls nothing on it
+but ``should_insert_row``, so its tests drive it with a stub rather than a
+storage backend.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -36,17 +38,6 @@ from tests.spyre.weekly_generation.failure_categories import (
 )
 from tests.spyre.weekly_generation.model_type import ModelType
 from tests.spyre.weekly_generation.result_sink import ResultSink
-
-IsDueForScan = Callable[[str], bool]
-"""``model_id -> bool``: False when a recent row already covers this model.
-
-In practice always ``sink.should_insert_row``. Taken as a callable rather than the
-sink itself because one bit per model is the entire dependency — a sink parameter
-would also type this module as able to call ``add_entry``/``flush``/``close``,
-none of which it should touch — and because it keeps ``model_prefilter`` free of
-database imports, so it and its unit tests run with no ``clickhouse_connect``
-installed.
-"""
 
 
 @dataclass(frozen=True)
@@ -116,6 +107,10 @@ def prefilter_models(
 ) -> PrefilterResult:
     """Partition *models* into work to do, verdicts to record, and models to skip.
 
+    Pure: reads *sink* but never writes to it. Recording the terminal verdicts is
+    ``write_skipped_rows``' job, so this function can be tested with a sink that
+    only answers ``should_insert_row``.
+
     Args:
         models: one dict per model as fetched from the HuggingFace Hub by
             ``build_catalog``, keyed as the catalog CSV header is (``model_id``,
@@ -123,7 +118,9 @@ def prefilter_models(
             ``config_class``, ``model_type``, ``architectures``). Callers should
             ``pop("model_info")`` first — the returned lists hold the same dict
             objects, and that field is not JSON-serializable.
-        sink: a sink to use for checking if row should be inserted.
+        sink: consulted via ``should_insert_row`` for the skip-window verdict —
+            False when a recent row already covers that model. Nothing else on
+            the sink is touched here.
         max_params: parameter ceiling above which a model cannot be brought up
             on Spyre.
 
@@ -188,49 +185,45 @@ def prefilter_models(
     return result
 
 
-def _prefilter_for_mode(
-    models: list[dict],
+def fetch_and_filter(
     model_type: ModelType,
     snapshot_date: date,
+    top_k: int,
     sink: ResultSink,
-    max_params: int
-) -> PrefilterResult:
-    """Apply the four pre-filters to *models* and record the terminal verdicts.
+    max_params: int,
+) -> list[dict]:
+    """Fetch *model_type*'s top-*top_k* catalog, filter it, record the verdicts.
 
-    See the module docstring for why this runs before chunking. The sink is built
-    per mode because it binds one table (or one file) per instance.
+    The one entry point both producers share, which is what keeps "worth handing
+    to a Spyre worker" a single definition: ``generate_weekly_shards`` calls it
+    before chunking (see the module docstring for why order matters there), and
+    ``weekly_test --fetch`` calls it instead of reading a shard file.
 
-    With *write_to_csv* the verdicts go to a new CSV instead of ClickHouse, which
-    needs no credentials. That sink is write-only, so it reports nothing as
-    already-scanned and the emitted shards include every model that clears the
-    other three filters.
+    Terminal verdicts are written to *sink* as they are decided, so a model
+    dropped here still gets its row and is not silently absent from the run's
+    output. Models dropped by the skip window get no row — one already exists.
+
+    Does NOT close *sink*: the caller constructed it and keeps writing
+    evaluation results to it afterwards. ``weekly_test.main`` in particular
+    hands in the same sink it uses for the rest of the run, and closing it here
+    left that path writing to a closed file.
+
+    Returns:
+        The models to evaluate, in the fetched (downloads-descending) order that
+        the tier router and shard chunker both rely on.
     """
-    # Imported here, not at module scope, so --write-to-csv works on a host with
-    # no clickhouse_connect installed (result_sink pulls it in transitively).
+    # Deferred so that importing this module — and running prefilter_models,
+    # which is pure — needs neither skip_writer nor anything it pulls in.
     from tests.spyre.weekly_generation.skip_writer import write_skipped_rows
 
-    with sink:
-        result = prefilter_models(models, sink=sink, max_params=max_params)
-        written = write_skipped_rows(sink, result.skipped, snapshot_date=snapshot_date)
+    models: list[dict] = model_fetcher.fetch(model_type=model_type, top_k=top_k)
+
+    result = prefilter_models(models, sink=sink, max_params=max_params)
+    written = write_skipped_rows(sink, result.skipped, snapshot_date=snapshot_date)
 
     print(
         f"{model_type}: {len(models)} fetched -> {len(result.keep)} to evaluate "
         f"({len(result.window_skipped)} already scanned within the skip window, "
         f"{written} terminal row(s) written) {result.counts}"
     )
-    return result
-
-
-def fetch_and_filter(model_type: ModelType, snapshot_date, top_k: int, sink: ResultSink, max_params: int) -> list[dict]:
-    # fetch the models
-    models: list[dict] = model_fetcher.fetch(
-        model_type=model_type,
-        top_k=top_k)
-
-    # Filter BEFORE routing and chunking.
-    return _prefilter_for_mode(
-        models=models,
-        model_type=model_type,
-        snapshot_date=snapshot_date,
-        sink=sink,
-        max_params=max_params).keep
+    return result.keep

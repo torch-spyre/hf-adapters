@@ -20,9 +20,9 @@ so a model doesn't share a batch with (and inflate the memory footprint
 of) much smaller ones. See push-to-clickhouse.yaml's weekly-model-scan job
 for how `matrix.runner` selects the actual runs-on label.
 
-Each mode's list is PRE-FILTERED before any chunking: models already scanned
-inside the skip window, models with no adapter for their config class, models
-too large for Spyre, and MoE models are all removed here, and the terminal
+Each model type's list is PRE-FILTERED before any chunking: models already
+scanned inside the skip window, models with no adapter for their config class,
+models too large for Spyre, and MoE models are all removed here, and the terminal
 verdicts among those are written straight to ClickHouse (so this script needs
 the CLICKHOUSE_* env vars, or --write-to-csv to record them in a file instead).
 
@@ -60,24 +60,26 @@ import os
 import sys
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from tests.spyre.weekly_generation.failure_categories import MAX_NUMBER_PARAMS
-from tests.spyre.weekly_generation.model_type import ModelType
-from tests.spyre.weekly_generation.result_sink import ResultSink
-from tests.spyre.weekly_generation.sink.sink_factory import create_sink
-
-# Add the project root to the Python path so we can import from utils/ and from
-# tests/spyre/weekly_generation/ (both resolve as namespace packages from here).
+# Add the project root to sys.path BEFORE importing from tests/ or utils/ — this
+# script lives in .github/scripts/, so neither is importable from its own
+# directory, and it is run as a plain script (not `python -m`), which puts that
+# directory on sys.path rather than the repo root. Must stay above the imports
+# below; the workflow happens to invoke it from the repo root, which would mask
+# a wrong order here until someone ran it from anywhere else.
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
+from tests.spyre.weekly_generation.failure_categories import (  # noqa: E402
+    MAX_NUMBER_PARAMS,
+)
 from tests.spyre.weekly_generation.model_prefilter import (  # noqa: E402
     fetch_and_filter,
 )
+from tests.spyre.weekly_generation.model_type import ModelType  # noqa: E402
+from tests.spyre.weekly_generation.result_sink import ResultSink  # noqa: E402
+from tests.spyre.weekly_generation.sink.sink_factory import create_sink  # noqa: E402
 
-if TYPE_CHECKING:  # pragma: no cover - annotation only, no runtime DB import
-    pass
 
 def _chunk(rows: list[dict], shard_size: int) -> list[list[dict]]:
     """Split *rows* into consecutive sub-lists of length *shard_size* (the
@@ -116,54 +118,70 @@ def generate_shards(
     snapshot_date: date | None = None,
     write_to_csv: Path | None = None,
 ) -> list[dict]:
-    """Fetch each requested model types top-K list once, write shard JSON files,
+    """Fetch each requested model type's top-K list once, write shard JSON files,
     and return the combined matrix (list of {mode, shard_index, shard_file,
     runner} dicts).
 
-    Each mode's list is pre-filtered (see ``_prefilter_for_mode``) before any
+    Each model type's list is pre-filtered (see ``fetch_and_filter``) before any
     chunking, so a shard's size is a count of real evaluations rather than of
-    fetched candidates. Within each mode, the survivors are then split into
-    three parameter-count tiers (see module docstring), each chunked at its own
-    shard size and tagged with the runner ("x1"/"x2"/"x4") that handles it.
+    fetched candidates. Within each type, the survivors are then split into three
+    parameter-count tiers (see module docstring), each chunked at its own shard
+    size and tagged with the runner ("x1"/"x2"/"x4") that handles it.
 
-    *model_types* restricts which of ModeType options to fetch/shard — used by
-    workflow_dispatch's model_type input so a manual run can scan just
-    embedding models (much quicker, less resource-hungry) without the
-    schedule-triggered full scan having to change.
+    *model_types* restricts which ``ModelType`` members to fetch/shard — used by
+    workflow_dispatch's model_type input so a manual run can scan just embedding
+    models (much quicker, less resource-hungry) without the schedule-triggered
+    full scan having to change.
 
-    *write_to_csv* records the terminal verdicts in a new CSV (one per mode)
+    *max_params* is the ceiling above which a model is rejected outright as too
+    large for Spyre — distinct from *x1_max_params*/*x2_max_params*, which only
+    route surviving models between runner tiers.
+
+    *write_to_csv* records the terminal verdicts in a new CSV (one per model type)
     instead of ClickHouse, so the whole fetch → filter → route → chunk path can be
     exercised without credentials. That sink is write-only, so the emitted shards
     then include models a real run would have dropped as recently-scanned.
+
+    The matrix's ``mode`` key keeps its name because push-to-clickhouse.yaml
+    reads ``matrix.mode`` and passes it to ``weekly_test.py --mode``.
     """
-    snapshot_date: date = snapshot_date or date.today()
+    snapshot_date = snapshot_date or date.today()
     output_dir.mkdir(parents=True, exist_ok=True)
-    x1_shardd_sizes = {
+    # Only the x1 tier's shard size is per-model-type; x2/x4 hold far fewer,
+    # larger models, so one size each is enough.
+    x1_shard_sizes = {
         ModelType.GENERATIVE: shard_size_generative,
         ModelType.EMBEDDING: shard_size_embedding,
     }
 
     matrix: list[dict] = []
     for model_type in model_types:
+        # One sink per model type — each binds a single table (or file) — and
+        # closed here because this function is what constructed it. Closing is
+        # what flushes the ClickHouse sink's buffered verdict rows.
         sink: ResultSink = create_sink(
             model_type=model_type,
             snapshot_date=snapshot_date,
-            write_to_csv=write_to_csv)
-
-        rows: list[dict] = fetch_and_filter(
-            model_type=model_type,
-            snapshot_date=snapshot_date,
-            top_k=top_k,
-            sink=sink,
-            max_params=max_params)
+            write_to_csv=write_to_csv,
+        )
+        with sink:
+            rows: list[dict] = fetch_and_filter(
+                model_type=model_type,
+                snapshot_date=snapshot_date,
+                top_k=top_k,
+                sink=sink,
+                max_params=max_params,
+            )
 
         by_tier: dict[str, list[dict]] = {"x1": [], "x2": [], "x4": []}
-
-        x1_shard_size = x1_shardd_sizes[model_type]
         for row in rows:
             by_tier[_tier_for(row, x1_max_params, x2_max_params)].append(row)
 
-        tier_shard_sizes = {"x1": x1_shard_size, "x2": x2_shard_size, "x4": x4_shard_size}
+        tier_shard_sizes = {
+            "x1": x1_shard_sizes[model_type],
+            "x2": x2_shard_size,
+            "x4": x4_shard_size,
+        }
         model_type_shard_count = 0
         for runner, group_rows in by_tier.items():
             group_shard_size = tier_shard_sizes[runner]
@@ -184,7 +202,10 @@ def generate_shards(
                         "runner": runner,
                     }
                 )
-        print(f"{model_type}: {len(rows)} model(s) total, {model_type_shard_count} shard(s)")
+        print(
+            f"{model_type}: {len(rows)} model(s) total, "
+            f"{model_type_shard_count} shard(s)"
+        )
 
     return matrix
 
@@ -285,15 +306,17 @@ def main() -> None:
     )
     parser.add_argument(
         "--model-type",
-        choices=("all",  *(model_type.value for model_type in ModelType)),
+        choices=("all", *(model_type.value for model_type in ModelType)),
         default="all",
         help="Restrict the scan to one model type (e.g. 'embedding' for a quick, "
         "low-resource manual run). 'all' (the default, and what the "
-        "scheduled run always uses) fetches/shards both model-types.",
+        "scheduled run always uses) fetches/shards every model type.",
     )
     args = parser.parse_args()
 
-    model_types = list(ModelType) if args.model_type == "all" else [ModelType(args.model_type)]
+    model_types = (
+        list(ModelType) if args.model_type == "all" else [ModelType(args.model_type)]
+    )
 
     matrix = generate_shards(
         top_k=args.top_k,
@@ -309,7 +332,7 @@ def main() -> None:
         write_to_csv=args.write_to_csv,
     )
 
-    print(f"\nTotal shards across both model-types: {len(matrix)}")
+    print(f"\nTotal shards across {len(model_types)} model type(s): {len(matrix)}")
 
     # Split by runner tier so push-to-clickhouse.yaml's three per-tier jobs
     # can each cap strategy.max-parallel in cards (x1=1, x2=2, x4=4/shard).

@@ -1,3 +1,13 @@
+"""CSV result sink: one run's rows to one new file, no database.
+
+What ``--write-to-csv`` selects, so the weekly pipeline can be exercised on a
+host with no ClickHouse credentials — and, because ``TABLE_COLUMNS`` comes from
+the dependency-free ``table_schema`` rather than from ``clickhouse_db``, with no
+ClickHouse driver installed either. The header stays column-for-column identical
+to the live table, since the point of this sink is to show what *would* be
+inserted.
+"""
+
 from __future__ import annotations
 
 import csv
@@ -5,8 +15,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from tests.spyre.weekly_generation.clickhouse_db import TABLE_COLUMNS
 from tests.spyre.weekly_generation.result_sink import ResultSink, _require_non_empty
+from tests.spyre.weekly_generation.table_schema import TABLE_COLUMNS
 
 
 class CsvResultSink(ResultSink):

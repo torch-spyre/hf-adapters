@@ -1,12 +1,23 @@
 """Abstract result sink for the weekly Spyre test suite.
 
-Two implementations:
-- ``CsvResultSink`` — write-only, for runs with no database access. Writes one
-  run's rows to a new file and never reads one back, so the skip rule below does
-  not apply to it: it has no history to consult and reports nothing as blocking.
-- ``ClickHouseResultSink`` — inserts rows into ClickHouse; the skip guard runs
-  a single bulk SELECT on construction so all per-row checks are O(1), and rows
-  are buffered in memory then flushed in a single bulk INSERT on ``close()``.
+This module holds only the ABC and the skip rule it defines. The two concrete
+implementations live in the ``sink`` package, and callers build one through
+``sink.sink_factory.create_sink`` rather than importing them directly:
+
+- ``sink.csv_sink.CsvResultSink`` — write-only, for runs with no database access.
+  Writes one run's rows to a new file and never reads one back, so the skip rule
+  below does not apply to it: it has no history to consult and reports nothing as
+  blocking.
+- ``sink.clickhouse_sink.ClickHouseResultSink`` — inserts rows into ClickHouse;
+  the skip guard runs a single bulk SELECT on construction so all per-row checks
+  are O(1), and rows are buffered in memory then flushed in a single bulk INSERT
+  on ``close()``.
+
+Keeping the ABC here, apart from its subclasses, is what lets ``model_prefilter``
+type against ``ResultSink`` without dragging in a storage backend, and lets its
+tests substitute a stub. Together with ``table_schema`` holding the column list,
+it is also what makes ``--write-to-csv`` genuinely runnable on a host with no
+``clickhouse_connect`` installed: only ``clickhouse_sink`` reaches the driver.
 
 Skip rule (ClickHouse): insert a row for *model_name* when either
 
@@ -50,6 +61,15 @@ class ResultSink(ABC):
 
     Implementations must be usable as a context manager; ``__exit__`` should
     release any external resources (CSV file handle, DB client).
+
+    Closing is the owner's job, and only the owner's. A sink is closed exactly
+    once, by whoever constructed it — a helper that is *handed* a sink must not
+    wrap it in ``with``, because ``close()`` is not idempotent in the way that
+    would need: the CSV sink closes its file handle, so a later ``add_entry``
+    raises ``ValueError: I/O operation on closed file``. ``weekly_test.main``
+    owns the sink for a whole run and passes it down to the pre-filter, so this
+    is a live constraint rather than a hypothetical one. Use ``flush()`` for
+    intermediate durability instead.
     """
 
     _today: date
@@ -159,4 +179,3 @@ class ResultSink(ABC):
 
     def close(self) -> None:
         """Release resources. Default is a no-op; subclasses override."""
-

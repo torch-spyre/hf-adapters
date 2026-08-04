@@ -14,18 +14,25 @@ Either way the same four pre-filters apply — skip window, no adapter for the
 config class, too large for Spyre, MoE — and each dropped model gets a terminal
 row recording why. With ``--model-list-file`` that happened upstream in
 ``.github/scripts/generate_weekly_shards.py``; with ``--fetch`` it happens here,
-through the same ``prefilter_models``. So everything that reaches the evaluation
+through the same ``fetch_and_filter``. So everything that reaches the evaluation
 loop needs a Spyre card.
 
 Filtering before the list is sharded is what keeps shard durations comparable:
 the dropped models cluster by download count, so filtering per-shard used to
 leave some CI jobs finishing in minutes and others running for hours.
 
-``--mode`` selects four things: the per-process batch size, the model class
-loaded in ``_load_on_cpu``, the verification pipeline in ``eval_model``
-(token-compare for generative, cosine-compare for embedding), and which
-ClickHouse table the sink reads and writes. With ``--fetch`` it also picks the
-catalog to fetch.
+``--mode`` is parsed into a ``ModelType``, which selects the per-process batch
+size, the model class loaded in ``_load_on_cpu``, the verification pipeline in
+``eval_model`` (token-compare for generative, cosine-compare for embedding), and
+which ClickHouse table the sink reads and writes. With ``--fetch`` it also picks
+the catalog to fetch.
+
+Process model
+-------------
+Each batch is evaluated in a freshly spawned child (``weekly_sub_process``) that
+exits when the batch ends, which is what actually returns the accelerator's
+memory. The parent owns the sink for the whole run and does all the writing; the
+child only returns plain dicts over a queue.
 
 Flags:
 
@@ -70,16 +77,17 @@ from tests.spyre.weekly_generation.failure_categories import (
 )
 from tests.spyre.weekly_generation.model_prefilter import fetch_and_filter
 from tests.spyre.weekly_generation.model_type import ModelType
-from tests.spyre.weekly_generation.sink.sink_factory import create_sink
+from tests.spyre.weekly_generation.sink.sink_factory import create_sink, csv_path_for
 from tests.spyre.weekly_generation.weekly_sub_process import _process_batch
 from utils.utilities import human_bytes, ts
 
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
-# Hard wall-clock cap for a single worker process (in seconds). If a batch
-# takes longer than this, the parent kills the child, marks the entire batch
-# as failed with FAILURE_CATEGORY_WORKER_TIMEOUT, and moves on. Prevents a
-# single hung model from stalling the whole run indefinitely.
+# Per-model wall-clock allowance for a worker process, in seconds. A batch's cap
+# is this times its model count; see the timeout guard in main(), which kills the
+# child and marks the batch FAILURE_CATEGORY_WORKER_TIMEOUT once it is exceeded,
+# so one hung model cannot stall the run indefinitely.
+_WORKER_TIMEOUT_SECONDS_PER_MODEL: int = 10 * 60
 
 
 class HardwareExceptionAbortError(RuntimeError):
@@ -92,6 +100,7 @@ class HardwareExceptionAbortError(RuntimeError):
     aborted rows up automatically via the sink's retry-on-hardware_exception
     skip rule.
     """
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SPYRE_TESTS_DIR = _REPO_ROOT / "tests" / "spyre"
@@ -325,11 +334,25 @@ def main(
     write_to_csv: Path | None,
     fetch: bool,
     top_k: int,
-    max_params: int
+    max_params: int,
 ) -> None:
-    from tests.spyre.weekly_generation.result_sink import (
-        ResultSink,
-    )
+    """Evaluate a model list on Spyre, one spawned worker per batch.
+
+    Exactly one of *model_list_file* (a shard prepared by
+    ``generate_weekly_shards``) and *fetch* supplies the list; argparse enforces
+    that. Both arrive pre-filtered, so every model reaching the batch loop is
+    expected to need a card.
+
+    Owns the sink for the whole run: it is created here, written to by both the
+    ``--fetch`` pre-filter and the evaluation loop, flushed at each batch
+    boundary, and closed once in the ``finally`` below. ``top_k``/``max_params``
+    apply only under *fetch*.
+
+    Raises:
+        HardwareExceptionAbortError: a batch reported ``hardware_exception``, so
+            the accelerator is unreachable and the remaining batches are skipped.
+    """
+    from tests.spyre.weekly_generation.result_sink import ResultSink
 
     print(f"{ts()} Starting main.")
     preexisting: set = _repos_with_weights()
@@ -338,7 +361,7 @@ def main(
 
     models_per_process = {
         ModelType.GENERATIVE: GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS,
-        ModelType.EMBEDDING: EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS
+        ModelType.EMBEDDING: EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS,
     }
 
     adapter_dates: dict[str, str | None] = _get_adapter_dates()
@@ -346,41 +369,47 @@ def main(
     sink: ResultSink = create_sink(
         model_type=model_type,
         snapshot_date=snapshot_date,
-        write_to_csv=write_to_csv
+        write_to_csv=write_to_csv,
     )
 
-    if fetch:
-        rows: list[dict] = fetch_and_filter(
-            model_type=model_type,
-            snapshot_date=snapshot_date,
-            top_k=top_k,
-            sink=sink,
-            max_params=max_params)
-    else:
-        assert model_list_file is not None  # argparse guarantees one of the two
-        print(f"{ts()} Loading model list from '{model_list_file}'.")
-        rows = json.loads(model_list_file.read_text())
-
-    total = len(rows)
+    # All five are read by the finally block, so they are bound before the try
+    # opens — otherwise a failure while building the model list would raise
+    # UnboundLocalError from the cleanup path and mask the real error.
     processed = 0
+    total = 0
     overall_start = time.monotonic()
-
-    print(f"{ts()} Will evaluate {total} model(s).")
-
-    batch_size = models_per_process[model_type]
-    batches: list[list[dict]] = _chunk_into_batches(
-        rows=rows,
-        batch_size= batch_size)
-    total_batches: int = len(batches)
-
-    ctx = multiprocessing.get_context("spawn")
-
-    # Initialised here so the finally block can clean up the in-flight batch
-    # even when KeyboardInterrupt fires mid-batch.
     batch_paths: list[str] = []
     had_weights_map: dict[str, bool] = {}
 
+    # The try opens before the model list is built so that a failure while
+    # fetching (a Hub outage, say) still closes the sink — under --fetch the
+    # pre-filter has by then already written terminal rows worth keeping.
     try:
+        if fetch:
+            rows: list[dict] = fetch_and_filter(
+                model_type=model_type,
+                snapshot_date=snapshot_date,
+                top_k=top_k,
+                sink=sink,
+                max_params=max_params,
+            )
+        else:
+            assert model_list_file is not None  # argparse guarantees one of the two
+            print(f"{ts()} Loading model list from '{model_list_file}'.")
+            rows = json.loads(model_list_file.read_text())
+
+        total = len(rows)
+        print(f"{ts()} Will evaluate {total} model(s).")
+
+        batch_size = models_per_process[model_type]
+        batches: list[list[dict]] = _chunk_into_batches(
+            rows=rows,
+            batch_size=batch_size,
+        )
+        total_batches: int = len(batches)
+
+        ctx = multiprocessing.get_context("spawn")
+
         for batch_idx, batch in enumerate(batches, start=1):
             batch_start = time.monotonic()
             batch_paths = [str(r["model_id"]) for r in batch]
@@ -407,7 +436,7 @@ def main(
                 ),
             )
             proc.start()
-            timeout = 10 * 60 * batch_size
+            timeout = _WORKER_TIMEOUT_SECONDS_PER_MODEL * batch_size
 
             proc.join(timeout=timeout)
 
@@ -574,9 +603,10 @@ def main(
 
         sink.close()
         if write_to_csv:
-            print(
-                f"\n{ts()} CSV: '{write_to_csv}' closed ({processed} rows processed)."
-            )
+            # Report the file actually written, not the bare --write-to-csv
+            # argument — the factory suffixes it with the model type.
+            written_to = csv_path_for(write_to_csv, model_type)
+            print(f"\n{ts()} CSV: '{written_to}' closed ({processed} rows processed).")
 
         overall_elapsed = time.monotonic() - overall_start
         mins, secs = divmod(int(overall_elapsed), 60)

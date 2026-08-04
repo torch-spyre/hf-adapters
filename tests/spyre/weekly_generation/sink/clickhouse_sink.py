@@ -1,18 +1,25 @@
+"""ClickHouse result sink: the real destination for weekly-scan rows.
+
+The only module in the weekly pipeline that reaches ``clickhouse_connect`` (via
+``clickhouse_db``), which is why it lives apart from the ABC in ``result_sink``:
+``--write-to-csv`` runs must reach that ABC, and the CSV sink, without the driver.
+Note the two imports below are deliberately split — the client and credentials
+come from ``clickhouse_db``, the table shape from the dependency-free
+``table_schema``, so a schema consumer never drags in the driver.
+
+``_SKIP_WINDOW_DAYS`` and ``_require_non_empty`` are imported from
+``result_sink`` despite the underscore. They are private to the sink layer as a
+whole, not to that module — the skip window is the rule the ABC documents and
+this class implements, so duplicating the constant here is how the two get to
+disagree.
+"""
+
 from __future__ import annotations
 
 from datetime import date, timedelta
 from typing import Any
 
-from tests.spyre.weekly_generation.clickhouse_db import (
-    DATABASE,
-    EMBEDDING_CREATE_TABLE_SQL,
-    EMBEDDING_TABLE_NAME,
-    GENERATIVE_CREATE_TABLE_SQL,
-    GENERATIVE_TABLE_NAME,
-    TABLE_COLUMNS,
-    get_client,
-    table_exists,
-)
+from tests.spyre.weekly_generation.clickhouse_db import get_client, table_exists
 from tests.spyre.weekly_generation.failure_categories import (
     FAILURE_CATEGORY_HARDWARE_EXCEPTION as _HARDWARE_EXCEPTION_CATEGORY,
 )
@@ -21,6 +28,14 @@ from tests.spyre.weekly_generation.result_sink import (
     _SKIP_WINDOW_DAYS,
     ResultSink,
     _require_non_empty,
+)
+from tests.spyre.weekly_generation.table_schema import (
+    DATABASE,
+    EMBEDDING_CREATE_TABLE_SQL,
+    EMBEDDING_TABLE_NAME,
+    GENERATIVE_CREATE_TABLE_SQL,
+    GENERATIVE_TABLE_NAME,
+    TABLE_COLUMNS,
 )
 
 
@@ -38,9 +53,7 @@ class ClickHouseResultSink(ResultSink):
     of 2 × N.
     """
 
-    def __init__(
-        self, model_type: ModelType, today: date | None = None
-    ) -> None:
+    def __init__(self, model_type: ModelType, today: date | None = None) -> None:
         super().__init__(today=today)
         self._model_type = model_type
         if model_type is ModelType.EMBEDDING:

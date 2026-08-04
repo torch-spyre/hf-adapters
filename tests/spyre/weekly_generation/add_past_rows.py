@@ -12,7 +12,7 @@ Usage::
 Arguments:
 
 * ``csv_file``  Path to a CSV file whose columns match ``TABLE_COLUMNS``
-                (see ``clickhouse_db.py``).
+                (see ``table_schema.py``).
 * ``mode``      Either ``embedding`` or ``generative``.
 """
 
