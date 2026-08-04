@@ -32,6 +32,7 @@ from hf_adapters.hf_common import (
     pad_lm_head,
     patch_rmsnorm,
     prepare_rope_and_heads,
+    text_config,
 )
 
 
@@ -93,8 +94,7 @@ def _run_forward(
         cache_position,
     )
     logits = model.lm_head(h)
-    logits = logits / model.config.logits_scaling
-    return logits
+    return logits / text_config(model.config).logits_scaling
 
 
 def prepare_for_spyre(model):
