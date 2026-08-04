@@ -1089,45 +1089,6 @@ def allocate_kv_caches(model, batch_size, max_cache_len, dtype, device=None):
 # ---------------------------------------------------------------------------
 
 
-def _patch_torch_empty():
-    """Workaround for torch_spyre spyre_empty() not accepting size= kwarg.
-
-    Upstream fix: https://github.com/torch-spyre/torch-spyre/issues/1729
-    """
-    _orig = torch.empty
-
-    def _patched(*args, size=None, **kwargs):
-        if size is not None:
-            return _orig(size, **kwargs)
-        return _orig(*args, **kwargs)
-
-    if getattr(torch.empty, "_hf_adapters_patched", False):
-        return
-    torch.empty = _patched
-    torch.empty._hf_adapters_patched = True
-
-
-def _embedding_param_ids(model):
-    """Data-pointers of weights that must keep the default (column-major) layout.
-
-    Gather-only embedding weights (used via ``nn.Embedding``, not matmul) must not
-    receive a row-major SpyreTensorLayout. Returns the set of ``data_ptr()``
-    values for all such weights.
-
-    Found by walking ``named_modules`` for ``nn.Embedding`` rather than matching
-    known attribute names. The name-matching version missed ModernBERT's
-    ``embeddings.tok_embeddings`` (and would miss the next new spelling), which
-    silently sent a [180000, 384] table down the matmul-weight path.
-    """
-    return {
-        module.weight.data_ptr()
-        for module in model.modules()
-        if isinstance(module, nn.Embedding)
-        and module.weight is not None
-        and module.weight.dim() == 2
-    }
-
-
 def untie_embedding_and_lm_head(model):
     """If the token-embedding weight and the LM head weight share storage, clone
     the LM head's weight so each can take a different Spyre layout.
@@ -1162,8 +1123,12 @@ def get_model_dtype(model: nn.Module) -> torch.dtype:
 
 
 def _move_to_spyre_with_layout(model, dtype):
-    """Move all parameters and buffers to Spyre with row-major layout for 2D
-    matmul weights, except embedding weights which keep the default layout.
+    """Prepare RoPE then transfer the model to Spyre via torch-spyre.
+
+    Layout selection (``dim_order=[1,0]`` for ``nn.Linear`` weights) is owned by
+    ``torch_spyre.model_utils.load_model_to_spyre``. This wrapper only handles
+    HF-specific RoPE prep and the CPU-test early return when ``DEVICE`` is not
+    Spyre.
     """
     # Propagate dtype to the precomputed RoPE module(s) so the freq cache
     # matches the chosen weight dtype (avoids fp16/bf16 mismatch in
@@ -1180,47 +1145,9 @@ def _move_to_spyre_with_layout(model, dtype):
         model.to(dtype=dtype)
         return
 
-    # Prime torch-spyre autoload before importing torch_spyre._C or calling
-    # torch.empty(..., device_layout=...). Calls with the spyre-only
-    # device_layout kwarg fail kwarg validation before dispatch.
-    torch.empty(1, device=DEVICE)
+    from torch_spyre.model_utils import load_model_to_spyre
 
-    from torch_spyre._C import SpyreTensorLayout  # type: ignore[import-not-found]
-
-    skip_layout_ptrs = _embedding_param_ids(model)
-
-    def _alloc_on_spyre(t: torch.Tensor) -> torch.Tensor:
-        # The row-major [1, 0] dim_order describes a 2-D permutation, so it only
-        # applies to 2-D matmul weights. 1-D tensors (norms, biases) and any
-        # higher-rank weight (e.g. the 3-D/4-D Conv2d and position-embedding
-        # tables in a multimodal checkpoint's vision/audio towers) keep the
-        # default layout — forcing [1, 0] on them raises "Incompatible host_size
-        # and dim_order". Embedding tables are gather-only and also skipped.
-        if t.dim() == 2 and t.data_ptr() not in skip_layout_ptrs:
-            stl = SpyreTensorLayout(t.shape, t.stride(), dtype, [1, 0])
-        else:
-            stl = None
-        new: torch.Tensor = torch.empty(  # type: ignore[call-overload]
-            t.shape,
-            device=torch.device(DEVICE),
-            device_layout=stl,
-            dtype=dtype,
-        )
-        new.copy_(t.to(dtype))
-        return new
-
-    for name, param in list(model.named_parameters()):
-        new = _alloc_on_spyre(param.data)
-        module_path, _, attr = name.rpartition(".")
-        owner = model.get_submodule(module_path) if module_path else model
-        setattr(owner, attr, nn.Parameter(new, requires_grad=False))
-
-    for name, buf in list(model.named_buffers()):
-        new = _alloc_on_spyre(buf)
-        module_path, _, attr = name.rpartition(".")
-        owner = model.get_submodule(module_path) if module_path else model
-        persistent = attr not in owner._non_persistent_buffers_set
-        owner.register_buffer(attr, new, persistent=persistent)
+    load_model_to_spyre(model, dtype=dtype)
 
 
 def load_model_common(model_path, module, dtype=torch.float16, auto_model_cls=None):
@@ -1255,8 +1182,6 @@ def load_model_common(model_path, module, dtype=torch.float16, auto_model_cls=No
 def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
     untie_embedding_and_lm_head(model)
     module.prepare_for_spyre(model)
-    # print("Moving model to Spyre ...")
-    _patch_torch_empty()
     _move_to_spyre_with_layout(model, dtype)
     for submod_name in getattr(model, "_spyre_cpu_submodules", []):
         model.get_submodule(submod_name).to("cpu")

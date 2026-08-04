@@ -560,8 +560,8 @@ SigLIP-specific Spyre adaptations:
   docs/siglip_vision_spyre_findings.md), so the patch embedding + learned
   position add run on CPU and the result is moved to Spyre. CPU copies of the
   conv weight/bias and position table are snapshotted at prepare time so the
-  closure survives the blanket device move (`_embedding_param_ids` can't exclude
-  a 4-D conv weight).
+  closure survives the blanket device move via `load_model_to_spyre`
+  (4-D conv weights are not left on CPU by the move).
 
 **Combined two-tower adapter — Granite** (`hf_granite_vision_mm.py`): runs the
 Spyre SigLIP tower, projects/packs its features, splices them into the
@@ -636,7 +636,7 @@ Multimodal-specific Spyre adaptations (beyond those shared with Granite VLM):
   explicitly stores Mistral decoder blocks in `model._spyre_text_blocks` to avoid
   collision with the vision tower's compiled blocks stored by
   `hf_pixtral_vision.prepare_for_spyre` in `model._spyre_compiled_blocks`.
-- **`multi_modal_projector` pinned to CPU** after `_move_to_spyre_with_layout`
+- **`multi_modal_projector` pinned to CPU** after the Spyre device move
   (same pattern as Granite's `layerwise_projectors` pin).
 - **`Mistral3PatchMerger`** (`nn.functional.unfold` + `merging_layer`) runs on
   CPU inside the projector — `unfold` doesn't lower on Spyre.
