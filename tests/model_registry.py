@@ -97,12 +97,6 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_granitemoehybrid.py",
         "size": "3b",
     },
-    "granite41_8b": {
-        "name": "Granite 4.1 8B",
-        "path": "ibm-granite/granite-4.1-8b",
-        "adapter": "hf_granite_swa.py",
-        "size": "8b",
-    },
     # hf_granite_swa.py
     "granite41_20b": {
         "name": "Granite 4.1 20B",
@@ -232,11 +226,53 @@ CAUSAL_LM_MODELS = {
         "size": "1b",
     },
     # hf_gemma4
+    "gemma4_base": {
+        "name": "Gemma 4 12B Base",
+        "path": "google/gemma-4-12b",
+        "adapter": "hf_gemma4.py",
+        "size": "12b",
+        "dtype": "bfloat16",
+    },
     "gemma4_google": {
         "name": "Gemma 4 12B",
         "path": "google/gemma-4-12B-it",
         "adapter": "hf_gemma4.py",
         "size": "12b",
+    },
+    "gemma4_31b": {
+        "name": "Gemma 4 31B",
+        "path": "google/gemma-4-31b",
+        "adapter": "hf_gemma4.py",
+        "size": "31b",
+        "dtype": "bfloat16",
+        "is_gated": True,
+    },
+    # DSpark speculative-decoding drafters (block proposers). kind="dspark_draft"
+    # keeps them out of the generate-based causal-LM harnesses (see CAUSAL_PATHS);
+    # tests/spyre/test_dspark_draft_spyre.py exercises the block-propose path.
+    # hf_dspark_qwen3.py
+    "dspark_qwen3": {
+        "name": "DSpark Qwen3 Drafter (block7)",
+        "path": "deepseek-ai/dspark_qwen3_4b_block7",
+        "adapter": "hf_dspark_qwen3.py",
+        "size": "0.6b",
+        "kind": "dspark_draft",
+    },
+    # hf_dspark_gemma4.py
+    "dspark_gemma4": {
+        "name": "DSpark Gemma 4 Drafter (block7)",
+        "path": "deepseek-ai/dspark_gemma4_12b_block7",
+        "adapter": "hf_dspark_gemma4.py",
+        "size": "1b",
+        "kind": "dspark_draft",
+    },
+    # hf_dspark_granite.py
+    "dspark_granite": {
+        "name": "DSpark Granite Drafter (block7)",
+        "path": "deepseek-ai/dspark_granite_4_1_8b_block7",
+        "adapter": "hf_dspark_granite.py",
+        "size": "1b",
+        "kind": "dspark_draft",
     },
 }
 
@@ -475,10 +511,22 @@ def _select_representative_paths(
 # shared across all three selections. ``kind == "vlm"`` excludes bare vision towers.
 _include_gated_flag = _include_gated()
 
+# ``kind == "dspark_draft"`` entries are speculative-decoding drafters (block
+# proposers, driven by ``_run_draft_block`` — no ``generate``), so they are
+# registered for adapter-coverage but excluded from the generate-based CPU/Spyre
+# causal-LM harnesses; they are exercised by tests/spyre/test_dspark_draft_spyre.py.
 CAUSAL_PATHS: list[str] = _select_representative_paths(
-    CAUSAL_LM_MODELS, include_gated=_include_gated_flag
+    CAUSAL_LM_MODELS,
+    include_gated=_include_gated_flag,
+    predicate=lambda info: info.get("kind") != "dspark_draft",
 )
-
+# The DSpark drafter checkpoints (block proposers), one per adapter — exercised by
+# tests/spyre/test_dspark_draft_spyre.py via the block-propose ``_run_draft_block``.
+DSPARK_PATHS: list[str] = _select_representative_paths(
+    CAUSAL_LM_MODELS,
+    include_gated=_include_gated_flag,
+    predicate=lambda info: info.get("kind") == "dspark_draft",
+)
 EMBED_PATHS: list[str] = _select_representative_paths(
     EMBEDDING_MODELS, include_gated=_include_gated_flag
 )
@@ -488,22 +536,43 @@ VISION_PATHS: list[str] = _select_representative_paths(
     predicate=lambda info: info.get("kind") == "vlm",
 )
 
-# Causal-LM models that just went green on torchs-spyre but aren't yet proven stable
-# across repeated runs. Kept as a non-blocking signal (xfail, non-strict) for
-# a trial period; remove an entry once it's been stably green so its Spyre
-# tests go back to gating CI normally.
 
-NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = {
-    CAUSAL_LM_MODELS[key]["path"]: (
-        f"{key}: newly green on Spyre, non-blocking signal for a trial "
-        "period before promoting to a blocking test"
-    )
-    for key in ("qwen3", "olmo2_1b", "gemma3_unsloth", "ministral8b", "gemma4_google")
-}
+def _non_blocking(models: dict[str, dict], keys: tuple[str, ...]) -> dict[str, str]:
+    """Build a ``{path: xfail reason}`` table from registry keys."""
+    return {
+        models[key]["path"]: (
+            f"{key}: temporarily non-blocking signal for specific models"
+        )
+        for key in keys
+    }
 
 
-def xfail_non_blocking(paths: list[str]) -> list[object]:
-    """Wrap entries of ``paths`` found in NON_BLOCKING_CAUSAL_MODELS with xfail.
+# Non-blocking models (xfail, non-strict); remove an entry once it's been stably
+# green so its Spyre tests go back to gating CI normally.
+#
+# The tables are per-harness rather than one merged dict because a path can name
+# two different adapters — google/gemma-4-12B-it is both ``gemma4_google`` (causal)
+# and ``gemma4_mm`` (VLM).
+NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = _non_blocking(
+    CAUSAL_LM_MODELS,
+    (
+        "smollm3",
+        "gemma3_unsloth",
+        "ministral3",
+        "pythia_410m",
+        "gemma4_google",
+        "gemma4_base",
+    ),
+)
+
+NON_BLOCKING_VISION_MODELS: dict[str, str] = _non_blocking(
+    VISION_MODELS,
+    ("gemma4_mm",),
+)
+
+
+def xfail_non_blocking(paths: list[str], *, table: dict[str, str]) -> list[object]:
+    """Wrap entries of ``paths`` found in ``table`` with a non-strict xfail.
 
     The test still runs and its outcome (PASS/FAIL) is visible in the report,
     but a failure won't fail the pytest run or block CI.
@@ -512,13 +581,24 @@ def xfail_non_blocking(paths: list[str]) -> list[object]:
         (
             pytest.param(
                 path,
-                marks=pytest.mark.xfail(
-                    reason=NON_BLOCKING_CAUSAL_MODELS[path], strict=False
-                ),
+                marks=pytest.mark.xfail(reason=table[path], strict=False),
                 id=path,
             )
-            if path in NON_BLOCKING_CAUSAL_MODELS
+            if path in table
             else path
         )
         for path in paths
     ]
+
+
+RERANKER_MODELS = {
+    # hf_xlm_roberta.py
+    "bge_reranker_v2_m3": {
+        "name": "BGE Reranker v2 M3",
+        "path": "BAAI/bge-reranker-v2-m3",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.5b",
+    },
+}
+
+RERANKER_PATHS: list[str] = [m["path"] for m in RERANKER_MODELS.values()]

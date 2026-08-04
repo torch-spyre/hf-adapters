@@ -23,7 +23,7 @@ def main():
     setup_logging()
     require_cuda()
 
-    model_path = "ibm-granite/granite-4.1-20b"
+    model_path = "ibm-research/granite-4.1-20b"
     chat = [
         {
             "role": "user",

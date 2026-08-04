@@ -6,6 +6,7 @@ SHELL := /bin/bash
 #   smoke — fast per-op unit tests only
 #   core  — all spyre-native tests (excludes the heavy upstream suites)
 #   full  — everything
+#   trunk — same coverage as full; push-to-main CI label (see resolve_test_type.sh)
 #   perf  — SCAFFOLD ONLY: no benchmark harness yet, writes a placeholder empty
 #           JUnit XML (no .benchmark classname, so ingest reads it as 0 rows).
 #           A real producer (like torch-spyre's spyre-perf-suite) is a follow-up.
@@ -50,7 +51,7 @@ endif
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-24s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
-	@echo "Variables: TEST_TYPE=smoke|core|full|unit|integration|regression|<space-separated suite keys> (default regression),"
+	@echo "Variables: TEST_TYPE=smoke|core|full|trunk|unit|integration|regression|<space-separated suite keys> (default regression),"
 	@echo "  MODEL_KEY (pytest -k filter, default all), PYTEST_ARGS (default '$(PYTEST_ARGS)'),"
 	@echo "  JUNIT_XML (single-suite targets only), RESULTS_DIR (default '$(RESULTS_DIR)')"
 
@@ -117,7 +118,7 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	@# for the "unit" tier via GHA.
 	resolved="$$(scripts/resolve_test_type.sh $(TEST_TYPE))"; \
 	case " $$resolved " in \
-	  *" full "*) suites="adapter_coverage smoke load token_compare embed_compare vlm model_module" ;; \
+	  *" full "*|*" trunk "*) suites="adapter_coverage smoke load token_compare embed_compare vlm model_module" ;; \
 	  *" core "*) suites="adapter_coverage load token_compare embed_compare vlm model_module" ;; \
 	  " smoke ") suites="smoke" ;; \
 	  " perf ") suites="perf" ;; \
