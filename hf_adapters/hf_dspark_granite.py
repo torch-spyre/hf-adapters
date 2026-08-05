@@ -34,13 +34,9 @@ No per-head q/k RMSNorm (``use_qk_norm=False``).
 Usage: see ``hf_dspark_qwen3``.
 """
 
-# The block-propose forward is shared across families — reuse the common runner
-# under the adapter's public ``_run_draft_block`` name (see hf_dspark_qwen3).
-from hf_adapters._dspark_common import prepare_dspark_common
-from hf_adapters._dspark_common import (  # noqa: F401  (re-exported as the public forward)
-    run_draft_block as _run_draft_block,
-)
+from hf_adapters._dspark_common import prepare_dspark_common, run_draft_block
 
+_run_draft_block = run_draft_block  # reuse the common runner
 CTX_PAD = 56
 
 

@@ -46,11 +46,9 @@ from hf_adapters._dspark_common import (
     _pad_markov_w2,
     install_spyre_compute_logits,
     install_spyre_markov,
+    run_draft_block,
     snapshot_cpu_embeddings,
     snapshot_cpu_fc,
-)
-from hf_adapters._dspark_common import (  # noqa: F401  (re-exported as the public forward)
-    run_draft_block as _run_draft_block,
 )
 from hf_adapters.hf_common import (
     InvFreqShim,
@@ -60,6 +58,7 @@ from hf_adapters.hf_common import (
 )
 from hf_adapters.hf_gemma4 import _patch_gemma4_rmsnorm
 
+_run_draft_block = run_draft_block  # reuse the common runner
 CTX_PAD = 56
 
 
@@ -132,7 +131,9 @@ def _make_gemma4_dspark_block(layer, *, kv_pad):
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to the Gemma4 DSpark drafter in-place."""
-    from deepspec.modeling.dspark.gemma4.modeling import Gemma4RMSNorm
+    from deepspec.modeling.dspark.gemma4.modeling import (  # type: ignore[import-not-found]
+        Gemma4RMSNorm,
+    )
 
     block_size = int(model.block_size)
     kv_pad = ((CTX_PAD + block_size + 31) // 32) * 32
