@@ -5,10 +5,17 @@ SHELL := /bin/bash
 # product repos: torch-spyre, hf-adapters, spyre-inference):
 #   smoke — fast per-op unit tests only
 #   core  — all spyre-native tests (excludes the heavy upstream suites)
-#   full  — everything (default)
+#   full  — everything
+#   trunk — same coverage as full; push-to-main CI label (see resolve_test_type.sh)
+#   perf  — SCAFFOLD ONLY: no benchmark harness yet, writes a placeholder empty
+#           JUnit XML (no .benchmark classname, so ingest reads it as 0 rows).
+#           A real producer (like torch-spyre's spyre-perf-suite) is a follow-up.
+# Also accepts the user-facing tier aliases unit (= core), integration (= smoke),
+# regression (= full) -- same mapping as _test_matrix.yaml's resolve-test-type job.
 # Also accepts a space-separated list of individual suite keys (matches
 # _test_matrix.yaml's `test_type` semantics), e.g. TEST_TYPE="smoke load".
-TEST_TYPE ?= full
+# Empty / unset defaults to "regression" (= full: every suite).
+TEST_TYPE ?= regression
 
 # MODEL_KEY narrows a suite to one model via pytest's -k filter (matrix-style
 # per-model CI jobs pass this); empty = run every model in the suite.
@@ -44,7 +51,7 @@ endif
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-24s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
-	@echo "Variables: TEST_TYPE=smoke|core|full|<space-separated suite keys> (default full),"
+	@echo "Variables: TEST_TYPE=smoke|core|full|trunk|unit|integration|regression|<space-separated suite keys> (default regression),"
 	@echo "  MODEL_KEY (pytest -k filter, default all), PYTEST_ARGS (default '$(PYTEST_ARGS)'),"
 	@echo "  JUNIT_XML (single-suite targets only), RESULTS_DIR (default '$(RESULTS_DIR)')"
 
@@ -105,11 +112,17 @@ model-module-tests: ## Run oot_framework module tests (suite key: model_module; 
 # the whole directory in one ClickHouse push. One failing suite doesn't skip the
 # rest; the aggregate's exit code still reflects any failure.
 tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite)
-	case " $(TEST_TYPE) " in \
-	  *" full "*) suites="adapter_coverage smoke load token_compare embed_compare vlm model_module" ;; \
+	@# Resolve the user-facing tier aliases (unit/integration/regression) via the
+	@# shared script -- same source of truth as _test_matrix.yaml's
+	@# resolve-test-type job, so `make tests TEST_TYPE=unit` matches what CI runs
+	@# for the "unit" tier via GHA.
+	resolved="$$(scripts/resolve_test_type.sh $(TEST_TYPE))"; \
+	case " $$resolved " in \
+	  *" full "*|*" trunk "*) suites="adapter_coverage smoke load token_compare embed_compare vlm model_module" ;; \
 	  *" core "*) suites="adapter_coverage load token_compare embed_compare vlm model_module" ;; \
 	  " smoke ") suites="smoke" ;; \
-	  *) suites="$(TEST_TYPE)" ;; \
+	  " perf ") suites="perf" ;; \
+	  *) suites="$$resolved" ;; \
 	esac; \
 	mkdir -p "$(RESULTS_DIR)"; \
 	rc=0; \
@@ -123,7 +136,13 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	    embed_compare)    $(MAKE) embed-compare-tests     JUNIT_XML="$(RESULTS_DIR)/spyre-embed-compare-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
 	    vlm)              $(MAKE) vlm-tests               JUNIT_XML="$(RESULTS_DIR)/spyre-vlm-e2e-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
 	    model_module)     $(MAKE) model-module-tests      JUNIT_XML=1 RESULTS_DIR="$(RESULTS_DIR)" MODULE_CONFIG="$(MODULE_CONFIG)" || rc=1 ;; \
-	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare embed_compare vlm model_module"; rc=1 ;; \
+	    perf)             printf '%s\n' \
+	                        '<?xml version="1.0" encoding="utf-8"?>' \
+	                        '<testsuites name="hf-adapters-perf">' \
+	                        '  <testsuite name="hf-adapters-perf" tests="0" skipped="0" failures="0" errors="0"/>' \
+	                        '</testsuites>' > "$(RESULTS_DIR)/report.xml"; \
+	                      echo "hf-adapters has no perf harness yet (scaffold stub): wrote placeholder $(RESULTS_DIR)/report.xml" ;; \
+	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare embed_compare vlm model_module perf"; rc=1 ;; \
 	  esac; \
 	done; \
 	exit $$rc

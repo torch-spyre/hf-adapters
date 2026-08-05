@@ -1,4 +1,9 @@
 name: integration-tests
+run-name: integration-tests (${{ inputs.test_type || 'smoke' }})
+# NOTE: run-name intentionally shows the RAW, user-facing input (before
+# _test_matrix.yaml's resolve-test-type job resolves unit/integration/regression
+# to core/smoke/full) -- this is also what push-to-clickhouse.yaml's trigger_type
+# ends up recording, so ClickHouse sees the tier name callers actually asked for.
 
 # ---------------------------------------------------------------------------
 # Triggered by commits in upstream dependant repos (deeptools, flex, torch-spyre etc.) via
@@ -61,12 +66,15 @@ on:
         default: ''
       test_type:
         description: >-
-          Test tier to run: smoke | core | full. "smoke" runs only the smoke
-          suite; "core" runs every other suite (load, token_compare,
-          embed_compare, vlm, model_module); "full" runs everything. This is
-          a plain string underneath (see _test_matrix.yaml), so a caller
-          using the API/gh CLI can also pass an individual suite key or a
-          space-separated combo (e.g. "smoke token_compare") for finer
+          Test tier to run: smoke | core | full -- or the user-facing tier
+          aliases unit (= core) | integration (= smoke) | regression (= full),
+          for callers (e.g. spyre-frameworks config.yaml) that speak in tier
+          names rather than suite names. "smoke" runs only the smoke suite;
+          "core" runs every other suite (load, token_compare, embed_compare,
+          vlm, model_module); "full" runs everything. This is a plain string
+          underneath (see _test_matrix.yaml's resolve-test-type job), so a
+          caller using the API/gh CLI can also pass an individual suite key or
+          a space-separated combo (e.g. "smoke token_compare") for finer
           control than the dropdown offers.
         required: false
         type: choice

@@ -1,0 +1,193 @@
+name: push-test-results-to-clickhouse
+
+# Ingests JUnit XML results from integration-tests.yaml (covers both the
+# integration and regression tiers -- both dispatch that same workflow file,
+# differing only by the test_type input; see its run-name for which tier ran)
+# into ClickHouse. Also supports manual dispatch for re-ingesting a specific run.
+#
+# NOTE: this filename is deliberately NOT push-to-clickhouse.yaml -- that name
+# is already taken by this repo's unrelated HF-Hub weekly-model-scan cron job,
+# which references the same CLICKHOUSE_* secrets for its own purposes.
+on:
+  workflow_run:
+    workflows:
+      - integration-tests
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      gha_run_id:
+        description: GHA run ID to re-ingest (leave blank to skip)
+        required: false
+        default: ''
+      workflow_name:
+        description: Workflow name (integration-tests)
+        required: false
+        default: integration-tests
+
+concurrency:
+  # Allow at most one ingest per triggering run (re-runs queue behind)
+  group: ingest-${{ github.event.workflow_run.id || inputs.gha_run_id || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read   # needed to download artifacts from the triggering run
+
+jobs:
+  ingest:
+    name: Ingest XML -> ClickHouse
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Skip if the triggering workflow was cancelled (but ingest failures are fine)
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion != 'cancelled'
+
+    env:
+      # ---------------------------------------------------------------------------
+      # Set these secrets in your repo / org settings:
+      #   CLICKHOUSE_HOST   e.g. clickhouse.internal.example.com
+      #   CLICKHOUSE_PORT   e.g. 8123  (HTTP interface)
+      #   CLICKHOUSE_USER   e.g. spyre_writer
+      #   CLICKHOUSE_PASS   the password
+      #   CLICKHOUSE_DB     e.g. spyre
+      # ---------------------------------------------------------------------------
+      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
+      CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
+      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+      CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
+      CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
+
+      # Metadata about the triggering run
+      TRIGGERING_RUN_ID: ${{ github.event.workflow_run.id || inputs.gha_run_id }}
+      TRIGGERING_WORKFLOW: ${{ github.event.workflow_run.name || inputs.workflow_name }}
+      TRIGGERING_BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+      TRIGGERING_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      TRIGGERING_AT: ${{ github.event.workflow_run.created_at || '' }}
+      # display_title carries "integration-tests (<test_type>)" via that workflow's
+      # run-name: -- this is the only way this job can recover the original dispatch
+      # tier (integration/regression/smoke/etc) without an extra API call.
+      TRIGGERING_DISPLAY_TITLE: ${{ github.event.workflow_run.display_title || '' }}
+
+    steps:
+      - name: Checkout ingest script (from torch-spyre, canonical copy -- do not fork)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: torch-spyre/torch-spyre
+          sparse-checkout: |
+            .github/scripts/ingest_xml.py
+          path: torch-spyre-scripts
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: setup venv
+        run: |
+          uv venv
+          source .venv/bin/activate
+          echo "VIRTUAL_ENV $VIRTUAL_ENV"
+
+      - name: Install Python dependencies
+        run: |
+          source .venv/bin/activate
+          uv pip install requests clickhouse-driver clickhouse-connect lxml regex
+
+      - name: Install gh CLI
+        run: |
+          wget -q https://github.com/cli/cli/releases/download/v2.92.0/gh_2.92.0_linux_amd64.tar.gz
+          tar -xzf gh_2.92.0_linux_amd64.tar.gz
+          echo "$PWD/gh_2.92.0_linux_amd64/bin" >> "${GITHUB_PATH}"
+          gh_2.92.0_linux_amd64/bin/gh --version
+
+      - name: Resolve PR number
+        id: resolve-pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR=$(gh api \
+            "/repos/${{ github.repository }}/commits/${TRIGGERING_SHA}/pulls" \
+            --jq '.[0].number // 0')
+          echo "Resolved PR number: ${PR}"
+          echo "pr_number=${PR}" >> "${GITHUB_OUTPUT}"
+
+      # ---------------------------------------------------------------------------
+      # Download all XML artifacts produced by the triggering run.
+      # ---------------------------------------------------------------------------
+      - name: List artifacts from triggering run
+        id: list-artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARTIFACTS=$(gh api \
+            "/repos/${{ github.repository }}/actions/runs/${TRIGGERING_RUN_ID}/artifacts" \
+            --jq '[.artifacts[] | select(.name | endswith(".xml")) | {id: .id, name: .name}]')
+          echo "artifacts=$ARTIFACTS" >> "$GITHUB_OUTPUT"
+          echo "Found artifacts:"
+          echo "$ARTIFACTS" | python3 -c "import json,sys; [print(' •', a['name']) for a in json.load(sys.stdin)]"
+
+      - name: Download XML artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p xml_artifacts
+          export ARTIFACTS='${{ steps.list-artifacts.outputs.artifacts }}'
+          python3 <<'PYEOF'
+          import json, os, subprocess, sys
+          artifacts = json.loads(os.environ['ARTIFACTS'])
+          repo  = os.environ['GITHUB_REPOSITORY']
+          for a in artifacts:
+              print(f"Downloading: {a['name']} (id={a['id']})")
+              with open(f"xml_artifacts/{a['name']}.zip", "wb") as f:
+                result = subprocess.run([
+                    "gh", "api",
+                    f"/repos/{repo}/actions/artifacts/{a['id']}/zip",
+                ], check=True, env={**os.environ}, capture_output=True)
+                f.write(result.stdout)
+              subprocess.run([
+                  "unzip", "-o", f"xml_artifacts/{a['name']}.zip",
+                  "-d", "xml_artifacts/"
+              ], check=True)
+          PYEOF
+          echo "Downloaded XML files:"
+          find xml_artifacts -name "*.xml" 2>/dev/null || echo "(none)"
+
+      - name: Extract suite tier from display title
+        id: extract-tier
+        run: |
+          TIER=$(echo "${TRIGGERING_DISPLAY_TITLE}" | sed -n 's/.*(\(.*\))\s*$/\1/p')
+          echo "Resolved tier: ${TIER:-<none>}"
+          echo "tier=${TIER}" >> "${GITHUB_OUTPUT}"
+
+      # ---------------------------------------------------------------------------
+      # Parse each XML file and insert rows into ClickHouse via torch-spyre's
+      # canonical ingest_xml.py (checked out above, never forked into this repo).
+      # ---------------------------------------------------------------------------
+      - name: Ingest XML files into ClickHouse
+        run: |
+          source .venv/bin/activate
+          python3 torch-spyre-scripts/.github/scripts/ingest_xml.py \
+            --xml-dir xml_artifacts \
+            --workflow "${TRIGGERING_WORKFLOW}" \
+            --branch   "${TRIGGERING_BRANCH}" \
+            --sha      "${TRIGGERING_SHA}" \
+            --run-id   "${TRIGGERING_RUN_ID}" \
+            --triggered-at "${TRIGGERING_AT}" \
+            --pr-number    "${{ steps.resolve-pr.outputs.pr_number }}" \
+            --trigger-type "${{ steps.extract-tier.outputs.tier }}"
+
+      - name: Summary
+        if: always()
+        run: |-
+          XML_COUNT=$(find xml_artifacts -name "*.xml" 2>/dev/null | wc -l || echo 0)
+          {
+            echo "### ClickHouse Ingest Summary"
+            echo "| Key | Value |"
+            echo "|---|---|"
+            echo "| Triggering workflow | ${TRIGGERING_WORKFLOW} |"
+            echo "| Triggering run ID   | ${TRIGGERING_RUN_ID} |"
+            echo "| Suite tier          | ${{ steps.extract-tier.outputs.tier }} |"
+            echo "| PR number           | ${{ steps.resolve-pr.outputs.pr_number }} |"
+            echo "| Branch              | ${TRIGGERING_BRANCH} |"
+            echo "| Commit SHA          | ${TRIGGERING_SHA:0:12} |"
+            echo "| XML files ingested  | ${XML_COUNT} |"
+          } >> "$GITHUB_STEP_SUMMARY"
