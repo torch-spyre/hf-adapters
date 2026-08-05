@@ -59,7 +59,7 @@ def hf_greedy_steps(model, input_ids, num_decode=NUM_DECODE):
     from transformers import DynamicCache
 
     results = []
-    past = DynamicCache()
+    past = DynamicCache(config=model.config)
     ids = input_ids.clone()
     seq_len = ids.shape[1]
 

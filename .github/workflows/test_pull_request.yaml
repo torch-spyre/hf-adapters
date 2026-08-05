@@ -1,5 +1,14 @@
 name: test_pull_request
 
+# Doubles as hf-adapters' "trunk" (push-to-main) workflow -- on push this
+# still runs every job unconditionally (job-selection for trunk == full,
+# which is already this workflow's only mode), so the run-name below is
+# purely a labeling change. Full delegation to _test_matrix.yaml's
+# test_type-gated suites (like integration-tests.yaml uses) is deferred --
+# this file defines its jobs inline and lacks _test_matrix.yaml's reranker
+# suite and RPM-build inputs, so reconciling them is a separate effort.
+run-name: ${{ github.event_name == 'push' && 'trunk' || 'test_pull_request' }}
+
 on:
   push:
     branches: [main]

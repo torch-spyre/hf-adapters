@@ -188,7 +188,7 @@ def prepare_for_spyre(model):
     )
 
     layer_types = set(model.config.layer_types)
-    assert "mamba" not in layer_types, (
+    assert layer_types.isdisjoint({"mamba", "linear_attention"}), (
         "hf_granitemoehybrid adapter only supports pure-attention dense models "
         f"(layer_types={sorted(layer_types)}). "
         f"'{model.config._name_or_path}' is a Mamba-attention hybrid — "

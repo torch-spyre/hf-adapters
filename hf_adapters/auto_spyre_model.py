@@ -108,6 +108,7 @@ from hf_adapters import (
 )
 from hf_adapters.hf_common import (
     SpyreNoAdapterError,
+    SpyreUnsupportedModelError,
     assert_spyre_dimensions,
     load_model_common,
     move_model_to_spyre,
@@ -269,6 +270,11 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
         dtype: torch.dtype = torch.float16,
     ) -> torch.nn.Module:
         module: ModuleType = resolve_adapter_module(model_name_or_path)
+        if getattr(module, "_is_encoder_only", False):
+            raise SpyreUnsupportedModelError(
+                "Generation is not currently supported for encoder-only architectures"
+            )
+
         model: torch.nn.Module = super().from_pretrained(
             model_name_or_path, dtype=dtype
         )
