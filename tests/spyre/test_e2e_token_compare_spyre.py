@@ -114,10 +114,7 @@ def adapter_greedy_steps(
     position_ids = torch.zeros((batch_size, padded_len), dtype=torch.long)
     position_ids[:, prompt_offset:] = torch.arange(seq_len)
 
-    max_cache_len = (
-        padded_len + math.ceil(num_decode / BLOCK_SIZE) * BLOCK_SIZE + BLOCK_SIZE
-    )
-
+    max_cache_len = padded_len + math.ceil((num_decode + 1) / BLOCK_SIZE) * BLOCK_SIZE
     dtype = get_model_dtype(model)
 
     key_caches, value_caches = allocate_kv_caches(
