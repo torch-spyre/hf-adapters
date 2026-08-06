@@ -198,7 +198,7 @@ def fetch_and_filter(
     curated_models: list[dict] = model_fetcher.load_curated(model_type=model_type)
 
     # concatenate and dedup while giving precedence to the curated
-    models = concat_and_dedup_dicts(curated_models, fetched_models)
+    models = concat_and_dedup_dicts(first=curated_models, second=fetched_models)
 
     # filter unsupported - MoE / no adapter / too large
     result: PrefilterResult = prefilter_models(models, max_params=max_params)

@@ -20,18 +20,27 @@ def human_bytes(n: float) -> str:
     raise AssertionError("unreachable: the TB branch always returns")
 
 
-def concat_and_dedup_dicts(l1: list[dict], l2: list[dict]) -> list[dict]:
-    """
-    Concatenates two lists of dicts, removing duplicates by a unique ID key.
-    Keeps the first instance encountered.
-    """
-    seen = set()
-    result = []
+def concat_and_dedup_dicts(
+    first: list[dict], second: list[dict], key: str = "model_id"
+) -> list[dict]:
+    """Concatenate two lists of dicts, dropping later duplicates of *key*.
 
-    # Iterate through both lists sequentially
-    for d in l1 + l2:
-        # Get the ID value, skip or handle safely if the key is missing
-        item_id = d["model_id"]
+    First occurrence wins, so passing the higher-precedence list as *first* is how
+    the caller chooses which copy of a duplicate survives. Relative order within
+    each list is preserved — the weekly pipeline's descending-downloads contract
+    depends on the fetched list not being reshuffled here.
+
+    Dicts missing *key* are passed through unchanged rather than raising: they
+    cannot be compared for identity, so they are never treated as duplicates.
+    """
+    seen: set = set()
+    result: list[dict] = []
+
+    for d in (*first, *second):
+        if key not in d:
+            result.append(d)
+            continue
+        item_id = d[key]
         if item_id not in seen:
             seen.add(item_id)
             result.append(d)

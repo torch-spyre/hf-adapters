@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TypeVar
 
 from huggingface_hub.errors import HfHubHTTPError
-from huggingface_hub.hf_api import ModelInfo
+from huggingface_hub.hf_api import ExpandModelProperty_T, ModelInfo
 from tqdm import tqdm
 from transformers import AutoConfig
 
@@ -63,8 +63,10 @@ def load_curated_embedding_models() -> list[str]:
     return load_curated_model_ids(CURATED_EMBEDDING_MODELS_FILE)
 
 
-# Metadata fields requested from list_models for every fetcher.
-EXPAND_FIELDS: list[str] = [
+# Metadata fields requested from list_models/model_info for every fetcher.
+# Typed as the hub's own ExpandModelProperty_T literal rather than list[str], so a
+# typo here is a type error instead of a runtime 400 from the API.
+EXPAND_FIELDS: list[ExpandModelProperty_T] = [
     "config",
     "safetensors",
     "gated",
