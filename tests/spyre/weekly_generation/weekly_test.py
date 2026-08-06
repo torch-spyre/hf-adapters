@@ -266,6 +266,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "whose producer applied its own limit."
         ),
     )
+    parser.add_argument(
+        "--snapshot-date",
+        type=date.fromisoformat,
+        default=date.today(),
+        metavar="YYYY-MM-DD",
+        help=(
+            "Date to record as the snapshot date for all rows written in this run "
+            "(default: today). Override when backfilling or replaying a specific scan."
+        ),
+    )
     args = parser.parse_args(argv)
     # Reject the silent no-op of passing a fetch tuning flag without --fetch.
     if not args.fetch:
@@ -353,6 +363,7 @@ def main(
     fetch: bool,
     top_k: int,
     max_params: int,
+    snapshot_date: date,
 ) -> None:
     """Evaluate a model list on Spyre, one spawned worker per batch.
 
@@ -374,7 +385,6 @@ def main(
 
     print(f"{ts()} Starting main.")
     total_freed: int = 0
-    snapshot_date = date.today()
 
     models_per_process = {
         ModelType.GENERATIVE: GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS,
@@ -650,6 +660,7 @@ if __name__ == "__main__":
             fetch=args.fetch,
             top_k=args.top_k,
             max_params=args.max_params,
+            snapshot_date=args.snapshot_date,
         )
     except HardwareExceptionAbortError as e:
         # Non-zero exit so CI / GHA scheduled runs can alert. main()'s
