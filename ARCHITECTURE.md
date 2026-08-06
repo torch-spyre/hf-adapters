@@ -167,7 +167,7 @@ Spyre memory). Gated models require HF token access.
 
 ## Public API
 
-### Unified Auto API (Recommended)
+### Generative Auto API
 
 ```python
 from hf_adapters import AutoSpyreModelForCausalLM
@@ -183,11 +183,18 @@ outputs = model.generate(tokenizer, ["What is 2+2?"], max_new_tokens=128)
 ### Masked-LM Auto API
 
 `AutoSpyreModelForMaskedLM` loads encoder models through `AutoModelForMaskedLM`.
-Its `prefill_logits(input_ids, attention_mask, token_type_ids=None)` method runs
-the bidirectional encoder on Spyre, runs the complete model-specific MLM head on
-CPU, and returns CPU `[batch, sequence, vocab]` logits. This API predicts masked
-tokens; it is not a causal continuation API and does not provide `generate()`
-semantics.
+Calling `model(**inputs)` returns a standard `MaskedLMOutput`. The
+bidirectional encoder runs on Spyre and the complete
+model-specific MLM head runs on CPU.
+
+### Extractive Question-Answering Auto API
+
+`AutoSpyreModelForQuestionAnswering` loads through
+`AutoModelForQuestionAnswering`. Calling `model(**inputs)` returns a standard
+`QuestionAnsweringModelOutput` with CPU `start_logits` and `end_logits`; the
+encoder runs on Spyre and `qa_outputs` runs on CPU. Both encoder task APIs are
+right-padded, `input_ids`-based inference only and do not currently support
+training/loss, custom embeddings, attentions, or hidden-state collection.
 
 ### Multimodal (image→text) Auto API
 
@@ -225,26 +232,6 @@ adapter. This applies to `Granite4VisionConfig` → `hf_granite_vision_mm`,
 `Mistral3Config` → `hf_mistral3_vision_mm`, and `Gemma4UnifiedConfig` →
 `hf_gemma4_mm` (the last is encoder-free — a vision projection, not a two-tower
 model).
-
-### Manual Control API
-
-Each adapter also exposes `prepare_for_spyre(model)` for manual control:
-
-```python
-from transformers import AutoModelForCausalLM
-from hf_adapters.hf_granite import prepare_for_spyre
-
-model = AutoModelForCausalLM.from_pretrained(
-    "ibm-granite/granite-3.3-8b-instruct",
-    dtype=torch.float16,
-    device_map="cpu",
-)
-prepare_for_spyre(model)
-model.to("spyre")
-outputs = generate(
-    model, tokenizer, ["Hello!"], max_new_tokens=32,
-)
-```
 
 ## How the Adapters Work
 

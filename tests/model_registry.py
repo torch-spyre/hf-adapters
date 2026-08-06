@@ -384,6 +384,22 @@ EMBEDDING_MODELS = {
 }
 
 
+QUESTION_ANSWERING_MODELS = {
+    "bert_qa": {
+        "name": "BERT base cased SQuAD 2",
+        "path": "deepset/bert-base-cased-squad2",
+        "adapter": "hf_bert.py",
+        "size": "0.1b",
+    },
+    "roberta_qa": {
+        "name": "RoBERTa base SQuAD 2",
+        "path": "deepset/roberta-base-squad2",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.1b",
+    },
+}
+
+
 MASKED_LM_MODELS = {
     "bert_mlm": {
         "name": "BERT base uncased",
@@ -559,6 +575,9 @@ EMBED_PATHS: list[str] = _select_representative_paths(
 )
 MASKED_LM_PATHS: list[str] = _select_representative_paths(
     MASKED_LM_MODELS, include_gated=_include_gated_flag
+)
+QUESTION_ANSWERING_PATHS: list[str] = _select_representative_paths(
+    QUESTION_ANSWERING_MODELS, include_gated=_include_gated_flag
 )
 VISION_PATHS: list[str] = _select_representative_paths(
     VISION_MODELS,

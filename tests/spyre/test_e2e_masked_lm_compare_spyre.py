@@ -50,11 +50,7 @@ def test_e2e_masked_lm_compare_spyre(model_path: str) -> None:
         model_path, dtype=torch_dtype_for_model_path(model_path)
     )
     with torch.no_grad():
-        logits = model.prefill_logits(
-            encoded["input_ids"],
-            encoded["attention_mask"],
-            token_type_ids=encoded.get("token_type_ids"),
-        ).float()
+        logits = model(**encoded, return_dict=True).logits.float()
 
     assert logits.shape == ref_logits.shape
     assert torch.isfinite(logits).all()

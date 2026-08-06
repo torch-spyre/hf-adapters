@@ -31,7 +31,12 @@ from typing import Any
 import pytest
 
 from tests.conftest import get_dtype_for_cpu
-from tests.model_registry import CAUSAL_PATHS, EMBED_PATHS
+from tests.model_registry import (
+    CAUSAL_PATHS,
+    EMBED_PATHS,
+    MASKED_LM_PATHS,
+    QUESTION_ANSWERING_PATHS,
+)
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
@@ -62,3 +67,28 @@ def load_embedding(model_path: str) -> Any:
     auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
     model = auto_spyre_model.AutoSpyreModel.from_pretrained(model_path, dtype=dtype)
     return model
+
+
+@pytest.mark.parametrize("model_path", MASKED_LM_PATHS, ids=MASKED_LM_PATHS)
+def test_load_masked_lm(model_path):
+    auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
+    model = auto_spyre_model.AutoSpyreModelForMaskedLM.from_pretrained(
+        model_path, dtype=get_dtype_for_cpu(model_path)
+    )
+    assert callable(model.forward)
+    del model
+    gc.collect()
+
+
+@pytest.mark.parametrize(
+    "model_path", QUESTION_ANSWERING_PATHS, ids=QUESTION_ANSWERING_PATHS
+)
+def test_load_question_answering(model_path):
+    auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
+    model = auto_spyre_model.AutoSpyreModelForQuestionAnswering.from_pretrained(
+        model_path, dtype=get_dtype_for_cpu(model_path)
+    )
+    assert callable(model.forward)
+    assert next(model.qa_outputs.parameters()).device.type == "cpu"
+    del model
+    gc.collect()

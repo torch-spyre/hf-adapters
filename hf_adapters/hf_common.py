@@ -2362,6 +2362,33 @@ def prefill_encoder(
         ``last_hidden_state``: ``[B, L, H]`` on Spyre, cropped back to the input
         ``L``. Caller moves to CPU as needed.
     """
+    if input_ids.ndim != 2:
+        raise ValueError(
+            f"input_ids must have shape [batch, sequence], got {input_ids.shape}"
+        )
+    if attention_mask.ndim != 2 or attention_mask.shape != input_ids.shape:
+        raise ValueError(
+            "attention_mask must have the same [batch, sequence] shape as input_ids"
+        )
+    if input_ids.shape[1] == 0:
+        raise ValueError("Encoder inputs must contain at least one token")
+    if token_type_ids is not None and token_type_ids.shape != input_ids.shape:
+        raise ValueError(
+            "token_type_ids must have the same [batch, sequence] shape as input_ids"
+        )
+
+    # HF pipelines may place inputs on ``model.device`` (Spyre). Padding and
+    # position construction happen on CPU; only completed graph inputs move to
+    # Spyre below.
+    input_ids = input_ids.to("cpu")
+    attention_mask = attention_mask.to("cpu")
+    if token_type_ids is not None:
+        token_type_ids = token_type_ids.to("cpu")
+
+    # ``actual_lengths`` and position construction below assume right padding.
+    if torch.any(attention_mask[:, 1:] > attention_mask[:, :-1]):
+        raise ValueError("Encoder task inputs must be right-padded")
+
     bsz, seq_len = input_ids.shape
 
     # Pad to BLOCK_SIZE multiple on the right
@@ -2415,7 +2442,7 @@ def prefill_masked_lm(
     input_ids,
     attention_mask,
     token_type_ids=None,
-):
+) -> torch.Tensor:
     """Run an encoder on Spyre and its masked-LM head on CPU."""
     last_hidden_state = prefill_encoder(
         run_encoder_forward_fn,
@@ -2428,7 +2455,7 @@ def prefill_masked_lm(
     if hasattr(model, "cls"):
         head = model.cls
         head_device = next(head.parameters()).device
-        logits = head(last_hidden_state.to(head_device))
+        logits: torch.Tensor = head(last_hidden_state.to(head_device))
     elif hasattr(model, "head") and hasattr(model, "decoder"):
         head_device = next(model.head.parameters()).device
         hidden = model.head(last_hidden_state.to(head_device))
@@ -2443,6 +2470,33 @@ def prefill_masked_lm(
         )
 
     return logits.to("cpu")
+
+
+def prefill_question_answering(
+    run_encoder_forward_fn: Callable,
+    model,
+    input_ids,
+    attention_mask,
+    token_type_ids=None,
+) -> tuple[torch.FloatTensor, torch.FloatTensor]:
+    """Run an encoder on Spyre and its extractive-QA head on CPU."""
+    last_hidden_state = prefill_encoder(
+        run_encoder_forward_fn,
+        model,
+        input_ids,
+        attention_mask,
+        token_type_ids=token_type_ids,
+    )
+
+    qa_outputs = model.qa_outputs
+    head_device = next(qa_outputs.parameters()).device
+    logits = qa_outputs(last_hidden_state.to(head_device))
+    if logits.shape[-1] != 2:
+        raise SpyreUnsupportedModelError(
+            f"Extractive question answering requires num_labels=2, got {logits.shape[-1]}"
+        )
+    start_logits, end_logits = logits.unbind(dim=-1)
+    return start_logits.to("cpu"), end_logits.to("cpu")
 
 
 # ---------------------------------------------------------------------------

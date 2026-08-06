@@ -54,6 +54,11 @@ def generate_matrices(exclude_models=None, only_models=None):
     masked_lm_paths = [
         k for k in tests.model_registry.MASKED_LM_PATHS if k not in exclude_models
     ]
+    question_answering_paths = [
+        k
+        for k in tests.model_registry.QUESTION_ANSWERING_PATHS
+        if k not in exclude_models
+    ]
     reranker_paths = [
         k for k in tests.model_registry.RERANKER_PATHS if k not in exclude_models
     ]
@@ -64,6 +69,10 @@ def generate_matrices(exclude_models=None, only_models=None):
         embed_paths = [k for k in embed_paths if k in only_models]
         vision_paths = [k for k in vision_paths if k in only_models]
         masked_lm_paths = [k for k in masked_lm_paths if k in only_models]
+        question_answering_paths = [
+            k for k in question_answering_paths if k in only_models
+        ]
+        reranker_paths = [k for k in reranker_paths if k in only_models]
 
     # Combine the task types exercised by the shared load suite.
     combined_paths = causal_paths + embed_paths
@@ -73,6 +82,7 @@ def generate_matrices(exclude_models=None, only_models=None):
         "embed": embed_paths,
         "vision": vision_paths,
         "masked_lm": masked_lm_paths,
+        "question_answering": question_answering_paths,
         "combined": combined_paths,
         "reranker": reranker_paths,
     }
@@ -93,6 +103,7 @@ def format_for_github_actions(matrices):
         "embed_matrix": json.dumps(matrices["embed"]),
         "vision_matrix": json.dumps(matrices["vision"]),
         "masked_lm_matrix": json.dumps(matrices["masked_lm"]),
+        "question_answering_matrix": json.dumps(matrices["question_answering"]),
         "combined_matrix": json.dumps(matrices["combined"]),
         "reranker_matrix": json.dumps(matrices["reranker"]),
     }
@@ -157,6 +168,10 @@ def main():
     )
     print(
         f"  Masked-LM models ({len(matrices['masked_lm'])}): {', '.join(matrices['masked_lm'])}"
+    )
+    print(
+        f"  Question-answering models ({len(matrices['question_answering'])}): "
+        f"{', '.join(matrices['question_answering'])}"
     )
     print(
         f"  Combined ({len(matrices['combined'])}): {', '.join(matrices['combined'])}"

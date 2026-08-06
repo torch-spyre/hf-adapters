@@ -6,7 +6,7 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""CPU accuracy for ``AutoSpyreModelForMaskedLM.prefill_logits``."""
+"""CPU accuracy for native ``AutoSpyreModelForMaskedLM`` forward."""
 
 import gc
 import sys
@@ -61,11 +61,8 @@ def test_auto_loader(model_path: str) -> None:
     )
     _unwrap_compiled_blocks(model)
     with torch.no_grad():
-        logits = model.prefill_logits(
-            encoded["input_ids"],
-            encoded["attention_mask"],
-            token_type_ids=encoded.get("token_type_ids"),
-        ).float()
+        outputs = model(**encoded, return_dict=True)
+        logits = outputs.logits.float()
     del model
     gc.collect()
 
