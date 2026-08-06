@@ -115,7 +115,7 @@ def generate_shards(
     x4_shard_size: int,
     output_dir: Path,
     model_types: list[ModelType],
-    snapshot_date: date | None = None,
+    snapshot_date: date,
     write_to_csv: Path | None = None,
 ) -> list[dict]:
     """Fetch each requested model type's top-K list once, write shard JSON files,
@@ -145,7 +145,6 @@ def generate_shards(
     The matrix's ``mode`` key keeps its name because push-to-clickhouse.yaml
     reads ``matrix.mode`` and passes it to ``weekly_test.py --mode``.
     """
-    snapshot_date = snapshot_date or date.today()
     output_dir.mkdir(parents=True, exist_ok=True)
     # Only the x1 tier's shard size is per-model-type; x2/x4 hold far fewer,
     # larger models, so one size each is enough.
@@ -308,6 +307,16 @@ def main() -> None:
         "low-resource manual run). 'all' (the default, and what the "
         "scheduled run always uses) fetches/shards every model type.",
     )
+    parser.add_argument(
+        "--snapshot-date",
+        type=date.fromisoformat,
+        required=True,
+        metavar="YYYY-MM-DD",
+        help=(
+            "Date to record as the snapshot date for all rows written in this run. "
+            "Use $(date -u +%Y-%m-%d) for today when invoking manually."
+        ),
+    )
     args = parser.parse_args()
 
     model_types = (
@@ -326,6 +335,7 @@ def main() -> None:
         output_dir=args.output_dir,
         model_types=model_types,
         write_to_csv=args.write_to_csv,
+        snapshot_date=args.snapshot_date,
     )
 
     print(f"\nTotal shards across {len(model_types)} model type(s): {len(matrix)}")

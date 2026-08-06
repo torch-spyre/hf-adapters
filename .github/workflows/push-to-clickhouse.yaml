@@ -55,6 +55,26 @@ on:
           - generative
           - embedding
         default: all
+      snapshot_date:
+        description: >-
+          Snapshot date (YYYY-MM-DD). Defaults to today. Override when
+          backfilling or replaying a specific scan.
+        required: false
+        type: string
+        default: ""
+      clickhouse_db:
+        description: >-
+          Which ClickHouse instance to write to. Defaults to dev for manual
+          runs so an ad-hoc scan can't clobber the production table; the
+          scheduled run always writes to prod regardless of this input (the
+          `inputs` context is empty for schedule triggers — see the env block
+          below).
+        required: false
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
 
 concurrency:
   # Scoped per-ref: a new commit on a given branch cancels and supersedes
@@ -78,6 +98,26 @@ env:
   CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
   STORAGE_1_DIR: /storage-1/hf-adapters
   HF_HOME: /storage-1/hf-adapters/.cache/huggingface
+
+  # ---------------------------------------------------------------------------
+  # ClickHouse target selection, resolved ONCE here and inherited by every job
+  # (generate-matrix + all three scan tiers) — workflow-level env supports both
+  # `secrets` and expressions, so the five variables don't need repeating
+  # per-job. Jobs must NOT redeclare CLICKHOUSE_* in their own `env:`, since a
+  # job-level key of the same name shadows the workflow-level one.
+  #
+  # Selection rule: prod unless this is a manual dispatch that asked for dev.
+  # Written in that direction deliberately — the `inputs` context is empty for
+  # schedule-triggered runs (the input schema's `default: dev` only applies to
+  # the manual "Run workflow" form), so the scheduled weekly scan falls through
+  # to prod, while a manual run defaults to dev and must opt in to prod.
+  # ---------------------------------------------------------------------------
+  CLICKHOUSE_TARGET: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && 'dev' || 'prod' }}
+  CLICKHOUSE_HOST: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_HOST_DEV || secrets.CLICKHOUSE_HOST }}
+  CLICKHOUSE_PORT: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_PORT_DEV || secrets.CLICKHOUSE_PORT }}
+  CLICKHOUSE_USER: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_USER_DEV || secrets.CLICKHOUSE_USER }}
+  CLICKHOUSE_PASS: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_PASS_DEV || secrets.CLICKHOUSE_PASS }}
+  CLICKHOUSE_DB: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_DB_DEV || secrets.CLICKHOUSE_DB }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -109,15 +149,13 @@ jobs:
       matrix_x1: ${{ steps.generate.outputs.matrix_x1 }}
       matrix_x2: ${{ steps.generate.outputs.matrix_x2 }}
       matrix_x4: ${{ steps.generate.outputs.matrix_x4 }}
+      snapshot_date: ${{ steps.generate.outputs.snapshot_date }}
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      # Needed because this job writes the terminal verdict rows for the models
-      # it filters out.
-      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
-      CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
-      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
-      CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
-      CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
+      # CLICKHOUSE_* are inherited from the workflow-level env block. This job
+      # needs them because it writes the terminal verdict rows for the models it
+      # filters out.
+      #
       # Overrides the workflow-level HF_HOME (/storage-1/... — a Spyre-pod-only
       # mount). Every AutoConfig.from_pretrained() call was failing with a
       # PermissionError trying to write there, which contains_remote_code()
@@ -193,14 +231,28 @@ jobs:
       # python with working-directory: '.'.
       - name: Verify ClickHouse connection
         run: |
+          echo "ClickHouse target: $CLICKHOUSE_TARGET"
+          MISSING=0
           for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
             VAL="${!VAR}"
             if [[ -n "$VAL" ]]; then
               echo "$VAR: set (${#VAL} chars)"
             else
               echo "$VAR: NOT SET"
+              MISSING=1
             fi
           done
+          # A `dev` run whose *_DEV secret is empty would NOT fail here: GitHub's
+          # `cond && secrets.X_DEV || secrets.X` is value-returning, not boolean,
+          # so an empty/missing _DEV secret silently falls through to the PROD
+          # value — i.e. a run asked to target dev would write to production, and
+          # the length check above would look perfectly healthy. Fail loudly
+          # instead of clobbering prod.
+          if [[ "$CLICKHOUSE_TARGET" == "dev" && "$MISSING" == "1" ]]; then
+            echo "::error::CLICKHOUSE_TARGET=dev but a CLICKHOUSE_*_DEV secret is missing;" \
+                 "refusing to run rather than risk falling back to the prod instance."
+            exit 1
+          fi
           python - <<'PY'
           import os
           import clickhouse_connect
@@ -228,9 +280,19 @@ jobs:
           #
           # Shard sizes use the script's real defaults (250/500 for the
           # x1 tier, 100/50 for the x2/x4 tiers by parameter count).
+          #
+          # snapshot_date is computed once here and forwarded to every scan
+          # job via the generate-matrix output, so a run straddling midnight
+          # records a consistent date across all shards and their terminal rows.
+          SNAPSHOT_DATE="${{ inputs.snapshot_date || '' }}"
+          if [[ -z "$SNAPSHOT_DATE" ]]; then
+            SNAPSHOT_DATE=$(date -u +%Y-%m-%d)
+          fi
+          echo "snapshot_date=$SNAPSHOT_DATE" >> "$GITHUB_OUTPUT"
           python .github/scripts/generate_weekly_shards.py \
             --top-k ${{ inputs.top_k || '10000' }} \
             --model-type ${{ github.event_name == 'workflow_dispatch' && (inputs.model_type || 'all') || 'all' }} \
+            --snapshot-date "$SNAPSHOT_DATE" \
             --output-dir shards
 
       - name: Upload shard artifacts
@@ -259,11 +321,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x1) }}
     env:
-      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
-      CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
-      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
-      CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
-      CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
+      # CLICKHOUSE_* are inherited from the workflow-level env block.
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - name: Checkout composite actions
@@ -290,14 +348,28 @@ jobs:
       # secret values, only presence/length and a live SELECT 1.
       - name: Verify ClickHouse connection
         run: |
+          echo "ClickHouse target: $CLICKHOUSE_TARGET"
+          MISSING=0
           for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
             VAL="${!VAR}"
             if [[ -n "$VAL" ]]; then
               echo "$VAR: set (${#VAL} chars)"
             else
               echo "$VAR: NOT SET"
+              MISSING=1
             fi
           done
+          # A `dev` run whose *_DEV secret is empty would NOT fail here: GitHub's
+          # `cond && secrets.X_DEV || secrets.X` is value-returning, not boolean,
+          # so an empty/missing _DEV secret silently falls through to the PROD
+          # value — i.e. a run asked to target dev would write to production, and
+          # the length check above would look perfectly healthy. Fail loudly
+          # instead of clobbering prod.
+          if [[ "$CLICKHOUSE_TARGET" == "dev" && "$MISSING" == "1" ]]; then
+            echo "::error::CLICKHOUSE_TARGET=dev but a CLICKHOUSE_*_DEV secret is missing;" \
+                 "refusing to run rather than risk falling back to the prod instance."
+            exit 1
+          fi
           cd "$CLONED_HF_ADAPTERS_DIR"
           uv run python - <<'PY'
           import os
@@ -322,7 +394,8 @@ jobs:
           cd "$CLONED_HF_ADAPTERS_DIR"
           uv run python tests/spyre/weekly_generation/weekly_test.py \
             --mode ${{ matrix.mode }} \
-            --model-list-file shards/${{ matrix.shard_file }}
+            --model-list-file shards/${{ matrix.shard_file }} \
+            --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }}
           echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
 
   weekly-model-scan-x2:
@@ -337,11 +410,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x2) }}
     env:
-      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
-      CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
-      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
-      CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
-      CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
+      # CLICKHOUSE_* are inherited from the workflow-level env block.
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - name: Checkout composite actions
@@ -368,14 +437,28 @@ jobs:
       # secret values, only presence/length and a live SELECT 1.
       - name: Verify ClickHouse connection
         run: |
+          echo "ClickHouse target: $CLICKHOUSE_TARGET"
+          MISSING=0
           for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
             VAL="${!VAR}"
             if [[ -n "$VAL" ]]; then
               echo "$VAR: set (${#VAL} chars)"
             else
               echo "$VAR: NOT SET"
+              MISSING=1
             fi
           done
+          # A `dev` run whose *_DEV secret is empty would NOT fail here: GitHub's
+          # `cond && secrets.X_DEV || secrets.X` is value-returning, not boolean,
+          # so an empty/missing _DEV secret silently falls through to the PROD
+          # value — i.e. a run asked to target dev would write to production, and
+          # the length check above would look perfectly healthy. Fail loudly
+          # instead of clobbering prod.
+          if [[ "$CLICKHOUSE_TARGET" == "dev" && "$MISSING" == "1" ]]; then
+            echo "::error::CLICKHOUSE_TARGET=dev but a CLICKHOUSE_*_DEV secret is missing;" \
+                 "refusing to run rather than risk falling back to the prod instance."
+            exit 1
+          fi
           cd "$CLONED_HF_ADAPTERS_DIR"
           uv run python - <<'PY'
           import os
@@ -400,7 +483,8 @@ jobs:
           cd "$CLONED_HF_ADAPTERS_DIR"
           uv run python tests/spyre/weekly_generation/weekly_test.py \
             --mode ${{ matrix.mode }} \
-            --model-list-file shards/${{ matrix.shard_file }}
+            --model-list-file shards/${{ matrix.shard_file }} \
+            --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }}
           echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
 
   weekly-model-scan-x4:
@@ -415,11 +499,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x4) }}
     env:
-      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
-      CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
-      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
-      CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
-      CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
+      # CLICKHOUSE_* are inherited from the workflow-level env block.
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - name: Checkout composite actions
@@ -446,14 +526,28 @@ jobs:
       # secret values, only presence/length and a live SELECT 1.
       - name: Verify ClickHouse connection
         run: |
+          echo "ClickHouse target: $CLICKHOUSE_TARGET"
+          MISSING=0
           for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
             VAL="${!VAR}"
             if [[ -n "$VAL" ]]; then
               echo "$VAR: set (${#VAL} chars)"
             else
               echo "$VAR: NOT SET"
+              MISSING=1
             fi
           done
+          # A `dev` run whose *_DEV secret is empty would NOT fail here: GitHub's
+          # `cond && secrets.X_DEV || secrets.X` is value-returning, not boolean,
+          # so an empty/missing _DEV secret silently falls through to the PROD
+          # value — i.e. a run asked to target dev would write to production, and
+          # the length check above would look perfectly healthy. Fail loudly
+          # instead of clobbering prod.
+          if [[ "$CLICKHOUSE_TARGET" == "dev" && "$MISSING" == "1" ]]; then
+            echo "::error::CLICKHOUSE_TARGET=dev but a CLICKHOUSE_*_DEV secret is missing;" \
+                 "refusing to run rather than risk falling back to the prod instance."
+            exit 1
+          fi
           cd "$CLONED_HF_ADAPTERS_DIR"
           uv run python - <<'PY'
           import os
@@ -478,5 +572,6 @@ jobs:
           cd "$CLONED_HF_ADAPTERS_DIR"
           uv run python tests/spyre/weekly_generation/weekly_test.py \
             --mode ${{ matrix.mode }} \
-            --model-list-file shards/${{ matrix.shard_file }}
+            --model-list-file shards/${{ matrix.shard_file }} \
+            --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }}
           echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
