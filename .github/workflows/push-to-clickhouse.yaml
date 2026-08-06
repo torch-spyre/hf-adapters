@@ -55,6 +55,13 @@ on:
           - generative
           - embedding
         default: all
+      snapshot_date:
+        description: >-
+          Snapshot date (YYYY-MM-DD). Defaults to today. Override when
+          backfilling or replaying a specific scan.
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   # Scoped per-ref: a new commit on a given branch cancels and supersedes
@@ -109,6 +116,7 @@ jobs:
       matrix_x1: ${{ steps.generate.outputs.matrix_x1 }}
       matrix_x2: ${{ steps.generate.outputs.matrix_x2 }}
       matrix_x4: ${{ steps.generate.outputs.matrix_x4 }}
+      snapshot_date: ${{ steps.generate.outputs.snapshot_date }}
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       # Needed because this job writes the terminal verdict rows for the models
@@ -228,9 +236,19 @@ jobs:
           #
           # Shard sizes use the script's real defaults (250/500 for the
           # x1 tier, 100/50 for the x2/x4 tiers by parameter count).
+          #
+          # snapshot_date is computed once here and forwarded to every scan
+          # job via the generate-matrix output, so a run straddling midnight
+          # records a consistent date across all shards and their terminal rows.
+          SNAPSHOT_DATE="${{ inputs.snapshot_date || '' }}"
+          if [[ -z "$SNAPSHOT_DATE" ]]; then
+            SNAPSHOT_DATE=$(date -u +%Y-%m-%d)
+          fi
+          echo "snapshot_date=$SNAPSHOT_DATE" >> "$GITHUB_OUTPUT"
           python .github/scripts/generate_weekly_shards.py \
             --top-k ${{ inputs.top_k || '10000' }} \
             --model-type ${{ github.event_name == 'workflow_dispatch' && (inputs.model_type || 'all') || 'all' }} \
+            --snapshot-date "$SNAPSHOT_DATE" \
             --output-dir shards
 
       - name: Upload shard artifacts
@@ -322,7 +340,8 @@ jobs:
           cd "$CLONED_HF_ADAPTERS_DIR"
           uv run python tests/spyre/weekly_generation/weekly_test.py \
             --mode ${{ matrix.mode }} \
-            --model-list-file shards/${{ matrix.shard_file }}
+            --model-list-file shards/${{ matrix.shard_file }} \
+            --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }}
           echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
 
   weekly-model-scan-x2:
@@ -400,7 +419,8 @@ jobs:
           cd "$CLONED_HF_ADAPTERS_DIR"
           uv run python tests/spyre/weekly_generation/weekly_test.py \
             --mode ${{ matrix.mode }} \
-            --model-list-file shards/${{ matrix.shard_file }}
+            --model-list-file shards/${{ matrix.shard_file }} \
+            --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }}
           echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
 
   weekly-model-scan-x4:
@@ -478,5 +498,6 @@ jobs:
           cd "$CLONED_HF_ADAPTERS_DIR"
           uv run python tests/spyre/weekly_generation/weekly_test.py \
             --mode ${{ matrix.mode }} \
-            --model-list-file shards/${{ matrix.shard_file }}
+            --model-list-file shards/${{ matrix.shard_file }} \
+            --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }}
           echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"

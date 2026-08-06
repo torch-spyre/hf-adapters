@@ -269,11 +269,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--snapshot-date",
         type=date.fromisoformat,
-        default=date.today(),
+        required=True,
         metavar="YYYY-MM-DD",
         help=(
-            "Date to record as the snapshot date for all rows written in this run "
-            "(default: today). Override when backfilling or replaying a specific scan."
+            "Date to record as the snapshot date for all rows written in this run. "
+            "Use $(date -u +%Y-%m-%d) for today when invoking manually."
         ),
     )
     args = parser.parse_args(argv)
