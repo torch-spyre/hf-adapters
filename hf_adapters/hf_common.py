@@ -38,6 +38,10 @@ class SpyreUnsupportedModelError(ValueError):
     """Architecture is supported, but this config can't run on Spyre."""
 
 
+class SpyreUnsupportedFeatureError(ValueError):
+    """A Hugging Face API feature is not currently supported on Spyre."""
+
+
 class SpyreNoAdapterError(ValueError):
     """No Spyre adapter is registered for this model's architecture."""
 

@@ -112,6 +112,7 @@ from hf_adapters import (
 )
 from hf_adapters.hf_common import (
     SpyreNoAdapterError,
+    SpyreUnsupportedFeatureError,
     SpyreUnsupportedModelError,
     assert_spyre_dimensions,
     load_model_common,
@@ -308,29 +309,29 @@ def _validate_encoder_task_forward(
 ) -> None:
     """Validate the inference-only forward contract shared by encoder tasks."""
     if inputs_embeds is not None:
-        raise SpyreUnsupportedModelError(
+        raise SpyreUnsupportedFeatureError(
             "inputs_embeds is not currently supported on Spyre"
         )
     if input_ids is None:
         raise ValueError("input_ids must be provided")
     if position_ids is not None:
-        raise SpyreUnsupportedModelError(
+        raise SpyreUnsupportedFeatureError(
             "Custom position_ids are not currently supported on Spyre"
         )
     if head_mask is not None:
-        raise SpyreUnsupportedModelError(
+        raise SpyreUnsupportedFeatureError(
             "head_mask is not currently supported on Spyre"
         )
     if labels is not None or model.training:
-        raise SpyreUnsupportedModelError(
+        raise SpyreUnsupportedFeatureError(
             "Loss computation and training are not currently supported"
         )
     if output_attentions:
-        raise SpyreUnsupportedModelError(
+        raise SpyreUnsupportedFeatureError(
             "output_attentions is not currently supported on Spyre"
         )
     if output_hidden_states:
-        raise SpyreUnsupportedModelError(
+        raise SpyreUnsupportedFeatureError(
             "output_hidden_states is not currently supported on Spyre"
         )
 
@@ -376,7 +377,7 @@ class AutoSpyreModelForMaskedLM(AutoSpyreModel):
             from hf_adapters.hf_common import prefill_masked_lm
 
             if encoder_hidden_states is not None or encoder_attention_mask is not None:
-                raise SpyreUnsupportedModelError(
+                raise SpyreUnsupportedFeatureError(
                     "Cross-attention inputs are not supported"
                 )
             if kwargs:
