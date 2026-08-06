@@ -133,7 +133,7 @@ elif not _ALREADY_PATCHED:
     # Default (spyre) lane: hf_adapters is imported normally (real
     # DEVICE="spyre"). model_registry populates CAUSAL_PATHS / EMBED_PATHS at
     # import time.
-    pass  # noqa: E402
+    pass
 
 # When _ALREADY_PATCHED (benign re-import via ``from tests.conftest import ...``)
 # both branches are skipped: hf_adapters is patched and the registry is

@@ -31,7 +31,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from model_registry import CAUSAL_PATHS, NON_BLOCKING_CAUSAL_MODELS, xfail_non_blocking
+from transformers import PreTrainedModel
 
 from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
 from hf_adapters.hf_common import (
@@ -41,10 +41,15 @@ from hf_adapters.hf_common import (
     move_model_to_spyre,
 )
 from tests.conftest import load_ref_model, resolve_adapter_module_for_test
+from tests.model_registry import (
+    CAUSAL_PATHS,
+    NON_BLOCKING_CAUSAL_MODELS,
+    xfail_non_blocking,
+)
 
 
 def hf_greedy_steps(
-    model: nn.Module,
+    model: PreTrainedModel,
     input_ids: torch.Tensor,
     num_decode: int = 4,
 ) -> list[dict[str, Any]]:
@@ -52,7 +57,7 @@ def hf_greedy_steps(
     from transformers import DynamicCache
 
     results = []
-    past = DynamicCache()
+    past = DynamicCache(config=model.config)
     ids = input_ids.clone()
     seq_len = ids.shape[1]
 

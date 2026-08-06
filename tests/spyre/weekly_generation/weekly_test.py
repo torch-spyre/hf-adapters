@@ -132,20 +132,36 @@ GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS: int = 10
 EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS: int = 90
 
 
-def _repos_with_weights():
-    """Set of repo_ids that already have >=1 weight file cached at startup."""
-    from huggingface_hub import scan_cache_dir
+def _repos_with_weights(repo_ids: list[str]) -> set[str]:
+    """Subset of *repo_ids* that already have >=1 weight file cached at startup.
 
-    have = set()
-    try:
-        cache = scan_cache_dir()
-    except Exception:
-        return have
-    for repo in cache.repos:
-        for rev in repo.revisions:
-            if any(fobj.file_name.endswith(_WEIGHT_SUFFIXES) for fobj in rev.files):
-                have.add(repo.repo_id)
-                break
+    Navigates directly to each repo's cache folder using the known HF layout —
+    same trick as ``_delete_repo_weights`` — instead of calling
+    ``scan_cache_dir()``, which walks and stats every blob under HF_HOME. On the
+    Spyre pod that cache is a shared network mount holding the accumulated
+    weights of the whole scan, and up to 32 shard jobs call this concurrently at
+    startup, so the full walk cost hours of wall-clock per job.
+
+    Only models in the current shard are ever looked up (see ``had_weights_map``
+    in ``main``), so scoping the check to *repo_ids* loses nothing.
+    """
+    print(f"{ts()} Scanning the weight cache for {len(repo_ids)} model(s)…", flush=True)
+    started: float = time.monotonic()
+    have: set[str] = set()
+    for repo_id in repo_ids:
+        snapshots_dir = _repo_cache_dir(repo_id) / "snapshots"
+        if not snapshots_dir.is_dir():
+            continue
+        try:
+            if any(p.name.endswith(_WEIGHT_SUFFIXES) for p in snapshots_dir.rglob("*")):
+                have.add(repo_id)
+        except OSError as e:
+            print(f"    warn: could not scan {snapshots_dir}: {e}")
+    print(
+        f"{ts()} Weight-cache scan done in {time.monotonic() - started:.2f}s — "
+        f"{len(have)}/{len(repo_ids)} model(s) already cached.",
+        flush=True,
+    )
     return have
 
 
@@ -620,7 +636,6 @@ def main(
     from utils.fetch_top_generative_models import fetch_top_generative_models
 
     print(f"{ts()} Starting main.")
-    preexisting: set = _repos_with_weights()
     total_freed: int = 0
     snapshot_date = date.today()
     if mode == EmbeddingGenerativeMode.GENERATIVE:
@@ -637,6 +652,11 @@ def main(
         to_process_list = fetch_top_generative_models(limit=top_k)
     else:
         to_process_list = fetch_top_embedding_models(limit=top_k)
+    # Must run after to_process_list is resolved — the cache check is scoped to
+    # this run's models rather than walking the whole (network-mounted) cache.
+    preexisting: set[str] = _repos_with_weights(
+        [str(row["model_id"]) for row in to_process_list]
+    )
     adapter_dates: dict[str, str | None] = _get_adapter_dates()
 
     sink: ResultSink
