@@ -649,7 +649,7 @@ class TestSinkFactory:
         for model_type in ModelType:
             with create_sink(
                 model_type=model_type,
-                    write_to_csv=base,
+                write_to_csv=base,
             ):
                 pass
         assert {p.name for p in tmp_path.iterdir()} == {
