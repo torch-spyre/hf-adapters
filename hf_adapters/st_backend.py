@@ -149,9 +149,26 @@ def _spyre_init(self, *args, **kwargs):
     would move our prepared, device-resident backbone back to CPU. Thus, we
     default the device to ``"spyre".
     """
-    if kwargs.get("backend") == "spyre" and kwargs.get("device") is None:
+    self._spyre_backend = kwargs.get("backend") == "spyre"
+    if self._spyre_backend and kwargs.get("device") is None:
         kwargs["device"] = "spyre"
     return _original_init(self, *args, **kwargs)
+
+
+def _spyre_forward(self, input, **kwargs):
+    """Some models have extra post-backbone heads with weights, for instance a
+    ``Dense`` projection. ``self.to("spyre")`` moves *every* module to Spyre, but
+    those heads operate on outputs that ``_cpu_pooling_forward`` moves to CPU.
+
+    Moving them at init is not enough: ``SentenceTransformer.encode`` re-issues
+    ``self.to(self.device)`` at the top of every call, silently pulling the
+    heads back onto Spyre before the forward pass. So we move the non-backbone
+    modules (``self[1:]``; the backbone is ``self[0]``) in each call.
+    """
+    if getattr(self, "_spyre_backend", False):
+        for module in list(self.children())[1:]:
+            module.to("cpu")
+    return _original_forward(self, input, **kwargs)
 
 
 def register():
@@ -164,7 +181,7 @@ def register():
     from sentence_transformers import SentenceTransformer
     from sentence_transformers.base.modules.transformer import Transformer
 
-    global _original_load_model, _original_init
+    global _original_load_model, _original_init, _original_forward
 
     if getattr(Transformer, "_spyre_patched", False):
         return
@@ -175,10 +192,14 @@ def register():
     _original_init = SentenceTransformer.__init__
     SentenceTransformer.__init__ = _spyre_init
 
+    _original_forward = SentenceTransformer.forward
+    SentenceTransformer.forward = _spyre_forward
+
     Transformer._spyre_patched = True
 
 
 # Register immediately on import.
 _original_load_model = None
 _original_init = None
+_original_forward = None
 register()
