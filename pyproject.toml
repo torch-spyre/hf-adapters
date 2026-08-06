@@ -22,13 +22,12 @@ packages = ["hf_adapters"]
 
 [tool.black]
 line-length = 88
-# Lowest version in requires-python; dropping py310 keeps these in step with it.
-target-version = ['py311']
+target-version = ['py310', 'py311']
 include = '\.pyi?$'
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
@@ -39,13 +38,7 @@ ignore = [
 ]
 
 [tool.mypy]
-# python_version is deliberately unset: mypy then analyzes as the interpreter it runs
-# under, which is what keeps it consistent with the numpy version resolved for that
-# interpreter. uv.lock pins numpy per interpreter (2.3.5 below 3.13, 2.5.1 at 3.13+),
-# and numpy 2.5.1's bundled stubs use PEP 695 `type X = ...` aliases. Pinning this to
-# 3.10 made mypy reject those stubs as a syntax error and abort before checking a
-# single project file; pinning it to any fixed value re-breaks on some interpreter.
-# See requires-python above for the supported range.
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
@@ -54,13 +47,6 @@ files = ["hf_adapters/**/*.py"]
 # sympy ships no py.typed marker (PEP 561), so mypy refuses to analyze it.
 [[tool.mypy.overrides]]
 module = "sympy.*"
-ignore_missing_imports = true
-
-# deepspec is an undeclared optional dependency, present only where the DSpark
-# drafters run. The adapters import it lazily inside functions for that reason, so
-# its absence is expected off-pod and must not be a type error.
-[[tool.mypy.overrides]]
-module = "deepspec.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
