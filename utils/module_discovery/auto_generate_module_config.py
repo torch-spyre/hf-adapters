@@ -14,10 +14,12 @@ Usage:
 
 import argparse
 import hashlib
+import inspect
 import json
 import logging
+import os
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 import yaml
@@ -216,6 +218,83 @@ def _resolve_layer_idx(module: Any) -> int | None:
     if self_attn is not None:
         return getattr(self_attn, "layer_idx", None)
     return None
+
+
+def _class_source_location(cls: type) -> Tuple[Optional[str], Optional[int]]:
+    """Return (source file, first line of the class definition) for ``cls``.
+
+    Resolved from the live class object while the hook still holds the module
+    instance. ``module_path`` alone is not enough: a model loaded with
+    ``trust_remote_code`` lives in a dynamically created module that cannot be
+    re-imported by name later. Returns ``(None, None)`` when no source is
+    retrievable (C extension, class synthesized at runtime).
+    """
+    try:
+        source_file = inspect.getsourcefile(cls)
+        _, lineno = inspect.getsourcelines(cls)
+    except (OSError, TypeError):
+        return None, None
+    return source_file, lineno
+
+
+def _shorten_source_path(path: str) -> str:
+    """Trim an absolute source path down to something environment-independent.
+
+    A ``site-packages``/``dist-packages`` install becomes ``<pkg>/...`` so the
+    generated YAML does not hard-code the generating machine's venv layout.
+    Paths outside a site install are returned unchanged.
+    """
+    parts = Path(path).parts
+    for marker in ("site-packages", "dist-packages"):
+        if marker in parts:
+            return str(Path(*parts[parts.index(marker) + 1 :]))
+    return path
+
+
+def _get_transformers_ref() -> str:
+    """Git ref used in generated transformers source URLs.
+
+    Mirrors ``utils/model_ops/utils/torchop_yaml.py``: ``TRANSFORMERS_VERSION``
+    overrides, otherwise the installed version becomes a ``vX.Y.Z`` release tag.
+    A dev/editable install ("5.0.0.dev0") has no such tag, so it falls back to
+    ``main`` rather than emitting a dead link.
+    """
+    version = os.getenv("TRANSFORMERS_VERSION")
+    if version:
+        return version
+    try:
+        import transformers
+    except ImportError:
+        return "main"
+    return (
+        "main" if "dev" in transformers.__version__ else f"v{transformers.__version__}"
+    )
+
+
+_TRANSFORMERS_BLOB_URL = "https://github.com/huggingface/transformers/blob"
+
+
+def _source_reference(
+    source_file: Optional[str], lineno: Optional[int]
+) -> Optional[str]:
+    """Render a captured source location as a human-followable reference.
+
+    A file inside an installed ``transformers`` package becomes a GitHub blob
+    URL pinned to the installed version, matching the scheme
+    ``torchop_yaml._convert_transformers_path_to_url`` uses. Any other package
+    (torch, vLLM, a trust_remote_code module) degrades to a venv-relative
+    ``path:line``, since there is no single upstream repo to point at.
+    """
+    if not source_file:
+        return None
+    rel = _shorten_source_path(source_file)
+    # rel differing from the input means the file came from a site install, so
+    # a leading "transformers/" component is the installed transformers package
+    # (and maps onto src/transformers/... in the upstream repo layout).
+    if rel != source_file and rel.startswith("transformers/"):
+        anchor = f"#L{lineno}" if lineno else ""
+        return f"{_TRANSFORMERS_BLOB_URL}/{_get_transformers_ref()}/src/{rel}{anchor}"
+    return f"{rel}:{lineno}" if lineno else rel
 
 
 def _extract_cache_info(
@@ -514,10 +593,14 @@ class ModuleInfoCapture:
             if unique_module_name not in self.module_data:
                 self.seen_module_configs.add(config_signature)
 
+                cls = module.__class__
+                source_file, source_lineno = _class_source_location(cls)
                 self.module_data[unique_module_name] = {
                     "name": unique_module_name,
                     "module_type": module_type,
-                    "module_path": f"{module.__class__.__module__}.{module.__class__.__name__}",
+                    "module_path": f"{cls.__module__}.{cls.__name__}",
+                    "source_file": source_file,
+                    "source_lineno": source_lineno,
                     "example_instance": module_name,
                     "constructor_args": constructor_info["constructor_args"],
                     "constructor_kwargs": constructor_info["constructor_kwargs"],
@@ -997,11 +1080,23 @@ def _build_module_entry_dict(module_info: Dict[str, Any]) -> Dict[str, Any]:
 
     forward_inputs = forward_inputs_list
 
+    # Record where the class is defined so a reader of the generated YAML can
+    # jump straight to the source. Appended to the free-text description rather
+    # than emitted as its own key, so the entry stays within the shape the OOT
+    # framework's include schema accepts. Absent for captures that carry no
+    # source location (the vLLM generator builds module_info dicts by hand).
+    description = f"Module: {module_info['module_path']}"
+    location = _source_reference(
+        module_info.get("source_file"), module_info.get("source_lineno")
+    )
+    if location:
+        description = f"{description} (defined at {location})"
+
     # Build module entry
     entry = {
         "name": module_info["name"],
         "module_path": module_info["module_path"],
-        "description": f"Module: {module_info['module_path']}",
+        "description": description,
         "constructor_inputs": {
             "args": constructor_args if constructor_args else [],
             "kwargs": constructor_kwargs if constructor_kwargs else {},
