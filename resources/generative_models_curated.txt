@@ -12,5 +12,3 @@ ibm-granite/granite-4.1-3b-base
 google/gemma-4-31b
 google/gemma-4-31b-it
 google/gemma-4-12b
-
-

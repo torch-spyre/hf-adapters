@@ -13,4 +13,3 @@ ibm-granite/granite-embedding-30m-english
 ibm-granite/granite-embedding-125m-english
 ibm-granite/granite-embedding-107m-multilingual
 ibm-granite/granite-embedding-278m-multilingual
-
