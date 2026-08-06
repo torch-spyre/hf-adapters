@@ -373,9 +373,15 @@ def build_catalog(
             logging.warning("filter_fn failed for %s: %s", model.id, e)
             return False
 
+    timings: dict[str, float] = {}
+    t_total = time.perf_counter()
+
+    t0 = time.perf_counter()
     candidates: list[ModelInfo] = list(fetch_fn(limit))
+    timings["fetch (HF list_models)"] = time.perf_counter() - t0
     print(f"Retrieved {len(candidates)} raw {label} candidates.")
 
+    t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=16) as ex:
         keep_flags: list[bool] = list(
             tqdm(
@@ -385,6 +391,7 @@ def build_catalog(
             )
         )
     models: list[ModelInfo] = [m for m, keep in zip(candidates, keep_flags) if keep]
+    timings["filter (filter_fn)"] = time.perf_counter() - t0
     print(f"Kept {len(models)} {label} models after filtering.")
 
     models = models[:limit]
@@ -406,6 +413,7 @@ def build_catalog(
     tail_head: list[str] = ["is_custom_code", "config_class", "is_supported", "Year"]
     header: list[str] = base_head + extra_head + tail_head
 
+    t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=16) as ex:
         config_classes: list[str | None] = list(
             tqdm(
@@ -414,7 +422,9 @@ def build_catalog(
                 desc="Fetching config classes",
             )
         )
+    timings["config classes (AutoConfig)"] = time.perf_counter() - t0
 
+    t0 = time.perf_counter()
     rows: list[dict[str, object]] = []
     for rank, (m, config_class) in enumerate(zip(models, config_classes), start=1):
         architectures: list[str] | None = (m.config or {}).get("architectures")
@@ -447,12 +457,16 @@ def build_catalog(
             )
         )
 
+    timings["build rows"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     if output_csv is not None:
         print(f"Writing top {len(rows)} to {output_csv}")
         with open(output_csv, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=header)
             writer.writeheader()
             writer.writerows(rows)
+    timings["write CSV"] = time.perf_counter() - t0
 
     # Attach the source ModelInfo to each row AFTER the CSV write. It is a
     # runtime-only field (not serializable, and never part of the schema),
@@ -462,8 +476,19 @@ def build_catalog(
     # is_moe is precomputed here (a pure function of data already fetched —
     # tags, config.model_type, config.architectures) so callers that need it
     # don't have to carry the non-serializable ModelInfo object forward.
+    t0 = time.perf_counter()
     for row, m in zip(rows, models):
         row["model_info"] = m
         row["is_moe"] = is_moe(m)
+    timings["attach model_info / is_moe"] = time.perf_counter() - t0
+
+    timings["other"] = (time.perf_counter() - t_total) - sum(timings.values())
+
+    total = sum(timings.values())
+    print(f"\nTiming breakdown for {label} catalog ({total:.1f}s total):")
+    width = max(len(name) for name in timings)
+    for name, secs in timings.items():
+        share = secs / total if total else 0.0
+        print(f"  {name:<{width}}  {secs:7.2f}s  {share:5.1%}")
 
     return rows
