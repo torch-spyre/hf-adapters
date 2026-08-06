@@ -3,9 +3,9 @@
 Split from ``model_prefilter`` so that module stays free of database imports:
 this one touches a ``ResultSink``, that one is pure.
 
-The field mapping below is the one the three skip branches in
-``weekly_test.main`` used before the filter moved upstream — all three wrote an
-identical shape and differed only in ``failure_category``.
+Every ``SkippedModel`` in ``PrefilterResult.skipped`` represents a terminal
+verdict — no adapter, too large, MoE — and gets exactly one row written here.
+The field mapping mirrors the ``add_entry`` signature on ``ResultSink``.
 """
 
 from __future__ import annotations
