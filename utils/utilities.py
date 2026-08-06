@@ -18,3 +18,22 @@ def human_bytes(n: float) -> str:
             return f"{n:.1f}{unit}"
         n /= 1024
     raise AssertionError("unreachable: the TB branch always returns")
+
+
+def concat_and_dedup_dicts(l1: list[dict], l2: list[dict]) -> list[dict]:
+    """
+    Concatenates two lists of dicts, removing duplicates by a unique ID key.
+    Keeps the first instance encountered.
+    """
+    seen = set()
+    result = []
+
+    # Iterate through both lists sequentially
+    for d in l1 + l2:
+        # Get the ID value, skip or handle safely if the key is missing
+        item_id = d["model_id"]
+        if item_id not in seen:
+            seen.add(item_id)
+            result.append(d)
+
+    return result

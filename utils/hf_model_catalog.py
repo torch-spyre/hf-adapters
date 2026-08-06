@@ -54,6 +54,15 @@ def load_curated_model_ids(path: Path) -> list[str]:
         model_ids.append(line)
     return model_ids
 
+
+def load_curated_generative_models() -> list[str]:
+    return load_curated_model_ids(CURATED_GENERATIVE_MODELS_FILE)
+
+
+def load_curated_embedding_models() -> list[str]:
+    return load_curated_model_ids(CURATED_EMBEDDING_MODELS_FILE)
+
+
 # Metadata fields requested from list_models for every fetcher.
 EXPAND_FIELDS: list[str] = [
     "config",

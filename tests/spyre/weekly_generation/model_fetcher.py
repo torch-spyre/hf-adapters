@@ -12,11 +12,20 @@ from collections.abc import Callable
 from tests.spyre.weekly_generation.model_type import ModelType
 from utils.fetch_top_embedding_models import fetch_top_embedding_models
 from utils.fetch_top_generative_models import fetch_top_generative_models
+from utils.hf_model_catalog import (
+    load_curated_embedding_models,
+    load_curated_generative_models,
+)
 from utils.utilities import ts
 
 all_fetchers: dict[ModelType, Callable[..., list[dict]]] = {
     ModelType.GENERATIVE: fetch_top_generative_models,
     ModelType.EMBEDDING: fetch_top_embedding_models,
+}
+
+all_curated_loaders: dict[ModelType, Callable[..., list[str]]] = {
+    ModelType.GENERATIVE: load_curated_generative_models,
+    ModelType.EMBEDDING: load_curated_embedding_models,
 }
 """Catalog fetcher per model type. Module-level and mutable so tests can
 monkeypatch it and exercise the pipeline without hitting the network."""
@@ -41,9 +50,26 @@ def fetch(model_type: ModelType, top_k: int) -> list[dict]:
     # Dropped here rather than at each call site because every consumer either
     # JSON-dumps these rows into a shard file or hands them to a spawned child
     # (which pickles them); both break on a ModelInfo.
+    # we also indicate that the model is not a curated model
     for model in models:
         model.pop("model_info", None)
+        model["curated"] = False
 
     print(f"{ts()} Fetched {len(models)} {model_type} model(s).")
 
     return models
+
+
+def load_curated(model_type: ModelType) -> list[dict]:
+    models: list[str] = all_curated_loaders[model_type]()
+    print(f"{ts()} Found {len(models)} curated {model_type} model(s) in pre-defined list.")
+
+    # collect metadata per model in models
+    models_with_metadata = [{}]
+
+    # indicate the model is curated
+    for model in models_with_metadata:
+        model['curated'] = True
+
+    print(f"{ts()} Obtained metadata for {model_type} model(s).")
+    return models_with_metadata

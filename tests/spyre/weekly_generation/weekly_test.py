@@ -559,6 +559,7 @@ def main(
                     verified_on_cpu=bool(rec["verified_on_cpu"]),
                     verified_on_gpu=bool(rec["verified_on_gpu"]),
                     verified_on_spyre=bool(rec["verified_on_spyre"]),
+                    curated=bool(rec["curated"]),
                     num_downloads=int(rec["num_downloads"]),
                     family=str(rec["family"]),
                     architecture=str(rec["architecture"]),
