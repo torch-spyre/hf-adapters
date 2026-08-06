@@ -79,6 +79,38 @@ embeddings = model.encode(["hello world", "how are you"])
 
 The `st_backend` module automatically patches `sentence-transformers` to apply the relevant Spyre adapter when loading the model. All standard SentenceTransformer methods (`encode()`, `similarity()`, etc.) work unchanged.
 
+## Masked Language Models
+
+Use `AutoSpyreModelForMaskedLM` for bidirectional masked-token prediction with
+encoder models. The encoder runs on Spyre and the model-specific MLM head runs on
+CPU:
+
+```python
+import torch
+from transformers import AutoTokenizer
+from hf_adapters import AutoSpyreModelForMaskedLM
+
+model_path = "google-bert/bert-base-uncased"
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+model = AutoSpyreModelForMaskedLM.from_pretrained(model_path)
+batch = tokenizer(
+    [f"The capital of France is {tokenizer.mask_token}."],
+    return_tensors="pt",
+)
+
+with torch.no_grad():
+    logits = model.prefill_logits(
+        batch["input_ids"],
+        batch["attention_mask"],
+        token_type_ids=batch.get("token_type_ids"),
+    )
+mask = batch["input_ids"].eq(tokenizer.mask_token_id)
+print(tokenizer.decode(logits[mask].argmax(dim=-1)))
+```
+
+`prefill_logits` returns CPU logits shaped `[batch, sequence, vocab]`. This is
+masked-language-model inference, not left-to-right causal generation.
+
 ## Multimodal Models (image → text)
 
 For vision-language models, use `AutoSpyreModelForImageTextToText`. It loads the

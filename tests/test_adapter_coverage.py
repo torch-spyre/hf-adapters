@@ -24,6 +24,7 @@ from pathlib import Path
 from tests.model_registry import (
     CAUSAL_LM_MODELS,
     EMBEDDING_MODELS,
+    MASKED_LM_MODELS,
     RERANKER_MODELS,
     VISION_MODELS,
 )
@@ -68,6 +69,12 @@ def get_registered_adapters():
 
     # Collect adapters from EMBEDDING_MODELS
     for model_info in EMBEDDING_MODELS.values():
+        adapter = model_info.get("adapter")
+        if adapter:
+            registered_adapters.add(adapter)
+
+    # Collect adapters from MASKED_LM_MODELS
+    for model_info in MASKED_LM_MODELS.values():
         adapter = model_info.get("adapter")
         if adapter:
             registered_adapters.add(adapter)

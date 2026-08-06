@@ -32,6 +32,7 @@ import pytest
 from model_registry import (
     CAUSAL_PATHS,
     EMBED_PATHS,
+    MASKED_LM_PATHS,
     NON_BLOCKING_CAUSAL_MODELS,
     xfail_non_blocking,
 )
@@ -93,3 +94,33 @@ def test_load_embedding(model_path: str) -> None:
     print("| Path | Kind | Status | Load (s) |")
     print("|------|------|--------|----------|")
     print(f"| {model_path} | embedding | PASS | {load_s:.1f} |")
+
+
+def load_masked_lm(model_path: str) -> tuple[Any, Any, float]:
+    from hf_adapters import AutoSpyreModelForMaskedLM
+
+    dtype = torch_dtype_for_model_path(model_path)
+
+    t0 = time.time()
+    model = AutoSpyreModelForMaskedLM.from_pretrained(model_path, dtype=dtype)
+    load_s = time.time() - t0
+
+    model_is_not_none = model is not None
+    callables = callable(getattr(model, "prefill_logits", None))
+    return model_is_not_none, callables, load_s
+
+
+@pytest.mark.parametrize("model_path", MASKED_LM_PATHS, ids=MASKED_LM_PATHS)
+def test_load_masked_lm(model_path: str) -> None:
+
+    model_is_not_none, callables, load_s = load_masked_lm(model_path)
+
+    print(f"  [{model_path}] masked-LM load time: {load_s:.1f}s")
+    print("\n## Spyre Load Test Results\n")
+    print("| Path | Kind | Status | Load (s) |")
+    print("|------|------|--------|----------|")
+    print(f"| {model_path} | masked-LM | PASS | {load_s:.1f} |")
+    assert model_is_not_none, f"{model_path}: from_pretrained returned None"
+    assert (
+        callables
+    ), f"{model_path}: AutoSpyreModelForMaskedLM did not attach prefill_logits()"

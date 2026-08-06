@@ -45,6 +45,7 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
+    AutoModelForMaskedLM,
     AutoModelForSequenceClassification,
     BertConfig,
     Gemma3Config,
@@ -288,6 +289,50 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
 
         model.generate = MethodType(model_generate, model)  # type: ignore[assignment]
 
+        return model
+
+
+class AutoSpyreModelForMaskedLM(AutoSpyreModel):
+    """Load an HF masked-LM model with its encoder on Spyre.
+
+    The complete masked-LM task head remains on CPU. ``prefill_logits`` accepts
+    tokenized tensors and returns ``[batch, sequence, vocab]`` logits on CPU.
+    """
+
+    _auto_model_cls = AutoModelForMaskedLM  # type: ignore[assignment]
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_name_or_path: Union[str, os.PathLike[str]],
+        dtype: torch.dtype = torch.float16,
+    ) -> torch.nn.Module:
+        module: ModuleType = resolve_adapter_module(
+            model_name_or_path, mapping=cls._module_mapping
+        )
+        model: torch.nn.Module = super().from_pretrained(
+            model_name_or_path, dtype=dtype
+        )
+
+        def model_prefill_logits(
+            self: torch.nn.Module,
+            input_ids: torch.Tensor,
+            attention_mask: torch.Tensor,
+            token_type_ids: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            from hf_adapters.hf_common import prefill_masked_lm
+
+            return prefill_masked_lm(
+                module._run_backbone_forward,
+                self,
+                input_ids,
+                attention_mask,
+                token_type_ids=token_type_ids,
+            )
+
+        model.prefill_logits = MethodType(  # type: ignore[assignment]
+            model_prefill_logits, model
+        )
         return model
 
 

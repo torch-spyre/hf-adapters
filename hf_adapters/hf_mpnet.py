@@ -186,6 +186,9 @@ def prepare_for_spyre(model):
         f"({BLOCK_SIZE}); add head padding for smaller variants."
     )
 
+    if hasattr(model, "lm_head"):
+        model._spyre_cpu_submodules = ["lm_head"]
+
     model._spyre_compiled_blocks = [
         _make_compiled_encoder_block(layer) for layer in backbone.encoder.layer
     ]

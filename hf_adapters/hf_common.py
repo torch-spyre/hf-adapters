@@ -76,45 +76,27 @@ def assert_spyre_dimensions(config, model_name):
 
 
 def get_backbone(model):
-    """Return the transformer backbone of an HF model.
+    """Return the transformer backbone of an HF model or task wrapper object.
 
-    Auto-loaded models come in two shapes:
-
-    - ``AutoModelForCausalLM`` returns a wrapper (``Qwen3ForCausalLM``,
-      ``LlamaForCausalLM``, ...) whose backbone lives at ``model.model``
-      and which exposes ``model.lm_head``.
-    - ``AutoModel`` returns the bare backbone (``Qwen3Model``,
-      ``LlamaModel``, ...) — no ``.model`` attribute, no ``lm_head``.
-
-    Adapter code reaches into the backbone to access ``embed_tokens``,
-    ``layers``, ``norm``, ``rotary_emb``. This accessor resolves the right
-    object regardless of how the model was loaded.
+    Task-specific auto classes (e.g., ``AutoModelForCausalLM``) return a wrapper
+    containing a backbone and one or more task heads, while the generic AutoModel
+    class may return the backbone directly. Search the supported wrapper attributes
+    and return the first non-``None`` module. If none is present, treat ``model``
+    itself as the backbone.
 
     Multimodal causal-LM wrappers (e.g. Gemma 4's
-    ``Gemma4ForConditionalGeneration``) nest the text decoder one level deeper
-    at ``model.model.language_model``; descend into ``.language_model`` when
-    present so the text backbone is returned.
-
-    GPT-2-family wrappers (``GPT2LMHeadModel``) keep the backbone at
-    ``model.transformer`` rather than ``model.model``; fall back to it when
-    ``.model`` is absent. The bare ``GPT2Model`` (``AutoModel``) has neither, so
-    it is returned as-is — it already is the backbone.
-
-    GPT-NeoX wrappers (``GPTNeoXForCausalLM``) keep the backbone at
-    ``model.gpt_neox`` (with ``embed_in``/``layers``/``final_layer_norm``);
-    fall back to it as well. The bare ``GPTNeoXModel`` is returned as-is.
+    ``Gemma4ForConditionalGeneration``) contain an additional nested
+    ``language_model`` level beneath that first module. Descend into it when
+    present.
     """
-    if hasattr(model, "model"):
-        inner = model.model
-    elif hasattr(model, "transformer"):
-        inner = model.transformer
-    elif hasattr(model, "gpt_neox"):
-        inner = model.gpt_neox
-    elif hasattr(model, "roberta"):
-        # XLMRobertaForSequenceClassification keeps the backbone at .roberta
-        inner = model.roberta
-    else:
-        inner = model
+    inner = next(
+        (
+            backbone
+            for name in ("model", "transformer", "gpt_neox", "bert", "mpnet", "roberta")
+            if (backbone := getattr(model, name, None)) is not None
+        ),
+        model,
+    )
     return getattr(inner, "language_model", inner)
 
 
@@ -1130,17 +1112,22 @@ def _embedding_param_ids(model):
 
 def untie_embedding_and_lm_head(model):
     """If the token-embedding weight and the LM head weight share storage, clone
-    the LM head's weight so each can take a different Spyre layout.
+    the LM head's weight so each can take a different device and Spyre layout.
     """
     head = _get_lm_head(model)
+    if head is None and hasattr(model, "get_output_embeddings"):
+        head = model.get_output_embeddings()
     if head is None:
         return
-    backbone = get_backbone(model)
-    embed = (
-        getattr(backbone, "embed_tokens", None)
-        or getattr(backbone, "wte", None)
-        or getattr(backbone, "embed_in", None)
-    )
+    if hasattr(model, "get_input_embeddings"):
+        embed = model.get_input_embeddings()
+    else:
+        backbone = get_backbone(model)
+        embed = (
+            getattr(backbone, "embed_tokens", None)
+            or getattr(backbone, "wte", None)
+            or getattr(backbone, "embed_in", None)
+        )
     if embed is None:
         return
     if embed.weight.data_ptr() == head.weight.data_ptr():
@@ -2420,6 +2407,42 @@ def prefill_encoder(
     h = h[:, :seq_len, :]
 
     return h
+
+
+def prefill_masked_lm(
+    run_encoder_forward_fn: Callable,
+    model,
+    input_ids,
+    attention_mask,
+    token_type_ids=None,
+):
+    """Run an encoder on Spyre and its masked-LM head on CPU."""
+    last_hidden_state = prefill_encoder(
+        run_encoder_forward_fn,
+        model,
+        input_ids,
+        attention_mask,
+        token_type_ids=token_type_ids,
+    )
+
+    if hasattr(model, "cls"):
+        head = model.cls
+        head_device = next(head.parameters()).device
+        logits = head(last_hidden_state.to(head_device))
+    elif hasattr(model, "head") and hasattr(model, "decoder"):
+        head_device = next(model.head.parameters()).device
+        hidden = model.head(last_hidden_state.to(head_device))
+        logits = model.decoder(hidden)
+    elif hasattr(model, "lm_head"):
+        head = model.lm_head
+        head_device = next(head.parameters()).device
+        logits = head(last_hidden_state.to(head_device))
+    else:
+        raise SpyreUnsupportedModelError(
+            f"Unsupported masked-LM head layout for {type(model).__name__}"
+        )
+
+    return logits.to("cpu")
 
 
 # ---------------------------------------------------------------------------

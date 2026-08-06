@@ -180,6 +180,15 @@ outputs = model.generate(tokenizer, ["What is 2+2?"], max_new_tokens=128)
 
 `AutoSpyreModelForCausalLM` automatically selects the correct adapter based on the model's config type.
 
+### Masked-LM Auto API
+
+`AutoSpyreModelForMaskedLM` loads encoder models through `AutoModelForMaskedLM`.
+Its `prefill_logits(input_ids, attention_mask, token_type_ids=None)` method runs
+the bidirectional encoder on Spyre, runs the complete model-specific MLM head on
+CPU, and returns CPU `[batch, sequence, vocab]` logits. This API predicts masked
+tokens; it is not a causal continuation API and does not provide `generate()`
+semantics.
+
 ### Multimodal (image→text) Auto API
 
 ```python

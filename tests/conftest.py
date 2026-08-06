@@ -169,7 +169,7 @@ def pytest_addoption(parser: Parser) -> None:
             "Override the ``model_path`` parametrization for every test that "
             "takes it. Repeat the flag to run against multiple models, e.g. "
             "``--model-path foo/bar --model-path baz/qux``. When set, the "
-            "registry-derived CAUSAL_PATHS / EMBED_PATHS / VISION_PATHS lists "
+            "registry-derived CAUSAL / EMBED / MASKED_LM / VISION path lists "
             "in the test decorators are ignored."
         ),
     )

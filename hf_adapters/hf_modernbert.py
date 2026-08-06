@@ -296,6 +296,9 @@ def prepare_for_spyre(model):
             padded_head_dim=padded_head_dim,
         )
 
+    if hasattr(model, "head") and hasattr(model, "decoder"):
+        model._spyre_cpu_submodules = ["head", "decoder"]
+
     model._spyre_head_dim = head_dim
     model._spyre_compiled_blocks = [
         _make_compiled_block(layer, num_heads, head_dim, orig_head_dim)
