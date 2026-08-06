@@ -24,9 +24,9 @@ from tests.conftest import (
 from tests.cpu.conftest import _unwrap_compiled_blocks
 from tests.model_registry import QUESTION_ANSWERING_PATHS
 
-QUESTIONS = ["Where does Ariel live?", "What color is the sky?"]
+QUESTIONS = ["Where does the engineer live?", "What color is the sky?"]
 CONTEXTS = [
-    "Ariel lives in Berlin and works on machine learning systems.",
+    "The engineer lives in Berlin and works on machine learning systems.",
     "On a clear day, the sky appears blue.",
 ]
 COSINE_THRESHOLD = 0.999
@@ -76,9 +76,58 @@ def test_native_forward(model_path: str) -> None:
         assert logits.shape == ref_logits.shape
         assert logits.device.type == "cpu"
         assert torch.isfinite(logits).all()
-        cosine = F.cosine_similarity(logits.float(), ref_logits.float(), dim=-1)
-        assert cosine.min().item() >= COSINE_THRESHOLD
-        assert torch.equal(logits.argmax(dim=-1), ref_logits.argmax(dim=-1))
 
+    real_tokens = encoded["attention_mask"].bool()
+    start_cosine = torch.stack(
+        [
+            F.cosine_similarity(
+                outputs.start_logits[i, mask].float(),
+                ref_outputs.start_logits[i, mask].float(),
+                dim=0,
+            )
+            for i, mask in enumerate(real_tokens)
+        ]
+    )
+    end_cosine = torch.stack(
+        [
+            F.cosine_similarity(
+                outputs.end_logits[i, mask].float(),
+                ref_outputs.end_logits[i, mask].float(),
+                dim=0,
+            )
+            for i, mask in enumerate(real_tokens)
+        ]
+    )
+    ref_start_ids = ref_outputs.start_logits.argmax(dim=-1)
+    ref_end_ids = ref_outputs.end_logits.argmax(dim=-1)
+    start_ids = outputs.start_logits.argmax(dim=-1)
+    end_ids = outputs.end_logits.argmax(dim=-1)
+
+    print("\n## Question-Answering CPU Comparison\n")
+    print(
+        "| Question | HF Answer | Adapter Answer | Start Cosine | End Cosine | Match |"
+    )
+    print(
+        "|----------|-----------|----------------|--------------|------------|-------|"
+    )
+    for i, question in enumerate(QUESTIONS):
+        ref_answer = tokenizer.decode(
+            encoded["input_ids"][i, ref_start_ids[i] : ref_end_ids[i] + 1],
+            skip_special_tokens=True,
+        ).strip()
+        answer = tokenizer.decode(
+            encoded["input_ids"][i, start_ids[i] : end_ids[i] + 1],
+            skip_special_tokens=True,
+        ).strip()
+        match = "Yes" if answer == ref_answer else "No"
+        print(
+            f"| {question} | {ref_answer} | {answer} | "
+            f"{start_cosine[i].item():.6f} | {end_cosine[i].item():.6f} | {match} |"
+        )
+
+    assert start_cosine.min().item() >= COSINE_THRESHOLD
+    assert end_cosine.min().item() >= COSINE_THRESHOLD
+    assert torch.equal(start_ids, ref_start_ids)
+    assert torch.equal(end_ids, ref_end_ids)
     assert torch.equal(tuple_outputs[0], outputs.start_logits)
     assert torch.equal(tuple_outputs[1], outputs.end_logits)
