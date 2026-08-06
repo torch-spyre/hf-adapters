@@ -36,7 +36,7 @@ def generate_matrices(exclude_models=None, only_models=None):
             paths (applied after exclusions). Empty/None = no restriction.
 
     Returns:
-        dict: Dictionary with 'causal', 'embed', 'vision', and 'combined' matrix lists
+        dict: Dictionary containing the per-suite and combined matrix lists
     """
     exclude_models = set(exclude_models or [])
     only_models = set(only_models or [])
@@ -51,6 +51,9 @@ def generate_matrices(exclude_models=None, only_models=None):
     vision_paths = [
         k for k in tests.model_registry.VISION_PATHS if k not in exclude_models
     ]
+    masked_lm_paths = [
+        k for k in tests.model_registry.MASKED_LM_PATHS if k not in exclude_models
+    ]
     reranker_paths = [
         k for k in tests.model_registry.RERANKER_PATHS if k not in exclude_models
     ]
@@ -60,14 +63,16 @@ def generate_matrices(exclude_models=None, only_models=None):
         causal_paths = [k for k in causal_paths if k in only_models]
         embed_paths = [k for k in embed_paths if k in only_models]
         vision_paths = [k for k in vision_paths if k in only_models]
+        masked_lm_paths = [k for k in masked_lm_paths if k in only_models]
 
-    # Combine for jobs that test both types
+    # Combine the task types exercised by the shared load suite.
     combined_paths = causal_paths + embed_paths
 
     return {
         "causal": causal_paths,
         "embed": embed_paths,
         "vision": vision_paths,
+        "masked_lm": masked_lm_paths,
         "combined": combined_paths,
         "reranker": reranker_paths,
     }
@@ -87,6 +92,7 @@ def format_for_github_actions(matrices):
         "causal_matrix": json.dumps(matrices["causal"]),
         "embed_matrix": json.dumps(matrices["embed"]),
         "vision_matrix": json.dumps(matrices["vision"]),
+        "masked_lm_matrix": json.dumps(matrices["masked_lm"]),
         "combined_matrix": json.dumps(matrices["combined"]),
         "reranker_matrix": json.dumps(matrices["reranker"]),
     }
@@ -148,6 +154,9 @@ def main():
     )
     print(
         f"  Vision models ({len(matrices['vision'])}): {', '.join(matrices['vision'])}"
+    )
+    print(
+        f"  Masked-LM models ({len(matrices['masked_lm'])}): {', '.join(matrices['masked_lm'])}"
     )
     print(
         f"  Combined ({len(matrices['combined'])}): {', '.join(matrices['combined'])}"
