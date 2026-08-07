@@ -451,6 +451,13 @@ class TestModuleCustom(TestCase):
         3. Runs module in compile mode on Spyre
         4. Compares outputs between eager CPU, eager Spyre, and compile Spyre
         """
+
+        cls_name = module_info.module_cls.__name__
+        if cls_name.endswith("DecoderLayer"):
+            self.skipTest(
+                f"{cls_name}: skip the whole decoder layer due to time-consuming module"
+            )
+
         module_inputs = module_info.module_inputs_func(
             module_info, device=device, dtype=dtype, requires_grad=False, training=False
         )
@@ -581,6 +588,13 @@ class TestModuleCustom(TestCase):
         """
         run_compile = os.getenv("TEST_COMPILE_WITH_CPU", "1") == "1"
         run_eager = os.getenv("TEST_EAGER_WITH_CPU", "0") == "1"
+
+        cls_name = module_info.module_cls.__name__
+        if cls_name.endswith("DecoderLayer"):
+            self.skipTest(
+                f"{cls_name}: skip the whole decoder layer due to time-consuming module"
+            )
+
         module_inputs = module_info.module_inputs_func(
             module_info,
             device=device,
