@@ -374,6 +374,12 @@ EMBEDDING_MODELS = {
         "adapter": "hf_xlm_roberta.py",
         "size": "0.1B",
     },
+    "multilingual_e5_large": {
+        "name": "Multilingual-E5-Large",
+        "path": "intfloat/multilingual-e5-large",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.5b",
+    },
     # hf_mpnet.py
     "mpnet": {
         "name": "all-mpnet-base-v2",
