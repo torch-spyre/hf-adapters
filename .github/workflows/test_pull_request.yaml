@@ -593,8 +593,11 @@ jobs:
         config:
           - granite_4_1_8b_spyre.yaml
           - granite_3_3_8b_instruct_spyre.yaml
+	  - Meta-Llama-3.1-8B-Instruct_spyre.yaml
           - Ministral-3-14B-Instruct-2512.yaml
           - Mistral-Small-3.2-24B-Instruct-2506.yaml
+	  - Qwen2.5-7B-Instruct_spyre.yaml
+	  - gpt_oss_20b_spyre.yaml
 
     steps:
       - name: Checkout composite actions
