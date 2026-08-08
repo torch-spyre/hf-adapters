@@ -52,6 +52,7 @@ class CsvResultSink(ResultSink):
         verified_on_cpu: bool,
         verified_on_gpu: bool,
         verified_on_spyre: bool,
+        curated: bool,
         num_downloads: int,
         family: str,
         architecture: str,
@@ -74,6 +75,7 @@ class CsvResultSink(ResultSink):
             "parameters_number": parameters_number,
             "failure_category": failure_category,
             "error": error,
+            "curated": curated,
         }
         self._writer.writerow(rec)
         self._fh.flush()

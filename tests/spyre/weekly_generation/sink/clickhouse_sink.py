@@ -94,6 +94,7 @@ class ClickHouseResultSink(ResultSink):
         verified_on_cpu: bool,
         verified_on_gpu: bool,
         verified_on_spyre: bool,
+        curated: bool,
         num_downloads: int,
         family: str,
         architecture: str,
@@ -122,6 +123,7 @@ class ClickHouseResultSink(ResultSink):
                 parameters_number,
                 failure_category or "",
                 error or "",
+                curated,
             ]
         )
 

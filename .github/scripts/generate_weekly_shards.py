@@ -323,6 +323,9 @@ def main() -> None:
         list(ModelType) if args.model_type == "all" else [ModelType(args.model_type)]
     )
 
+    print("Generating shards started")
+    print("Snapshot date:", args.snapshot_date)
+
     matrix = generate_shards(
         top_k=args.top_k,
         max_params=args.max_params,

@@ -46,8 +46,7 @@ on:
         default: "10000"
       model_type:
         description: >-
-          Model type to scan (manual runs only — the scheduled run always
-          scans all)
+          Model type to scan
         required: false
         type: choice
         options:
@@ -57,18 +56,13 @@ on:
         default: all
       snapshot_date:
         description: >-
-          Snapshot date (YYYY-MM-DD). Defaults to today. Override when
-          backfilling or replaying a specific scan.
+          Snapshot date (YYYY-MM-DD). Defaults to today.
         required: false
         type: string
         default: ""
       clickhouse_db:
         description: >-
-          Which ClickHouse instance to write to. Defaults to dev for manual
-          runs so an ad-hoc scan can't clobber the production table; the
-          scheduled run always writes to prod regardless of this input (the
-          `inputs` context is empty for schedule triggers — see the env block
-          below).
+          Which ClickHouse instance to write to: dev or prod.
         required: false
         type: choice
         options:
@@ -134,7 +128,11 @@ jobs:
   # ---------------------------------------------------------------------------
   generate-matrix:
     name: Generate weekly shards
-    runs-on: ubuntu-latest
+    runs-on:
+      - x86_64
+      - spyre_pf_x0
+      - linux
+      - image_spyre_backend
     # At top_k=10000+, fetching 2x oversampled raw candidates per mode (each
     # requiring a has_loadable_weights/contains_remote_code network call) is
     # genuinely slow — 30 min wasn't enough and the job was cancelled mid-run.
@@ -166,22 +164,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
+      - name: Check Python
         run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          pip install -e .
-          # clickhouse-connect and python-dotenv are named explicitly because
-          # `pip install -e .` does NOT pull them: they live in the `dev` and
-          # `models-ops` dependency groups respectively (pyproject.toml), and
-          # dependency groups are not installed by a plain editable install.
-          # Omitting them fails this job at import time on the sink.
-          pip install huggingface_hub tqdm transformers clickhouse-connect python-dotenv
+          which python3
+          python3 --version
+          python3 -m pip --version
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: setup venv
+        run: |
+          uv venv
+          source .venv/bin/activate
+          echo "VIRTUAL_ENV $VIRTUAL_ENV"
+
+      - name: Install Python dependencies
+        run: |
+          source .venv/bin/activate
+          uv pip install huggingface_hub tqdm transformers clickhouse-connect python-dotenv
+          uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       # TEMPORARY debug step: confirms HF_TOKEN actually reaches this job as a
       # working credential, and re-runs the real keep()-filter checks against
@@ -191,6 +193,7 @@ jobs:
       # Remove once the 0-kept-models issue is root-caused.
       - name: Verify HF Hub authentication
         run: |
+          source .venv/bin/activate
           python -m pip freeze | grep -iE "^(huggingface-hub|transformers)==" || true
           python - <<'PY'
           import os
@@ -231,6 +234,7 @@ jobs:
       # python with working-directory: '.'.
       - name: Verify ClickHouse connection
         run: |
+          source .venv/bin/activate
           echo "ClickHouse target: $CLICKHOUSE_TARGET"
           MISSING=0
           for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
@@ -284,6 +288,7 @@ jobs:
           # snapshot_date is computed once here and forwarded to every scan
           # job via the generate-matrix output, so a run straddling midnight
           # records a consistent date across all shards and their terminal rows.
+          source .venv/bin/activate
           SNAPSHOT_DATE="${{ inputs.snapshot_date || '' }}"
           if [[ -z "$SNAPSHOT_DATE" ]]; then
             SNAPSHOT_DATE=$(date -u +%Y-%m-%d)
