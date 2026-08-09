@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TypeVar
 
 from huggingface_hub.errors import HfHubHTTPError
-from huggingface_hub.hf_api import ModelInfo
+from huggingface_hub.hf_api import ExpandModelProperty_T, ModelInfo
 from tqdm import tqdm
 from transformers import AutoConfig
 
@@ -30,8 +30,43 @@ logging.getLogger("transformers").setLevel(logging.ERROR)
 # Get the resources directory (parent of resources/__init__.py)
 RESOURCES_DIR: Path = Path(__file__).resolve().parent.parent / "resources"
 
-# Metadata fields requested from list_models for every fetcher.
-EXPAND_FIELDS: list[str] = [
+# Manually-maintained model-id lists (one id per line; '#' comments and blank
+# lines ignored). See load_curated_model_ids().
+CURATED_GENERATIVE_MODELS_FILE: Path = RESOURCES_DIR / "generative_models_curated.txt"
+CURATED_EMBEDDING_MODELS_FILE: Path = RESOURCES_DIR / "embedding_models_curated.txt"
+
+
+def load_curated_model_ids(path: Path) -> list[str]:
+    """Load Hugging Face model ids from a curated list file.
+
+    The file holds one model id per line. Blank lines and lines whose first
+    non-whitespace character is ``#`` are ignored, as is any inline ``#``
+    comment following an id. Surrounding whitespace is stripped. Order is
+    preserved and duplicates are dropped (first occurrence wins).
+    """
+    seen: set[str] = set()
+    model_ids: list[str] = []
+    for raw_line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line or line in seen:
+            continue
+        seen.add(line)
+        model_ids.append(line)
+    return model_ids
+
+
+def load_curated_generative_models() -> list[str]:
+    return load_curated_model_ids(CURATED_GENERATIVE_MODELS_FILE)
+
+
+def load_curated_embedding_models() -> list[str]:
+    return load_curated_model_ids(CURATED_EMBEDDING_MODELS_FILE)
+
+
+# Metadata fields requested from list_models/model_info for every fetcher.
+# Typed as the hub's own ExpandModelProperty_T literal rather than list[str], so a
+# typo here is a type error instead of a runtime 400 from the API.
+EXPAND_FIELDS: list[ExpandModelProperty_T] = [
     "config",
     "safetensors",
     "gated",
@@ -373,9 +408,15 @@ def build_catalog(
             logging.warning("filter_fn failed for %s: %s", model.id, e)
             return False
 
+    timings: dict[str, float] = {}
+    t_total = time.perf_counter()
+
+    t0 = time.perf_counter()
     candidates: list[ModelInfo] = list(fetch_fn(limit))
+    timings["fetch (HF list_models)"] = time.perf_counter() - t0
     print(f"Retrieved {len(candidates)} raw {label} candidates.")
 
+    t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=16) as ex:
         keep_flags: list[bool] = list(
             tqdm(
@@ -385,6 +426,7 @@ def build_catalog(
             )
         )
     models: list[ModelInfo] = [m for m, keep in zip(candidates, keep_flags) if keep]
+    timings["filter (filter_fn)"] = time.perf_counter() - t0
     print(f"Kept {len(models)} {label} models after filtering.")
 
     models = models[:limit]
@@ -406,6 +448,7 @@ def build_catalog(
     tail_head: list[str] = ["is_custom_code", "config_class", "is_supported", "Year"]
     header: list[str] = base_head + extra_head + tail_head
 
+    t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=16) as ex:
         config_classes: list[str | None] = list(
             tqdm(
@@ -414,7 +457,9 @@ def build_catalog(
                 desc="Fetching config classes",
             )
         )
+    timings["config classes (AutoConfig)"] = time.perf_counter() - t0
 
+    t0 = time.perf_counter()
     rows: list[dict[str, object]] = []
     for rank, (m, config_class) in enumerate(zip(models, config_classes), start=1):
         architectures: list[str] | None = (m.config or {}).get("architectures")
@@ -447,12 +492,16 @@ def build_catalog(
             )
         )
 
+    timings["build rows"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     if output_csv is not None:
         print(f"Writing top {len(rows)} to {output_csv}")
         with open(output_csv, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=header)
             writer.writeheader()
             writer.writerows(rows)
+    timings["write CSV"] = time.perf_counter() - t0
 
     # Attach the source ModelInfo to each row AFTER the CSV write. It is a
     # runtime-only field (not serializable, and never part of the schema),
@@ -462,8 +511,19 @@ def build_catalog(
     # is_moe is precomputed here (a pure function of data already fetched —
     # tags, config.model_type, config.architectures) so callers that need it
     # don't have to carry the non-serializable ModelInfo object forward.
+    t0 = time.perf_counter()
     for row, m in zip(rows, models):
         row["model_info"] = m
         row["is_moe"] = is_moe(m)
+    timings["attach model_info / is_moe"] = time.perf_counter() - t0
+
+    timings["other"] = (time.perf_counter() - t_total) - sum(timings.values())
+
+    total = sum(timings.values())
+    print(f"\nTiming breakdown for {label} catalog ({total:.1f}s total):")
+    width = max(len(name) for name in timings)
+    for name, secs in timings.items():
+        share = secs / total if total else 0.0
+        print(f"  {name:<{width}}  {secs:7.2f}s  {share:5.1%}")
 
     return rows

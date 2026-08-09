@@ -37,14 +37,9 @@ Usage::
         model, draft_input_ids, target_hidden_states, selected_freqs, ctx_valid_len)
 """
 
-# The block-propose forward is identical across the drafter families — reuse the
-# shared runner directly (exposed under the adapter's public ``_run_draft_block``
-# name that ``resolve_adapter_module``/tests look up).
-from hf_adapters._dspark_common import prepare_dspark_common
-from hf_adapters._dspark_common import (  # noqa: F401  (re-exported as the public forward)
-    run_draft_block as _run_draft_block,
-)
+from hf_adapters._dspark_common import prepare_dspark_common, run_draft_block
 
+_run_draft_block = run_draft_block  # reuse the common runner
 # Fixed context / kv widths (stick-aligned). CTX_PAD=56 keeps kv_pad =
 # round32(CTX_PAD + block_size=7) = 64 — the proven-compilable attention width.
 CTX_PAD = 56
@@ -52,7 +47,9 @@ CTX_PAD = 56
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to the Qwen3 DSpark drafter in-place."""
-    from deepspec.modeling.dspark.qwen3.modeling import Qwen3RMSNorm
+    from deepspec.modeling.dspark.qwen3.modeling import (  # type: ignore[import-not-found]
+        Qwen3RMSNorm,
+    )
 
     block_size = int(model.block_size)
     kv_pad = ((CTX_PAD + block_size + 31) // 32) * 32

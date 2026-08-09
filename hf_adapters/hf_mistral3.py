@@ -49,14 +49,14 @@ Usage::
     outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
 """
 
+from hf_adapters import hf_mistral
 from hf_adapters.hf_common import (
     get_backbone,
     prepare_standard_gqa,
 )
-from hf_adapters.hf_mistral import (
-    _run_backbone_forward,  # noqa: F401  re-exported as adapter module API
-    _run_forward,  # noqa: F401  re-exported as adapter module API
-)
+
+_run_backbone_forward = hf_mistral._run_backbone_forward
+_run_forward = hf_mistral._run_forward
 
 
 def load_hf_model(model_path, dtype):

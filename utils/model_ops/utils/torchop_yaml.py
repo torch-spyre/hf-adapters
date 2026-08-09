@@ -332,11 +332,16 @@ def add_test_case_yaml(
 
     if len(kwmap) > 0:
         if not old_format:
-            test_case_yaml["kwargs"] = kwmap
+            test_case_yaml[inputs]["kwargs"] = kwmap
         else:
             test_case_yaml["kwmap"] = kwmap
 
     return test_case_yaml
+
+
+class YamlFmtDumper(yaml.Dumper):
+    def increase_indent(self, flow=False, indentless=False):
+        return super().increase_indent(flow, indentless=False)
 
 
 @dataclass
@@ -1669,7 +1674,17 @@ class TorchOpCollector:
             print(f"Total no. of test cases: {len(config['cases'])}")
 
         with open(os.path.join(output_dir, model_name + ".yaml"), "w") as f:
-            yaml.dump(config, f, sort_keys=False)
+            yaml.dump(
+                config,
+                f,
+                Dumper=YamlFmtDumper,
+                default_flow_style=False,
+                sort_keys=False,
+                allow_unicode=True,
+                explicit_start=False,
+                indent=2,
+                width=4096,
+            )
 
         if not supress_spyre:
             if not USE_OLDFORMAT:
@@ -1682,7 +1697,17 @@ class TorchOpCollector:
             else:
                 config["cases"] = _filter_cases(self.test_cases_norm_yaml)
             with open(os.path.join(output_dir, model_name + "_spyre.yaml"), "w") as f:
-                yaml.dump(config, f, sort_keys=False)
+                yaml.dump(
+                    config,
+                    f,
+                    Dumper=YamlFmtDumper,
+                    default_flow_style=False,
+                    sort_keys=False,
+                    allow_unicode=True,
+                    explicit_start=False,
+                    indent=2,
+                    width=4096,
+                )
 
 
 # for debug purpose

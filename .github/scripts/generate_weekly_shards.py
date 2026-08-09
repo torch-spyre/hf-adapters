@@ -20,13 +20,27 @@ so a model doesn't share a batch with (and inflate the memory footprint
 of) much smaller ones. See push-to-clickhouse.yaml's weekly-model-scan job
 for how `matrix.runner` selects the actual runs-on label.
 
+Each model type's list is PRE-FILTERED before any chunking: models with no
+adapter for their config class, models too large for Spyre, and MoE models are
+all removed here, and a terminal verdict row for each is written straight to
+ClickHouse (so this script needs the CLICKHOUSE_* env vars, or --write-to-csv to
+record them in a file instead).
+
+That ordering is the point. The dropped models cluster heavily — config-class
+families cluster by download count — so filtering inside each worker, as
+weekly_test.py used to, left surviving counts wildly uneven: some CI jobs
+finished in minutes while others ran for hours. Filtering first means a shard's
+size is a count of real evaluations, and shard durations become comparable.
+
 Per-tier shard sizes do NOT need to be small: weekly_test.py already
 re-chunks whatever list it's given into fresh-OS-process batches of
 GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS/EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS
 regardless of shard size, which is what actually bounds how many models'
 memory can accumulate in one process before a clean restart. A tiny shard
 size buys no extra safety over a large one — it only multiplies GitHub
-Actions job count, and matrices are hard-capped at 256 jobs total.
+Actions job count, and matrices are hard-capped at 256 jobs total. Since the
+sizes now apply to filtered lists, the same values yield fewer, fuller jobs
+than they used to.
 
 Usage (called by the GHA workflow):
     python .github/scripts/generate_weekly_shards.py \
@@ -44,16 +58,27 @@ import argparse
 import json
 import os
 import sys
+from datetime import date
 from pathlib import Path
 
-# Add the project root to the Python path so we can import from utils/
+# Add the project root to sys.path BEFORE importing from tests/ or utils/ — this
+# script lives in .github/scripts/, so neither is importable from its own
+# directory, and it is run as a plain script (not `python -m`), which puts that
+# directory on sys.path rather than the repo root. Must stay above the imports
+# below; the workflow happens to invoke it from the repo root, which would mask
+# a wrong order here until someone ran it from anywhere else.
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from utils.fetch_top_embedding_models import fetch_top_embedding_models  # noqa: E402
-from utils.fetch_top_generative_models import fetch_top_generative_models  # noqa: E402
-
-MODEL_TYPES = ("generative", "embedding")
+from tests.spyre.weekly_generation.failure_categories import (  # noqa: E402
+    MAX_NUMBER_PARAMS,
+)
+from tests.spyre.weekly_generation.model_prefilter import (  # noqa: E402
+    fetch_and_filter,
+)
+from tests.spyre.weekly_generation.model_type import ModelType  # noqa: E402
+from tests.spyre.weekly_generation.sink.result_sink import ResultSink  # noqa: E402
+from tests.spyre.weekly_generation.sink.sink_factory import create_sink  # noqa: E402
 
 
 def _chunk(rows: list[dict], shard_size: int) -> list[list[dict]]:
@@ -81,6 +106,7 @@ def _tier_for(row: dict, x1_max_params: int, x2_max_params: int) -> str:
 
 def generate_shards(
     top_k: int,
+    max_params: int,
     shard_size_generative: int,
     shard_size_embedding: int,
     x1_max_params: int,
@@ -88,63 +114,96 @@ def generate_shards(
     x2_shard_size: int,
     x4_shard_size: int,
     output_dir: Path,
-    model_types: tuple[str, ...] = MODEL_TYPES,
+    model_types: list[ModelType],
+    snapshot_date: date,
+    write_to_csv: Path | None = None,
 ) -> list[dict]:
-    """Fetch each requested mode's top-K list once, write shard JSON files,
+    """Fetch each requested model type's top-K list once, write shard JSON files,
     and return the combined matrix (list of {mode, shard_index, shard_file,
     runner} dicts).
 
-    Within each mode, models are split into three parameter-count tiers (see
-    module docstring), each chunked at its own shard size and tagged with
-    the runner ("x1"/"x2"/"x4") that ends up handling it.
+    Each model type's list is pre-filtered (see ``fetch_and_filter``) before any
+    chunking, so a shard's size is a count of real evaluations rather than of
+    fetched candidates. Within each type, the survivors are then split into three
+    parameter-count tiers (see module docstring), each chunked at its own shard
+    size and tagged with the runner ("x1"/"x2"/"x4") that handles it.
 
-    *model_types* restricts which of MODEL_TYPES to fetch/shard — used by
-    workflow_dispatch's model_type input so a manual run can scan just
-    embedding models (much quicker, less resource-hungry) without the
-    schedule-triggered full scan having to change.
+    *model_types* restricts which ``ModelType`` members to fetch/shard — used by
+    workflow_dispatch's model_type input so a manual run can scan just embedding
+    models (much quicker, less resource-hungry) without the schedule-triggered
+    full scan having to change.
+
+    *max_params* is the ceiling above which a model is rejected outright as too
+    large for Spyre — distinct from *x1_max_params*/*x2_max_params*, which only
+    route surviving models between runner tiers.
+
+    *write_to_csv* records the terminal verdicts in a new CSV (one per model type)
+    instead of ClickHouse, so the whole fetch → filter → route → chunk path can be
+    exercised without credentials. That sink is write-only, so the emitted shards
+    then include models a real run would have dropped as recently-scanned.
+
+    The matrix's ``mode`` key keeps its name because push-to-clickhouse.yaml
+    reads ``matrix.mode`` and passes it to ``weekly_test.py --mode``.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    all_fetchers = {
-        "generative": (fetch_top_generative_models, shard_size_generative),
-        "embedding": (fetch_top_embedding_models, shard_size_embedding),
+    # Only the x1 tier's shard size is per-model-type; x2/x4 hold far fewer,
+    # larger models, so one size each is enough.
+    x1_shard_sizes = {
+        ModelType.GENERATIVE: shard_size_generative,
+        ModelType.EMBEDDING: shard_size_embedding,
     }
-    fetchers = {model_type: all_fetchers[model_type] for model_type in model_types}
 
     matrix: list[dict] = []
-    for mode, (fetch_fn, shard_size) in fetchers.items():
-        rows: list[dict] = fetch_fn(limit=top_k)
-        # model_info is a live huggingface_hub.ModelInfo object attached by
-        # build_catalog — not JSON-serializable, and no longer needed since
-        # is_moe is precomputed onto each row (see utils/hf_model_catalog.py).
-        for row in rows:
-            row.pop("model_info", None)
+    for model_type in model_types:
+        # One sink per model type — each binds a single table (or file) — and
+        # closed here because this function is what constructed it. Closing is
+        # what flushes the ClickHouse sink's buffered verdict rows.
+        sink: ResultSink = create_sink(
+            model_type=model_type,
+            write_to_csv=write_to_csv,
+        )
+        with sink:
+            rows: list[dict] = fetch_and_filter(
+                model_type=model_type,
+                snapshot_date=snapshot_date,
+                top_k=top_k,
+                sink=sink,
+                max_params=max_params,
+            )
 
         by_tier: dict[str, list[dict]] = {"x1": [], "x2": [], "x4": []}
         for row in rows:
             by_tier[_tier_for(row, x1_max_params, x2_max_params)].append(row)
 
-        tier_shard_sizes = {"x1": shard_size, "x2": x2_shard_size, "x4": x4_shard_size}
-        mode_shard_count = 0
+        tier_shard_sizes = {
+            "x1": x1_shard_sizes[model_type],
+            "x2": x2_shard_size,
+            "x4": x4_shard_size,
+        }
+        model_type_shard_count = 0
         for runner, group_rows in by_tier.items():
             group_shard_size = tier_shard_sizes[runner]
             shards = _chunk(group_rows, group_shard_size)
-            mode_shard_count += len(shards)
+            model_type_shard_count += len(shards)
             print(
-                f"{mode} ({runner}): {len(group_rows)} model(s), split into "
+                f"{model_type} ({runner}): {len(group_rows)} model(s), split into "
                 f"{len(shards)} shard(s) of up to {group_shard_size} each"
             )
             for shard_index, shard_rows in enumerate(shards):
-                shard_file = f"{mode}-{runner}-shard-{shard_index:03d}.json"
+                shard_file = f"{model_type}-{runner}-shard-{shard_index:03d}.json"
                 (output_dir / shard_file).write_text(json.dumps(shard_rows))
                 matrix.append(
                     {
-                        "mode": mode,
+                        "mode": model_type,
                         "shard_index": shard_index,
                         "shard_file": shard_file,
                         "runner": runner,
                     }
                 )
-        print(f"{mode}: {len(rows)} model(s) total, {mode_shard_count} shard(s)")
+        print(
+            f"{model_type}: {len(rows)} model(s) total, "
+            f"{model_type_shard_count} shard(s)"
+        )
 
     return matrix
 
@@ -168,7 +227,16 @@ def main() -> None:
         "--top-k",
         type=int,
         default=10000,
-        help="Number of top models to fetch per mode (by downloads).",
+        help="Number of top models to fetch per model type (by downloads).",
+    )
+    parser.add_argument(
+        "--max-params",
+        type=int,
+        default=MAX_NUMBER_PARAMS,
+        help=(
+            "Reject models above this parameter count "
+            f"(default: {MAX_NUMBER_PARAMS:,})."
+        ),
     )
     parser.add_argument(
         "--shard-size-generative",
@@ -221,19 +289,46 @@ def main() -> None:
         help="Directory to write shard JSON files into.",
     )
     parser.add_argument(
+        "--write-to-csv",
+        type=Path,
+        default=None,
+        metavar="VERDICTS_CSV",
+        help=(
+            "Record the terminal verdicts in a new CSV per mode (suffixed "
+            "-generative / -embedding) instead of ClickHouse, so this script can "
+            "run without credentials."
+        ),
+    )
+    parser.add_argument(
         "--model-type",
-        choices=("all", *MODEL_TYPES),
+        choices=("all", *(model_type.value for model_type in ModelType)),
         default="all",
-        help="Restrict the scan to one mode (e.g. 'embedding' for a quick, "
+        help="Restrict the scan to one model type (e.g. 'embedding' for a quick, "
         "low-resource manual run). 'all' (the default, and what the "
-        "scheduled run always uses) fetches/shards both model-types.",
+        "scheduled run always uses) fetches/shards every model type.",
+    )
+    parser.add_argument(
+        "--snapshot-date",
+        type=date.fromisoformat,
+        required=True,
+        metavar="YYYY-MM-DD",
+        help=(
+            "Date to record as the snapshot date for all rows written in this run. "
+            "Use $(date -u +%Y-%m-%d) for today when invoking manually."
+        ),
     )
     args = parser.parse_args()
 
-    model_types = MODEL_TYPES if args.model_type == "all" else (args.model_type,)
+    model_types = (
+        list(ModelType) if args.model_type == "all" else [ModelType(args.model_type)]
+    )
+
+    print("Generating shards started")
+    print("Snapshot date:", args.snapshot_date)
 
     matrix = generate_shards(
         top_k=args.top_k,
+        max_params=args.max_params,
         shard_size_generative=args.shard_size_generative,
         shard_size_embedding=args.shard_size_embedding,
         x1_max_params=args.x1_max_params,
@@ -242,9 +337,11 @@ def main() -> None:
         x4_shard_size=args.x4_shard_size,
         output_dir=args.output_dir,
         model_types=model_types,
+        write_to_csv=args.write_to_csv,
+        snapshot_date=args.snapshot_date,
     )
 
-    print(f"\nTotal shards across both model-types: {len(matrix)}")
+    print(f"\nTotal shards across {len(model_types)} model type(s): {len(matrix)}")
 
     # Split by runner tier so push-to-clickhouse.yaml's three per-tier jobs
     # can each cap strategy.max-parallel in cards (x1=1, x2=2, x4=4/shard).
