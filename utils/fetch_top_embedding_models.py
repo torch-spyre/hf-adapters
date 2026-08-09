@@ -155,8 +155,6 @@ def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
     rejected (empty string when kept).
     """
     baseline_keep, baseline_reason = is_baseline_keep(model)
-    if not baseline_keep:
-        return False, baseline_reason
     if not _has_embedding_signal(model):
         return False, "no embedding signal (not sentence-transformers library or tag)"
     if _is_reranker(model):
@@ -167,6 +165,8 @@ def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
         return False, "no loadable weights"
     if contains_remote_code(model):
         return False, "requires trust_remote_code"
+    if not baseline_keep:
+        return False, baseline_reason
     return True, ""
 
 
