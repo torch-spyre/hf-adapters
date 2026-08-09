@@ -47,8 +47,9 @@ def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
     Returns a (keep, reason) tuple where reason describes why the model was
     rejected (empty string when kept).
     """
-    if not is_baseline_keep(model):
-        return False, "failed baseline keep (no config, non-native format, or NSFW)"
+    baseline_keep, baseline_reason = is_baseline_keep(model)
+    if not baseline_keep:
+        return False, baseline_reason
     if model.gated:
         return False, "model is gated"
     if not has_loadable_weights(model):

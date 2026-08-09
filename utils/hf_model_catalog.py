@@ -198,18 +198,23 @@ def is_nsfw(model: ModelInfo) -> bool:
 NON_NATIVE_ID_SUBSTRINGS: tuple[str, ...] = ("onnx", "gguf", "mlx")
 
 
-def is_baseline_keep(model: ModelInfo) -> bool:
-    """Shared inclusion gate: drop config-less, and ONNX/GGUF/MLX id checkpoints."""
+def is_baseline_keep(model: ModelInfo) -> tuple[bool, str]:
+    """Shared inclusion gate: drop config-less, and ONNX/GGUF/MLX id checkpoints.
+
+    Returns (keep, reason) where reason describes why the model was rejected
+    (empty string when kept).
+    """
+    failure_constant = "failed baseline keep: "
     if not model.config:
-        return False
+        return False, failure_constant + "no config"
     if model.library_name in NON_NATIVE_ID_SUBSTRINGS:
-        return False
+        return False, failure_constant + "non-native library (ONNX/GGUF/MLX)"
     model_id_lower: str = model.id.lower()
     if any(sub in model_id_lower for sub in NON_NATIVE_ID_SUBSTRINGS):
-        return False
+        return False, failure_constant + "non-native format in model id (ONNX/GGUF/MLX)"
     if "nsfw" in tags(model):
-        return False
-    return True
+        return False, failure_constant + "NSFW tag"
+    return True, ""
 
 
 def contains_remote_code(model: ModelInfo) -> bool:
