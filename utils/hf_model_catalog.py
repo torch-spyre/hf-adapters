@@ -346,7 +346,7 @@ def _resolve_param_columns(
 def build_catalog(
     *,
     fetch_fn: Callable[[int], Iterable[ModelInfo]],
-    filter_fn: Callable[[ModelInfo], bool],
+    filter_fn: Callable[[ModelInfo], tuple[bool, str]],
     limit: int,
     output_csv: Path | str | None,
     label: str,
@@ -360,7 +360,7 @@ def build_catalog(
 
     Args:
         fetch_fn: callable(limit) -> list of raw model objects (over-fetched).
-        filter_fn: callable(model) -> bool, keep the model if True.
+        filter_fn: callable(model) -> (keep, reason), keep the model if keep is True.
         limit: number of rows to write after filtering.
         output_csv: destination path, or None to skip writing.
         label: human-readable noun for log lines (e.g. "generative").
@@ -374,12 +374,12 @@ def build_catalog(
     """
     extra_columns = extra_columns or []
 
-    def _safe_filter(model: ModelInfo) -> bool:
+    def _safe_filter(model: ModelInfo) -> tuple[bool, str]:
         try:
             return filter_fn(model)
         except Exception as e:
             logging.warning("filter_fn failed for %s: %s", model.id, e)
-            return False
+            return False, f"filter_fn raised an exception: {e}"
 
     timings: dict[str, float] = {}
     t_total = time.perf_counter()
@@ -391,14 +391,16 @@ def build_catalog(
 
     t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=16) as ex:
-        keep_flags: list[bool] = list(
+        keep_flags: list[tuple[bool, str]] = list(
             tqdm(
                 ex.map(_safe_filter, candidates),
                 total=len(candidates),
                 desc="Filtering candidates",
             )
         )
-    models: list[ModelInfo] = [m for m, keep in zip(candidates, keep_flags) if keep]
+    models: list[ModelInfo] = [
+        m for m, (keep, _) in zip(candidates, keep_flags) if keep
+    ]
     timings["filter (filter_fn)"] = time.perf_counter() - t0
     print(f"Kept {len(models)} {label} models after filtering.")
 

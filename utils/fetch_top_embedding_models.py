@@ -147,29 +147,31 @@ def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
     return sorted(by_id.values(), key=lambda m: (m.downloads or 0), reverse=True)
 
 
-def keep(model: ModelInfo, token: str | bool) -> bool:
+def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
     """Keep predicate for the embedding fetcher.
 
     Ordering matters: the cheap metadata-only checks run first.
+    Returns a (keep, reason) tuple where reason describes why the model was
+    rejected (empty string when kept).
     """
     if not is_baseline_keep(model):
-        return False
+        return False, "failed baseline keep (no config, non-native format, or NSFW)"
     if not _has_embedding_signal(model):
-        return False
+        return False, "no embedding signal (not sentence-transformers library or tag)"
     if _is_reranker(model):
-        return False
+        return False, "model is a reranker / cross-encoder"
     if model.gated:
-        return False
+        return False, "model is gated"
     if not has_loadable_weights(model):
-        return False
+        return False, "no loadable weights"
     if contains_remote_code(model):
-        return False
-    return True
+        return False, "requires trust_remote_code"
+    return True, ""
 
 
 def _fetch_embedding_models(
     fetcher: Callable[[HfApi, int], list[ModelInfo]],
-    keeper: Callable[[ModelInfo, str | bool], bool],
+    keeper: Callable[[ModelInfo, str | bool], tuple[bool, str]],
     limit: int,
     output_csv: Path | str | None = None,
 ) -> list[dict[str, object]]:
