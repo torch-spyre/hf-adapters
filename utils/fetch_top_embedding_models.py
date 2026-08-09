@@ -167,7 +167,7 @@ def keep(model: ModelInfo, token: str | bool) -> bool:
     return True
 
 
-def fetch_embedding_models(
+def _fetch_embedding_models(
     fetcher: Callable[[HfApi, int], list[ModelInfo]],
     keeper: Callable[[ModelInfo, str | bool], bool],
     limit: int,
@@ -190,7 +190,7 @@ def fetch_embedding_models(
 def fetch_top_embedding_models(
     limit: int, output_csv: Path | str | None = None
 ) -> list[dict[str, object]]:
-    return fetch_embedding_models(
+    return _fetch_embedding_models(
         fetcher=_fetch, keeper=keep, limit=limit, output_csv=output_csv
     )
 
@@ -198,7 +198,7 @@ def fetch_top_embedding_models(
 def fetch_curated_embedding_models_metadata(
     model_ids: list[str], output_csv: Path | str | None = None
 ) -> list[dict[str, object]]:
-    return fetch_embedding_models(
+    return _fetch_embedding_models(
         fetcher=_create_fetch_metadata(model_ids),
         keeper=keep_all,
         limit=len(model_ids),
