@@ -33,7 +33,7 @@ def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
         lambda: api.list_models(
             pipeline_tag="text-generation",
             sort="downloads",
-            limit=int(limit * 2),
+            limit=int(limit * 2.5),
             expand=EXPAND_FIELDS,
         ),
         description="list_models[text-generation]",
