@@ -379,7 +379,7 @@ def build_catalog(
             return filter_fn(model)
         except Exception as e:
             logging.warning("filter_fn failed for %s: %s", model.id, e)
-            return False, f"filter_fn raised an exception: {e}"
+            return False, "filter_fn raised an exception"
 
     timings: dict[str, float] = {}
     t_total = time.perf_counter()
