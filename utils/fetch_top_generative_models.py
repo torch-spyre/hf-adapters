@@ -43,17 +43,15 @@ def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
 def keep(model: ModelInfo, token: str | bool) -> bool:
     """Keep predicate for the generative fetcher.
 
-    Ordering matters: the cheap metadata-only checks run first so we only
-    spend the ``has_loadable_weights`` HTTP call on the ~1k candidates that
-    would otherwise survive.
+    Ordering matters: the cheap metadata-only checks run first.
     """
     if not is_baseline_keep(model):
         return False
     if model.gated:
         return False
-    if contains_remote_code(model):
+    if not has_loadable_weights(model):
         return False
-    if not has_loadable_weights(model, token):
+    if contains_remote_code(model):
         return False
     return True
 
