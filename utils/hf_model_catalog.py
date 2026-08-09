@@ -404,6 +404,18 @@ def build_catalog(
     timings["filter (filter_fn)"] = time.perf_counter() - t0
     print(f"Kept {len(models)} {label} models after filtering.")
 
+    reason_counts: dict[str, int] = {}
+    for keep, reason in keep_flags:
+        if not keep:
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    if reason_counts:
+        total_filtered_out: int = sum(reason_counts.values())
+        print(f"Filtered out {total_filtered_out} {label} models by reason:")
+        for reason, count in sorted(
+            reason_counts.items(), key=lambda kv: kv[1], reverse=True
+        ):
+            print(f"  {reason}: {count}")
+
     models = models[:limit]
 
     base_head: list[str] = [
