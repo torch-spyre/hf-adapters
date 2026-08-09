@@ -76,6 +76,7 @@ def _process_batch(
             "verified_on_cpu":  bool,
             "verified_on_gpu":  False,
             "verified_on_spyre": bool,
+            "curated":          bool,
             "num_downloads":    int,
             "family":           str,
             "architecture":     str,
@@ -106,6 +107,7 @@ def _process_batch(
             "verified_on_cpu": False,
             "verified_on_gpu": False,
             "verified_on_spyre": False,
+            "curated": bool(row["curated"]),
             "num_downloads": int(row.get("downloads") or 0),
             "family": str(row.get("model_type") or ""),
             "architecture": str(row.get("architectures") or ""),
@@ -113,6 +115,7 @@ def _process_batch(
             "error": None,
             "failure_category": None,
         }
+        print(f"{ts()} - {model_path} " + ("\t(curated)" if row["curated"] else ""))
         try:
             try:
                 adapter_module = resolve_adapter_module_for_test(model_path)

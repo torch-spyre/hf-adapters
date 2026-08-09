@@ -384,6 +384,8 @@ def main(
     from tests.spyre.weekly_generation.sink.result_sink import ResultSink
 
     print(f"{ts()} Starting main.")
+    print(f"{ts()} Snapshot date: {snapshot_date}")
+
     total_freed: int = 0
 
     models_per_process = {
@@ -444,12 +446,13 @@ def main(
         for batch_idx, batch in enumerate(batches, start=1):
             batch_start = time.monotonic()
             batch_paths = [str(r["model_id"]) for r in batch]
+            batch_curated = [r["curated"] for r in batch]
             print(
                 f"\n{ts()} [batch {batch_idx}/{total_batches}] {len(batch)} model(s) "
                 f"(overall elapsed: {batch_start - overall_start:.0f}s)"
             )
-            for path in batch_paths:
-                print(f"{ts()}     - {path}")
+            for path, curated in zip(batch_paths, batch_curated):
+                print(f"{ts()} - {path}" + ("\t(curated)" if curated else ""))
 
             # Track which weights existed BEFORE this batch ran, so we can
             # decide per-model whether to delete after.
@@ -506,6 +509,7 @@ def main(
                         "verified_on_cpu": False,
                         "verified_on_gpu": False,
                         "verified_on_spyre": False,
+                        "curated": bool(row["curated"]),
                         "num_downloads": int(row.get("downloads") or 0),
                         "family": str(row.get("model_type") or ""),
                         "architecture": str(row.get("architectures") or ""),
@@ -531,6 +535,7 @@ def main(
                         "verified_on_cpu": False,
                         "verified_on_gpu": False,
                         "verified_on_spyre": False,
+                        "curated": bool(row["curated"]),
                         "num_downloads": int(row.get("downloads") or 0),
                         "family": str(row.get("model_type") or ""),
                         "architecture": str(row.get("architectures") or ""),
@@ -569,6 +574,7 @@ def main(
                     verified_on_cpu=bool(rec["verified_on_cpu"]),
                     verified_on_gpu=bool(rec["verified_on_gpu"]),
                     verified_on_spyre=bool(rec["verified_on_spyre"]),
+                    curated=bool(rec["curated"]),
                     num_downloads=int(rec["num_downloads"]),
                     family=str(rec["family"]),
                     architecture=str(rec["architecture"]),
@@ -584,7 +590,8 @@ def main(
                     f"{ts()}     sink: row written for '{model_path}' "
                     f"(verified_on_cpu={rec.get('verified_on_cpu')}, "
                     f"verified_on_spyre={rec.get('verified_on_spyre')}, "
-                    f"failure_category={rec.get('failure_category')}, )"
+                    f"failure_category={rec.get('failure_category')}, "
+                    f"curated={rec.get('curated')})"
                 )
 
             # Cache cleanup: delete weights downloaded during this batch,

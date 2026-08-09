@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Single source of truth for the unit/integration/regression tier aliases,
-# shared by the Makefile `tests` target and _test_matrix.yaml's
+# Single source of truth for the unit/integration/regression/trunk tier
+# aliases, shared by the Makefile `tests` target and _test_matrix.yaml's
 # resolve-test-type job so both entry points apply the same mapping.
 #
 # Usage: resolve_test_type.sh [TEST_TYPE...]
@@ -21,6 +21,7 @@ for t in "$@"; do
         unit)        resolved="$resolved core" ;;
         integration) resolved="$resolved smoke" ;;
         regression)  resolved="$resolved full" ;;
+        trunk)       resolved="$resolved full" ;;
         '')          resolved="$resolved full" ;;
         *)           resolved="$resolved $t" ;;
     esac

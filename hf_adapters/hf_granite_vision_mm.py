@@ -54,8 +54,6 @@ Verified on CPU to match stock full-deepstack ``model.forward`` (first-token
 logits cosine ≥ 0.999, argmax match) and stock ``model.generate`` (token-exact).
 """
 
-import math
-
 import torch
 
 from hf_adapters import hf_siglip_vision
@@ -67,6 +65,7 @@ from hf_adapters.hf_common import (
     build_expansion_mask,
     build_prefill_mask,
     decode_block_walk,
+    generation_cache_len,
     get_backbone,
     get_model_dtype,
     make_standard_gqa_block,
@@ -453,10 +452,7 @@ def generate(
     batch_size, prompt_length = input_ids.shape
     actual_prompt_lengths = attention_mask.sum(dim=1)  # [B]
 
-    max_cache_len = (
-        math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
-        + math.ceil(max_new_tokens / BLOCK_SIZE) * BLOCK_SIZE
-    )
+    max_cache_len = generation_cache_len(prompt_length, max_new_tokens)
     input_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
         input_ids, actual_prompt_lengths
     )

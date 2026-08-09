@@ -30,6 +30,8 @@ Columns:
   - parameters_number  (UInt64)   – number of model parameters
   - failure_category   (String?)  – classification for failures (optional - None if model passed)
   - error              (String?)  – error message if the model failed (optional - None if model passed)
+  - curated            (Bool)     – model came from a hand-maintained curated list
+                                    rather than the top-K download ranking
 """
 
 from __future__ import annotations
@@ -56,6 +58,7 @@ TABLE_COLUMNS: tuple[str, ...] = (
     "parameters_number",
     "failure_category",
     "error",
+    "curated",
 )
 
 
@@ -83,7 +86,8 @@ CREATE TABLE IF NOT EXISTS {DATABASE}.{table_name}
     architecture      String,
     parameters_number UInt64,
     failure_category  Nullable(String),
-    error             Nullable(String)
+    error             Nullable(String),
+    curated           Bool DEFAULT false
 )
 ENGINE = ReplacingMergeTree(snapshot_date)
 ORDER BY (model_name, snapshot_date)

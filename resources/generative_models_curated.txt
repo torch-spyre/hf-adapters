@@ -1,0 +1,54 @@
+# Curated list of generative (text-generation) Hugging Face model ids.
+# Maintained manually. One model id per line.
+# Lines starting with '#' and blank lines are ignored.
+
+# Granite 4.1
+ibm-granite/granite-4.1-8b
+ibm-granite/granite-4.1-8b-base
+ibm-granite/granite-4.1-3b
+ibm-granite/granite-4.1-3b-base
+
+# Granite 4.x-20B
+# NOT FOUND
+
+# Granite 4.2 8B
+# NOT FOUND
+
+# Ministral-3-8B-2512
+mistralai/Ministral-3-8B-Instruct-2512
+mistralai/Ministral-3-8B-Reasoning-2512
+mistralai/Ministral-3-8B-Base-2512
+
+# Mistral 7B*
+mistralai/Mistral-7B-v0.1
+mistralai/Mistral-7B-v0.3
+mistralai/Mistral-7B-Instruct-v0.1
+mistralai/Mistral-7B-Instruct-v0.2
+mistralai/Mistral-7B-Instruct-v0.3
+
+# Mistral Small 4*
+mistralai/Mistral-Small-4-119B-2603
+
+# Gemma 4-E2B*
+google/gemma-4-E2B
+google/gemma-4-E2B-it
+
+# Gemma 4-E4B*
+google/gemma-4-E4B
+google/gemma-4-E4B-it
+
+# Gemma 4-12B-Unified*
+google/gemma-4-12B
+google/gemma-4-12B-it
+
+# Gemma 4-26B-A4B*
+google/gemma-4-26B-A4B
+google/gemma-4-26B-A4B-it
+
+# Gemma 4 31B
+google/gemma-4-31b
+google/gemma-4-31b-it
+
+# GPT-OSS-20B*
+openai/gpt-oss-20b
+openai/gpt-oss-safeguard-20b

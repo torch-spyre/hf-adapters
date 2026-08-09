@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TypeVar
 
 from huggingface_hub.errors import HfHubHTTPError
-from huggingface_hub.hf_api import ModelInfo
+from huggingface_hub.hf_api import ExpandModelProperty_T, ModelInfo
 from tqdm import tqdm
 from transformers import AutoConfig
 
@@ -30,8 +30,43 @@ logging.getLogger("transformers").setLevel(logging.ERROR)
 # Get the resources directory (parent of resources/__init__.py)
 RESOURCES_DIR: Path = Path(__file__).resolve().parent.parent / "resources"
 
-# Metadata fields requested from list_models for every fetcher.
-EXPAND_FIELDS: list[str] = [
+# Manually-maintained model-id lists (one id per line; '#' comments and blank
+# lines ignored). See load_curated_model_ids().
+CURATED_GENERATIVE_MODELS_FILE: Path = RESOURCES_DIR / "generative_models_curated.txt"
+CURATED_EMBEDDING_MODELS_FILE: Path = RESOURCES_DIR / "embedding_models_curated.txt"
+
+
+def load_curated_model_ids(path: Path) -> list[str]:
+    """Load Hugging Face model ids from a curated list file.
+
+    The file holds one model id per line. Blank lines and lines whose first
+    non-whitespace character is ``#`` are ignored, as is any inline ``#``
+    comment following an id. Surrounding whitespace is stripped. Order is
+    preserved and duplicates are dropped (first occurrence wins).
+    """
+    seen: set[str] = set()
+    model_ids: list[str] = []
+    for raw_line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line or line in seen:
+            continue
+        seen.add(line)
+        model_ids.append(line)
+    return model_ids
+
+
+def load_curated_generative_models() -> list[str]:
+    return load_curated_model_ids(CURATED_GENERATIVE_MODELS_FILE)
+
+
+def load_curated_embedding_models() -> list[str]:
+    return load_curated_model_ids(CURATED_EMBEDDING_MODELS_FILE)
+
+
+# Metadata fields requested from list_models/model_info for every fetcher.
+# Typed as the hub's own ExpandModelProperty_T literal rather than list[str], so a
+# typo here is a type error instead of a runtime 400 from the API.
+EXPAND_FIELDS: list[ExpandModelProperty_T] = [
     "config",
     "safetensors",
     "gated",

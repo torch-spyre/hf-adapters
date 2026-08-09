@@ -53,7 +53,13 @@ def _filter(
 
 
 def _row(model_id: str, **overrides: object) -> dict:
-    """A catalog row that passes every filter unless *overrides* say otherwise."""
+    """A catalog row that passes every filter unless *overrides* say otherwise.
+
+    ``curated`` is present because both producers stamp it — ``model_fetcher.fetch``
+    with False, ``load_curated`` with True — so a row reaching the pre-filter or the
+    skip writer always has the key. Omitting it here would let those consumers read
+    it with a default they do not need.
+    """
     row: dict = {
         "model_id": model_id,
         "downloads": 100,
@@ -63,6 +69,7 @@ def _row(model_id: str, **overrides: object) -> dict:
         "config_class": "LlamaConfig",
         "model_type": "llama",
         "architectures": "LlamaForCausalLM",
+        "curated": False,
     }
     row.update(overrides)
     return row
@@ -333,7 +340,13 @@ class TestFetchAndFilter:
 
     @pytest.fixture
     def _stub_fetcher(self, monkeypatch):
-        """Replace the Hub fetchers so no network call happens."""
+        """Replace the Hub fetchers so no network call happens.
+
+        Both sources must be stubbed: ``fetch_and_filter`` reads the top-K
+        ranking *and* the curated lists, so leaving the curated loaders live
+        would let these tests reach the Hub (and make them depend on whatever
+        ids the checked-in curated files happen to hold).
+        """
         import tests.spyre.weekly_generation.model_fetcher as model_fetcher
 
         rows = [
@@ -353,6 +366,11 @@ class TestFetchAndFilter:
             model_fetcher,
             "all_fetchers",
             {ModelType.GENERATIVE: _fake, ModelType.EMBEDDING: _fake},
+        )
+        monkeypatch.setattr(
+            model_fetcher,
+            "all_curated_loaders",
+            {ModelType.GENERATIVE: lambda: [], ModelType.EMBEDDING: lambda: []},
         )
         return rows
 
@@ -391,6 +409,7 @@ class TestFetchAndFilter:
                 verified_on_cpu=True,
                 verified_on_gpu=False,
                 verified_on_spyre=True,
+                curated=False,
                 num_downloads=100,
                 family="llama",
                 architecture="LlamaForCausalLM",
@@ -402,6 +421,73 @@ class TestFetchAndFilter:
         written = list(_csv.DictReader(path.open()))
         assert [r["model_name"] for r in written] == ["org/moe", "org/keep"]
         assert written[0]["failure_category"] == FAILURE_CATEGORY_MOE
+
+    def test_curated_models_are_merged_ahead_of_fetched_and_flagged(
+        self, tmp_path, monkeypatch, _stub_fetcher
+    ) -> None:
+        """Curated ids join the scan, lead the list, and carry curated=True.
+
+        The duplicate is the point: 'org/keep' is in both sources, and the curated
+        copy must win so the row written to the DB reports curated=True rather than
+        the False the top-K fetcher stamps on.
+        """
+        import tests.spyre.weekly_generation.model_fetcher as model_fetcher
+        from tests.spyre.weekly_generation.model_prefilter import fetch_and_filter
+        from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
+
+        def _fake_curated(model_type, **_kw) -> list[dict]:
+            return [_row("org/curated", curated=True), _row("org/keep", curated=True)]
+
+        monkeypatch.setattr(model_fetcher, "load_curated", _fake_curated)
+
+        with CsvResultSink(path=tmp_path / "c.csv") as sink:
+            kept = fetch_and_filter(
+                model_type=ModelType.GENERATIVE,
+                snapshot_date=date.today(),
+                top_k=10,
+                sink=sink,
+                max_params=MAX_NUMBER_PARAMS,
+            )
+
+        by_id = {r["model_id"]: r for r in kept}
+        # Curated first, then the fetched survivors, with no duplicate of org/keep.
+        assert [r["model_id"] for r in kept] == [
+            "org/curated",
+            "org/keep",
+            "org/keep-too",
+        ]
+        assert by_id["org/curated"]["curated"] is True
+        assert by_id["org/keep"]["curated"] is True  # curated copy won the dedup
+        assert by_id["org/keep-too"]["curated"] is False
+
+    def test_skipped_curated_model_is_recorded_as_curated(
+        self, tmp_path, monkeypatch, _stub_fetcher
+    ) -> None:
+        """A curated model the pre-filter drops still lands in the DB as curated."""
+        import csv as _csv
+
+        import tests.spyre.weekly_generation.model_fetcher as model_fetcher
+        from tests.spyre.weekly_generation.model_prefilter import fetch_and_filter
+        from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
+
+        def _fake_curated(model_type, **_kw) -> list[dict]:
+            return [_row("org/curated-moe", is_moe=True, curated=True)]
+
+        monkeypatch.setattr(model_fetcher, "load_curated", _fake_curated)
+
+        path = tmp_path / "s.csv"
+        with CsvResultSink(path=path) as sink:
+            fetch_and_filter(
+                model_type=ModelType.GENERATIVE,
+                snapshot_date=date.today(),
+                top_k=10,
+                sink=sink,
+                max_params=MAX_NUMBER_PARAMS,
+            )
+
+        written = {r["model_name"]: r for r in _csv.DictReader(path.open())}
+        assert written["org/curated-moe"]["curated"] == "True"
+        assert written["org/moe"]["curated"] == "False"
 
     def test_drops_the_unserializable_model_info_field(
         self, tmp_path, _stub_fetcher
@@ -462,6 +548,89 @@ class TestFetchAndFilter:
         assert kept == []
 
 
+class TestCuratedKeeperWiring:
+    """The curated catalogs must bypass the ranked scan's keep predicate.
+
+    A curated id was requested by name, so gates meant for ranking noise (gated
+    repos, missing embedding signal, remote code) must not silently drop it. This
+    was regressed once by routing curated ids through the ranked wrappers, which
+    swallowed a gated model with no warning and no DB row — hence a test that
+    pins the wiring rather than trusting the call sites to stay correct.
+
+    Asserted structurally: the real gates need network calls, so checking *which*
+    predicate each entry point injects is both faster and the actual contract.
+    """
+
+    def test_curated_entry_points_inject_keep_all(self) -> None:
+        import utils.fetch_top_embedding_models as fe
+        import utils.fetch_top_generative_models as fg
+        from utils.fetch_curated_models_metadata import keep_all
+
+        captured: dict[str, object] = {}
+
+        for mod, fn in (
+            (fg, fg.fetch_curated_generative_models_metadata),
+            (fe, fe.fetch_curated_embedding_models_metadata),
+        ):
+            name = "fetch_generative_models" if mod is fg else "fetch_embedding_models"
+            original = getattr(mod, name)
+            try:
+                setattr(
+                    mod,
+                    name,
+                    lambda *, keeper, **_kw: captured.__setitem__(mod.__name__, keeper),
+                )
+                fn(model_ids=["org/whatever"])
+            finally:
+                setattr(mod, name, original)
+
+        assert captured[fg.__name__] is keep_all
+        assert captured[fe.__name__] is keep_all
+
+    def test_keep_all_accepts_what_the_ranked_predicate_rejects(self) -> None:
+        """keep_all is unconditional — no ModelInfo attribute can turn it False."""
+        from utils.fetch_curated_models_metadata import keep_all
+
+        class _Gated:
+            id = "org/gated"
+            gated = "manual"
+            config: dict = {}
+            library_name = None
+            tags: list[str] = []
+
+        assert keep_all(_Gated(), False) is True
+        assert keep_all(None, "tok") is True
+
+    def test_ranked_entry_points_still_filter(self) -> None:
+        """The bypass must not leak into the top-K scan it was carved out of."""
+        import utils.fetch_top_embedding_models as fe
+        import utils.fetch_top_generative_models as fg
+        from utils.fetch_curated_models_metadata import keep_all
+
+        captured: dict[str, object] = {}
+
+        for mod, fn in (
+            (fg, fg.fetch_top_generative_models),
+            (fe, fe.fetch_top_embedding_models),
+        ):
+            name = "fetch_generative_models" if mod is fg else "fetch_embedding_models"
+            original = getattr(mod, name)
+            try:
+                setattr(
+                    mod,
+                    name,
+                    lambda *, keeper, **_kw: captured.__setitem__(mod.__name__, keeper),
+                )
+                fn(limit=1)
+            finally:
+                setattr(mod, name, original)
+
+        assert captured[fg.__name__] is fg.keep
+        assert captured[fe.__name__] is fe.keep
+        assert captured[fg.__name__] is not keep_all
+        assert captured[fe.__name__] is not keep_all
+
+
 def _fake_sink_cls():
     """Build a minimal concrete ResultSink subclass, importing the base lazily.
 
@@ -493,6 +662,7 @@ def _add(sink, name: str) -> bool:
         verified_on_cpu=True,
         verified_on_gpu=False,
         verified_on_spyre=True,
+        curated=False,
         num_downloads=1,
         family="llama",
         architecture="LlamaForCausalLM",
@@ -751,7 +921,7 @@ class TestSinkFactory:
                     adapter_name="hf_llama", added_date=None,
                     snapshot_date=date.today(), verified_on_cpu=True,
                     verified_on_gpu=False, verified_on_spyre=True,
-                    num_downloads=1, family="llama",
+                    curated=False, num_downloads=1, family="llama",
                     architecture="LlamaForCausalLM", parameters_number=1,
                     failure_category=None, error=None,
                 )

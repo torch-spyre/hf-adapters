@@ -1,0 +1,48 @@
+# Curated list of embedding (feature-extraction / sentence-similarity) Hugging Face model ids.
+# Maintained manually. One model id per line.
+# Lines starting with '#' and blank lines are ignored.
+
+
+# Granite Embedding
+ibm-granite/granite-embedding-small-english-r2
+ibm-granite/granite-embedding-english-r2
+ibm-granite/granite-embedding-97m-multilingual-r2
+ibm-granite/granite-embedding-311m-multilingual-r2
+
+ibm-granite/granite-embedding-30m-english
+ibm-granite/granite-embedding-125m-english
+ibm-granite/granite-embedding-107m-multilingual
+ibm-granite/granite-embedding-278m-multilingual
+
+# Models from product
+
+# SQuAD
+deepset/roberta-base-squad2
+deepset/roberta-large-squad2
+google-bert/bert-large-uncased-whole-word-masking-finetuned-squad
+deepset/bert-base-cased-squad2
+distilbert/distilbert-base-cased-distilled-squad
+deepset/minilm-uncased-squad2
+deepset/tinyroberta-squad2
+
+# Pre-trained
+FacebookAI/roberta-base
+google-bert/bert-base-uncased
+distilbert/distilbert-base-uncased-finetuned-sst-2-english
+
+# MNLI
+FacebookAI/roberta-large-mnli
+
+# NER
+dslim/bert-base-NER
+Jean-Baptiste/roberta-large-ner-english
+
+# General-purpose
+sentence-transformers/all-MiniLM-L6-v2
+sentence-transformers/all-mpnet-base-v2
+
+# Document Understanding / OCR / Vision
+Ultralytics/YOLO26
+zai-org/GLM-OCR
+PaddlePaddle/PaddleOCR-VL-1.6
+sentence-transformers/clip-ViT-B-32

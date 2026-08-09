@@ -30,6 +30,7 @@ from tests.spyre.weekly_generation.failure_categories import (
 )
 from tests.spyre.weekly_generation.model_type import ModelType
 from tests.spyre.weekly_generation.sink.result_sink import ResultSink
+from utils.utilities import concat_and_dedup_dicts
 
 
 @dataclass(frozen=True)
@@ -190,13 +191,23 @@ def fetch_and_filter(
     # which is pure — needs neither skip_writer nor anything it pulls in.
     from tests.spyre.weekly_generation.skip_writer import write_skipped_rows
 
-    models: list[dict] = model_fetcher.fetch(model_type=model_type, top_k=top_k)
+    # obtain the top-k models from hugging face
+    fetched_models: list[dict] = model_fetcher.fetch(model_type=model_type, top_k=top_k)
 
+    # obtain the curated models
+    curated_models: list[dict] = model_fetcher.load_curated(model_type=model_type)
+
+    # concatenate and dedup while giving precedence to the curated
+    models = concat_and_dedup_dicts(first=curated_models, second=fetched_models)
+
+    # filter unsupported - MoE / no adapter / too large
     result: PrefilterResult = prefilter_models(models, max_params=max_params)
+
+    # write the skipped models to the sink; these won't be tested
     written: int = write_skipped_rows(sink, result.skipped, snapshot_date=snapshot_date)
 
     print(
-        f"{model_type}: {len(models)} fetched -> {len(result.keep)} to evaluate "
+        f"{model_type}: {len(models)} collected -> {len(result.keep)} to evaluate "
         f"({written} terminal row(s) written for skipped models) {result.counts}"
     )
     return result.keep

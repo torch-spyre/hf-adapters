@@ -22,10 +22,12 @@ jina-embeddings-v5-omni, ...) are kept but flagged via ``is_multimodal``.
 import os
 import sys
 from pathlib import Path
+from typing import Callable
 
 from huggingface_hub import HfApi
 from huggingface_hub.hf_api import ModelInfo
 
+from utils.fetch_curated_models_metadata import _create_fetch_metadata, keep_all
 from utils.hf_model_catalog import (
     EXPAND_FIELDS,
     RESOURCES_DIR,
@@ -167,27 +169,42 @@ def keep(model: ModelInfo, token: str | bool) -> bool:
     return True
 
 
-def fetch_top_embedding_models(
-    limit: int, output_csv: Path | str | None = None
+def fetch_embedding_models(
+    fetcher: Callable[[HfApi, int], list[ModelInfo]],
+    keeper: Callable[[ModelInfo, str | bool], bool],
+    limit: int,
+    output_csv: Path | str | None = None,
 ) -> list[dict[str, object]]:
-    # Falls back to False (explicit anonymous access), not True: in
-    # huggingface_hub, token=True means "use the locally cached login token,
-    # and raise LocalTokenNotFoundError if none exists" — it does NOT mean
-    # "anonymous is fine". A CI runner with no `hf auth login` would raise on
-    # every call with that fallback. `or False` also covers GHA setting
-    # HF_TOKEN to an empty string (rather than omitting it) when the secret
-    # doesn't exist, which `.get(..., True)` alone would not catch.
     token: str | bool = os.environ.get("HF_TOKEN") or False
     api: HfApi = HfApi(token=token)
     return build_catalog(
-        fetch_fn=lambda lim: _fetch(api, lim),
-        filter_fn=lambda m: keep(m, token),
+        fetch_fn=lambda lim: fetcher(api, lim),
+        filter_fn=lambda m: keeper(m, token),
         limit=limit,
         output_csv=output_csv,
         label="embedding",
         extra_columns=[("is_multimodal", _is_multimodal)],
         allow_millions=True,
         token=token,
+    )
+
+
+def fetch_top_embedding_models(
+    limit: int, output_csv: Path | str | None = None
+) -> list[dict[str, object]]:
+    return fetch_embedding_models(
+        fetcher=_fetch, keeper=keep, limit=limit, output_csv=output_csv
+    )
+
+
+def fetch_curated_embedding_models_metadata(
+    model_ids: list[str], output_csv: Path | str | None = None
+) -> list[dict[str, object]]:
+    return fetch_embedding_models(
+        fetcher=_create_fetch_metadata(model_ids),
+        keeper=keep_all,
+        limit=len(model_ids),
+        output_csv=output_csv,
     )
 
 

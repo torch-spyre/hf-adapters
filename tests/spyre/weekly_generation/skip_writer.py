@@ -43,6 +43,7 @@ def write_skipped_rows(
             verified_on_cpu=False,
             verified_on_gpu=False,
             verified_on_spyre=False,
+            curated=bool(row["curated"]),
             num_downloads=int(row.get("downloads") or 0),
             family=str(row.get("model_type") or ""),
             architecture=str(row.get("architectures") or ""),
