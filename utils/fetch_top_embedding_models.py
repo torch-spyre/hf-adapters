@@ -154,19 +154,40 @@ def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
     Returns a (keep, reason) tuple where reason describes why the model was
     rejected (empty string when kept).
     """
-    baseline_keep, baseline_reason = is_baseline_keep(model)
-    if not baseline_keep:
-        return False, baseline_reason
-    if not _has_embedding_signal(model):
-        return False, "no embedding signal (not sentence-transformers library or tag)"
-    if _is_reranker(model):
-        return False, "model is a reranker / cross-encoder"
-    if model.gated:
-        return False, "model is gated"
-    if not has_loadable_weights(model):
-        return False, "no loadable weights"
-    if contains_remote_code(model):
-        return False, "requires trust_remote_code"
+    try:
+        baseline_keep, baseline_reason = is_baseline_keep(model)
+        if not baseline_keep:
+            return False, baseline_reason
+    except Exception:
+        return False, "exception during is_baseline_keep"
+    try:
+        if not _has_embedding_signal(model):
+            return (
+                False,
+                "no embedding signal (not sentence-transformers library or tag)",
+            )
+    except Exception:
+        return False, "exception during _has_embedding_signal"
+    try:
+        if _is_reranker(model):
+            return False, "model is a reranker / cross-encoder"
+    except Exception:
+        return False, "exception during _is_reranker"
+    try:
+        if model.gated:
+            return False, "model is gated"
+    except Exception:
+        return False, "exception during model.gated"
+    try:
+        if not has_loadable_weights(model):
+            return False, "no loadable weights"
+    except Exception as e:
+        return False, f"exception during has_loadable_weights: {e}"
+    try:
+        if contains_remote_code(model):
+            return False, "requires trust_remote_code"
+    except Exception as e:
+        return False, f"exception during contains_remote_code: {e}"
     return True, ""
 
 

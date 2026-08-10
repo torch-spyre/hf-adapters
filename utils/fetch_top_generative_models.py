@@ -47,15 +47,27 @@ def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
     Returns a (keep, reason) tuple where reason describes why the model was
     rejected (empty string when kept).
     """
-    baseline_keep, baseline_reason = is_baseline_keep(model)
-    if not baseline_keep:
-        return False, baseline_reason
-    if model.gated:
-        return False, "model is gated"
-    if not has_loadable_weights(model):
-        return False, "no loadable weights"
-    if contains_remote_code(model):
-        return False, "requires trust_remote_code"
+    try:
+        baseline_keep, baseline_reason = is_baseline_keep(model)
+        if not baseline_keep:
+            return False, baseline_reason
+    except Exception:
+        return False, "exception during is_baseline_keep"
+    try:
+        if model.gated:
+            return False, "model is gated"
+    except Exception:
+        return False, "exception during model.gated"
+    try:
+        if not has_loadable_weights(model):
+            return False, "no loadable weights"
+    except Exception:
+        return False, "exception during has_loadable_weights"
+    try:
+        if contains_remote_code(model):
+            return False, "requires trust_remote_code"
+    except Exception:
+        return False, "exception during contains_remote_code"
     return True, ""
 
 
