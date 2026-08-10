@@ -382,8 +382,8 @@ def build_catalog(
     def _safe_filter(model: ModelInfo) -> tuple[bool, str]:
         try:
             return filter_fn(model)
-        except Exception as e:
-            return False, f"filter_fn raised an exception {e}"
+        except Exception:
+            return False, "_safe_filter raised an exception"
 
     timings: dict[str, float] = {}
     t_total = time.perf_counter()
