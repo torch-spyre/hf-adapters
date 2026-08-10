@@ -172,17 +172,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 128, 128]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                     - args:
                         - tensor:
                             shape: [1, 1, 4096]
@@ -246,17 +242,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 1, 128]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                 - name: Ministral3RMSNorm_4096
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3RMSNorm
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3RMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/ministral3/modeling_ministral3.py#L192)'
@@ -327,17 +319,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 128, 128]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                     - args: []
                       kwargs:
                         hidden_states:
@@ -402,17 +390,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 1, 128]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                 - name: Ministral3MLP_eb806b7d
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3MLP
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3MLP (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/ministral3/modeling_ministral3.py#L176)'

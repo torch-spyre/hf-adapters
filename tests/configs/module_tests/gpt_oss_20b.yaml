@@ -109,17 +109,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 128, 32]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                         position_ids:
                           tensor:
                             shape: [1, 128]
@@ -156,17 +152,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 128, 32]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                         position_ids:
                           tensor:
                             shape: [1, 128]
@@ -203,17 +195,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 1, 32]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                         position_ids:
                           tensor:
                             shape: [1, 1]
@@ -277,17 +265,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 1, 32]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                         position_ids:
                           tensor:
                             shape: [1, 1]
@@ -404,17 +388,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 128, 32]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                     - args: []
                       kwargs:
                         hidden_states:
@@ -452,17 +432,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 128, 32]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                     - args: []
                       kwargs:
                         hidden_states:
@@ -527,17 +503,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 1, 32]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                     - args: []
                       kwargs:
                         hidden_states:
@@ -602,17 +574,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 1, 32]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                 - name: GptOssMLP_ac9bcb56
                   module_path: transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP
                   description: 'Module: transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/gpt_oss/modeling_gpt_oss.py#L138)'

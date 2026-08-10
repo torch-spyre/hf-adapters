@@ -111,17 +111,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 128, 128]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                     - args:
                         - tensor:
                             shape: [1, 1, 4096]
@@ -184,17 +180,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 1, 128]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                 - name: GraniteRMSNorm_4096
                   module_path: transformers.models.granite.modeling_granite.GraniteRMSNorm
                   description: 'Module: transformers.models.granite.modeling_granite.GraniteRMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/granite/modeling_granite.py#L182)'
@@ -264,17 +256,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 128, 128]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                     - args: []
                       kwargs:
                         hidden_states:
@@ -338,17 +326,13 @@ test_suite_config:
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                             - shape: [1, 1, 128]
                               stride: null
                               storage_offset: 0
                               dtype: torch.bfloat16
                               device: spyre
-                              init: randint
-                              init_args:
-                                high: 1
+                              init: xavier
                 - name: GraniteMLP_77d2613c
                   module_path: transformers.models.granite.modeling_granite.GraniteMLP
                   description: 'Module: transformers.models.granite.modeling_granite.GraniteMLP (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/granite/modeling_granite.py#L203)'
