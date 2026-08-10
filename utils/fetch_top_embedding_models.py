@@ -31,6 +31,7 @@ from utils.fetch_curated_models_metadata import _create_fetch_metadata, keep_all
 from utils.hf_model_catalog import (
     EXPAND_FIELDS,
     RESOURCES_DIR,
+    _guarded,
     build_catalog,
     contains_remote_code,
     has_loadable_weights,
@@ -155,39 +156,42 @@ def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
     rejected (empty string when kept).
     """
     try:
-        baseline_keep, baseline_reason = is_baseline_keep(model)
-        if not baseline_keep:
-            return False, baseline_reason
+        keep_flag, reason = is_baseline_keep(model)
+        if not keep_flag:
+            return False, reason
     except Exception:
         return False, "exception during is_baseline_keep"
-    try:
-        if not _has_embedding_signal(model):
-            return (
-                False,
-                "no embedding signal (not sentence-transformers library or tag)",
-            )
-    except Exception:
-        return False, "exception during _has_embedding_signal"
-    try:
-        if _is_reranker(model):
-            return False, "model is a reranker / cross-encoder"
-    except Exception:
-        return False, "exception during _is_reranker"
-    try:
-        if model.gated:
-            return False, "model is gated"
-    except Exception:
-        return False, "exception during model.gated"
-    try:
-        if not has_loadable_weights(model):
-            return False, "no loadable weights"
-    except Exception as e:
-        return False, f"exception during has_loadable_weights: {e}"
-    try:
-        if contains_remote_code(model):
-            return False, "requires trust_remote_code"
-    except Exception as e:
-        return False, f"exception during contains_remote_code: {e}"
+
+    checks: list[tuple[Callable[[], bool], str, str]] = [
+        (
+            lambda: not _has_embedding_signal(model),
+            "_has_embedding_signal",
+            "no embedding signal (not sentence-transformers library or tag)",
+        ),
+        (
+            lambda: _is_reranker(model),
+            "_is_reranker",
+            "model is a reranker / cross-encoder",
+        ),
+        (lambda: model.gated, "model.gated", "model is gated"),
+        (
+            lambda: not has_loadable_weights(model),
+            "has_loadable_weights",
+            "no loadable weights",
+        ),
+        (
+            lambda: contains_remote_code(model),
+            "contains_remote_code",
+            "requires trust_remote_code",
+        ),
+    ]
+    for predicate, name, rejection in checks:
+        result, err = _guarded(predicate, name)
+        if err:
+            return False, err
+        if result:
+            return False, rejection
+
     return True, ""
 
 
