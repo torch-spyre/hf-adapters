@@ -1,4 +1,4 @@
-# Copyright 2025 The Torch-Spyre Authors.
+# Copyright 2026 The Torch-Spyre Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,11 +15,7 @@
 import os
 
 import torch
-from transformers import (
-    Mistral3ForConditionalGeneration,
-    MistralCommonBackend,
-    StaticCache,
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer, StaticCache
 from utils.torchop_yaml import TorchOpCollector, require_cuda, setup_logging
 
 
@@ -27,31 +23,25 @@ def main():
     setup_logging()
     require_cuda()
 
-    model_path = "mistralai/Ministral-3-14B-Instruct-2512"
-
+    model_path = "Qwen/Qwen2.5-7B-Instruct"
+    prompt = "Give me a short introduction to large language model."
     messages = [
         {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "Where is the Thomas J. Watson Research Center located?",
-                },
-            ],
+            "role": "system",
+            "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
         },
+        {"role": "user", "content": prompt},
     ]
 
     device = "cuda"
-    model = Mistral3ForConditionalGeneration.from_pretrained(
-        model_path,
-        device_map=device,
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=False,
-    )
-    tokenizer = MistralCommonBackend.from_pretrained(model_path)
-    encoded_input = tokenizer.apply_chat_template(
-        messages, return_tensors="pt", return_dict=True
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path, device_map="auto", dtype=torch.bfloat16
     ).to(device)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    text = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    encoded_input = tokenizer(text, return_tensors="pt").to(device)
 
     past_key_values = StaticCache(config=model.config, max_cache_len=2048)
 
@@ -65,9 +55,9 @@ def main():
         with torch.no_grad():
             model.generate(
                 **encoded_input,
-                max_new_tokens=512,
                 past_key_values=past_key_values,
                 use_cache=True,
+                max_new_tokens=16,
             )
 
     # print traced torch op

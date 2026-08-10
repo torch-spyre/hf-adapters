@@ -3,10 +3,12 @@
 import os
 import sys
 from pathlib import Path
+from typing import Callable
 
 from huggingface_hub import HfApi
 from huggingface_hub.hf_api import ModelInfo
 
+from utils.fetch_curated_models_metadata import _create_fetch_metadata, keep_all
 from utils.hf_model_catalog import (
     EXPAND_FIELDS,
     RESOURCES_DIR,
@@ -41,40 +43,53 @@ def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
 def keep(model: ModelInfo, token: str | bool) -> bool:
     """Keep predicate for the generative fetcher.
 
-    Ordering matters: the cheap metadata-only checks run first so we only
-    spend the ``has_loadable_weights`` HTTP call on the ~1k candidates that
-    would otherwise survive.
+    Ordering matters: the cheap metadata-only checks run first.
     """
     if not is_baseline_keep(model):
         return False
     if model.gated:
         return False
+    if not has_loadable_weights(model):
+        return False
     if contains_remote_code(model):
         return False
-    if not has_loadable_weights(model, token):
-        return False
     return True
+
+
+def fetch_generative_models(
+    fetcher: Callable[[HfApi, int], list[ModelInfo]],
+    keeper: Callable[[ModelInfo, str | bool], bool],
+    limit: int,
+    output_csv: Path | str | None = None,
+) -> list[dict]:
+    token: str | bool = os.environ.get("HF_TOKEN") or False
+    api: HfApi = HfApi(token=token)
+    return build_catalog(
+        fetch_fn=lambda lim: fetcher(api, lim),
+        filter_fn=lambda m: keeper(m, token),
+        limit=limit,
+        output_csv=output_csv,
+        label="generative",
+        token=token,
+    )
 
 
 def fetch_top_generative_models(
     limit: int, output_csv: Path | str | None = None
 ) -> list[dict[str, object]]:
-    # Falls back to False (explicit anonymous access), not True: in
-    # huggingface_hub, token=True means "use the locally cached login token,
-    # and raise LocalTokenNotFoundError if none exists" — it does NOT mean
-    # "anonymous is fine". A CI runner with no `hf auth login` would raise on
-    # every call with that fallback. `or False` also covers GHA setting
-    # HF_TOKEN to an empty string (rather than omitting it) when the secret
-    # doesn't exist, which `.get(..., True)` alone would not catch.
-    token: str | bool = os.environ.get("HF_TOKEN") or False
-    api: HfApi = HfApi(token=token)
-    return build_catalog(
-        fetch_fn=lambda lim: _fetch(api, lim),
-        filter_fn=lambda m: keep(m, token),
-        limit=limit,
+    return fetch_generative_models(
+        fetcher=_fetch, keeper=keep, limit=limit, output_csv=output_csv
+    )
+
+
+def fetch_curated_generative_models_metadata(
+    model_ids: list[str], output_csv: Path | str | None = None
+) -> list[dict[str, object]]:
+    return fetch_generative_models(
+        fetcher=_create_fetch_metadata(model_ids),
+        keeper=keep_all,
+        limit=len(model_ids),
         output_csv=output_csv,
-        label="generative",
-        token=token,
     )
 
 

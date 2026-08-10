@@ -143,6 +143,7 @@ jobs:
   generate-matrix:
     name: Generate test matrices
     runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
     outputs:
       causal_matrix: ${{ steps.generate.outputs.causal_matrix }}
       embed_matrix: ${{ steps.generate.outputs.embed_matrix }}
@@ -178,6 +179,7 @@ jobs:
   adapter-coverage:
     name: adapter coverage
     runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
     defaults:
       run:
         working-directory: .
@@ -254,6 +256,7 @@ jobs:
   spyre-load-tests:
     name: Spyre load (${{ matrix.model_key }})
     needs: [generate-matrix]
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -303,6 +306,7 @@ jobs:
   spyre-smoke-tests:
     name: Spyre smoke (${{ matrix.model_key }})
     needs: [generate-matrix]
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -351,6 +355,7 @@ jobs:
   spyre-token-compare-tests:
     name: Spyre token compare (${{ matrix.model_key }})
     needs: [generate-matrix]
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -399,6 +404,7 @@ jobs:
   spyre-embed-compare-tests:
     name: Spyre embed compare (${{ matrix.model_key }})
     needs: [generate-matrix]
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -447,6 +453,7 @@ jobs:
   spyre-reranker-compare-tests:
     name: Spyre reranker compare (${{ matrix.model_key }})
     needs: [generate-matrix]
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -493,6 +500,7 @@ jobs:
   spyre-vlm-e2e-tests:
     name: Spyre VLM e2e (${{ matrix.model_key }})
     needs: [generate-matrix]
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -541,6 +549,7 @@ jobs:
 
   spyre-model-module-tests:
     name: Spyre model-module tests (${{ matrix.config }})
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -600,6 +609,11 @@ jobs:
   # Required check gate — fans in all matrix jobs so a single branch
   # protection rule ("tests / run spyre unit tests") passes only when every
   # suite passes.
+  #
+  # All upstream jobs are individually skipped (via `if:`) when the PR is
+  # labeled "integration-test" -- that flow is handled elsewhere. `needs.*`
+  # then resolve to `skipped`, which is not `failure`/`cancelled`, so this
+  # gate still passes (green, near-instant) rather than blocking the merge.
   # ===========================================================================
   run-spyre-unit-tests:
     name: run spyre unit tests

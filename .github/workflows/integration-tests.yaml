@@ -66,16 +66,21 @@ on:
         default: ''
       test_type:
         description: >-
-          Test tier to run: smoke | core | full -- or the user-facing tier
-          aliases unit (= core) | integration (= smoke) | regression (= full),
-          for callers (e.g. spyre-frameworks config.yaml) that speak in tier
-          names rather than suite names. "smoke" runs only the smoke suite;
-          "core" runs every other suite (load, token_compare, embed_compare,
-          vlm, model_module); "full" runs everything. This is a plain string
-          underneath (see _test_matrix.yaml's resolve-test-type job), so a
-          caller using the API/gh CLI can also pass an individual suite key or
-          a space-separated combo (e.g. "smoke token_compare") for finer
-          control than the dropdown offers.
+          Test tier to run: smoke | core | full | trunk -- or the user-facing
+          tier aliases unit (= core) | integration (= smoke) | regression
+          (= full), for callers (e.g. spyre-frameworks config.yaml) that speak
+          in tier names rather than suite names. "smoke" runs only the smoke
+          suite; "core" runs every other suite (load, token_compare,
+          embed_compare, vlm, model_module); "full"/"trunk" run everything
+          (trunk mirrors this repo's push-to-main CI label — see
+          resolve_test_type.sh). This is a plain string underneath (see
+          _test_matrix.yaml's resolve-test-type job), so a caller using the
+          API/gh CLI can also pass an individual suite key or a
+          space-separated combo (e.g. "smoke token_compare") for finer
+          control than the dropdown offers -- but GitHub validates `choice`
+          options against the REST API dispatch too, not just the web UI
+          dropdown, so every value a real caller sends (like the "trunk" tier
+          above) must be listed explicitly below.
         required: false
         type: choice
         default: smoke
@@ -83,6 +88,7 @@ on:
           - smoke
           - core
           - full
+          - trunk
       models:
         description: >-
           Space-separated list of model paths to restrict every matrix job

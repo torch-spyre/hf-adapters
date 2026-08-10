@@ -1324,6 +1324,13 @@ def _resolve_generation_params(model, tokenizer, overrides):
     }
 
 
+def generation_cache_len(prompt_length, max_new_tokens):
+    """Return KV-cache capacity for block-padded prompt and generation tokens."""
+    padded_prompt_len = math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
+    padded_generation_len = math.ceil(max_new_tokens / BLOCK_SIZE) * BLOCK_SIZE
+    return padded_prompt_len + padded_generation_len
+
+
 def pad_and_position(input_ids, actual_lengths):
     """Left block-pad ``input_ids`` to a BLOCK_SIZE multiple and build positions.
 
@@ -1490,10 +1497,7 @@ def generate(
 
     # Block-pad to a BLOCK_SIZE multiple; real tokens right-aligned (positions
     # 0..actual_len-1 at padded indices prompt_offsets[b]..padded_len-1).
-    max_cache_len = (
-        math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
-        + math.ceil(max_new_tokens / BLOCK_SIZE) * BLOCK_SIZE
-    )
+    max_cache_len = generation_cache_len(prompt_length, max_new_tokens)
     input_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
         input_ids, actual_prompt_lengths
     )

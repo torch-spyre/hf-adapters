@@ -55,7 +55,6 @@ Usage (on Spyre pod)::
 """
 
 import gc
-import math
 import types
 from typing import Any
 
@@ -81,6 +80,7 @@ from hf_adapters.hf_common import (
     DEVICE,
     allocate_kv_caches,
     build_expansion_mask,
+    generation_cache_len,
     get_model_dtype,
     pad_and_position,
 )
@@ -146,7 +146,6 @@ def _adapter_teacher_forced_steps(
 
     model_d_type = get_model_dtype(model)
     backbone = adapter.get_backbone(model)
-    # emb_mult = backbone.embedding_multiplier
     # Falls back to 1.0 for models (Mistral) that don't scale embeddings
     emb_mult = getattr(backbone, "embedding_multiplier", 1.0)
 
@@ -154,10 +153,7 @@ def _adapter_teacher_forced_steps(
     actual_prompt_lengths = attention_mask.sum(dim=1)
     n_steps = len(forced_tokens)
 
-    max_cache_len = (
-        math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
-        + math.ceil((n_steps + 1) / BLOCK_SIZE) * BLOCK_SIZE
-    )
+    max_cache_len = generation_cache_len(prompt_length, n_steps)
     padded_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
         input_ids, actual_prompt_lengths
     )
