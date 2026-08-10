@@ -249,7 +249,7 @@ test_suite_config:
                               num_attention_heads: 64
                               num_key_value_heads: 8
                               head_dim: 64
-                              num_hidden_layers: 24
+                              num_hidden_layers: 1
                               max_position_embeddings: 131072
                     - args:
                         - tensor:
@@ -323,7 +323,7 @@ test_suite_config:
                               num_attention_heads: 64
                               num_key_value_heads: 8
                               head_dim: 64
-                              num_hidden_layers: 24
+                              num_hidden_layers: 1
                               max_position_embeddings: 131072
                 - name: GptOssRMSNorm_2880
                   module_path: transformers.models.gpt_oss.modeling_gpt_oss.GptOssRMSNorm
@@ -518,7 +518,7 @@ test_suite_config:
                               num_attention_heads: 64
                               num_key_value_heads: 8
                               head_dim: 64
-                              num_hidden_layers: 24
+                              num_hidden_layers: 1
                               max_position_embeddings: 131072
                         position_embeddings:
                           tensor_list:
@@ -593,7 +593,7 @@ test_suite_config:
                               num_attention_heads: 64
                               num_key_value_heads: 8
                               head_dim: 64
-                              num_hidden_layers: 24
+                              num_hidden_layers: 1
                               max_position_embeddings: 131072
                         position_embeddings:
                           tensor_list:

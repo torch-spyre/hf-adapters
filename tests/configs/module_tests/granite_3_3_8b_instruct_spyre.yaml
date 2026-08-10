@@ -175,7 +175,7 @@ test_suite_config:
                               hidden_size: 4096
                               num_attention_heads: 32
                               num_key_value_heads: 8
-                              num_hidden_layers: 40
+                              num_hidden_layers: 1
                               max_position_embeddings: 131072
                         position_embeddings:
                           tensor_list:
@@ -329,7 +329,7 @@ test_suite_config:
                               hidden_size: 4096
                               num_attention_heads: 32
                               num_key_value_heads: 8
-                              num_hidden_layers: 40
+                              num_hidden_layers: 1
                               max_position_embeddings: 131072
                         position_embeddings:
                           tensor_list:

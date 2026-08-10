@@ -33,6 +33,7 @@ test_suite_config:
                           num_key_value_heads: 8
                           intermediate_size: 32768
                           max_position_embeddings: 131072
+                          num_hidden_layers : 1
                           _attn_implementation: sdpa
                     kwargs: {}
                   forward_inputs:
@@ -88,6 +89,7 @@ test_suite_config:
                           num_key_value_heads: 8
                           intermediate_size: 32768
                           max_position_embeddings: 131072
+                          num_hidden_layers : 1
                           _attn_implementation: sdpa
                     kwargs: {}
                   forward_inputs:
@@ -141,6 +143,7 @@ test_suite_config:
                           num_key_value_heads: 8
                           intermediate_size: 32768
                           max_position_embeddings: 131072
+                          num_hidden_layers : 1
                           _attn_implementation: sdpa
                     kwargs:
                       layer_idx: 0
@@ -236,7 +239,7 @@ test_suite_config:
                               num_attention_heads: 32
                               num_key_value_heads: 8
                               head_dim: 128
-                              num_hidden_layers: 40
+                              num_hidden_layers: 1
                               max_position_embeddings: 131072
                         position_embeddings:
                           tensor_list:
@@ -294,6 +297,7 @@ test_suite_config:
                           num_key_value_heads: 8
                           intermediate_size: 32768
                           max_position_embeddings: 131072
+                          num_hidden_layers : 1
                           _attn_implementation: sdpa
                     kwargs:
                       layer_idx: 0
@@ -391,7 +395,7 @@ test_suite_config:
                               num_attention_heads: 32
                               num_key_value_heads: 8
                               head_dim: 128
-                              num_hidden_layers: 40
+                              num_hidden_layers: 1
                               max_position_embeddings: 131072
                         position_embeddings:
                           tensor_list:
@@ -423,6 +427,7 @@ test_suite_config:
                           num_key_value_heads: 8
                           intermediate_size: 32768
                           max_position_embeddings: 131072
+                          num_hidden_layers : 1
                           _attn_implementation: sdpa
                     kwargs: {}
                   forward_inputs:

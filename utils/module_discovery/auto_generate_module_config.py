@@ -418,6 +418,10 @@ def _extract_cache_info(
         ]:
             if hasattr(config, attr):
                 config_kwargs[attr] = getattr(config, attr)
+        # The module test rebuilds only a single decoder layer, so pin
+        # num_hidden_layers to 1: the real model depth would size a KV
+        # cache / layer stack the standalone module never populates.
+        config_kwargs["num_hidden_layers"] = 1
         cache_info["config_path"] = f"{config_cls.__module__}.{config_cls.__name__}"
         cache_info["config_kwargs"] = config_kwargs
 

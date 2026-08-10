@@ -191,7 +191,7 @@ test_suite_config:
                               hidden_size: 3584
                               num_attention_heads: 28
                               num_key_value_heads: 4
-                              num_hidden_layers: 28
+                              num_hidden_layers: 1
                               max_position_embeddings: 32768
                 - name: Qwen2RMSNorm_3584
                   module_path: transformers.models.qwen2.modeling_qwen2.Qwen2RMSNorm
@@ -327,7 +327,7 @@ test_suite_config:
                               hidden_size: 3584
                               num_attention_heads: 28
                               num_key_value_heads: 4
-                              num_hidden_layers: 28
+                              num_hidden_layers: 1
                               max_position_embeddings: 32768
                         position_embeddings:
                           tensor_list:
