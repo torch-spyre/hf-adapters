@@ -205,8 +205,6 @@ def is_baseline_keep(model: ModelInfo) -> tuple[bool, str]:
     (empty string when kept).
     """
     failure_constant = "failed baseline keep: "
-    if not model.config:
-        return False, failure_constant + "no config"
     if model.library_name in NON_NATIVE_ID_SUBSTRINGS:
         return False, failure_constant + "non-native library (ONNX/GGUF/MLX)"
     model_id_lower: str = model.id.lower()
@@ -214,6 +212,8 @@ def is_baseline_keep(model: ModelInfo) -> tuple[bool, str]:
         return False, failure_constant + "non-native format in model id (ONNX/GGUF/MLX)"
     if "nsfw" in tags(model):
         return False, failure_constant + "NSFW tag"
+    if not model.config:
+        return False, failure_constant + "no config"
     return True, ""
 
 
@@ -383,8 +383,7 @@ def build_catalog(
         try:
             return filter_fn(model)
         except Exception as e:
-            logging.warning("filter_fn failed for %s: %s", model.id, e)
-            return False, "filter_fn raised an exception"
+            return False, f"filter_fn raised an exception {e}"
 
     timings: dict[str, float] = {}
     t_total = time.perf_counter()
