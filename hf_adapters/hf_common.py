@@ -2403,9 +2403,14 @@ def prefill_encoder(
             else token_type_ids
         )
 
-    # Bidirectional mask: real tokens attend to all other real tokens
+    # Bidirectional mask: real tokens attend to all other real tokens. Match the
+    # model dtype because SDPA requires a floating-point mask to match q/k/v.
     mask = build_prefill_mask_right_padded(
-        bsz, padded_len, actual_lengths, is_causal=False
+        bsz,
+        padded_len,
+        actual_lengths,
+        is_causal=False,
+        dtype=get_model_dtype(model),
     )
 
     h = run_encoder_forward_fn(
