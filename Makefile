@@ -22,9 +22,18 @@ SHELL := /bin/bash
 # Empty / unset defaults to "regression" (every suite).
 TEST_TYPE ?= regression
 
-# MODEL_KEY narrows a suite to one model via pytest's -k filter (matrix-style
-# per-model CI jobs pass this); empty = run every model in the suite.
+# MODEL_KEY narrows a suite to one model via pytest's -k substring filter
+# (local dev use, e.g. `make tests MODEL_KEY=granite` to match several paths
+# at once); empty = run every model in the suite.
 MODEL_KEY ?=
+
+# MODEL_PATH narrows a suite to exactly one model via pytest's --model-path
+# (see tests/conftest.py's pytest_generate_tests), which replaces the
+# registry-derived parametrization outright rather than filtering it -- so it
+# works for any model path, including ones that lost the smallest-per-adapter
+# CAUSAL_PATHS/EMBED_PATHS/VISION_PATHS representative slot. Matrix-style
+# per-model CI jobs pass this (see _test_matrix.yaml); empty = no override.
+MODEL_PATH ?=
 
 # Flags passed verbatim to pytest, mirroring _test_matrix.yaml's extra_test_flags.
 PYTEST_ARGS ?= -s -vvv
@@ -50,6 +59,12 @@ else
 K_ARGS :=
 endif
 
+ifneq ($(MODEL_PATH),)
+MODEL_PATH_ARGS := --model-path "$(MODEL_PATH)"
+else
+MODEL_PATH_ARGS :=
+endif
+
 .PHONY: help test tests adapter-coverage-tests smoke-tests load-tests \
         token-compare-tests embed-compare-tests vlm-tests model-module-tests
 
@@ -57,8 +72,8 @@ help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-24s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
 	@echo "Variables: TEST_TYPE=unit|integration|regression|trunk|<space-separated suite keys, e.g. smoke> (default regression),"
-	@echo "  MODEL_KEY (pytest -k filter, default all), PYTEST_ARGS (default '$(PYTEST_ARGS)'),"
-	@echo "  JUNIT_XML (single-suite targets only), RESULTS_DIR (default '$(RESULTS_DIR)')"
+	@echo "  MODEL_KEY (pytest -k filter, default all), MODEL_PATH (exact model path via --model-path, overrides registry parametrization),"
+	@echo "  PYTEST_ARGS (default '$(PYTEST_ARGS)'), JUNIT_XML (single-suite targets only), RESULTS_DIR (default '$(RESULTS_DIR)')"
 
 # Suite keys, one target each -- same vocabulary and test_types membership as
 # _test_matrix.yaml. Each is independently runnable with its own JUNIT_XML.
@@ -66,19 +81,19 @@ adapter-coverage-tests: ## Run adapter registry coverage check (suite key: adapt
 	$(PYTEST) -v --noconftest tests/test_adapter_coverage.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 smoke-tests: ## Run e2e smoke tests (suite key: smoke)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_smoke_spyre.py $(K_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_smoke_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 load-tests: ## Run load tests (suite key: load)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_load_spyre.py $(K_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_load_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 token-compare-tests: ## Run token-compare tests (suite key: token_compare)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_token_compare_spyre.py $(K_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_token_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 embed-compare-tests: ## Run embed-compare tests (suite key: embed_compare)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_embed_compare_spyre.py $(K_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_embed_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 vlm-tests: ## Run VLM e2e tests (suite key: vlm)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_vlm_e2e_spyre.py $(K_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_vlm_e2e_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 # MODULE_CONFIG narrows model-module-tests to one YAML config (matrix-style
 # per-config CI jobs pass this); empty = run every config in tests/configs/module_tests.

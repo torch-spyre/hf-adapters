@@ -373,7 +373,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_load_spyre.py for ${{ matrix.model_key }}..."
-          make load-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_KEY="${{ matrix.model_key }}" JUNIT_XML=junit-load-${{ matrix.model_key }}.xml
+          make load-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-load-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -433,7 +433,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
-          make smoke-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_KEY="${{ matrix.model_key }}" JUNIT_XML=junit-smoke-${{ matrix.model_key }}.xml
+          make smoke-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-smoke-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -489,7 +489,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}..."
-          make token-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_KEY="${{ matrix.model_key }}" JUNIT_XML=junit-token-compare-${{ matrix.model_key }}.xml
+          make token-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -545,7 +545,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}..."
-          make embed-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_KEY="${{ matrix.model_key }}" JUNIT_XML=junit-embed-compare-${{ matrix.model_key }}.xml
+          make embed-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-embed-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -602,7 +602,7 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_vlm_e2e_spyre.py for ${{ matrix.model_key }}..."
-          make vlm-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_KEY="${{ matrix.model_key }}" JUNIT_XML=junit-vlm-${{ matrix.model_key }}.xml
+          make vlm-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-vlm-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
