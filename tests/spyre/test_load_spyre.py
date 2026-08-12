@@ -36,8 +36,6 @@ from model_registry import (
     xfail_non_blocking,
 )
 
-from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
-
 
 @pytest.mark.parametrize(
     "model_path", xfail_non_blocking(CAUSAL_PATHS, table=NON_BLOCKING_CAUSAL_MODELS)
@@ -60,10 +58,8 @@ def test_load_causal_lm(model_path: str) -> None:
 def load_causal_lm(model_path: str) -> tuple[Any, Any, float]:
     from hf_adapters import AutoSpyreModelForCausalLM
 
-    dtype = torch_dtype_for_model_path(model_path)
-
     t0 = time.time()
-    model = AutoSpyreModelForCausalLM.from_pretrained(model_path, dtype=dtype)
+    model = AutoSpyreModelForCausalLM.from_pretrained(model_path)
     load_s = time.time() - t0
 
     model_is_not_none = model is not None
@@ -75,10 +71,8 @@ def load_causal_lm(model_path: str) -> tuple[Any, Any, float]:
 def load_embedding(model_path: str) -> tuple[Any, float]:
     from hf_adapters import AutoSpyreModel
 
-    dtype = torch_dtype_for_model_path(model_path)
-
     t0 = time.time()
-    model = AutoSpyreModel.from_pretrained(model_path, dtype=dtype)
+    model = AutoSpyreModel.from_pretrained(model_path)
     load_s = time.time() - t0
     return model is not None, load_s
 

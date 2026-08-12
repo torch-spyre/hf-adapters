@@ -39,7 +39,7 @@ import types
 
 import pytest
 import torch
-from transformers import AutoModelForImageTextToText
+from transformers import AutoModelForImageTextToText, PreTrainedModel
 
 from hf_adapters.auto_spyre_model import (
     IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
@@ -63,7 +63,7 @@ PROMPT: str = "Briefly describe this image."
 
 def _adapter_generate(
     adapter: types.ModuleType,
-    model: torch.nn.Module,
+    model: PreTrainedModel,
     processor,
     batch: dict,
     max_new_tokens: int,

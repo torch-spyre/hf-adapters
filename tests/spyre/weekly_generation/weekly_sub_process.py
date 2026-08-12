@@ -310,20 +310,16 @@ def _load_on_cpu(
     import hf_adapters.hf_common as _hf_common
     from hf_adapters import AutoSpyreModelForCausalLM
     from hf_adapters.auto_spyre_model import AutoSpyreModel
-    from tests.conftest import get_dtype_for_cpu
 
     _orig_device = _hf_common.DEVICE  # save
     _hf_common.DEVICE = "cpu"  # patch
     try:
-        dtype = get_dtype_for_cpu(model_path)
         model = None
         match model_type:
             case ModelType.EMBEDDING:
-                model = AutoSpyreModel.from_pretrained(model_path, dtype=dtype)
+                model = AutoSpyreModel.from_pretrained(model_path)
             case ModelType.GENERATIVE:
-                model = AutoSpyreModelForCausalLM.from_pretrained(
-                    model_path, dtype=dtype
-                )
+                model = AutoSpyreModelForCausalLM.from_pretrained(model_path)
 
         return model is not None, None
     except HfHubHTTPError as e:

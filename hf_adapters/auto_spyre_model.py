@@ -36,6 +36,7 @@ padded decode generation loop.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from types import MethodType, ModuleType
 from typing import Any, Union
 
@@ -76,6 +77,7 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.models.ministral.configuration_ministral import MinistralConfig
 from transformers.models.mistral3.configuration_mistral3 import Mistral3Config
 
+import hf_adapters.hf_common as hf_common
 from hf_adapters import (
     hf_bert,
     hf_dspark_gemma4,
@@ -179,17 +181,43 @@ SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     RobertaConfig: hf_xlm_roberta,
 }
 
-MODEL_PATH_TO_TORCH_DTYPE: dict[str, torch.dtype] = {
-    "mistralai/Ministral-3-3B-Instruct-2512": torch.bfloat16,
-    "mistralai/Ministral-3-8B-Instruct-2512": torch.bfloat16,
-    "mistralai/Ministral-3-14B-Instruct-2512": torch.bfloat16,
-    "google/embeddinggemma-300m": torch.bfloat16,
-    "google/gemma-4-12b": torch.bfloat16,
-    "google/gemma-4-12B-it": torch.bfloat16,
-    "google/gemma-4-31b": torch.bfloat16,
-    "ibm-granite/granite-4.0-1b-base": torch.float32,
-    "ibm-granite/granite-4.0-1b": torch.float32,
+
+@dataclass(frozen=True)
+class ModelDTypePolicy:
+    dtype: torch.dtype | None = None
+    cpu_dtype: torch.dtype | None = None
+
+
+MODEL_DTYPE_POLICIES: dict[str, ModelDTypePolicy] = {
+    "google/embeddinggemma-300m": ModelDTypePolicy(dtype=torch.bfloat16),
+    "ibm-granite/granite-4.0-1b-base": ModelDTypePolicy(cpu_dtype=torch.float32),
+    "ibm-granite/granite-4.0-1b": ModelDTypePolicy(cpu_dtype=torch.float32),
 }
+
+
+def dtype_for_model_path(
+    model_name_or_path: Union[str, os.PathLike[str]],
+    target_device: str | torch.device,
+) -> torch.dtype:
+    """Resolve one concrete dtype before loading a model."""
+    device_str = (
+        target_device.type
+        if isinstance(target_device, torch.device)
+        else target_device.split(":", 1)[0]
+    )
+    policy = MODEL_DTYPE_POLICIES.get(os.fspath(model_name_or_path), ModelDTypePolicy())
+    if device_str == "cpu" and policy.cpu_dtype is not None:
+        dtype = policy.cpu_dtype
+    elif policy.dtype is not None:
+        dtype = policy.dtype
+    else:
+        config = AutoConfig.from_pretrained(model_name_or_path)
+        dtype = getattr(config, "dtype", None) or torch.float16
+
+    if dtype == torch.float32 and device_str == "spyre":
+        dtype = torch.float16
+
+    return dtype
 
 
 def resolve_adapter_module(
@@ -238,11 +266,16 @@ class AutoSpyreModel:
     def from_pretrained(
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
-        dtype: torch.dtype = torch.float16,
+        dtype: torch.dtype | None = None,
     ) -> torch.nn.Module:
         module: ModuleType = resolve_adapter_module(
             model_name_or_path=model_name_or_path, mapping=cls._module_mapping
         )
+        if dtype is None:
+            dtype = dtype_for_model_path(
+                model_name_or_path,
+                target_device=hf_common.DEVICE,
+            )
 
         model: torch.nn.Module = load_model_common(
             model_name_or_path,
@@ -267,7 +300,7 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
     def from_pretrained(
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
-        dtype: torch.dtype = torch.float16,
+        dtype: torch.dtype | None = None,
     ) -> torch.nn.Module:
         module: ModuleType = resolve_adapter_module(model_name_or_path)
         if getattr(module, "_is_encoder_only", False):
@@ -318,7 +351,7 @@ class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
     def from_pretrained(
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
-        dtype: torch.dtype = torch.float16,
+        dtype: torch.dtype | None = None,
     ) -> torch.nn.Module:
         module: ModuleType = resolve_adapter_module(
             model_name_or_path, mapping=cls._module_mapping
@@ -375,7 +408,7 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
     def from_pretrained(
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
-        dtype: torch.dtype = torch.float16,
+        dtype: torch.dtype | None = None,
     ):
         module: ModuleType = resolve_adapter_module(
             model_name_or_path,
@@ -420,19 +453,3 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
         model.prefill_logits = MethodType(model_prefill_logits, model)  # type: ignore[assignment]
         model.generate = MethodType(model_generate, model)  # type: ignore[assignment]
         return model
-
-
-def torch_dtype_for_model_path(model_path: str) -> torch.dtype:
-    """Resolve the Spyre-safe torch dtype for *model_path*.
-
-    Looks up *model_path* in ``MODEL_PATH_TO_TORCH_DTYPE``; defaults to
-    ``torch.float16`` when no entry is found. Registry entries of
-    ``torch.float32`` (e.g. Granite 4 1B, where fp16 overflows on CPU) are
-    downcast to ``torch.float16`` because Spyre does not support float32;
-    ``torch.bfloat16`` entries (e.g. EmbeddingGemma) are passed through
-    unchanged.
-    """
-    dtype = MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
-    if dtype == torch.float32:
-        return torch.float16
-    return dtype

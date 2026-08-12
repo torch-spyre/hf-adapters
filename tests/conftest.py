@@ -58,8 +58,7 @@ from transformers import AutoModelForCausalLM, PretrainedConfig
 # NOTE: do NOT import hf_adapters at module top level. The CPU patch block below
 # rebuilds ``hf_adapters.hf_common`` with ``DEVICE='cpu'`` and asserts that no
 # import has materialized it yet; a top-level import here would always trip that
-# assert. ``MODEL_PATH_TO_TORCH_DTYPE`` / ``MODEL_PATH_WITH_LOAD_FN`` are pulled
-# in lazily inside the helpers that use them.
+# assert. Dtype policy and model-load helpers are imported lazily below.
 # CONFIG_TO_ADAPTER_MODULE_MAPPING / resolve_adapter_module are imported lazily
 # below (after the CPU patch) so the editable-install .pth cannot pre-load
 # hf_common before the patch runs.
@@ -245,9 +244,9 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
 
 
 def get_dtype_for_cpu(model_path: str) -> torch.dtype:
-    from hf_adapters.auto_spyre_model import MODEL_PATH_TO_TORCH_DTYPE
+    from hf_adapters.auto_spyre_model import dtype_for_model_path
 
-    return MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
+    return dtype_for_model_path(model_path, target_device="cpu")
 
 
 def load_ref_model(
@@ -255,9 +254,10 @@ def load_ref_model(
     adapter_mod: types.ModuleType | None = None,
     auto_model_cls: type = AutoModelForCausalLM,
 ):
+    from hf_adapters.auto_spyre_model import dtype_for_model_path
     from hf_adapters.hf_common import load_model_common
 
-    dtype = get_dtype_for_cpu(model_path)
+    dtype = dtype_for_model_path(model_path, target_device="cpu")
 
     ref_model = load_model_common(
         model_path=model_path,

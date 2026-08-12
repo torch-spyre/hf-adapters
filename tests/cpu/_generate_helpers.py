@@ -21,7 +21,7 @@ have to depend on a pytest-discovered file.
 import gc
 
 import torch
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
 from tests.conftest import load_ref_model, resolve_adapter_module_for_test
 
@@ -33,8 +33,8 @@ MAX_NEW_TOKENS: int = 8
 
 
 def hf_reference_outputs(
-    model: torch.nn.Module,
-    tokenizer: AutoTokenizer,
+    model: PreTrainedModel,
+    tokenizer: PreTrainedTokenizerBase,
     prompts: list[str],
     max_new_tokens: int,
 ) -> list[str]:

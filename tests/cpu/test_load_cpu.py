@@ -30,17 +30,13 @@ from typing import Any
 
 import pytest
 
-from tests.conftest import get_dtype_for_cpu
 from tests.model_registry import CAUSAL_PATHS, EMBED_PATHS
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 def test_load_causal_lm(model_path):
     auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
-    dtype = get_dtype_for_cpu(model_path)
-    model = auto_spyre_model.AutoSpyreModelForCausalLM.from_pretrained(
-        model_path, dtype=dtype
-    )
+    model = auto_spyre_model.AutoSpyreModelForCausalLM.from_pretrained(model_path)
     assert model is not None
     assert callable(
         getattr(model, "generate", None)
@@ -58,7 +54,6 @@ def test_load_embedding(model_path):
 
 
 def load_embedding(model_path: str) -> Any:
-    dtype = get_dtype_for_cpu(model_path)
     auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
-    model = auto_spyre_model.AutoSpyreModel.from_pretrained(model_path, dtype=dtype)
+    model = auto_spyre_model.AutoSpyreModel.from_pretrained(model_path)
     return model
