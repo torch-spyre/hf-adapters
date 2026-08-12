@@ -82,11 +82,11 @@ from hf_adapters.hf_common import (
     generation_cache_len,
     get_backbone,
     get_model_dtype,
-    make_standard_gqa_block,
     pad_and_position,
     pad_lm_head,
     patch_rmsnorm,
     prepare_rope_and_heads,
+    prepare_standard_gqa_blocks,
     select_next_token,
 )
 
@@ -142,9 +142,7 @@ def prepare_for_spyre(model):
     pad_lm_head(model)
 
     backbone = get_backbone(model)
-    model._spyre_text_blocks = [
-        make_standard_gqa_block(layer) for layer in backbone.layers
-    ]
+    model._spyre_text_blocks = prepare_standard_gqa_blocks(backbone.layers)
 
 
 # ---------------------------------------------------------------------------

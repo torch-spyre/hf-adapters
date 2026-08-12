@@ -1,9 +1,14 @@
 name: push-test-results-to-clickhouse
 
-# Ingests JUnit XML results from integration-tests.yaml (covers both the
-# integration and regression tiers -- both dispatch that same workflow file,
-# differing only by the test_type input; see its run-name for which tier ran)
-# into ClickHouse. Also supports manual dispatch for re-ingesting a specific run.
+# Ingests JUnit XML results from hf-adapters' own model-centric e2e suites
+# into ClickHouse via .github/scripts/ingest_xml_hf_adapters.py, writing to
+# hf_test_runs / hf_test_cases / hf_run_properties. Triggered by both
+# workflows that produce those suites:
+#   - test_pull_request.yaml (hf-adapters' PR/trunk workflow)
+#   - integration-tests.yaml (delegates to _test_matrix.yaml, which runs the
+#     same suites -- smoke, load, token_compare, embed_compare, vlm,
+#     model_module -- against upstream-triggered or manually dispatched refs)
+# Also supports manual dispatch for re-ingesting a specific run.
 #
 # NOTE: this filename is deliberately NOT push-to-clickhouse.yaml -- that name
 # is already taken by this repo's unrelated HF-Hub weekly-model-scan cron job,
@@ -12,6 +17,7 @@ on:
   workflow_run:
     workflows:
       - integration-tests
+      - test_pull_request
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -20,7 +26,7 @@ on:
         required: false
         default: ''
       workflow_name:
-        description: Workflow name (integration-tests)
+        description: Workflow name (integration-tests | test_pull_request)
         required: false
         default: integration-tests
 
@@ -36,7 +42,11 @@ permissions:
 jobs:
   ingest:
     name: Ingest XML -> ClickHouse
-    runs-on: ubuntu-latest
+    runs-on:
+      - x86_64
+      - spyre_pf_x0
+      - linux
+      - image_spyre_backend
     timeout-minutes: 15
     # Skip if the triggering workflow was cancelled (but ingest failures are fine)
     if: |
@@ -64,19 +74,22 @@ jobs:
       TRIGGERING_BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
       TRIGGERING_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
       TRIGGERING_AT: ${{ github.event.workflow_run.created_at || '' }}
-      # display_title carries "integration-tests (<test_type>)" via that workflow's
-      # run-name: -- this is the only way this job can recover the original dispatch
-      # tier (integration/regression/smoke/etc) without an extra API call.
+      # display_title carries "integration-tests (<test_type>)" via that
+      # workflow's run-name, or the bare tier ("trunk" / "test_pull_request")
+      # via test_pull_request's -- the only way this job can recover which
+      # tier ran without an extra API call.
       TRIGGERING_DISPLAY_TITLE: ${{ github.event.workflow_run.display_title || '' }}
 
     steps:
-      - name: Checkout ingest script (from torch-spyre, canonical copy -- do not fork)
+      # workflow_run always executes this file as it exists on the default
+      # branch, so a plain checkout (no ref:) here pulls the canonical copy
+      # of the ingest script regardless of which ref triggered the run.
+      - name: Checkout ingest script
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
-          repository: torch-spyre/torch-spyre
           sparse-checkout: |
-            .github/scripts/ingest_xml.py
-          path: torch-spyre-scripts
+            .github/scripts/ingest_xml_hf_adapters.py
+          sparse-checkout-cone-mode: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -135,6 +148,8 @@ jobs:
           export ARTIFACTS='${{ steps.list-artifacts.outputs.artifacts }}'
           python3 <<'PYEOF'
           import json, os, subprocess, sys
+          from pathlib import Path
+
           artifacts = json.loads(os.environ['ARTIFACTS'])
           repo  = os.environ['GITHUB_REPOSITORY']
           for a in artifacts:
@@ -145,10 +160,19 @@ jobs:
                     f"/repos/{repo}/actions/artifacts/{a['id']}/zip",
                 ], check=True, env={**os.environ}, capture_output=True)
                 f.write(result.stdout)
-              subprocess.run([
-                  "unzip", "-o", f"xml_artifacts/{a['name']}.zip",
-                  "-d", "xml_artifacts/"
-              ], check=True)
+              # Each artifact unzips into its OWN subdirectory (named after
+              # the artifact, which is unique per suite+model) rather than a
+              # shared flat one: a single-file artifact's upload strips its
+              # model-key subdirectory, so two suites can both produce a
+              # "Qwen3-0.6B.xml" and would otherwise clobber each other.
+              # ingest_xml_hf_adapters.py globs --xml-dir recursively and
+              # derives a unique filename from the path relative to it, so
+              # this nesting is exactly what it expects.
+              dest = Path("xml_artifacts") / a["name"]
+              subprocess.run(
+                  ["unzip", "-o", f"xml_artifacts/{a['name']}.zip", "-d", str(dest)],
+                  check=True,
+              )
           PYEOF
           echo "Downloaded XML files:"
           find xml_artifacts -name "*.xml" 2>/dev/null || echo "(none)"
@@ -156,18 +180,26 @@ jobs:
       - name: Extract suite tier from display title
         id: extract-tier
         run: |
-          TIER=$(echo "${TRIGGERING_DISPLAY_TITLE}" | sed -n 's/.*(\(.*\))\s*$/\1/p')
+          if [[ "${TRIGGERING_DISPLAY_TITLE}" == *"("*")"* ]]; then
+            # integration-tests' run-name is "integration-tests (<tier>)".
+            TIER=$(echo "${TRIGGERING_DISPLAY_TITLE}" | sed -n 's/.*(\(.*\))\s*$/\1/p')
+          else
+            # test_pull_request's run-name is the bare tier itself ("trunk"
+            # on push, "test_pull_request" otherwise) -- no parens to parse.
+            TIER="${TRIGGERING_DISPLAY_TITLE}"
+          fi
           echo "Resolved tier: ${TIER:-<none>}"
           echo "tier=${TIER}" >> "${GITHUB_OUTPUT}"
 
       # ---------------------------------------------------------------------------
-      # Parse each XML file and insert rows into ClickHouse via torch-spyre's
-      # canonical ingest_xml.py (checked out above, never forked into this repo).
+      # Parse each XML file and insert rows into ClickHouse via
+      # ingest_xml_hf_adapters.py (checked out above), into
+      # hf_test_runs / hf_test_cases / hf_run_properties.
       # ---------------------------------------------------------------------------
       - name: Ingest XML files into ClickHouse
         run: |
           source .venv/bin/activate
-          python3 torch-spyre-scripts/.github/scripts/ingest_xml.py \
+          python3 .github/scripts/ingest_xml_hf_adapters.py \
             --xml-dir xml_artifacts \
             --workflow "${TRIGGERING_WORKFLOW}" \
             --branch   "${TRIGGERING_BRANCH}" \
@@ -175,7 +207,8 @@ jobs:
             --run-id   "${TRIGGERING_RUN_ID}" \
             --triggered-at "${TRIGGERING_AT}" \
             --pr-number    "${{ steps.resolve-pr.outputs.pr_number }}" \
-            --trigger-type "${{ steps.extract-tier.outputs.tier }}"
+            --trigger-type "${{ steps.extract-tier.outputs.tier }}" \
+            --platform "$(uname -m)"
 
       - name: Summary
         if: always()

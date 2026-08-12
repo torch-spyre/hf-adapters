@@ -123,11 +123,42 @@ jobs:
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.1
         with:
-          # Skip the local mypy hook — it requires the project venv with
-          # torch/transformers installed, which we don't set up in this lint job.
           extra_args: --all-files --hook-stage commit --show-diff-on-failure
         env:
-          SKIP: mypy
+          SKIP: mypy  # mypy runs in its own job below; see the `mypy` job
+
+  # ---------------------------------------------------------------------------
+  # mypy — static type checker for hf_adapters/.
+  #
+  # Runs in its own job so it can install torch+transformers (needed to resolve
+  # the type stubs) without bloating the pre-commit lint job, which runs on a
+  # plain Python install. The local pre-commit mypy hook is intentionally kept
+  # so developers still get feedback on commit; this job is the CI enforcement.
+  # ---------------------------------------------------------------------------
+  mypy:
+    name: mypy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --quiet \
+            "torch>=2.0" \
+            "transformers>=5.12.1,<6.0.0" \
+            "mypy>=2.3.0,<3"
+
+      - name: Run mypy
+        run: mypy --config-file=pyproject.toml
 
   # ===========================================================================
   # Dynamic matrix generation
@@ -296,12 +327,21 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_load_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_load_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_load_spyre.py -k "${{ matrix.model_key }}" --junit-xml=junit-load-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-load-${{ env.SAFE_MODEL_KEY }}
+          path: junit-load-${{ matrix.model_key }}.xml
+          retention-days: 14
 
   spyre-smoke-tests:
     name: Spyre smoke (${{ matrix.model_key }})
@@ -345,12 +385,21 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k "${{ matrix.model_key }}" --junit-xml=junit-smoke-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-smoke-${{ env.SAFE_MODEL_KEY }}
+          path: junit-smoke-${{ matrix.model_key }}.xml
+          retention-days: 14
 
   spyre-token-compare-tests:
     name: Spyre token compare (${{ matrix.model_key }})
@@ -394,12 +443,21 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k "${{ matrix.model_key }}" --junit-xml=junit-token-compare-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-token-compare-${{ env.SAFE_MODEL_KEY }}
+          path: junit-token-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
 
   spyre-embed-compare-tests:
     name: Spyre embed compare (${{ matrix.model_key }})
@@ -443,12 +501,21 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k "${{ matrix.model_key }}" --junit-xml=junit-embed-compare-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-embed-compare-${{ env.SAFE_MODEL_KEY }}
+          path: junit-embed-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
 
   spyre-reranker-compare-tests:
     name: Spyre reranker compare (${{ matrix.model_key }})
@@ -490,12 +557,21 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_reranker_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_e2e_reranker_compare_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_e2e_reranker_compare_spyre.py -k "${{ matrix.model_key }}" --junit-xml=junit-reranker-compare-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-reranker-compare-${{ env.SAFE_MODEL_KEY }}
+          path: junit-reranker-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
 
   spyre-vlm-e2e-tests:
     name: Spyre VLM e2e (${{ matrix.model_key }})
@@ -540,12 +616,21 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_vlm_e2e_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_vlm_e2e_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_vlm_e2e_spyre.py -k "${{ matrix.model_key }}" --junit-xml=junit-vlm-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-vlm-${{ env.SAFE_MODEL_KEY }}
+          path: junit-vlm-${{ matrix.model_key }}.xml
+          retention-days: 14
 
   spyre-model-module-tests:
     name: Spyre model-module tests (${{ matrix.config }})
@@ -603,7 +688,15 @@ jobs:
           echo "Using oot-framework runner: $_run_test"
           bash "$_run_test" \
             "tests/configs/module_tests/${{ matrix.config }}" \
-            -v
+            -v --junit-xml="$PWD/junit-model-module-${{ matrix.config }}.xml"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-model-module-${{ matrix.config }}
+          path: ${{ env.CLONED_HF_ADAPTERS_DIR }}/junit-model-module-${{ matrix.config }}.xml
+          retention-days: 14
 
   # ===========================================================================
   # Required check gate — fans in all matrix jobs so a single branch
@@ -623,6 +716,7 @@ jobs:
         working-directory: .
     needs:
       - pre-commit
+      - mypy
       - generate-matrix
       - adapter-coverage
 #      - cpu-tests
@@ -643,6 +737,7 @@ jobs:
         # lines when restoring either job.
         run: |-
           if ${{ contains(needs.pre-commit.result, 'failure') || contains(needs.pre-commit.result, 'cancelled') ||
+                 contains(needs.mypy.result, 'failure') || contains(needs.mypy.result, 'cancelled') ||
                  contains(needs.generate-matrix.result, 'failure') || contains(needs.generate-matrix.result, 'cancelled') ||
                  contains(needs.adapter-coverage.result, 'failure') || contains(needs.adapter-coverage.result, 'cancelled') ||
                  contains(needs.spyre-load-tests.result, 'failure') || contains(needs.spyre-load-tests.result, 'cancelled') ||

@@ -305,10 +305,21 @@ jobs:
         with:
           name: weekly-shards
           path: shards/
-          retention-days: 1
+          retention-days: 7
 
-  # Split by runner tier so max-parallel caps total cards held at once:
-  # 10*1 + 4*2 + 1*4 = 22 cards (~2 nodes), so PR/daily CI isn't starved.
+  # Split by runner tier so max-parallel caps total cards held at once. The cap
+  # depends on who dispatched the run:
+  #   - manual workflow_dispatch shares the fleet with PR/daily CI, so it stays
+  #     small: 10*1 + 2*2 + 1*4 = 18 cards (~2 nodes).
+  #   - the scheduled weekly scan (Saturday 22:00) effectively owns the fleet, so
+  #     it spreads wider to finish sooner: 25*1 + 10*2 + 4*4 = 61 cards.
+  #
+  # The three expressions are repeated inline rather than hoisted into one place.
+  # `env` can't be used: jobs.<job_id>.strategy only accepts the github/needs/
+  # vars/inputs contexts. Routing them through generate-matrix `outputs` does
+  # parse, but job outputs are always strings and max-parallel wants a number —
+  # actionlint rejects it, and an unparsed max-parallel means *unlimited*
+  # parallelism, which is the one failure mode worth avoiding here.
   #
   # The `if` guards an empty matrix: now that generate-matrix filters before
   # chunking, a tier can legitimately produce zero shards — no fetched model
@@ -322,7 +333,7 @@ jobs:
     timeout-minutes: 4320
     strategy:
       fail-fast: false
-      max-parallel: 20 # 20 shards x 1 card = 20 cards
+      max-parallel: ${{ github.event_name == 'workflow_dispatch' && 10 || 25 }}
       matrix:
         include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x1) }}
     env:
@@ -411,7 +422,7 @@ jobs:
     timeout-minutes: 4320
     strategy:
       fail-fast: false
-      max-parallel: 4 # 4 shards x 2 cards = 8 cards
+      max-parallel: ${{ github.event_name == 'workflow_dispatch' && 2 || 10 }}
       matrix:
         include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x2) }}
     env:
@@ -500,7 +511,7 @@ jobs:
     timeout-minutes: 4320
     strategy:
       fail-fast: false
-      max-parallel: 1 # 1 shard x 4 cards = 4 cards
+      max-parallel: ${{ github.event_name == 'workflow_dispatch' && 1 || 4 }}
       matrix:
         include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x4) }}
     env:

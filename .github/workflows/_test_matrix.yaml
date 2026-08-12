@@ -62,24 +62,23 @@ on:
         default: ''
       test_type:
         description: >-
-          Which Spyre suites to run. Three coarse tiers cover the common
-          cross-repo case (a caller like Jenkins that treats this workflow as
-          a blackbox): "smoke" runs only the smoke suite; "core" runs every
-          other suite (load, token_compare, embed_compare, vlm,
-          model_module); "full" (default) runs everything, i.e. smoke + core.
-          Also accepts the user-facing tier aliases unit (= core), integration
-          (= smoke), regression (= full) -- resolved once by the
-          resolve-test-type job below, so every caller (Makefile-equivalent,
-          Jenkins, config.yaml) sees the same mapping. For finer control, any
-          other value is a space-separated allowlist of individual suite keys
-          matched against each matrix job's own `if:` (see the "Suite key"
-          comment above each spyre-*-tests job below), e.g.
-          "smoke token_compare". Adding a new suite later means giving the
-          new job its own key and adding it to the "core" set -- no other job
-          needs to change.
+          Which Spyre suites to run: smoke | unit | integration | regression |
+          trunk. These tier names are literal, first-class values -- no
+          alias-resolution layer. "unit" runs every suite except smoke (load,
+          token_compare, embed_compare, vlm, model_module); "integration" runs
+          only the smoke suite; "regression"/"trunk" (default: regression) run
+          everything, i.e. smoke + unit. The resolve-test-type job below
+          applies the shared default so every caller (Makefile, Jenkins,
+          config.yaml) stays in sync. For finer control, any other value is a
+          space-separated allowlist of individual suite keys matched against
+          each matrix job's own `if:` (see the "Suite key" comment above each
+          spyre-*-tests job below), e.g. "smoke token_compare" -- "smoke" by
+          itself works this way too (it's a suite key, not its own tier).
+          Adding a new suite later means giving the new job its own key and
+          adding it to the "unit" set -- no other job needs to change.
         required: false
         type: string
-        default: full
+        default: regression
       models:
         description: >-
           Space-separated list of model paths to restrict every matrix job
@@ -117,13 +116,14 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Resolve user-facing tier aliases (unit/integration/regression) to this
-  # workflow's own vocabulary (smoke/core/full/<suite key>) in one place, so
-  # every suite job's `if:` below stays keyed on the resolved value instead
-  # of each carrying its own alias-comparison logic.
+  # Apply the shared empty->regression default (scripts/resolve_test_type.sh)
+  # in one place, so every suite job's `if:` below stays keyed on the same
+  # value the Makefile would resolve to for the same TEST_TYPE. smoke/unit/
+  # integration/regression/trunk are literal values by the time they reach
+  # this job -- no alias-resolution happens here.
   # ---------------------------------------------------------------------------
   resolve-test-type:
-    name: Resolve test_type alias
+    name: Resolve test_type default
     runs-on: ubuntu-latest
     outputs:
       test_type: ${{ steps.resolve.outputs.test_type }}
@@ -326,11 +326,12 @@ jobs:
   spyre-load-tests:
     name: Spyre load (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type]
-    # Suite key: "load". Runs on the "full" or "core" coarse tiers (core =
-    # every suite except smoke), or when "load" appears as a space-separated
-    # word in test_type (e.g. "smoke load") for fine-grained selection.
+    # Suite key: "load". Runs on the "regression"/"trunk" or "unit" coarse
+    # tiers (unit = every suite except smoke), or when "load" appears as a
+    # space-separated word in test_type (e.g. "smoke load") for fine-grained
+    # selection.
     # See spyre-smoke-tests for the other keys.
-    if: needs.resolve-test-type.outputs.test_type == 'full' || needs.resolve-test-type.outputs.test_type == 'core' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' load ')
+    if: needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' load ')
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -386,11 +387,12 @@ jobs:
   spyre-smoke-tests:
     name: Spyre smoke (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type]
-    # Suite key: "smoke", also the coarse "smoke" tier itself (this is the
+    # Suite key: "smoke" (used directly, e.g. TEST_TYPE=smoke, not as a tier
+    # name), also the target of the "integration" coarse tier (this is the
     # only job that tier runs). Same allowlist mechanism as spyre-load-tests
     # above -- to add a new suite later, give the new job its own key and
     # copy this `if:` line with that key; no existing job needs to change.
-    if: needs.resolve-test-type.outputs.test_type == 'full' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' smoke ')
+    if: needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'integration' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' smoke ')
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -445,8 +447,8 @@ jobs:
   spyre-token-compare-tests:
     name: Spyre token compare (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type]
-    # Suite key: "token_compare". Part of the "core" coarse tier.
-    if: needs.resolve-test-type.outputs.test_type == 'full' || needs.resolve-test-type.outputs.test_type == 'core' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_compare ')
+    # Suite key: "token_compare". Part of the "unit" coarse tier.
+    if: needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_compare ')
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -501,8 +503,8 @@ jobs:
   spyre-embed-compare-tests:
     name: Spyre embed compare (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type]
-    # Suite key: "embed_compare". Part of the "core" coarse tier.
-    if: needs.resolve-test-type.outputs.test_type == 'full' || needs.resolve-test-type.outputs.test_type == 'core' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' embed_compare ')
+    # Suite key: "embed_compare". Part of the "unit" coarse tier.
+    if: needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' embed_compare ')
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -557,8 +559,8 @@ jobs:
   spyre-vlm-e2e-tests:
     name: Spyre VLM e2e (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type]
-    # Suite key: "vlm". Part of the "core" coarse tier.
-    if: needs.resolve-test-type.outputs.test_type == 'full' || needs.resolve-test-type.outputs.test_type == 'core' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' vlm ')
+    # Suite key: "vlm". Part of the "unit" coarse tier.
+    if: needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' vlm ')
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -670,8 +672,8 @@ jobs:
   spyre-model-module-tests:
     name: Spyre model-module tests (${{ matrix.config }})
     needs: [resolve-test-type]
-    # Suite key: "model_module". Part of the "core" coarse tier.
-    if: needs.resolve-test-type.outputs.test_type == 'full' || needs.resolve-test-type.outputs.test_type == 'core' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_module ')
+    # Suite key: "model_module". Part of the "unit" coarse tier.
+    if: needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_module ')
     runs-on:
       - x86_64
       - spyre_pf_x1

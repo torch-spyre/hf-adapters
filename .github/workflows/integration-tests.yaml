@@ -1,13 +1,15 @@
 name: integration-tests
-run-name: integration-tests (${{ inputs.test_type || 'smoke' }})
-# NOTE: run-name intentionally shows the RAW, user-facing input (before
-# _test_matrix.yaml's resolve-test-type job resolves unit/integration/regression
-# to core/smoke/full) -- this is also what push-to-clickhouse.yaml's trigger_type
-# ends up recording, so ClickHouse sees the tier name callers actually asked for.
+run-name: integration-tests (${{ inputs.test_type || 'integration' }})
+# NOTE: run-name intentionally shows the RAW, user-facing input -- smoke/unit/
+# integration/regression/trunk are literal, first-class values (no
+# alias-resolution layer; see _test_matrix.yaml's resolve-test-type job,
+# which only applies the shared empty->regression default) -- this is also
+# what push-to-clickhouse.yaml's trigger_type ends up recording, so
+# ClickHouse sees the tier name callers actually asked for.
 
 # ---------------------------------------------------------------------------
 # Triggered by commits in upstream dependant repos (deeptools, flex, torch-spyre etc.) via
-# workflow_dispatch. Runs the smoke suite (test_type default) against a
+# workflow_dispatch. Runs the smoke suite (test_type default: "integration") against a
 # specified hf-adapters ref so regressions from upstream changes are caught
 # early without paying for the full matrix on every upstream commit; pass
 # test_type/models explicitly for a broader check.
@@ -66,28 +68,30 @@ on:
         default: ''
       test_type:
         description: >-
-          Test tier to run: smoke | core | full | trunk -- or the user-facing
-          tier aliases unit (= core) | integration (= smoke) | regression
-          (= full), for callers (e.g. spyre-frameworks config.yaml) that speak
-          in tier names rather than suite names. "smoke" runs only the smoke
-          suite; "core" runs every other suite (load, token_compare,
-          embed_compare, vlm, model_module); "full"/"trunk" run everything
-          (trunk mirrors this repo's push-to-main CI label — see
-          resolve_test_type.sh). This is a plain string underneath (see
+          Test tier to run: unit | integration | regression | trunk -- literal,
+          first-class values (no alias-resolution layer), for callers (e.g.
+          spyre-frameworks config.yaml) that speak in tier names. "unit" runs
+          every suite except smoke (load, token_compare, embed_compare, vlm,
+          model_module); "integration" runs only the smoke suite (there is no
+          separate "smoke" tier/dropdown option -- pick "integration" for
+          that suite; "smoke" is just the individual suite key it maps to
+          internally, still reachable via a raw space-separated combo through
+          the API/gh CLI, e.g. "smoke token_compare"); "regression"/"trunk"
+          run everything (trunk mirrors this repo's push-to-main CI label —
+          see resolve_test_type.sh). This is a plain string underneath (see
           _test_matrix.yaml's resolve-test-type job), so a caller using the
-          API/gh CLI can also pass an individual suite key or a
-          space-separated combo (e.g. "smoke token_compare") for finer
-          control than the dropdown offers -- but GitHub validates `choice`
-          options against the REST API dispatch too, not just the web UI
-          dropdown, so every value a real caller sends (like the "trunk" tier
-          above) must be listed explicitly below.
+          API/gh CLI can pass such a combo for finer control than the
+          dropdown offers -- but GitHub validates `choice` options against
+          the REST API dispatch too, not just the web UI dropdown, so every
+          value a real caller sends (like the "unit"/"trunk" tiers above)
+          must be listed explicitly below.
         required: false
         type: choice
-        default: smoke
+        default: integration
         options:
-          - smoke
-          - core
-          - full
+          - unit
+          - integration
+          - regression
           - trunk
       models:
         description: >-
@@ -133,11 +137,11 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Delegates to the same reusable _test_matrix.yaml used by "run-tests" in
-  # torch_spyre_tests.yaml. `test_type` defaults to "smoke" and, if `models`
-  # is left empty, falls back to a fixed 3-model spot-check (Qwen3-0.6B,
-  # Ministral-3B-Instruct, granite-4.0-1b-base) -- so upstream-triggered runs
-  # stay fast by default. Pass test_type: full and/or an explicit models
-  # value for full coverage.
+  # torch_spyre_tests.yaml. `test_type` defaults to "integration" (the smoke
+  # suite) and, if `models` is left empty, falls back to a fixed 3-model
+  # spot-check (Qwen3-0.6B, Ministral-3B-Instruct, granite-4.0-1b-base) -- so
+  # upstream-triggered runs stay fast by default. Pass test_type: regression
+  # and/or an explicit models value for full coverage.
   # ---------------------------------------------------------------------------
   run-tests:
     needs: provenance
@@ -148,7 +152,7 @@ jobs:
       extra_test_flags_multi_spyre: -vvv -s
       ref: ${{ inputs.ref || '' }}
       repository: ${{ inputs.repository || '' }}
-      test_type: ${{ inputs.test_type || 'smoke' }}
+      test_type: ${{ inputs.test_type || 'integration' }}
       models: ${{ inputs.models || 'Qwen/Qwen3-0.6B ministral/Ministral-3B-Instruct ibm-granite/granite-4.0-1b-base' }}
 
   # ----------------------------------------------------------------------------------
