@@ -95,6 +95,14 @@ runs:
       env:
         UV_GROUPS: "${{ inputs.uv_groups }}"
         INPUT_REF: ""
+        # /next dev images bake + export VIRTUAL_ENV=/home/senuser/.venv. Without
+        # this, `uv sync` creates a separate PROJECT-local `.venv` while the test
+        # steps' `uv run --active` honor the baked VIRTUAL_ENV -> the two diverge
+        # and imports fail (ModuleNotFoundError). Pointing uv's project env at the
+        # baked venv makes sync + --active converge on one complete venv. GitHub
+        # env: survives the `source $HOME/.bashrc` re-activation. Arch-safe: ppc/
+        # s390x already require the baked venv (the lockfile has no wheel there).
+        UV_PROJECT_ENVIRONMENT: /home/senuser/.venv
       run: |
         source "$HOME/.bashrc"
         source /etc/profile.d/ibm-aiu-setup.sh
