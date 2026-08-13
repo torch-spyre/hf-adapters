@@ -613,7 +613,7 @@ NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = _non_blocking(
 
 NON_BLOCKING_VISION_MODELS: dict[str, str] = _non_blocking(
     VISION_MODELS,
-    ("gemma4_mm", "ministral3_vision_mm"),
+    ("gemma4_mm", "ministral3_3b_vision_mm"),
 )
 
 
