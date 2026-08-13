@@ -1162,7 +1162,12 @@ def _resolve_tp_plan(model_path, auto_model_cls, tp_plan):
       so sharding the head upstream fights that layout pass.
 
     Dropping ``lm_head`` from the plan leaves it unmatched, which HF treats as
-    replicated (full head on every rank). We resolve the fully-namespaced plan
+    replicated (full head on every rank).
+    Similarly, we also drop ``model.embed_tokens``, which is automatically added
+    for models with tied embeddings, and currently involves unsupported bool
+    comparisons of int32 tensors.
+
+    We resolve the fully-namespaced plan
     by instantiating the model on the ``meta`` device (no weights allocated) and
     reading its ``.tp_plan`` — this uses HF's own namespacing rather than
     reconstructing it, so it stays correct across model families.
@@ -1179,6 +1184,7 @@ def _resolve_tp_plan(model_path, auto_model_cls, tp_plan):
         probe = auto_model_cls.from_config(cfg)
     plan = dict(probe.tp_plan or {})
     plan.pop("lm_head", None)
+    plan.pop("model.embed_tokens", None)
     return plan
 
 
