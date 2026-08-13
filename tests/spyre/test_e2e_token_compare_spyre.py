@@ -37,6 +37,7 @@ from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
+    generation_cache_len,
     get_model_dtype,
     move_model_to_spyre,
 )
@@ -114,10 +115,7 @@ def adapter_greedy_steps(
     position_ids = torch.zeros((batch_size, padded_len), dtype=torch.long)
     position_ids[:, prompt_offset:] = torch.arange(seq_len)
 
-    max_cache_len = (
-        padded_len + math.ceil(num_decode / BLOCK_SIZE) * BLOCK_SIZE + BLOCK_SIZE
-    )
-
+    max_cache_len = generation_cache_len(seq_len, num_decode + 1)
     dtype = get_model_dtype(model)
 
     key_caches, value_caches = allocate_kv_caches(

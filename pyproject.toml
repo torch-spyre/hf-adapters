@@ -38,15 +38,29 @@ ignore = [
 ]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
+explicit_package_bases = true
 files = ["hf_adapters/**/*.py"]
 
 # sympy ships no py.typed marker (PEP 561), so mypy refuses to analyze it.
 [[tool.mypy.overrides]]
 module = "sympy.*"
+ignore_missing_imports = true
+
+# deepspec is an optional private package (DSpark speculative decoding);
+# it is not installed in the standard dev environment.
+[[tool.mypy.overrides]]
+module = "deepspec.*"
+ignore_missing_imports = true
+
+# sentence_transformers is a runtime dependency (see [project].dependencies)
+# but is not installed in the CI mypy job to keep that job cheap, and it
+# ships no py.typed marker either — so mypy can't resolve its stubs.
+[[tool.mypy.overrides]]
+module = "sentence_transformers.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -82,7 +96,7 @@ dev = [
     "pre-commit>=3.5.0",
     "black>=26.3.1",
     "ruff>=0.15.6",
-    "mypy>=1.14.0,<2",
+    "mypy>=2.3.0,<3",
     "typing-extensions",
     "nicegui",
     "clickhouse-connect>=1.4.1",

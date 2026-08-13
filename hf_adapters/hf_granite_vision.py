@@ -41,15 +41,17 @@ Usage::
 
 import torch
 
+from hf_adapters import hf_granite
 from hf_adapters.hf_common import (
     get_backbone,
-    make_standard_gqa_block,
     pad_lm_head,
     patch_rmsnorm,
     prepare_rope_and_heads,
-    text_config,
+    prepare_standard_gqa_blocks,
 )
-from hf_adapters.hf_granite import _run_backbone_forward
+
+_run_backbone_forward = hf_granite._run_backbone_forward
+_run_forward = hf_granite._run_forward
 
 
 def load_hf_model(model_path, dtype=torch.float16):
@@ -93,37 +95,6 @@ def prepare_for_spyre(model):
     prepare_rope_and_heads(model)
     patch_rmsnorm(Granite4VisionTextRMSNorm)
     pad_lm_head(model)
-    model._spyre_compiled_blocks = [
-        make_standard_gqa_block(layer, True) for layer in get_backbone(model).layers
-    ]
-
-
-def _run_forward(
-    model,
-    input_ids,
-    position_ids,
-    attn_mask,
-    key_caches,
-    value_caches,
-    is_filling,
-    token_index,
-    cache_position,
-):
-    """Granite Vision text causal-LM forward: backbone + head / scaling.
-
-    Identical to ``hf_granite._run_forward`` except ``logits_scaling`` lives on
-    the nested ``text_config`` rather than the top-level VLM config.
-    """
-    h = _run_backbone_forward(
-        model,
-        input_ids,
-        position_ids,
-        attn_mask,
-        key_caches,
-        value_caches,
-        is_filling,
-        token_index,
-        cache_position,
+    model._spyre_compiled_blocks = prepare_standard_gqa_blocks(
+        get_backbone(model).layers, True
     )
-    logits = model.lm_head(h)
-    return logits / text_config(model.config).logits_scaling

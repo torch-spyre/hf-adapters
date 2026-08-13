@@ -2,24 +2,38 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 # TEST_TYPE selects which subset of tests to run (uniform knob across the
-# product repos: torch-spyre, hf-adapters, spyre-inference):
-#   smoke — fast per-op unit tests only
-#   core  — all spyre-native tests (excludes the heavy upstream suites)
-#   full  — everything
-#   trunk — same coverage as full; push-to-main CI label (see resolve_test_type.sh)
-#   perf  — SCAFFOLD ONLY: no benchmark harness yet, writes a placeholder empty
-#           JUnit XML (no .benchmark classname, so ingest reads it as 0 rows).
-#           A real producer (like torch-spyre's spyre-perf-suite) is a follow-up.
-# Also accepts the user-facing tier aliases unit (= core), integration (= smoke),
-# regression (= full) -- same mapping as _test_matrix.yaml's resolve-test-type job.
+# product repos: torch-spyre, hf-adapters, spyre-inference). These tier names
+# are literal, first-class values -- there is no alias-resolution layer:
+#   unit        — all spyre-native tests (excludes the heavy upstream suites)
+#   integration — the smoke suite. This is the ONLY valid top-level tier for
+#                 that suite -- TEST_TYPE=smoke by itself is rejected (see the
+#                 `tests` target below); "smoke" is just the individual suite
+#                 key "integration" maps to, still usable inside a
+#                 multi-suite combo (e.g. TEST_TYPE="smoke load").
+#   regression  — everything
+#   trunk       — same coverage as regression; push-to-main CI label (see
+#                 resolve_test_type.sh)
+#   perf        — SCAFFOLD ONLY: no benchmark harness yet, writes a placeholder
+#                 empty JUnit XML (no .benchmark classname, so ingest reads it
+#                 as 0 rows). A real producer (like torch-spyre's
+#                 spyre-perf-suite) is a follow-up.
 # Also accepts a space-separated list of individual suite keys (matches
 # _test_matrix.yaml's `test_type` semantics), e.g. TEST_TYPE="smoke load".
-# Empty / unset defaults to "regression" (= full: every suite).
+# Empty / unset defaults to "regression" (every suite).
 TEST_TYPE ?= regression
 
-# MODEL_KEY narrows a suite to one model via pytest's -k filter (matrix-style
-# per-model CI jobs pass this); empty = run every model in the suite.
+# MODEL_KEY narrows a suite to one model via pytest's -k substring filter
+# (local dev use, e.g. `make tests MODEL_KEY=granite` to match several paths
+# at once); empty = run every model in the suite.
 MODEL_KEY ?=
+
+# MODEL_PATH narrows a suite to exactly one model via pytest's --model-path
+# (see tests/conftest.py's pytest_generate_tests), which replaces the
+# registry-derived parametrization outright rather than filtering it -- so it
+# works for any model path, including ones that lost the smallest-per-adapter
+# CAUSAL_PATHS/EMBED_PATHS/VISION_PATHS representative slot. Matrix-style
+# per-model CI jobs pass this (see _test_matrix.yaml); empty = no override.
+MODEL_PATH ?=
 
 # Flags passed verbatim to pytest, mirroring _test_matrix.yaml's extra_test_flags.
 PYTEST_ARGS ?= -s -vvv
@@ -45,15 +59,21 @@ else
 K_ARGS :=
 endif
 
+ifneq ($(MODEL_PATH),)
+MODEL_PATH_ARGS := --model-path "$(MODEL_PATH)"
+else
+MODEL_PATH_ARGS :=
+endif
+
 .PHONY: help test tests adapter-coverage-tests smoke-tests load-tests \
         token-compare-tests embed-compare-tests vlm-tests model-module-tests
 
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-24s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
-	@echo "Variables: TEST_TYPE=smoke|core|full|trunk|unit|integration|regression|<space-separated suite keys> (default regression),"
-	@echo "  MODEL_KEY (pytest -k filter, default all), PYTEST_ARGS (default '$(PYTEST_ARGS)'),"
-	@echo "  JUNIT_XML (single-suite targets only), RESULTS_DIR (default '$(RESULTS_DIR)')"
+	@echo "Variables: TEST_TYPE=unit|integration|regression|trunk|<space-separated suite keys, e.g. smoke> (default regression),"
+	@echo "  MODEL_KEY (pytest -k filter, default all), MODEL_PATH (exact model path via --model-path, overrides registry parametrization),"
+	@echo "  PYTEST_ARGS (default '$(PYTEST_ARGS)'), JUNIT_XML (single-suite targets only), RESULTS_DIR (default '$(RESULTS_DIR)')"
 
 # Suite keys, one target each -- same vocabulary and test_types membership as
 # _test_matrix.yaml. Each is independently runnable with its own JUNIT_XML.
@@ -61,19 +81,19 @@ adapter-coverage-tests: ## Run adapter registry coverage check (suite key: adapt
 	$(PYTEST) -v --noconftest tests/test_adapter_coverage.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 smoke-tests: ## Run e2e smoke tests (suite key: smoke)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_smoke_spyre.py $(K_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_smoke_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 load-tests: ## Run load tests (suite key: load)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_load_spyre.py $(K_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_load_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 token-compare-tests: ## Run token-compare tests (suite key: token_compare)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_token_compare_spyre.py $(K_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_token_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 embed-compare-tests: ## Run embed-compare tests (suite key: embed_compare)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_embed_compare_spyre.py $(K_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_embed_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 vlm-tests: ## Run VLM e2e tests (suite key: vlm)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_vlm_e2e_spyre.py $(K_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_vlm_e2e_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 # MODULE_CONFIG narrows model-module-tests to one YAML config (matrix-style
 # per-config CI jobs pass this); empty = run every config in tests/configs/module_tests.
@@ -107,21 +127,23 @@ model-module-tests: ## Run oot_framework module tests (suite key: model_module; 
 	done; \
 	exit $$rc
 
-# Aggregate target: every suite named in TEST_TYPE (smoke|core|full|space-separated
-# keys), each writing its own flat JUnit file into RESULTS_DIR so a caller can glob
-# the whole directory in one ClickHouse push. One failing suite doesn't skip the
-# rest; the aggregate's exit code still reflects any failure.
+# Aggregate target: every suite named in TEST_TYPE (unit|integration|
+# regression|trunk|space-separated suite keys), each writing its own flat
+# JUnit file into RESULTS_DIR so a caller can glob the whole directory in one
+# ClickHouse push. One failing suite doesn't skip the rest; the aggregate's
+# exit code still reflects any failure.
 tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite)
-	@# Resolve the user-facing tier aliases (unit/integration/regression) via the
-	@# shared script -- same source of truth as _test_matrix.yaml's
-	@# resolve-test-type job, so `make tests TEST_TYPE=unit` matches what CI runs
-	@# for the "unit" tier via GHA.
+	@# Apply the shared default (empty -> regression) and pass literal tier
+	@# names / suite keys through unchanged -- same source of truth as
+	@# _test_matrix.yaml's resolve-test-type job, so `make tests TEST_TYPE=unit`
+	@# matches what CI runs for the "unit" tier via GHA.
 	resolved="$$(scripts/resolve_test_type.sh $(TEST_TYPE))"; \
 	case " $$resolved " in \
-	  *" full "*|*" trunk "*) suites="adapter_coverage smoke load token_compare embed_compare vlm model_module" ;; \
-	  *" core "*) suites="adapter_coverage load token_compare embed_compare vlm model_module" ;; \
-	  " smoke ") suites="smoke" ;; \
+	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare embed_compare vlm model_module" ;; \
+	  *" unit "*) suites="adapter_coverage load token_compare embed_compare vlm model_module" ;; \
+	  " integration ") suites="smoke" ;; \
 	  " perf ") suites="perf" ;; \
+	  " smoke ") echo "TEST_TYPE=smoke is not a valid tier -- use TEST_TYPE=integration to run the smoke suite alone, or include 'smoke' in a multi-suite combo (e.g. TEST_TYPE=\"smoke load\")."; exit 1 ;; \
 	  *) suites="$$resolved" ;; \
 	esac; \
 	mkdir -p "$(RESULTS_DIR)"; \

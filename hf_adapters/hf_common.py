@@ -1324,6 +1324,13 @@ def _resolve_generation_params(model, tokenizer, overrides):
     }
 
 
+def generation_cache_len(prompt_length, max_new_tokens):
+    """Return KV-cache capacity for block-padded prompt and generation tokens."""
+    padded_prompt_len = math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
+    padded_generation_len = math.ceil(max_new_tokens / BLOCK_SIZE) * BLOCK_SIZE
+    return padded_prompt_len + padded_generation_len
+
+
 def pad_and_position(input_ids, actual_lengths):
     """Left block-pad ``input_ids`` to a BLOCK_SIZE multiple and build positions.
 
@@ -1490,10 +1497,7 @@ def generate(
 
     # Block-pad to a BLOCK_SIZE multiple; real tokens right-aligned (positions
     # 0..actual_len-1 at padded indices prompt_offsets[b]..padded_len-1).
-    max_cache_len = (
-        math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
-        + math.ceil(max_new_tokens / BLOCK_SIZE) * BLOCK_SIZE
-    )
+    max_cache_len = generation_cache_len(prompt_length, max_new_tokens)
     input_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
         input_ids, actual_prompt_lengths
     )
@@ -1639,18 +1643,21 @@ def generate(
 # ---------------------------------------------------------------------------
 
 
-def make_standard_gqa_block(layer, is_res_mul: bool | None = None):
-    """Compiled block for standard GQA models (separate QKV, no multipliers).
+class StandardGQAAttention(nn.Module):
+    """Attention executed by the standard GQA Spyre adapter path."""
 
-    Shared by Llama, Qwen2, Mistral, and other standard GQA adapters.
-    """
-    attn = layer.self_attn
-    mlp = layer.mlp
-    input_ln = layer.input_layernorm
-    post_attn_ln = layer.post_attention_layernorm
-    v_head_dim = getattr(attn, "v_head_dim", attn.head_dim)
+    def __init__(self, attn):
+        super().__init__()
+        self.q_proj = attn.q_proj
+        self.k_proj = attn.k_proj
+        self.v_proj = attn.v_proj
+        self.o_proj = attn.o_proj
+        self.head_dim = attn.head_dim
+        self.v_head_dim = getattr(attn, "v_head_dim", attn.head_dim)
+        self.scaling = attn.scaling
 
-    def block_forward(
+    def forward(
+        self,
         hidden_states,
         selected_freqs,
         attn_mask,
@@ -1660,13 +1667,22 @@ def make_standard_gqa_block(layer, is_res_mul: bool | None = None):
         token_index,
         cache_position,
     ):
-        residual = hidden_states
-        h = input_ln(hidden_states)
-
-        bsz, seq_len, _ = h.shape
-        q = attn.q_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
-        k = attn.k_proj(h).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
-        v = attn.v_proj(h).view(bsz, seq_len, -1, v_head_dim).transpose(1, 2)
+        bsz, seq_len, _ = hidden_states.shape
+        q = (
+            self.q_proj(hidden_states)
+            .view(bsz, seq_len, -1, self.head_dim)
+            .transpose(1, 2)
+        )
+        k = (
+            self.k_proj(hidden_states)
+            .view(bsz, seq_len, -1, self.head_dim)
+            .transpose(1, 2)
+        )
+        v = (
+            self.v_proj(hidden_states)
+            .view(bsz, seq_len, -1, self.v_head_dim)
+            .transpose(1, 2)
+        )
 
         q = apply_rope_matmul(q, selected_freqs)
         k = apply_rope_matmul(k, selected_freqs)
@@ -1687,30 +1703,78 @@ def make_standard_gqa_block(layer, is_res_mul: bool | None = None):
             value_cache,
             attn_mask=attn_mask,
             dropout_p=0.0,
-            scale=attn.scaling,
+            scale=self.scaling,
             enable_gqa=True,
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
-        attn_out = attn.o_proj(attn_out)
+        return self.o_proj(attn_out), key_cache, value_cache
 
-        res_mult = None
-        if not is_res_mul:
+
+class StandardGQABlock(nn.Module):
+    """Registered decoder block used by standard GQA Spyre adapters."""
+
+    def __init__(self, layer, is_res_mul: bool | None = None):
+        super().__init__()
+        self.self_attn = StandardGQAAttention(layer.self_attn)
+        self.mlp = layer.mlp
+        self.input_layernorm = layer.input_layernorm
+        self.post_attention_layernorm = layer.post_attention_layernorm
+        self.residual_multiplier = layer.residual_multiplier if is_res_mul else None
+        self.train(layer.training)
+
+    def forward(
+        self,
+        hidden_states,
+        selected_freqs,
+        attn_mask,
+        key_cache,
+        value_cache,
+        is_filling,
+        token_index,
+        cache_position,
+    ):
+        residual = hidden_states
+        h = self.input_layernorm(hidden_states)
+        attn_out, key_cache, value_cache = self.self_attn(
+            h,
+            selected_freqs,
+            attn_mask,
+            key_cache,
+            value_cache,
+            is_filling,
+            token_index,
+            cache_position,
+        )
+
+        if self.residual_multiplier is None:
             h = residual + attn_out
         else:
-            res_mult = layer.residual_multiplier
-            h = residual + attn_out * res_mult
+            h = residual + attn_out * self.residual_multiplier
 
         residual = h
-        h = post_attn_ln(h)
-        h = mlp(h)
-        if not is_res_mul:
+        h = self.post_attention_layernorm(h)
+        h = self.mlp(h)
+        if self.residual_multiplier is None:
             h = residual + h
         else:
-            h = residual + h * res_mult
+            h = residual + h * self.residual_multiplier
 
         return h, key_cache, value_cache
 
-    return torch.compile(block_forward, dynamic=False)
+
+def make_standard_gqa_block(layer, is_res_mul: bool | None = None):
+    """Compile one standard GQA block without registering it on a parent model."""
+    return torch.compile(StandardGQABlock(layer, is_res_mul), dynamic=False)
+
+
+def prepare_standard_gqa_blocks(layers, is_res_mul: bool | None = None):
+    """Replace decoder layers with registered Spyre blocks and compile them."""
+    blocks = []
+    for i, layer in enumerate(list(layers)):
+        block = StandardGQABlock(layer, is_res_mul)
+        layers[i] = block
+        blocks.append(torch.compile(block, dynamic=False))
+    return blocks
 
 
 def make_decoder_block(
@@ -2165,9 +2229,9 @@ def prepare_standard_gqa(model, rmsnorm_cls):
     prepare_rope_and_heads(model)
     patch_rmsnorm(rmsnorm_cls)
     pad_lm_head(model)
-    model._spyre_compiled_blocks = [
-        make_standard_gqa_block(layer) for layer in get_backbone(model).layers
-    ]
+    model._spyre_compiled_blocks = prepare_standard_gqa_blocks(
+        get_backbone(model).layers
+    )
 
 
 # ---------------------------------------------------------------------------

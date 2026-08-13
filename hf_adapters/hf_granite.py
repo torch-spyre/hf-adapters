@@ -28,10 +28,11 @@ Usage::
 
 from hf_adapters.hf_common import (
     get_backbone,
-    make_standard_gqa_block,
     pad_lm_head,
     patch_rmsnorm,
     prepare_rope_and_heads,
+    prepare_standard_gqa_blocks,
+    text_config,
 )
 
 
@@ -93,8 +94,7 @@ def _run_forward(
         cache_position,
     )
     logits = model.lm_head(h)
-    logits = logits / model.config.logits_scaling
-    return logits
+    return logits / text_config(model.config).logits_scaling
 
 
 def prepare_for_spyre(model):
@@ -104,6 +104,6 @@ def prepare_for_spyre(model):
     prepare_rope_and_heads(model)
     patch_rmsnorm(GraniteRMSNorm)
     pad_lm_head(model)
-    model._spyre_compiled_blocks = [
-        make_standard_gqa_block(layer, True) for layer in get_backbone(model).layers
-    ]
+    model._spyre_compiled_blocks = prepare_standard_gqa_blocks(
+        get_backbone(model).layers, True
+    )
