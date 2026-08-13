@@ -48,7 +48,6 @@ import types
 from typing import Union
 
 import pytest
-import torch
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.nodes import Item
@@ -241,12 +240,6 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
         for item in items:
             if "slow" in item.keywords:
                 item.add_marker(skip_slow)
-
-
-def get_dtype_for_cpu(model_path: str) -> torch.dtype:
-    from hf_adapters.auto_spyre_model import dtype_for_model_path
-
-    return dtype_for_model_path(model_path, target_device="cpu")
 
 
 def load_ref_model(
