@@ -23,7 +23,7 @@ test_suite_config:
               include: &id001
                 - name: MistralModel_b95f1163
                   module_path: transformers.models.mistral.modeling_mistral.MistralModel
-                  description: 'Module: transformers.models.mistral.modeling_mistral.MistralModel'
+                  description: 'Module: transformers.models.mistral.modeling_mistral.MistralModel (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/mistral/modeling_mistral.py#L327)'
                   constructor_inputs:
                     args:
                       - config_path: transformers.models.mistral.configuration_mistral.MistralConfig
@@ -33,7 +33,7 @@ test_suite_config:
                           num_key_value_heads: 8
                           intermediate_size: 32768
                           max_position_embeddings: 131072
-                          num_hidden_layers: 1  # default is 40; capped to avoid eager-on-Spyre timeout in test_eager_vs_compile
+                          num_hidden_layers : 1
                           _attn_implementation: sdpa
                     kwargs: {}
                   forward_inputs:
@@ -79,7 +79,7 @@ test_suite_config:
                             init: xavier
                 - name: MistralRotaryEmbedding_0af204ee
                   module_path: transformers.models.mistral.modeling_mistral.MistralRotaryEmbedding
-                  description: 'Module: transformers.models.mistral.modeling_mistral.MistralRotaryEmbedding'
+                  description: 'Module: transformers.models.mistral.modeling_mistral.MistralRotaryEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/mistral/modeling_mistral.py#L262)'
                   constructor_inputs:
                     args:
                       - config_path: transformers.models.mistral.configuration_mistral.MistralConfig
@@ -89,6 +89,7 @@ test_suite_config:
                           num_key_value_heads: 8
                           intermediate_size: 32768
                           max_position_embeddings: 131072
+                          num_hidden_layers : 1
                           _attn_implementation: sdpa
                     kwargs: {}
                   forward_inputs:
@@ -100,7 +101,9 @@ test_suite_config:
                             dtype: torch.bfloat16
                             device: spyre
                             init: xavier
-                        - tensor:
+                      kwargs:
+                        position_ids:
+                          tensor:
                             shape: [1, 128]
                             stride: null
                             storage_offset: 0
@@ -109,7 +112,6 @@ test_suite_config:
                             init: randint
                             init_args:
                               high: 1
-                      kwargs: {}
                     - args:
                         - tensor:
                             shape: [1, 1, 4096]
@@ -118,7 +120,9 @@ test_suite_config:
                             dtype: torch.bfloat16
                             device: spyre
                             init: xavier
-                        - tensor:
+                      kwargs:
+                        position_ids:
+                          tensor:
                             shape: [1, 1]
                             stride: null
                             storage_offset: 0
@@ -127,10 +131,9 @@ test_suite_config:
                             init: randint
                             init_args:
                               high: 1
-                      kwargs: {}
                 - name: MistralDecoderLayer_layer0
                   module_path: transformers.models.mistral.modeling_mistral.MistralDecoderLayer
-                  description: 'Module: transformers.models.mistral.modeling_mistral.MistralDecoderLayer'
+                  description: 'Module: transformers.models.mistral.modeling_mistral.MistralDecoderLayer (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/mistral/modeling_mistral.py#L202)'
                   constructor_inputs:
                     args:
                       - config_path: transformers.models.mistral.configuration_mistral.MistralConfig
@@ -140,6 +143,7 @@ test_suite_config:
                           num_key_value_heads: 8
                           intermediate_size: 32768
                           max_position_embeddings: 131072
+                          num_hidden_layers : 1
                           _attn_implementation: sdpa
                     kwargs:
                       layer_idx: 0
@@ -163,16 +167,6 @@ test_suite_config:
                             init: randint
                             init_args:
                               high: 1
-                        cache_position:
-                          tensor:
-                            shape: [128]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.int64
-                            device: spyre
-                            init: randint
-                            init_args:
-                              high: 128
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 128, 128]
@@ -196,6 +190,16 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs:
+                        attention_mask:
+                          tensor:
+                            shape: [1, 1, 1, 2048]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bool
+                            device: spyre
+                            init: randint
+                            init_args:
+                              high: 1
                         position_ids:
                           tensor:
                             shape: [1, 1]
@@ -206,16 +210,33 @@ test_suite_config:
                             init: randint
                             init_args:
                               high: 1
-                        cache_position:
-                          tensor:
-                            shape: [1]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.int64
-                            device: spyre
-                            init: randint
-                            init_args:
-                              high: 1
+                        past_key_values:
+                          cache:
+                            cache_path: transformers.cache_utils.StaticCache
+                            layer_idx: 0
+                            key:
+                              shape: [1, 8, 128, 128]
+                              stride: null
+                              storage_offset: 0
+                              dtype: torch.bfloat16
+                              device: spyre
+                              init: xavier
+                            value:
+                              shape: [1, 8, 128, 128]
+                              stride: null
+                              storage_offset: 0
+                              dtype: torch.bfloat16
+                              device: spyre
+                              init: xavier
+                            max_cache_len: 2048
+                            config_path: transformers.models.mistral.configuration_mistral.MistralConfig
+                            config_kwargs:
+                              hidden_size: 4096
+                              num_attention_heads: 32
+                              num_key_value_heads: 8
+                              head_dim: 128
+                              num_hidden_layers: 1
+                              max_position_embeddings: 131072
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 1, 128]
@@ -232,7 +253,7 @@ test_suite_config:
                               init: xavier
                 - name: MistralRMSNorm_4096
                   module_path: transformers.models.mistral.modeling_mistral.MistralRMSNorm
-                  description: 'Module: transformers.models.mistral.modeling_mistral.MistralRMSNorm'
+                  description: 'Module: transformers.models.mistral.modeling_mistral.MistralRMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/mistral/modeling_mistral.py#L181)'
                   constructor_inputs:
                     args:
                       - value: 4096
@@ -258,7 +279,7 @@ test_suite_config:
                       kwargs: {}
                 - name: MistralAttention_layer0
                   module_path: transformers.models.mistral.modeling_mistral.MistralAttention
-                  description: 'Module: transformers.models.mistral.modeling_mistral.MistralAttention'
+                  description: 'Module: transformers.models.mistral.modeling_mistral.MistralAttention (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/mistral/modeling_mistral.py#L121)'
                   constructor_inputs:
                     args:
                       - config_path: transformers.models.mistral.configuration_mistral.MistralConfig
@@ -268,6 +289,7 @@ test_suite_config:
                           num_key_value_heads: 8
                           intermediate_size: 32768
                           max_position_embeddings: 131072
+                          num_hidden_layers : 1
                           _attn_implementation: sdpa
                     kwargs:
                       layer_idx: 0
@@ -292,16 +314,6 @@ test_suite_config:
                             init: randint
                             init_args:
                               high: 1
-                        cache_position:
-                          tensor:
-                            shape: [128]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.int64
-                            device: spyre
-                            init: randint
-                            init_args:
-                              high: 128
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 128, 128]
@@ -326,6 +338,16 @@ test_suite_config:
                             dtype: torch.bfloat16
                             device: spyre
                             init: xavier
+                        attention_mask:
+                          tensor:
+                            shape: [1, 1, 1, 2048]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bool
+                            device: spyre
+                            init: randint
+                            init_args:
+                              high: 1
                         position_ids:
                           tensor:
                             shape: [1, 1]
@@ -336,16 +358,33 @@ test_suite_config:
                             init: randint
                             init_args:
                               high: 1
-                        cache_position:
-                          tensor:
-                            shape: [1]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.int64
-                            device: spyre
-                            init: randint
-                            init_args:
-                              high: 1
+                        past_key_values:
+                          cache:
+                            cache_path: transformers.cache_utils.StaticCache
+                            layer_idx: 0
+                            key:
+                              shape: [1, 8, 128, 128]
+                              stride: null
+                              storage_offset: 0
+                              dtype: torch.bfloat16
+                              device: spyre
+                              init: xavier
+                            value:
+                              shape: [1, 8, 128, 128]
+                              stride: null
+                              storage_offset: 0
+                              dtype: torch.bfloat16
+                              device: spyre
+                              init: xavier
+                            max_cache_len: 2048
+                            config_path: transformers.models.mistral.configuration_mistral.MistralConfig
+                            config_kwargs:
+                              hidden_size: 4096
+                              num_attention_heads: 32
+                              num_key_value_heads: 8
+                              head_dim: 128
+                              num_hidden_layers: 1
+                              max_position_embeddings: 131072
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 1, 128]
@@ -362,7 +401,7 @@ test_suite_config:
                               init: xavier
                 - name: MistralMLP_f82d9546
                   module_path: transformers.models.mistral.modeling_mistral.MistralMLP
-                  description: 'Module: transformers.models.mistral.modeling_mistral.MistralMLP'
+                  description: 'Module: transformers.models.mistral.modeling_mistral.MistralMLP (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/mistral/modeling_mistral.py#L35)'
                   constructor_inputs:
                     args:
                       - config_path: transformers.models.mistral.configuration_mistral.MistralConfig
@@ -372,7 +411,8 @@ test_suite_config:
                           num_key_value_heads: 8
                           intermediate_size: 32768
                           max_position_embeddings: 131072
-                          _attn_implementation: null
+                          num_hidden_layers : 1
+                          _attn_implementation: sdpa
                     kwargs: {}
                   forward_inputs:
                     - args:
@@ -395,7 +435,7 @@ test_suite_config:
                       kwargs: {}
                 - name: SiLUActivation_d2f532e9
                   module_path: transformers.activations.SiLUActivation
-                  description: 'Module: transformers.activations.SiLUActivation'
+                  description: 'Module: transformers.activations.SiLUActivation (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/activations.py#L92)'
                   constructor_inputs:
                     args: []
                     kwargs: {}

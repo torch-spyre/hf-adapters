@@ -111,14 +111,25 @@ def prepare_for_spyre(model):
     from transformers.models.ministral3.modeling_ministral3 import Ministral3RMSNorm
     from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
+    try:
+        from torch_spyre._inductor import (  # type: ignore[import-not-found]
+            config as spyre_config,
+        )
+
+        # Bundle-scoped HBM pool planning in torch-spyre d9c0301 corrupts
+        # Ministral outputs. Keep this disabled through lazy compilation.
+        setattr(spyre_config, "hbm_pool_planning", False)
+    except ImportError:
+        pass
+
     # --- Vision tower ---
     hf_pixtral_vision.prepare_for_spyre(model)
 
     # --- Text decoder ---
-    # Re-pin the multi_modal_projector to CPU: _move_to_spyre_with_layout
-    # will blanket-move every param; the projector must run on CPU because
-    # it processes CPU vision features (same pattern as granite_vision_mm's
-    # layerwise_projectors pin).
+    # Re-pin the multi_modal_projector to CPU: the device move via
+    # load_model_to_spyre blanket-moves every param; the projector must run
+    # on CPU because it processes CPU vision features (same pattern as
+    # granite_vision_mm's layerwise_projectors pin).
     if hasattr(model, "model") and hasattr(model.model, "multi_modal_projector"):
         model.model.multi_modal_projector.to("cpu")
 

@@ -96,15 +96,18 @@ on:
       models:
         description: >-
           Space-separated list of model paths to restrict every matrix job
-          (smoke/load/token-compare/embed-compare/vision) to, e.g.
+          (smoke/load/token-compare/embed-compare/vision/reranker-compare) to, e.g.
           "Qwen/Qwen3-0.6B mistralai/Ministral-3-8B-Instruct-2512". Must match
           paths exactly as they appear in tests/model_registry.py -- any
           registered path works, not just the smallest-per-adapter default
           used when this input is left empty. Leave empty (default) to fall
-          back to a fixed 4-model spot-check -- see run-tests below.
+          back to a fixed 4-model (causal-only) spot-check when test_type is
+          "integration" (the default), or to every registered model per suite
+          for any other test_type -- see run-tests below. An explicit models
+          value applies to every test_type, including "integration".
         required: false
         type: string
-        default: 'Qwen/Qwen3-0.6B mistralai/Ministral-3-8B-Instruct-2512 ibm-granite/granite-4.1-8b ibm-granite/granite-3.3-8b-instruct'
+        default: ''
 
 concurrency:
   group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.pull_request.html_url) || (github.event_name == 'workflow_dispatch'
@@ -139,10 +142,18 @@ jobs:
   # ---------------------------------------------------------------------------
   # Delegates to the same reusable _test_matrix.yaml used by "run-tests" in
   # torch_spyre_tests.yaml. `test_type` defaults to "integration" (the smoke
-  # suite) and, if `models` is left empty, falls back to a fixed 4-model
-  # spot-check (Qwen3-0.6B, Ministral-3-8B-Instruct-2512, Granite 4.1 8B,
-  # Granite 3.3 8B) -- so upstream-triggered runs stay fast by default. Pass
-  # test_type: regression and/or an explicit models value for full coverage.
+  # suite); if `models` is left empty AND test_type is "integration", it falls
+  # back to a fixed 4-model spot-check (Qwen3-0.6B, Ministral-3-8B-Instruct-2512,
+  # Granite 4.1 8B, Granite 3.3 8B) -- all causal-only -- so upstream-triggered
+  # runs stay fast by default. For any other test_type (unit/regression/trunk/
+  # a suite-key combo), an empty `models` instead passes '' through to
+  # _test_matrix.yaml, which means "no restriction" there -- every suite (incl.
+  # vision/embed/reranker, which the 4-model spot-check has none of) runs its
+  # full registry. Without this split, the spot-check default would starve
+  # spyre-vlm-e2e-tests/spyre-embed-compare-tests of any matrix entries under
+  # test_type: regression (0-model matrix -> job never runs, not even a
+  # failure -- see the "run spyre unit tests" gate). An explicit `models`
+  # value always wins outright, for every test_type.
   # ---------------------------------------------------------------------------
   run-tests:
     needs: provenance
@@ -154,7 +165,7 @@ jobs:
       ref: ${{ inputs.ref || '' }}
       repository: ${{ inputs.repository || '' }}
       test_type: ${{ inputs.test_type || 'integration' }}
-      models: ${{ inputs.models || 'Qwen/Qwen3-0.6B mistralai/Ministral-3-8B-Instruct-2512 ibm-granite/granite-4.1-8b ibm-granite/granite-3.3-8b-instruct' }}
+      models: ${{ (inputs.models != '' && inputs.models) || ((inputs.test_type || 'integration') == 'integration' && 'Qwen/Qwen3-0.6B mistralai/Ministral-3-8B-Instruct-2512 ibm-granite/granite-4.1-8b ibm-granite/granite-3.3-8b-instruct') || '' }}
 
   # ----------------------------------------------------------------------------------
   # Fan-in gate job so callers can poll a single stable job name for pass/fail.

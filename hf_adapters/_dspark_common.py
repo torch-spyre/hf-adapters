@@ -261,8 +261,8 @@ def snapshot_cpu_embeddings(model):
     """Keep CPU copies of the gather-only embedding weights.
 
     ``nn.Embedding`` is a gather with no Spyre kernel (CPU fallback), so the
-    noise-block and markov ``w1`` lookups must run on CPU. But
-    ``_move_to_spyre_with_layout`` (which runs AFTER ``prepare_for_spyre``) moves
+    noise-block and markov ``w1`` lookups must run on CPU. But the device move
+    via ``load_model_to_spyre`` (which runs AFTER ``prepare_for_spyre``) moves
     every parameter — including these embeddings — onto the Spyre device, which
     would collide CPU ids with a Spyre weight. Snapshot the weights on CPU here so
     the lookups are device-independent of where the move leaves the module; the
@@ -315,7 +315,7 @@ def snapshot_cpu_fc(model):
     tensor, off the autoregressive loop, so we run it on CPU (fp32, exact) and
     return the result on device — the same host boundary spyre_draft.py used, and
     analogous to the RoPE / embedding CPU fallbacks. Snapshot the weights here so
-    the projection is independent of where ``_move_to_spyre_with_layout`` leaves
+    the projection is independent of where the Spyre device move leaves
     ``fc``/``hidden_norm``.
     """
     fc = getattr(model, "fc", None)

@@ -79,6 +79,64 @@ embeddings = model.encode(["hello world", "how are you"])
 
 The `st_backend` module automatically patches `sentence-transformers` to apply the relevant Spyre adapter when loading the model. All standard SentenceTransformer methods (`encode()`, `similarity()`, etc.) work unchanged.
 
+## Masked Language Models
+
+Use `AutoSpyreModelForMaskedLM` for bidirectional masked-token prediction with
+encoder models. The encoder runs on Spyre and the model-specific MLM head runs on
+CPU:
+
+```python
+import torch
+from transformers import AutoTokenizer
+from hf_adapters import AutoSpyreModelForMaskedLM
+
+model_path = "google-bert/bert-base-uncased"
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+model = AutoSpyreModelForMaskedLM.from_pretrained(model_path)
+batch = tokenizer(
+    [f"The capital of France is {tokenizer.mask_token}."],
+    return_tensors="pt",
+)
+
+with torch.no_grad():
+    outputs = model(**batch)
+logits = outputs.logits
+mask = batch["input_ids"].eq(tokenizer.mask_token_id)
+print(tokenizer.decode(logits[mask].argmax(dim=-1)))
+```
+
+`outputs.logits` is a CPU tensor shaped
+`[batch, sequence, vocab]`. This is inference-only masked-language modeling, not
+left-to-right causal generation.
+
+## Extractive Question Answering
+
+Use `AutoSpyreModelForQuestionAnswering` with fine-tuned BERT-family QA models.
+The encoder runs on Spyre, the small token-classification head runs on CPU, and
+the normal Hugging Face output contract is preserved:
+
+```python
+from transformers import AutoTokenizer
+from hf_adapters import AutoSpyreModelForQuestionAnswering
+
+model_path = "deepset/roberta-base-squad2"
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+model = AutoSpyreModelForQuestionAnswering.from_pretrained(model_path)
+batch = tokenizer(
+    "Where do I live?",
+    "My name is Wolfgang and I live in Berlin.",
+    return_tensors="pt",
+)
+outputs = model(**batch)
+start = outputs.start_logits.argmax(dim=-1)
+end = outputs.end_logits.argmax(dim=-1)
+answer = tokenizer.decode(batch["input_ids"][0, start.item() : end.item() + 1])
+```
+
+Encoder task inputs must be right-padded. Masked-LM and question-answering
+support inference from `input_ids`; training/loss, `inputs_embeds`, attentions,
+and hidden-state collection are not currently supported.
+
 ## Multimodal Models (image → text)
 
 For vision-language models, use `AutoSpyreModelForImageTextToText`. It loads the

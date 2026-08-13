@@ -12,6 +12,7 @@ from utils.fetch_curated_models_metadata import _create_fetch_metadata, keep_all
 from utils.hf_model_catalog import (
     EXPAND_FIELDS,
     RESOURCES_DIR,
+    _guarded,
     build_catalog,
     contains_remote_code,
     has_loadable_weights,
@@ -48,26 +49,32 @@ def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
     rejected (empty string when kept).
     """
     try:
-        baseline_keep, baseline_reason = is_baseline_keep(model)
-        if not baseline_keep:
-            return False, baseline_reason
+        keep_flag, reason = is_baseline_keep(model)
+        if not keep_flag:
+            return False, reason
     except Exception:
         return False, "exception during is_baseline_keep"
-    try:
-        if model.gated:
-            return False, "model is gated"
-    except Exception:
-        return False, "exception during model.gated"
-    try:
-        if not has_loadable_weights(model):
-            return False, "no loadable weights"
-    except Exception:
-        return False, "exception during has_loadable_weights"
-    try:
-        if contains_remote_code(model):
-            return False, "requires trust_remote_code"
-    except Exception:
-        return False, "exception during contains_remote_code"
+
+    checks: list[tuple[Callable[[], bool], str, str]] = [
+        (lambda: model.gated, "model.gated", "model is gated"),
+        (
+            lambda: not has_loadable_weights(model),
+            "has_loadable_weights",
+            "no loadable weights",
+        ),
+        (
+            lambda: contains_remote_code(model),
+            "contains_remote_code",
+            "requires trust_remote_code",
+        ),
+    ]
+    for predicate, name, rejection in checks:
+        result, err = _guarded(predicate, name)
+        if err:
+            return False, err
+        if result:
+            return False, rejection
+
     return True, ""
 
 

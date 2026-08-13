@@ -32,7 +32,9 @@ import pytest
 from model_registry import (
     CAUSAL_PATHS,
     EMBED_PATHS,
+    MASKED_LM_PATHS,
     NON_BLOCKING_CAUSAL_MODELS,
+    QUESTION_ANSWERING_PATHS,
     xfail_non_blocking,
 )
 
@@ -93,3 +95,54 @@ def test_load_embedding(model_path: str) -> None:
     print("| Path | Kind | Status | Load (s) |")
     print("|------|------|--------|----------|")
     print(f"| {model_path} | embedding | PASS | {load_s:.1f} |")
+
+
+def load_masked_lm(model_path: str) -> tuple[Any, Any, float]:
+    from hf_adapters import AutoSpyreModelForMaskedLM
+
+    dtype = torch_dtype_for_model_path(model_path)
+
+    t0 = time.time()
+    model = AutoSpyreModelForMaskedLM.from_pretrained(model_path, dtype=dtype)
+    load_s = time.time() - t0
+
+    model_is_not_none = model is not None
+    callables = callable(model.forward)
+    return model_is_not_none, callables, load_s
+
+
+@pytest.mark.parametrize("model_path", MASKED_LM_PATHS, ids=MASKED_LM_PATHS)
+def test_load_masked_lm(model_path: str) -> None:
+
+    model_is_not_none, callables, load_s = load_masked_lm(model_path)
+
+    print(f"  [{model_path}] masked-LM load time: {load_s:.1f}s")
+    print("\n## Spyre Load Test Results\n")
+    print("| Path | Kind | Status | Load (s) |")
+    print("|------|------|--------|----------|")
+    print(f"| {model_path} | masked-LM | PASS | {load_s:.1f} |")
+    assert model_is_not_none, f"{model_path}: from_pretrained returned None"
+    assert callables, f"{model_path}: AutoSpyreModelForMaskedLM forward is not callable"
+
+
+def load_question_answering(model_path: str) -> tuple[Any, Any, float]:
+    from hf_adapters import AutoSpyreModelForQuestionAnswering
+
+    dtype = torch_dtype_for_model_path(model_path)
+    t0 = time.time()
+    model: Any = AutoSpyreModelForQuestionAnswering.from_pretrained(
+        model_path, dtype=dtype
+    )
+    load_s = time.time() - t0
+    head_on_cpu = next(model.qa_outputs.parameters()).device.type == "cpu"
+    return model is not None, callable(model.forward) and head_on_cpu, load_s
+
+
+@pytest.mark.parametrize(
+    "model_path", QUESTION_ANSWERING_PATHS, ids=QUESTION_ANSWERING_PATHS
+)
+def test_load_question_answering(model_path: str) -> None:
+    model_is_not_none, ready, load_s = load_question_answering(model_path)
+    print(f"  [{model_path}] question-answering load time: {load_s:.1f}s")
+    assert model_is_not_none, f"{model_path}: from_pretrained returned None"
+    assert ready, f"{model_path}: native forward or CPU QA head is not ready"

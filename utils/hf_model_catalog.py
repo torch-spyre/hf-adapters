@@ -217,6 +217,14 @@ def is_baseline_keep(model: ModelInfo) -> tuple[bool, str]:
     return True, ""
 
 
+def _guarded(fn: Callable[[], bool], name: str) -> tuple[bool, str]:
+    """Call fn(); return (result, "") on success or (False, "exception during <name>") on error."""
+    try:
+        return fn(), ""
+    except Exception:
+        return False, f"exception during {name}"
+
+
 def contains_remote_code(model: ModelInfo) -> bool:
     """Return False if the model requires trust_remote_code=True to load its config."""
     try:
