@@ -1145,9 +1145,7 @@ def _move_to_spyre_with_layout(model, dtype):
         model.to(dtype=dtype)
         return
 
-    from torch_spyre.model_utils import load_model_to_spyre
-
-    load_model_to_spyre(model, dtype=dtype)
+    model.to(dtype=dtype, device=DEVICE)
 
 
 def load_model_common(model_path, module, dtype=torch.float16, auto_model_cls=None):
