@@ -31,11 +31,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from sympy import factorint
 
-# Rank-aware device for multi-Spyre (tensor-parallel) runs. torchrun sets RANK
-# in the environment before this module is imported, so each process binds to
-# its own AIU (spyre:0, spyre:1, ...). Single-device runs get spyre:0.
-# The conftest CPU-patch overwrites this to "cpu" for CPU tests.
-DEVICE = f"spyre:{os.getenv('RANK', '0')}"
+# Rank-aware device for multi-Spyre (tensor-parallel) runs. torchrun sets
+# LOCAL_RANK before this module is imported, so each process binds to its local
+# AIU. Single-device runs get spyre:0. The conftest CPU-patch overwrites this to
+# "cpu" for CPU tests.
+DEVICE = f"spyre:{os.getenv('LOCAL_RANK', '0')}"
 BLOCK_SIZE = 64  # Spyre stick size at fp16 (128 bytes / 2 bytes per element)
 
 
@@ -1182,8 +1182,27 @@ def _resolve_tp_plan(model_path, auto_model_cls, tp_plan):
     return plan
 
 
+def _resolve_tp_size():
+    """Resolve and validate the TP degree required by ``DistributedConfig``."""
+    world_size = os.getenv("WORLD_SIZE")
+    if world_size is None:
+        raise ValueError(
+            "tp_size is required when WORLD_SIZE is not set; launch with "
+            "torchrun or pass tp_size explicitly"
+        )
+    try:
+        tp_size = int(world_size)
+    except ValueError as exc:
+        raise ValueError(f"WORLD_SIZE must be an integer, got {world_size!r}") from exc
+    return tp_size
+
+
 def load_model_common(
-    model_path, module, dtype=torch.float16, auto_model_cls=None, tp_plan=None
+    model_path,
+    module,
+    dtype=torch.float16,
+    auto_model_cls=None,
+    tp_plan=None,
 ):
     """Load an HF model.
 
@@ -1193,24 +1212,35 @@ def load_model_common(
         dtype: Weight dtype (default fp16).
         auto_model_cls: HF auto-model class to use (e.g. ``AutoModel``,
             ``AutoModelForCausalLM``). Defaults to ``AutoModel``.
-        tp_plan: Optional tensor-parallel plan forwarded to HF
-            ``from_pretrained`` (e.g. ``"auto"``). When set, HF shards the model
-            across the ``torchrun`` process group; ``device_map`` is omitted so
-            HF's TP placement is authoritative. ``"auto"`` is resolved to a plan
-            that keeps ``lm_head`` replicated (see ``_resolve_tp_plan``).
+        tp_plan: Optional tensor-parallel plan (e.g. ``"auto"``). When set, HF
+            shards the model across the ``torchrun`` process group and
+            ``device_map`` is omitted so HF's TP placement is authoritative.
+            ``"auto"`` is resolved to a plan that keeps ``lm_head`` replicated
+            (see ``_resolve_tp_plan``).
     """
     if auto_model_cls is None:
         from transformers import AutoModel
 
         auto_model_cls = AutoModel
 
+    if tp_plan is not None and hasattr(module, "load_hf_model"):
+        raise SpyreUnsupportedModelError(
+            "tensor-parallel loading is not supported by this adapter's custom loader"
+        )
+
     if hasattr(module, "load_hf_model"):
         model = module.load_hf_model(model_path, dtype)
     elif tp_plan is not None:
+        from transformers.distributed import DistributedConfig
+
+        distributed_config = DistributedConfig(
+            tp_size=_resolve_tp_size(),
+            tp_plan=_resolve_tp_plan(model_path, auto_model_cls, tp_plan),
+        )
         model = auto_model_cls.from_pretrained(
             model_path,
             dtype=dtype,
-            tp_plan=_resolve_tp_plan(model_path, auto_model_cls, tp_plan),
+            distributed_config=distributed_config,
         )
     else:
         model = auto_model_cls.from_pretrained(

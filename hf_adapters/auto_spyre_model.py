@@ -363,7 +363,7 @@ class AutoSpyreModelForMaskedLM(AutoSpyreModel):
             model_name_or_path, mapping=cls._module_mapping
         )
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype
+            model_name_or_path, dtype=dtype, tp_plan=tp_plan
         )
 
         def model_forward(
@@ -435,7 +435,7 @@ class AutoSpyreModelForQuestionAnswering(AutoSpyreModel):
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(model_name_or_path)
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype
+            model_name_or_path, dtype=dtype, tp_plan=tp_plan
         )
         if model.config.num_labels != 2:
             raise SpyreUnsupportedModelError(
