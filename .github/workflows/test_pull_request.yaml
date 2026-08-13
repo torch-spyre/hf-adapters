@@ -105,6 +105,31 @@ env:
   # MODELS_FILTER: "qwen3 or bge_base"
 
 jobs:
+  # Resolves the `integration-test` label for BOTH pull_request and merge_group.
+  # A merge_group payload has no pull_request object, so the label cannot be read
+  # inline there -- the previous `github.event_name == 'pull_request' && ...` form
+  # was always false in the queue, so every suite below re-ran on a commit whose
+  # testing the label had already handed to the Jenkins integration run.
+  #
+  # Every gated suite `needs` this job, so a FAILURE here would skip all of them
+  # regardless of their own `if:` -- which is why it is also listed in
+  # run-spyre-unit-tests' failure predicates below: the required check then goes red
+  # rather than reporting a false green over suites that never ran.
+  detect-label:
+    name: Detect integration-test label
+    runs-on: ubuntu-latest
+    outputs:
+      labeled: ${{ steps.label.outputs.labeled }}
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+      - name: Resolve label
+        id: label
+        uses: ./.github/actions/detect-integration-test-label
+
   pre-commit:
     name: pre-commit
     runs-on: ubuntu-latest
@@ -172,9 +197,10 @@ jobs:
   # To exclude models from all test matrices, add them to the --exclude list below.
   # ===========================================================================
   generate-matrix:
+    needs: [detect-label]
     name: Generate test matrices
     runs-on: ubuntu-latest
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    if: ${{ needs.detect-label.outputs.labeled != 'true' }}
     outputs:
       causal_matrix: ${{ steps.generate.outputs.causal_matrix }}
       embed_matrix: ${{ steps.generate.outputs.embed_matrix }}
@@ -210,9 +236,10 @@ jobs:
           python .github/scripts/generate_test_matrix.py --exclude tiiuae/Falcon3-1B-Base mistralai/Mistral-Small-3.1-24B-Instruct-2503
 
   adapter-coverage:
+    needs: [detect-label]
     name: adapter coverage
     runs-on: ubuntu-latest
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    if: ${{ needs.detect-label.outputs.labeled != 'true' }}
     defaults:
       run:
         working-directory: .
@@ -288,8 +315,8 @@ jobs:
 
   spyre-load-tests:
     name: Spyre load (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    needs: [detect-label, generate-matrix]
+    if: ${{ needs.detect-label.outputs.labeled != 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -347,8 +374,8 @@ jobs:
 
   spyre-smoke-tests:
     name: Spyre smoke (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    needs: [detect-label, generate-matrix]
+    if: ${{ needs.detect-label.outputs.labeled != 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -405,8 +432,8 @@ jobs:
 
   spyre-token-compare-tests:
     name: Spyre token compare (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    needs: [detect-label, generate-matrix]
+    if: ${{ needs.detect-label.outputs.labeled != 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -463,8 +490,8 @@ jobs:
 
   spyre-embed-compare-tests:
     name: Spyre embed compare (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    needs: [detect-label, generate-matrix]
+    if: ${{ needs.detect-label.outputs.labeled != 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -631,8 +658,8 @@ jobs:
 
   spyre-reranker-compare-tests:
     name: Spyre reranker compare (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    needs: [detect-label, generate-matrix]
+    if: ${{ needs.detect-label.outputs.labeled != 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -687,8 +714,8 @@ jobs:
 
   spyre-vlm-e2e-tests:
     name: Spyre VLM e2e (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    needs: [detect-label, generate-matrix]
+    if: ${{ needs.detect-label.outputs.labeled != 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -745,8 +772,9 @@ jobs:
           retention-days: 14
 
   spyre-model-module-tests:
+    needs: [detect-label]
     name: Spyre model-module tests (${{ matrix.config }})
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    if: ${{ needs.detect-label.outputs.labeled != 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -827,6 +855,7 @@ jobs:
       run:
         working-directory: .
     needs:
+      - detect-label
       - pre-commit
       - mypy
       - generate-matrix
@@ -850,7 +879,8 @@ jobs:
         #   contains(needs.<job>.result, 'failure') || contains(needs.<job>.result, 'cancelled') ||
         # lines when restoring either job.
         run: |-
-          if ${{ contains(needs.pre-commit.result, 'failure') || contains(needs.pre-commit.result, 'cancelled') ||
+          if ${{ contains(needs.detect-label.result, 'failure') || contains(needs.detect-label.result, 'cancelled') ||
+                 contains(needs.pre-commit.result, 'failure') || contains(needs.pre-commit.result, 'cancelled') ||
                  contains(needs.mypy.result, 'failure') || contains(needs.mypy.result, 'cancelled') ||
                  contains(needs.generate-matrix.result, 'failure') || contains(needs.generate-matrix.result, 'cancelled') ||
                  contains(needs.adapter-coverage.result, 'failure') || contains(needs.adapter-coverage.result, 'cancelled') ||
