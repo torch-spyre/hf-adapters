@@ -1127,23 +1127,17 @@ def _move_to_spyre_with_layout(model, dtype):
 
     Layout selection (``dim_order=[1,0]`` for ``nn.Linear`` weights) is owned by
     ``torch_spyre.model_utils.load_model_to_spyre``. This wrapper only handles
-    HF-specific RoPE prep and the CPU-test early return when ``DEVICE`` is not
-    Spyre.
+    HF-specific RoPE prep before the device move.
     """
     # Propagate dtype to the precomputed RoPE module(s) so the freq cache
     # matches the chosen weight dtype (avoids fp16/bf16 mismatch in
-    # apply_rope_matmul when dtype != fp16). Done before the CPU early-return so
-    # both the CPU and Spyre paths get it.
+    # apply_rope_matmul when dtype != fp16).
     set_rope_dtype(model, dtype)
 
     # Build the RoPE rotation cache on CPU now, before any device move. If left
     # to its lazy first-forward build, the construction ops run inside the Spyre
     # graph and corrupt the result (see prebuild_rope_cache). Harmless on CPU.
     prebuild_rope_cache(model)
-
-    if torch.device(DEVICE).type != "spyre":
-        model.to(dtype=dtype)
-        return
 
     model.to(dtype=dtype, device=DEVICE)
 
