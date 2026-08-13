@@ -14,7 +14,7 @@ from `transformers`.
 
 ## Supported Models
 
-**30 adapters · 46 verified checkpoints · 100+ compatible models**
+**30 adapters · 47 verified checkpoints · 100+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
 **vision-language** (image→text), and **speculative-decoding drafter** models — from

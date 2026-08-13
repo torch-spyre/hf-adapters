@@ -252,6 +252,14 @@ CAUSAL_LM_MODELS = {
         "dtype": "bfloat16",
         "is_gated": True,
     },
+    "gemma4_31b_it": {
+        "name": "Gemma 4 31B Instruct",
+        "path": "google/gemma-4-31b-it",
+        "adapter": "hf_gemma4.py",
+        "size": "31b",
+        "dtype": "bfloat16",
+        "is_gated": True,
+    },
     # DSpark speculative-decoding drafters (block proposers). kind="dspark_draft"
     # keeps them out of the generate-based causal-LM harnesses (see CAUSAL_PATHS);
     # tests/spyre/test_dspark_draft_spyre.py exercises the block-propose path.
