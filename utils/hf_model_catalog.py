@@ -75,6 +75,7 @@ EXPAND_FIELDS: list[ExpandModelProperty_T] = [
     "createdAt",
     "library_name",
     "tags",
+    "siblings",
 ]
 
 # HF-API gateway 5xx statuses. Anything outside this set (400/401/403/404/...)
@@ -197,18 +198,23 @@ def is_nsfw(model: ModelInfo) -> bool:
 NON_NATIVE_ID_SUBSTRINGS: tuple[str, ...] = ("onnx", "gguf", "mlx")
 
 
-def is_baseline_keep(model: ModelInfo) -> bool:
-    """Shared inclusion gate: drop config-less, and ONNX/GGUF/MLX id checkpoints."""
-    if not model.config:
-        return False
+def is_baseline_keep(model: ModelInfo) -> tuple[bool, str]:
+    """Shared inclusion gate: drop config-less, and ONNX/GGUF/MLX id checkpoints.
+
+    Returns (keep, reason) where reason describes why the model was rejected
+    (empty string when kept).
+    """
+    failure_constant = "failed baseline keep: "
     if model.library_name in NON_NATIVE_ID_SUBSTRINGS:
-        return False
+        return False, failure_constant + "non-native library (ONNX/GGUF/MLX)"
     model_id_lower: str = model.id.lower()
     if any(sub in model_id_lower for sub in NON_NATIVE_ID_SUBSTRINGS):
-        return False
+        return False, failure_constant + "non-native format in model id (ONNX/GGUF/MLX)"
     if "nsfw" in tags(model):
-        return False
-    return True
+        return False, failure_constant + "NSFW tag"
+    if not model.config:
+        return False, failure_constant + "no config"
+    return True, ""
 
 
 def contains_remote_code(model: ModelInfo) -> bool:
@@ -219,12 +225,6 @@ def contains_remote_code(model: ModelInfo) -> bool:
     except (ValueError, OSError):
         return True
 
-
-# Session-scoped cache for _has_loadable_weights. Keyed by repo_id; values are
-# the bool result. The fetchers run twice a week in a fresh process, and repo
-# file lists rarely change within a single run, so a plain dict is enough — no
-# TTL or on-disk persistence needed.
-_LOADABLE_WEIGHTS_CACHE: dict[str, bool] = {}
 
 # Filenames transformers' AutoModel.from_pretrained recognizes as native
 # weights (single-file or sharded via the matching index.json).
@@ -238,48 +238,26 @@ _NATIVE_WEIGHT_FILES: frozenset[str] = frozenset(
 )
 
 
-def has_loadable_weights(model: ModelInfo, token: str | bool) -> bool:
+def has_loadable_weights(model: ModelInfo) -> bool:
     """True if the repo ships weights AutoModel.from_pretrained can consume.
 
-    Detects three unloadable classes without downloading any weight files
-    — one ``list_repo_files`` call per repo:
+    Detects three unloadable classes from the sibling metadata included in the
+    bulk ``list_models`` response, without issuing a request per repository:
 
     * adapter-only repos (LoRA/PEFT, `adapter_config.json` but no full model),
     * GGUF/MLX/ONNX-only repos that slipped past the id-substring filter,
     * abandoned uploads with a config but no weight files at all.
-
-    Cached in-process by repo_id: transformers repos are effectively immutable
-    within a fetcher run, and each fetcher process is short-lived.
     """
-    from huggingface_hub import HfApi
-
-    cached = _LOADABLE_WEIGHTS_CACHE.get(model.id)
-    if cached is not None:
-        return cached
-
-    api: HfApi = HfApi(token=token)
-    try:
-        files: list[str] = with_transient_retry(
-            lambda: api.list_repo_files(model.id, token=token),
-            description=f"list_repo_files[{model.id}]",
-        )
-    except Exception:
-        # Any permanent failure (404, gated without token, ...) — treat as
-        # not loadable rather than raising into the fetcher's filter path.
-        _LOADABLE_WEIGHTS_CACHE[model.id] = False
-        return False
-
-    lower_files: set[str] = {f.lower() for f in files}
+    lower_files: set[str] = {
+        sibling.rfilename.lower() for sibling in (model.siblings or [])
+    }
 
     # Adapter-only repos ship adapter_config.json + adapter_model.safetensors
     # and expect PeftModel.from_pretrained(base, ...), not AutoModel directly.
     if "adapter_config.json" in lower_files:
-        _LOADABLE_WEIGHTS_CACHE[model.id] = False
         return False
 
-    result: bool = any(name in lower_files for name in _NATIVE_WEIGHT_FILES)
-    _LOADABLE_WEIGHTS_CACHE[model.id] = result
-    return result
+    return any(name in lower_files for name in _NATIVE_WEIGHT_FILES)
 
 
 def format_number_to_billions_smart(num: int | float) -> str:
@@ -373,7 +351,7 @@ def _resolve_param_columns(
 def build_catalog(
     *,
     fetch_fn: Callable[[int], Iterable[ModelInfo]],
-    filter_fn: Callable[[ModelInfo], bool],
+    filter_fn: Callable[[ModelInfo], tuple[bool, str]],
     limit: int,
     output_csv: Path | str | None,
     label: str,
@@ -387,7 +365,7 @@ def build_catalog(
 
     Args:
         fetch_fn: callable(limit) -> list of raw model objects (over-fetched).
-        filter_fn: callable(model) -> bool, keep the model if True.
+        filter_fn: callable(model) -> (keep, reason), keep the model if keep is True.
         limit: number of rows to write after filtering.
         output_csv: destination path, or None to skip writing.
         label: human-readable noun for log lines (e.g. "generative").
@@ -401,12 +379,11 @@ def build_catalog(
     """
     extra_columns = extra_columns or []
 
-    def _safe_filter(model: ModelInfo) -> bool:
+    def _safe_filter(model: ModelInfo) -> tuple[bool, str]:
         try:
             return filter_fn(model)
-        except Exception as e:
-            logging.warning("filter_fn failed for %s: %s", model.id, e)
-            return False
+        except Exception:
+            return False, "_safe_filter raised an exception"
 
     timings: dict[str, float] = {}
     t_total = time.perf_counter()
@@ -418,16 +395,30 @@ def build_catalog(
 
     t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=16) as ex:
-        keep_flags: list[bool] = list(
+        keep_flags: list[tuple[bool, str]] = list(
             tqdm(
                 ex.map(_safe_filter, candidates),
                 total=len(candidates),
                 desc="Filtering candidates",
             )
         )
-    models: list[ModelInfo] = [m for m, keep in zip(candidates, keep_flags) if keep]
+    models: list[ModelInfo] = [
+        m for m, (keep, _) in zip(candidates, keep_flags) if keep
+    ]
     timings["filter (filter_fn)"] = time.perf_counter() - t0
     print(f"Kept {len(models)} {label} models after filtering.")
+
+    reason_counts: dict[str, int] = {}
+    for keep, reason in keep_flags:
+        if not keep:
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    if reason_counts:
+        total_filtered_out: int = sum(reason_counts.values())
+        print(f"Filtered out {total_filtered_out} {label} models by reason:")
+        for reason, count in sorted(
+            reason_counts.items(), key=lambda kv: kv[1], reverse=True
+        ):
+            print(f"  {reason}: {count}")
 
     models = models[:limit]
 

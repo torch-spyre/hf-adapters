@@ -147,31 +147,53 @@ def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
     return sorted(by_id.values(), key=lambda m: (m.downloads or 0), reverse=True)
 
 
-def keep(model: ModelInfo, token: str | bool) -> bool:
+def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
     """Keep predicate for the embedding fetcher.
 
-    Ordering matters: the cheap metadata-only checks run first so we only
-    spend the ``has_loadable_weights`` HTTP call on the ~1k candidates that
-    would otherwise survive.
+    Ordering matters: the cheap metadata-only checks run first.
+    Returns a (keep, reason) tuple where reason describes why the model was
+    rejected (empty string when kept).
     """
-    if not is_baseline_keep(model):
-        return False
-    if not _has_embedding_signal(model):
-        return False
-    if _is_reranker(model):
-        return False
-    if model.gated:
-        return False
-    if contains_remote_code(model):
-        return False
-    if not has_loadable_weights(model, token):
-        return False
-    return True
+    try:
+        baseline_keep, baseline_reason = is_baseline_keep(model)
+        if not baseline_keep:
+            return False, baseline_reason
+    except Exception:
+        return False, "exception during is_baseline_keep"
+    try:
+        if not _has_embedding_signal(model):
+            return (
+                False,
+                "no embedding signal (not sentence-transformers library or tag)",
+            )
+    except Exception:
+        return False, "exception during _has_embedding_signal"
+    try:
+        if _is_reranker(model):
+            return False, "model is a reranker / cross-encoder"
+    except Exception:
+        return False, "exception during _is_reranker"
+    try:
+        if model.gated:
+            return False, "model is gated"
+    except Exception:
+        return False, "exception during model.gated"
+    try:
+        if not has_loadable_weights(model):
+            return False, "no loadable weights"
+    except Exception as e:
+        return False, f"exception during has_loadable_weights: {e}"
+    try:
+        if contains_remote_code(model):
+            return False, "requires trust_remote_code"
+    except Exception as e:
+        return False, f"exception during contains_remote_code: {e}"
+    return True, ""
 
 
-def fetch_embedding_models(
+def _fetch_embedding_models(
     fetcher: Callable[[HfApi, int], list[ModelInfo]],
-    keeper: Callable[[ModelInfo, str | bool], bool],
+    keeper: Callable[[ModelInfo, str | bool], tuple[bool, str]],
     limit: int,
     output_csv: Path | str | None = None,
 ) -> list[dict[str, object]]:
@@ -192,7 +214,7 @@ def fetch_embedding_models(
 def fetch_top_embedding_models(
     limit: int, output_csv: Path | str | None = None
 ) -> list[dict[str, object]]:
-    return fetch_embedding_models(
+    return _fetch_embedding_models(
         fetcher=_fetch, keeper=keep, limit=limit, output_csv=output_csv
     )
 
@@ -200,7 +222,7 @@ def fetch_top_embedding_models(
 def fetch_curated_embedding_models_metadata(
     model_ids: list[str], output_csv: Path | str | None = None
 ) -> list[dict[str, object]]:
-    return fetch_embedding_models(
+    return _fetch_embedding_models(
         fetcher=_create_fetch_metadata(model_ids),
         keeper=keep_all,
         limit=len(model_ids),

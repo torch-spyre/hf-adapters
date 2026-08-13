@@ -1,29 +1,33 @@
 #!/usr/bin/env bash
-# Single source of truth for the unit/integration/regression/trunk tier
-# aliases, shared by the Makefile `tests` target and _test_matrix.yaml's
-# resolve-test-type job so both entry points apply the same mapping.
+# Single source of truth for defaulting an empty/unset TEST_TYPE, shared by
+# the Makefile `tests` target and _test_matrix.yaml's resolve-test-type job
+# so both entry points apply the same default. unit/integration/regression/
+# trunk are literal, first-class tier values everywhere downstream (this
+# repo's Makefile suite-selection case, and every suite job's `if:` in
+# _test_matrix.yaml) -- there is no alias-resolution step here anymore.
+# "smoke" is a suite key, not a tier (a bare TEST_TYPE=smoke is rejected by
+# the Makefile's case statement; use TEST_TYPE=integration for that suite
+# alone), but it still passes through this script unchanged like any other
+# suite key.
 #
 # Usage: resolve_test_type.sh [TEST_TYPE...]
-# Each argument is resolved independently and printed space-separated.
-# Empty/no args resolves to "full" (this repo's own default label; callers
-# that want the user-facing "regression" default pass it explicitly).
+# Each argument is passed through unchanged (empty args resolve to
+# "regression"); multiple arguments are printed space-separated, so a
+# space-separated suite-key combo (e.g. "smoke load") still works.
 
 set -euo pipefail
 
 if [[ $# -eq 0 ]]; then
-    echo full
+    echo regression
     exit 0
 fi
 
 resolved=""
 for t in "$@"; do
-    case "$t" in
-        unit)        resolved="$resolved core" ;;
-        integration) resolved="$resolved smoke" ;;
-        regression)  resolved="$resolved full" ;;
-        trunk)       resolved="$resolved full" ;;
-        '')          resolved="$resolved full" ;;
-        *)           resolved="$resolved $t" ;;
-    esac
+    if [[ -z "$t" ]]; then
+        resolved="$resolved regression"
+    else
+        resolved="$resolved $t"
+    fi
 done
 echo "${resolved# }"

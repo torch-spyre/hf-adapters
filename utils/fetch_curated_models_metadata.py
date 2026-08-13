@@ -21,14 +21,14 @@ from utils.hf_model_catalog import EXPAND_FIELDS, with_transient_retry
 from utils.utilities import ts
 
 
-def keep_all(_model: ModelInfo, _token: str | bool) -> bool:
+def keep_all(_model: ModelInfo, _token: str | bool) -> tuple[bool, str]:
     """Keep predicate for curated catalogs: accept every id that resolved.
 
     Named rather than an inline ``lambda`` so the call sites read as a decision
     ("curated ids bypass the ranked scan's gates") instead of an unexplained
     constant. Matches the ``keep(model, token)`` signature the fetchers expect.
     """
-    return True
+    return True, ""
 
 
 def _create_fetch_metadata(

@@ -105,6 +105,31 @@ env:
   # MODELS_FILTER: "qwen3 or bge_base"
 
 jobs:
+  # Resolves the `integration-test` label for BOTH pull_request and merge_group.
+  # A merge_group payload has no pull_request object, so the label cannot be read
+  # inline there -- the previous `github.event_name == 'pull_request' && ...` form
+  # was always false in the queue, so every suite below re-ran on a commit whose
+  # testing the label had already handed to the Jenkins integration run.
+  #
+  # Every gated suite `needs` this job, so a FAILURE here would skip all of them
+  # regardless of their own `if:` -- which is why it is also listed in
+  # run-spyre-unit-tests' failure predicates below: the required check then goes red
+  # rather than reporting a false green over suites that never ran.
+  detect-label:
+    name: Detect integration-test label
+    runs-on: ubuntu-latest
+    outputs:
+      labeled: ${{ steps.label.outputs.labeled }}
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+      - name: Resolve label
+        id: label
+        uses: ./.github/actions/detect-integration-test-label
+
   pre-commit:
     name: pre-commit
     runs-on: ubuntu-latest
@@ -123,11 +148,42 @@ jobs:
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.1
         with:
-          # Skip the local mypy hook — it requires the project venv with
-          # torch/transformers installed, which we don't set up in this lint job.
           extra_args: --all-files --hook-stage commit --show-diff-on-failure
         env:
-          SKIP: mypy
+          SKIP: mypy  # mypy runs in its own job below; see the `mypy` job
+
+  # ---------------------------------------------------------------------------
+  # mypy — static type checker for hf_adapters/.
+  #
+  # Runs in its own job so it can install torch+transformers (needed to resolve
+  # the type stubs) without bloating the pre-commit lint job, which runs on a
+  # plain Python install. The local pre-commit mypy hook is intentionally kept
+  # so developers still get feedback on commit; this job is the CI enforcement.
+  # ---------------------------------------------------------------------------
+  mypy:
+    name: mypy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --quiet \
+            "torch>=2.0" \
+            "transformers>=5.12.1,<6.0.0" \
+            "mypy>=2.3.0,<3"
+
+      - name: Run mypy
+        run: mypy --config-file=pyproject.toml
 
   # ===========================================================================
   # Dynamic matrix generation
@@ -141,9 +197,10 @@ jobs:
   # To exclude models from all test matrices, add them to the --exclude list below.
   # ===========================================================================
   generate-matrix:
+    needs: [detect-label]
     name: Generate test matrices
     runs-on: ubuntu-latest
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    if: ${{ needs.detect-label.outputs.labeled != 'true' }}
     outputs:
       causal_matrix: ${{ steps.generate.outputs.causal_matrix }}
       embed_matrix: ${{ steps.generate.outputs.embed_matrix }}
@@ -177,9 +234,10 @@ jobs:
           python .github/scripts/generate_test_matrix.py --exclude tiiuae/Falcon3-1B-Base mistralai/Mistral-Small-3.1-24B-Instruct-2503
 
   adapter-coverage:
+    needs: [detect-label]
     name: adapter coverage
     runs-on: ubuntu-latest
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    if: ${{ needs.detect-label.outputs.labeled != 'true' }}
     defaults:
       run:
         working-directory: .
@@ -255,8 +313,8 @@ jobs:
 
   spyre-load-tests:
     name: Spyre load (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    needs: [detect-label, generate-matrix]
+    if: ${{ needs.detect-label.outputs.labeled != 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -296,17 +354,26 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_load_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_load_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_load_spyre.py -k "${{ matrix.model_key }}" --junit-xml=junit-load-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-load-${{ env.SAFE_MODEL_KEY }}
+          path: junit-load-${{ matrix.model_key }}.xml
+          retention-days: 14
 
   spyre-smoke-tests:
     name: Spyre smoke (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    needs: [detect-label, generate-matrix]
+    if: ${{ needs.detect-label.outputs.labeled != 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -345,17 +412,26 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k "${{ matrix.model_key }}" --junit-xml=junit-smoke-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-smoke-${{ env.SAFE_MODEL_KEY }}
+          path: junit-smoke-${{ matrix.model_key }}.xml
+          retention-days: 14
 
   spyre-token-compare-tests:
     name: Spyre token compare (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    needs: [detect-label, generate-matrix]
+    if: ${{ needs.detect-label.outputs.labeled != 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -394,17 +470,26 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k "${{ matrix.model_key }}" --junit-xml=junit-token-compare-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-token-compare-${{ env.SAFE_MODEL_KEY }}
+          path: junit-token-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
 
   spyre-embed-compare-tests:
     name: Spyre embed compare (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    needs: [detect-label, generate-matrix]
+    if: ${{ needs.detect-label.outputs.labeled != 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -443,17 +528,26 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k "${{ matrix.model_key }}" --junit-xml=junit-embed-compare-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-embed-compare-${{ env.SAFE_MODEL_KEY }}
+          path: junit-embed-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
 
   spyre-reranker-compare-tests:
     name: Spyre reranker compare (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    needs: [detect-label, generate-matrix]
+    if: ${{ needs.detect-label.outputs.labeled != 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -490,17 +584,26 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_e2e_reranker_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_e2e_reranker_compare_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_e2e_reranker_compare_spyre.py -k "${{ matrix.model_key }}" --junit-xml=junit-reranker-compare-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-reranker-compare-${{ env.SAFE_MODEL_KEY }}
+          path: junit-reranker-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
 
   spyre-vlm-e2e-tests:
     name: Spyre VLM e2e (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    needs: [detect-label, generate-matrix]
+    if: ${{ needs.detect-label.outputs.labeled != 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -540,16 +643,26 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           echo "Running test_vlm_e2e_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_vlm_e2e_spyre.py -k "${{ matrix.model_key }}"
+          uv run pytest -s -vvv tests/spyre/test_vlm_e2e_spyre.py -k "${{ matrix.model_key }}" --junit-xml=junit-vlm-${{ matrix.model_key }}.xml
           echo "tests done"
 
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-vlm-${{ env.SAFE_MODEL_KEY }}
+          path: junit-vlm-${{ matrix.model_key }}.xml
+          retention-days: 14
+
   spyre-model-module-tests:
+    needs: [detect-label]
     name: Spyre model-module tests (${{ matrix.config }})
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    if: ${{ needs.detect-label.outputs.labeled != 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1__pvc_1tb_x1
@@ -603,7 +716,15 @@ jobs:
           echo "Using oot-framework runner: $_run_test"
           bash "$_run_test" \
             "tests/configs/module_tests/${{ matrix.config }}" \
-            -v
+            -v --junit-xml="$PWD/junit-model-module-${{ matrix.config }}.xml"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-model-module-${{ matrix.config }}
+          path: ${{ env.CLONED_HF_ADAPTERS_DIR }}/junit-model-module-${{ matrix.config }}.xml
+          retention-days: 14
 
   # ===========================================================================
   # Required check gate — fans in all matrix jobs so a single branch
@@ -622,7 +743,9 @@ jobs:
       run:
         working-directory: .
     needs:
+      - detect-label
       - pre-commit
+      - mypy
       - generate-matrix
       - adapter-coverage
 #      - cpu-tests
@@ -642,7 +765,9 @@ jobs:
         #   contains(needs.<job>.result, 'failure') || contains(needs.<job>.result, 'cancelled') ||
         # lines when restoring either job.
         run: |-
-          if ${{ contains(needs.pre-commit.result, 'failure') || contains(needs.pre-commit.result, 'cancelled') ||
+          if ${{ contains(needs.detect-label.result, 'failure') || contains(needs.detect-label.result, 'cancelled') ||
+                 contains(needs.pre-commit.result, 'failure') || contains(needs.pre-commit.result, 'cancelled') ||
+                 contains(needs.mypy.result, 'failure') || contains(needs.mypy.result, 'cancelled') ||
                  contains(needs.generate-matrix.result, 'failure') || contains(needs.generate-matrix.result, 'cancelled') ||
                  contains(needs.adapter-coverage.result, 'failure') || contains(needs.adapter-coverage.result, 'cancelled') ||
                  contains(needs.spyre-load-tests.result, 'failure') || contains(needs.spyre-load-tests.result, 'cancelled') ||

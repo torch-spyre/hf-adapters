@@ -399,7 +399,7 @@ def install_spyre_markov(model):
     correction runs on host with only the ``w2`` matmul on-device — no device mix.
     No-op when the drafter has no markov head.
     """
-    from deepspec.utils.sampling import sample_tokens
+    from deepspec.utils.sampling import sample_tokens  # type: ignore[import-not-found]
 
     mh = getattr(model, "markov_head", None)
     if mh is None or not hasattr(mh, "markov_w2"):
