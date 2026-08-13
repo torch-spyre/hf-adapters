@@ -126,10 +126,10 @@ def prepare_for_spyre(model):
     hf_pixtral_vision.prepare_for_spyre(model)
 
     # --- Text decoder ---
-    # Re-pin the multi_modal_projector to CPU: _move_to_spyre_with_layout
-    # will blanket-move every param; the projector must run on CPU because
-    # it processes CPU vision features (same pattern as granite_vision_mm's
-    # layerwise_projectors pin).
+    # Re-pin the multi_modal_projector to CPU: the device move via
+    # load_model_to_spyre blanket-moves every param; the projector must run
+    # on CPU because it processes CPU vision features (same pattern as
+    # granite_vision_mm's layerwise_projectors pin).
     if hasattr(model, "model") and hasattr(model.model, "multi_modal_projector"):
         model.model.multi_modal_projector.to("cpu")
 

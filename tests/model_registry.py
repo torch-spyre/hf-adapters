@@ -103,6 +103,13 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_granitemoehybrid.py",
         "size": "8b",
     },
+    # hf_granite_swa.py
+    "granite41_20b": {
+        "name": "Granite 4.1 20B",
+        "path": "ibm-research/granite-4.1-20b",
+        "adapter": "hf_granite_swa.py",
+        "size": "20b",
+    },
     # hf_granite_vision.py
     "granite-vision": {
         "name": "Granite Vision 4.1 4B",
@@ -396,6 +403,56 @@ EMBEDDING_MODELS = {
 }
 
 
+QUESTION_ANSWERING_MODELS = {
+    "bert_qa": {
+        "name": "BERT base cased SQuAD 2",
+        "path": "deepset/bert-base-cased-squad2",
+        "adapter": "hf_bert.py",
+        "size": "0.1b",
+    },
+    "roberta_qa": {
+        "name": "RoBERTa base SQuAD 2",
+        "path": "deepset/roberta-base-squad2",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.1b",
+    },
+}
+
+
+MASKED_LM_MODELS = {
+    "bert_mlm": {
+        "name": "BERT base uncased",
+        "path": "google-bert/bert-base-uncased",
+        "adapter": "hf_bert.py",
+        "size": "0.1b",
+    },
+    "modernbert_mlm": {
+        "name": "ModernBERT base",
+        "path": "answerdotai/ModernBERT-base",
+        "adapter": "hf_modernbert.py",
+        "size": "0.1b",
+    },
+    "mpnet_mlm": {
+        "name": "MPNet base",
+        "path": "microsoft/mpnet-base",
+        "adapter": "hf_mpnet.py",
+        "size": "0.1b",
+    },
+    "roberta_mlm": {
+        "name": "RoBERTa base",
+        "path": "FacebookAI/roberta-base",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.1b",
+    },
+    "xlm_roberta_mlm": {
+        "name": "XLM-RoBERTa base",
+        "path": "FacebookAI/xlm-roberta-base",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.3b",
+    },
+}
+
+
 # Vision models. ``kind="tower"`` adapters are encoder-only; ``kind="vlm"`` adapters
 # are full multimodal models with a causal text decoder, RoPE, KV caches, and ``generate``.
 VISION_MODELS = {
@@ -535,6 +592,12 @@ DSPARK_PATHS: list[str] = _select_representative_paths(
 EMBED_PATHS: list[str] = _select_representative_paths(
     EMBEDDING_MODELS, include_gated=_include_gated_flag
 )
+MASKED_LM_PATHS: list[str] = _select_representative_paths(
+    MASKED_LM_MODELS, include_gated=_include_gated_flag
+)
+QUESTION_ANSWERING_PATHS: list[str] = _select_representative_paths(
+    QUESTION_ANSWERING_MODELS, include_gated=_include_gated_flag
+)
 VISION_PATHS: list[str] = _select_representative_paths(
     VISION_MODELS,
     include_gated=_include_gated_flag,
@@ -574,6 +637,12 @@ ALL_CAUSAL_PATHS: list[str] = _all_paths(
 )
 ALL_EMBED_PATHS: list[str] = _all_paths(
     EMBEDDING_MODELS, include_gated=_include_gated_flag
+)
+ALL_MASKED_LM_PATHS: list[str] = _all_paths(
+    MASKED_LM_MODELS, include_gated=_include_gated_flag
+)
+ALL_QUESTION_ANSWERING_PATHS: list[str] = _all_paths(
+    QUESTION_ANSWERING_MODELS, include_gated=_include_gated_flag
 )
 ALL_VISION_PATHS: list[str] = _all_paths(
     VISION_MODELS,

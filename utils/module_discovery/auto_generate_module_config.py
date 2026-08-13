@@ -14,10 +14,12 @@ Usage:
 
 import argparse
 import hashlib
+import inspect
 import json
 import logging
+import os
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 import yaml
@@ -72,7 +74,7 @@ class PrettyDumper(yaml.SafeDumper):
 
 def _is_special_tensor(name: str) -> bool:
     """Check if tensor name indicates it should not be random."""
-    return "position_embedding" not in name.lower() and any(
+    return "position_embeddings" not in name.lower() and any(
         keyword in name.lower() for keyword in ["position", "mask", "ids"]
     )
 
@@ -199,6 +201,231 @@ def _process_pytree_structure(value: Any, name: str) -> Dict[str, Any] | None:
         }
 
     return None
+
+
+def _resolve_layer_idx(module: Any) -> int | None:
+    """Find a module's decoder layer index for indexing into the KV cache.
+
+    In transformers >=5 the ``layer_idx`` lives on the attention submodule, not
+    on the DecoderLayer itself, so we check the layer first (older layouts /
+    other archs) and fall back to ``self_attn.layer_idx``. Returns ``None`` when
+    neither exists (e.g. a norm/MLP module that never touches the KV cache).
+    """
+    layer_idx = getattr(module, "layer_idx", None)
+    if layer_idx is not None:
+        return layer_idx
+    self_attn = getattr(module, "self_attn", None)
+    if self_attn is not None:
+        return getattr(self_attn, "layer_idx", None)
+    return None
+
+
+def _class_source_location(cls: type) -> Tuple[Optional[str], Optional[int]]:
+    """Return (source file, first line of the class definition) for ``cls``.
+
+    Resolved from the live class object while the hook still holds the module
+    instance. ``module_path`` alone is not enough: a model loaded with
+    ``trust_remote_code`` lives in a dynamically created module that cannot be
+    re-imported by name later. Returns ``(None, None)`` when no source is
+    retrievable (C extension, class synthesized at runtime).
+    """
+    try:
+        source_file = inspect.getsourcefile(cls)
+        _, lineno = inspect.getsourcelines(cls)
+    except (OSError, TypeError):
+        return None, None
+    return source_file, lineno
+
+
+def _shorten_source_path(path: str) -> str:
+    """Trim an absolute source path down to something environment-independent.
+
+    A ``site-packages``/``dist-packages`` install becomes ``<pkg>/...`` so the
+    generated YAML does not hard-code the generating machine's venv layout.
+    Paths outside a site install are returned unchanged.
+    """
+    parts = Path(path).parts
+    for marker in ("site-packages", "dist-packages"):
+        if marker in parts:
+            return str(Path(*parts[parts.index(marker) + 1 :]))
+    return path
+
+
+def _get_transformers_ref() -> str:
+    """Git ref used in generated transformers source URLs.
+
+    Mirrors ``utils/model_ops/utils/torchop_yaml.py``: ``TRANSFORMERS_VERSION``
+    overrides, otherwise the installed version becomes a ``vX.Y.Z`` release tag.
+    A dev/editable install ("5.0.0.dev0") has no such tag, so it falls back to
+    ``main`` rather than emitting a dead link.
+    """
+    version = os.getenv("TRANSFORMERS_VERSION")
+    if version:
+        return version
+    try:
+        import transformers
+    except ImportError:
+        return "main"
+    return (
+        "main" if "dev" in transformers.__version__ else f"v{transformers.__version__}"
+    )
+
+
+_TRANSFORMERS_BLOB_URL = "https://github.com/huggingface/transformers/blob"
+
+
+def _source_reference(
+    source_file: Optional[str], lineno: Optional[int]
+) -> Optional[str]:
+    """Render a captured source location as a human-followable reference.
+
+    A file inside an installed ``transformers`` package becomes a GitHub blob
+    URL pinned to the installed version, matching the scheme
+    ``torchop_yaml._convert_transformers_path_to_url`` uses. Any other package
+    (torch, vLLM, a trust_remote_code module) degrades to a venv-relative
+    ``path:line``, since there is no single upstream repo to point at.
+    """
+    if not source_file:
+        return None
+    rel = _shorten_source_path(source_file)
+    # rel differing from the input means the file came from a site install, so
+    # a leading "transformers/" component is the installed transformers package
+    # (and maps onto src/transformers/... in the upstream repo layout).
+    if rel != source_file and rel.startswith("transformers/"):
+        anchor = f"#L{lineno}" if lineno else ""
+        return f"{_TRANSFORMERS_BLOB_URL}/{_get_transformers_ref()}/src/{rel}{anchor}"
+    return f"{rel}:{lineno}" if lineno else rel
+
+
+def _extract_cache_info(
+    past_key_values: Any, name: str, layer_idx: int, config: Any = None
+) -> Dict[str, Any] | None:
+    """Snapshot one layer's populated K/V from a ``Cache`` for a decode step.
+
+    A DecoderLayer receives ``past_key_values`` as a live
+    :class:`~transformers.cache_utils.Cache`, not raw tensors. During prefill
+    the layer's slot is empty (``keys is None``), so there is nothing to record
+    and this returns ``None`` — the layer then runs its
+    ``if past_key_values is not None: past_key_values.update(...)`` branch on
+    freshly computed K/V only, which is the correct prefill behaviour. During
+    decode the slot already holds ``past_len`` tokens; we snapshot that layer's
+    ``keys``/``values`` so the module test can rebuild an equivalent Cache and
+    exercise the same "attend over past + new token" path. Without this, the
+    decode invocation would replay with ``past_key_values=None`` and silently
+    degrade to a 1-token self-attention (the ``update`` branch never runs).
+
+    Transformers >=5 stores per-layer K/V under ``.layers[i].keys/.values``
+    (the older flat ``key_cache``/``value_cache`` lists are gone).
+
+    Only :class:`~transformers.cache_utils.StaticCache` is recorded. A
+    fixed-size StaticCache has a fully specified per-layer K/V shape that the
+    test side can reconstruct deterministically; a growable ``DynamicCache``
+    (the default when no cache is passed in) has no such fixed shape, so we warn
+    and skip it rather than emit a cache the test cannot faithfully rebuild.
+    Drive the generator with an explicit StaticCache to capture decode state.
+
+    Args:
+        past_key_values: The live cache passed to the DecoderLayer.
+        name: The kwarg name (``"past_key_values"``).
+        layer_idx: The layer whose K/V slot to snapshot.
+        config: The model config the cache was built from. In transformers >=5
+            a StaticCache no longer exposes ``.config``, but its ``__init__``
+            requires one, so the test side needs ``config_path`` +
+            ``config_kwargs`` to reconstruct it. Pass the DecoderLayer's config
+            (e.g. ``module.self_attn.config``).
+
+    Returns:
+        A cache spec dict, or ``None`` when the cache is not a StaticCache, this
+        layer's slot is empty (prefill), or it exposes no usable per-layer K/V.
+    """
+    cache_cls = type(past_key_values)
+    if cache_cls.__name__ != "StaticCache":
+        logger.warning(
+            "past_key_values is a %s, not StaticCache; skipping cache capture. "
+            "Drive the generator with an explicit StaticCache to record the "
+            "decode KV state (see generate_gpt_oss_20b_config.py).",
+            cache_cls.__name__,
+        )
+        return None
+
+    layers = getattr(past_key_values, "layers", None)
+    if layers is None or layer_idx >= len(layers):
+        return None
+
+    layer_cache = layers[layer_idx]
+    keys = getattr(layer_cache, "keys", None)
+    values = getattr(layer_cache, "values", None)
+
+    # Empty slot -> prefill call; nothing populated to record.
+    if not isinstance(keys, torch.Tensor) or not isinstance(values, torch.Tensor):
+        return None
+
+    # StaticCache allocates the full max_cache_len up front, so keys/values are
+    # [B, num_kv_heads, max_cache_len, head_dim] with only the first past_len
+    # positions populated. Record just that populated slice so the shape means
+    # "the real past" and the test side can prime a cache by a single update()
+    # of past_len tokens (not the whole fixed allocation of mostly-zeros).
+    #
+    # Use the PER-LAYER length, not past_key_values.get_seq_length(): at a
+    # decode step the whole-cache length reflects layers already updated this
+    # pass, so for layer i>0 (whose slot hasn't been updated yet at pre-hook
+    # time) it reads one token too long. layer_cache.get_seq_length() reports
+    # just this layer's populated past, which is the same across layers.
+    try:
+        past_len = int(layer_cache.get_seq_length())
+    except Exception:
+        try:
+            past_len = int(past_key_values.get_seq_length())
+        except Exception:
+            past_len = keys.shape[-2]
+    if past_len <= 0:
+        return None
+    keys = keys[:, :, :past_len, :]
+    values = values[:, :, :past_len, :]
+
+    cache_info: Dict[str, Any] = {
+        "name": name,
+        "type": "cache",
+        "cache_path": f"{cache_cls.__module__}.{cache_cls.__name__}",
+        "layer_idx": layer_idx,
+        # StaticCache.__init__ needs max_cache_len (the fixed allocation), which
+        # is not derivable from the (sliced) K/V shape. Record it so the test
+        # side rebuilds a cache of the same allocation before priming it.
+        "max_cache_len": getattr(past_key_values, "max_cache_len", None),
+        # keys/values carry real past tokens; the test rebuilds a cache of the
+        # same seq length via update(). "key"/"value" are not special tensor
+        # names, so they default to random init (see _is_special_tensor).
+        "key": _extract_tensor_info(keys, f"{name}_key"),
+        "value": _extract_tensor_info(values, f"{name}_value"),
+    }
+
+    # Snapshot the config so the test side can construct the concrete Cache with
+    # matching dimensions (num_kv_heads, head_dim, ...). transformers >=5 no
+    # longer exposes StaticCache.config, so we take the config passed in from
+    # the DecoderLayer; fall back to the cache's own attribute for older builds.
+    if config is None:
+        config = getattr(past_key_values, "config", None)
+    if config is not None:
+        config_cls = type(config)
+        config_kwargs = {}
+        for attr in [
+            "hidden_size",
+            "num_attention_heads",
+            "num_key_value_heads",
+            "head_dim",
+            "num_hidden_layers",
+            "max_position_embeddings",
+        ]:
+            if hasattr(config, attr):
+                config_kwargs[attr] = getattr(config, attr)
+        # The module test rebuilds only a single decoder layer, so pin
+        # num_hidden_layers to 1: the real model depth would size a KV
+        # cache / layer stack the standalone module never populates.
+        config_kwargs["num_hidden_layers"] = 1
+        cache_info["config_path"] = f"{config_cls.__module__}.{config_cls.__name__}"
+        cache_info["config_kwargs"] = config_kwargs
+
+    return cache_info
 
 
 class ModuleInfoCapture:
@@ -370,10 +597,14 @@ class ModuleInfoCapture:
             if unique_module_name not in self.module_data:
                 self.seen_module_configs.add(config_signature)
 
+                cls = module.__class__
+                source_file, source_lineno = _class_source_location(cls)
                 self.module_data[unique_module_name] = {
                     "name": unique_module_name,
                     "module_type": module_type,
-                    "module_path": f"{module.__class__.__module__}.{module.__class__.__name__}",
+                    "module_path": f"{cls.__module__}.{cls.__name__}",
+                    "source_file": source_file,
+                    "source_lineno": source_lineno,
                     "example_instance": module_name,
                     "constructor_args": constructor_info["constructor_args"],
                     "constructor_kwargs": constructor_info["constructor_kwargs"],
@@ -393,7 +624,23 @@ class ModuleInfoCapture:
             # Analyze keyword arguments using pytree
             for key, value in kwargs.items():
                 if key in ("past_key_values", "past_key_value"):
-                    continue  # Skip - not needed for module-level tests
+                    # A live Cache object can't go through the tensor-spec
+                    # pytree path. For a decode step we snapshot this layer's
+                    # populated K/V so the module test can rebuild an equivalent
+                    # cache and drive the real "attend over past + new token"
+                    # path; for prefill the slot is empty and this records
+                    # nothing (equivalent to past_key_values=None).
+                    layer_idx = _resolve_layer_idx(module)
+                    if layer_idx is not None and value is not None:
+                        layer_config = getattr(
+                            getattr(module, "self_attn", None), "config", None
+                        ) or getattr(module, "config", None)
+                        cache_info = _extract_cache_info(
+                            value, "past_key_values", layer_idx, config=layer_config
+                        )
+                        if cache_info is not None:
+                            invocation_inputs.append(cache_info)
+                    continue
                 input_info = _process_pytree_structure(value, key)
                 if input_info:
                     invocation_inputs.append(input_info)
@@ -497,6 +744,15 @@ class ModuleInfoCapture:
             - Single tensor: {"name": "arg_0", "shape": [...], "dtype": ..., ...}
             - Container: {"name": "arg_0", "type": "list/tuple/dict/pytree", "items": [...]}
             """
+            # A KV cache: distinct pattern so prefill (no cache) and decode
+            # (cache present) never collapse into one invocation signature.
+            if input_info.get("type") == "cache":
+                return {
+                    "type": "cache",
+                    "cache_path": input_info.get("cache_path"),
+                    "key_shape": input_info.get("key", {}).get("shape"),
+                    "value_shape": input_info.get("value", {}).get("shape"),
+                }
             # Check if this is a container with items
             if "type" in input_info and "items" in input_info:
                 # Container (list, tuple, dict, pytree)
@@ -688,8 +944,78 @@ def _convert_captured_input_to_sample_input(inp_spec: Dict[str, Any]) -> Dict[st
 
         return {"tensor_list": tensor_list}
 
+    elif inp_type == "cache":
+        # A KV cache: emit cache_path + per-layer key/value tensor specs so the
+        # test side can rebuild a concrete Cache and prime it via update(),
+        # reproducing the decode path (attend over past + new token).
+        cache_spec: Dict[str, Any] = {
+            "cache_path": inp_spec["cache_path"],
+            "layer_idx": inp_spec["layer_idx"],
+            "key": _tensor_info_to_spec(inp_spec["key"], f"{inp_name}_key"),
+            "value": _tensor_info_to_spec(inp_spec["value"], f"{inp_name}_value"),
+        }
+        if inp_spec.get("max_cache_len") is not None:
+            cache_spec["max_cache_len"] = inp_spec["max_cache_len"]
+        if "config_path" in inp_spec:
+            cache_spec["config_path"] = inp_spec["config_path"]
+            cache_spec["config_kwargs"] = inp_spec.get("config_kwargs", {})
+        return {"cache": cache_spec}
+
     else:
         return {"value": None}
+
+
+def _validate_cache_mask_consistency(
+    invocation_inputs: List[Dict[str, Any]], module_name: str
+) -> None:
+    """Warn if a cached (decode) invocation lacks a mask that can cover the past.
+
+    When an invocation carries a KV cache, the test side rebuilds a Cache primed
+    with ``past_len`` tokens and drives a decode forward. That forward also needs
+    an ``attention_mask`` whose key/value axis is at least ``past_len`` (the
+    cache's populated length) — otherwise the mask and the cache disagree about
+    how many past tokens exist and the replayed decode attends over the wrong
+    span. This is a generation-time sanity check (logged, not fatal) so a
+    malformed invocation is visible rather than silently emitted.
+
+    K/V key shape is ``[B, num_kv_heads, head_dim, past_len]`` (past_len last).
+    A 4-D ``attention_mask`` is ``[B, 1, q_len, kv_len]`` (kv_len last). We only
+    require ``past_len <= kv_len`` since a fixed-length cache (e.g. StaticCache)
+    reports its allocation, not its populated length, in the mask.
+    """
+    cache_spec = None
+    mask_spec = None
+    for inp in invocation_inputs:
+        if inp.get("type") == "cache":
+            cache_spec = inp
+        elif inp.get("name") == "attention_mask":
+            mask_spec = inp
+
+    if cache_spec is None:
+        return  # prefill invocation — nothing to check
+
+    if mask_spec is None:
+        logger.warning(
+            "%s: decode invocation has a KV cache but no attention_mask; "
+            "the replayed decode cannot mask the cached past correctly.",
+            module_name,
+        )
+        return
+
+    key_shape = cache_spec.get("key", {}).get("shape")
+    mask_shape = mask_spec.get("shape")
+    if not key_shape or not mask_shape:
+        return
+    past_len = key_shape[-1]
+    kv_len = mask_shape[-1]
+    if kv_len < past_len:
+        logger.warning(
+            "%s: attention_mask kv_len=%d < cached past_len=%d; mask cannot "
+            "cover the cached past for the decode step.",
+            module_name,
+            kv_len,
+            past_len,
+        )
 
 
 def _build_module_entry_dict(module_info: Dict[str, Any]) -> Dict[str, Any]:
@@ -741,6 +1067,14 @@ def _build_module_entry_dict(module_info: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 forward_kwargs[inp_name] = converted
 
+        # A decode invocation carries a KV cache; verify it also carries an
+        # attention_mask whose key/value length can cover the cached past, so
+        # the test side rebuilds a self-consistent (mask, cache) pair rather
+        # than a decode step that silently attends over the wrong span.
+        _validate_cache_mask_consistency(
+            invocation_inputs, module_info.get("name", "<unknown>")
+        )
+
         forward_inputs_list.append(
             {
                 "args": forward_args if forward_args else [],
@@ -750,11 +1084,23 @@ def _build_module_entry_dict(module_info: Dict[str, Any]) -> Dict[str, Any]:
 
     forward_inputs = forward_inputs_list
 
+    # Record where the class is defined so a reader of the generated YAML can
+    # jump straight to the source. Appended to the free-text description rather
+    # than emitted as its own key, so the entry stays within the shape the OOT
+    # framework's include schema accepts. Absent for captures that carry no
+    # source location (the vLLM generator builds module_info dicts by hand).
+    description = f"Module: {module_info['module_path']}"
+    location = _source_reference(
+        module_info.get("source_file"), module_info.get("source_lineno")
+    )
+    if location:
+        description = f"{description} (defined at {location})"
+
     # Build module entry
     entry = {
         "name": module_info["name"],
         "module_path": module_info["module_path"],
-        "description": f"Module: {module_info['module_path']}",
+        "description": description,
         "constructor_inputs": {
             "args": constructor_args if constructor_args else [],
             "kwargs": constructor_kwargs if constructor_kwargs else {},

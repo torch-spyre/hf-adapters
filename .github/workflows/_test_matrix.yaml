@@ -65,7 +65,7 @@ on:
           Which Spyre suites to run: smoke | unit | integration | regression |
           trunk. These tier names are literal, first-class values -- no
           alias-resolution layer. "unit" runs every suite except smoke (load,
-          token_compare, embed_compare, vlm, model_module); "integration" runs
+          token_compare, embed_compare, vlm, reranker_compare, model_module); "integration" runs
           only the smoke suite; "regression"/"trunk" (default: regression) run
           everything, i.e. smoke + unit. The resolve-test-type job below
           applies the shared default so every caller (Makefile, Jenkins,
@@ -187,6 +187,7 @@ jobs:
       embed_matrix: ${{ steps.generate.outputs.embed_matrix }}
       vision_matrix: ${{ steps.generate.outputs.vision_matrix }}
       combined_matrix: ${{ steps.generate.outputs.combined_matrix }}
+      reranker_matrix: ${{ steps.generate.outputs.reranker_matrix }}
     defaults:
       run:
         working-directory: .
@@ -669,6 +670,61 @@ jobs:
   #         uv run pytest ${{ inputs.extra_test_flags_multi_spyre }} tests/spyre/test_vlm_e2e_spyre.py -k "${{ matrix.model_key }}"
   #         echo "tests done"
 
+  spyre-reranker-compare-tests:
+    name: Spyre reranker compare (${{ matrix.model_key }})
+    needs: [generate-matrix, resolve-test-type]
+    # Suite key: "reranker_compare". Part of the "unit" coarse tier.
+    if: needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' reranker_compare ')
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Dynamic matrix: reranker models from tests/model_registry.py
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.reranker_matrix) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+
+      - name: Run test_e2e_reranker_compare_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_e2e_reranker_compare_spyre.py for ${{ matrix.model_key }}..."
+          make reranker-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-reranker-compare-${{ matrix.model_key }}.xml
+          echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-reranker-compare-${{ env.SAFE_MODEL_KEY }}
+          path: junit-reranker-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
+
   spyre-model-module-tests:
     name: Spyre model-module tests (${{ matrix.config }})
     needs: [resolve-test-type]
@@ -747,6 +803,7 @@ jobs:
       - spyre-token-compare-tests
       - spyre-embed-compare-tests
       - spyre-vlm-e2e-tests
+      - spyre-reranker-compare-tests
       - spyre-model-module-tests #updated to run model centric HF module tests
     if: always()
     steps:
@@ -766,6 +823,7 @@ jobs:
                  contains(needs.spyre-token-compare-tests.result, 'failure') || contains(needs.spyre-token-compare-tests.result, 'cancelled') ||
                  contains(needs.spyre-embed-compare-tests.result, 'failure') || contains(needs.spyre-embed-compare-tests.result, 'cancelled') ||
                  contains(needs.spyre-vlm-e2e-tests.result, 'failure') || contains(needs.spyre-vlm-e2e-tests.result, 'cancelled') ||
+                 contains(needs.spyre-reranker-compare-tests.result, 'failure') || contains(needs.spyre-reranker-compare-tests.result, 'cancelled') ||
                  contains(needs.spyre-model-module-tests.result, 'failure') || contains(needs.spyre-model-module-tests.result, 'cancelled') }}; then
             echo "One or more test suites failed."
             exit 1

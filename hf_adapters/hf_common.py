@@ -38,6 +38,10 @@ class SpyreUnsupportedModelError(ValueError):
     """Architecture is supported, but this config can't run on Spyre."""
 
 
+class SpyreUnsupportedFeatureError(ValueError):
+    """A Hugging Face API feature is not currently supported on Spyre."""
+
+
 class SpyreNoAdapterError(ValueError):
     """No Spyre adapter is registered for this model's architecture."""
 
@@ -76,45 +80,27 @@ def assert_spyre_dimensions(config, model_name):
 
 
 def get_backbone(model):
-    """Return the transformer backbone of an HF model.
+    """Return the transformer backbone of an HF model or task wrapper object.
 
-    Auto-loaded models come in two shapes:
-
-    - ``AutoModelForCausalLM`` returns a wrapper (``Qwen3ForCausalLM``,
-      ``LlamaForCausalLM``, ...) whose backbone lives at ``model.model``
-      and which exposes ``model.lm_head``.
-    - ``AutoModel`` returns the bare backbone (``Qwen3Model``,
-      ``LlamaModel``, ...) — no ``.model`` attribute, no ``lm_head``.
-
-    Adapter code reaches into the backbone to access ``embed_tokens``,
-    ``layers``, ``norm``, ``rotary_emb``. This accessor resolves the right
-    object regardless of how the model was loaded.
+    Task-specific auto classes (e.g., ``AutoModelForCausalLM``) return a wrapper
+    containing a backbone and one or more task heads, while the generic AutoModel
+    class may return the backbone directly. Search the supported wrapper attributes
+    and return the first non-``None`` module. If none is present, treat ``model``
+    itself as the backbone.
 
     Multimodal causal-LM wrappers (e.g. Gemma 4's
-    ``Gemma4ForConditionalGeneration``) nest the text decoder one level deeper
-    at ``model.model.language_model``; descend into ``.language_model`` when
-    present so the text backbone is returned.
-
-    GPT-2-family wrappers (``GPT2LMHeadModel``) keep the backbone at
-    ``model.transformer`` rather than ``model.model``; fall back to it when
-    ``.model`` is absent. The bare ``GPT2Model`` (``AutoModel``) has neither, so
-    it is returned as-is — it already is the backbone.
-
-    GPT-NeoX wrappers (``GPTNeoXForCausalLM``) keep the backbone at
-    ``model.gpt_neox`` (with ``embed_in``/``layers``/``final_layer_norm``);
-    fall back to it as well. The bare ``GPTNeoXModel`` is returned as-is.
+    ``Gemma4ForConditionalGeneration``) contain an additional nested
+    ``language_model`` level beneath that first module. Descend into it when
+    present.
     """
-    if hasattr(model, "model"):
-        inner = model.model
-    elif hasattr(model, "transformer"):
-        inner = model.transformer
-    elif hasattr(model, "gpt_neox"):
-        inner = model.gpt_neox
-    elif hasattr(model, "roberta"):
-        # XLMRobertaForSequenceClassification keeps the backbone at .roberta
-        inner = model.roberta
-    else:
-        inner = model
+    inner = next(
+        (
+            backbone
+            for name in ("model", "transformer", "gpt_neox", "bert", "mpnet", "roberta")
+            if (backbone := getattr(model, name, None)) is not None
+        ),
+        model,
+    )
     return getattr(inner, "language_model", inner)
 
 
@@ -1089,58 +1075,24 @@ def allocate_kv_caches(model, batch_size, max_cache_len, dtype, device=None):
 # ---------------------------------------------------------------------------
 
 
-def _patch_torch_empty():
-    """Workaround for torch_spyre spyre_empty() not accepting size= kwarg.
-
-    Upstream fix: https://github.com/torch-spyre/torch-spyre/issues/1729
-    """
-    _orig = torch.empty
-
-    def _patched(*args, size=None, **kwargs):
-        if size is not None:
-            return _orig(size, **kwargs)
-        return _orig(*args, **kwargs)
-
-    if getattr(torch.empty, "_hf_adapters_patched", False):
-        return
-    torch.empty = _patched
-    torch.empty._hf_adapters_patched = True
-
-
-def _embedding_param_ids(model):
-    """Data-pointers of weights that must keep the default (column-major) layout.
-
-    Gather-only embedding weights (used via ``nn.Embedding``, not matmul) must not
-    receive a row-major SpyreTensorLayout. Returns the set of ``data_ptr()``
-    values for all such weights.
-
-    Found by walking ``named_modules`` for ``nn.Embedding`` rather than matching
-    known attribute names. The name-matching version missed ModernBERT's
-    ``embeddings.tok_embeddings`` (and would miss the next new spelling), which
-    silently sent a [180000, 384] table down the matmul-weight path.
-    """
-    return {
-        module.weight.data_ptr()
-        for module in model.modules()
-        if isinstance(module, nn.Embedding)
-        and module.weight is not None
-        and module.weight.dim() == 2
-    }
-
-
 def untie_embedding_and_lm_head(model):
     """If the token-embedding weight and the LM head weight share storage, clone
-    the LM head's weight so each can take a different Spyre layout.
+    the LM head's weight so each can take a different device and Spyre layout.
     """
     head = _get_lm_head(model)
+    if head is None and hasattr(model, "get_output_embeddings"):
+        head = model.get_output_embeddings()
     if head is None:
         return
-    backbone = get_backbone(model)
-    embed = (
-        getattr(backbone, "embed_tokens", None)
-        or getattr(backbone, "wte", None)
-        or getattr(backbone, "embed_in", None)
-    )
+    if hasattr(model, "get_input_embeddings"):
+        embed = model.get_input_embeddings()
+    else:
+        backbone = get_backbone(model)
+        embed = (
+            getattr(backbone, "embed_tokens", None)
+            or getattr(backbone, "wte", None)
+            or getattr(backbone, "embed_in", None)
+        )
     if embed is None:
         return
     if embed.weight.data_ptr() == head.weight.data_ptr():
@@ -1162,13 +1114,15 @@ def get_model_dtype(model: nn.Module) -> torch.dtype:
 
 
 def _move_to_spyre_with_layout(model, dtype):
-    """Move all parameters and buffers to Spyre with row-major layout for 2D
-    matmul weights, except embedding weights which keep the default layout.
+    """Prepare RoPE then transfer the model to Spyre via torch-spyre.
+
+    Layout selection (``dim_order=[1,0]`` for ``nn.Linear`` weights) is owned by
+    ``torch_spyre.model_utils.load_model_to_spyre``. This wrapper only handles
+    HF-specific RoPE prep before the device move.
     """
     # Propagate dtype to the precomputed RoPE module(s) so the freq cache
     # matches the chosen weight dtype (avoids fp16/bf16 mismatch in
-    # apply_rope_matmul when dtype != fp16). Done before the CPU early-return so
-    # both the CPU and Spyre paths get it.
+    # apply_rope_matmul when dtype != fp16).
     set_rope_dtype(model, dtype)
 
     # Build the RoPE rotation cache on CPU now, before any device move. If left
@@ -1176,51 +1130,7 @@ def _move_to_spyre_with_layout(model, dtype):
     # graph and corrupt the result (see prebuild_rope_cache). Harmless on CPU.
     prebuild_rope_cache(model)
 
-    if torch.device(DEVICE).type != "spyre":
-        model.to(dtype=dtype)
-        return
-
-    # Prime torch-spyre autoload before importing torch_spyre._C or calling
-    # torch.empty(..., device_layout=...). Calls with the spyre-only
-    # device_layout kwarg fail kwarg validation before dispatch.
-    torch.empty(1, device=DEVICE)
-
-    from torch_spyre._C import SpyreTensorLayout  # type: ignore[import-not-found]
-
-    skip_layout_ptrs = _embedding_param_ids(model)
-
-    def _alloc_on_spyre(t: torch.Tensor) -> torch.Tensor:
-        # The row-major [1, 0] dim_order describes a 2-D permutation, so it only
-        # applies to 2-D matmul weights. 1-D tensors (norms, biases) and any
-        # higher-rank weight (e.g. the 3-D/4-D Conv2d and position-embedding
-        # tables in a multimodal checkpoint's vision/audio towers) keep the
-        # default layout — forcing [1, 0] on them raises "Incompatible host_size
-        # and dim_order". Embedding tables are gather-only and also skipped.
-        if t.dim() == 2 and t.data_ptr() not in skip_layout_ptrs:
-            stl = SpyreTensorLayout(t.shape, t.stride(), dtype, [1, 0])
-        else:
-            stl = None
-        new: torch.Tensor = torch.empty(  # type: ignore[call-overload]
-            t.shape,
-            device=torch.device(DEVICE),
-            device_layout=stl,
-            dtype=dtype,
-        )
-        new.copy_(t.to(dtype))
-        return new
-
-    for name, param in list(model.named_parameters()):
-        new = _alloc_on_spyre(param.data)
-        module_path, _, attr = name.rpartition(".")
-        owner = model.get_submodule(module_path) if module_path else model
-        setattr(owner, attr, nn.Parameter(new, requires_grad=False))
-
-    for name, buf in list(model.named_buffers()):
-        new = _alloc_on_spyre(buf)
-        module_path, _, attr = name.rpartition(".")
-        owner = model.get_submodule(module_path) if module_path else model
-        persistent = attr not in owner._non_persistent_buffers_set
-        owner.register_buffer(attr, new, persistent=persistent)
+    model.to(dtype=dtype, device=DEVICE)
 
 
 def load_model_common(model_path, module, dtype=torch.float16, auto_model_cls=None):
@@ -1255,8 +1165,6 @@ def load_model_common(model_path, module, dtype=torch.float16, auto_model_cls=No
 def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
     untie_embedding_and_lm_head(model)
     module.prepare_for_spyre(model)
-    # print("Moving model to Spyre ...")
-    _patch_torch_empty()
     _move_to_spyre_with_layout(model, dtype)
     for submod_name in getattr(model, "_spyre_cpu_submodules", []):
         model.get_submodule(submod_name).to("cpu")
@@ -2375,6 +2283,33 @@ def prefill_encoder(
         ``last_hidden_state``: ``[B, L, H]`` on Spyre, cropped back to the input
         ``L``. Caller moves to CPU as needed.
     """
+    if input_ids.ndim != 2:
+        raise ValueError(
+            f"input_ids must have shape [batch, sequence], got {input_ids.shape}"
+        )
+    if attention_mask.ndim != 2 or attention_mask.shape != input_ids.shape:
+        raise ValueError(
+            "attention_mask must have the same [batch, sequence] shape as input_ids"
+        )
+    if input_ids.shape[1] == 0:
+        raise ValueError("Encoder inputs must contain at least one token")
+    if token_type_ids is not None and token_type_ids.shape != input_ids.shape:
+        raise ValueError(
+            "token_type_ids must have the same [batch, sequence] shape as input_ids"
+        )
+
+    # HF pipelines may place inputs on ``model.device`` (Spyre). Padding and
+    # position construction happen on CPU; only completed graph inputs move to
+    # Spyre below.
+    input_ids = input_ids.to("cpu")
+    attention_mask = attention_mask.to("cpu")
+    if token_type_ids is not None:
+        token_type_ids = token_type_ids.to("cpu")
+
+    # ``actual_lengths`` and position construction below assume right padding.
+    if torch.any(attention_mask[:, 1:] > attention_mask[:, :-1]):
+        raise ValueError("Encoder task inputs must be right-padded")
+
     bsz, seq_len = input_ids.shape
 
     # Pad to BLOCK_SIZE multiple on the right
@@ -2425,6 +2360,69 @@ def prefill_encoder(
     h = h[:, :seq_len, :]
 
     return h
+
+
+def prefill_masked_lm(
+    run_encoder_forward_fn: Callable,
+    model,
+    input_ids,
+    attention_mask,
+    token_type_ids=None,
+) -> torch.Tensor:
+    """Run an encoder on Spyre and its masked-LM head on CPU."""
+    last_hidden_state = prefill_encoder(
+        run_encoder_forward_fn,
+        model,
+        input_ids,
+        attention_mask,
+        token_type_ids=token_type_ids,
+    )
+
+    if hasattr(model, "cls"):
+        head = model.cls
+        head_device = next(head.parameters()).device
+        logits: torch.Tensor = head(last_hidden_state.to(head_device))
+    elif hasattr(model, "head") and hasattr(model, "decoder"):
+        head_device = next(model.head.parameters()).device
+        hidden = model.head(last_hidden_state.to(head_device))
+        logits = model.decoder(hidden)
+    elif hasattr(model, "lm_head"):
+        head = model.lm_head
+        head_device = next(head.parameters()).device
+        logits = head(last_hidden_state.to(head_device))
+    else:
+        raise SpyreUnsupportedModelError(
+            f"Unsupported masked-LM head layout for {type(model).__name__}"
+        )
+
+    return logits.to("cpu")
+
+
+def prefill_question_answering(
+    run_encoder_forward_fn: Callable,
+    model,
+    input_ids,
+    attention_mask,
+    token_type_ids=None,
+) -> tuple[torch.FloatTensor, torch.FloatTensor]:
+    """Run an encoder on Spyre and its extractive-QA head on CPU."""
+    last_hidden_state = prefill_encoder(
+        run_encoder_forward_fn,
+        model,
+        input_ids,
+        attention_mask,
+        token_type_ids=token_type_ids,
+    )
+
+    qa_outputs = model.qa_outputs
+    head_device = next(qa_outputs.parameters()).device
+    logits = qa_outputs(last_hidden_state.to(head_device))
+    if logits.shape[-1] != 2:
+        raise SpyreUnsupportedModelError(
+            f"Extractive question answering requires num_labels=2, got {logits.shape[-1]}"
+        )
+    start_logits, end_logits = logits.unbind(dim=-1)
+    return start_logits.to("cpu"), end_logits.to("cpu")
 
 
 # ---------------------------------------------------------------------------

@@ -204,6 +204,8 @@ jobs:
     outputs:
       causal_matrix: ${{ steps.generate.outputs.causal_matrix }}
       embed_matrix: ${{ steps.generate.outputs.embed_matrix }}
+      masked_lm_matrix: ${{ steps.generate.outputs.masked_lm_matrix }}
+      question_answering_matrix: ${{ steps.generate.outputs.question_answering_matrix }}
       vision_matrix: ${{ steps.generate.outputs.vision_matrix }}
       combined_matrix: ${{ steps.generate.outputs.combined_matrix }}
       reranker_matrix: ${{ steps.generate.outputs.reranker_matrix }}
@@ -231,7 +233,8 @@ jobs:
           # Example: python .github/scripts/generate_test_matrix.py --exclude ibm-granite/granite-vision-4.1-4b tiiuae/Falcon3-1B-Base
 
           # We exclude these models - See https://github.com/torch-spyre/hf-adapters/issues/89
-          python .github/scripts/generate_test_matrix.py --exclude tiiuae/Falcon3-1B-Base mistralai/Mistral-Small-3.1-24B-Instruct-2503
+          # ibm-research/granite-4.1-20b is excluded because the model is not yet publicly accessible
+          python .github/scripts/generate_test_matrix.py --exclude tiiuae/Falcon3-1B-Base mistralai/Mistral-Small-3.1-24B-Instruct-2503 ibm-research/granite-4.1-20b
 
   adapter-coverage:
     needs: [detect-label]
@@ -544,6 +547,116 @@ jobs:
           path: junit-embed-compare-${{ matrix.model_key }}.xml
           retention-days: 14
 
+  spyre-masked-lm-compare-tests:
+    name: Spyre masked-LM compare (${{ matrix.model_key }})
+    needs: [generate-matrix]
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - ${{ inputs.runner_label || 'image_torch_spyre' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.masked_lm_matrix) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - name: Run masked-LM comparison for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_e2e_masked_lm_compare_spyre.py for ${{ matrix.model_key }}..."
+          uv run pytest -s -vvv tests/spyre/test_e2e_masked_lm_compare_spyre.py -k "${{ matrix.model_key }}" --junit-xml=junit-masked-lm-compare-${{ matrix.model_key }}.xml
+          echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-masked-lm-compare-${{ env.SAFE_MODEL_KEY }}
+          path: junit-masked-lm-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
+
+  spyre-question-answering-compare-tests:
+    name: Spyre question-answering compare (${{ matrix.model_key }})
+    needs: [generate-matrix]
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x1__pvc_1tb_x1
+      - linux
+      - ${{ inputs.runner_label || 'image_torch_spyre' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.question_answering_matrix) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          rpm_names: ${{ inputs.rpm_names }}
+          rpm_location: ${{ inputs.rpm_location }}
+          output_dir: ${{ inputs.output_dir }}
+          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
+          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
+          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
+          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+
+      - name: Run question-answering comparison for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv run pytest -s -vvv tests/spyre/test_e2e_question_answering_compare_spyre.py -k "${{ matrix.model_key }}" --junit-xml=junit-question-answering-compare-${{ matrix.model_key }}.xml
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-question-answering-compare-${{ env.SAFE_MODEL_KEY }}
+          path: junit-question-answering-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
+
   spyre-reranker-compare-tests:
     name: Spyre reranker compare (${{ matrix.model_key }})
     needs: [detect-label, generate-matrix]
@@ -673,10 +786,13 @@ jobs:
       fail-fast: false
       matrix:
         config:
-          - granite_4_1_8b_spyre.yaml
-          - granite_3_3_8b_instruct_spyre.yaml
+          - granite_4_1_8b.yaml
+          - granite_3_3_8b_instruct.yaml
+          - Meta-Llama-3.1-8B-Instruct.yaml
           - Ministral-3-14B-Instruct-2512.yaml
           - Mistral-Small-3.2-24B-Instruct-2506.yaml
+          - Qwen2.5-7B-Instruct.yaml
+          - gpt_oss_20b.yaml
 
     steps:
       - name: Checkout composite actions
@@ -753,6 +869,8 @@ jobs:
       - spyre-smoke-tests
       - spyre-token-compare-tests
       - spyre-embed-compare-tests
+      - spyre-masked-lm-compare-tests
+      - spyre-question-answering-compare-tests
       - spyre-reranker-compare-tests
       - spyre-vlm-e2e-tests
       - spyre-model-module-tests #updated to run model centric HF module tests
@@ -774,6 +892,8 @@ jobs:
                  contains(needs.spyre-smoke-tests.result, 'failure') || contains(needs.spyre-smoke-tests.result, 'cancelled') ||
                  contains(needs.spyre-token-compare-tests.result, 'failure') || contains(needs.spyre-token-compare-tests.result, 'cancelled') ||
                  contains(needs.spyre-embed-compare-tests.result, 'failure') || contains(needs.spyre-embed-compare-tests.result, 'cancelled') ||
+                 contains(needs.spyre-masked-lm-compare-tests.result, 'failure') || contains(needs.spyre-masked-lm-compare-tests.result, 'cancelled') ||
+                 contains(needs.spyre-question-answering-compare-tests.result, 'failure') || contains(needs.spyre-question-answering-compare-tests.result, 'cancelled') ||
                  contains(needs.spyre-reranker-compare-tests.result, 'failure') || contains(needs.spyre-reranker-compare-tests.result, 'cancelled') ||
                  contains(needs.spyre-vlm-e2e-tests.result, 'failure') || contains(needs.spyre-vlm-e2e-tests.result, 'cancelled') ||
                  contains(needs.spyre-model-module-tests.result, 'failure') || contains(needs.spyre-model-module-tests.result, 'cancelled') }}; then

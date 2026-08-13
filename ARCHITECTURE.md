@@ -14,6 +14,7 @@ which models are supported on Spyre.
 | Granite 3.3 2B | granite | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | Granite 4.0 1B Base | granitemoehybrid | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite 4.0 1B Instruct | granitemoehybrid | 128 | 64 | Yes | Yes | Yes | Yes |
+| Granite 4.1 20B (bf16) | granite_swa | 128 | 64 | Yes | Yes | Yes | Yes |
 | SmolLM3 3B | smollm3 | 128 | 64 | Yes | Yes | Yes | Yes |
 | Llama 3.2 3B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | TinyLlama 1.1B | llama | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
@@ -29,8 +30,6 @@ which models are supported on Spyre.
 | Yi 1.5 6B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite Vision 4.1 4B (text backbone) | granite (text) | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | Gemma 4 12B | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
-| Gemma 4 12B Base | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
-| Gemma 4 31B | gemma4 | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 3 1B | gemma3\_text | 256 | 128 | Yes | Yes | Yes | Yes |
 | GPT-2 124M | gpt2 | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
 | GPT-Neo 125M | gpt_neo | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
@@ -112,8 +111,8 @@ single-token decode path (seq_len=1), not an adapter issue.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 27 adapters · 46 verified checkpoints · 100+ compatible models.
-The 46 verified rows are 29 generative + 13 embedding + 4 vision-language (see the
+**Coverage:** 28 adapters · 45 verified checkpoints · 100+ compatible models.
+The 45 verified rows are 28 generative + 13 embedding + 4 vision-language (see the
 Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are
 vision-tower components used by VLM adapters rather than standalone model adapters.
 Granite Vision 4.1 is verified both as a text backbone (generative) and as a full VLM.
@@ -140,8 +139,9 @@ pattern, norms, and weight layout.
 | hf\_ministral.py | ministral | 1 | Ministral-8B Instruct fine-tunes |
 | hf\_phi3.py | phi3 | 1 | Phi-3 mini 4k/128k, Phi-3 small 8k |
 | hf\_granitemoehybrid.py | granitemoehybrid | 2 | Granite 4.0 Micro |
+| hf\_granite\_swa.py | granite\_swa | 1 | Granite 4.1 8B (unverified), Granite 4.1 20B |
 | hf\_smollm3.py | smollm3 | 1 | — |
-| hf\_gemma4.py | gemma4\_unified / gemma4 (dense) | 3 | Not E2B/E4B (PLE) or 26B-A4B (MoE). |
+| hf\_gemma4.py | gemma4\_unified / gemma4 (dense) | 1 | Gemma 4 31B (dense). Not E2B/E4B (PLE) or 26B-A4B (MoE). |
 | hf\_gemma4\_mm.py | gemma4\_unified (multimodal) | 1 | Gemma 4 31B (dense unified VLM). Not E2B/E4B (PLE) or 26B-A4B (MoE). |
 | hf\_gemma3.py | gemma3\_text / gemma3 (dense) | 2 | Gemma 3 4B/12B/27B (text decoder of the multimodal checkpoints); EmbeddingGemma (bidirectional embedder). Not Gemma 3n (PLE). |
 | hf\_olmo.py | olmo | 1 | OLMo 7B |
@@ -167,7 +167,7 @@ Spyre memory). Gated models require HF token access.
 
 ## Public API
 
-### Unified Auto API (Recommended)
+### Generative Auto API
 
 ```python
 from hf_adapters import AutoSpyreModelForCausalLM
@@ -179,6 +179,22 @@ outputs = model.generate(tokenizer, ["What is 2+2?"], max_new_tokens=128)
 ```
 
 `AutoSpyreModelForCausalLM` automatically selects the correct adapter based on the model's config type.
+
+### Masked-LM Auto API
+
+`AutoSpyreModelForMaskedLM` loads encoder models through `AutoModelForMaskedLM`.
+Calling `model(**inputs)` returns a standard `MaskedLMOutput`. The
+bidirectional encoder runs on Spyre and the complete
+model-specific MLM head runs on CPU.
+
+### Extractive Question-Answering Auto API
+
+`AutoSpyreModelForQuestionAnswering` loads through
+`AutoModelForQuestionAnswering`. Calling `model(**inputs)` returns a standard
+`QuestionAnsweringModelOutput` with CPU `start_logits` and `end_logits`; the
+encoder runs on Spyre and `qa_outputs` runs on CPU. Both encoder task APIs are
+right-padded, `input_ids`-based inference only and do not currently support
+training/loss, custom embeddings, attentions, or hidden-state collection.
 
 ### Multimodal (image→text) Auto API
 
@@ -216,26 +232,6 @@ adapter. This applies to `Granite4VisionConfig` → `hf_granite_vision_mm`,
 `Mistral3Config` → `hf_mistral3_vision_mm`, and `Gemma4UnifiedConfig` →
 `hf_gemma4_mm` (the last is encoder-free — a vision projection, not a two-tower
 model).
-
-### Manual Control API
-
-Each adapter also exposes `prepare_for_spyre(model)` for manual control:
-
-```python
-from transformers import AutoModelForCausalLM
-from hf_adapters.hf_granite import prepare_for_spyre
-
-model = AutoModelForCausalLM.from_pretrained(
-    "ibm-granite/granite-3.3-8b-instruct",
-    dtype=torch.float16,
-    device_map="cpu",
-)
-prepare_for_spyre(model)
-model.to("spyre")
-outputs = generate(
-    model, tokenizer, ["Hello!"], max_new_tokens=32,
-)
-```
 
 ## How the Adapters Work
 
@@ -392,20 +388,21 @@ modification:
 
 ### Model-Specific Adaptations
 
-| Feature | Granite 3.3 | Granite Vision 4.1 | Qwen3 | Granite 4.0 | SmolLM3 | Llama | Qwen2 | Mistral | Phi-4 mini | OLMo | OLMo2 | Gemma 3 | Gemma 4 |
-|---------|------------|-------------------|-------|-------------|---------|-------|-------|---------|-----------|------|-------|---------|---------|
-| Embedding multiplier | Yes | Yes | No | Yes | No | No | No | No | No | No | No | Yes | Yes |
-| Residual multiplier | Yes | Yes | No | Yes | No | No | No | No | No | No | No | No | No |
-| Logits scaling | Yes | Yes | No | Yes | No | No | No | No | No | No | No | No | No |
-| Q/K RMSNorm | No | No | Yes (per-head) | No | No | No | No | No | No | No | Yes (flattened) | Yes (per-head Q/K) | Yes (per-head Q/K/V) |
-| Fused QKV split | No | No | No | No | No | No | No | No | Yes | No | No | No | No |
-| Fused MLP split | No | No | No | Yes | No | No | No | No | Yes | No | No | No | No |
-| NoPE layers | No | No | No | No | Yes | No | No | No | No | No | No | No | No |
-| Partial RoPE | No | No | No | No | No | No | No | No | Yes | No | No | No | Yes (global layers) |
-| Head-dim padding | 2B only | Yes (64→128) | No | Micro only (64→128) | No | TinyLlama | No | No | No | No | No | No | No |
-| Custom model loading | No | Yes (safetensor remap) | No | No | No | No | No | No | No | No | No | No | No |
-| Attention scaling | `config.attention_multiplier` | `config.attention_multiplier` | `head_dim**-0.5` | `config.attention_multiplier` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `query_pre_attn_scalar**-0.5` | `1.0` (unscaled) |
-| Norm type | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | LayerNorm (pre, no weight) | RMSNorm (post) | RMSNorm (sandwich) | RMSNorm (sandwich) |
+| Feature | Granite 3.3 | Granite Vision 4.1 | Qwen3 | Granite 4.0 | Granite 4.1 SWA | SmolLM3 | Llama | Qwen2 | Mistral | Phi-4 mini | OLMo | OLMo2 | Gemma 3 | Gemma 4 |
+|---------|------------|-------------------|-------|-------------|-----------------|---------|-------|-------|---------|-----------|------|-------|---------|---------|
+| Embedding multiplier | Yes | Yes | No | Yes | Yes | No | No | No | No | No | No | No | Yes | Yes |
+| Residual multiplier | Yes | Yes | No | Yes | Yes | No | No | No | No | No | No | No | No | No |
+| Logits scaling | Yes | Yes | No | Yes | Yes | No | No | No | No | No | No | No | No | No |
+| Q/K RMSNorm | No | No | Yes (per-head) | No | No | No | No | No | No | No | No | Yes (flattened) | Yes (per-head Q/K) | Yes (per-head Q/K/V) |
+| Fused QKV split | No | No | No | No | No | No | No | No | No | Yes | No | No | No | No |
+| Fused MLP split | No | No | No | Yes | No | No | No | No | No | Yes | No | No | No | No |
+| NoPE layers | No | No | No | No | No | Yes | No | No | No | No | No | No | No | No |
+| Partial RoPE | No | No | No | No | No | No | No | No | No | Yes | No | No | No | Yes (global layers) |
+| Sliding-window layers | No | No | No | No | Yes (alternating) | No | No | No | No | No | No | No | No | No |
+| Head-dim padding | 2B only | Yes (64→128) | No | Micro only (64→128) | No | No | TinyLlama | No | No | No | No | No | No | No |
+| Custom model loading | No | Yes (safetensor remap) | No | No | No | No | No | No | No | No | No | No | No | No |
+| Attention scaling | `config.attention_multiplier` | `config.attention_multiplier` | `head_dim**-0.5` | `config.attention_multiplier` | `config.attention_multiplier` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `head_dim**-0.5` | `query_pre_attn_scalar**-0.5` | `1.0` (unscaled) |
+| Norm type | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | RMSNorm (pre) | LayerNorm (pre, no weight) | RMSNorm (post) | RMSNorm (sandwich) | RMSNorm (sandwich) |
 
 **Partial RoPE** (Phi-4): `PartialPrecomputedRotaryEmbedding` pads
 the rotation matrix with identity `[[1,0],[0,1]]` entries so
@@ -560,8 +557,8 @@ SigLIP-specific Spyre adaptations:
   docs/siglip_vision_spyre_findings.md), so the patch embedding + learned
   position add run on CPU and the result is moved to Spyre. CPU copies of the
   conv weight/bias and position table are snapshotted at prepare time so the
-  closure survives the blanket device move (`_embedding_param_ids` can't exclude
-  a 4-D conv weight).
+  closure survives the blanket device move via `load_model_to_spyre`
+  (4-D conv weights are not left on CPU by the move).
 
 **Combined two-tower adapter — Granite** (`hf_granite_vision_mm.py`): runs the
 Spyre SigLIP tower, projects/packs its features, splices them into the
@@ -636,7 +633,7 @@ Multimodal-specific Spyre adaptations (beyond those shared with Granite VLM):
   explicitly stores Mistral decoder blocks in `model._spyre_text_blocks` to avoid
   collision with the vision tower's compiled blocks stored by
   `hf_pixtral_vision.prepare_for_spyre` in `model._spyre_compiled_blocks`.
-- **`multi_modal_projector` pinned to CPU** after `_move_to_spyre_with_layout`
+- **`multi_modal_projector` pinned to CPU** after the Spyre device move
   (same pattern as Granite's `layerwise_projectors` pin).
 - **`Mistral3PatchMerger`** (`nn.functional.unfold` + `merging_layer`) runs on
   CPU inside the projector — `unfold` doesn't lower on Spyre.
