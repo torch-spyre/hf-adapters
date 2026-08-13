@@ -68,7 +68,8 @@ def load_embedding(model_path: str) -> Any:
 def test_load_masked_lm(model_path):
     auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
     model = auto_spyre_model.AutoSpyreModelForMaskedLM.from_pretrained(
-        model_path, dtype=get_dtype_for_cpu(model_path)
+        model_path,
+        dtype=auto_spyre_model.dtype_for_model_path(model_path, target_device="cpu"),
     )
     assert callable(model.forward)
     del model
@@ -81,7 +82,8 @@ def test_load_masked_lm(model_path):
 def test_load_question_answering(model_path):
     auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
     model = auto_spyre_model.AutoSpyreModelForQuestionAnswering.from_pretrained(
-        model_path, dtype=get_dtype_for_cpu(model_path)
+        model_path,
+        dtype=auto_spyre_model.dtype_for_model_path(model_path, target_device="cpu"),
     )
     assert callable(model.forward)
     assert next(model.qa_outputs.parameters()).device.type == "cpu"

@@ -16,8 +16,7 @@ import torch.nn.functional as F
 from transformers import AutoModelForQuestionAnswering, AutoTokenizer
 
 from hf_adapters import AutoSpyreModelForQuestionAnswering
-from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
-from tests.conftest import get_dtype_for_cpu
+from hf_adapters.auto_spyre_model import dtype_for_model_path
 from tests.model_registry import QUESTION_ANSWERING_PATHS
 
 QUESTIONS = ["Where does the engineer live?", "What color is the sky?"]
@@ -43,7 +42,9 @@ def test_e2e_question_answering_compare_spyre(model_path: str) -> None:
     )
 
     ref_model = AutoModelForQuestionAnswering.from_pretrained(
-        model_path, dtype=get_dtype_for_cpu(model_path), device_map="cpu"
+        model_path,
+        dtype=dtype_for_model_path(model_path, target_device="cpu"),
+        device_map="cpu",
     ).eval()
     with torch.no_grad():
         ref_outputs = ref_model(**encoded, return_dict=True)
@@ -51,7 +52,7 @@ def test_e2e_question_answering_compare_spyre(model_path: str) -> None:
     gc.collect()
 
     model = AutoSpyreModelForQuestionAnswering.from_pretrained(
-        model_path, dtype=torch_dtype_for_model_path(model_path)
+        model_path, dtype=dtype_for_model_path(model_path, target_device="spyre")
     )
     with torch.no_grad():
         outputs = model(**encoded, return_dict=True)
