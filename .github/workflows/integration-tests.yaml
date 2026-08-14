@@ -164,8 +164,14 @@ jobs:
       extra_test_flags_multi_spyre: -vvv -s
       ref: ${{ inputs.ref || '' }}
       repository: ${{ inputs.repository || '' }}
-      test_type: ${{ inputs.test_type || 'integration' }}
-      models: ${{ (inputs.models != '' && inputs.models) || ((inputs.test_type || 'integration') == 'integration' && 'Qwen/Qwen3-0.6B mistralai/Ministral-3-8B-Instruct-2512 ibm-granite/granite-4.1-8b ibm-granite/granite-3.3-8b-instruct') || '' }}
+      # TEMPORARY: on the pull_request trigger above (added to validate the
+      # _test_matrix.yaml refactor), default to "regression" instead of
+      # "integration" so this PR's run actually exercises the suites that
+      # refactor touched (mypy, masked_lm_compare, question_answering_compare,
+      # check-uv-lock, model-module) rather than just the smoke spot-check.
+      # Remove this ternary's pull_request branch together with the trigger.
+      test_type: ${{ inputs.test_type || (github.event_name == 'pull_request' && 'regression') || 'integration' }}
+      models: ${{ (inputs.models != '' && inputs.models) || ((inputs.test_type || 'integration') == 'integration' && github.event_name != 'pull_request' && 'Qwen/Qwen3-0.6B mistralai/Ministral-3-8B-Instruct-2512 ibm-granite/granite-4.1-8b ibm-granite/granite-3.3-8b-instruct') || '' }}
 
   # ----------------------------------------------------------------------------------
   # Fan-in gate job so callers can poll a single stable job name for pass/fail.

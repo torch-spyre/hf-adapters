@@ -6,9 +6,8 @@ name: test_pull_request
 # purely a labeling change. Delegates its suite jobs to the same reusable
 # _test_matrix.yaml used by integration-tests.yaml, keeping only what's
 # specific to the PR/trunk trigger inline: the "integration-test" label
-# detection (skips the whole suite when Jenkins owns this commit's testing,
-# via _test_matrix.yaml's skip_tests input) and the runner_label_x1 override
-# that pins these jobs to the PVC-backed spyre_pf_x1__pvc_1tb_x1 pool.
+# detection, which skips the whole suite when Jenkins owns this commit's
+# testing (via _test_matrix.yaml's skip_tests input).
 run-name: ${{ github.event_name == 'push' && 'trunk' || 'test_pull_request' }}
 
 on:
@@ -123,15 +122,13 @@ jobs:
   # "integration-test" label decision through: it skips matrix generation,
   # adapter-coverage, and every spyre suite (leaving pre-commit/mypy/
   # check-uv-lock running, same as before) when Jenkins owns this commit's
-  # testing. runner_label_x1 keeps these jobs on the PVC-backed pool this
-  # workflow has always used instead of _test_matrix.yaml's plain default.
+  # testing.
   # ---------------------------------------------------------------------------
   run-tests:
     needs: [detect-label]
     uses: ./.github/workflows/_test_matrix.yaml
     with:
       image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
-      runner_label_x1: spyre_pf_x1__pvc_1tb_x1
       extra_test_flags: -vvv -s
       extra_test_flags_multi_spyre: -vvv -s
       ref: ${{ inputs.ref || '' }}

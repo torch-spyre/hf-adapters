@@ -89,18 +89,6 @@ on:
         required: false
         type: string
         default: ''
-      runner_label_x1:
-        description: >-
-          Second label in every single-card (spyre_pf_x1) job's `runs-on`
-          (alongside the fixed [x86_64, linux] and image_label). Lets a
-          caller pin these jobs to a specific runner pool -- e.g.
-          test_pull_request.yaml uses the PVC-backed spyre_pf_x1__pvc_1tb_x1
-          set for its persistent /storage-1 HF cache, while the default
-          below (plain spyre_pf_x1) matches integration-tests.yaml's
-          standing pool. Must be a label in .github/actionlint.yaml.
-        required: false
-        type: string
-        default: spyre_pf_x1
       skip_tests:
         description: >-
           When true, skips matrix generation, adapter-coverage, and every
@@ -347,7 +335,7 @@ jobs:
 #    name: CPU tests (${{ matrix.test_file }})
 #    runs-on:
 #      - x86_64
-#      - spyre_pf_x0__pvc_1tb_x1
+#      - spyre_pf_x0
 #      - linux
 #      - ${{ inputs.image_label }}
 #    timeout-minutes: 120
@@ -400,7 +388,7 @@ jobs:
     if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' load ')) }}
     runs-on:
       - x86_64
-      - ${{ inputs.runner_label_x1 }}
+      - spyre_pf_x1
       - linux
       - ${{ inputs.image_label }}
     timeout-minutes: 120
@@ -461,7 +449,7 @@ jobs:
     if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'integration' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' smoke ')) }}
     runs-on:
       - x86_64
-      - ${{ inputs.runner_label_x1 }}
+      - spyre_pf_x1
       - linux
       - ${{ inputs.image_label }}
     timeout-minutes: 120
@@ -517,7 +505,7 @@ jobs:
     if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_compare ')) }}
     runs-on:
       - x86_64
-      - ${{ inputs.runner_label_x1 }}
+      - spyre_pf_x1
       - linux
       - ${{ inputs.image_label }}
     timeout-minutes: 120
@@ -573,7 +561,7 @@ jobs:
     if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' embed_compare ')) }}
     runs-on:
       - x86_64
-      - ${{ inputs.runner_label_x1 }}
+      - spyre_pf_x1
       - linux
       - ${{ inputs.image_label }}
     timeout-minutes: 120
@@ -629,7 +617,7 @@ jobs:
     if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' vlm ')) }}
     runs-on:
       - x86_64
-      - ${{ inputs.runner_label_x1 }}
+      - spyre_pf_x1
       - linux
       - ${{ inputs.image_label }}
     timeout-minutes: 120
@@ -742,7 +730,7 @@ jobs:
     if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' reranker_compare ')) }}
     runs-on:
       - x86_64
-      - ${{ inputs.runner_label_x1 }}
+      - spyre_pf_x1
       - linux
       - ${{ inputs.image_label }}
     timeout-minutes: 120
@@ -797,7 +785,7 @@ jobs:
     if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' masked_lm_compare ')) }}
     runs-on:
       - x86_64
-      - ${{ inputs.runner_label_x1 }}
+      - spyre_pf_x1
       - linux
       - ${{ inputs.image_label }}
     timeout-minutes: 120
@@ -852,7 +840,7 @@ jobs:
     if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' question_answering_compare ')) }}
     runs-on:
       - x86_64
-      - ${{ inputs.runner_label_x1 }}
+      - spyre_pf_x1
       - linux
       - ${{ inputs.image_label }}
     timeout-minutes: 120
@@ -907,7 +895,7 @@ jobs:
     if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_module ')) }}
     runs-on:
       - x86_64
-      - ${{ inputs.runner_label_x1 }}
+      - spyre_pf_x1
       - linux
       - ${{ inputs.image_label }}
     timeout-minutes: 120
