@@ -282,7 +282,7 @@ jobs:
 #    name: CPU tests (${{ matrix.test_file }})
 #    runs-on:
 #      - x86_64
-#      - spyre_pf_x0__pvc_1tb_x1
+#      - spyre_pf_x0
 #      - linux
 #      - ${{ inputs.image_label }}
 #    timeout-minutes: 120
