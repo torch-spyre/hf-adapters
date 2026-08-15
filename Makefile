@@ -85,7 +85,16 @@ smoke-tests: ## Run e2e smoke tests (suite key: smoke)
 	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_smoke_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 load-tests: ## Run load tests (suite key: load)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_load_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	# test_load_spyre.py is the one suite file with FOUR model_path-parametrized
+	# functions (causal/embed/masked-LM/QA) sharing that fixture name. conftest's
+	# --model-path override reparametrizes every function with a model_path
+	# fixture, not just the one whose registry the model belongs to -- so it
+	# would force the other three to load the model through the wrong auto-class
+	# and fail. Filter via -k (substring on the test ID) instead, which only
+	# selects the one matching parametrization, same as every other suite target
+	# gets from --model-path (safe here because MODEL_PATH is always one exact
+	# registry path, never an attacker-controlled or ambiguous substring).
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_load_spyre.py $(if $(MODEL_PATH),-k "$(MODEL_PATH)",$(K_ARGS)) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 token-compare-tests: ## Run token-compare tests (suite key: token_compare)
 	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_token_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
