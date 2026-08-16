@@ -29,7 +29,8 @@ Usage::
     model = AutoSpyreModelForCausalLM.from_pretrained(
         "/tmp/models/granite-4.1-20b")
     tokenizer = AutoTokenizer.from_pretrained("/tmp/models/granite-4.1-20b")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
 import torch

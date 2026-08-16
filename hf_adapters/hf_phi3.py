@@ -30,7 +30,8 @@ Usage::
 
     model = AutoSpyreModelForCausalLM.from_pretrained("microsoft/Phi-4-mini-instruct")
     tokenizer = AutoTokenizer.from_pretrained("microsoft/Phi-4-mini-instruct")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
 import torch

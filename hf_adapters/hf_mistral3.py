@@ -40,13 +40,15 @@ Usage::
         "mistralai/Mistral-Small-3.2-24B-Instruct-2506")
     tokenizer = AutoTokenizer.from_pretrained(
         "mistralai/Mistral-Small-3.2-24B-Instruct-2506")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 
     model = AutoSpyreModelForCausalLM.from_pretrained(
         "mistralai/Ministral-3-14B-Instruct-2512")
     tokenizer = AutoTokenizer.from_pretrained(
         "mistralai/Ministral-3-14B-Instruct-2512")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
 from hf_adapters import hf_mistral

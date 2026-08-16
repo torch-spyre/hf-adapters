@@ -26,7 +26,8 @@ Usage::
 
     model = AutoSpyreModelForCausalLM.from_pretrained("allenai/OLMo-2-0425-1B")
     tokenizer = AutoTokenizer.from_pretrained("allenai/OLMo-2-0425-1B")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
 import torch

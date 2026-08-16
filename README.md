@@ -57,13 +57,18 @@ from transformers import AutoTokenizer
 model = AutoSpyreModelForCausalLM.from_pretrained("ibm-granite/granite-3.3-8b-instruct")
 tokenizer = AutoTokenizer.from_pretrained("ibm-granite/granite-3.3-8b-instruct")
 
-outputs = model.generate(tokenizer, ["What is 2+2?"], max_new_tokens=128)
+inputs = tokenizer(["What is 2+2?"], return_tensors="pt", padding=True)
+sequences = model.generate(**inputs, max_new_tokens=5)
+outputs = tokenizer.batch_decode(
+    sequences[:, inputs["input_ids"].shape[1] :],
+    skip_special_tokens=True,
+)
 print(outputs[0])
 ```
 
 The `AutoSpyreModelForCausalLM` class automatically selects the correct adapter module based on the model's config type.
 
-Note that `model.generate()` is a modified version of the stock HF `generate()` method, with a different signature and functionality (See [docs/generate_vs_stock_hf.md](docs/generate_vs_stock_hf.md)).
+`model.generate()` follows the stock Hugging Face input and basic tensor-output conventions, but supports a smaller set of generation features (see [docs/generate_vs_stock_hf.md](docs/generate_vs_stock_hf.md)).
 
 ## Embedding Models
 
