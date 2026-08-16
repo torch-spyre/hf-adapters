@@ -429,7 +429,6 @@ def generate(
     tokenizer = processor.tokenizer
     params = _resolve_generation_params(
         model,
-        tokenizer,
         {
             "do_sample": do_sample,
             "temperature": temperature,
