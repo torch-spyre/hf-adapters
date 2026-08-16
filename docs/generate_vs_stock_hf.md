@@ -16,9 +16,11 @@ stopping, but diverges from stock HF in several ways worth documenting.
   continuation outside `generate()` with the tokenizer, as with stock HF.
   Internal block padding is never returned; rows that finish early receive the
   configured pad token while the rest of the batch continues.
-- **`max_new_tokens` is required**, not optional. HF resolves a default length
-  via `max_length` (prompt + new); our block-decode loop doesn't implement
-  `max_length`, so callers must always state a new-token budget.
+- Length resolution follows stock HF conventions: `max_new_tokens` takes
+  precedence over `max_length`, while `max_length` limits the total returned
+  sequence width. If neither is configured, generation uses HF's model-agnostic
+  default of 20 new tokens. `min_new_tokens` suppresses EOS until the minimum
+  continuation length is reached.
 
 ## Internal block alignment
 
@@ -41,9 +43,9 @@ Not supported:
 - **Beam search** (`num_beams > 1`), group/diverse beam search, contrastive
   search, assisted/speculative decoding.
 - **`num_return_sequences > 1`.**
-- **Logits processors / warpers** beyond top-k/top-p: no `repetition_penalty`,
-  `no_repeat_ngram_size`, `min_new_tokens`, `bad_words_ids`, `min_p`,
-  `typical_p`, etc.
+- **Logits processors / warpers** beyond top-k/top-p and EOS suppression for
+  `min_new_tokens`: no `repetition_penalty`, `no_repeat_ngram_size`,
+  `bad_words_ids`, `min_p`, `typical_p`, etc.
 - **Custom `StoppingCriteria` / `stopping_criteria`** — only EOS-token stopping
   is implemented (matching `EosTokenCriteria`); no stop-strings, no `max_time`.
 - **`LogitsProcessorList` / `logits_processor` injection**, `streamer`,
@@ -53,6 +55,7 @@ Not supported:
 
 - Returns the basic sequence tensor only — no `GenerateOutput`, `output_scores`,
   `output_hidden_states`, or `return_dict_in_generate`.
-- Sampling/EOS precedence (explicit kwarg > `generation_config` > HF default)
-  *does* match stock HF via `_prepare_generation_config`, so that part is
-  faithful.
+- Supported generation settings use stock precedence (explicit kwarg > caller
+  `generation_config` > model config > HF default) through
+  `_prepare_generation_config`. Unknown arguments and active unsupported
+  generation-config options are rejected instead of being silently ignored.

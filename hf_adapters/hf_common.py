@@ -1201,17 +1201,62 @@ def _normalize_eos_ids(eos):
     return eos
 
 
-def _resolve_generation_params(model, overrides):
-    """Resolve sampling, stop, and padding params via HF generation config.
+def _validate_supported_generation_config(cfg):
+    """Reject active generation options the Spyre decode loop does not support."""
+    unsupported = {
+        "min_length": (None, 0),
+        "max_time": (None,),
+        "stop_strings": (None,),
+        "num_beams": (None, 1),
+        "num_beam_groups": (None, 1),
+        "num_return_sequences": (None, 1),
+        "penalty_alpha": (None,),
+        "typical_p": (None, 1.0),
+        "min_p": (None,),
+        "top_h": (None,),
+        "repetition_penalty": (None, 1.0),
+        "no_repeat_ngram_size": (None, 0),
+        "bad_words_ids": (None, []),
+        "force_words_ids": (None, []),
+        "constraints": (None, []),
+        "forced_bos_token_id": (None,),
+        "forced_eos_token_id": (None,),
+        "suppress_tokens": (None, []),
+        "begin_suppress_tokens": (None, []),
+        "sequence_bias": (None, {}),
+        "output_attentions": (None, False),
+        "output_hidden_states": (None, False),
+        "output_scores": (None, False),
+        "output_logits": (None, False),
+        "return_dict_in_generate": (None, False),
+    }
+    active = []
+    for name, neutral_values in unsupported.items():
+        value = getattr(cfg, name, None)
+        if value not in neutral_values:
+            active.append(name)
+    if active:
+        options = ", ".join(f"`{name}`" for name in active)
+        raise SpyreUnsupportedFeatureError(
+            f"The following generation options are not supported on Spyre: {options}"
+        )
 
-    Precedence matches stock HF: ``explicit kwarg > model.generation_config >
-    HF global defaults``. Parameters with ``None`` are dropped except EOS, where
-    an explicit ``None`` disables stopping. EOS is normalized to a CPU tensor.
-    """
+
+def _resolve_generation_params(model, generation_config, overrides, model_kwargs):
+    """Resolve supported parameters via the stock HF generation-config merge."""
     explicit = {
         k: v for k, v in overrides.items() if k == "eos_token_id" or v is not None
     }
-    cfg, _ = model._prepare_generation_config(None, **explicit)
+    explicit.update(model_kwargs)
+    cfg, unused = model._prepare_generation_config(generation_config, **explicit)
+    if unused:
+        names = sorted(unused)
+        raise ValueError(
+            f"The following `model_kwargs` are not used by the model: {names} "
+            "(note: typos in the generate arguments will also show up in this list)"
+        )
+    _validate_supported_generation_config(cfg)
+
     eos_ids = _normalize_eos_ids(cfg.eos_token_id)
     if eos_ids is not None:
         eos_ids = eos_ids.to(device="cpu", dtype=torch.long).reshape(-1)
@@ -1220,14 +1265,7 @@ def _resolve_generation_params(model, overrides):
     if pad_token_id is None and eos_ids is not None:
         pad_token_id = eos_ids[0].item()
 
-    return {
-        "do_sample": cfg.do_sample,
-        "temperature": cfg.temperature,
-        "top_k": cfg.top_k,
-        "top_p": cfg.top_p,
-        "eos_ids": eos_ids,
-        "pad_token_id": pad_token_id,
-    }
+    return cfg, eos_ids, pad_token_id
 
 
 def generation_cache_len(prompt_length, max_new_tokens):
@@ -1396,15 +1434,19 @@ def generate(
     run_forward_fn: Callable,
     model,
     input_ids,
-    max_new_tokens,
+    max_new_tokens=None,
     *,
     attention_mask=None,
+    generation_config=None,
+    max_length=None,
+    min_new_tokens=None,
     do_sample=None,
     temperature=None,
     top_k=None,
     top_p=None,
     eos_token_id=_UNSET,
     timing=False,
+    **kwargs,
 ):
     """Model-agnostic generation from tokenized inputs with 64-block decode.
 
@@ -1430,9 +1472,10 @@ def generate(
     config (e.g. ``do_sample=False`` for deterministic greedy on a model whose
     config bakes in sampling).
 
-    ``max_new_tokens`` is REQUIRED and is not resolved from config: HF's
-    default length goes through ``max_length`` (total prompt+new), which this
-    decode loop does not implement. Callers must state the new-token budget.
+    Length parameters use stock semantics: ``max_new_tokens`` takes precedence,
+    while ``max_length`` limits the total caller-visible sequence length. If
+    neither is configured, the HF model-agnostic default generates 20 tokens.
+    ``min_new_tokens`` suppresses EOS until the requested minimum is reached.
 
     Args:
         run_forward_fn: ``fn(model, input_ids, position_ids, attn_mask,
@@ -1440,8 +1483,11 @@ def generate(
             cache_position) -> logits``
         model: Prepared HF model on Spyre (supplies ``generation_config``).
         input_ids: Integer token IDs with shape ``[batch, sequence]``.
-        max_new_tokens: Number of tokens to generate (required).
+        max_new_tokens: Maximum number of continuation tokens.
         attention_mask: Optional binary mask with the same shape as ``input_ids``.
+        generation_config: Optional HF ``GenerationConfig`` override.
+        max_length: Maximum total returned sequence length.
+        min_new_tokens: Minimum continuation length before EOS stopping.
         do_sample: Sampling vs greedy.
         temperature: Sampling temperature.
         top_k: Top-k filtering (0/None disables).
@@ -1451,17 +1497,10 @@ def generate(
             stock ``generate()``).
         timing: Print per-token latency.
     """
-    if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, int):
-        raise TypeError("max_new_tokens must be an integer")
-    if max_new_tokens < 0:
-        raise ValueError("max_new_tokens must be non-negative")
-
-    caller_input_ids = input_ids.detach().to("cpu").clone()
-    if max_new_tokens == 0:
-        normalize_generation_inputs(input_ids, attention_mask)
-        return caller_input_ids
-
     overrides = {
+        "max_new_tokens": max_new_tokens,
+        "max_length": max_length,
+        "min_new_tokens": min_new_tokens,
         "do_sample": do_sample,
         "temperature": temperature,
         "top_k": top_k,
@@ -1471,26 +1510,52 @@ def generate(
     # (disable EOS) is distinguishable from "unspecified" (defer to config).
     if eos_token_id is not _UNSET:
         overrides["eos_token_id"] = eos_token_id
-    params = _resolve_generation_params(model, overrides)
-    do_sample = params["do_sample"]
-    temperature = params["temperature"]
-    top_k = params["top_k"]
-    top_p = params["top_p"]
-    eos_ids = params["eos_ids"]
-    pad_token_id = params["pad_token_id"]
 
+    has_default_max_length = (
+        max_length is None
+        and (generation_config is None or generation_config.max_length is None)
+        and model.generation_config.max_length is None
+    )
+    has_default_min_length = (
+        "min_length" not in kwargs
+        and (generation_config is None or generation_config.min_length is None)
+        and model.generation_config.min_length is None
+    )
+    cfg, eos_ids, pad_token_id = _resolve_generation_params(
+        model, generation_config, overrides, kwargs
+    )
+
+    orig_input_ids = input_ids.detach().to("cpu").clone()
     (
         input_ids,
         actual_prompt_lengths,
         padded_len,
         prompt_offsets,
         position_ids,
-    ) = normalize_generation_inputs(input_ids, attention_mask)
+    ) = normalize_generation_inputs(orig_input_ids, attention_mask)
+
+    input_length = orig_input_ids.shape[1]
+    cfg = model._prepare_generated_length(
+        generation_config=cfg,
+        has_default_max_length=has_default_max_length,
+        has_default_min_length=has_default_min_length,
+        model_input_name="input_ids",
+        input_ids_length=input_length,
+        inputs_tensor=orig_input_ids,
+    )
+    model._validate_generated_length(
+        cfg,
+        input_ids_length=input_length,
+        has_default_max_length=has_default_max_length,
+    )
+    effective_max_new_tokens = cfg.max_length - input_length
+    min_new_tokens = cfg.min_new_tokens or 0
+
     batch_size = input_ids.shape[0]
 
     # Cache capacity is based on compacted logical prompts, not caller padding.
     max_cache_len = generation_cache_len(
-        actual_prompt_lengths.max().item(), max_new_tokens
+        actual_prompt_lengths.max().item(), effective_max_new_tokens
     )
 
     # Initialize empty KV caches. Per-layer shapes come from the model
@@ -1513,7 +1578,7 @@ def generate(
     finished = torch.zeros(batch_size, dtype=torch.bool)
     generated_columns = []
 
-    for i in range(max_new_tokens):
+    for i in range(effective_max_new_tokens):
         t0 = time.time()
 
         if i == 0:
@@ -1596,9 +1661,13 @@ def generate(
                 next_logits = logits_cpu[:, -BLOCK_SIZE, :]
                 fill_mask_device = exp_mask.to(DEVICE)
 
-        # Token selection (CPU)
+        # Token selection (CPU). Match HF's MinNewTokensLengthLogitsProcessor
+        # by suppressing every EOS id until the minimum continuation is emitted.
+        if eos_ids is not None and i < min_new_tokens:
+            next_logits = next_logits.clone()
+            next_logits[:, eos_ids] = -torch.inf
         next_tokens = select_next_token(
-            next_logits, do_sample, temperature, top_k, top_p
+            next_logits, cfg.do_sample, cfg.temperature, cfg.top_k, cfg.top_p
         )
 
         if timing:
@@ -1636,7 +1705,7 @@ def generate(
         print("Per-token: " + ", ".join(f"{t*1000:.1f}" for t in times_list) + " ms")
 
     generated_ids = torch.stack(generated_columns, dim=1)
-    return torch.cat([caller_input_ids, generated_ids], dim=1)
+    return torch.cat([orig_input_ids, generated_ids], dim=1)
 
 
 # ---------------------------------------------------------------------------
