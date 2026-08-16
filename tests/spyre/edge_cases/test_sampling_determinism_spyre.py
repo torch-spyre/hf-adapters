@@ -43,26 +43,23 @@ def test_sampling_determinism_spyre(model_path: str) -> None:
         torch.manual_seed(1234)
         a1 = model.generate(
             **encoded,
-            tokenizer=tokenizer,
             max_new_tokens=SAMPLING_MAX_NEW,
             **SAMPLING_KWARGS,
         )
         torch.manual_seed(1234)
         a2 = model.generate(
             **encoded,
-            tokenizer=tokenizer,
             max_new_tokens=SAMPLING_MAX_NEW,
             **SAMPLING_KWARGS,
         )
         torch.manual_seed(9999)
         b = model.generate(
             **encoded,
-            tokenizer=tokenizer,
             max_new_tokens=SAMPLING_MAX_NEW,
             **SAMPLING_KWARGS,
         )
         elapsed = time.time() - t0
-        ok = a1 == a2 and a1 != b
+        ok = torch.equal(a1, a2) and not torch.equal(a1, b)
         detail = "" if ok else f"a1={a1!r} a2={a2!r} b={b!r}"
         print(f"  sampling_determinism: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
         assert ok, detail

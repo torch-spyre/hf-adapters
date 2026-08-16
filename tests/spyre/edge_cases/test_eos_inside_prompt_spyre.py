@@ -49,12 +49,14 @@ def test_eos_inside_prompt_spyre(model_path: str) -> None:
         t0 = time.time()
         out = model.generate(
             **encoded,
-            tokenizer=tokenizer,
             max_new_tokens=eos_in_prompt_max_new,
             do_sample=False,
         )
+        spyre_output = tokenizer.decode(
+            out[0, encoded["input_ids"].shape[1] :], skip_special_tokens=True
+        )
         elapsed = time.time() - t0
-        ok = eos_in_prompt_refs[0].strip() == out[0].strip()
+        ok = eos_in_prompt_refs[0].strip() == spyre_output.strip()
         detail = "" if ok else f"hf={eos_in_prompt_refs!r} spyre={out!r}"
         print(f"  eos_inside_prompt: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
         assert ok, detail

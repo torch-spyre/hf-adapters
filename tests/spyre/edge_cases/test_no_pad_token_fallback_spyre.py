@@ -45,12 +45,14 @@ def test_no_pad_token_fallback_spyre(model_path: str) -> None:
         t0 = time.time()
         out = model.generate(
             **encoded,
-            tokenizer=wrapped,
             max_new_tokens=no_pad_max_new,
             do_sample=False,
         )
+        spyre_outputs = tokenizer.batch_decode(
+            out[:, encoded["input_ids"].shape[1] :], skip_special_tokens=True
+        )
         elapsed = time.time() - t0
-        ok = all(hf.strip() == sp.strip() for hf, sp in zip(no_pad_refs, out))
+        ok = all(hf.strip() == sp.strip() for hf, sp in zip(no_pad_refs, spyre_outputs))
         detail = "" if ok else f"hf={no_pad_refs!r} spyre={out!r}"
         print(f"  no_pad_token_fallback: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
         assert ok, detail

@@ -70,13 +70,15 @@ def test_multibatch(model_path: str) -> None:
     adapter_mod.prepare_for_spyre(model)
     _unwrap_compiled_blocks(model)
     _set_rope_dtype(model, get_dtype_for_cpu(model_path))
-    adapter_outputs = hf_common_mod.generate(
+    sequences = hf_common_mod.generate(
         adapter_mod._run_forward,
         model,
         **encoded,
-        tokenizer=tokenizer,
         max_new_tokens=MAX_NEW_TOKENS,
         do_sample=False,
+    )
+    adapter_outputs = tokenizer.batch_decode(
+        sequences[:, encoded["input_ids"].shape[1] :], skip_special_tokens=True
     )
     del model
     gc.collect()

@@ -26,8 +26,9 @@ Usage::
     model = AutoSpyreModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-3B")
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-3B")
     encoded = tokenizer(["Hello!"], return_tensors="pt", padding=True)
-    outputs = model.generate(
-        **encoded, tokenizer=tokenizer, max_new_tokens=32
+    sequences = model.generate(**encoded, max_new_tokens=32)
+    outputs = tokenizer.batch_decode(
+        sequences[:, encoded["input_ids"].shape[1] :], skip_special_tokens=True
     )
 
 The model is automatically prepared for Spyre (RoPE precomputation, RMSNorm
@@ -295,8 +296,6 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
             self: PreTrainedModel,
             input_ids: torch.Tensor,
             attention_mask: torch.Tensor | None = None,
-            *,
-            tokenizer: Any,
             **kwargs: Any,
         ):
             from hf_adapters.hf_common import generate
@@ -306,7 +305,6 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
                 self,
                 input_ids,
                 attention_mask=attention_mask,
-                tokenizer=tokenizer,
                 **kwargs,
             )
 

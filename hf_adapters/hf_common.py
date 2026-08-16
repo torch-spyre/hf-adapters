@@ -1201,34 +1201,32 @@ def _normalize_eos_ids(eos):
     return eos
 
 
-def _resolve_generation_params(model, tokenizer, overrides):
-    """Resolve sampling + stop params via HF's ``_prepare_generation_config``.
+def _resolve_generation_params(model, overrides):
+    """Resolve sampling, stop, and padding params via HF generation config.
 
     Precedence matches stock HF: ``explicit kwarg > model.generation_config >
-    HF global defaults``. Parameters with ``None`` are dropped so HF
-    fills them. EOS is normalized to a tensor.
-
-    Returns a dict with keys ``do_sample, temperature, top_k, top_p`` plus
-    ``eos_ids`` (a long tensor or ``None``).
+    HF global defaults``. Parameters with ``None`` are dropped except EOS, where
+    an explicit ``None`` disables stopping. EOS is normalized to a CPU tensor.
     """
-    eos_specified = "eos_token_id" in overrides
     explicit = {
         k: v for k, v in overrides.items() if k == "eos_token_id" or v is not None
     }
     cfg, _ = model._prepare_generation_config(None, **explicit)
+    eos_ids = _normalize_eos_ids(cfg.eos_token_id)
+    if eos_ids is not None:
+        eos_ids = eos_ids.to(device="cpu", dtype=torch.long).reshape(-1)
 
-    eos = cfg.eos_token_id
-    # Fall back to the tokenizer only when EOS was unspecified — an explicit
-    # eos_token_id=None means "disable EOS" and must not be re-enabled.
-    if eos is None and not eos_specified:
-        eos = getattr(tokenizer, "eos_token_id", None)
+    pad_token_id = cfg.pad_token_id
+    if pad_token_id is None and eos_ids is not None:
+        pad_token_id = eos_ids[0].item()
 
     return {
         "do_sample": cfg.do_sample,
         "temperature": cfg.temperature,
         "top_k": cfg.top_k,
         "top_p": cfg.top_p,
-        "eos_ids": _normalize_eos_ids(eos),
+        "eos_ids": eos_ids,
+        "pad_token_id": pad_token_id,
     }
 
 
@@ -1374,13 +1372,7 @@ def select_next_token(next_logits, do_sample, temperature, top_k, top_p):
 
 
 def decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer):
-    """Per-sequence block-walk over generated slots → EOS-trimmed decoded strings.
-
-    Generated tokens are contiguous within each BLOCK_SIZE block but blocks may
-    be separated by unused slots; all sequences share the same block layout
-    starting at ``padded_len``. Walks each sequence using its own
-    ``num_generated`` count, trims at the first EOS, and decodes.
-    """
+    """Decode generated slots from the physical block layout used by VLMs."""
     results = []
     for b in range(result.shape[0]):
         gen_ids_list = []
@@ -1388,8 +1380,7 @@ def decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer):
         remaining = num_generated[b].item()
         while remaining > 0:
             take = min(remaining, BLOCK_SIZE)
-            for j in range(take):
-                gen_ids_list.append(result[b, block_start + j].item())
+            gen_ids_list.extend(result[b, block_start : block_start + take].tolist())
             remaining -= take
             block_start += BLOCK_SIZE
         gen_ids = torch.tensor(gen_ids_list)
@@ -1407,7 +1398,6 @@ def generate(
     input_ids,
     max_new_tokens,
     *,
-    tokenizer,
     attention_mask=None,
     do_sample=None,
     temperature=None,
@@ -1420,17 +1410,16 @@ def generate(
 
     When attached to a model via ``auto_spyre_model.py`` (which binds
     ``run_forward_fn`` to the adapter module's ``_run_forward``), callers use
-    the input side of the stock API while temporarily supplying a tokenizer for
-    the decoded-string return::
+    the stock input and tensor-output shape::
 
         encoded = tokenizer(["Hello!"], return_tensors="pt", padding=True)
-        model.generate(
-            **encoded, tokenizer=tokenizer, max_new_tokens=32, **kwargs
-        )
+        sequences = model.generate(**encoded, max_new_tokens=32, **kwargs)
 
     Ordinary contiguous left or right caller padding is removed according to
     ``attention_mask``. Real tokens are then right-aligned and left block-padded
-    for the Spyre scheduler. Internal block padding is never decoded.
+    for the Spyre scheduler. Returned sequences preserve the caller's original
+    input prefix and append logical generated tokens; internal block padding is
+    never returned.
 
     Sampling and stop parameters follow stock-HF precedence:
     ``explicit kwarg > model.generation_config > HF global default``. Leaving a
@@ -1452,17 +1441,26 @@ def generate(
         model: Prepared HF model on Spyre (supplies ``generation_config``).
         input_ids: Integer token IDs with shape ``[batch, sequence]``.
         max_new_tokens: Number of tokens to generate (required).
-        tokenizer: HF tokenizer used only to decode the temporary string return.
         attention_mask: Optional binary mask with the same shape as ``input_ids``.
         do_sample: Sampling vs greedy.
         temperature: Sampling temperature.
         top_k: Top-k filtering (0/None disables).
         top_p: Nucleus (top-p) filtering (1.0 disables).
         eos_token_id: Override stop token(s); scalar or list. Omit to defer to
-            config/tokenizer eos; pass ``None`` to disable EOS stopping (matches
+            generation config; pass ``None`` to disable EOS stopping (matches
             stock ``generate()``).
         timing: Print per-token latency.
     """
+    if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, int):
+        raise TypeError("max_new_tokens must be an integer")
+    if max_new_tokens < 0:
+        raise ValueError("max_new_tokens must be non-negative")
+
+    caller_input_ids = input_ids.detach().to("cpu").clone()
+    if max_new_tokens == 0:
+        normalize_generation_inputs(input_ids, attention_mask)
+        return caller_input_ids
+
     overrides = {
         "do_sample": do_sample,
         "temperature": temperature,
@@ -1473,12 +1471,13 @@ def generate(
     # (disable EOS) is distinguishable from "unspecified" (defer to config).
     if eos_token_id is not _UNSET:
         overrides["eos_token_id"] = eos_token_id
-    params = _resolve_generation_params(model, tokenizer, overrides)
+    params = _resolve_generation_params(model, overrides)
     do_sample = params["do_sample"]
     temperature = params["temperature"]
     top_k = params["top_k"]
     top_p = params["top_p"]
     eos_ids = params["eos_ids"]
+    pad_token_id = params["pad_token_id"]
 
     (
         input_ids,
@@ -1512,7 +1511,7 @@ def generate(
 
     times_list = []
     finished = torch.zeros(batch_size, dtype=torch.bool)
-    num_generated = torch.zeros(batch_size, dtype=torch.long)
+    generated_columns = []
 
     for i in range(max_new_tokens):
         t0 = time.time()
@@ -1605,7 +1604,17 @@ def generate(
         if timing:
             times_list.append(time.time() - t0)
 
-        # Place token in result (FMS logic)
+        # Finished rows emit padding while unfinished rows continue. Mask using
+        # the previous state so the first EOS token remains in the output.
+        if finished.any():
+            if pad_token_id is None:
+                raise ValueError(
+                    "pad_token_id must be configured when batch rows finish at different steps"
+                )
+            next_tokens = next_tokens.masked_fill(finished, pad_token_id)
+        generated_columns.append(next_tokens.clone())
+
+        # Place the same logical token in the physical block buffer (FMS logic).
         tokens_in_block = (tokens_in_block + 1) % BLOCK_SIZE
         if tokens_in_block == 0:
             # Just finished a block, pad for next block
@@ -1614,7 +1623,6 @@ def generate(
         result[:, -grab_idx] = next_tokens  # [B]
         if eos_ids is not None:
             finished |= torch.isin(next_tokens, eos_ids)
-        num_generated += (~finished).long()
 
         if finished.all():
             break
@@ -1627,7 +1635,8 @@ def generate(
             print(f"Avg next-token latency: {avg*1000:.3f} ms")
         print("Per-token: " + ", ".join(f"{t*1000:.1f}" for t in times_list) + " ms")
 
-    return decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer)
+    generated_ids = torch.stack(generated_columns, dim=1)
+    return torch.cat([caller_input_ids, generated_ids], dim=1)
 
 
 # ---------------------------------------------------------------------------

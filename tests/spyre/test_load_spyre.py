@@ -29,7 +29,9 @@ import time
 from typing import Any
 
 import pytest
-from model_registry import (
+
+from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
+from tests.model_registry import (
     CAUSAL_PATHS,
     EMBED_PATHS,
     MASKED_LM_PATHS,
@@ -37,8 +39,6 @@ from model_registry import (
     QUESTION_ANSWERING_PATHS,
     xfail_non_blocking,
 )
-
-from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
 
 
 @pytest.mark.parametrize(

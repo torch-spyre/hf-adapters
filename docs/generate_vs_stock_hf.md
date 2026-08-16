@@ -4,17 +4,18 @@ Our [`generate()`](../hf_adapters/hf_common.py) in `hf_common.py` covers greedy 
 temperature/top-k/top-p sampling with HF-matching parameter precedence and EOS
 stopping, but diverges from stock HF in several ways worth documenting.
 
-## Partially stock-shaped signature
+## Stock-shaped inputs and basic output
 
 - **Inputs are pre-tokenized.** Callers pass `input_ids` and an optional
   `attention_mask`, as with stock HF. Ordinary contiguous left or right caller
   padding is removed on CPU, the logical prompts are compacted, and each row is
   right-aligned in the internal 64-token block layout before prefill. Sparse
   masks with holes are rejected rather than silently reinterpreted.
-- **A keyword-only `tokenizer` is still required for output decoding.** The
-  implementation temporarily returns generated strings, so final
-  `tokenizer.decode(..., skip_special_tokens=True)` remains inside `generate()`.
-  Moving decoding outside and returning stock token tensors is a follow-up.
+- **The default return is a token tensor.** It contains the caller's exact
+  `input_ids` prefix followed by generated tokens, including EOS. Decode the
+  continuation outside `generate()` with the tokenizer, as with stock HF.
+  Internal block padding is never returned; rows that finish early receive the
+  configured pad token while the rest of the batch continues.
 - **`max_new_tokens` is required**, not optional. HF resolves a default length
   via `max_length` (prompt + new); our block-decode loop doesn't implement
   `max_length`, so callers must always state a new-token budget.
@@ -50,8 +51,8 @@ Not supported:
 
 ## Other behavioral notes
 
-- Returns a `list[str]` only — no `GenerateOutput`, no `output_scores` /
-  `output_hidden_states` / `return_dict_in_generate`.
+- Returns the basic sequence tensor only — no `GenerateOutput`, `output_scores`,
+  `output_hidden_states`, or `return_dict_in_generate`.
 - Sampling/EOS precedence (explicit kwarg > `generation_config` > HF default)
   *does* match stock HF via `_prepare_generation_config`, so that part is
   faithful.

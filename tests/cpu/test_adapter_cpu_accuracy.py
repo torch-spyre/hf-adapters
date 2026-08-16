@@ -175,11 +175,14 @@ def test_auto_loader(model_path):
     )
     _unwrap_compiled_blocks(model)
     encoded = encode_generation_inputs(tokenizer, [PROMPT])
-    auto_outputs = model.generate(
+    auto_sequences = model.generate(
         **encoded,
-        tokenizer=tokenizer,
         max_new_tokens=NUM_DECODE,
         do_sample=False,
+    )
+    auto_outputs = tokenizer.batch_decode(
+        auto_sequences[:, encoded["input_ids"].shape[1] :],
+        skip_special_tokens=True,
     )
     del model
     gc.collect()

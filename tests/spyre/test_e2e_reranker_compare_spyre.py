@@ -32,8 +32,6 @@ Usage (on Spyre LPAR)::
 
 import pytest
 import torch
-from conftest import load_ref_model
-from model_registry import RERANKER_PATHS
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from hf_adapters.auto_spyre_model import (
@@ -42,6 +40,8 @@ from hf_adapters.auto_spyre_model import (
     torch_dtype_for_model_path,
 )
 from hf_adapters.hf_common import move_model_to_spyre, prefill_reranker
+from tests.conftest import load_ref_model
+from tests.model_registry import RERANKER_PATHS
 
 # Pairs that span a range of relevance scores — ensures ranking order is
 # meaningful, not just that all scores are close to zero.

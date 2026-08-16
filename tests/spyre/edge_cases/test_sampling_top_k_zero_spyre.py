@@ -43,19 +43,17 @@ def test_sampling_top_k_zero_spyre(model_path: str) -> None:
         torch.manual_seed(2024)
         out1 = model.generate(
             **encoded,
-            tokenizer=tokenizer,
             max_new_tokens=SAMPLING_MAX_NEW,
             **kwargs,
         )
         torch.manual_seed(2024)
         out2 = model.generate(
             **encoded,
-            tokenizer=tokenizer,
             max_new_tokens=SAMPLING_MAX_NEW,
             **kwargs,
         )
         elapsed = time.time() - t0
-        ok = out1 == out2 and all(s for s in out1)
+        ok = torch.equal(out1, out2) and out1.shape[1] > encoded["input_ids"].shape[1]
         detail = "" if ok else f"out1={out1!r} out2={out2!r}"
         print(f"  sampling_top_k_zero: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
         assert ok, detail

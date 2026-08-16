@@ -55,13 +55,15 @@ def test_no_eos_runs_full_budget_spyre(model_path: str) -> None:
         t0 = time.time()
         out = model.generate(
             **encoded,
-            tokenizer=tokenizer,
             max_new_tokens=no_eos_max_new,
             do_sample=False,
             eos_token_id=None,
         )
+        spyre_outputs = tokenizer.batch_decode(
+            out[:, encoded["input_ids"].shape[1] :], skip_special_tokens=True
+        )
         elapsed = time.time() - t0
-        ok = all(hf.strip() == sp.strip() for hf, sp in zip(no_eos_refs, out))
+        ok = all(hf.strip() == sp.strip() for hf, sp in zip(no_eos_refs, spyre_outputs))
         detail = "" if ok else f"hf={no_eos_refs!r} spyre={out!r}"
         print(f"  no_eos_runs_full_budget: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
         assert ok, detail

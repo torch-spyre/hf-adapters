@@ -154,7 +154,6 @@ def run_profile(
     encoded = tokenizer(prompt, return_tensors="pt")
     gen_kwargs = dict(
         **encoded,
-        tokenizer=tokenizer,
         max_new_tokens=max_new_tokens,
         do_sample=False,
         timing=True,
@@ -185,7 +184,9 @@ def run_profile(
 
     prof.export_chrome_trace(out_path)
 
-    output_text = outputs[0] if outputs else ""
+    output_text = tokenizer.decode(
+        outputs[0, encoded["input_ids"].shape[1] :], skip_special_tokens=True
+    )
     print(f"\n  Output: {output_text!r}")
     print(f"  trace → {out_path}")
     print("  open in https://ui.perfetto.dev/ or chrome://tracing")

@@ -19,6 +19,7 @@ from __future__ import annotations
 import time
 
 import pytest
+import torch
 
 from tests._generate_edge_case_helpers import make_prompts
 from tests.conftest import encode_generation_inputs
@@ -34,11 +35,9 @@ def test_zero_new_tokens_spyre(model_path: str) -> None:
         prompts = make_prompts(tokenizer, [5, 12])
         encoded = encode_generation_inputs(tokenizer, prompts)
         t0 = time.time()
-        out = model.generate(
-            **encoded, tokenizer=tokenizer, max_new_tokens=0, do_sample=False
-        )
+        out = model.generate(**encoded, max_new_tokens=0, do_sample=False)
         elapsed = time.time() - t0
-        ok = len(out) == len(prompts) and all(s == "" for s in out)
+        ok = torch.equal(out, encoded["input_ids"])
         detail = "" if ok else f"got={out!r}"
         print(f"  zero_new_tokens: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
         assert ok, detail
