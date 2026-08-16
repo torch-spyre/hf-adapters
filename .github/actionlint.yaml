@@ -7,3 +7,7 @@ self-hosted-runner:
     - spyre_pf_x4
     - image_spyre_inference
     - image_torch_spyre
+    # Shadow runner-set selector (spyre-frameworks shadow-overlays). Routes jobs
+    # onto the isolated hf-adapters shadow set, which boots the pinned /next
+    # hf-adapters image. Used only by the DO-NOT-MERGE shadow-validation branch.
+    - image_hf_adapters_shadow
