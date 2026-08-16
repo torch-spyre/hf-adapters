@@ -33,6 +33,7 @@ import pytest
 from model_registry import CAUSAL_PATHS, NON_BLOCKING_CAUSAL_MODELS, xfail_non_blocking
 
 from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
+from tests.conftest import encode_generation_inputs
 
 
 def run_smoke_test(model_path: str) -> dict[str, Any]:
@@ -55,10 +56,11 @@ def run_smoke_test(model_path: str) -> dict[str, Any]:
     prompt = "The capital of France is"
     print(f"  Prompt: {prompt!r}")
 
+    encoded = encode_generation_inputs(tokenizer, [prompt])
     t0 = time.time()
     outputs = model.generate(
-        tokenizer,
-        [prompt],
+        **encoded,
+        tokenizer=tokenizer,
         max_new_tokens=5,
         do_sample=False,
         timing=True,

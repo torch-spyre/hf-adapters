@@ -15,8 +15,9 @@
 """Spyre edge case: ``forced_eos:eos_on_last_step`` (finished.all() == loop end)."""
 
 import pytest
-from _shared import run_eos_case
-from model_registry import CAUSAL_PATHS
+
+from tests.model_registry import CAUSAL_PATHS
+from tests.spyre.edge_cases._shared import run_eos_case
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)

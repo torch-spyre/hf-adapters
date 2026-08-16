@@ -20,9 +20,11 @@ import time
 
 import pytest
 import torch
-from _generate_edge_case_helpers import make_prompts
-from edge_cases._shared import _setup, _teardown
-from model_registry import CAUSAL_PATHS
+
+from tests._generate_edge_case_helpers import make_prompts
+from tests.conftest import encode_generation_inputs
+from tests.model_registry import CAUSAL_PATHS
+from tests.spyre.edge_cases._shared import _setup, _teardown
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
@@ -49,10 +51,11 @@ def test_no_eos_runs_full_budget_spyre(model_path: str) -> None:
                 )
             new_ids = out[0][encoded["input_ids"].shape[1] :]
             no_eos_refs.append(tokenizer.decode(new_ids, skip_special_tokens=True))
+        encoded = encode_generation_inputs(tokenizer, no_eos_prompts)
         t0 = time.time()
         out = model.generate(
-            tokenizer,
-            no_eos_prompts,
+            **encoded,
+            tokenizer=tokenizer,
             max_new_tokens=no_eos_max_new,
             do_sample=False,
             eos_token_id=None,

@@ -12,20 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Spyre edge case: ``no_pad_token_fallback`` (pad_token=None hits eos fallback)."""
+"""Spyre edge case: tokenization falls back from a missing pad token to EOS."""
 
 from __future__ import annotations
 
 import time
 
 import pytest
-from _generate_edge_case_helpers import (
+
+from tests._generate_edge_case_helpers import (
     NoPadTokenizer,
     hf_reference_outputs,
     make_prompts,
 )
-from edge_cases._shared import _setup, _teardown
-from model_registry import CAUSAL_PATHS
+from tests.conftest import encode_generation_inputs
+from tests.model_registry import CAUSAL_PATHS
+from tests.spyre.edge_cases._shared import _setup, _teardown
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
@@ -39,9 +41,13 @@ def test_no_pad_token_fallback_spyre(model_path: str) -> None:
             ref_model, tokenizer, no_pad_prompts, no_pad_max_new
         )
         wrapped = NoPadTokenizer(tokenizer)
+        encoded = encode_generation_inputs(wrapped, no_pad_prompts)
         t0 = time.time()
         out = model.generate(
-            wrapped, no_pad_prompts, max_new_tokens=no_pad_max_new, do_sample=False
+            **encoded,
+            tokenizer=wrapped,
+            max_new_tokens=no_pad_max_new,
+            do_sample=False,
         )
         elapsed = time.time() - t0
         ok = all(hf.strip() == sp.strip() for hf, sp in zip(no_pad_refs, out))

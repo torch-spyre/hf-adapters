@@ -19,12 +19,14 @@ from __future__ import annotations
 import time
 
 import pytest
-from _generate_edge_case_helpers import (
+
+from tests._generate_edge_case_helpers import (
     hf_reference_outputs,
     make_prompt_with_eos_inside,
 )
-from edge_cases._shared import _setup, _teardown
-from model_registry import CAUSAL_PATHS
+from tests.conftest import encode_generation_inputs
+from tests.model_registry import CAUSAL_PATHS
+from tests.spyre.edge_cases._shared import _setup, _teardown
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
@@ -43,10 +45,11 @@ def test_eos_inside_prompt_spyre(model_path: str) -> None:
         eos_in_prompt_refs = hf_reference_outputs(
             ref_model, tokenizer, [eos_in_prompt], eos_in_prompt_max_new
         )
+        encoded = encode_generation_inputs(tokenizer, [eos_in_prompt])
         t0 = time.time()
         out = model.generate(
-            tokenizer,
-            [eos_in_prompt],
+            **encoded,
+            tokenizer=tokenizer,
             max_new_tokens=eos_in_prompt_max_new,
             do_sample=False,
         )

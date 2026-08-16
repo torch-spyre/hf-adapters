@@ -1262,6 +1262,93 @@ def pad_and_position(input_ids, actual_lengths):
     return input_ids, padded_len, prompt_offsets, position_ids
 
 
+def normalize_generation_inputs(input_ids, attention_mask=None):
+    """Validate and normalize tokenized decoder inputs for block generation.
+
+    Caller padding is removed according to ``attention_mask``. Each row's real
+    tokens are then right-aligned in a compact batch and left-padded to a
+    ``BLOCK_SIZE`` multiple, which is the physical layout expected by the
+    generation masks and KV-cache scheduler.
+
+    Returns ``(padded_ids, actual_lengths, padded_len, prompt_offsets,
+    position_ids)``. Inputs are copied to CPU and are not modified.
+    """
+    if not isinstance(input_ids, torch.Tensor):
+        raise TypeError("input_ids must be a torch.Tensor")
+    if input_ids.ndim != 2:
+        raise ValueError("input_ids must have shape [batch_size, sequence_length]")
+    if input_ids.dtype not in (
+        torch.uint8,
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+    ):
+        raise TypeError("input_ids must have an integer dtype")
+
+    batch_size, sequence_length = input_ids.shape
+    if batch_size == 0:
+        raise ValueError("input_ids must contain at least one sequence")
+    if sequence_length == 0:
+        raise ValueError("input_ids sequences must contain at least one token")
+
+    input_ids_cpu = input_ids.detach().to("cpu")
+    if attention_mask is None:
+        mask = torch.ones_like(input_ids_cpu, dtype=torch.bool)
+    else:
+        if not isinstance(attention_mask, torch.Tensor):
+            raise TypeError("attention_mask must be a torch.Tensor")
+        if attention_mask.shape != input_ids.shape:
+            raise ValueError("attention_mask must have the same shape as input_ids")
+        attention_mask_cpu = attention_mask.detach().to("cpu")
+        if attention_mask_cpu.dtype.is_floating_point:
+            is_binary = torch.all((attention_mask_cpu == 0) | (attention_mask_cpu == 1))
+        elif attention_mask_cpu.dtype == torch.bool or attention_mask_cpu.dtype in (
+            torch.uint8,
+            torch.int8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+        ):
+            is_binary = torch.all((attention_mask == 0) | (attention_mask == 1))
+        else:
+            raise TypeError("attention_mask must have a boolean or numeric dtype")
+        if not is_binary.item():
+            raise ValueError("attention_mask values must be 0 or 1")
+        mask = attention_mask_cpu.to(dtype=torch.bool)
+
+    actual_lengths = mask.sum(dim=1, dtype=torch.long)
+    if torch.any(actual_lengths == 0):
+        raise ValueError("each input sequence must contain at least one unmasked token")
+
+    valid_rows = []
+    for b in range(batch_size):
+        valid_indices = mask[b].nonzero(as_tuple=True)[0]
+        first = valid_indices[0].item()
+        last = valid_indices[-1].item()
+        if last - first + 1 != actual_lengths[b].item():
+            raise ValueError(
+                "attention_mask must contain one contiguous span of unmasked tokens per row"
+            )
+        valid_rows.append(input_ids_cpu[b, first : last + 1])
+
+    compact_len = actual_lengths.max().item()
+    compact_ids = input_ids_cpu.new_zeros((batch_size, compact_len))
+    for b, valid_ids in enumerate(valid_rows):
+        compact_ids[b, compact_len - valid_ids.numel() :] = valid_ids
+
+    padded_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
+        compact_ids, actual_lengths
+    )
+    return (
+        padded_ids,
+        actual_lengths,
+        padded_len,
+        prompt_offsets,
+        position_ids,
+    )
+
+
 def select_next_token(next_logits, do_sample, temperature, top_k, top_p):
     """CPU token selection: greedy argmax, or temperature/top-k/top-p sampling.
 
@@ -1317,9 +1404,11 @@ def decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer):
 def generate(
     run_forward_fn: Callable,
     model,
-    tokenizer,
-    prompts,
+    input_ids,
     max_new_tokens,
+    *,
+    tokenizer,
+    attention_mask=None,
     do_sample=None,
     temperature=None,
     top_k=None,
@@ -1327,14 +1416,21 @@ def generate(
     eos_token_id=_UNSET,
     timing=False,
 ):
-    """Model-agnostic generation with padded 64-block decode.
+    """Model-agnostic generation from tokenized inputs with 64-block decode.
 
     When attached to a model via ``auto_spyre_model.py`` (which binds
-    ``run_forward_fn`` to the adapter module's ``_run_forward``), the
-    ``run_forward_fn`` parameter drops out of the public signature, so callers
-    invoke it as::
+    ``run_forward_fn`` to the adapter module's ``_run_forward``), callers use
+    the input side of the stock API while temporarily supplying a tokenizer for
+    the decoded-string return::
 
-        model.generate(tokenizer, ["Hello!"], max_new_tokens=32, **kwargs)
+        encoded = tokenizer(["Hello!"], return_tensors="pt", padding=True)
+        model.generate(
+            **encoded, tokenizer=tokenizer, max_new_tokens=32, **kwargs
+        )
+
+    Ordinary contiguous left or right caller padding is removed according to
+    ``attention_mask``. Real tokens are then right-aligned and left block-padded
+    for the Spyre scheduler. Internal block padding is never decoded.
 
     Sampling and stop parameters follow stock-HF precedence:
     ``explicit kwarg > model.generation_config > HF global default``. Leaving a
@@ -1354,9 +1450,10 @@ def generate(
             key_caches, value_caches, is_filling, token_index,
             cache_position) -> logits``
         model: Prepared HF model on Spyre (supplies ``generation_config``).
-        tokenizer: HF tokenizer.
-        prompts: List of prompt strings.
+        input_ids: Integer token IDs with shape ``[batch, sequence]``.
         max_new_tokens: Number of tokens to generate (required).
+        tokenizer: HF tokenizer used only to decode the temporary string return.
+        attention_mask: Optional binary mask with the same shape as ``input_ids``.
         do_sample: Sampling vs greedy.
         temperature: Sampling temperature.
         top_k: Top-k filtering (0/None disables).
@@ -1383,31 +1480,18 @@ def generate(
     top_p = params["top_p"]
     eos_ids = params["eos_ids"]
 
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    # Force left-padding: with right-padding, shorter sequences end with
-    # padding tokens, and logits[:, -1, :] would predict from a pad position.
-    # Left-padding aligns all sequences to end at the same position.
-    encoded = tokenizer(
-        prompts,
-        return_tensors="pt",
-        padding=True,
-        padding_side="left",
-        return_attention_mask=True,
-    )
-    input_ids = encoded["input_ids"]
-    attention_mask = encoded["attention_mask"]
+    (
+        input_ids,
+        actual_prompt_lengths,
+        padded_len,
+        prompt_offsets,
+        position_ids,
+    ) = normalize_generation_inputs(input_ids, attention_mask)
     batch_size = input_ids.shape[0]
-    prompt_length = input_ids.shape[1]
 
-    # Per-sequence actual prompt length (excluding tokenizer left-padding)
-    actual_prompt_lengths = attention_mask.sum(dim=1)  # [B]
-
-    # Block-pad to a BLOCK_SIZE multiple; real tokens right-aligned (positions
-    # 0..actual_len-1 at padded indices prompt_offsets[b]..padded_len-1).
-    max_cache_len = generation_cache_len(prompt_length, max_new_tokens)
-    input_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
-        input_ids, actual_prompt_lengths
+    # Cache capacity is based on compacted logical prompts, not caller padding.
+    max_cache_len = generation_cache_len(
+        actual_prompt_lengths.max().item(), max_new_tokens
     )
 
     # Initialize empty KV caches. Per-layer shapes come from the model

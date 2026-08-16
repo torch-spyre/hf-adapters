@@ -44,7 +44,11 @@ from transformers import (
 )
 
 from hf_adapters import AutoSpyreModelForCausalLM
-from tests.conftest import load_ref_model, resolve_adapter_module_for_test
+from tests.conftest import (
+    encode_generation_inputs,
+    load_ref_model,
+    resolve_adapter_module_for_test,
+)
 
 
 def _load_spyre_model(model_path: str) -> Module:
@@ -84,9 +88,13 @@ def run_greedy_case(model_path: str, case_id: str) -> tuple[bool, str]:
         targets, max_new = CASES[case_id]
         prompts = make_prompts(tokenizer, targets)
         hf_outputs = hf_reference_outputs(ref_model, tokenizer, prompts, max_new)
+        encoded = encode_generation_inputs(tokenizer, prompts)
         t0 = time.time()
         spyre_outputs = model.generate(
-            tokenizer, prompts, max_new_tokens=max_new, do_sample=False
+            **encoded,
+            tokenizer=tokenizer,
+            max_new_tokens=max_new,
+            do_sample=False,
         )
         elapsed = time.time() - t0
         ok = all(hf.strip() == sp.strip() for hf, sp in zip(hf_outputs, spyre_outputs))
@@ -115,10 +123,11 @@ def run_eos_case(model_path: str, case_id: str) -> tuple[bool, str]:
 
             pytest.skip("no clean shared eos token at requested offsets")
         expected = forced_eos_expected(per_prompt_ids, eos_offsets, tokenizer)
+        encoded = encode_generation_inputs(tokenizer, prompts)
         t0 = time.time()
         out = model.generate(
-            tokenizer,
-            prompts,
+            **encoded,
+            tokenizer=tokenizer,
             max_new_tokens=max_new,
             do_sample=False,
             eos_token_id=eos_id,

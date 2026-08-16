@@ -15,8 +15,9 @@
 """Spyre edge case: ``short_two_blocks_plus`` (two expansions + partial fill)."""
 
 import pytest
-from _shared import run_greedy_case
-from model_registry import CAUSAL_PATHS
+
+from tests.model_registry import CAUSAL_PATHS
+from tests.spyre.edge_cases._shared import run_greedy_case
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)

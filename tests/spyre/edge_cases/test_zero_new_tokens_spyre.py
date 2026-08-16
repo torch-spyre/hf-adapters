@@ -19,9 +19,11 @@ from __future__ import annotations
 import time
 
 import pytest
-from _generate_edge_case_helpers import make_prompts
-from edge_cases._shared import _setup, _teardown
-from model_registry import CAUSAL_PATHS
+
+from tests._generate_edge_case_helpers import make_prompts
+from tests.conftest import encode_generation_inputs
+from tests.model_registry import CAUSAL_PATHS
+from tests.spyre.edge_cases._shared import _setup, _teardown
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
@@ -30,8 +32,11 @@ def test_zero_new_tokens_spyre(model_path: str) -> None:
     info, tokenizer, _, model = _setup(model_path, need_ref=False)
     try:
         prompts = make_prompts(tokenizer, [5, 12])
+        encoded = encode_generation_inputs(tokenizer, prompts)
         t0 = time.time()
-        out = model.generate(tokenizer, prompts, max_new_tokens=0, do_sample=False)
+        out = model.generate(
+            **encoded, tokenizer=tokenizer, max_new_tokens=0, do_sample=False
+        )
         elapsed = time.time() - t0
         ok = len(out) == len(prompts) and all(s == "" for s in out)
         detail = "" if ok else f"got={out!r}"

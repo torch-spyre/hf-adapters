@@ -20,9 +20,15 @@ import time
 
 import pytest
 import torch
-from _generate_edge_case_helpers import SAMPLING_MAX_NEW, SAMPLING_TARGETS, make_prompts
-from edge_cases._shared import _setup, _teardown
-from model_registry import CAUSAL_PATHS
+
+from tests._generate_edge_case_helpers import (
+    SAMPLING_MAX_NEW,
+    SAMPLING_TARGETS,
+    make_prompts,
+)
+from tests.conftest import encode_generation_inputs
+from tests.model_registry import CAUSAL_PATHS
+from tests.spyre.edge_cases._shared import _setup, _teardown
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
@@ -31,15 +37,22 @@ def test_sampling_top_k_zero_spyre(model_path: str) -> None:
     info, tokenizer, _, model = _setup(model_path, need_ref=False)
     try:
         sampling_prompts = make_prompts(tokenizer, SAMPLING_TARGETS)
+        encoded = encode_generation_inputs(tokenizer, sampling_prompts)
         kwargs = dict(do_sample=True, temperature=1.0, top_k=0)
         t0 = time.time()
         torch.manual_seed(2024)
         out1 = model.generate(
-            tokenizer, sampling_prompts, max_new_tokens=SAMPLING_MAX_NEW, **kwargs
+            **encoded,
+            tokenizer=tokenizer,
+            max_new_tokens=SAMPLING_MAX_NEW,
+            **kwargs,
         )
         torch.manual_seed(2024)
         out2 = model.generate(
-            tokenizer, sampling_prompts, max_new_tokens=SAMPLING_MAX_NEW, **kwargs
+            **encoded,
+            tokenizer=tokenizer,
+            max_new_tokens=SAMPLING_MAX_NEW,
+            **kwargs,
         )
         elapsed = time.time() - t0
         ok = out1 == out2 and all(s for s in out1)
