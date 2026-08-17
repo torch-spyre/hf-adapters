@@ -18,6 +18,7 @@ import inspect
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -220,6 +221,45 @@ def _resolve_layer_idx(module: Any) -> int | None:
     return None
 
 
+# Decoder-stack path segments across HF architectures: ``model.layers.N``
+# (Llama/Granite/Qwen/Mistral), ``transformer.h.N`` (GPT-2), ``blocks.N``,
+# ``encoder.layer.N`` (BERT). The captured group is the layer index.
+_LAYER_PATH_RE = re.compile(
+    r"(?:^|\.)(?:layers|h|block|blocks|encoder\.layer)\.(\d+)(?:\.|$)"
+)
+
+
+def _layer_index_from_path(module_name: str) -> Optional[int]:
+    """Return the decoder-layer index a module lives under, or ``None`` if outside one.
+
+    Derived from the ``named_modules()`` path rather than a ``layer_idx``
+    attribute, because only the attention module carries that attribute --
+    verified on Granite 3.3, where ``mlp`` / ``input_layernorm`` / the
+    ``DecoderLayer`` itself have none. An attribute-based approach therefore
+    cannot attribute most modules to a layer.
+
+    Returning ``None`` for a module outside any layer is load-bearing: an RMSNorm
+    exists both inside a layer and as the backbone's final ``model.norm``, and only
+    the former should be named per layer. Note the converse also occurs -- a
+    ``RotaryEmbedding`` sits outside the stack in Granite (``model.rotary_emb``) but
+    inside it in others (RecurrentGemma's ``layers.N.temporal_block.rotary_emb``),
+    so no module type may be assumed to be on one side or the other.
+    """
+    match = _LAYER_PATH_RE.search(module_name)
+    return None if match is None else int(match.group(1))
+
+
+def _compose_module_name(base: str, *suffixes: Optional[str]) -> str:
+    """Join a module base name with the suffixes that distinguish this entry.
+
+    Suffixes are appended in a fixed order so a name stays stable as new axes are
+    added (layer today; execution phase is the expected next one). ``None``
+    suffixes are dropped, so a module outside any decoder layer keeps exactly the
+    name it has today.
+    """
+    return "_".join([base, *(s for s in suffixes if s)])
+
+
 def _class_source_location(cls: type) -> Tuple[Optional[str], Optional[int]]:
     """Return (source file, first line of the class definition) for ``cls``.
 
@@ -418,26 +458,41 @@ def _extract_cache_info(
         ]:
             if hasattr(config, attr):
                 config_kwargs[attr] = getattr(config, attr)
-        # The module test rebuilds only a single decoder layer, so pin
-        # num_hidden_layers to 1: the real model depth would size a KV
-        # cache / layer stack the standalone module never populates.
-        config_kwargs["num_hidden_layers"] = 1
+        # num_hidden_layers must cover layer_idx: the framework primes the cache
+        # with cache.update(key, value, layer_idx), so a cache sized to 1 layer
+        # raises IndexError for any layer_idx > 0 (e.g. --capture_layers 0,5).
+        # Size it to layer_idx + 1 -- the layers below the captured one stay empty
+        # and are never read, so this costs allocation only, not correctness.
+        config_kwargs["num_hidden_layers"] = layer_idx + 1
         cache_info["config_path"] = f"{config_cls.__module__}.{config_cls.__name__}"
         cache_info["config_kwargs"] = config_kwargs
 
     return cache_info
 
 
+# Sentinel for "record every layer" -- distinct from ``None``, which selects the
+# default of layer 0 only. An empty frozenset reads as "no filtering".
+CAPTURE_ALL_LAYERS: frozenset = frozenset()
+
+
 class ModuleInfoCapture:
     """Captures module information during forward pass using hooks."""
 
-    def __init__(self):
+    def __init__(self, capture_layers: Optional[Set[int]] = None):
         self.module_data: Dict[str, Dict[str, Any]] = {}
         self.seen_module_configs: Set[str] = (
             set()
         )  # Track unique configs, not just types
         # Track model-level context (KV cache, execution mode)
         self.current_model_context: Dict[str, Any] = {}
+        # Layers to record, by index. ``None`` -> {0}: a decoder stack repeats the
+        # same module shapes per layer, so recording all 40 of an 8B model would
+        # multiply the YAML -- and, on Spyre, the number of compiled binaries in
+        # the module test -- for little extra coverage. Pass CAPTURE_ALL_LAYERS to
+        # record every layer.
+        self.capture_layers: Set[int] = (
+            {0} if capture_layers is None else set(capture_layers)
+        )
 
     def capture_constructor_info(
         self, module, module_name: str, module_type: str
@@ -479,10 +534,20 @@ class ModuleInfoCapture:
                 )
 
                 # Decoder layers typically need layer_idx as kwarg
-                # Always add it for decoder layers, even if not found as attribute
+                # Always add it for decoder layers, even if not found as attribute.
+                #
+                # A DecoderLayer carries no layer_idx attribute of its own (only
+                # its attention submodule does), so fall back to the index in the
+                # module path before defaulting to 0. Without the path fallback,
+                # every captured layer would be rebuilt as layer 0 -- silently
+                # wrong once more than one layer is captured.
                 layer_idx_value = 0  # Default to 0
                 if hasattr(module, "layer_idx") and module.layer_idx is not None:
                     layer_idx_value = module.layer_idx
+                else:
+                    path_layer_idx = _layer_index_from_path(module_name)
+                    if path_layer_idx is not None:
+                        layer_idx_value = path_layer_idx
                 constructor_kwargs["layer_idx"] = {
                     "type": "int",
                     "value": layer_idx_value,
@@ -507,9 +572,12 @@ class ModuleInfoCapture:
             # Check for layer_idx (common in decoder layers with config)
             # Note: layer_idx can be 0, so check for attribute existence, not truthiness
             if hasattr(module, "layer_idx"):
-                layer_idx_value = (
-                    module.layer_idx if module.layer_idx is not None else 0
-                )
+                layer_idx_value = module.layer_idx
+                if layer_idx_value is None:
+                    # Present but unset: prefer the index in the module path over a
+                    # blanket 0, so a captured layer is rebuilt as itself.
+                    path_layer_idx = _layer_index_from_path(module_name)
+                    layer_idx_value = 0 if path_layer_idx is None else path_layer_idx
                 constructor_kwargs["layer_idx"] = {
                     "type": "int",
                     "value": layer_idx_value,
@@ -577,6 +645,18 @@ class ModuleInfoCapture:
         """
 
         def hook(module, args, kwargs):
+            # Attribute this module to a decoder layer, and skip layers the caller
+            # did not ask for. A module outside any layer (model.norm, lm_head,
+            # rotary_emb on most architectures) is always recorded: it exists
+            # once, not once per layer.
+            layer_index = _layer_index_from_path(module_name)
+            if (
+                layer_index is not None
+                and self.capture_layers
+                and layer_index not in self.capture_layers
+            ):
+                return
+
             # Capture constructor information to create unique config identifier
             constructor_info = self.capture_constructor_info(
                 module, module_name, module_type
@@ -585,12 +665,12 @@ class ModuleInfoCapture:
             # Create a unique identifier based on module type + constructor args
             # This allows us to capture multiple variants of the same module type
             config_signature = self._create_config_signature(
-                module_type, constructor_info
+                module_type, constructor_info, layer_index
             )
 
             # Create unique module name for this variant
             unique_module_name = self._create_unique_module_name(
-                module_type, constructor_info, config_signature
+                module_type, constructor_info, config_signature, layer_index
             )
 
             # Initialize module_info if this is the first invocation
@@ -606,6 +686,7 @@ class ModuleInfoCapture:
                     "source_file": source_file,
                     "source_lineno": source_lineno,
                     "example_instance": module_name,
+                    "layer_index": layer_index,
                     "constructor_args": constructor_info["constructor_args"],
                     "constructor_kwargs": constructor_info["constructor_kwargs"],
                     "invocations": [],  # List of unique invocations
@@ -663,12 +744,19 @@ class ModuleInfoCapture:
         return hook
 
     def _create_config_signature(
-        self, module_type: str, constructor_info: Dict[str, Any]
+        self,
+        module_type: str,
+        constructor_info: Dict[str, Any],
+        layer_index: Optional[int] = None,
     ) -> str:
         """Create a unique signature for a module configuration.
 
         This signature is used to detect duplicate configurations.
-        layer_idx is EXCLUDED because we only need one representative layer.
+
+        The layer index IS part of the signature: how many layers get recorded is
+        bounded by ``capture_layers``, so distinct layers must not collapse here.
+        ``layer_index=None`` (a module outside any layer) reproduces the previous
+        signature exactly, keeping those entries unchanged.
         """
         # Build signature from constructor args
         sig_parts = [module_type]
@@ -681,46 +769,62 @@ class ModuleInfoCapture:
             else:
                 sig_parts.append(f"{arg['type']}")
 
-        # IMPORTANT: Exclude layer_idx from signature
-        # We only need one representative layer, not all 40 decoder layers
+        # layer_idx is skipped here because the layer is represented by
+        # layer_index below, taken from the module path -- which covers the
+        # modules that have no layer_idx attribute (mlp, norms, the layer itself).
         for key, kwarg in constructor_info.get("constructor_kwargs", {}).items():
             if key == "layer_idx":
-                continue  # Skip layer_idx - treat all layers as same config
+                continue
             if kwarg["type"] == "int":
                 sig_parts.append(f"{key}_{kwarg['value']}")
+
+        if layer_index is not None:
+            sig_parts.append(f"layer_{layer_index}")
 
         return "__".join(sig_parts)
 
     def _create_unique_module_name(
-        self, module_type: str, constructor_info: Dict[str, Any], config_signature: str
+        self,
+        module_type: str,
+        constructor_info: Dict[str, Any],
+        config_signature: str,
+        layer_index: Optional[int] = None,
     ) -> str:
         """Create a unique, human-readable name for a module variant.
 
-        Names are based on the config signature (which excludes layer_idx),
-        ensuring that modules with identical configs get the same name and
-        their invocations are grouped together.
+        A module inside a decoder layer is suffixed with its layer index, so each
+        captured layer gets its own entry. A module outside any layer keeps the
+        name it has today.
+
+        The layer suffix replaces the old hash fallback for in-layer modules. That
+        hash carried almost no information -- ``_create_config_signature`` records
+        only the config CLASS path, not its dimensions, so ``SiLUActivation``'s
+        hash was ``sha256("SiLUActivation")[:8]``, a constant -- and ``_layer0``
+        is both meaningful and readable. The hash remains for out-of-layer modules
+        that still need disambiguating.
 
         Examples:
             MyRMSNorm with dim=4096 -> MyRMSNorm_4096
-            MyRMSNorm with dim=2048 -> MyRMSNorm_2048
-            GraniteDecoderLayer (all layers same config) -> GraniteDecoderLayer_layer0
+            MyRMSNorm with dim=4096, inside layer 3 -> MyRMSNorm_4096_layer3
+            GraniteMLP inside layer 0 -> GraniteMLP_layer0
+            GraniteDecoderLayer inside layer 3 -> GraniteDecoderLayer_layer3
         """
+        layer_suffix = None if layer_index is None else f"layer{layer_index}"
+
         # Check if there's a simple int arg (common for norm layers)
         args = constructor_info.get("constructor_args", [])
         if len(args) == 1 and args[0]["type"] == "int":
-            return f"{module_type}_{args[0]['value']}"
+            return _compose_module_name(
+                module_type, str(args[0]["value"]), layer_suffix
+            )
 
-        # For modules with layer_idx, use "layer0" as representative name
-        # since all layers have the same config (layer_idx excluded from signature)
-        kwargs = constructor_info.get("constructor_kwargs", {})
-        if "layer_idx" in kwargs:
-            # Use layer0 as the canonical name for all layers
-            return f"{module_type}_layer0"
+        # Inside a layer the index alone disambiguates; no hash needed.
+        if layer_suffix is not None:
+            return _compose_module_name(module_type, layer_suffix)
 
-        # If no simple identifier, use a hash of the config signature
-        # This ensures uniqueness while keeping names readable
+        # Outside any layer, fall back to a hash of the config signature.
         sig_hash = hashlib.sha256(config_signature.encode()).hexdigest()[:8]
-        return f"{module_type}_{sig_hash}"
+        return _compose_module_name(module_type, sig_hash)
 
     def _create_invocation_signature(
         self, invocation_inputs: List[Dict[str, Any]]
@@ -803,9 +907,18 @@ class ModuleInfoCapture:
         return result
 
 
-def get_all_custom_modules(model) -> List[Tuple[str, str, Any]]:
+def get_all_custom_modules(
+    model, capture_layers: Optional[Set[int]] = None
+) -> List[Tuple[str, str, Any]]:
     """
     Get ALL custom module instances from the model (not just unique types).
+
+    Args:
+        model: The model to walk.
+        capture_layers: When given, in-layer modules outside these indices are
+            skipped, so hooks are registered on one layer's worth of modules
+            instead of all 40. Modules outside any layer are always kept. The hook
+            itself re-checks, so this is purely an optimization.
 
     Returns:
         List of (module_name, module_type, module_instance) tuples
@@ -820,6 +933,11 @@ def get_all_custom_modules(model) -> List[Tuple[str, str, Any]]:
         # Skip if already in upstream module_db
         if module_type in existing_modules:
             continue
+
+        if capture_layers:
+            layer_index = _layer_index_from_path(name)
+            if layer_index is not None and layer_index not in capture_layers:
+                continue
 
         # Keep ALL instances (not just first of each type)
         custom_modules.append((name, module_type, module))
@@ -1294,7 +1412,9 @@ def capture_module_invocations(model, capture: ModuleInfoCapture, inputs) -> Non
         capture: The :class:`ModuleInfoCapture` to populate.
         inputs: Forward kwargs for the prefill pass (e.g. tokenizer output).
     """
-    all_custom_modules = get_all_custom_modules(model)
+    all_custom_modules = get_all_custom_modules(
+        model, capture_layers=capture.capture_layers
+    )
     logger.info(f"Found {len(all_custom_modules)} custom module instances")
 
     # This hook sets context that module-level hooks will read
@@ -1468,27 +1588,82 @@ def parse_args():
         help="max_cache_len for the StaticCache (default: 2048). "
         "Ignored when --no_static_cache is set.",
     )
+    parser.add_argument(
+        "--capture_layers",
+        type=str,
+        default="0",
+        help="Comma-separated decoder layer indices to capture, or 'all' "
+        "(default: 0). Each captured layer emits its own entries, named "
+        "<Module>_layer<N>. A decoder stack repeats the same shapes per layer, so "
+        "capturing many layers multiplies the YAML and the number of compiled "
+        "binaries in the module test -- prefer a couple of representatives.",
+    )
     return parser.parse_args()
+
+
+def _parse_capture_layers(spec: str) -> Optional[Set[int]]:
+    """Parse ``--capture_layers`` into a set of indices.
+
+    ``'all'`` maps to :data:`CAPTURE_ALL_LAYERS` (no filtering), NOT to ``None``:
+    ``None`` means "use the default", which is layer 0 only.
+    """
+    if spec.strip().lower() == "all":
+        return CAPTURE_ALL_LAYERS
+    layers = {int(x) for x in spec.split(",") if x.strip()}
+    if not layers:
+        raise ValueError(
+            f"--capture_layers={spec!r} selected no layers; pass indices "
+            f"(e.g. '0,1') or 'all'."
+        )
+    return layers
+
+
+def generate_module_config(
+    model_path: str,
+    seq_len: int = 128,
+    output: Optional[str] = None,
+    capture_layers: Optional[Set[int]] = None,
+    use_static_cache: bool = True,
+    max_cache_len: int = 2048,
+):
+    """Capture a module-test YAML from a HuggingFace model.
+
+    The programmatic entry point; :func:`main` is a thin CLI wrapper over it, so
+    both routes share one implementation.
+
+    ``capture_layers`` selects which decoder layers to record, by index. ``None``
+    records only layer 0; pass :data:`CAPTURE_ALL_LAYERS` to record every layer.
+
+    Returns:
+        The written YAML path.
+    """
+    model, tokenizer = load_model_and_tokenizer(model_path)
+    inputs = build_dummy_inputs(tokenizer, seq_len)
+
+    # Use a StaticCache by default; disabling it falls back to the model's default
+    # dynamic cache. The (empty) StaticCache is passed into the prefill forward
+    # and reused for decode.
+    if use_static_cache:
+        inputs["past_key_values"] = StaticCache(
+            config=model.config, max_cache_len=max_cache_len
+        )
+
+    capture = ModuleInfoCapture(capture_layers=capture_layers)
+    capture_module_invocations(model, capture, inputs)
+
+    return write_module_config(capture, model_path, output)
 
 
 def main():
     args = parse_args()
-
-    model, tokenizer = load_model_and_tokenizer(args.model_path)
-    inputs = build_dummy_inputs(tokenizer, args.seq_len)
-
-    # Use a StaticCache by default; --no_static_cache falls back to the model's
-    # default dynamic cache. The (empty) StaticCache is passed into the prefill
-    # forward and reused for decode.
-    if not args.no_static_cache:
-        inputs["past_key_values"] = StaticCache(
-            config=model.config, max_cache_len=args.max_cache_len
-        )
-
-    capture = ModuleInfoCapture()
-    capture_module_invocations(model, capture, inputs)
-
-    write_module_config(capture, args.model_path, args.output)
+    generate_module_config(
+        args.model_path,
+        seq_len=args.seq_len,
+        output=args.output,
+        capture_layers=_parse_capture_layers(args.capture_layers),
+        use_static_cache=not args.no_static_cache,
+        max_cache_len=args.max_cache_len,
+    )
 
 
 if __name__ == "__main__":
