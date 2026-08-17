@@ -243,6 +243,66 @@ jobs:
             --exclude tiiuae/Falcon3-1B-Base mistralai/Mistral-Small-3.1-24B-Instruct-2503 ibm-research/granite-4.1-20b \
             "${ONLY_ARGS[@]}"
 
+  # ===========================================================================
+  # Generates spyre-model-module-tests' matrix from the tests/configs/module_tests/
+  # directory of the SAME ref+repository that build-hf-adapters is about to check
+  # out (inputs.ref/inputs.repository), instead of a filename list hardcoded here.
+  #
+  # Why this exists: this reusable workflow file is resolved at whichever ref
+  # GitHub's workflow_dispatch call targets (dispatch_ref), while the source tree
+  # spyre-model-module-tests actually tests is checked out from a SEPARATE `ref`
+  # input -- callers are free to point these at different commits (that's the
+  # whole point of the Test-With:/companion-ref flow). A filename list hardcoded
+  # in this file is therefore a second, independent copy of "what configs exist,"
+  # which drifts silently whenever those two refs disagree -- e.g. a config gets
+  # renamed on the ref under test but dispatch_ref still resolves to a pre-rename
+  # copy of this file (or vice versa), and the matrix hands run_test.sh a path
+  # that doesn't exist ("No YAML config file(s) found in the arguments.").
+  # Deriving the list from the actual checked-out tree, every time, makes that
+  # class of drift impossible.
+  # ===========================================================================
+  generate-module-config-matrix:
+    name: Generate module-test config matrix
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_tests }}
+    outputs:
+      module_config_matrix: ${{ steps.generate.outputs.module_config_matrix }}
+    # Same override as generate-matrix above: the workflow-level default
+    # (working-directory: /home/senuser) only exists on the self-hosted Spyre
+    # runners. This job runs on ubuntu-latest (a plain git clone + ls needs no
+    # Spyre hardware), where that path doesn't exist.
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: List tests/configs/module_tests at the ref under test
+        id: generate
+        env:
+          # Same inputs, same clone-URL resolution as build-hf-adapters/action.yaml's
+          # "Checkout target commit" step, so this always inspects the identical
+          # source tree that step is about to check out.
+          INPUT_REF: ${{ inputs.ref }}
+          INPUT_REPOSITORY: ${{ inputs.repository }}
+        run: |
+          set -euo pipefail
+          CLONE_URL="${INPUT_REPOSITORY:-$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git}"
+          if [[ -n "$INPUT_REPOSITORY" && "$CLONE_URL" != *"://"* ]]; then
+            CLONE_URL="$GITHUB_SERVER_URL/${CLONE_URL%.git}.git"
+          fi
+          TARGET_REF="${INPUT_REF:-$GITHUB_SHA}"
+          git clone --filter=blob:none --no-checkout "$CLONE_URL" repo
+          cd repo
+          git checkout --force "$TARGET_REF"
+          cd tests/configs/module_tests
+          # *vllm* configs (e.g. granite_4_1_8b_vllm.yaml, gpt_oss_20b_vllm_spyre.yaml)
+          # are a separate, not-yet-wired-in flavor -- excluded here to match the
+          # scope of the filename list this replaces exactly, not just "whatever's
+          # on disk". Widen this (or wire up a real vllm-module-tests job) as a
+          # deliberate follow-up, not a side effect of fixing the drift bug.
+          configs=$(ls *.yaml | grep -v vllm | jq -R -s -c 'split("\n")[:-1]')
+          echo "Configs found at ${TARGET_REF} (excluding vllm): ${configs}"
+          echo "module_config_matrix=${configs}" >> "$GITHUB_OUTPUT"
+
   adapter-coverage:
     name: adapter coverage
     runs-on: ubuntu-latest
@@ -890,7 +950,7 @@ jobs:
 
   spyre-model-module-tests:
     name: Spyre model-module tests (${{ matrix.config }})
-    needs: [resolve-test-type]
+    needs: [resolve-test-type, generate-module-config-matrix]
     # Suite key: "model_module". Part of the "unit" coarse tier.
     if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_module ')) }}
     runs-on:
@@ -902,14 +962,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        config:
-          - granite_4_1_8b.yaml
-          - granite_3_3_8b_instruct.yaml
-          - Meta-Llama-3.1-8B-Instruct.yaml
-          - Ministral-3-14B-Instruct-2512.yaml
-          - Mistral-Small-3.2-24B-Instruct-2506.yaml
-          - Qwen2.5-7B-Instruct.yaml
-          - gpt_oss_20b.yaml
+        # Dynamic matrix: every tests/configs/module_tests/*.yaml file at the ref
+        # under test (see generate-module-config-matrix above) -- not a filename
+        # list hardcoded here, which can silently drift from the actual tree.
+        config: ${{ fromJSON(needs.generate-module-config-matrix.outputs.module_config_matrix) }}
 
     steps:
       - name: Checkout composite actions
@@ -962,6 +1018,7 @@ jobs:
       - pre-commit
       - mypy
       - generate-matrix
+      - generate-module-config-matrix
       - adapter-coverage
       - check-uv-lock
 #      - cpu-tests
@@ -986,6 +1043,7 @@ jobs:
           if ${{ contains(needs.pre-commit.result, 'failure') || contains(needs.pre-commit.result, 'cancelled') ||
                  contains(needs.mypy.result, 'failure') || contains(needs.mypy.result, 'cancelled') ||
                  contains(needs.generate-matrix.result, 'failure') || contains(needs.generate-matrix.result, 'cancelled') ||
+                 contains(needs.generate-module-config-matrix.result, 'failure') || contains(needs.generate-module-config-matrix.result, 'cancelled') ||
                  contains(needs.adapter-coverage.result, 'failure') || contains(needs.adapter-coverage.result, 'cancelled') ||
                  contains(needs.check-uv-lock.result, 'failure') || contains(needs.check-uv-lock.result, 'cancelled') ||
                  contains(needs.spyre-load-tests.result, 'failure') || contains(needs.spyre-load-tests.result, 'cancelled') ||
