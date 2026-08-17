@@ -63,26 +63,31 @@ on:
       test_type:
         description: >-
           Which Spyre suites to run: smoke | unit | integration | regression |
-          trunk. These tier names are literal, first-class values -- no
-          alias-resolution layer. "unit" runs every suite except smoke (load,
-          token_compare, embed_compare, vlm, reranker_compare, model_module); "integration" runs
-          only the smoke suite; "regression"/"trunk" (default: regression) run
-          everything, i.e. smoke + unit. The resolve-test-type job below
-          applies the shared default so every caller (Makefile, Jenkins,
-          config.yaml) stays in sync. For finer control, any other value is a
-          space-separated allowlist of individual suite keys matched against
-          each matrix job's own `if:` (see the "Suite key" comment above each
-          spyre-*-tests job below), e.g. "smoke token_compare" -- "smoke" by
-          itself works this way too (it's a suite key, not its own tier).
-          Adding a new suite later means giving the new job its own key and
-          adding it to the "unit" set -- no other job needs to change.
+          trunk | edge_cases. These tier names are literal, first-class values
+          -- no alias-resolution layer. "unit" runs every suite except smoke
+          (load, token_compare, embed_compare, vlm, reranker_compare,
+          model_module); "integration" runs only the smoke suite;
+          "regression"/"trunk" (default: regression) run everything except
+          edge_cases, i.e. smoke + unit. "edge_cases" runs the tests/spyre/
+          edge_cases/ suite (9 files x every causal-LM model) -- daily-only
+          tier, kept out of PR/trunk to bound CI cost. The resolve-test-type
+          job below applies the shared default so every caller (Makefile,
+          Jenkins, config.yaml) stays in sync. For finer control, any other
+          value is a space-separated allowlist of individual suite keys
+          matched against each matrix job's own `if:` (see the "Suite key"
+          comment above each spyre-*-tests job below), e.g. "smoke
+          token_compare" or "smoke edge_cases" -- "smoke" and "edge_cases" by
+          themselves work this way too (they're suite keys, not tiers on
+          their own dropdown here). Adding a new suite later means giving the
+          new job its own key and adding it to the "unit" set -- no other
+          job needs to change.
         required: false
         type: string
         default: regression
       models:
         description: >-
           Space-separated list of model paths to restrict every matrix job
-          (smoke/load/token-compare/embed-compare/vision) to, e.g.
+          (smoke/load/token-compare/embed-compare/vision/edge-cases) to, e.g.
           "Qwen/Qwen3-0.6B ministral/Ministral-3B-Instruct". Must match paths
           exactly as they appear in tests/model_registry.py. Empty (default)
           = run every model in the registry.
@@ -888,6 +893,90 @@ jobs:
           path: junit-question-answering-compare-${{ matrix.model_key }}.xml
           retention-days: 14
 
+  # ---------------------------------------------------------------------------
+  # Edge-case suite (suite key: "edge_cases").
+  #
+  # Runs each file under tests/spyre/edge_cases/ against every causal-LM model
+  # from the generated matrix, one job per (model, file) pair. All files are
+  # @pytest.mark.slow, so `make edge-cases-tests` passes --run-slow.
+  #
+  # Not part of the regression/trunk/unit tiers -- gated to test_type ==
+  # 'edge_cases' (or an explicit "edge_cases" word in a space-separated combo)
+  # so PR runs don't grow by 9 x N jobs. daily_test.yaml is the intended
+  # caller, passing test_type: edge_cases. Adding this job to the standard
+  # tiers is a separate follow-up decision (see run-spyre-unit-tests below --
+  # kept out of that gate for the same reason).
+  # ---------------------------------------------------------------------------
+  spyre-edge-cases-tests:
+    name: Spyre edge case ${{ matrix.test_file }} (${{ matrix.model_key }})
+    needs: [generate-matrix, resolve-test-type]
+    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'edge_cases' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' edge_cases ')) }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.causal_matrix) }}
+        test_file:
+          - test_eos_spyre.py
+          - test_long_multi_block_spyre.py
+          - test_prompt_exactly_block_spyre.py
+          - test_short_spyre.py
+          - test_single_token_prompt_spyre.py
+          - test_mixed_spyre.py
+          - test_no_pad_token_fallback_spyre.py
+          - test_sampling_spyre.py
+          - test_zero_new_tokens_spyre.py
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+
+      - name: Run ${{ matrix.test_file }} for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          SAFE_MODEL_KEY="$(echo '${{ matrix.model_key }}' | tr '/' '-')"
+          SAFE_TEST_FILE="$(echo '${{ matrix.test_file }}' | tr '/' '-')"
+          echo "SAFE_MODEL_KEY=${SAFE_MODEL_KEY}" >> "$GITHUB_ENV"
+          echo "SAFE_TEST_FILE=${SAFE_TEST_FILE}" >> "$GITHUB_ENV"
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running ${{ matrix.test_file }} for ${{ matrix.model_key }}..."
+          make edge-cases-tests \
+            PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
+            EDGE_CASE_FILE='${{ matrix.test_file }}' \
+            MODEL_PATH='${{ matrix.model_key }}' \
+            JUNIT_XML="junit-edge-cases-${SAFE_TEST_FILE}-${SAFE_MODEL_KEY}.xml"
+          echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-edge-cases-${{ env.SAFE_TEST_FILE }}-${{ env.SAFE_MODEL_KEY }}
+          path: junit-edge-cases-${{ env.SAFE_TEST_FILE }}-${{ env.SAFE_MODEL_KEY }}.xml
+          retention-days: 14
+
   spyre-model-module-tests:
     name: Spyre model-module tests (${{ matrix.config }})
     needs: [resolve-test-type]
@@ -973,6 +1062,7 @@ jobs:
       - spyre-reranker-compare-tests
       - spyre-masked-lm-compare-tests
       - spyre-question-answering-compare-tests
+      - spyre-edge-cases-tests
       - spyre-model-module-tests #updated to run model centric HF module tests
     if: always()
     steps:
@@ -996,6 +1086,7 @@ jobs:
                  contains(needs.spyre-reranker-compare-tests.result, 'failure') || contains(needs.spyre-reranker-compare-tests.result, 'cancelled') ||
                  contains(needs.spyre-masked-lm-compare-tests.result, 'failure') || contains(needs.spyre-masked-lm-compare-tests.result, 'cancelled') ||
                  contains(needs.spyre-question-answering-compare-tests.result, 'failure') || contains(needs.spyre-question-answering-compare-tests.result, 'cancelled') ||
+                 contains(needs.spyre-edge-cases-tests.result, 'failure') || contains(needs.spyre-edge-cases-tests.result, 'cancelled') ||
                  contains(needs.spyre-model-module-tests.result, 'failure') || contains(needs.spyre-model-module-tests.result, 'cancelled') }}; then
             echo "One or more test suites failed."
             exit 1
