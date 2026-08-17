@@ -402,12 +402,14 @@ def build_catalog(
     print(f"Retrieved {len(candidates)} raw {label} candidates.")
 
     t0 = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=16) as ex:
+    with ThreadPoolExecutor(max_workers=32) as ex:
         keep_flags: list[tuple[bool, str]] = list(
             tqdm(
                 ex.map(_safe_filter, candidates),
                 total=len(candidates),
                 desc="Filtering candidates",
+                miniters=1000,
+                mininterval=10,
             )
         )
     models: list[ModelInfo] = [
@@ -423,10 +425,11 @@ def build_catalog(
     if reason_counts:
         total_filtered_out: int = sum(reason_counts.values())
         print(f"Filtered out {total_filtered_out} {label} models by reason:")
+        count_width: int = len(f"{limit:,}")
         for reason, count in sorted(
             reason_counts.items(), key=lambda kv: kv[1], reverse=True
         ):
-            print(f"  {reason}: {count}")
+            print(f"\t{count:>{count_width},} - {reason}")
 
     models = models[:limit]
 
@@ -448,12 +451,14 @@ def build_catalog(
     header: list[str] = base_head + extra_head + tail_head
 
     t0 = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=16) as ex:
+    with ThreadPoolExecutor(max_workers=32) as ex:
         config_classes: list[str | None] = list(
             tqdm(
                 ex.map(lambda m: get_config_type(m.id, token), models),
                 total=len(models),
                 desc="Fetching config classes",
+                miniters=1000,
+                mininterval=10,
             )
         )
     timings["config classes (AutoConfig)"] = time.perf_counter() - t0
