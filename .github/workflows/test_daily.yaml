@@ -123,7 +123,7 @@ jobs:
       matrix:
         model_key: ${{ fromJSON(needs.generate-matrix.outputs.causal_matrix) }}
         test_file:
-          - test_eos.py
+          - test_eos_spyre.py
           - test_long_multi_block_spyre.py
           - test_prompt_exactly_block_spyre.py
           - test_short_block_minus_one_spyre.py
@@ -131,11 +131,9 @@ jobs:
           - test_short_one_token_spyre.py
           - test_short_two_blocks_plus_spyre.py
           - test_single_token_prompt_spyre.py
-          - test_mixed_short_spyre.py
-          - test_mixed_with_single_token_spyre.py
+          - test_mixed_spyre.py
           - test_no_pad_token_fallback_spyre.py
-          - test_sampling_determinism_spyre.py
-          - test_sampling_top_k_zero_spyre.py
+          - test_sampling_spyre.py
           - test_zero_new_tokens_spyre.py
     steps:
       - name: Checkout composite actions
