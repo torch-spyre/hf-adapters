@@ -1221,8 +1221,6 @@ def _validate_supported_generation_config(cfg):
         "constraints": (None, []),
         "forced_bos_token_id": (None,),
         "forced_eos_token_id": (None,),
-        "suppress_tokens": (None, []),
-        "begin_suppress_tokens": (None, []),
         "sequence_bias": (None, {}),
         "output_attentions": (None, False),
         "output_hidden_states": (None, False),
@@ -1385,11 +1383,23 @@ def normalize_generation_inputs(input_ids, attention_mask=None):
     )
 
 
-def select_next_token(next_logits, do_sample, temperature, top_k, top_p):
-    """CPU token selection: greedy argmax, or temperature/top-k/top-p sampling.
-
-    The top-p path mirrors HF's ``TopPLogitsWarper.__call__``.
-    """
+def select_next_token(
+    next_logits,
+    do_sample,
+    temperature,
+    top_k,
+    top_p,
+    suppress_tokens=None,
+    begin_suppress_tokens=None,
+    is_first_step=False,
+):
+    """CPU token selection with supported HF logits processing and sampling."""
+    if suppress_tokens or (is_first_step and begin_suppress_tokens):
+        next_logits = next_logits.clone()
+        if suppress_tokens:
+            next_logits[:, suppress_tokens] = -torch.inf
+        if is_first_step and begin_suppress_tokens:
+            next_logits[:, begin_suppress_tokens] = -torch.inf
     if not do_sample:
         return torch.argmax(next_logits, dim=-1)  # [B]
     scaled = next_logits / temperature
@@ -1667,7 +1677,14 @@ def generate(
             next_logits = next_logits.clone()
             next_logits[:, eos_ids] = -torch.inf
         next_tokens = select_next_token(
-            next_logits, cfg.do_sample, cfg.temperature, cfg.top_k, cfg.top_p
+            next_logits,
+            cfg.do_sample,
+            cfg.temperature,
+            cfg.top_k,
+            cfg.top_p,
+            cfg.suppress_tokens,
+            cfg.begin_suppress_tokens,
+            is_first_step=i == 0,
         )
 
         if timing:

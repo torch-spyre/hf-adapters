@@ -554,7 +554,14 @@ def generate(
 
         # Token selection (CPU) — mirrors hf_common.generate.
         next_tokens = select_next_token(
-            next_logits, do_sample, temperature, top_k, top_p
+            next_logits,
+            do_sample,
+            temperature,
+            top_k,
+            top_p,
+            cfg.suppress_tokens,
+            cfg.begin_suppress_tokens,
+            is_first_step=i == 0,
         )
 
         tokens_in_block = (tokens_in_block + 1) % BLOCK_SIZE
