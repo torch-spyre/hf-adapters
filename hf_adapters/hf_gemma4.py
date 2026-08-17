@@ -13,10 +13,12 @@
 # limitations under the License.
 
 """
-HuggingFace Transformers adapter for Gemma 4 (dense) causal-LM models on Spyre.
+HuggingFace Transformers adapter for Gemma 4 causal-LM models on Spyre.
 
-Targets the **12B dense** variant (``model_type`` ``gemma4_text`` /
-``gemma4``). Gemma 4 departs from the standard GQA decoder (``hf_qwen2`` etc.)
+Targets the **12B / 31B dense** variants and the **E2B / E4B E-variants**
+(``model_type`` ``gemma4_text`` / ``gemma4``); the E-variant per-layer
+embeddings and KV-sharing are handled below (see "E-variant support"). Gemma 4
+departs from the standard GQA decoder (``hf_qwen2`` etc.)
 in several ways, so it gets a custom compiled block rather than reusing
 ``make_standard_gqa_block``:
 
@@ -55,9 +57,22 @@ in several ways, so it gets a custom compiled block rather than reusing
   ``hf_phi3``); ``final_logit_softcapping`` (30.0) applies a
   ``cap * tanh(logits / cap)`` after the head.
 
-Out of scope (E2B / 26B-A4B features): per-layer embeddings (PLE), KV-sharing
-across layers, and MoE blocks. ``prepare_for_spyre`` asserts these are absent
-so an unsupported checkpoint fails loudly instead of running incorrectly.
+E-variant support (E2B / E4B): the two E-variant features are handled here:
+
+- **Per-Layer Embeddings (PLE).** E-variants inject a per-layer residual after
+  the MLP: ``embed_tokens_per_layer`` + a projected/normed context term, gated
+  and added back per layer (``_compute_per_layer_inputs`` + ``_ple_tail``,
+  mirroring stock ``get_per_layer_inputs`` / ``project_per_layer_inputs`` and
+  the decoder tail). Gated off (``has_ple=False``) for the dense 12B/31B
+  variants, which carry no PLE submodules.
+- **KV-sharing across layers.** The trailing ``num_kv_shared_layers`` layers
+  reuse the KV cache of the nearest preceding non-shared layer of the same
+  ``layer_type`` (stock ``store_full_length_kv`` semantics), so they run a lean
+  Q-only block (no k/v proj, no cache write) against that producer's cache — see
+  ``_shared_producer_map`` and ``Gemma4SharedBlock``.
+
+Still out of scope: MoE blocks (26B-A4B). ``prepare_for_spyre`` asserts MoE is
+absent so an unsupported checkpoint fails loudly instead of running incorrectly.
 
 Usage::
 
@@ -98,6 +113,118 @@ def _gemma4_backbone(model):
     matching where ``pad_lm_head`` looks.
     """
     return get_backbone(model)
+
+
+def _compute_per_layer_inputs(model, inputs_embeds, input_ids):
+    """Compute the combined Per-Layer Embeddings tensor, or None if the model
+    has no PLE. Mirrors stock ``Gemma4TextModel.get_per_layer_inputs`` +
+    ``project_per_layer_inputs`` (transformers ``modeling_gemma4``).
+
+    Returns ``[B, S, num_hidden_layers, hidden_size_per_layer_input]``.
+    """
+    backbone = _gemma4_backbone(model)
+    if not getattr(backbone, "hidden_size_per_layer_input", 0):
+        return None
+
+    cfg = text_config(model.config)
+    ple_dim = cfg.hidden_size_per_layer_input
+    n_layers = cfg.num_hidden_layers
+
+    # Token-identity component (scaled embedding already applies sqrt(ple_dim)).
+    token_identity = backbone.embed_tokens_per_layer(input_ids).reshape(
+        *input_ids.shape, n_layers, ple_dim
+    )
+    # Context component: project the main embeds, scale, reshape, RMSNorm.
+    context = backbone.per_layer_model_projection(inputs_embeds)
+    context = context * backbone.per_layer_model_projection_scale
+    context = context.reshape(*inputs_embeds.shape[:-1], n_layers, ple_dim)
+    context = backbone.per_layer_projection_norm(context)
+
+    return (context + token_identity) * backbone.per_layer_input_scale
+
+
+def _ple_tail(block, h, per_layer_input):
+    """Gemma 4 PLE per-layer residual injection (stock modeling_gemma4 tail).
+
+    ``block`` is the registered decoder block carrying the per-layer PLE
+    submodules (``per_layer_input_gate`` / ``per_layer_projection`` /
+    ``post_per_layer_input_norm``), captured in ``__init__`` when ``has_ple``.
+    """
+    residual = h
+    x = block.per_layer_input_gate(h)
+    x = F.gelu(x, approximate="tanh")
+    x = x * per_layer_input
+    x = block.per_layer_projection(x)
+    x = block.post_per_layer_input_norm(x)
+    return residual + x
+
+
+def _shared_producer_map(cfg):
+    """For each layer, the producer layer index whose KV a shared layer reuses.
+
+    Shared layers are the last ``num_kv_shared_layers`` layers; each reuses the
+    KV of the nearest preceding NON-shared layer of the same ``layer_type``
+    (stock Gemma4 ``store_full_length_kv`` semantics). Non-shared layers map to
+    ``None``. Returns ``(first_shared_index, producer_of)``.
+    """
+    n = cfg.num_hidden_layers
+    n_shared = getattr(cfg, "num_kv_shared_layers", 0)
+    first = n - n_shared
+    layer_types = cfg.layer_types
+    producer_of = [None] * n
+    if n_shared <= 0:
+        return first, producer_of
+    # Last non-shared layer index per type (only layers before `first` produce).
+    last_by_type = {}
+    for i in range(first):
+        last_by_type[layer_types[i]] = i
+    for i in range(first, n):
+        p = last_by_type.get(layer_types[i])
+        assert p is not None, (
+            f"Gemma 4 KV-share: shared layer {i} (type {layer_types[i]}) has no "
+            "same-type producer before the KV-share boundary."
+        )
+        producer_of[i] = p
+    return first, producer_of
+
+
+def _zero_fully_masked_rows(h, attn_mask):
+    """Zero the hidden-state rows whose attention mask is entirely ``-inf``.
+
+    Under ``hf_common.generate``'s block-padded prefill, a short prompt is
+    left-padded to a ``BLOCK_SIZE`` multiple. The leading pad query rows attend
+    to *no* key (their whole mask row is ``-inf``), so their output is discarded
+    downstream — but they still flow through the decoder and write K/V into the
+    padded cache slots. On Gemma 4 that is fatal: the ``<pad>`` (id 0) embedding
+    RMSNorms to a large-magnitude activation whose MLP ``gate*up`` product
+    overflows **fp16** to ``+inf`` (real rows peak two orders of magnitude
+    lower), and the sandwich ``post_feedforward_layernorm`` then computes
+    ``inf * rsqrt(inf) = inf * 0 = NaN``. That NaN is written as K/V at the pad
+    cache positions; because ``NaN + (-inf) = NaN`` (an additive mask cannot
+    suppress a NaN score), the *next* layer's real query rows pick it up through
+    SDPA and every real-token logit goes NaN — ``generate`` then emits all
+    ``<pad>``. (A mask fix cannot help: the poison is a NaN *key*, not a masking
+    error.)
+
+    Zeroing these rows breaks the chain at the source: Gemma 4 has no
+    projection biases and SDPA returns exactly ``0`` for a fully-masked row, so
+    ``RMSNorm(0) = 0`` and an all-zero row stays all-zero through every layer —
+    the pad cache slots hold clean zeros and real rows (masked ``-inf`` against
+    them) get weight 0. Real query rows always attend to at least their own
+    position, so they are never zeroed and their numerics are unchanged; in the
+    unpadded path (no fully-masked row) this is a no-op.
+
+    The fully-masked test is derived on **CPU** (a boolean reduction) and only
+    the resulting float multiplier is moved to ``h``'s device, mirroring
+    ``add_causal_sliding_window_band`` — Spyre's compiled backend rejects
+    on-device boolean reductions. This runs in the eager block driver, outside
+    any compiled region, so it is static and Spyre-safe.
+    """
+    # attn_mask: [B, 1, S, cache_len]. A row is "live" if it has any finite
+    # (attendable) key; pad rows are entirely -inf -> multiplier 0.
+    am = attn_mask.to("cpu")
+    live_rows = torch.isfinite(am).any(dim=-1).any(dim=1).to(h.dtype)  # [B, S]
+    return h * live_rows.to(h.device)[:, :, None]
 
 
 def _patch_gemma4_rmsnorm(rmsnorm_cls):
@@ -217,7 +344,9 @@ class Gemma4Attention(nn.Module):
 class Gemma4Block(nn.Module):
     """Registered dense Gemma 4 decoder block used by the Spyre adapter."""
 
-    def __init__(self, layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v):
+    def __init__(
+        self, layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v, has_ple
+    ):
         super().__init__()
         self.self_attn = Gemma4Attention(
             layer.self_attn,
@@ -236,6 +365,12 @@ class Gemma4Block(nn.Module):
             layer.layer_scalar,
             persistent="layer_scalar" not in layer._non_persistent_buffers_set,
         )
+        # E-variant per-layer-embedding submodules (absent on dense 12B/31B).
+        self.has_ple = has_ple
+        if has_ple:
+            self.per_layer_input_gate = layer.per_layer_input_gate
+            self.per_layer_projection = layer.per_layer_projection
+            self.post_per_layer_input_norm = layer.post_per_layer_input_norm
         self.train(layer.training)
 
     def forward(
@@ -247,6 +382,7 @@ class Gemma4Block(nn.Module):
         value_cache,
         cache_index,
         layer_scalar,
+        per_layer_input=None,
     ):
         residual = hidden_states
         h = self.input_layernorm(hidden_states)
@@ -266,22 +402,114 @@ class Gemma4Block(nn.Module):
         h = self.mlp(h)
         h = self.post_feedforward_layernorm(h)
         h = residual + h
+        if self.has_ple:
+            h = _ple_tail(self, h, per_layer_input)
         return h * layer_scalar, key_cache, value_cache
 
 
+class Gemma4SharedBlock(nn.Module):
+    """KV-sharing Gemma 4 decoder block (E-variant trailing layers).
+
+    Runs a lean Q-only attention against a *producer* layer's KV cache: no
+    k/v projection, no k_norm/v_norm, no RoPE-on-K, no cache update. The
+    producer's cache is passed in by the driver (``_run_blocks_over_embeds``
+    selects ``key_caches[producer_of[i]]``), so this block returns only the
+    updated hidden state (never a cache tuple) and needs no ``cache_index`` —
+    it never writes.
+    """
+
+    def __init__(self, layer, num_q_heads, head_dim, has_ple):
+        super().__init__()
+        attn = layer.self_attn
+        self.q_proj = attn.q_proj
+        self.q_norm = attn.q_norm
+        self.o_proj = attn.o_proj
+        self.scaling = attn.scaling  # 1.0 for Gemma 4
+        self.num_q_heads = num_q_heads
+        self.head_dim = head_dim
+        self.mlp = layer.mlp
+        self.input_layernorm = layer.input_layernorm
+        self.post_attention_layernorm = layer.post_attention_layernorm
+        self.pre_feedforward_layernorm = layer.pre_feedforward_layernorm
+        self.post_feedforward_layernorm = layer.post_feedforward_layernorm
+        self.register_buffer(
+            "layer_scalar",
+            layer.layer_scalar,
+            persistent="layer_scalar" not in layer._non_persistent_buffers_set,
+        )
+        self.has_ple = has_ple
+        if has_ple:
+            self.per_layer_input_gate = layer.per_layer_input_gate
+            self.per_layer_projection = layer.per_layer_projection
+            self.post_per_layer_input_norm = layer.post_per_layer_input_norm
+        self.train(layer.training)
+
+    def forward(
+        self,
+        hidden_states,
+        selected_freqs,
+        attn_mask,
+        key_cache,
+        value_cache,
+        layer_scalar,
+        per_layer_input=None,
+    ):
+        residual = hidden_states
+        h = self.input_layernorm(hidden_states)
+        bsz, seq_len, _ = h.shape
+        q = self.q_proj(h).view(bsz, seq_len, self.num_q_heads, self.head_dim)
+        q = self.q_norm(q).transpose(1, 2)
+        q = apply_rope_matmul(q, selected_freqs)
+        attn_out = F.scaled_dot_product_attention(
+            q,
+            key_cache,
+            value_cache,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            scale=self.scaling,
+            enable_gqa=True,
+        )
+        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
+        attn_out = self.o_proj(attn_out)
+        h = residual + self.post_attention_layernorm(attn_out)
+
+        residual = h
+        h = self.pre_feedforward_layernorm(h)
+        h = self.mlp(h)
+        h = self.post_feedforward_layernorm(h)
+        h = residual + h
+        if self.has_ple:
+            h = _ple_tail(self, h, per_layer_input)
+        return h * layer_scalar
+
+
 def prepare_gemma4_blocks(
-    layers, num_q_heads_per_layer, kv_shapes, is_kv_eq_v_per_layer
+    layers, num_q_heads_per_layer, kv_shapes, is_kv_eq_v_per_layer, producer_of, has_ple
 ):
-    """Replace Gemma 4 decoder layers with registered blocks and compile them."""
+    """Replace Gemma 4 decoder layers with registered blocks and compile them.
+
+    ``producer_of[i]`` is ``None`` for a normal (KV-writing) layer and an int
+    for a KV-sharing layer, in which case a lean ``Gemma4SharedBlock`` is built
+    instead of a full ``Gemma4Block``.
+    """
     blocks = []
     for i, layer in enumerate(list(layers)):
-        block = Gemma4Block(
-            layer,
-            num_q_heads_per_layer[i],
-            kv_shapes[i][0],
-            kv_shapes[i][1],
-            is_kv_eq_v_per_layer[i],
-        )
+        if producer_of[i] is None:
+            block = Gemma4Block(
+                layer,
+                num_q_heads_per_layer[i],
+                kv_shapes[i][0],
+                kv_shapes[i][1],
+                is_kv_eq_v_per_layer[i],
+                has_ple,
+            )
+        else:
+            block = Gemma4SharedBlock(
+                layer,
+                num_q_heads_per_layer[i],
+                kv_shapes[i][1],
+                has_ple,
+            )
         layers[i] = block
         blocks.append(torch.compile(block, dynamic=False))
     return blocks
@@ -329,6 +557,7 @@ def _run_blocks_over_embeds(
     value_caches,
     cache_index,
     masks=None,
+    per_layer_inputs=None,
 ):
     """Run the compiled Gemma 4 decoder blocks over precomputed embeddings.
 
@@ -342,6 +571,18 @@ def _run_blocks_over_embeds(
     OR-ed in. When ``None``, the text-only causal + sliding masks are built from
     ``attn_mask`` via ``_build_layer_masks`` (``attn_mask`` is ignored when
     ``masks`` is given).
+
+    ``per_layer_inputs`` (optional ``[B, S, num_hidden_layers, ple_dim]``) is
+    the combined PLE tensor from ``_compute_per_layer_inputs``, or ``None`` for
+    non-PLE models (dense 12B/31B and the 12B VLM) — in which case
+    ``per_layer_input=None`` is passed to each block, never read since
+    ``has_ple=False`` gates the PLE tail off. A ``None`` (not a zero-length
+    tensor) keeps the "no zero-length tensors on Spyre" rule on the shared path.
+
+    Each layer dispatches on ``model._spyre_producer_of[i]``: ``None`` runs the
+    full block (writes its own KV cache, returns a 3-tuple); an int runs the
+    shared block against that producer layer's cache (returns 1 tensor; the
+    shared layer's own cache entry is never written).
     """
     backbone = _gemma4_backbone(model)
     cfg = text_config(model.config)
@@ -367,20 +608,38 @@ def _run_blocks_over_embeds(
         masks = _build_layer_masks(model, attn_mask, seq_len, bsz, block_base)
 
     backbone_layers = backbone.layers
+    producer_of = model._spyre_producer_of
     for i, compiled_block in enumerate(model._spyre_compiled_blocks):
         lt = cfg.layer_types[i]
+        pli = (
+            per_layer_inputs[:, :, i, :] if per_layer_inputs is not None else None
+        )
+        p = producer_of[i]
         # Pass the per-layer scalar as a tensor read fresh from the registered,
         # device-moved block — NOT as a Python float — so Dynamo guards on tensor
         # metadata instead of recompiling for each distinct learned value.
-        h, key_caches[i], value_caches[i] = compiled_block(
-            h,
-            freqs[lt],
-            masks[lt],
-            key_caches[i],
-            value_caches[i],
-            cache_index,
-            backbone_layers[i].layer_scalar,
-        )
+        if p is None:
+            h, key_caches[i], value_caches[i] = compiled_block(
+                h,
+                freqs[lt],
+                masks[lt],
+                key_caches[i],
+                value_caches[i],
+                cache_index,
+                backbone_layers[i].layer_scalar,
+                pli,
+            )
+        else:
+            # KV-sharing layer: read the producer's cache, write nothing.
+            h = compiled_block(
+                h,
+                freqs[lt],
+                masks[lt],
+                key_caches[p],
+                value_caches[p],
+                backbone_layers[i].layer_scalar,
+                pli,
+            )
 
     h = backbone.norm(h)
     return h
@@ -397,11 +656,16 @@ def _run_backbone_forward(
 ):
     """Gemma 4 backbone: scaled embedding, per-type RoPE + masks, blocks, norm.
 
-    Text-only path: embed the ids (scaled word embedding) then delegate to
+    Text-only path: embed the ids (scaled word embedding), neutralize left-pad
+    rows, compute the PLE tensor (``None`` for non-PLE models), then delegate to
     ``_run_blocks_over_embeds`` (no blockwise vision band).
     """
     backbone = _gemma4_backbone(model)
     h = backbone.embed_tokens(input_ids)
+    # Neutralize left-pad rows before they can overflow fp16 and poison the KV
+    # cache with NaN (see _zero_fully_masked_rows). No-op for the unpadded path.
+    h = _zero_fully_masked_rows(h, attn_mask)
+    per_layer_inputs = _compute_per_layer_inputs(model, h, input_ids)
     return _run_blocks_over_embeds(
         model,
         h,
@@ -410,6 +674,7 @@ def _run_backbone_forward(
         key_caches,
         value_caches,
         cache_index,
+        per_layer_inputs=per_layer_inputs,
     )
 
 
@@ -446,26 +711,24 @@ def _run_forward(
 def prepare_text_decoder_for_spyre(model):
     """Prepare ONLY the Gemma 4 text decoder for Spyre (in-place).
 
-    1. Assert the unsupported (E2B / MoE) features are absent.
+    1. Build the PLE flag + KV-share producer map; assert the still-unsupported
+       (MoE) feature is absent.
     2. Patch ``Gemma4RMSNorm`` for the fp16 Spyre path.
     3. Build one ``PrecomputedRotaryEmbedding`` per layer type from the model's
        per-type ``inv_freq`` buffers (no head padding — D/2 >= 64 already).
     4. Record per-layer KV-cache shapes (sliding vs global differ).
     5. Chunk the LM head for the large vocab.
-    6. Compile each decoder layer's block.
+    6. Compile each decoder layer's block (full or KV-sharing per the producer
+       map).
     """
     backbone = _gemma4_backbone(model)
     cfg = text_config(model.config)
 
-    assert not getattr(cfg, "hidden_size_per_layer_input", 0), (
-        "Gemma 4 adapter does not support per-layer embeddings (PLE); "
-        f"hidden_size_per_layer_input={cfg.hidden_size_per_layer_input}. "
-        "This adapter targets the dense 12B/31B variants, not E2B/E4B."
-    )
-    assert not getattr(cfg, "num_kv_shared_layers", 0), (
-        "Gemma 4 adapter does not support KV-sharing across layers; "
-        f"num_kv_shared_layers={cfg.num_kv_shared_layers}."
-    )
+    # E-variant features (handled): PLE flag + KV-share producer map.
+    model._spyre_has_ple = bool(getattr(cfg, "hidden_size_per_layer_input", 0))
+    _, producer_of = _shared_producer_map(cfg)
+    model._spyre_producer_of = producer_of
+
     assert not getattr(
         cfg, "enable_moe_block", False
     ), "Gemma 4 adapter does not support MoE blocks (enable_moe_block=True)."
@@ -513,9 +776,15 @@ def prepare_text_decoder_for_spyre(model):
         num_q_heads_per_layer,
         kv_shapes,
         is_kv_eq_v_per_layer,
+        producer_of,
+        model._spyre_has_ple,
     )
 
 
 def prepare_for_spyre(model):
-    """Apply Spyre adaptations to a dense Gemma 4 causal-LM model in-place."""
+    """Apply Spyre adaptations to a Gemma 4 causal-LM model in-place.
+
+    Handles both the dense 12B/31B variants and the E2B/E4B E-variants
+    (per-layer embeddings + KV-sharing); see ``prepare_text_decoder_for_spyre``.
+    """
     prepare_text_decoder_for_spyre(model)
