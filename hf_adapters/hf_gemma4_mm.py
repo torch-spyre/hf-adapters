@@ -506,6 +506,7 @@ def generate(
     temperature=None,
     top_k=None,
     top_p=None,
+    generation_config=None,
 ):
     """Autoregressive image→text generation on Spyre (greedy / top-k/p sampling).
 
@@ -524,20 +525,21 @@ def generate(
     (``processor.tokenizer.padding_side='left'``). Returns EOS-trimmed strings.
     """
     tokenizer = processor.tokenizer
-    params = _resolve_generation_params(
+    cfg, eos_ids, _ = _resolve_generation_params(
         model,
+        generation_config,
         {
             "do_sample": do_sample,
             "temperature": temperature,
             "top_k": top_k,
             "top_p": top_p,
         },
+        {},
     )
-    do_sample = params["do_sample"]
-    temperature = params["temperature"]
-    top_k = params["top_k"]
-    top_p = params["top_p"]
-    eos_ids = params["eos_ids"]
+    do_sample = cfg.do_sample
+    temperature = cfg.temperature
+    top_k = cfg.top_k
+    top_p = cfg.top_p
 
     backbone = get_backbone(model)
     model_d_type = get_model_dtype(model)
