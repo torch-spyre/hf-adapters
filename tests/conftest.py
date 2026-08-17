@@ -205,7 +205,26 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
         m for m in metafunc.definition.own_markers if m.name != "parametrize"
     ] + kept
 
-    metafunc.parametrize("model_path", overrides, ids=overrides)
+    # Re-apply non-blocking xfail(strict=False) for any override that's a known-flaky
+    # model in the registry -- otherwise a MODEL_PATH-driven per-model CI job (see
+    # _test_matrix.yaml) turns an expected soft failure into a hard, blocking one.
+    import model_registry
+
+    non_blocking = {
+        **model_registry.NON_BLOCKING_CAUSAL_MODELS,
+        **model_registry.NON_BLOCKING_VISION_MODELS,
+    }
+    params = [
+        (
+            pytest.param(
+                path, marks=pytest.mark.xfail(reason=non_blocking[path], strict=False)
+            )
+            if path in non_blocking
+            else path
+        )
+        for path in overrides
+    ]
+    metafunc.parametrize("model_path", params, ids=overrides)
 
 
 def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:

@@ -337,6 +337,7 @@ def token_compare_spyre(
 )
 def test_e2e_token_compare_spyre(model_path: str) -> None:
     mismatches, rows = token_compare_spyre(model_path)
+    _print_table(rows)
     n_match = sum(1 for r in rows if r["top1_match"])
     print(f"\nTop-1 agreement: {n_match}/{len(rows)} steps")
     assert not mismatches, mismatches

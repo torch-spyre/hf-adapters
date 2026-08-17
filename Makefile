@@ -66,7 +66,8 @@ MODEL_PATH_ARGS :=
 endif
 
 .PHONY: help test tests adapter-coverage-tests smoke-tests load-tests \
-        token-compare-tests embed-compare-tests vlm-tests reranker-tests model-module-tests
+        token-compare-tests embed-compare-tests vlm-tests reranker-tests model-module-tests \
+        masked-lm-compare-tests question-answering-compare-tests
 
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-24s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -84,7 +85,16 @@ smoke-tests: ## Run e2e smoke tests (suite key: smoke)
 	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_smoke_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 load-tests: ## Run load tests (suite key: load)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_load_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	# test_load_spyre.py is the one suite file with FOUR model_path-parametrized
+	# functions (causal/embed/masked-LM/QA) sharing that fixture name. conftest's
+	# --model-path override reparametrizes every function with a model_path
+	# fixture, not just the one whose registry the model belongs to -- so it
+	# would force the other three to load the model through the wrong auto-class
+	# and fail. Filter via -k (substring on the test ID) instead, which only
+	# selects the one matching parametrization, same as every other suite target
+	# gets from --model-path (safe here because MODEL_PATH is always one exact
+	# registry path, never an attacker-controlled or ambiguous substring).
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_load_spyre.py $(if $(MODEL_PATH),-k "$(MODEL_PATH)",$(K_ARGS)) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 token-compare-tests: ## Run token-compare tests (suite key: token_compare)
 	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_token_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
@@ -97,6 +107,12 @@ vlm-tests: ## Run VLM e2e tests (suite key: vlm)
 
 reranker-tests: ## Run reranker compare tests (suite key: reranker_compare)
 	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_reranker_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+
+masked-lm-compare-tests: ## Run masked-LM compare tests (suite key: masked_lm_compare)
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_masked_lm_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+
+question-answering-compare-tests: ## Run question-answering compare tests (suite key: question_answering_compare)
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_question_answering_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 # MODULE_CONFIG narrows model-module-tests to one YAML config (matrix-style
 # per-config CI jobs pass this); empty = run every config in tests/configs/module_tests.
@@ -145,8 +161,8 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	@# matches what CI runs for the "unit" tier via GHA.
 	resolved="$$(scripts/resolve_test_type.sh $(TEST_TYPE))"; \
 	case " $$resolved " in \
-	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare embed_compare vlm reranker_compare model_module" ;; \
-	  *" unit "*) suites="adapter_coverage load token_compare embed_compare vlm reranker_compare model_module" ;; \
+	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare model_module" ;; \
+	  *" unit "*) suites="adapter_coverage load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare model_module" ;; \
 	  " integration ") suites="smoke" ;; \
 	  " perf ") suites="perf" ;; \
 	  " smoke ") echo "TEST_TYPE=smoke is not a valid tier -- use TEST_TYPE=integration to run the smoke suite alone, or include 'smoke' in a multi-suite combo (e.g. TEST_TYPE=\"smoke load\")."; exit 1 ;; \
@@ -164,6 +180,8 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	    embed_compare)    $(MAKE) embed-compare-tests     JUNIT_XML="$(RESULTS_DIR)/spyre-embed-compare-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
 	    vlm)              $(MAKE) vlm-tests               JUNIT_XML="$(RESULTS_DIR)/spyre-vlm-e2e-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
 	    reranker_compare) $(MAKE) reranker-tests          JUNIT_XML="$(RESULTS_DIR)/spyre-reranker-compare-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    masked_lm_compare) $(MAKE) masked-lm-compare-tests JUNIT_XML="$(RESULTS_DIR)/spyre-masked-lm-compare-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    question_answering_compare) $(MAKE) question-answering-compare-tests JUNIT_XML="$(RESULTS_DIR)/spyre-question-answering-compare-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
 	    model_module)     $(MAKE) model-module-tests      JUNIT_XML=1 RESULTS_DIR="$(RESULTS_DIR)" MODULE_CONFIG="$(MODULE_CONFIG)" || rc=1 ;; \
 	    perf)             printf '%s\n' \
 	                        '<?xml version="1.0" encoding="utf-8"?>' \
@@ -171,7 +189,7 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	                        '  <testsuite name="hf-adapters-perf" tests="0" skipped="0" failures="0" errors="0"/>' \
 	                        '</testsuites>' > "$(RESULTS_DIR)/report.xml"; \
 	                      echo "hf-adapters has no perf harness yet (scaffold stub): wrote placeholder $(RESULTS_DIR)/report.xml" ;; \
-	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare embed_compare vlm reranker_compare model_module perf"; rc=1 ;; \
+	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare model_module perf"; rc=1 ;; \
 	  esac; \
 	done; \
 	exit $$rc

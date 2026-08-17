@@ -70,6 +70,7 @@ Usage::
 """
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
@@ -133,63 +134,26 @@ def _patch_gemma4_rmsnorm(rmsnorm_cls):
     rmsnorm_cls.forward = _forward_fp16
 
 
-def _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v):
-    """Compile one Gemma 4 dense decoder layer.
+class Gemma4Attention(nn.Module):
+    """Attention executed by the dense Gemma 4 Spyre adapter path."""
 
-    Block signature carries the per-layer mask and RoPE freqs (which differ
-    between sliding and global layers), so the caller selects them:
+    def __init__(self, attn, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v):
+        super().__init__()
+        self.q_proj = attn.q_proj
+        self.k_proj = attn.k_proj
+        self.v_proj = attn.v_proj
+        self.o_proj = attn.o_proj
+        self.q_norm = attn.q_norm
+        self.k_norm = attn.k_norm
+        self.v_norm = attn.v_norm
+        self.num_q_heads = num_q_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+        self.is_kv_eq_v = is_kv_eq_v
+        self.scaling = attn.scaling
 
-        block_forward(hidden_states, selected_freqs, attn_mask,
-                      key_cache, value_cache,
-                      is_filling, token_index, cache_position,
-                      layer_scalar)
-            -> (hidden_states, key_cache, value_cache)
-
-    Gemma applies Q/K/V RMSNorm before RoPE, uses the four-norm "sandwich"
-    structure, an unscaled (scale=1.0) attention, and a final per-layer scalar.
-    The per-layer scalar is a *tensor argument* (not a captured constant) so all
-    layers share one compiled binary — see the note in the body.
-    On global ``attention_k_eq_v`` layers (``is_kv_eq_v=True``) there is no
-    ``v_proj``: V is the raw ``k_proj`` output (before k_norm and RoPE) put
-    through ``v_norm``, mirroring stock HF.
-    """
-    attn = layer.self_attn
-    q_proj = attn.q_proj
-    k_proj = attn.k_proj
-    v_proj = attn.v_proj  # None when is_kv_eq_v
-    o_proj = attn.o_proj
-    q_norm = attn.q_norm
-    k_norm = attn.k_norm
-    v_norm = attn.v_norm
-    scaling = attn.scaling  # 1.0 for Gemma 4
-
-    input_ln = layer.input_layernorm
-    post_attn_ln = layer.post_attention_layernorm
-    pre_ff_ln = layer.pre_feedforward_layernorm
-    post_ff_ln = layer.post_feedforward_layernorm
-    mlp = layer.mlp
-    # NOTE: the per-layer ``layer_scalar`` is NOT captured here. It is passed as
-    # a tensor *argument* to ``block_forward`` instead (see below). All 48 layers
-    # share one ``block_forward`` ``__code__`` (loop-created closures). If the
-    # scalar were folded in as a Python float constant, dynamo would guard each
-    # compiled entry on its exact value (``layer_scalar == 0.296875``) — and
-    # because the 48 layers carry ~43 *distinct* learned scalars, layer N's call
-    # would miss every prior layer's guard and recompile. That banks ~N_layers
-    # cache entries per forward on the shared frame, crossing dynamo's
-    # ``accumulated_recompile_limit`` (256) after only a handful of decode steps
-    # and dropping the tail of generation onto the slow/inaccurate eager path.
-    # Passing the scalar as a *tensor* makes dynamo guard on tensor metadata
-    # (shape/dtype — identical across layers), so all layers reuse one binary per
-    # offset (~1 entry/step, like Granite/Qwen3). Granite's ``residual_multiplier``
-    # can be a captured float because it is a single config value shared by every
-    # layer; Gemma 4's is per-layer, so it must be a tensor arg.
-    #
-    # The scalar tensor is read fresh from ``layer.layer_scalar`` at call time in
-    # ``_run_backbone_forward`` (NOT captured), so it is always the post-Spyre-move
-    # buffer on the right device — avoiding the device-mismatch the old float
-    # capture sidestepped.
-
-    def block_forward(
+    def forward(
+        self,
         hidden_states,
         selected_freqs,
         attn_mask,
@@ -198,32 +162,26 @@ def _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v)
         is_filling,
         token_index,
         cache_position,
-        layer_scalar,
     ):
-        residual = hidden_states
-        h = input_ln(hidden_states)
+        bsz, seq_len, _ = hidden_states.shape
+        q = self.q_proj(hidden_states).view(
+            bsz, seq_len, self.num_q_heads, self.head_dim
+        )
+        k_lin = self.k_proj(hidden_states).view(
+            bsz, seq_len, self.num_kv_heads, self.head_dim
+        )
 
-        bsz, seq_len, _ = h.shape
-
-        # Q/K/V projections viewed as [B, L, n_heads, head_dim]; norms are
-        # applied per-head (last dim = head_dim) before the transpose.
-        q = q_proj(h).view(bsz, seq_len, num_q_heads, head_dim)
-        k_lin = k_proj(h).view(bsz, seq_len, num_kv_heads, head_dim)
-
-        if is_kv_eq_v:
-            # V reuses the raw k_proj output (pre-k_norm, pre-RoPE) but still
-            # passes through v_norm: stock HF aliases value_states = key_states
-            # *before* k_norm/RoPE, then applies self.v_norm(value_states)
-            # unconditionally (modeling_gemma4 Gemma4TextAttention.forward). The
-            # norm exists on these layers even though v_proj is None.
-            v = v_norm(k_lin).transpose(1, 2)
+        if self.is_kv_eq_v:
+            # V aliases the raw K projection before K normalization and RoPE.
+            v = self.v_norm(k_lin).transpose(1, 2)
         else:
-            v = v_proj(h).view(bsz, seq_len, num_kv_heads, head_dim)
-            v = v_norm(v).transpose(1, 2)
+            v = self.v_proj(hidden_states).view(
+                bsz, seq_len, self.num_kv_heads, self.head_dim
+            )
+            v = self.v_norm(v).transpose(1, 2)
 
-        q = q_norm(q).transpose(1, 2)
-        k = k_norm(k_lin).transpose(1, 2)
-
+        q = self.q_norm(q).transpose(1, 2)
+        k = self.k_norm(k_lin).transpose(1, 2)
         q = apply_rope_matmul(q, selected_freqs)
         k = apply_rope_matmul(k, selected_freqs)
 
@@ -236,32 +194,93 @@ def _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v)
             token_index,
             cache_position,
         )
-
         attn_out = F.scaled_dot_product_attention(
             q,
             key_cache,
             value_cache,
             attn_mask=attn_mask,
             dropout_p=0.0,
-            scale=scaling,
+            scale=self.scaling,
             enable_gqa=True,
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
-        attn_out = o_proj(attn_out)
-        # Sandwich: norm the attention output BEFORE adding the residual.
-        attn_out = post_attn_ln(attn_out)
-        h = residual + attn_out
+        return self.o_proj(attn_out), key_cache, value_cache
+
+
+class Gemma4Block(nn.Module):
+    """Registered dense Gemma 4 decoder block used by the Spyre adapter."""
+
+    def __init__(self, layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v):
+        super().__init__()
+        self.self_attn = Gemma4Attention(
+            layer.self_attn,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            is_kv_eq_v,
+        )
+        self.mlp = layer.mlp
+        self.input_layernorm = layer.input_layernorm
+        self.post_attention_layernorm = layer.post_attention_layernorm
+        self.pre_feedforward_layernorm = layer.pre_feedforward_layernorm
+        self.post_feedforward_layernorm = layer.post_feedforward_layernorm
+        self.register_buffer(
+            "layer_scalar",
+            layer.layer_scalar,
+            persistent="layer_scalar" not in layer._non_persistent_buffers_set,
+        )
+        self.train(layer.training)
+
+    def forward(
+        self,
+        hidden_states,
+        selected_freqs,
+        attn_mask,
+        key_cache,
+        value_cache,
+        is_filling,
+        token_index,
+        cache_position,
+        layer_scalar,
+    ):
+        residual = hidden_states
+        h = self.input_layernorm(hidden_states)
+        attn_out, key_cache, value_cache = self.self_attn(
+            h,
+            selected_freqs,
+            attn_mask,
+            key_cache,
+            value_cache,
+            is_filling,
+            token_index,
+            cache_position,
+        )
+        h = residual + self.post_attention_layernorm(attn_out)
 
         residual = h
-        h = pre_ff_ln(h)
-        h = mlp(h)
-        h = post_ff_ln(h)
+        h = self.pre_feedforward_layernorm(h)
+        h = self.mlp(h)
+        h = self.post_feedforward_layernorm(h)
         h = residual + h
+        return h * layer_scalar, key_cache, value_cache
 
-        h = h * layer_scalar
-        return h, key_cache, value_cache
 
-    return torch.compile(block_forward, dynamic=False)
+def prepare_gemma4_blocks(
+    layers, num_q_heads_per_layer, kv_shapes, is_kv_eq_v_per_layer
+):
+    """Replace Gemma 4 decoder layers with registered blocks and compile them."""
+    blocks = []
+    for i, layer in enumerate(list(layers)):
+        block = Gemma4Block(
+            layer,
+            num_q_heads_per_layer[i],
+            kv_shapes[i][0],
+            kv_shapes[i][1],
+            is_kv_eq_v_per_layer[i],
+        )
+        layers[i] = block
+        blocks.append(torch.compile(block, dynamic=False))
+    return blocks
 
 
 def _build_layer_masks(
@@ -340,10 +359,9 @@ def _run_blocks_over_embeds(
     backbone_layers = backbone.layers
     for i, compiled_block in enumerate(model._spyre_compiled_blocks):
         lt = cfg.layer_types[i]
-        # Pass the per-layer scalar as a tensor read fresh from the (already
-        # device-moved) buffer — NOT a captured float — so the 48 layers share
-        # one compiled binary instead of recompiling per distinct scalar value.
-        # See the note in _make_compiled_block.
+        # Pass the per-layer scalar as a tensor read fresh from the registered,
+        # device-moved block — NOT as a Python float — so Dynamo guards on tensor
+        # metadata instead of recompiling for each distinct learned value.
         h, key_caches[i], value_caches[i] = compiled_block(
             h,
             freqs[lt],
@@ -457,21 +475,22 @@ def prepare_text_decoder_for_spyre(model):
     rmsnorm_cls = type(backbone.layers[0].input_layernorm)
     _patch_gemma4_rmsnorm(rmsnorm_cls)
 
-    head_dim = cfg.head_dim
-    global_head_dim = getattr(cfg, "global_head_dim", None) or head_dim
-    num_q_heads = cfg.num_attention_heads
-    num_kv_heads = cfg.num_key_value_heads
-    num_global_kv_heads = (
-        getattr(cfg, "num_global_key_value_heads", None) or num_kv_heads
-    )
     attention_k_eq_v = getattr(cfg, "attention_k_eq_v", False)
-
-    # Both head_dims must be stick-aligned for the RoPE [2, D/2] reshape.
-    for hd, name in ((head_dim, "head_dim"), (global_head_dim, "global_head_dim")):
-        assert hd % 2 == 0 and hd // 2 >= 64, (
-            f"Gemma 4 {name}={hd}: head_dim/2 must be >= 64 (one Spyre stick). "
-            "A padded variant is not implemented for this adapter."
+    layer_configs = cfg.per_layer_config
+    num_q_heads_per_layer = []
+    kv_shapes = []
+    is_kv_eq_v_per_layer = []
+    for i, (layer_type, layer_cfg) in enumerate(zip(cfg.layer_types, layer_configs)):
+        num_q_heads_per_layer.append(layer_cfg.num_attention_heads)
+        head_dim = layer_cfg.head_dim
+        assert head_dim % 2 == 0 and head_dim // 2 >= 64, (
+            f"Gemma 4 layer {i} head_dim={head_dim}: head_dim/2 must be >= 64 "
+            "(one Spyre stick). A padded variant is not implemented for this adapter."
         )
+        num_kv_heads = layer_cfg.num_key_value_heads
+        kv_shapes.append((num_kv_heads, head_dim, head_dim))
+        is_kv_eq_v_per_layer.append(attention_k_eq_v and layer_type == "full_attention")
+    model._spyre_kv_shapes = kv_shapes
 
     # One PrecomputedRotaryEmbedding per layer type, reading the model's
     # per-type inv_freq + attention_scaling buffers via a shim. No padding:
@@ -485,38 +504,16 @@ def prepare_text_decoder_for_spyre(model):
             InvFreqShim(inv_freq, scaling)
         )
 
-    # Per-layer KV-cache shapes. Global (full_attention) layers use
-    # global_head_dim and, when attention_k_eq_v, num_global_key_value_heads;
-    # sliding layers use head_dim and num_key_value_heads.
-    kv_shapes = []
-    is_kv_eq_v_per_layer = []
-    for lt in cfg.layer_types:
-        is_global = lt == "full_attention"
-        use_kv_eq_v = attention_k_eq_v and is_global
-        is_kv_eq_v_per_layer.append(use_kv_eq_v)
-        if is_global:
-            n_kv = num_global_kv_heads if use_kv_eq_v else num_kv_heads
-            hd = global_head_dim
-        else:
-            n_kv = num_kv_heads
-            hd = head_dim
-        kv_shapes.append((n_kv, hd, hd))
-    model._spyre_kv_shapes = kv_shapes
-
     # LM head: smooth-padded to a stick-aligned vocab whose per-core span fits
     # the 256 MB EAR limit (see hf_common.pad_lm_head).
     pad_lm_head(model)
 
-    model._spyre_compiled_blocks = [
-        _make_compiled_block(
-            layer,
-            num_q_heads,
-            kv_shapes[i][0],
-            kv_shapes[i][1],
-            is_kv_eq_v_per_layer[i],
-        )
-        for i, layer in enumerate(backbone.layers)
-    ]
+    model._spyre_compiled_blocks = prepare_gemma4_blocks(
+        backbone.layers,
+        num_q_heads_per_layer,
+        kv_shapes,
+        is_kv_eq_v_per_layer,
+    )
 
 
 def prepare_for_spyre(model):
