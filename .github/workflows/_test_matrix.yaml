@@ -233,8 +233,6 @@ jobs:
           # Example: python .github/scripts/generate_test_matrix.py --exclude ibm-granite/granite-vision-4.1-4b tiiuae/Falcon3-1B-Base
 
           # We exclude these models - See https://github.com/torch-spyre/hf-adapters/issues/89
-          # google/gemma-4-12B-it: VLM e2e passes on the pod but OOMs the CI runner
-          # (see PR #182); validated on-pod, excluded here to match upstream/main.
           # ibm-research/granite-4.1-20b: model is not yet publicly accessible.
           ONLY_ARGS=()
           if [[ -n "$ONLY_MODELS" ]]; then
@@ -242,7 +240,7 @@ jobs:
             ONLY_ARGS=(--only "${ONLY_ARGS[@]}")
           fi
           python .github/scripts/generate_test_matrix.py \
-            --exclude tiiuae/Falcon3-1B-Base mistralai/Mistral-Small-3.1-24B-Instruct-2503 google/gemma-4-12B-it ibm-research/granite-4.1-20b \
+            --exclude tiiuae/Falcon3-1B-Base mistralai/Mistral-Small-3.1-24B-Instruct-2503 ibm-research/granite-4.1-20b \
             "${ONLY_ARGS[@]}"
 
   adapter-coverage:
@@ -675,8 +673,10 @@ jobs:
   # near-tie; see run 29574528796). Commented out for now; may re-enable later
   # once the numerics/threshold are sorted. To re-enable: uncomment this block.
   # It was non-blocking (continue-on-error, NOT in the run-spyre-unit-tests gate),
-  # so it never blocked merges. gemma stays in the generate-matrix --exclude, and
-  # the spyre_pf_x2 labels (actionlint.yaml) + extra_test_flags_multi_spyre
+  # so it never blocked merges. gemma is no longer in the generate-matrix
+  # --exclude (it now runs on the 1-card spyre-vlm-e2e-tests job, where it was
+  # previously documented to OOM -- watch that job if re-enabling this one too),
+  # and the spyre_pf_x2 labels (actionlint.yaml) + extra_test_flags_multi_spyre
   # (callers) remain in place so re-enabling is just an uncomment.
   # spyre-vlm-e2e-tests-x2:
   #   name: Spyre VLM e2e x2 (${{ matrix.model_key }})
