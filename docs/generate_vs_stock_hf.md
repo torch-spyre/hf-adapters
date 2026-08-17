@@ -16,6 +16,13 @@ stopping, but diverges from stock HF in several ways worth documenting.
   continuation outside `generate()` with the tokenizer, as with stock HF.
   Internal block padding is never returned; rows that finish early receive the
   configured pad token while the rest of the batch continues.
+- **Basic rich decoder output is supported.** With
+  `return_dict_in_generate=True`, generation returns stock HF's
+  `GenerateDecoderOnlyOutput`. `output_scores=True` adds the processed scores
+  used for token selection, and `output_logits=True` adds raw logits. Both are
+  CPU tuples with one `[batch_size, vocab_size]` tensor per generated step;
+  padded Spyre LM-head rows are cropped to the configured vocabulary. As in
+  stock HF, output flags alone do not change the default tensor return.
 - Length resolution follows stock HF conventions: `max_new_tokens` takes
   precedence over `max_length`, while `max_length` limits the total returned
   sequence width. If neither is configured, generation uses HF's model-agnostic
@@ -53,8 +60,10 @@ Not supported:
 
 ## Other behavioral notes
 
-- Returns the basic sequence tensor only — no `GenerateOutput`, `output_scores`,
-  `output_hidden_states`, or `return_dict_in_generate`.
+- Rich output is deliberately minimal: attentions and hidden states remain
+  unsupported, and `past_key_values` is `None` because the internal Spyre tensor
+  caches are not a stock HF `Cache`. Multimodal/VLM generation is unchanged and
+  does not return rich outputs.
 - Supported generation settings use stock precedence (explicit kwarg > caller
   `generation_config` > model config > HF default) through
   `_prepare_generation_config`. Unknown arguments and active unsupported

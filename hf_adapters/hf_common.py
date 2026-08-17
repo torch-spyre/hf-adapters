@@ -29,6 +29,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sympy import factorint
+from transformers.generation import GenerateDecoderOnlyOutput
 
 DEVICE = "spyre"
 BLOCK_SIZE = 64  # Spyre stick size at fp16 (128 bytes / 2 bytes per element)
@@ -1224,9 +1225,6 @@ def _validate_supported_generation_config(cfg):
         "sequence_bias": (None, {}),
         "output_attentions": (None, False),
         "output_hidden_states": (None, False),
-        "output_scores": (None, False),
-        "output_logits": (None, False),
-        "return_dict_in_generate": (None, False),
     }
     active = []
     for name, neutral_values in unsupported.items():
@@ -1392,31 +1390,41 @@ def select_next_token(
     suppress_tokens=None,
     begin_suppress_tokens=None,
     is_first_step=False,
+    return_scores=False,
 ):
-    """CPU token selection with supported HF logits processing and sampling."""
+    """CPU token selection with supported HF processing and optional scores.
+
+    Returned scores are the fully processed values used for selection: token
+    suppression for greedy generation, plus temperature/top-k/top-p warping for
+    sampling. ``return_scores=False`` preserves the token-only API used by the
+    multimodal generation paths.
+    """
+    scores = next_logits
     if suppress_tokens or (is_first_step and begin_suppress_tokens):
-        next_logits = next_logits.clone()
+        scores = scores.clone()
         if suppress_tokens:
-            next_logits[:, suppress_tokens] = -torch.inf
+            scores[:, suppress_tokens] = -torch.inf
         if is_first_step and begin_suppress_tokens:
-            next_logits[:, begin_suppress_tokens] = -torch.inf
+            scores[:, begin_suppress_tokens] = -torch.inf
     if not do_sample:
-        return torch.argmax(next_logits, dim=-1)  # [B]
-    scaled = next_logits / temperature
+        tokens = torch.argmax(scores, dim=-1)  # [B]
+        return (tokens, scores) if return_scores else tokens
+    scores = scores / temperature
     if top_k and top_k > 0:
-        v, _ = torch.topk(scaled, min(top_k, scaled.size(-1)), dim=-1)
-        scaled[scaled < v[:, -1:]] = -torch.inf
+        v, _ = torch.topk(scores, min(top_k, scores.size(-1)), dim=-1)
+        scores[scores < v[:, -1:]] = -torch.inf
     if top_p is not None and top_p < 1.0:
-        sorted_logits, sorted_indices = torch.sort(scaled, descending=False)
+        sorted_logits, sorted_indices = torch.sort(scores, descending=False)
         cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
         sorted_indices_to_remove = cumulative_probs <= (1 - top_p)
         sorted_indices_to_remove[..., -1:] = 0  # keep at least one token
         indices_to_remove = sorted_indices_to_remove.scatter(
             1, sorted_indices, sorted_indices_to_remove
         )
-        scaled = scaled.masked_fill(indices_to_remove, -torch.inf)
-    probs = F.softmax(scaled, dim=-1)
-    return torch.multinomial(probs, num_samples=1).squeeze(-1)  # [B]
+        scores = scores.masked_fill(indices_to_remove, -torch.inf)
+    probs = F.softmax(scores, dim=-1)
+    tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [B]
+    return (tokens, scores) if return_scores else tokens
 
 
 def decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer):
@@ -1471,7 +1479,9 @@ def generate(
     ``attention_mask``. Real tokens are then right-aligned and left block-padded
     for the Spyre scheduler. Returned sequences preserve the caller's original
     input prefix and append logical generated tokens; internal block padding is
-    never returned.
+    never returned. With ``return_dict_in_generate=True``, returns stock HF's
+    ``GenerateDecoderOnlyOutput`` and optionally per-step processed ``scores``
+    and raw ``logits`` on CPU, cropped to the configured vocabulary size.
 
     Sampling and stop parameters follow stock-HF precedence:
     ``explicit kwarg > model.generation_config > HF global default``. Leaving a
@@ -1562,6 +1572,11 @@ def generate(
     min_new_tokens = cfg.min_new_tokens or 0
 
     batch_size = input_ids.shape[0]
+    vocab_size = text_config(model.config).vocab_size
+    collect_scores = bool(cfg.return_dict_in_generate and cfg.output_scores)
+    collect_logits = bool(cfg.return_dict_in_generate and cfg.output_logits)
+    generation_scores = []
+    generation_logits = []
 
     # Cache capacity is based on compacted logical prompts, not caller padding.
     max_cache_len = generation_cache_len(
@@ -1671,13 +1686,20 @@ def generate(
                 next_logits = logits_cpu[:, -BLOCK_SIZE, :]
                 fill_mask_device = exp_mask.to(DEVICE)
 
+        # Crop away Spyre LM-head padding before exposing logits or selecting a
+        # token. Stock generation only sees the model's configured vocabulary.
+        raw_next_logits = next_logits[:, :vocab_size]
+        if collect_logits:
+            generation_logits.append(raw_next_logits)
+
         # Token selection (CPU). Match HF's MinNewTokensLengthLogitsProcessor
         # by suppressing every EOS id until the minimum continuation is emitted.
+        processed_logits = raw_next_logits
         if eos_ids is not None and i < min_new_tokens:
-            next_logits = next_logits.clone()
-            next_logits[:, eos_ids] = -torch.inf
-        next_tokens = select_next_token(
-            next_logits,
+            processed_logits = processed_logits.clone()
+            processed_logits[:, eos_ids] = -torch.inf
+        next_tokens, processed_scores = select_next_token(
+            processed_logits,
             cfg.do_sample,
             cfg.temperature,
             cfg.top_k,
@@ -1685,8 +1707,10 @@ def generate(
             cfg.suppress_tokens,
             cfg.begin_suppress_tokens,
             is_first_step=i == 0,
+            return_scores=True,
         )
-
+        if collect_scores:
+            generation_scores.append(processed_scores)
         if timing:
             times_list.append(time.time() - t0)
 
@@ -1722,7 +1746,15 @@ def generate(
         print("Per-token: " + ", ".join(f"{t*1000:.1f}" for t in times_list) + " ms")
 
     generated_ids = torch.stack(generated_columns, dim=1)
-    return torch.cat([orig_input_ids, generated_ids], dim=1)
+    sequences = torch.LongTensor(torch.cat([orig_input_ids, generated_ids], dim=1))
+    if not cfg.return_dict_in_generate:
+        return sequences
+    return GenerateDecoderOnlyOutput(
+        sequences=sequences,
+        scores=tuple(generation_scores) if generation_scores else None,
+        logits=tuple(generation_logits) if generation_logits else None,
+        past_key_values=None,
+    )
 
 
 # ---------------------------------------------------------------------------
