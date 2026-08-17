@@ -126,10 +126,7 @@ jobs:
           - test_eos_spyre.py
           - test_long_multi_block_spyre.py
           - test_prompt_exactly_block_spyre.py
-          - test_short_block_minus_one_spyre.py
-          - test_short_cross_block_spyre.py
-          - test_short_one_token_spyre.py
-          - test_short_two_blocks_plus_spyre.py
+          - test_short_spyre.py
           - test_single_token_prompt_spyre.py
           - test_mixed_spyre.py
           - test_no_pad_token_fallback_spyre.py
