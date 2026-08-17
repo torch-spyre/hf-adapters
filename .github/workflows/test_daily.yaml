@@ -123,12 +123,7 @@ jobs:
       matrix:
         model_key: ${{ fromJSON(needs.generate-matrix.outputs.causal_matrix) }}
         test_file:
-          - test_eos_first_of_second_block_spyre.py
-          - test_eos_first_token_spyre.py
-          - test_eos_inside_prompt_spyre.py
-          - test_eos_mid_block_spyre.py
-          - test_eos_on_last_step_spyre.py
-          - test_no_eos_runs_full_budget_spyre.py
+          - test_eos.py
           - test_long_multi_block_spyre.py
           - test_prompt_exactly_block_spyre.py
           - test_short_block_minus_one_spyre.py
