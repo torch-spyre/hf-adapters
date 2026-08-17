@@ -1340,16 +1340,22 @@ def run_prefill(model, inputs) -> Any:
 
 
 def _build_decode_inputs(inputs, past_key_values) -> Dict[str, Any]:
-    """Build the forward kwargs for a single decode step from prefill state."""
+    """Build the forward kwargs for a single decode step from prefill state.
+
+    The new tensors are created on the same device as the prefill inputs, so a
+    capture running on cuda/spyre does not mix an on-device prefill with CPU decode
+    tensors (``torch.cat`` and the forward would both raise).
+    """
     batch_size = inputs["input_ids"].shape[0]
+    device = inputs["input_ids"].device
     # Single new token for decode
-    next_token = torch.zeros((batch_size, 1), dtype=torch.long)
+    next_token = torch.zeros((batch_size, 1), dtype=torch.long, device=device)
     return {
         "input_ids": next_token,  # Shape: [B, 1]
         "attention_mask": torch.cat(
             [
                 inputs["attention_mask"],
-                torch.ones((batch_size, 1), dtype=torch.long),
+                torch.ones((batch_size, 1), dtype=torch.long, device=device),
             ],
             dim=1,
         ),
@@ -1437,6 +1443,62 @@ def capture_module_invocations(model, capture: ModuleInfoCapture, inputs) -> Non
             handle.remove()
 
 
+def resolve_capture_device(device: Optional[str]) -> Optional[str]:
+    """Validate the device the capture forward pass will run on.
+
+    ``None`` keeps the historical behaviour: ``from_pretrained`` leaves the model on
+    CPU. Any other value is checked for availability up front, so an unavailable
+    accelerator fails with a clear message here rather than deep inside the forward
+    pass. ``"spyre"`` additionally needs ``torch_spyre`` imported to register the
+    backend.
+    """
+    if device is None:
+        return None
+
+    # "spyre" is handled BEFORE torch.device(): torch does not know the backend
+    # until torch_spyre is imported, so torch.device("spyre") would raise
+    # "Expected one of cpu, cuda, ..." and mask the real cause.
+    if device.split(":")[0] == "spyre":
+        try:
+            import torch_spyre  # noqa: F401  (registers the "spyre" backend)
+        except ImportError as exc:
+            raise RuntimeError(
+                f"--device {device!r} requested but torch_spyre is not installed "
+                f"({exc}). Run on the Spyre pod or use --device cpu."
+            ) from exc
+        # Importing is not enough: the source tree imports fine without its
+        # compiled extension, leaving the backend unregistered. Allocate a tensor
+        # to confirm the device actually works before loading a whole model onto it.
+        try:
+            torch.zeros(1, device=device)
+        except Exception as exc:
+            raise RuntimeError(
+                f"--device {device!r} requested and torch_spyre imported, but the "
+                f"device is not usable ({exc}). The backend extension is probably "
+                f"missing; run on the Spyre pod or use --device cpu."
+            ) from exc
+        return device
+
+    device_type = torch.device(device).type
+    if device_type == "cpu":
+        return device
+    if device_type == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                f"--device {device!r} requested but torch.cuda.is_available() is "
+                f"False. Run on a CUDA host or use --device cpu."
+            )
+        return device
+
+    # Anything else is passed through: torch may know a backend we do not.
+    logger.warning(
+        "Capture device %r is not one of cpu/cuda/spyre; passing it through "
+        "unchecked.",
+        device,
+    )
+    return device
+
+
 def load_model_only(
     model_path: str,
     model_cls=AutoModel,
@@ -1495,19 +1557,32 @@ def load_model_and_tokenizer(
     return model, tokenizer
 
 
-def build_dummy_inputs(tokenizer, seq_len: int) -> Dict[str, Any]:
-    """Tokenize placeholder text padded/truncated to ``seq_len``."""
+def build_dummy_inputs(
+    tokenizer, seq_len: int, device: Optional[str] = None
+) -> Dict[str, Any]:
+    """Tokenize placeholder text padded/truncated to ``seq_len``.
+
+    ``device`` relocates the tokenized tensors, which must sit on the same device
+    as the model or the forward pass raises a device mismatch. ``None`` leaves them
+    on CPU (the tokenizer's default).
+    """
     # Generate enough text to reach desired seq_len
     text = "This is a test input for capturing module information. " * (
         seq_len // 10 + 1
     )
-    return tokenizer(
+    encoded = tokenizer(
         text,
         return_tensors="pt",
         max_length=seq_len,
         truncation=True,
         padding="max_length",
     )
+    if device is not None:
+        encoded = {
+            key: value.to(device) if isinstance(value, torch.Tensor) else value
+            for key, value in encoded.items()
+        }
+    return encoded
 
 
 def write_module_config(
@@ -1598,6 +1673,16 @@ def parse_args():
         "capturing many layers multiplies the YAML and the number of compiled "
         "binaries in the module test -- prefer a couple of representatives.",
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Device to RUN the capture forward pass on, e.g. cpu / cuda / "
+        "cuda:1 / spyre (default: leave the model on CPU). This is where the "
+        "model executes while its inputs are recorded; it does not change the "
+        "'device' written into the generated tensor specs, which stays spyre "
+        "because that is where the module test runs.",
+    )
     return parser.parse_args()
 
 
@@ -1625,6 +1710,7 @@ def generate_module_config(
     capture_layers: Optional[Set[int]] = None,
     use_static_cache: bool = True,
     max_cache_len: int = 2048,
+    device: Optional[str] = None,
 ):
     """Capture a module-test YAML from a HuggingFace model.
 
@@ -1634,11 +1720,24 @@ def generate_module_config(
     ``capture_layers`` selects which decoder layers to record, by index. ``None``
     records only layer 0; pass :data:`CAPTURE_ALL_LAYERS` to record every layer.
 
+    ``device`` is where the capture forward pass RUNS (e.g. ``"cpu"``, ``"cuda"``,
+    ``"spyre"``); ``None`` leaves the model on CPU, as before. This is independent
+    of the ``device`` recorded in the generated tensor specs, which stays ``spyre``
+    because that is where the module test will run.
+
     Returns:
         The written YAML path.
     """
-    model, tokenizer = load_model_and_tokenizer(model_path)
-    inputs = build_dummy_inputs(tokenizer, seq_len)
+    device = resolve_capture_device(device)
+    from_pretrained_kwargs: Dict[str, Any] = {}
+    if device is not None:
+        # device_map places the weights at load time, avoiding a CPU copy that a
+        # post-hoc .to(device) would make.
+        from_pretrained_kwargs["device_map"] = device
+        logger.info("Running capture forward pass on device: %s", device)
+
+    model, tokenizer = load_model_and_tokenizer(model_path, **from_pretrained_kwargs)
+    inputs = build_dummy_inputs(tokenizer, seq_len, device=device)
 
     # Use a StaticCache by default; disabling it falls back to the model's default
     # dynamic cache. The (empty) StaticCache is passed into the prefill forward
@@ -1663,6 +1762,7 @@ def main():
         capture_layers=_parse_capture_layers(args.capture_layers),
         use_static_cache=not args.no_static_cache,
         max_cache_len=args.max_cache_len,
+        device=args.device,
     )
 
 
