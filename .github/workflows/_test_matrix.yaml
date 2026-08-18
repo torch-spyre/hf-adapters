@@ -63,24 +63,22 @@ on:
       test_type:
         description: >-
           Which Spyre suites to run: smoke | unit | integration | regression |
-          trunk | edge_cases. These tier names are literal, first-class values
-          -- no alias-resolution layer. "unit" runs every suite except smoke
-          (load, token_compare, embed_compare, vlm, reranker_compare,
-          model_module); "integration" runs only the smoke suite;
-          "regression"/"trunk" (default: regression) run everything except
-          edge_cases, i.e. smoke + unit. "edge_cases" runs the tests/spyre/
-          edge_cases/ suite (9 files x every causal-LM model) -- daily-only
-          tier, kept out of PR/trunk to bound CI cost. The resolve-test-type
-          job below applies the shared default so every caller (Makefile,
-          Jenkins, config.yaml) stays in sync. For finer control, any other
-          value is a space-separated allowlist of individual suite keys
-          matched against each matrix job's own `if:` (see the "Suite key"
-          comment above each spyre-*-tests job below), e.g. "smoke
-          token_compare" or "smoke edge_cases" -- "smoke" and "edge_cases" by
-          themselves work this way too (they're suite keys, not tiers on
-          their own dropdown here). Adding a new suite later means giving the
-          new job its own key and adding it to the "unit" set -- no other
-          job needs to change.
+          trunk. These tier names are literal, first-class values -- no
+          alias-resolution layer. "unit" runs every suite except smoke (load,
+          token_compare, embed_compare, vlm, reranker_compare, masked_lm_compare,
+          question_answering_compare, model_module); "integration" runs only the
+          smoke suite; "regression"/"trunk" (default: regression) run the
+          standard Spyre suite set. The tests/spyre/edge_cases/ suite is opted
+          into separately via the edge_cases_only boolean input below -- it
+          is deliberately outside this shared test_type contract so callers
+          in sister repos stay compatible. The resolve-test-type job below
+          applies the shared default so every caller (Makefile, Jenkins,
+          config.yaml) stays in sync. For finer control, any other value is
+          a space-separated allowlist of individual suite keys matched
+          against each matrix job's own `if:` (see the "Suite key" comment
+          above each spyre-*-tests job below), e.g. "smoke token_compare".
+          Adding a new suite later means giving the new job its own key and
+          adding it to the "unit" set -- no other job needs to change.
         required: false
         type: string
         default: regression
@@ -94,6 +92,17 @@ on:
         required: false
         type: string
         default: ''
+      edge_cases_only:
+        description: >-
+          When true, run **only** the tests/spyre/edge_cases/ suite; every
+          other spyre-*-tests job is suppressed regardless of test_type.
+          Default false runs the standard suite selection from test_type and
+          leaves edge_cases out. This flag is orthogonal to the shared
+          trunk/regression/integration/unit test_type contract -- callers that
+          don't know about it just get the standard behavior.
+        required: false
+        type: boolean
+        default: false
       skip_tests:
         description: >-
           When true, skips matrix generation, adapter-coverage, and every
@@ -448,7 +457,7 @@ jobs:
     # space-separated word in test_type (e.g. "smoke load") for fine-grained
     # selection.
     # See spyre-smoke-tests for the other keys.
-    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' load ')) }}
+    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' load ')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -511,7 +520,7 @@ jobs:
     # only job that tier runs). Same allowlist mechanism as spyre-load-tests
     # above -- to add a new suite later, give the new job its own key and
     # copy this `if:` line with that key; no existing job needs to change.
-    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'integration' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' smoke ')) }}
+    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'integration' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' smoke ')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -569,7 +578,7 @@ jobs:
     name: Spyre token compare (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type]
     # Suite key: "token_compare". Part of the "unit" coarse tier.
-    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_compare ')) }}
+    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_compare ')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -627,7 +636,7 @@ jobs:
     name: Spyre embed compare (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type]
     # Suite key: "embed_compare". Part of the "unit" coarse tier.
-    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' embed_compare ')) }}
+    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' embed_compare ')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -685,7 +694,7 @@ jobs:
     name: Spyre VLM e2e (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type]
     # Suite key: "vlm". Part of the "unit" coarse tier.
-    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' vlm ')) }}
+    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' vlm ')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -802,7 +811,7 @@ jobs:
     name: Spyre reranker compare (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type]
     # Suite key: "reranker_compare". Part of the "unit" coarse tier.
-    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' reranker_compare ')) }}
+    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' reranker_compare ')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -857,7 +866,7 @@ jobs:
     name: Spyre masked-LM compare (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type]
     # Suite key: "masked_lm_compare". Part of the "unit" coarse tier.
-    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' masked_lm_compare ')) }}
+    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' masked_lm_compare ')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -912,7 +921,7 @@ jobs:
     name: Spyre question-answering compare (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type]
     # Suite key: "question_answering_compare". Part of the "unit" coarse tier.
-    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' question_answering_compare ')) }}
+    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' question_answering_compare ')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -964,23 +973,23 @@ jobs:
           retention-days: 14
 
   # ---------------------------------------------------------------------------
-  # Edge-case suite (suite key: "edge_cases").
+  # Edge-case suite (daily-only).
   #
   # Runs each file under tests/spyre/edge_cases/ against every causal-LM model
   # from the generated matrix, one job per (model, file) pair. All files are
   # @pytest.mark.slow, so `make edge-cases-tests` passes --run-slow.
   #
-  # Not part of the regression/trunk/unit tiers -- gated to test_type ==
-  # 'edge_cases' (or an explicit "edge_cases" word in a space-separated combo)
-  # so PR runs don't grow by 9 x N jobs. daily_test.yaml is the intended
-  # caller, passing test_type: edge_cases. Adding this job to the standard
-  # tiers is a separate follow-up decision (see run-spyre-unit-tests below --
-  # kept out of that gate for the same reason).
+  # Deliberately outside the shared test_type contract: callers enable it with
+  # the dedicated edge_cases_only boolean while keeping test_type at one of
+  # the canonical values (the daily workflow passes test_type: regression).
+  # When edge_cases_only is true, every standard spyre-*-tests job's `if:`
+  # short-circuits on !inputs.edge_cases_only, so only this suite runs -- grep
+  # for `!inputs.edge_cases_only` to find all sites of the suppression pattern.
   # ---------------------------------------------------------------------------
   spyre-edge-cases-tests:
     name: Spyre edge case ${{ matrix.test_file }} (${{ matrix.model_key }})
-    needs: [generate-matrix, resolve-test-type]
-    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'edge_cases' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' edge_cases ')) }}
+    needs: [generate-matrix]
+    if: ${{ !inputs.skip_tests && inputs.edge_cases_only }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -1051,7 +1060,7 @@ jobs:
     name: Spyre model-module tests (${{ matrix.config }})
     needs: [resolve-test-type, generate-module-config-matrix]
     # Suite key: "model_module". Part of the "unit" coarse tier.
-    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_module ')) }}
+    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_module ')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1

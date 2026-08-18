@@ -2,12 +2,11 @@ name: test_daily
 
 # ---------------------------------------------------------------------------
 # Daily edge-case sweep. Delegates entirely to _test_matrix.yaml with
-# test_type: edge_cases, which fans out the tests/spyre/edge_cases/ suite
-# (9 files x every causal-LM model) on the standing image_torch_spyre set.
+# test_type: regression and edge_cases_only: true, so only the
+# tests/spyre/edge_cases/ suite runs on the standing image_torch_spyre set.
 #
-# Only the edge_cases suite runs -- pre-commit/mypy/check-uv-lock and the
-# other spyre-*-tests suites either skip or don't apply (their `if:` gates
-# require test_type in regression/trunk/unit or a matching suite-key word).
+# pre-commit / mypy / check-uv-lock still run as usual; every standard
+# spyre-*-tests suite short-circuits on !inputs.edge_cases_only and skips.
 # ---------------------------------------------------------------------------
 on:
   schedule:
@@ -60,7 +59,8 @@ jobs:
       extra_test_flags_multi_spyre: -vvv -s
       ref: ${{ inputs.ref || '' }}
       repository: ${{ inputs.repository || '' }}
-      test_type: edge_cases
+      test_type: regression
+      edge_cases_only: true
       models: ${{ inputs.models || '' }}
 
   # ----------------------------------------------------------------------------------
