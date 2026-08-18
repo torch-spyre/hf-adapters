@@ -34,6 +34,8 @@ from model_registry import CAUSAL_PATHS, NON_BLOCKING_CAUSAL_MODELS, xfail_non_b
 
 from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
 
+pytestmark = pytest.mark.model_harness("causal")
+
 
 def run_smoke_test(model_path: str) -> dict[str, Any]:
     """Load model, generate 5 tokens, validate output. Returns a result dict."""

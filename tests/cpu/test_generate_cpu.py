@@ -47,6 +47,8 @@ from tests.model_registry import (
     xfail_non_blocking,
 )
 
+pytestmark = pytest.mark.model_harness("causal")
+
 
 @pytest.mark.parametrize(
     "model_path", xfail_non_blocking(CAUSAL_PATHS, table=NON_BLOCKING_CAUSAL_MODELS)

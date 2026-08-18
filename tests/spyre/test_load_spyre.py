@@ -41,6 +41,7 @@ from model_registry import (
 from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
 
 
+@pytest.mark.model_harness("causal")
 @pytest.mark.parametrize(
     "model_path", xfail_non_blocking(CAUSAL_PATHS, table=NON_BLOCKING_CAUSAL_MODELS)
 )
@@ -85,6 +86,7 @@ def load_embedding(model_path: str) -> tuple[Any, float]:
     return model is not None, load_s
 
 
+@pytest.mark.model_harness("embedding")
 @pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
 def test_load_embedding(model_path: str) -> None:
 
@@ -111,6 +113,7 @@ def load_masked_lm(model_path: str) -> tuple[Any, Any, float]:
     return model_is_not_none, callables, load_s
 
 
+@pytest.mark.model_harness("masked_lm")
 @pytest.mark.parametrize("model_path", MASKED_LM_PATHS, ids=MASKED_LM_PATHS)
 def test_load_masked_lm(model_path: str) -> None:
 
@@ -138,6 +141,7 @@ def load_question_answering(model_path: str) -> tuple[Any, Any, float]:
     return model is not None, callable(model.forward) and head_on_cpu, load_s
 
 
+@pytest.mark.model_harness("question_answering")
 @pytest.mark.parametrize(
     "model_path", QUESTION_ANSWERING_PATHS, ids=QUESTION_ANSWERING_PATHS
 )

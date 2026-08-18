@@ -52,6 +52,8 @@ from tests.conftest import get_dtype_for_cpu, load_ref_model
 from tests.cpu.conftest import _unwrap_compiled_blocks
 from tests.model_registry import RERANKER_PATHS
 
+pytestmark = pytest.mark.model_harness("reranker")
+
 # Query-document pairs that cover a range of relevance (positive + negative)
 # so ranking-order correctness is exercised in addition to absolute score match.
 PAIRS: list[tuple[str, str]] = [

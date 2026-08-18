@@ -86,6 +86,8 @@ from hf_adapters.hf_common import (
 )
 from tests.conftest import load_ref_model
 
+pytestmark = pytest.mark.model_harness("vision")
+
 MAX_NEW_TOKENS = 16
 # Decode steps to verify token-by-token (prefill + this many decode steps). Kept
 # modest like the causal lane (test_e2e_token_compare_spyre uses 4).

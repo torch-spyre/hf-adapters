@@ -57,6 +57,8 @@ from tests.conftest import (
 from tests.cpu.conftest import _set_rope_dtype, _unwrap_compiled_blocks
 from tests.model_registry import VISION_PATHS
 
+pytestmark = pytest.mark.model_harness("vision")
+
 MAX_NEW_TOKENS: int = 16
 PROMPT: str = "Briefly describe this image."
 

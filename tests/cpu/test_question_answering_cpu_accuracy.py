@@ -24,6 +24,8 @@ from tests.conftest import (
 from tests.cpu.conftest import _unwrap_compiled_blocks
 from tests.model_registry import QUESTION_ANSWERING_PATHS
 
+pytestmark = pytest.mark.model_harness("question_answering")
+
 QUESTIONS = ["Where does the engineer live?", "What color is the sky?"]
 CONTEXTS = [
     "The engineer lives in Berlin and works on machine learning systems.",

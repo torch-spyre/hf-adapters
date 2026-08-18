@@ -69,6 +69,8 @@ from tests.model_registry import (
     xfail_non_blocking,
 )
 
+pytestmark = pytest.mark.model_harness("causal")
+
 
 def _print_table(model_path: str, rows: list[dict[str, Any]]) -> None:
     """Markdown comparison table — one line per prompt in the batch.

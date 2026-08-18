@@ -46,6 +46,8 @@ from tests.conftest import (
 from tests.cpu.conftest import _unwrap_compiled_blocks
 from tests.model_registry import CAUSAL_PATHS
 
+pytestmark = pytest.mark.model_harness("causal")
+
 PROMPT = "The capital of France is"
 NUM_DECODE = 4
 
