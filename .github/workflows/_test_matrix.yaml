@@ -480,6 +480,8 @@ jobs:
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Echo the exact runner-label selectors this job's runs-on used.
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
 
       - name: Run test_load_spyre.py for ${{ matrix.model_key }}
         env:
@@ -540,6 +542,8 @@ jobs:
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Echo the exact runner-label selectors this job's runs-on used.
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
 
       - name: Run test_e2e_smoke_spyre.py for ${{ matrix.model_key }}
         env:
@@ -596,6 +600,8 @@ jobs:
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Echo the exact runner-label selectors this job's runs-on used.
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
 
       - name: Run test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}
         env:
@@ -652,6 +658,8 @@ jobs:
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Echo the exact runner-label selectors this job's runs-on used.
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
 
       - name: Run test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}
         env:
@@ -709,6 +717,8 @@ jobs:
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Echo the exact runner-label selectors this job's runs-on used.
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
 
       - name: Run test_vlm_e2e_spyre.py for ${{ matrix.model_key }}
         env:
@@ -1073,6 +1083,8 @@ jobs:
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Echo the exact runner-label selectors this job's runs-on used.
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
 
       - name: Run module tests for ${{ matrix.config }}
         env:
