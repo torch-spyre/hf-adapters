@@ -611,8 +611,21 @@ def _run_blocks_over_embeds(
     producer_of = model._spyre_producer_of
     for i, compiled_block in enumerate(model._spyre_compiled_blocks):
         lt = cfg.layer_types[i]
+        # `.contiguous()` forces a fresh offset-0 tensor. per_layer_inputs[:, :, i, :]
+        # is a VIEW whose storage_offset grows with the layer index i. All producer
+        # blocks share one compiled code object (one Dynamo guarded-code cache slot),
+        # and Inductor DROPS a graph input's storage_offset (the offset-drop footgun
+        # documented in torch_spyre customops.py: the kernel binds the storage base
+        # pointer and reads element 0). A block compiled alone is fine — its runtime
+        # view's data_ptr already folds in the offset — but reusing one baked block
+        # binary across differently-offset ple slices under the same cache slot
+        # corrupts later same-structure compiles (device garbage; CPU is immune).
+        # An offset-0 input per block sidesteps the footgun. See
+        # probe_e2b_layers.py loop_contig / loop_uniq for the device proof.
         pli = (
-            per_layer_inputs[:, :, i, :] if per_layer_inputs is not None else None
+            per_layer_inputs[:, :, i, :].contiguous()
+            if per_layer_inputs is not None
+            else None
         )
         p = producer_of[i]
         # Pass the per-layer scalar as a tensor read fresh from the registered,
