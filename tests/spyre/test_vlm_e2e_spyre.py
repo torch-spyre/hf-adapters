@@ -27,9 +27,9 @@ likewise compares per-step logits — but it asserts the cosine rather than top-
     Builds image+prompt with the processor, runs stock greedy on CPU capturing
     its per-step logits and token ids, then drives the adapter on Spyre
     **teacher-forced on stock's token sequence** (prefill via the adapter's
-    deepstack ``_prefill_forward``; decode via the adapter's own block-decode
-    mechanics, but feeding stock's chosen token back each step instead of the
-    adapter's argmax). At each step the adapter's full logit vector must stay
+    deepstack ``_prefill_forward``; decode via the adapter's own single-token
+    decode mechanics, but feeding stock's chosen token back each step instead of
+    the adapter's argmax). At each step the adapter's full logit vector must stay
     within ``MIN_COSINE`` of stock's. A coherent free-run caption is also printed
     as a human-eyeball diagnostic.
 
@@ -76,12 +76,12 @@ from hf_adapters.auto_spyre_model import (
     torch_dtype_for_model_path,
 )
 from hf_adapters.hf_common import (
-    BLOCK_SIZE,
     DEVICE,
     allocate_kv_caches,
-    build_expansion_mask,
+    build_decode_mask,
     generation_cache_len,
     get_model_dtype,
+    make_cache_index,
     pad_and_position,
 )
 from tests.conftest import load_ref_model
@@ -126,13 +126,13 @@ def _adapter_teacher_forced_steps(
 ) -> list[torch.Tensor]:
     """Per-step adapter logits on Spyre, teacher-forced on ``forced_tokens``.
 
-    Replicates the adapter ``generate`` block-decode bookkeeping (KV caches,
-    per-step ``decode_pos`` / fill vs expansion masks, the right-aligned
-    ``result`` block-walk), but feeds ``forced_tokens[i]`` back at each decode
-    step instead of the adapter's own argmax — so the adapter sees the *same*
-    prefix as stock and the comparison is free of greedy-fork drift. Step 0 is
-    the deepstack prefill (the same ``_prefill_forward`` that ``generate`` /
-    ``prefill_logits`` use).
+    Replicates the adapter ``generate`` single-token decode bookkeeping (KV
+    caches, per-step ``decode_pos`` / ``build_decode_mask``, one cache slot
+    written per step so ``result`` grows contiguously), but feeds
+    ``forced_tokens[i]`` back at each decode step instead of the adapter's own
+    argmax — so the adapter sees the *same* prefix as stock and the comparison is
+    free of greedy-fork drift. Step 0 is the deepstack prefill (the same
+    ``_prefill_forward`` that ``generate`` / ``prefill_logits`` use).
 
     Returns ``[logits_step0, logits_step1, ...]`` (CPU, ``[vocab]`` each) of
     length ``len(forced_tokens)`` — prefill plus one per forced decode token.
@@ -161,22 +161,20 @@ def _adapter_teacher_forced_steps(
         model, batch_size, max_cache_len, model_d_type
     )
 
+    # Decode state. Every decode step writes exactly one token at
+    # ``current_cache_len``, so forced tokens are contiguous from ``padded_len``
+    # and ``result`` just grows by one column per step.
     result = padded_ids.clone()
     current_cache_len = padded_len
-    tokens_in_block = BLOCK_SIZE - 1
-    fill_mask_device = None
     per_step_logits = []
 
     def embed_ids(ids):
         return backbone.embed_tokens(ids) * emb_mult
 
     def _write_token(tok_id):
-        nonlocal result, tokens_in_block
-        tokens_in_block = (tokens_in_block + 1) % BLOCK_SIZE
-        if tokens_in_block == 0:
-            result = torch.nn.functional.pad(result, (0, BLOCK_SIZE))
-        grab = (BLOCK_SIZE - tokens_in_block) if tokens_in_block > 0 else BLOCK_SIZE
-        result[:, -grab] = tok_id
+        nonlocal result
+        col = torch.full((batch_size, 1), tok_id, dtype=result.dtype)
+        result = torch.cat([result, col], dim=1)
 
     # --- Step 0: multimodal prefill ---
     # Adapters differ in how many image inputs _prefill_forward takes before the
@@ -195,56 +193,35 @@ def _adapter_teacher_forced_steps(
         max_cache_len=max_cache_len,
     )
     per_step_logits.append(logits.to("cpu")[0, -1, :].float())
-    decode_pos = torch.zeros((batch_size, BLOCK_SIZE), dtype=torch.long)
-    for j in range(BLOCK_SIZE):
-        decode_pos[0, j] = actual_prompt_lengths[0].item() + j - BLOCK_SIZE
     _write_token(forced_tokens[0])
 
     # --- Decode steps teacher-forced on stock's tokens ---
+    # One token in, one cache slot written — the same path ``generate`` takes.
     for i in range(1, n_steps):
-        is_filling = tokens_in_block > 0
-        next_input = result[:, -BLOCK_SIZE:].to(DEVICE)
+        # The token to feed is the one appended by the previous step.
+        next_input = result[:, -1:].to(DEVICE)
         next_embeds = embed_ids(next_input)
-        if is_filling:
-            fill_pos = current_cache_len - BLOCK_SIZE + tokens_in_block
-            logits = adapter._logits_from_embeds(
-                model,
-                next_embeds,
-                decode_pos.to(DEVICE),
-                fill_mask_device,
-                key_caches,
-                value_caches,
-                is_filling=True,
-                token_index=tokens_in_block,
-                cache_position=fill_pos,
-            )
-            grab_idx = BLOCK_SIZE - tokens_in_block
-            step_logits = logits.to("cpu")[0, -grab_idx, :].float()
-        else:
-            current_cache_len += BLOCK_SIZE
-            decode_pos = decode_pos + BLOCK_SIZE
-            exp_mask = build_expansion_mask(
-                batch_size,
-                BLOCK_SIZE,
-                max_cache_len,
-                current_cache_len,
-                prompt_offsets,
-                dtype=model_d_type,
-            )
-            logits = adapter._logits_from_embeds(
-                model,
-                next_embeds,
-                decode_pos.to(DEVICE),
-                exp_mask.to(DEVICE),
-                key_caches,
-                value_caches,
-                is_filling=False,
-                token_index=0,
-                cache_position=current_cache_len - BLOCK_SIZE,
-            )
-            step_logits = logits.to("cpu")[0, -BLOCK_SIZE, :].float()
-            fill_mask_device = exp_mask.to(DEVICE)
-        per_step_logits.append(step_logits)
+        # Absolute position of that token per sequence: its cache column minus
+        # the sequence's left-padding offset.
+        decode_pos = (current_cache_len - prompt_offsets).unsqueeze(1)  # [B, 1]
+        decode_mask = build_decode_mask(
+            batch_size,
+            max_cache_len,
+            current_cache_len,
+            prompt_offsets,
+            dtype=model_d_type,
+        )
+        logits = adapter._logits_from_embeds(
+            model,
+            next_embeds,
+            decode_pos.to(DEVICE),
+            decode_mask.to(DEVICE),
+            key_caches,
+            value_caches,
+            cache_index=make_cache_index(current_cache_len, 1, DEVICE),
+        )
+        per_step_logits.append(logits.to("cpu")[0, -1, :].float())
+        current_cache_len += 1
         _write_token(forced_tokens[i])
 
     return per_step_logits

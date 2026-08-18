@@ -134,9 +134,7 @@ def _run_backbone_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     """GPT-2 backbone: token + learned position embeddings, compiled blocks, ln_f.
 
@@ -154,9 +152,7 @@ def _run_backbone_forward(
             attn_mask,
             key_caches[i],
             value_caches[i],
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
 
     h = bb.ln_f(h)
@@ -170,9 +166,7 @@ def _run_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     """GPT-2 causal-LM forward: backbone + LM head.
 
@@ -190,9 +184,7 @@ def _run_forward(
         attn_mask,
         key_caches,
         value_caches,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     )
     logits = model.lm_head(h)
     return logits[..., : model.config.vocab_size]

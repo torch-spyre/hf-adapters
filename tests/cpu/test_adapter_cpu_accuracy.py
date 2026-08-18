@@ -89,7 +89,7 @@ def hf_greedy_steps(model, input_ids, num_decode=NUM_DECODE):
 
 def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=NUM_DECODE):
     """Run adapter forward for prefill + N greedy decode steps on CPU."""
-    from hf_adapters.hf_common import allocate_kv_caches
+    from hf_adapters.hf_common import allocate_kv_caches, make_cache_index
 
     results = []
     batch_size = input_ids.shape[0]
@@ -123,9 +123,7 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=NUM_DECODE
             causal_mask,
             key_caches,
             value_caches,
-            is_filling=False,
-            token_index=0,
-            cache_position=0,
+            cache_index=make_cache_index(0, seq_len),
         )
 
     last_logits = logits[0, -1, :].float()[:vocab_size]
@@ -149,9 +147,7 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=NUM_DECODE
                 decode_mask,
                 key_caches,
                 value_caches,
-                is_filling=False,
-                token_index=0,
-                cache_position=cache_len,
+                cache_index=make_cache_index(cache_len, 1),
             )
 
         last_logits = logits[0, -1, :].float()[:vocab_size]

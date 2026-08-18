@@ -135,13 +135,18 @@ def _patch_gemma4_rmsnorm(rmsnorm_cls):
 
 
 class Gemma4Attention(nn.Module):
-    """Attention executed by the dense Gemma 4 Spyre adapter path."""
+    """Attention executed by the dense Gemma 4 Spyre adapter path.
+
+    On global ``attention_k_eq_v`` layers (``is_kv_eq_v=True``) there is no
+    ``v_proj``: V is the raw ``k_proj`` output (before k_norm and RoPE) put
+    through ``v_norm``, mirroring stock HF.
+    """
 
     def __init__(self, attn, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v):
         super().__init__()
         self.q_proj = attn.q_proj
         self.k_proj = attn.k_proj
-        self.v_proj = attn.v_proj
+        self.v_proj = attn.v_proj  # None when is_kv_eq_v
         self.o_proj = attn.o_proj
         self.q_norm = attn.q_norm
         self.k_norm = attn.k_norm
@@ -150,7 +155,7 @@ class Gemma4Attention(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.is_kv_eq_v = is_kv_eq_v
-        self.scaling = attn.scaling
+        self.scaling = attn.scaling  # 1.0 for Gemma 4
 
     def forward(
         self,
@@ -159,11 +164,11 @@ class Gemma4Attention(nn.Module):
         attn_mask,
         key_cache,
         value_cache,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     ):
         bsz, seq_len, _ = hidden_states.shape
+        # Q/K/V projections viewed as [B, L, n_heads, head_dim]; norms are
+        # applied per-head (last dim = head_dim) before the transpose.
         q = self.q_proj(hidden_states).view(
             bsz, seq_len, self.num_q_heads, self.head_dim
         )
@@ -172,7 +177,11 @@ class Gemma4Attention(nn.Module):
         )
 
         if self.is_kv_eq_v:
-            # V aliases the raw K projection before K normalization and RoPE.
+            # V reuses the raw k_proj output (pre-k_norm, pre-RoPE) but still
+            # passes through v_norm: stock HF aliases value_states = key_states
+            # *before* k_norm/RoPE, then applies self.v_norm(value_states)
+            # unconditionally (modeling_gemma4 Gemma4TextAttention.forward). The
+            # norm exists on these layers even though v_proj is None.
             v = self.v_norm(k_lin).transpose(1, 2)
         else:
             v = self.v_proj(hidden_states).view(
@@ -190,9 +199,7 @@ class Gemma4Attention(nn.Module):
             v,
             key_cache,
             value_cache,
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
         attn_out = F.scaled_dot_product_attention(
             q,
@@ -238,9 +245,7 @@ class Gemma4Block(nn.Module):
         attn_mask,
         key_cache,
         value_cache,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
         layer_scalar,
     ):
         residual = hidden_states
@@ -251,10 +256,9 @@ class Gemma4Block(nn.Module):
             attn_mask,
             key_cache,
             value_cache,
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
+        # Sandwich: norm the attention output BEFORE adding the residual.
         h = residual + self.post_attention_layernorm(attn_out)
 
         residual = h
@@ -288,17 +292,18 @@ def _build_layer_masks(
     attn_mask,
     seq_len,
     batch_size,
-    token_index,
-    cache_position,
+    block_base,
 ):
     """Build the text-only per-layer-type mask dict {full_attention, sliding_attention}.
 
     ``attn_mask`` is the base causal mask the caller built (column index = cache
     slot). Global ("full_attention") layers use it as-is (plain causal). Sliding
     ("sliding_attention") layers intersect it with a causal sliding-window band
-    using each query row's cache coordinate ``block_base + j`` where
-    ``block_base = cache_position - token_index`` (see
+    using each query row's cache coordinate ``block_base + j`` (see
     ``add_causal_sliding_window_band``).
+
+    ``block_base`` is the cache column the first query row occupies — the first
+    entry of the block's ``cache_index`` (``int(cache_index[0])``).
 
     This is the text-decoder mask policy. The unified VLM adapter
     (``hf_gemma4_mm``) needs a bidirectional vision overlay OR-ed into both mask
@@ -306,7 +311,6 @@ def _build_layer_masks(
     ``_run_blocks_over_embeds(..., masks=...)`` rather than calling this.
     """
     cfg = text_config(model.config)
-    block_base = cache_position - token_index
     query_coords = (torch.arange(seq_len)[None, :] + block_base).expand(
         batch_size, seq_len
     )
@@ -323,9 +327,7 @@ def _run_blocks_over_embeds(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
     masks=None,
 ):
     """Run the compiled Gemma 4 decoder blocks over precomputed embeddings.
@@ -352,9 +354,17 @@ def _run_blocks_over_embeds(
 
     if masks is None:
         bsz, seq_len = h.shape[0], h.shape[1]
-        masks = _build_layer_masks(
-            model, attn_mask, seq_len, bsz, token_index, cache_position
-        )
+        # The sliding-window band needs each query row's cache coordinate: row j
+        # sits at block_base + j, where block_base is the first cache slot this
+        # block writes — the first entry of cache_index.
+        #
+        # The scalar read syncs from the device; deliberately not optimized. This
+        # runs once per step (not per layer — the mask dict is reused across all
+        # layers) in eager code outside the compiled block, and
+        # add_causal_sliding_window_band already round-trips the whole mask
+        # through CPU by necessity. See the same note in hf_gemma3.
+        block_base = int(cache_index[0])
+        masks = _build_layer_masks(model, attn_mask, seq_len, bsz, block_base)
 
     backbone_layers = backbone.layers
     for i, compiled_block in enumerate(model._spyre_compiled_blocks):
@@ -368,9 +378,7 @@ def _run_blocks_over_embeds(
             masks[lt],
             key_caches[i],
             value_caches[i],
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
             backbone_layers[i].layer_scalar,
         )
 
@@ -385,9 +393,7 @@ def _run_backbone_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     """Gemma 4 backbone: scaled embedding, per-type RoPE + masks, blocks, norm.
 
@@ -403,9 +409,7 @@ def _run_backbone_forward(
         attn_mask,
         key_caches,
         value_caches,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     )
 
 
@@ -416,9 +420,7 @@ def _run_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     """Gemma 4 causal-LM forward: backbone + LM head + logit softcap."""
     h = _run_backbone_forward(
@@ -428,9 +430,7 @@ def _run_forward(
         attn_mask,
         key_caches,
         value_caches,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     )
 
     logits = model.lm_head(h)

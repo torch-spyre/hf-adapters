@@ -29,8 +29,8 @@ Usage::
 
 The model is automatically prepared for Spyre (RoPE precomputation, RMSNorm
 patching, LM head padding, compiled blocks) and moved to the Spyre device.
-A `generate` method is attached to the model that handles the 64-block
-padded decode generation loop.
+A `generate` method is attached to the model that handles the block-padded
+prefill + single-token decode generation loop.
 """
 
 from __future__ import annotations
@@ -268,8 +268,8 @@ class AutoSpyreModel:
 class AutoSpyreModelForCausalLM(AutoSpyreModel):
     """Load an HF causal-LM model and prepare it for Spyre.
 
-    Attaches a Spyre-aware ``generate`` method that runs the 64-block padded
-    decode loop.
+    Attaches a Spyre-aware ``generate`` method that runs the block-padded
+    prefill + single-token decode loop.
     """
 
     _auto_model_cls = AutoModelForCausalLM  # type: ignore[assignment]

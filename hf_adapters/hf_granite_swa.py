@@ -66,9 +66,7 @@ def _make_compiled_block(layer, sliding_window: int):
         attn_mask,
         key_cache,
         value_cache,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     ):
         residual = hidden_states
         h = input_ln(hidden_states)
@@ -86,14 +84,22 @@ def _make_compiled_block(layer, sliding_window: int):
             v,
             key_cache,
             value_cache,
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
 
         cache_len = key_cache.shape[2]
         q_len = q.shape[2]
-        q_pos = (token_index + torch.arange(q_len, device=q.device)).unsqueeze(
+        # Query row j occupies cache column block_base + j. Decode writes one
+        # token per step, so block_base is simply the written slot (see
+        # hf_gemma3/hf_gemma4 for the same band in eager code).
+        #
+        # Kept as a 0-d device tensor rather than read out with int(): unlike
+        # Gemma 3/4, which build their band in eager code outside the compiled
+        # block, this band is built *inside* it, and an int() here would sync a
+        # scalar off the device mid-graph and re-specialize the binary per write
+        # position — the very cost the tensor cache_index removed.
+        block_base = cache_index[0]
+        q_pos = (block_base + torch.arange(q_len, device=q.device)).unsqueeze(
             1
         )  # [q, 1]
         k_pos = torch.arange(cache_len, device=q.device).unsqueeze(0)  # [1, k]

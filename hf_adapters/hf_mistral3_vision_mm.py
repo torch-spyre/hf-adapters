@@ -72,16 +72,16 @@ import torch
 
 from hf_adapters import hf_pixtral_vision
 from hf_adapters.hf_common import (
-    BLOCK_SIZE,
     DEVICE,
     _resolve_generation_params,
     allocate_kv_caches,
-    build_expansion_mask,
+    build_decode_mask,
     build_prefill_mask,
     decode_block_walk,
     generation_cache_len,
     get_backbone,
     get_model_dtype,
+    make_cache_index,
     pad_and_position,
     pad_lm_head,
     patch_rmsnorm,
@@ -253,9 +253,7 @@ def _run_text_backbone(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
     image_features=None,
     vision_mask=None,
 ):
@@ -281,9 +279,7 @@ def _run_text_backbone(
             attn_mask,
             key_caches[i],
             value_caches[i],
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
     return backbone.norm(h)
 
@@ -295,9 +291,7 @@ def _logits_from_embeds(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
     image_features=None,
     vision_mask=None,
 ):
@@ -309,9 +303,7 @@ def _logits_from_embeds(
         attn_mask,
         key_caches,
         value_caches,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
         image_features=image_features,
         vision_mask=vision_mask,
     )
@@ -367,9 +359,7 @@ def _prefill_forward(
         prefill_mask.to(DEVICE),
         key_caches,
         value_caches,
-        is_filling=False,
-        token_index=0,
-        cache_position=0,
+        cache_index=make_cache_index(0, padded_len, DEVICE),
         image_features=image_feats,  # on CPU; _inject_image_features moves it
         vision_mask=vision_mask,  # on CPU
     )
@@ -426,14 +416,15 @@ def generate(
 ):
     """Autoregressive image→text generation on Spyre (greedy / top-k/p sampling).
 
-    Mirrors ``hf_common.generate``'s 64-block padded decode, but driven by
+    Mirrors ``hf_common.generate``'s single-token decode, but driven by
     **embeddings** so the prefill step can carry the image injection:
 
     - **Prefill** (step 0): build text embeddings, zero the ``<image>`` slots,
       run the Pixtral tower + projector, inject image features before decoder
       layer 0, run the Mistral decoder once.
-    - **Decode** (steps ≥1): each newly generated token id is embedded with
-      the text embedding table and fed back — pure text, no image re-encoding.
+    - **Decode** (steps ≥1): the single token the previous step produced is
+      embedded with the text embedding table and fed back — pure text, no image
+      re-encoding — and exactly one cache slot is written.
 
     Inputs come pre-tokenized from ``AutoProcessor`` (handles chat template +
     ``[IMG]`` token expansion). Assumes **left-padded** input (set
@@ -473,11 +464,11 @@ def generate(
         model, batch_size, max_cache_len, model_dtype
     )
 
+    # Every decode step writes exactly one token at ``current_cache_len``, so
+    # generated tokens are contiguous from ``padded_len`` and ``result`` just
+    # grows by one column per step (mirrors ``hf_common.generate``).
     result = input_ids.clone()
     current_cache_len = padded_len
-    tokens_in_block = BLOCK_SIZE - 1
-    decode_pos = None
-    fill_mask_device = None
     finished = torch.zeros(batch_size, dtype=torch.bool)
     num_generated = torch.zeros(batch_size, dtype=torch.long)
 
@@ -502,65 +493,40 @@ def generate(
             )
             next_logits = logits.to("cpu")[:, -1, :]
             current_cache_len = padded_len
-            decode_pos = torch.zeros((batch_size, BLOCK_SIZE), dtype=torch.long)
-            for b in range(batch_size):
-                actual_len = actual_prompt_lengths[b].item()
-                for j in range(BLOCK_SIZE):
-                    decode_pos[b, j] = actual_len + j - BLOCK_SIZE
         else:
-            is_filling = tokens_in_block > 0
-            next_input = result[:, -BLOCK_SIZE:].to(DEVICE)
+            # --- DECODE: one token in, one cache slot written ---
+            # The token to feed is the one the previous step appended.
+            next_input = result[:, -1:].to(DEVICE)
             next_embeds = embed_ids(next_input)
-            if is_filling:
-                fill_pos = current_cache_len - BLOCK_SIZE + tokens_in_block
-                logits = _logits_from_embeds(
-                    model,
-                    next_embeds,
-                    decode_pos.to(DEVICE),
-                    fill_mask_device,
-                    key_caches,
-                    value_caches,
-                    is_filling=True,
-                    token_index=tokens_in_block,
-                    cache_position=fill_pos,
-                )
-                grab_idx = BLOCK_SIZE - tokens_in_block
-                next_logits = logits.to("cpu")[:, -grab_idx, :]
-            else:
-                current_cache_len += BLOCK_SIZE
-                decode_pos = decode_pos + BLOCK_SIZE
-                exp_mask = build_expansion_mask(
-                    batch_size,
-                    BLOCK_SIZE,
-                    max_cache_len,
-                    current_cache_len,
-                    prompt_offsets,
-                    dtype=model_dtype,
-                )
-                logits = _logits_from_embeds(
-                    model,
-                    next_embeds,
-                    decode_pos.to(DEVICE),
-                    exp_mask.to(DEVICE),
-                    key_caches,
-                    value_caches,
-                    is_filling=False,
-                    token_index=0,
-                    cache_position=current_cache_len - BLOCK_SIZE,
-                )
-                next_logits = logits.to("cpu")[:, -BLOCK_SIZE, :]
-                fill_mask_device = exp_mask.to(DEVICE)
+            # Absolute position of that token per sequence: its cache column
+            # minus the sequence's left-padding offset.
+            decode_pos = (current_cache_len - prompt_offsets).unsqueeze(1)  # [B, 1]
+            decode_mask = build_decode_mask(
+                batch_size,
+                max_cache_len,
+                current_cache_len,
+                prompt_offsets,
+                dtype=model_dtype,
+            )
+            logits = _logits_from_embeds(
+                model,
+                next_embeds,
+                decode_pos.to(DEVICE),
+                decode_mask.to(DEVICE),
+                key_caches,
+                value_caches,
+                cache_index=make_cache_index(current_cache_len, 1, DEVICE),
+            )
+            next_logits = logits.to("cpu")[:, -1, :]
+            current_cache_len += 1
 
         # Token selection (CPU) — mirrors hf_common.generate.
         next_tokens = select_next_token(
             next_logits, do_sample, temperature, top_k, top_p
         )
 
-        tokens_in_block = (tokens_in_block + 1) % BLOCK_SIZE
-        if tokens_in_block == 0:
-            result = torch.nn.functional.pad(result, (0, BLOCK_SIZE))
-        grab_idx = (BLOCK_SIZE - tokens_in_block) if tokens_in_block > 0 else BLOCK_SIZE
-        result[:, -grab_idx] = next_tokens
+        # Append the token: generated slots are contiguous from padded_len.
+        result = torch.cat([result, next_tokens.unsqueeze(1)], dim=1)
         if eos_ids is not None:
             finished |= torch.isin(next_tokens, eos_ids)
         num_generated += (~finished).long()

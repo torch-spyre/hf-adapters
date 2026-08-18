@@ -57,9 +57,7 @@ def _make_compiled_block(layer, use_rope):
         attn_mask,
         key_cache,
         value_cache,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     ):
         residual = hidden_states
         h = input_ln(hidden_states)
@@ -79,9 +77,7 @@ def _make_compiled_block(layer, use_rope):
             v,
             key_cache,
             value_cache,
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
 
         attn_out = F.scaled_dot_product_attention(

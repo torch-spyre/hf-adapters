@@ -80,16 +80,16 @@ import torch
 
 from hf_adapters import hf_gemma4
 from hf_adapters.hf_common import (
-    BLOCK_SIZE,
     DEVICE,
     _resolve_generation_params,
     allocate_kv_caches,
-    build_expansion_mask,
+    build_decode_mask,
     build_prefill_mask,
     decode_block_walk,
     generation_cache_len,
     get_backbone,
     get_model_dtype,
+    make_cache_index,
     pad_and_position,
     patch_layernorm,
     select_next_token,
@@ -315,7 +315,7 @@ def _sliding_window_lower_band(mask, sliding_window):
     causal window band instead would re-mask the forward-attending bidirectional
     image pairs.
 
-    Prefill only (``cache_position == token_index == 0``), so a query row's cache
+    Prefill only (``cache_index`` starts at cache slot 0), so a query row's cache
     coordinate is its row index ``q`` and the key column is the cache slot ``k``.
     ``mask`` is ``[B, 1, Lq, Lk]`` where ``Lk`` (the cache length) may exceed
     ``Lq`` (unused decode slots), so the band is the rectangular ``q - k`` over
@@ -362,9 +362,7 @@ def _logits_from_embeds(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
     masks=None,
 ):
     """Text decoder over image-scattered embeds → logits (+ softcap).
@@ -375,7 +373,11 @@ def _logits_from_embeds(
     (``{layer_type: mask}``) carries the bidirectional vision overlay at prefill;
     decode steps pass ``None`` and let
     the shared walk build the plain text-only causal + sliding masks from
-    ``attn_mask``.
+    ``attn_mask``. ``cache_index`` is the KV-write coordinate forwarded verbatim
+    to the shared walk — the destination cache slots for the computed positions:
+    ``[0, padded_len)`` at prefill, a single slot per decode step. Every computed
+    position is written, so the shared walk's sliding-window ``block_base`` is
+    simply ``cache_index[0]``: the cache column the (only) query row occupies.
     """
     h = hf_gemma4._run_blocks_over_embeds(
         model,
@@ -384,9 +386,7 @@ def _logits_from_embeds(
         attn_mask,
         key_caches,
         value_caches,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
         masks=masks,
     )
     logits = model.lm_head(h)
@@ -438,9 +438,7 @@ def _prefill_forward(
         prefill_mask.to(DEVICE),
         key_caches,
         value_caches,
-        is_filling=False,
-        token_index=0,
-        cache_position=0,
+        cache_index=make_cache_index(0, padded_len, DEVICE),
         masks=masks,
     )
 
@@ -509,15 +507,15 @@ def generate(
 ):
     """Autoregressive image→text generation on Spyre (greedy / top-k/p sampling).
 
-    Mirrors ``hf_granite_vision_mm.generate``'s 64-block padded decode, driven by
-    embeddings so the prefill step carries the image scatter + bidirectional
-    vision mask:
+    Mirrors ``hf_common.generate``'s single-token decode, driven by embeddings so
+    the prefill step carries the image scatter + bidirectional vision mask:
 
     - **Prefill** (step 0): scaled text embeds with ``<image>`` slots filled by
       the vision features; decoder runs once with the blockwise band on sliding
       layers.
-    - **Decode** (steps ≥1): each new token id is embedded (scaled) and fed back
-      — pure text, causal, no image band.
+    - **Decode** (steps ≥1): the single token the previous step produced is
+      embedded (scaled) and fed back, writing one cache slot — pure text, causal,
+      no image band. Generated tokens are therefore contiguous from ``padded_len``.
 
     Inputs come pre-tokenized from the checkpoint's ``AutoProcessor`` (chat
     template + image-token expansion). Assumes **left-padded** input
@@ -555,11 +553,11 @@ def generate(
         model, batch_size, max_cache_len, model_d_type
     )
 
+    # Decode state. Every decode step writes exactly one token at
+    # ``current_cache_len``, so generated tokens are contiguous from ``padded_len``
+    # and ``result`` just grows by one column per step.
     result = input_ids.clone()
     current_cache_len = padded_len
-    tokens_in_block = BLOCK_SIZE - 1
-    decode_pos = None
-    fill_mask_device = None
     finished = torch.zeros(batch_size, dtype=torch.bool)
     num_generated = torch.zeros(batch_size, dtype=torch.long)
 
@@ -585,64 +583,39 @@ def generate(
             )
             next_logits = logits.to("cpu")[:, -1, :]
             current_cache_len = padded_len
-            decode_pos = torch.zeros((batch_size, BLOCK_SIZE), dtype=torch.long)
-            for b in range(batch_size):
-                actual_len = actual_prompt_lengths[b].item()
-                for j in range(BLOCK_SIZE):
-                    decode_pos[b, j] = actual_len + j - BLOCK_SIZE
         else:
-            is_filling = tokens_in_block > 0
-            next_input = result[:, -BLOCK_SIZE:].to(DEVICE)
+            # --- DECODE: one token in, one cache slot written (pure text) ---
+            # The token to feed is the one the previous step appended.
+            next_input = result[:, -1:].to(DEVICE)
             next_embeds = embed_ids(next_input)
-            if is_filling:
-                fill_pos = current_cache_len - BLOCK_SIZE + tokens_in_block
-                logits = _logits_from_embeds(
-                    model,
-                    next_embeds,
-                    decode_pos.to(DEVICE),
-                    fill_mask_device,
-                    key_caches,
-                    value_caches,
-                    is_filling=True,
-                    token_index=tokens_in_block,
-                    cache_position=fill_pos,
-                )
-                grab_idx = BLOCK_SIZE - tokens_in_block
-                next_logits = logits.to("cpu")[:, -grab_idx, :]
-            else:
-                current_cache_len += BLOCK_SIZE
-                decode_pos = decode_pos + BLOCK_SIZE
-                exp_mask = build_expansion_mask(
-                    batch_size,
-                    BLOCK_SIZE,
-                    max_cache_len,
-                    current_cache_len,
-                    prompt_offsets,
-                    dtype=model_d_type,
-                )
-                logits = _logits_from_embeds(
-                    model,
-                    next_embeds,
-                    decode_pos.to(DEVICE),
-                    exp_mask.to(DEVICE),
-                    key_caches,
-                    value_caches,
-                    is_filling=False,
-                    token_index=0,
-                    cache_position=current_cache_len - BLOCK_SIZE,
-                )
-                next_logits = logits.to("cpu")[:, -BLOCK_SIZE, :]
-                fill_mask_device = exp_mask.to(DEVICE)
+            # Absolute position of that token per sequence: its cache column
+            # minus the sequence's left-padding offset.
+            decode_pos = (current_cache_len - prompt_offsets).unsqueeze(1)  # [B, 1]
+            decode_mask = build_decode_mask(
+                batch_size,
+                max_cache_len,
+                current_cache_len,
+                prompt_offsets,
+                dtype=model_d_type,
+            )
+            logits = _logits_from_embeds(
+                model,
+                next_embeds,
+                decode_pos.to(DEVICE),
+                decode_mask.to(DEVICE),
+                key_caches,
+                value_caches,
+                cache_index=make_cache_index(current_cache_len, 1, DEVICE),
+            )
+            next_logits = logits.to("cpu")[:, -1, :]
+            current_cache_len += 1
 
         next_tokens = select_next_token(
             next_logits, do_sample, temperature, top_k, top_p
         )
 
-        tokens_in_block = (tokens_in_block + 1) % BLOCK_SIZE
-        if tokens_in_block == 0:
-            result = torch.nn.functional.pad(result, (0, BLOCK_SIZE))
-        grab_idx = (BLOCK_SIZE - tokens_in_block) if tokens_in_block > 0 else BLOCK_SIZE
-        result[:, -grab_idx] = next_tokens
+        # Append the token: generated slots are contiguous from padded_len.
+        result = torch.cat([result, next_tokens.unsqueeze(1)], dim=1)
         if eos_ids is not None:
             finished |= torch.isin(next_tokens, eos_ids)
         num_generated += (~finished).long()
