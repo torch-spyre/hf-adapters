@@ -8,7 +8,7 @@ name: test_pull_request
 # specific to the PR/trunk trigger inline: the "integration-test" label
 # detection, which skips the whole suite when Jenkins owns this commit's
 # testing (via _test_matrix.yaml's skip_tests input).
-run-name: ${{ github.event_name == 'push' && 'trunk' || 'test_pull_request' }}
+run-name: ${{ github.event_name == 'push' && 'trunk' || 'regression' }}
 
 on:
   push:
