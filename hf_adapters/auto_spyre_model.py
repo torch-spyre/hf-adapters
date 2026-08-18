@@ -33,15 +33,15 @@ Usage::
 
 The model is automatically prepared for Spyre (RoPE precomputation, RMSNorm
 patching, LM head padding, compiled blocks) and moved to the Spyre device.
-A `generate` method is attached to the model that handles the 64-block
-padded decode generation loop.
+A `generate` method is attached to the model that handles the block-padded
+prefill + single-token decode generation loop.
 """
 
 from __future__ import annotations
 
 import os
 from types import MethodType, ModuleType
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 import torch
 from transformers import (
@@ -252,6 +252,7 @@ class AutoSpyreModel:
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype = torch.float16,
+        tp_plan: Optional[Union[dict, str]] = None,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
             model_name_or_path=model_name_or_path, mapping=cls._module_mapping
@@ -262,6 +263,7 @@ class AutoSpyreModel:
             module,
             dtype,
             auto_model_cls=cls._auto_model_cls,
+            tp_plan=tp_plan,
         )
         move_model_to_spyre(model, module, dtype)
         return model
@@ -270,8 +272,8 @@ class AutoSpyreModel:
 class AutoSpyreModelForCausalLM(AutoSpyreModel):
     """Load an HF causal-LM model and prepare it for Spyre.
 
-    Attaches a Spyre-aware ``generate`` method that runs the 64-block padded
-    decode loop.
+    Attaches a Spyre-aware ``generate`` method that runs the block-padded
+    prefill + single-token decode loop.
     """
 
     _auto_model_cls = AutoModelForCausalLM  # type: ignore[assignment]
@@ -281,6 +283,7 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype = torch.float16,
+        tp_plan: Optional[Union[dict, str]] = None,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(model_name_or_path)
         if getattr(module, "_is_encoder_only", False):
@@ -289,7 +292,7 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
             )
 
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype
+            model_name_or_path, dtype=dtype, tp_plan=tp_plan
         )
 
         def model_generate(
@@ -367,12 +370,13 @@ class AutoSpyreModelForMaskedLM(AutoSpyreModel):
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype = torch.float16,
+        tp_plan: Optional[Union[dict, str]] = None,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
             model_name_or_path, mapping=cls._module_mapping
         )
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype
+            model_name_or_path, dtype=dtype, tp_plan=tp_plan
         )
 
         def model_forward(
@@ -440,10 +444,11 @@ class AutoSpyreModelForQuestionAnswering(AutoSpyreModel):
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype = torch.float16,
+        tp_plan: Optional[Union[dict, str]] = None,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(model_name_or_path)
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype
+            model_name_or_path, dtype=dtype, tp_plan=tp_plan
         )
         if model.config.num_labels != 2:
             raise SpyreUnsupportedModelError(
@@ -532,12 +537,13 @@ class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype = torch.float16,
+        tp_plan: Optional[Union[dict, str]] = None,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
             model_name_or_path, mapping=cls._module_mapping
         )
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype
+            model_name_or_path, dtype=dtype, tp_plan=tp_plan
         )
 
         def model_rerank(
@@ -589,13 +595,14 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype = torch.float16,
+        tp_plan: Optional[Union[dict, str]] = None,
     ):
         module: ModuleType = resolve_adapter_module(
             model_name_or_path,
             mapping=cls._module_mapping,
         )
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype
+            model_name_or_path, dtype=dtype, tp_plan=tp_plan
         )
 
         def model_prefill_logits(

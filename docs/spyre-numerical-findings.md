@@ -97,13 +97,13 @@ if result is not None:
 
 **Adapter status (migrated):** `hf_common.py`'s `kv_cache_update` no
 longer uses `torch.ops.spyre.overwrite`. It was deprecated (torch-spyre#2488)
-and the write was migrated to a native slice assignment
-(`cache[:, :, pos:pos+seq_len, :] = k`), which sidesteps both the eager
+and the write is now an indirect scatter
+(`key_cache.index_copy_(2, cache_index, k)`), which sidesteps both the eager
 numerical error and the `None`-return issue above. This finding is
 retained as a record of the op's behavior; it no longer affects the
-adapter. (The separate per-offset compile specialization is a property of
-the offset being a compile-time constant, not of the op — it persists
-after the migration; see ARCHITECTURE.md "Open Work".)
+adapter. Because the destination positions travel in a tensor (`cache_index`)
+rather than a compile-time-constant offset, the write compiles to a single
+binary for any position — the old per-offset specialization is gone.
 
 ### Open: RMSNorm wrong on non-contiguous inputs (#1781)
 

@@ -130,7 +130,7 @@ Create `hf_adapters/hf_<model>.py`. Every adapter must expose:
 
 | Export | Purpose |
 |--------|---------|
-| `_run_forward(model, input_ids, position_ids, attn_mask, key_caches, value_caches, is_filling, token_index, cache_position)` | Full forward → logits |
+| `_run_forward(model, input_ids, position_ids, attn_mask, key_caches, value_caches, cache_index)` | Full forward → logits |
 | `_run_backbone_forward(...)` | Same signature → last hidden state (no lm_head). Used by embedding callers |
 | `prepare_for_spyre(model)` | Patch model in-place for Spyre |
 
@@ -152,9 +152,7 @@ def block_forward(
     attn_mask,          # [B, 1, S, cache_len] — float16 causal mask
     key_cache,          # [B, num_kv_heads, max_cache_len, head_dim]
     value_cache,        # [B, num_kv_heads, max_cache_len, v_head_dim]
-    is_filling,         # bool — True=fill mode, False=expand mode
-    token_index,        # int — current write position in cache
-    cache_position,     # [S] — position indices for cache slice
+    cache_index,        # [n] int64 — destination cache positions (indirect scatter)
 ) -> (hidden_states, key_cache, value_cache)
 ```
 

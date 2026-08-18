@@ -101,9 +101,7 @@ def _make_compiled_block(layer, q_proj, k_proj, v_proj, gate_proj, up_proj, head
         attn_mask,
         key_cache,
         value_cache,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     ):
         residual = hidden_states
         h = input_ln(hidden_states)
@@ -124,9 +122,7 @@ def _make_compiled_block(layer, q_proj, k_proj, v_proj, gate_proj, up_proj, head
             v,
             key_cache,
             value_cache,
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
 
         attn_out = F.scaled_dot_product_attention(
@@ -166,9 +162,7 @@ def _run_backbone_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     """Phi-3 backbone: embedding, blocks, norm."""
     backbone = get_backbone(model)
@@ -182,9 +176,7 @@ def _run_backbone_forward(
             attn_mask,
             key_caches[i],
             value_caches[i],
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
 
     h = backbone.norm(h)
@@ -198,9 +190,7 @@ def _run_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     """Phi-3 causal-LM forward: backbone + LM head."""
     h = _run_backbone_forward(
@@ -210,9 +200,7 @@ def _run_forward(
         attn_mask,
         key_caches,
         value_caches,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     )
 
     return model.lm_head(h)

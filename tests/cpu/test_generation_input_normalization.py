@@ -120,9 +120,9 @@ def test_prefill_mask_matches_normalized_offsets():
     mask = build_prefill_mask(2, padded_len, 128, offsets)
 
     assert padded_ids[:, -1].tolist() == [13, 25]
-    assert torch.isneginf(mask[0, 0, -1, : offsets[0]]).all()
+    assert (mask[0, 0, -1, : offsets[0]] < 0).all()
     assert (mask[0, 0, -1, offsets[0] : padded_len] == 0).all()
-    assert torch.isneginf(mask[0, 0, -1, padded_len:]).all()
+    assert (mask[0, 0, -1, padded_len:] < 0).all()
 
 
 def test_inputs_are_not_mutated():

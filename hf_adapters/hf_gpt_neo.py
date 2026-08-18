@@ -140,9 +140,7 @@ def _run_backbone_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     """GPT-Neo backbone: token + learned position embeddings, compiled blocks, ln_f."""
     bb = get_backbone(model)
@@ -155,9 +153,7 @@ def _run_backbone_forward(
             attn_mask,
             key_caches[i],
             value_caches[i],
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
 
     h = bb.ln_f(h)
@@ -171,9 +167,7 @@ def _run_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     """GPT-Neo causal-LM forward: backbone + LM head (vocab-cropped)."""
     h = _run_backbone_forward(
@@ -183,9 +177,7 @@ def _run_forward(
         attn_mask,
         key_caches,
         value_caches,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     )
     logits = model.lm_head(h)
     return logits[..., : model.config.vocab_size]

@@ -89,6 +89,20 @@ on:
         required: false
         type: string
         default: ''
+      skip_tests:
+        description: >-
+          When true, skips matrix generation, adapter-coverage, and every
+          spyre-*-tests / spyre-model-module-tests job (they report
+          "skipped", not "failure", so the run-spyre-unit-tests gate still
+          passes). Does NOT skip pre-commit, mypy, or check-uv-lock -- those
+          static checks stay cheap and hardware-independent, so callers that
+          hand testing off elsewhere (e.g. test_pull_request.yaml's
+          "integration-test" PR label, which routes to a separate Jenkins
+          run) can still get fast lint feedback here. Default false runs
+          everything, unchanged from today.
+        required: false
+        type: boolean
+        default: false
 
 defaults:
   run:
@@ -182,10 +196,13 @@ jobs:
   generate-matrix:
     name: Generate test matrices
     runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_tests }}
     outputs:
       causal_matrix: ${{ steps.generate.outputs.causal_matrix }}
       embed_matrix: ${{ steps.generate.outputs.embed_matrix }}
       vision_matrix: ${{ steps.generate.outputs.vision_matrix }}
+      masked_lm_matrix: ${{ steps.generate.outputs.masked_lm_matrix }}
+      question_answering_matrix: ${{ steps.generate.outputs.question_answering_matrix }}
       combined_matrix: ${{ steps.generate.outputs.combined_matrix }}
       reranker_matrix: ${{ steps.generate.outputs.reranker_matrix }}
     defaults:
@@ -216,20 +233,80 @@ jobs:
           # Example: python .github/scripts/generate_test_matrix.py --exclude ibm-granite/granite-vision-4.1-4b tiiuae/Falcon3-1B-Base
 
           # We exclude these models - See https://github.com/torch-spyre/hf-adapters/issues/89
-          # google/gemma-4-12B-it: VLM e2e passes on the pod but OOMs the CI runner
-          # (see PR #182); validated on-pod, excluded here to match upstream/main.
+          # ibm-research/granite-4.1-20b: model is not yet publicly accessible.
           ONLY_ARGS=()
           if [[ -n "$ONLY_MODELS" ]]; then
             read -r -a ONLY_ARGS <<< "$ONLY_MODELS"
             ONLY_ARGS=(--only "${ONLY_ARGS[@]}")
           fi
           python .github/scripts/generate_test_matrix.py \
-            --exclude tiiuae/Falcon3-1B-Base mistralai/Mistral-Small-3.1-24B-Instruct-2503 google/gemma-4-12B-it \
+            --exclude tiiuae/Falcon3-1B-Base mistralai/Mistral-Small-3.1-24B-Instruct-2503 ibm-research/granite-4.1-20b \
             "${ONLY_ARGS[@]}"
+
+  # ===========================================================================
+  # Generates spyre-model-module-tests' matrix from the tests/configs/module_tests/
+  # directory of the SAME ref+repository that build-hf-adapters is about to check
+  # out (inputs.ref/inputs.repository), instead of a filename list hardcoded here.
+  #
+  # Why this exists: this reusable workflow file is resolved at whichever ref
+  # GitHub's workflow_dispatch call targets (dispatch_ref), while the source tree
+  # spyre-model-module-tests actually tests is checked out from a SEPARATE `ref`
+  # input -- callers are free to point these at different commits (that's the
+  # whole point of the Test-With:/companion-ref flow). A filename list hardcoded
+  # in this file is therefore a second, independent copy of "what configs exist,"
+  # which drifts silently whenever those two refs disagree -- e.g. a config gets
+  # renamed on the ref under test but dispatch_ref still resolves to a pre-rename
+  # copy of this file (or vice versa), and the matrix hands run_test.sh a path
+  # that doesn't exist ("No YAML config file(s) found in the arguments.").
+  # Deriving the list from the actual checked-out tree, every time, makes that
+  # class of drift impossible.
+  # ===========================================================================
+  generate-module-config-matrix:
+    name: Generate module-test config matrix
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_tests }}
+    outputs:
+      module_config_matrix: ${{ steps.generate.outputs.module_config_matrix }}
+    # Same override as generate-matrix above: the workflow-level default
+    # (working-directory: /home/senuser) only exists on the self-hosted Spyre
+    # runners. This job runs on ubuntu-latest (a plain git clone + ls needs no
+    # Spyre hardware), where that path doesn't exist.
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: List tests/configs/module_tests at the ref under test
+        id: generate
+        env:
+          # Same inputs, same clone-URL resolution as build-hf-adapters/action.yaml's
+          # "Checkout target commit" step, so this always inspects the identical
+          # source tree that step is about to check out.
+          INPUT_REF: ${{ inputs.ref }}
+          INPUT_REPOSITORY: ${{ inputs.repository }}
+        run: |
+          set -euo pipefail
+          CLONE_URL="${INPUT_REPOSITORY:-$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git}"
+          if [[ -n "$INPUT_REPOSITORY" && "$CLONE_URL" != *"://"* ]]; then
+            CLONE_URL="$GITHUB_SERVER_URL/${CLONE_URL%.git}.git"
+          fi
+          TARGET_REF="${INPUT_REF:-$GITHUB_SHA}"
+          git clone --filter=blob:none --no-checkout "$CLONE_URL" repo
+          cd repo
+          git checkout --force "$TARGET_REF"
+          cd tests/configs/module_tests
+          # *vllm* configs (e.g. granite_4_1_8b_vllm.yaml, gpt_oss_20b_vllm_spyre.yaml)
+          # are a separate, not-yet-wired-in flavor -- excluded here to match the
+          # scope of the filename list this replaces exactly, not just "whatever's
+          # on disk". Widen this (or wire up a real vllm-module-tests job) as a
+          # deliberate follow-up, not a side effect of fixing the drift bug.
+          configs=$(ls *.yaml | grep -v vllm | jq -R -s -c 'split("\n")[:-1]')
+          echo "Configs found at ${TARGET_REF} (excluding vllm): ${configs}"
+          echo "module_config_matrix=${configs}" >> "$GITHUB_OUTPUT"
 
   adapter-coverage:
     name: adapter coverage
     runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_tests }}
     defaults:
       run:
         working-directory: .
@@ -277,6 +354,40 @@ jobs:
 
       - name: Check root uv.lock is up to date
         run: uv lock --check
+
+  # ---------------------------------------------------------------------------
+  # mypy — static type checker for hf_adapters/.
+  #
+  # Runs in its own job so it can install torch+transformers (needed to resolve
+  # the type stubs) without bloating the pre-commit lint job, which runs on a
+  # plain Python install. The local pre-commit mypy hook is intentionally kept
+  # so developers still get feedback on commit; this job is the CI enforcement.
+  # Not gated by skip_tests -- see that input's description.
+  # ---------------------------------------------------------------------------
+  mypy:
+    name: mypy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --quiet \
+            "torch>=2.0" \
+            "transformers>=5.12.1,<6.0.0" \
+            "mypy>=2.3.0,<3"
+
+      - name: Run mypy
+        run: mypy --config-file=pyproject.toml
 
 #  cpu-tests:
 #    name: CPU tests (${{ matrix.test_file }})
@@ -332,7 +443,7 @@ jobs:
     # space-separated word in test_type (e.g. "smoke load") for fine-grained
     # selection.
     # See spyre-smoke-tests for the other keys.
-    if: needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' load ')
+    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' load ')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -364,6 +475,8 @@ jobs:
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Echo the exact runner-label selectors this job's runs-on used.
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
 
       - name: Run test_load_spyre.py for ${{ matrix.model_key }}
         env:
@@ -393,7 +506,7 @@ jobs:
     # only job that tier runs). Same allowlist mechanism as spyre-load-tests
     # above -- to add a new suite later, give the new job its own key and
     # copy this `if:` line with that key; no existing job needs to change.
-    if: needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'integration' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' smoke ')
+    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'integration' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' smoke ')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -424,6 +537,8 @@ jobs:
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Echo the exact runner-label selectors this job's runs-on used.
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
 
       - name: Run test_e2e_smoke_spyre.py for ${{ matrix.model_key }}
         env:
@@ -449,7 +564,7 @@ jobs:
     name: Spyre token compare (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type]
     # Suite key: "token_compare". Part of the "unit" coarse tier.
-    if: needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_compare ')
+    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_compare ')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -480,6 +595,8 @@ jobs:
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Echo the exact runner-label selectors this job's runs-on used.
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
 
       - name: Run test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}
         env:
@@ -505,7 +622,7 @@ jobs:
     name: Spyre embed compare (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type]
     # Suite key: "embed_compare". Part of the "unit" coarse tier.
-    if: needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' embed_compare ')
+    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' embed_compare ')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -536,6 +653,8 @@ jobs:
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Echo the exact runner-label selectors this job's runs-on used.
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
 
       - name: Run test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}
         env:
@@ -561,7 +680,7 @@ jobs:
     name: Spyre VLM e2e (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type]
     # Suite key: "vlm". Part of the "unit" coarse tier.
-    if: needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' vlm ')
+    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' vlm ')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -593,6 +712,8 @@ jobs:
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Echo the exact runner-label selectors this job's runs-on used.
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
 
       - name: Run test_vlm_e2e_spyre.py for ${{ matrix.model_key }}
         env:
@@ -622,8 +743,10 @@ jobs:
   # near-tie; see run 29574528796). Commented out for now; may re-enable later
   # once the numerics/threshold are sorted. To re-enable: uncomment this block.
   # It was non-blocking (continue-on-error, NOT in the run-spyre-unit-tests gate),
-  # so it never blocked merges. gemma stays in the generate-matrix --exclude, and
-  # the spyre_pf_x2 labels (actionlint.yaml) + extra_test_flags_multi_spyre
+  # so it never blocked merges. gemma is no longer in the generate-matrix
+  # --exclude (it now runs on the 1-card spyre-vlm-e2e-tests job, where it was
+  # previously documented to OOM -- watch that job if re-enabling this one too),
+  # and the spyre_pf_x2 labels (actionlint.yaml) + extra_test_flags_multi_spyre
   # (callers) remain in place so re-enabling is just an uncomment.
   # spyre-vlm-e2e-tests-x2:
   #   name: Spyre VLM e2e x2 (${{ matrix.model_key }})
@@ -674,7 +797,7 @@ jobs:
     name: Spyre reranker compare (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type]
     # Suite key: "reranker_compare". Part of the "unit" coarse tier.
-    if: needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' reranker_compare ')
+    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' reranker_compare ')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -725,11 +848,11 @@ jobs:
           path: junit-reranker-compare-${{ matrix.model_key }}.xml
           retention-days: 14
 
-  spyre-model-module-tests:
-    name: Spyre model-module tests (${{ matrix.config }})
-    needs: [resolve-test-type]
-    # Suite key: "model_module". Part of the "unit" coarse tier.
-    if: needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_module ')
+  spyre-masked-lm-compare-tests:
+    name: Spyre masked-LM compare (${{ matrix.model_key }})
+    needs: [generate-matrix, resolve-test-type]
+    # Suite key: "masked_lm_compare". Part of the "unit" coarse tier.
+    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' masked_lm_compare ')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -739,11 +862,120 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        config:
-          - granite_4_1_8b_spyre.yaml
-          - granite_3_3_8b_instruct_spyre.yaml
-          - Ministral-3-14B-Instruct-2512.yaml
-          - Mistral-Small-3.2-24B-Instruct-2506.yaml
+        # Dynamic matrix: masked-LM models from tests/model_registry.py
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.masked_lm_matrix) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+
+      - name: Run test_e2e_masked_lm_compare_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_e2e_masked_lm_compare_spyre.py for ${{ matrix.model_key }}..."
+          make masked-lm-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-masked-lm-compare-${{ matrix.model_key }}.xml
+          echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-masked-lm-compare-${{ env.SAFE_MODEL_KEY }}
+          path: junit-masked-lm-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
+
+  spyre-question-answering-compare-tests:
+    name: Spyre question-answering compare (${{ matrix.model_key }})
+    needs: [generate-matrix, resolve-test-type]
+    # Suite key: "question_answering_compare". Part of the "unit" coarse tier.
+    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' question_answering_compare ')) }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Dynamic matrix: extractive-QA models from tests/model_registry.py
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.question_answering_matrix) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+
+      - name: Run test_e2e_question_answering_compare_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_e2e_question_answering_compare_spyre.py for ${{ matrix.model_key }}..."
+          make question-answering-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-question-answering-compare-${{ matrix.model_key }}.xml
+          echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-question-answering-compare-${{ env.SAFE_MODEL_KEY }}
+          path: junit-question-answering-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
+
+  spyre-model-module-tests:
+    name: Spyre model-module tests (${{ matrix.config }})
+    needs: [resolve-test-type, generate-module-config-matrix]
+    # Suite key: "model_module". Part of the "unit" coarse tier.
+    if: ${{ !inputs.skip_tests && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_module ')) }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Dynamic matrix: every tests/configs/module_tests/*.yaml file at the ref
+        # under test (see generate-module-config-matrix above) -- not a filename
+        # list hardcoded here, which can silently drift from the actual tree.
+        config: ${{ fromJSON(needs.generate-module-config-matrix.outputs.module_config_matrix) }}
 
     steps:
       - name: Checkout composite actions
@@ -762,6 +994,8 @@ jobs:
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Echo the exact runner-label selectors this job's runs-on used.
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
 
       - name: Run module tests for ${{ matrix.config }}
         env:
@@ -794,7 +1028,9 @@ jobs:
         working-directory: .
     needs:
       - pre-commit
+      - mypy
       - generate-matrix
+      - generate-module-config-matrix
       - adapter-coverage
       - check-uv-lock
 #      - cpu-tests
@@ -804,6 +1040,8 @@ jobs:
       - spyre-embed-compare-tests
       - spyre-vlm-e2e-tests
       - spyre-reranker-compare-tests
+      - spyre-masked-lm-compare-tests
+      - spyre-question-answering-compare-tests
       - spyre-model-module-tests #updated to run model centric HF module tests
     if: always()
     steps:
@@ -815,7 +1053,9 @@ jobs:
         # lines when restoring either job.
         run: |-
           if ${{ contains(needs.pre-commit.result, 'failure') || contains(needs.pre-commit.result, 'cancelled') ||
+                 contains(needs.mypy.result, 'failure') || contains(needs.mypy.result, 'cancelled') ||
                  contains(needs.generate-matrix.result, 'failure') || contains(needs.generate-matrix.result, 'cancelled') ||
+                 contains(needs.generate-module-config-matrix.result, 'failure') || contains(needs.generate-module-config-matrix.result, 'cancelled') ||
                  contains(needs.adapter-coverage.result, 'failure') || contains(needs.adapter-coverage.result, 'cancelled') ||
                  contains(needs.check-uv-lock.result, 'failure') || contains(needs.check-uv-lock.result, 'cancelled') ||
                  contains(needs.spyre-load-tests.result, 'failure') || contains(needs.spyre-load-tests.result, 'cancelled') ||
@@ -824,6 +1064,8 @@ jobs:
                  contains(needs.spyre-embed-compare-tests.result, 'failure') || contains(needs.spyre-embed-compare-tests.result, 'cancelled') ||
                  contains(needs.spyre-vlm-e2e-tests.result, 'failure') || contains(needs.spyre-vlm-e2e-tests.result, 'cancelled') ||
                  contains(needs.spyre-reranker-compare-tests.result, 'failure') || contains(needs.spyre-reranker-compare-tests.result, 'cancelled') ||
+                 contains(needs.spyre-masked-lm-compare-tests.result, 'failure') || contains(needs.spyre-masked-lm-compare-tests.result, 'cancelled') ||
+                 contains(needs.spyre-question-answering-compare-tests.result, 'failure') || contains(needs.spyre-question-answering-compare-tests.result, 'cancelled') ||
                  contains(needs.spyre-model-module-tests.result, 'failure') || contains(needs.spyre-model-module-tests.result, 'cancelled') }}; then
             echo "One or more test suites failed."
             exit 1
