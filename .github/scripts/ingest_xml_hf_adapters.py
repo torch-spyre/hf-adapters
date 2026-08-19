@@ -219,7 +219,7 @@ def insert_run(client, run_id: str, run: dict, args):
             "xpass",
             "duration_s",
             "platform",
-            "trigger_type",
+            "test_type",
             "img_digest",
         ],
     )

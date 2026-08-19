@@ -11,7 +11,7 @@ inserted.
 from __future__ import annotations
 
 import csv
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,10 +20,11 @@ from tests.spyre.weekly_generation.table_schema import TABLE_COLUMNS
 
 
 class CsvResultSink(ResultSink):
-    """Write rows to a fresh CSV file. Write-only, for no-database test runs.
+    """Write rows to a fresh CSV file, for no-database test runs.
 
-    Nothing is read back, and the file must not already exist — so one file holds
-    exactly one run's rows.
+    The file must not already exist — so one file holds exactly one run's rows.
+    Reading back via ``get_models_at_snapshot_date`` is supported: the CSV is
+    re-opened for reading and filtered by ``snapshot_date``.
     """
 
     def __init__(self, path: Path) -> None:
@@ -79,6 +80,40 @@ class CsvResultSink(ResultSink):
         }
         self._writer.writerow(rec)
         self._fh.flush()
+
+    def get_models_at_snapshot_date(self, *, snapshot_date: date) -> set[str]:
+        """Return every distinct model name recorded for *snapshot_date*.
+
+        Re-opens the CSV for reading (independent of the write handle, which
+        stays open and flushed-per-row) and returns the unique ``model_name``
+        values whose ``snapshot_date`` column parses to *snapshot_date*.
+
+        Row values are parsed as dates rather than compared as strings, so a
+        CSV that mixes ISO and ``DD/MM/YYYY`` snapshot_date formats (e.g. one
+        assembled by ``clickhouse_db.import_csv``, which accepts either) still
+        resumes correctly. Rows with an unparseable snapshot_date, or an
+        empty model_name, are ignored — the base class rejects empty names at
+        ``add_entry`` time, so a blank one is by definition external noise.
+        """
+        seen: set[str] = set()
+        with open(self._path, newline="") as fh:
+            for row in csv.DictReader(fh):
+                name: str = (row.get("model_name") or "").strip()
+                if not name:
+                    continue
+                raw: str = (row.get("snapshot_date") or "").strip()
+                try:
+                    parsed: date = date.fromisoformat(raw)
+                except ValueError:
+                    # DD/MM/YYYY is the only other shape the sibling importer
+                    # writes; anything else is skipped.
+                    try:
+                        parsed = datetime.strptime(raw, "%d/%m/%Y").date()
+                    except ValueError:
+                        continue
+                if parsed == snapshot_date:
+                    seen.add(name)
+        return seen
 
     def close(self) -> None:
         if self._fh is not None:

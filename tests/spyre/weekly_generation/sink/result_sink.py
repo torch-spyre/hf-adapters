@@ -132,5 +132,14 @@ class ResultSink(ABC):
         of the parent loses at most one batch instead of the whole run.
         """
 
+    @abstractmethod
+    def get_models_at_snapshot_date(self, *, snapshot_date: date) -> set[str]:
+        """Read-back hook: return the model names already recorded for a date.
+
+        Enumerates the row keys the sink has for *snapshot_date* so callers
+        can build a skip-set on resume without needing to know the storage
+        backend. The returned set contains no duplicates and no empty names.
+        """
+
     def close(self) -> None:
         """Release resources. Default is a no-op; subclasses override."""
