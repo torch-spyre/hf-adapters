@@ -145,6 +145,26 @@ class ClickHouseResultSink(ResultSink):
         print("ClickHouse: bulk insert complete.")
         self._pending.clear()
 
+    def get_models_at_snapshot_date(self, *, snapshot_date: date) -> set[str]:
+        """Return every distinct model name recorded for *snapshot_date*.
+
+        Queries ``DISTINCT model_name`` from the table so the caller can build
+        a skip-set without knowing the storage backend. Empty names cannot
+        appear (the base class rejects them at ``add_entry`` time), so the
+        result is safe to use directly as a membership set.
+        """
+        result = self._client.query(
+            "SELECT DISTINCT model_name "
+            "FROM {db:Identifier}.{tbl:Identifier} "
+            "WHERE snapshot_date = {snapshot_date:Date}",
+            parameters={
+                "db": DATABASE,
+                "tbl": self._table_name,
+                "snapshot_date": snapshot_date,
+            },
+        )
+        return {row[0] for row in result.result_rows}
+
     def close(self) -> None:
         """Flush any remaining buffered rows on shutdown."""
         self.flush()
