@@ -25,3 +25,24 @@ from tests.spyre.edge_cases._shared import run_greedy_case
 def test_short_block_minus_one_spyre(model_path: str) -> None:
     ok, detail = run_greedy_case(model_path, "short_block_minus_one")
     assert ok, detail
+
+
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.slow
+def test_short_cross_block_spyre(model_path: str) -> None:
+    ok, detail = run_greedy_case(model_path, "short_cross_block")
+    assert ok, detail
+
+
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.slow
+def test_short_one_token_spyre(model_path: str) -> None:
+    ok, detail = run_greedy_case(model_path, "short_one_token")
+    assert ok, detail
+
+
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.slow
+def test_short_two_blocks_plus_spyre(model_path: str) -> None:
+    ok, detail = run_greedy_case(model_path, "short_two_blocks_plus")
+    assert ok, detail

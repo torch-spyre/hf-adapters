@@ -12,16 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Spyre edge case: ``forced_eos:eos_on_last_step`` (finished.all() == loop end)."""
+"""Spyre edge case: ``mixed_short`` (batch=3 mixed-length scheduling)."""
 
 import pytest
 
 from tests.model_registry import CAUSAL_PATHS
-from tests.spyre.edge_cases._shared import run_eos_case
+from tests.spyre.edge_cases._shared import run_greedy_case
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_eos_on_last_step_spyre(model_path: str) -> None:
-    ok, detail = run_eos_case(model_path, "eos_on_last_step")
+def test_mixed_short_spyre(model_path: str) -> None:
+    ok, detail = run_greedy_case(model_path, "mixed_short")
+    assert ok, detail
+
+
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.slow
+def test_mixed_with_single_token_spyre(model_path: str) -> None:
+    ok, detail = run_greedy_case(model_path, "mixed_with_single_token")
     assert ok, detail

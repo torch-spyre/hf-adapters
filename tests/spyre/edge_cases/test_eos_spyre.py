@@ -12,19 +12,82 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Spyre edge case: ``no_eos_runs_full_budget`` (eos_token_id=None crosses block)."""
-
-from __future__ import annotations
+"""Spyre edge cases for EOS-token handling in generation."""
 
 import time
 
 import pytest
 import torch
 
-from tests._generate_edge_case_helpers import make_prompts
+from tests._generate_edge_case_helpers import (
+    hf_reference_outputs,
+    make_prompt_with_eos_inside,
+    make_prompts,
+)
 from tests.conftest import encode_generation_inputs
 from tests.model_registry import CAUSAL_PATHS
-from tests.spyre.edge_cases._shared import _setup, _teardown
+from tests.spyre.edge_cases._shared import _setup, _teardown, run_eos_case
+
+
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.slow
+def test_eos_first_of_second_block_spyre(model_path: str) -> None:
+    ok, detail = run_eos_case(model_path, "eos_first_of_second_block")
+    assert ok, detail
+
+
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.slow
+def test_eos_first_token_spyre(model_path: str) -> None:
+    ok, detail = run_eos_case(model_path, "eos_first_token")
+    assert ok, detail
+
+
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.slow
+def test_eos_inside_prompt_spyre(model_path: str) -> None:
+    info, tokenizer, ref_model, model = _setup(model_path, need_ref=True)
+    try:
+        if tokenizer.eos_token_id is None:
+            pytest.skip("tokenizer has no eos_token_id")
+        eos_in_prompt = make_prompt_with_eos_inside(
+            tokenizer, tokenizer.eos_token_id, target_tokens=12
+        )
+        eos_in_prompt_max_new = 64 + 8
+        eos_in_prompt_refs = hf_reference_outputs(
+            ref_model, tokenizer, [eos_in_prompt], eos_in_prompt_max_new
+        )
+        encoded = encode_generation_inputs(tokenizer, [eos_in_prompt])
+        t0 = time.time()
+        out = model.generate(
+            **encoded,
+            max_new_tokens=eos_in_prompt_max_new,
+            do_sample=False,
+        )
+        spyre_output = tokenizer.decode(
+            out[0, encoded["input_ids"].shape[1] :], skip_special_tokens=True
+        )
+        elapsed = time.time() - t0
+        ok = eos_in_prompt_refs[0].strip() == spyre_output.strip()
+        detail = "" if ok else f"hf={eos_in_prompt_refs!r} spyre={out!r}"
+        print(f"  eos_inside_prompt: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
+        assert ok, detail
+    finally:
+        _teardown(model, ref_model)
+
+
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.slow
+def test_eos_mid_block_spyre(model_path: str) -> None:
+    ok, detail = run_eos_case(model_path, "eos_mid_block")
+    assert ok, detail
+
+
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.slow
+def test_eos_on_last_step_spyre(model_path: str) -> None:
+    ok, detail = run_eos_case(model_path, "eos_on_last_step")
+    assert ok, detail
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
