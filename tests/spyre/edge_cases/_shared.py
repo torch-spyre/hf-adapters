@@ -29,7 +29,13 @@ from __future__ import annotations
 import gc
 import time
 
-from _generate_edge_case_helpers import (
+from transformers import (
+    AutoTokenizer,
+    PreTrainedModel,
+)
+
+from hf_adapters import AutoSpyreModelForCausalLM
+from tests._generate_edge_case_helpers import (
     CASES,
     EOS_CASES,
     forced_eos_expected,
@@ -37,12 +43,6 @@ from _generate_edge_case_helpers import (
     hf_reference_outputs,
     make_prompts,
 )
-from transformers import (
-    AutoTokenizer,
-    PreTrainedModel,
-)
-
-from hf_adapters import AutoSpyreModelForCausalLM
 from tests.conftest import load_ref_model, resolve_adapter_module_for_test
 
 
@@ -106,7 +106,7 @@ def run_eos_case(model_path: str, case_id: str) -> tuple[bool, str]:
         per_prompt_ids = [
             greedy_token_ids(ref_model, tokenizer, p, max_new) for p in prompts
         ]
-        from _generate_edge_case_helpers import pick_forced_eos_id
+        from tests._generate_edge_case_helpers import pick_forced_eos_id
 
         eos_id = pick_forced_eos_id(per_prompt_ids, eos_offsets)
         if eos_id is None:

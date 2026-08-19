@@ -19,6 +19,8 @@ from hf_adapters import AutoSpyreModelForQuestionAnswering
 from hf_adapters.auto_spyre_model import dtype_for_model_path
 from tests.model_registry import QUESTION_ANSWERING_PATHS
 
+pytestmark = pytest.mark.model_harness("question_answering")
+
 QUESTIONS = ["Where does the engineer live?", "What color is the sky?"]
 CONTEXTS = [
     "The engineer lives in Berlin and works on machine learning systems.",

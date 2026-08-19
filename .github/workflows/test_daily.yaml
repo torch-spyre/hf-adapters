@@ -1,8 +1,16 @@
 name: test_daily
 
+# ---------------------------------------------------------------------------
+# Daily edge-case sweep. Delegates entirely to _test_matrix.yaml with
+# test_type: regression and edge_cases_only: true, so only the
+# tests/spyre/edge_cases/ suite runs on the standing image_torch_spyre set.
+#
+# pre-commit / mypy / check-uv-lock still run as usual; every standard
+# spyre-*-tests suite short-circuits on !inputs.edge_cases_only and skips.
+# ---------------------------------------------------------------------------
 on:
   schedule:
-    # Runs at 06:00 UTC every day
+    # Runs at 06:00 UTC every day.
     - cron: "0 6 * * *"
   workflow_dispatch:
     inputs:
@@ -15,175 +23,63 @@ on:
         description: |
           Full clone URL of the hf-adapters fork to check out (e.g.
           "https://github.com/myuser/hf-adapters.git"); leave empty for the base repo.
-          Used by the cross-repo Test-With: flow to test a companion fork/branch.
-        required: false
-        type: string
-        default: ""
-      pr_url_hash:
-        description: |
-          Hash of the full URL of the PR that triggered this run.
-          Sent by the internal integration pipeline; unused on push/PR/merge_group.
         required: false
         type: string
         default: ""
       runner_label:
         description: |
-          Per-PR ephemeral runner-set IMAGE label to select for runs-on
-          (image_hf_adapters_pr_<component>_<sha12>, e.g.
-          image_hf_adapters_pr_flex_8ddcf3e155e9). The per-PR ephemeral flow passes
-          that PR's set label so jobs land on the per-PR image (the changed RPM is
-          baked in -> no runtime sudo). Empty keeps push/PR/merge_group runs on the
-          standing image_torch_spyre set (today's behaviour).
+          Per-PR ephemeral runner-set IMAGE label to select for runs-on.
+          Empty keeps the run on the standing image_torch_spyre set.
+        required: false
+        type: string
+        default: ""
+      models:
+        description: >-
+          Space-separated list of model paths to restrict edge-case jobs to.
+          Must match paths exactly as they appear in tests/model_registry.py.
+          Empty (default) = run every causal-LM model in the registry.
         required: false
         type: string
         default: ""
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
-defaults:
-  run:
-    shell: bash
-    working-directory: /home/senuser
 
 permissions:
   contents: read
   checks: write
 
-env:
-  # The CI env var is very important.
-  # GitHub actions automatically sets CI=true
-  # which causes the pytest inductor tests to fail with AssertionError
-  # due to a mix of fallbacks and decompositions.
-  # Here we set it to an empty string (or we could also unset it).
-  CI: ""
-  CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
-  STORAGE_1_DIR: /storage-1/hf-adapters
-  HF_HOME: /storage-1/hf-adapters/.cache/huggingface
-
 jobs:
+  run-tests:
+    uses: ./.github/workflows/_test_matrix.yaml
+    with:
+      image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
+      extra_test_flags: -vvv -s
+      extra_test_flags_multi_spyre: -vvv -s
+      ref: ${{ inputs.ref || '' }}
+      repository: ${{ inputs.repository || '' }}
+      test_type: regression
+      edge_cases_only: true
+      models: ${{ inputs.models || '' }}
 
-  # ===========================================================================
-  # Dynamic matrix generation
-  # ===========================================================================
-  generate-matrix:
-    name: Generate test matrices
+  # ----------------------------------------------------------------------------------
+  # Required check gate -- fans in the delegated suite run so a single
+  # stable job name reports pass/fail.
+  # ----------------------------------------------------------------------------------
+  daily-test-result:
+    name: Daily test result
     runs-on: ubuntu-latest
-    outputs:
-      causal_matrix: ${{ steps.generate.outputs.causal_matrix }}
-    defaults:
-      run:
-        working-directory: .
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install transformers torch pytest
-
-      - name: Generate matrices
-        id: generate
-        run: |
-          # Manually exclude models here by adding them to --exclude
-          # Example: python .github/scripts/generate_test_matrix.py --exclude ibm-granite/granite-vision-4.1-4b ibm-granite/granite-4.0-1b-base
-
-          # We exclude these models - See https://github.com/torch-spyre/hf-adapters/issues/89
-          python .github/scripts/generate_test_matrix.py --exclude ibm-granite/granite-vision-4.1-4b ibm-granite/granite-4.0-1b-base mistralai/Mistral-Small-3.2-24B-Instruct-2506 tiiuae/Falcon3-1B-Base
-
-  # ===========================================================================
-  # Edge-case suite
-  #
-  # Every edge-case test in tests/spyre/edge_cases/ runs the same job body,
-  # differing only by the test file. A single matrix over `test_file` (crossed
-  # with the generated causal-LM `model_key` matrix) fans out one job per
-  # (model, test file) pair. To add a new edge-case test, drop the file in
-  # tests/spyre/edge_cases/ and add one line to the `test_file` list below.
-  #
-  # All edge-case tests are @pytest.mark.slow, so we pass --run-slow.
-  # ===========================================================================
-  spyre-edge-cases:
-    name: Spyre edge case ${{ matrix.test_file }} (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    runs-on:
-      - x86_64
-      - spyre_pf_x1
-      - linux
-      - ${{ inputs.runner_label || 'image_torch_spyre' }}
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        model_key: ${{ fromJSON(needs.generate-matrix.outputs.causal_matrix) }}
-        test_file:
-          - test_eos_first_of_second_block_spyre.py
-          - test_eos_first_token_spyre.py
-          - test_eos_inside_prompt_spyre.py
-          - test_eos_mid_block_spyre.py
-          - test_eos_on_last_step_spyre.py
-          - test_no_eos_runs_full_budget_spyre.py
-          - test_long_multi_block_spyre.py
-          - test_prompt_exactly_block_spyre.py
-          - test_short_block_minus_one_spyre.py
-          - test_short_cross_block_spyre.py
-          - test_short_one_token_spyre.py
-          - test_short_two_blocks_plus_spyre.py
-          - test_single_token_prompt_spyre.py
-          - test_mixed_short_spyre.py
-          - test_mixed_with_single_token_spyre.py
-          - test_no_pad_token_fallback_spyre.py
-          - test_sampling_determinism_spyre.py
-          - test_sampling_top_k_zero_spyre.py
-          - test_zero_new_tokens_spyre.py
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: .github/actions
-          sparse-checkout-cone-mode: false
-      - uses: ./.github/actions/build-hf-adapters
-        with:
-          uv_groups: "dev spyre test"
-          ref: ${{ inputs.ref }}
-          repository: ${{ inputs.repository }}
-      - name: Run ${{ matrix.test_file }} for ${{ matrix.model_key }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          uv run pytest -s -vvv "tests/spyre/edge_cases/${{ matrix.test_file }}" -k "${{ matrix.model_key }}" --run-slow
-          echo "tests done"
-
-  # ===========================================================================
-  # Required check gate — fans in the edge-case matrix so a single branch
-  # protection rule ("tests / run spyre unit tests") passes only when every
-  # (model, test file) combination passes.
-  # ===========================================================================
-  run-spyre-unit-tests:
-    name: run spyre unit tests
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
-    needs:
-      - generate-matrix
-      - spyre-edge-cases
+    needs: run-tests
     if: always()
     steps:
-      - name: Check all suites passed
-        run: |-
-          if ${{ contains(needs.generate-matrix.result, 'failure') || contains(needs.generate-matrix.result, 'cancelled') ||
-                 contains(needs.spyre-edge-cases.result, 'failure') || contains(needs.spyre-edge-cases.result, 'cancelled') }}; then
-            echo "One or more test suites failed."
-            exit 1
+      - name: Evaluate test results
+        run: |
+          RESULT="${{ needs.run-tests.result }}"
+          echo "run-tests result: ${RESULT}"
+          if [[ "${RESULT}" == "success" ]]; then
+            echo "Daily edge-case suite passed."
+            exit 0
           fi
-          echo "All test suites passed."
+          echo "Daily edge-case suite failed or was cancelled."
+          exit 1

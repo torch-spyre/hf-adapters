@@ -43,6 +43,8 @@ from hf_adapters.auto_spyre_model import (
 )
 from hf_adapters.hf_common import move_model_to_spyre, prefill_reranker
 
+pytestmark = pytest.mark.model_harness("reranker")
+
 # Pairs that span a range of relevance scores — ensures ranking order is
 # meaningful, not just that all scores are close to zero.
 PAIRS: list[tuple[str, str]] = [

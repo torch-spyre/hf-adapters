@@ -75,10 +75,12 @@ jobs:
       TRIGGERING_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
       TRIGGERING_AT: ${{ github.event.workflow_run.created_at || '' }}
       # display_title carries "integration-tests (<test_type>)" via that
-      # workflow's run-name, or the bare tier ("trunk" / "test_pull_request")
+      # workflow's run-name, or the bare tier ("trunk" / "regression")
       # via test_pull_request's -- the only way this job can recover which
       # tier ran without an extra API call.
       TRIGGERING_DISPLAY_TITLE: ${{ github.event.workflow_run.display_title || '' }}
+      # Triggering event (push/pull_request/schedule/workflow_dispatch/merge_group; empty on manual re-ingest) -- gates the PR-number lookup below.
+      TRIGGERING_EVENT: ${{ github.event.workflow_run.event || '' }}
 
     steps:
       # workflow_run always executes this file as it exists on the default
@@ -117,25 +119,39 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PR=$(gh api \
-            "/repos/${{ github.repository }}/commits/${TRIGGERING_SHA}/pulls" \
-            --jq '.[0].number // 0')
-          echo "Resolved PR number: ${PR}"
+          # An unconditional commit->PR lookup stamped a trunk/scheduled run with whatever PR previously merged that commit; only trust it for an actual pull_request-triggered run.
+          if [[ "${TRIGGERING_EVENT}" == "pull_request" ]]; then
+            PR=$(gh api \
+              "/repos/${{ github.repository }}/commits/${TRIGGERING_SHA}/pulls" \
+              --jq '.[0].number // 0')
+          else
+            PR=0
+          fi
+          echo "Resolved PR number: ${PR} (triggering event: ${TRIGGERING_EVENT:-<manual dispatch>})"
           echo "pr_number=${PR}" >> "${GITHUB_OUTPUT}"
 
       # ---------------------------------------------------------------------------
       # Download every artifact from the triggering run and unzip it — artifact
       # *names* carry no file extension (only the file inside the zip does), so
       # filtering has to happen post-unzip by actual filename, not by artifact name.
+      #
+      # `--paginate` is required: the artifacts endpoint defaults to 30 per
+      # page, and a run with more jobs than that silently lost every artifact
+      # past the first page, with no error — rows just never showed up in
+      # ClickHouse. `--paginate` applies `--jq` per page and concatenates the
+      # filtered results across pages (`gh api` rejects `--slurp` combined
+      # with `--jq`), so the per-artifact objects come out as a JSON stream,
+      # not a single array; python3 slurps that stream into one array below.
       # ---------------------------------------------------------------------------
       - name: List artifacts from triggering run
         id: list-artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ARTIFACTS=$(gh api \
-            "/repos/${{ github.repository }}/actions/runs/${TRIGGERING_RUN_ID}/artifacts" \
-            --jq '[.artifacts[] | {id: .id, name: .name}]')
+          ARTIFACTS=$(gh api --paginate \
+            "/repos/${{ github.repository }}/actions/runs/${TRIGGERING_RUN_ID}/artifacts?per_page=100" \
+            --jq '.artifacts[] | {id: .id, name: .name}' \
+            | python3 -c "import json,sys; print(json.dumps([json.loads(l) for l in sys.stdin if l.strip()]))")
           echo "artifacts=$ARTIFACTS" >> "$GITHUB_OUTPUT"
           echo "Found artifacts:"
           echo "$ARTIFACTS" | python3 -c "import json,sys; [print(' •', a['name']) for a in json.load(sys.stdin)]"
@@ -185,7 +201,7 @@ jobs:
             TIER=$(echo "${TRIGGERING_DISPLAY_TITLE}" | sed -n 's/.*(\(.*\))\s*$/\1/p')
           else
             # test_pull_request's run-name is the bare tier itself ("trunk"
-            # on push, "test_pull_request" otherwise) -- no parens to parse.
+            # on push, "regression" otherwise) -- no parens to parse.
             TIER="${TRIGGERING_DISPLAY_TITLE}"
           fi
           echo "Resolved tier: ${TIER:-<none>}"

@@ -20,8 +20,10 @@ import time
 
 import pytest
 from _generate_edge_case_helpers import make_prompts
-from edge_cases._shared import _setup, _teardown
+from _shared import _setup, _teardown
 from model_registry import CAUSAL_PATHS
+
+pytestmark = pytest.mark.model_harness("causal")
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)

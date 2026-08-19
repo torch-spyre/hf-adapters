@@ -109,6 +109,8 @@ CAUSAL_LM_MODELS = {
         "path": "ibm-research/granite-4.1-20b",
         "adapter": "hf_granite_swa.py",
         "size": "20b",
+        # Not yet publicly accessible on the HF Hub -- drop this once the model ships.
+        "is_gated": True,
     },
     # hf_granite_vision.py
     "granite-vision": {
@@ -670,12 +672,9 @@ def _non_blocking(models: dict[str, dict], keys: tuple[str, ...]) -> dict[str, s
 NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = _non_blocking(
     CAUSAL_LM_MODELS,
     (
-        "smollm3",
-        "gemma3_unsloth",
-        "ministral3",
-        "pythia_410m",
-        "gemma4_google",
+        "gemma4_google",  # gemma4 responds poorly to prompt without template
         "gemma4_base",
+        "smollm3",
     ),
 )
 

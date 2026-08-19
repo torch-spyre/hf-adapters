@@ -44,6 +44,8 @@ import hf_adapters.st_backend  # noqa: F401
 from hf_adapters.auto_spyre_model import dtype_for_model_path
 from tests.model_registry import EMBED_PATHS
 
+pytestmark = pytest.mark.model_harness("embedding")
+
 PROMPTS = [
     "Hi.",
     "The capital of France is Paris.",

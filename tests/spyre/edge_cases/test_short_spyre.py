@@ -12,11 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Spyre edge case: ``short_two_blocks_plus`` (two expansions + partial fill)."""
+"""Spyre edge case: ``short_block_minus_one`` (last fill step of first block)."""
 
 import pytest
 from _shared import run_greedy_case
 from model_registry import CAUSAL_PATHS
+
+pytestmark = pytest.mark.model_harness("causal")
+
+
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.slow
+def test_short_block_minus_one_spyre(model_path: str) -> None:
+    ok, detail = run_greedy_case(model_path, "short_block_minus_one")
+    assert ok, detail
+
+
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.slow
+def test_short_cross_block_spyre(model_path: str) -> None:
+    ok, detail = run_greedy_case(model_path, "short_cross_block")
+    assert ok, detail
+
+
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.slow
+def test_short_one_token_spyre(model_path: str) -> None:
+    ok, detail = run_greedy_case(model_path, "short_one_token")
+    assert ok, detail
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)

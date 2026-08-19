@@ -43,9 +43,7 @@ def _run_backbone_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     """Granite 3.3 backbone: embedding * multiplier, blocks, norm."""
     backbone = get_backbone(model)
@@ -61,9 +59,7 @@ def _run_backbone_forward(
             attn_mask,
             key_caches[i],
             value_caches[i],
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
 
     h = backbone.norm(h)
@@ -77,9 +73,7 @@ def _run_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     """Granite 3.3 causal-LM forward: backbone + head / scaling."""
     h = _run_backbone_forward(
@@ -89,9 +83,7 @@ def _run_forward(
         attn_mask,
         key_caches,
         value_caches,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     )
     logits = model.lm_head(h)
     return logits / text_config(model.config).logits_scaling

@@ -98,6 +98,82 @@ def _move_inputs(module_input, *, dtype=None, device=None):
     return args, kwargs
 
 
+def _tensor_summary(x):
+    if not isinstance(x, torch.Tensor):
+        return None
+    return {
+        "shape": list(x.shape),
+        "stride": list(x.stride()),
+        "dtype": str(x.dtype),
+        "device": str(x.device),
+    }
+
+
+def _log_forward_inputs(module_name, label, args, kwargs, variant=0):
+    """Emit one [module-input] line with the shapes/strides/dtypes of the
+    actual tensors that will be passed to the forward call.
+    """
+    from torch.utils._pytree import tree_leaves
+
+    payload = {
+        "module": module_name,
+        "label": label,
+        "variant": variant,
+        "args": [],
+        "kwargs": {},
+    }
+
+    for idx, leaf in enumerate(tree_leaves(args)):
+        summary = _tensor_summary(leaf)
+        if summary is not None:
+            payload["args"].append({"index": idx, **summary})
+
+    for key, val in kwargs.items():
+        leaves = tree_leaves(val)
+        summaries = [_tensor_summary(lf) for lf in leaves if _tensor_summary(lf)]
+        if len(summaries) == 1:
+            payload["kwargs"][key] = summaries[0]
+        elif summaries:
+            payload["kwargs"][key] = summaries
+
+    import sys as _sys
+
+    out = _sys.__stdout__ if _sys.__stdout__ is not None else _sys.stdout
+
+    print(f"[module-input] {payload}", file=out, flush=True)
+
+    variant_label = "prefill" if variant == 0 else "decode"
+    lines = [
+        "",  # blank line separator between consecutive module entries
+        f"  module  : {module_name}",
+        f"  label   : {label}",
+        f"  variant : {variant} ({variant_label})",
+    ]
+    if payload["args"]:
+        lines.append("  args    :")
+        for a in payload["args"]:
+            lines.append(
+                f"    [{a['index']}] shape={a['shape']}  "
+                f"stride={a['stride']}  dtype={a['dtype']}"
+            )
+    if payload["kwargs"]:
+        lines.append("  kwargs  :")
+        for k, v in payload["kwargs"].items():
+            if isinstance(v, list):
+                lines.append(f"    {k}:")
+                for item in v:
+                    lines.append(
+                        f"      shape={item['shape']}  "
+                        f"stride={item['stride']}  dtype={item['dtype']}"
+                    )
+            else:
+                lines.append(
+                    f"    {k}: shape={v['shape']}  "
+                    f"stride={v['stride']}  dtype={v['dtype']}"
+                )
+    print("\n".join(lines), file=out, flush=True)
+
+
 def _run_forward(module, args, kwargs):
     """Run a no-grad forward pass and return the flattened list of output tensors."""
     with torch.no_grad():
@@ -451,10 +527,26 @@ class TestModuleCustom(TestCase):
         3. Runs module in compile mode on Spyre
         4. Compares outputs between eager CPU, eager Spyre, and compile Spyre
         """
-
         module_inputs = module_info.module_inputs_func(
             module_info, device=device, dtype=dtype, requires_grad=False, training=False
         )
+
+        for i, module_input in enumerate(module_inputs):
+            args_device = module_input.forward_input.args
+            kwargs_device = module_input.forward_input.kwargs
+            args_cpu_log = tree_map(
+                lambda x: x.cpu() if isinstance(x, torch.Tensor) else x, args_device
+            )
+            kwargs_cpu_log = tree_map(
+                lambda x: x.cpu() if isinstance(x, torch.Tensor) else x, kwargs_device
+            )
+            _log_forward_inputs(
+                module_info.name,
+                "test_eager_vs_compile",
+                args_cpu_log,
+                kwargs_cpu_log,
+                variant=i,
+            )
 
         for module_input in module_inputs:
             # Create module on CPU (eager)
@@ -582,7 +674,6 @@ class TestModuleCustom(TestCase):
         """
         run_compile = os.getenv("TEST_COMPILE_WITH_CPU", "1") == "1"
         run_eager = os.getenv("TEST_EAGER_WITH_CPU", "0") == "1"
-
         module_inputs = module_info.module_inputs_func(
             module_info,
             device=device,
@@ -598,6 +689,20 @@ class TestModuleCustom(TestCase):
         ]
         if not modes:
             raise ValueError("At least one of run_compile or run_eager must be True")
+
+        for i, module_input in enumerate(module_inputs):
+            if module_input.forward_input is None:
+                continue
+            args_cpu_log, kwargs_cpu_log = _move_inputs(
+                module_input, dtype=dtype, device="cpu"
+            )
+            _log_forward_inputs(
+                module_info.name,
+                "test_with_cpu",
+                args_cpu_log,
+                kwargs_cpu_log,
+                variant=i,
+            )
 
         for mode in modes:
             for module_input in module_inputs:  # iterate over prefill and decode
@@ -669,6 +774,23 @@ class TestModuleCustom(TestCase):
         module_inputs = module_info.module_inputs_func(
             module_info, device=device, dtype=dtype, requires_grad=False, training=False
         )
+
+        for i, module_input in enumerate(module_inputs):
+            args_device = module_input.forward_input.args
+            kwargs_device = module_input.forward_input.kwargs
+            args_cpu_log = tree_map(
+                lambda x: x.cpu() if isinstance(x, torch.Tensor) else x, args_device
+            )
+            kwargs_cpu_log = tree_map(
+                lambda x: x.cpu() if isinstance(x, torch.Tensor) else x, kwargs_device
+            )
+            _log_forward_inputs(
+                module_info.name,
+                "test_layout_stride",
+                args_cpu_log,
+                kwargs_cpu_log,
+                variant=i,
+            )
 
         for module_input in module_inputs:
             # Create module on CPU

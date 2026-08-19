@@ -150,6 +150,10 @@ def pytest_configure(config: Config) -> None:
         "markers",
         "requires_spyre: mark test as requiring the Spyre backend device",
     )
+    config.addinivalue_line(
+        "markers",
+        "model_harness(name): identify which model registry harness a test uses",
+    )
 
 
 def pytest_addoption(parser: Parser) -> None:
@@ -203,7 +207,37 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
         m for m in metafunc.definition.own_markers if m.name != "parametrize"
     ] + kept
 
-    metafunc.parametrize("model_path", overrides, ids=overrides)
+    # Re-apply non-blocking xfail(strict=False) only from this test's explicit
+    # harness table. A path may be shared by different harnesses with different
+    # expected outcomes, so these tables must never be merged.
+    import model_registry
+
+    harness_marker = metafunc.definition.get_closest_marker("model_harness")
+    harness = harness_marker.args[0] if harness_marker else None
+    non_blocking_tables = {
+        "causal": model_registry.NON_BLOCKING_CAUSAL_MODELS,
+        "vision": model_registry.NON_BLOCKING_VISION_MODELS,
+        "embedding": {},
+        "masked_lm": {},
+        "question_answering": {},
+        "reranker": {},
+    }
+    try:
+        non_blocking = non_blocking_tables[harness]
+    except (KeyError, TypeError):
+        raise pytest.UsageError(f"unknown model harness: {harness!r}") from None
+
+    params = [
+        (
+            pytest.param(
+                path, marks=pytest.mark.xfail(reason=non_blocking[path], strict=False)
+            )
+            if path in non_blocking
+            else path
+        )
+        for path in overrides
+    ]
+    metafunc.parametrize("model_path", params, ids=overrides)
 
 
 def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:

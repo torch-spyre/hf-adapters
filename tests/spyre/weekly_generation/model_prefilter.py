@@ -204,7 +204,9 @@ def fetch_and_filter(
     result: PrefilterResult = prefilter_models(models, max_params=max_params)
 
     # write the skipped models to the sink; these won't be tested
-    written: int = write_skipped_rows(sink, result.skipped, snapshot_date=snapshot_date)
+    written: int = write_skipped_rows(
+        sink, result.skipped, snapshot_date=snapshot_date, verbose=False
+    )
 
     print(
         f"{model_type}: {len(models)} collected -> {len(result.keep)} to evaluate "
