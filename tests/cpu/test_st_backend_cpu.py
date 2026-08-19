@@ -37,6 +37,8 @@ import pytest
 from tests.cpu.conftest import _unwrap_compiled_blocks, cosine_per_row
 from tests.model_registry import EMBED_PATHS
 
+pytestmark = pytest.mark.model_harness("embedding")
+
 # sentence_transformers is an optional dependency; skip the whole module if
 # it's missing. The hf_adapters.st_backend import is deferred to inside the
 # test so collection doesn't fail on CPU-only hosts that lack ST.

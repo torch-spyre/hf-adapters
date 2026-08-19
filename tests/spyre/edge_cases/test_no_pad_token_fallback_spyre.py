@@ -29,6 +29,8 @@ from tests.conftest import encode_generation_inputs
 from tests.model_registry import CAUSAL_PATHS
 from tests.spyre.edge_cases._shared import _setup, _teardown
 
+pytestmark = pytest.mark.model_harness("causal")
+
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow

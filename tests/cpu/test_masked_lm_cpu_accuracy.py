@@ -24,6 +24,8 @@ from tests.conftest import (
 from tests.cpu.conftest import _unwrap_compiled_blocks
 from tests.model_registry import MASKED_LM_PATHS
 
+pytestmark = pytest.mark.model_harness("masked_lm")
+
 PROMPTS = [
     "The capital of France is {mask}.",
     "A language model can predict a {mask} token in a sentence.",

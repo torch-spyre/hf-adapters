@@ -39,6 +39,8 @@ from tests.model_registry import (
     xfail_non_blocking,
 )
 
+pytestmark = pytest.mark.model_harness("causal")
+
 
 def run_smoke_test(model_path: str) -> dict[str, Any]:
     """Load model, generate 5 tokens, validate output. Returns a result dict."""

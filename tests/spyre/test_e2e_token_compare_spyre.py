@@ -47,6 +47,8 @@ from tests.model_registry import (
     xfail_non_blocking,
 )
 
+pytestmark = pytest.mark.model_harness("causal")
+
 
 def hf_greedy_steps(
     model: PreTrainedModel,

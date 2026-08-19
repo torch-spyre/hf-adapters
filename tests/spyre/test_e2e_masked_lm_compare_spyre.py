@@ -20,6 +20,8 @@ from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
 from tests.conftest import get_dtype_for_cpu
 from tests.model_registry import MASKED_LM_PATHS
 
+pytestmark = pytest.mark.model_harness("masked_lm")
+
 PROMPTS = [
     "The capital of France is {mask}.",
     "A language model can predict a {mask} token in a sentence.",
