@@ -180,17 +180,23 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	for suite in $$suites; do \
 	  echo "=== running suite: $$suite ==="; \
 	  case "$$suite" in \
-	    adapter_coverage) $(MAKE) adapter-coverage-tests JUNIT_XML="$(RESULTS_DIR)/adapter-coverage.xml" || rc=1 ;; \
-	    smoke)            $(MAKE) smoke-tests            JUNIT_XML="$(RESULTS_DIR)/spyre-smoke-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    load)             $(MAKE) load-tests             JUNIT_XML="$(RESULTS_DIR)/spyre-load-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    token_compare)    $(MAKE) token-compare-tests     JUNIT_XML="$(RESULTS_DIR)/spyre-token-compare-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    embed_compare)    $(MAKE) embed-compare-tests     JUNIT_XML="$(RESULTS_DIR)/spyre-embed-compare-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    vlm)              $(MAKE) vlm-tests               JUNIT_XML="$(RESULTS_DIR)/spyre-vlm-e2e-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    reranker_compare) $(MAKE) reranker-tests          JUNIT_XML="$(RESULTS_DIR)/spyre-reranker-compare-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    masked_lm_compare) $(MAKE) masked-lm-compare-tests JUNIT_XML="$(RESULTS_DIR)/spyre-masked-lm-compare-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    question_answering_compare) $(MAKE) question-answering-compare-tests JUNIT_XML="$(RESULTS_DIR)/spyre-question-answering-compare-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    model_module)     $(MAKE) model-module-tests      JUNIT_XML=1 RESULTS_DIR="$(RESULTS_DIR)" MODULE_CONFIG="$(MODULE_CONFIG)" || rc=1 ;; \
-	    edge_cases)       $(MAKE) edge-cases-tests        JUNIT_XML="$(RESULTS_DIR)/spyre-edge-cases-tests.xml" MODEL_KEY="$(MODEL_KEY)" EDGE_CASE_FILE="$(EDGE_CASE_FILE)" || rc=1 ;; \
+	    adapter_coverage) mkdir -p "$(RESULTS_DIR)/junit-adapter-coverage" && $(MAKE) adapter-coverage-tests JUNIT_XML="$(RESULTS_DIR)/junit-adapter-coverage/junit-adapter-coverage.xml" || rc=1 ;; \
+	    smoke)            mkdir -p "$(RESULTS_DIR)/junit-smoke" && $(MAKE) smoke-tests            JUNIT_XML="$(RESULTS_DIR)/junit-smoke/junit-smoke.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    load)             mkdir -p "$(RESULTS_DIR)/junit-load" && $(MAKE) load-tests             JUNIT_XML="$(RESULTS_DIR)/junit-load/junit-load.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    token_compare)    mkdir -p "$(RESULTS_DIR)/junit-token-compare" && $(MAKE) token-compare-tests     JUNIT_XML="$(RESULTS_DIR)/junit-token-compare/junit-token-compare.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    embed_compare)    mkdir -p "$(RESULTS_DIR)/junit-embed-compare" && $(MAKE) embed-compare-tests     JUNIT_XML="$(RESULTS_DIR)/junit-embed-compare/junit-embed-compare.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    vlm)              mkdir -p "$(RESULTS_DIR)/junit-vlm" && $(MAKE) vlm-tests               JUNIT_XML="$(RESULTS_DIR)/junit-vlm/junit-vlm.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    reranker_compare) mkdir -p "$(RESULTS_DIR)/junit-reranker-compare" && $(MAKE) reranker-tests          JUNIT_XML="$(RESULTS_DIR)/junit-reranker-compare/junit-reranker-compare.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    masked_lm_compare) mkdir -p "$(RESULTS_DIR)/junit-masked-lm-compare" && $(MAKE) masked-lm-compare-tests JUNIT_XML="$(RESULTS_DIR)/junit-masked-lm-compare/junit-masked-lm-compare.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    question_answering_compare) mkdir -p "$(RESULTS_DIR)/junit-question-answering-compare" && $(MAKE) question-answering-compare-tests JUNIT_XML="$(RESULTS_DIR)/junit-question-answering-compare/junit-question-answering-compare.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    model_module)     $(MAKE) model-module-tests      JUNIT_XML=1 RESULTS_DIR="$(RESULTS_DIR)" MODULE_CONFIG="$(MODULE_CONFIG)" || rc=1; \
+	                      for f in "$(RESULTS_DIR)"/model-module-*.xml; do \
+	                        [ -e "$$f" ] || continue; \
+	                        base="junit-$$(basename "$$f" .xml)"; \
+	                        mkdir -p "$(RESULTS_DIR)/$$base"; \
+	                        mv "$$f" "$(RESULTS_DIR)/$$base/$$base.xml"; \
+	                      done ;; \
+	    edge_cases)       mkdir -p "$(RESULTS_DIR)/junit-edge-cases" && $(MAKE) edge-cases-tests        JUNIT_XML="$(RESULTS_DIR)/junit-edge-cases/junit-edge-cases.xml" MODEL_KEY="$(MODEL_KEY)" EDGE_CASE_FILE="$(EDGE_CASE_FILE)" || rc=1 ;; \
 	    perf)             printf '%s\n' \
 	                        '<?xml version="1.0" encoding="utf-8"?>' \
 	                        '<testsuites name="hf-adapters-perf">' \
