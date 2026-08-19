@@ -1590,18 +1590,14 @@ def normalize_generation_inputs(input_ids, attention_mask=None):
         if attention_mask.shape != input_ids.shape:
             raise ValueError("attention_mask must have the same shape as input_ids")
         attention_mask_cpu = attention_mask.detach().to("cpu")
-        if attention_mask_cpu.dtype.is_floating_point:
-            is_binary = torch.all((attention_mask_cpu == 0) | (attention_mask_cpu == 1))
-        elif attention_mask_cpu.dtype == torch.bool or attention_mask_cpu.dtype in (
-            torch.uint8,
-            torch.int8,
-            torch.int16,
-            torch.int32,
-            torch.int64,
+        if not (
+            attention_mask_cpu.dtype.is_floating_point
+            or attention_mask_cpu.dtype == torch.bool
+            or attention_mask_cpu.dtype
+            in (torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64)
         ):
-            is_binary = torch.all((attention_mask == 0) | (attention_mask == 1))
-        else:
             raise TypeError("attention_mask must have a boolean or numeric dtype")
+        is_binary = torch.all((attention_mask_cpu == 0) | (attention_mask_cpu == 1))
         if not is_binary.item():
             raise ValueError("attention_mask values must be 0 or 1")
         mask = attention_mask_cpu.to(dtype=torch.bool)
