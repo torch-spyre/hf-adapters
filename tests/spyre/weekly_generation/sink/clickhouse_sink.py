@@ -133,9 +133,49 @@ class ClickHouseResultSink(ResultSink):
         Safe to call repeatedly; a no-op when the buffer is empty. The driver
         loop calls this after every batch so a hard parent crash loses at most
         one batch of rows rather than the entire run.
+
+        Before inserting, rows whose (model_name, snapshot_date) already exist
+        in the table are filtered out. The check is a single query covering all
+        snapshot dates present in ``_pending``, so the guard costs one extra
+        round-trip per flush rather than one per row.
         """
         if not self._pending:
             return
+
+        # Collect the snapshot dates present in the buffer (usually just one).
+        # _IDX_MODEL_NAME / _IDX_SNAPSHOT_DATE match TABLE_COLUMNS positions.
+        _IDX_MODEL_NAME = 0
+        _IDX_SNAPSHOT_DATE = 4
+        pending_dates: set[date] = {row[_IDX_SNAPSHOT_DATE] for row in self._pending}
+
+        existing: set[tuple[str, date]] = set()
+        for snap_date in pending_dates:
+            result = self._client.query(
+                "SELECT model_name, snapshot_date "
+                "FROM {db:Identifier}.{tbl:Identifier} "
+                "WHERE snapshot_date = {snapshot_date:Date}",
+                parameters={
+                    "db": DATABASE,
+                    "tbl": self._table_name,
+                    "snapshot_date": snap_date,
+                },
+            )
+            existing.update((row[0], row[1]) for row in result.result_rows)
+
+        if existing:
+            before = len(self._pending)
+            self._pending = [
+                row
+                for row in self._pending
+                if (row[_IDX_MODEL_NAME], row[_IDX_SNAPSHOT_DATE]) not in existing
+            ]
+            skipped = before - len(self._pending)
+            if skipped:
+                print(f"ClickHouse: skipping {skipped} row(s) already in the table.")
+
+        if not self._pending:
+            return
+
         print(f"ClickHouse: flushing {len(self._pending)} buffered row(s)…", flush=True)
         self._client.insert(
             self._table_name,
@@ -146,15 +186,15 @@ class ClickHouseResultSink(ResultSink):
         self._pending.clear()
 
     def get_models_at_snapshot_date(self, *, snapshot_date: date) -> set[str]:
-        """Return every distinct model name recorded for *snapshot_date*.
+        """Return every model name recorded for *snapshot_date*.
 
-        Queries ``DISTINCT model_name`` from the table so the caller can build
-        a skip-set without knowing the storage backend. Empty names cannot
-        appear (the base class rejects them at ``add_entry`` time), so the
-        result is safe to use directly as a membership set.
+        The caller receives a ``set[str]``, so duplicates (if any) are
+        collapsed at collection time. Empty names cannot appear — the base
+        class rejects them at ``add_entry`` time — so the result is safe to
+        use directly as a membership set.
         """
         result = self._client.query(
-            "SELECT DISTINCT model_name "
+            "SELECT model_name "
             "FROM {db:Identifier}.{tbl:Identifier} "
             "WHERE snapshot_date = {snapshot_date:Date}",
             parameters={
