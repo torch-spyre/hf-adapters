@@ -12,13 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Spyre edge case: ``mixed_with_single_token`` (single-token row in batch)."""
+"""Spyre edge case: ``mixed_short`` (batch=3 mixed-length scheduling)."""
 
 import pytest
 from _shared import run_greedy_case
 from model_registry import CAUSAL_PATHS
 
 pytestmark = pytest.mark.model_harness("causal")
+
+
+@pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
+@pytest.mark.slow
+def test_mixed_short_spyre(model_path: str) -> None:
+    ok, detail = run_greedy_case(model_path, "mixed_short")
+    assert ok, detail
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)

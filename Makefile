@@ -67,7 +67,7 @@ endif
 
 .PHONY: help test tests adapter-coverage-tests smoke-tests load-tests \
         token-compare-tests embed-compare-tests vlm-tests reranker-tests model-module-tests \
-        masked-lm-compare-tests question-answering-compare-tests
+        masked-lm-compare-tests question-answering-compare-tests edge-cases-tests
 
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-24s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -113,6 +113,13 @@ masked-lm-compare-tests: ## Run masked-LM compare tests (suite key: masked_lm_co
 
 question-answering-compare-tests: ## Run question-answering compare tests (suite key: question_answering_compare)
 	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_question_answering_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+
+# EDGE_CASE_FILE narrows edge-cases-tests to one file under tests/spyre/edge_cases/
+# (matrix-style per-file CI jobs pass this); empty = run every file in the directory.
+# All edge-case tests are @pytest.mark.slow, so --run-slow is passed unconditionally.
+EDGE_CASE_FILE ?=
+edge-cases-tests: ## Run edge-case tests (suite key: edge_cases; EDGE_CASE_FILE=<file>.py narrows to one)
+	$(PYTEST) $(PYTEST_ARGS) --run-slow $(if $(EDGE_CASE_FILE),tests/spyre/edge_cases/$(EDGE_CASE_FILE),tests/spyre/edge_cases/) $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 # MODULE_CONFIG narrows model-module-tests to one YAML config (matrix-style
 # per-config CI jobs pass this); empty = run every config in tests/configs/module_tests.
@@ -183,13 +190,14 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	    masked_lm_compare) $(MAKE) masked-lm-compare-tests JUNIT_XML="$(RESULTS_DIR)/spyre-masked-lm-compare-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
 	    question_answering_compare) $(MAKE) question-answering-compare-tests JUNIT_XML="$(RESULTS_DIR)/spyre-question-answering-compare-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
 	    model_module)     $(MAKE) model-module-tests      JUNIT_XML=1 RESULTS_DIR="$(RESULTS_DIR)" MODULE_CONFIG="$(MODULE_CONFIG)" || rc=1 ;; \
+	    edge_cases)       $(MAKE) edge-cases-tests        JUNIT_XML="$(RESULTS_DIR)/spyre-edge-cases-tests.xml" MODEL_KEY="$(MODEL_KEY)" EDGE_CASE_FILE="$(EDGE_CASE_FILE)" || rc=1 ;; \
 	    perf)             printf '%s\n' \
 	                        '<?xml version="1.0" encoding="utf-8"?>' \
 	                        '<testsuites name="hf-adapters-perf">' \
 	                        '  <testsuite name="hf-adapters-perf" tests="0" skipped="0" failures="0" errors="0"/>' \
 	                        '</testsuites>' > "$(RESULTS_DIR)/report.xml"; \
 	                      echo "hf-adapters has no perf harness yet (scaffold stub): wrote placeholder $(RESULTS_DIR)/report.xml" ;; \
-	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare model_module perf"; rc=1 ;; \
+	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare model_module edge_cases perf"; rc=1 ;; \
 	  esac; \
 	done; \
 	exit $$rc
