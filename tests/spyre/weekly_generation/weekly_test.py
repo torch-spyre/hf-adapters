@@ -430,17 +430,23 @@ def main(
         already_recorded: set[str] = sink.get_models_at_snapshot_date(
             snapshot_date=snapshot_date
         )
-        print(f"{ts()} DEBUG_SKIP - Before = {len(rows)} models to run'.")
         print(
-            f"{ts()} DEBUG_SKIP - Already_recorded = {len(already_recorded)} models already recorded."
+            f"{ts()} DEBUG_SKIP - Before ({model_type}) = {len(rows)} models to run'."
+        )
+        print(
+            f"{ts()} DEBUG_SKIP - Already_recorded ({model_type}) = {len(already_recorded)} models already recorded."
         )
         if already_recorded:
             before = len(rows)
             rows = [r for r in rows if r["model_id"] not in already_recorded]
             print(
-                f"{ts()} Skipping {before - len(rows)} model(s) already recorded "
-                f"for {snapshot_date} ({len(rows)} remaining)."
+                f"{ts()} DEBUG_SKIP Skipping ({model_type}) {before - len(rows)} model(s) already recorded."
             )
+            if before == rows:
+                for c, m in enumerate(already_recorded, start=1):
+                    print(
+                        f"{ts()} DEBUG_SKIP - already recorded ({model_type}) : {c} - {m}"
+                    )
 
         total = len(rows)
         print(f"{ts()} Will evaluate {total} model(s).")
