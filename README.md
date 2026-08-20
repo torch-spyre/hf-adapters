@@ -1,6 +1,6 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-30-blue)
+![adapters](https://img.shields.io/badge/adapters-28-blue)
 ![verified](https://img.shields.io/badge/verified_checkpoints-46-green)
 ![compatible](https://img.shields.io/badge/compatible_models-100%2B-orange)
 
@@ -14,10 +14,11 @@ from `transformers`.
 
 ## Supported Models
 
-**30 adapters · 46 verified checkpoints · 100+ compatible models**
+**28 adapters · 46 verified checkpoints · 100+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
-**vision-language** (image→text), and **speculative-decoding drafter** models — from
+**token classification** (NER/POS), **vision-language** (image→text), and
+**speculative-decoding drafter** models — from
 Llama / Qwen / Granite / Mistral / Phi / Gemma / OLMo / GPT decoders to BERT /
 XLM-RoBERTa / MPNet / ModernBERT encoders, the Granite Vision 4.1 (SigLIP tower +
 Granite text), Mistral3 Vision (Pixtral tower + Mistral text), and Gemma 4
@@ -136,6 +137,32 @@ answer = tokenizer.decode(batch["input_ids"][0, start.item() : end.item() + 1])
 Encoder task inputs must be right-padded. Masked-LM and question-answering
 support inference from `input_ids`; training/loss, `inputs_embeds`, attentions,
 and hidden-state collection are not currently supported.
+
+## Token Classification (NER / POS)
+
+Use `AutoSpyreModelForTokenClassification` for token-level label prediction
+(named-entity recognition, part-of-speech tagging, chunking). The encoder runs on
+Spyre; the linear `classifier` head runs on CPU. Returns a standard HuggingFace
+`TokenClassifierOutput` with `logits [B, L, num_labels]`:
+
+```python
+from transformers import AutoTokenizer
+from hf_adapters import AutoSpyreModelForTokenClassification
+
+model_path = "dslim/bert-base-NER"
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+model = AutoSpyreModelForTokenClassification.from_pretrained(model_path)
+batch = tokenizer(
+    ["John lives in New York and works at IBM."],
+    return_tensors="pt",
+    padding=True,
+    return_attention_mask=True,
+)
+outputs = model(**batch)
+label_ids = outputs.logits.argmax(dim=-1)
+labels = [model.config.id2label[i] for i in label_ids[0].tolist()]
+print(list(zip(tokenizer.convert_ids_to_tokens(batch["input_ids"][0]), labels)))
+```
 
 ## Multimodal Models (image → text)
 
