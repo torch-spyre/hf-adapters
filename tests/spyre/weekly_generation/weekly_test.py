@@ -430,7 +430,14 @@ def main(
         already_recorded: set[str] = sink.get_models_at_snapshot_date(
             snapshot_date=snapshot_date
         )
+        print(f"{ts()} DEBUG_SKIP - Before = {len(rows)} models to run'.")
+        print(
+            f"{ts()} DEBUG_SKIP - Already_recorded = {len(already_recorded)} models already recorded."
+        )
         if already_recorded:
+            print(
+                f"{ts()} DEBUG_SKIP - Already_recorded = {len(already_recorded)} models to run'."
+            )
             before = len(rows)
             rows = [r for r in rows if r["model_id"] not in already_recorded]
             print(
