@@ -442,7 +442,7 @@ def main(
             print(
                 f"{ts()} DEBUG_SKIP Skipping ({model_type}) {before - len(rows)} model(s) already recorded."
             )
-            if before == rows:
+            if before == len(rows):
                 for c, m in enumerate(already_recorded, start=1):
                     print(
                         f"{ts()} DEBUG_SKIP - already recorded ({model_type}) : {c} - {m}"
