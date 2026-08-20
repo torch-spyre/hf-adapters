@@ -121,8 +121,11 @@ def _unwrap_compiled_blocks(model: types.ModuleType) -> None:
             continue
         unwrapped = []
         for cb in blocks:
-            orig = _orig(cb)
-            unwrapped.append(orig if orig is not None else cb)
+            if isinstance(cb, tuple):
+                unwrapped.append(tuple(_orig(stage) or stage for stage in cb))
+            else:
+                orig = _orig(cb)
+                unwrapped.append(orig if orig is not None else cb)
         setattr(model, attr, unwrapped)
 
     for attr in ("_spyre_vision_core",):

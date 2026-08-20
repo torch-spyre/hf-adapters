@@ -269,10 +269,73 @@ class Gemma4Block(nn.Module):
         return h * layer_scalar, key_cache, value_cache
 
 
+def _compile_gemma4_block_stages(block):
+    """Compile a block across boundaries required for correct Spyre decode."""
+    attn = block.self_attn
+
+    def project_norm(hidden_states):
+        h = block.input_layernorm(hidden_states)
+        bsz, seq_len, _ = h.shape
+        q = attn.q_proj(h).view(bsz, seq_len, attn.num_q_heads, attn.head_dim)
+        k_lin = attn.k_proj(h).view(bsz, seq_len, attn.num_kv_heads, attn.head_dim)
+        if attn.is_kv_eq_v:
+            v = attn.v_norm(k_lin).transpose(1, 2)
+        else:
+            v = attn.v_proj(h).view(bsz, seq_len, attn.num_kv_heads, attn.head_dim)
+            v = attn.v_norm(v).transpose(1, 2)
+        q = attn.q_norm(q).transpose(1, 2)
+        k = attn.k_norm(k_lin).transpose(1, 2)
+        return q, k, v
+
+    def apply_rope(q, k, selected_freqs):
+        return (
+            apply_rope_matmul(q, selected_freqs),
+            apply_rope_matmul(k, selected_freqs),
+        )
+
+    def complete_block(
+        hidden_states,
+        q,
+        k,
+        v,
+        attn_mask,
+        key_cache,
+        value_cache,
+        cache_index,
+        layer_scalar,
+    ):
+        key_cache, value_cache = kv_cache_update(
+            k, v, key_cache, value_cache, cache_index
+        )
+        attn_out = F.scaled_dot_product_attention(
+            q,
+            key_cache,
+            value_cache,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            scale=attn.scaling,
+            enable_gqa=True,
+        )
+        attn_out = attn_out.transpose(1, 2).reshape(q.shape[0], q.shape[2], -1)
+        attn_out = attn.o_proj(attn_out)
+
+        h = hidden_states + block.post_attention_layernorm(attn_out)
+        residual = h
+        h = block.pre_feedforward_layernorm(h)
+        h = block.mlp(h)
+        h = block.post_feedforward_layernorm(h)
+        return (residual + h) * layer_scalar, key_cache, value_cache
+
+    return tuple(
+        torch.compile(stage, dynamic=False)
+        for stage in (project_norm, apply_rope, complete_block)
+    )
+
+
 def prepare_gemma4_blocks(
     layers, num_q_heads_per_layer, kv_shapes, is_kv_eq_v_per_layer
 ):
-    """Replace Gemma 4 decoder layers with registered blocks and compile them."""
+    """Replace Gemma 4 decoder layers and compile each into three stages."""
     blocks = []
     for i, layer in enumerate(list(layers)):
         block = Gemma4Block(
@@ -283,7 +346,7 @@ def prepare_gemma4_blocks(
             is_kv_eq_v_per_layer[i],
         )
         layers[i] = block
-        blocks.append(torch.compile(block, dynamic=False))
+        blocks.append(_compile_gemma4_block_stages(block))
     return blocks
 
 
@@ -367,14 +430,19 @@ def _run_blocks_over_embeds(
         masks = _build_layer_masks(model, attn_mask, seq_len, bsz, block_base)
 
     backbone_layers = backbone.layers
-    for i, compiled_block in enumerate(model._spyre_compiled_blocks):
+    for i, compiled_stages in enumerate(model._spyre_compiled_blocks):
         lt = cfg.layer_types[i]
+        project_norm, apply_rope, complete_block = compiled_stages
+        q, k, v = project_norm(h)
+        q, k = apply_rope(q, k, freqs[lt])
         # Pass the per-layer scalar as a tensor read fresh from the registered,
         # device-moved block — NOT as a Python float — so Dynamo guards on tensor
         # metadata instead of recompiling for each distinct learned value.
-        h, key_caches[i], value_caches[i] = compiled_block(
+        h, key_caches[i], value_caches[i] = complete_block(
             h,
-            freqs[lt],
+            q,
+            k,
+            v,
             masks[lt],
             key_caches[i],
             value_caches[i],
@@ -456,6 +524,17 @@ def prepare_text_decoder_for_spyre(model):
     """
     backbone = _gemma4_backbone(model)
     cfg = text_config(model.config)
+
+    try:
+        from torch_spyre._inductor import (  # type: ignore[import-not-found]
+            config as spyre_config,
+        )
+
+        # Bundle-scoped HBM planning can corrupt Gemma 4 outputs and remains in
+        # effect through lazy compilation, so disable it before creating stages.
+        setattr(spyre_config, "hbm_pool_planning", False)
+    except ImportError:
+        pass
 
     assert not getattr(cfg, "hidden_size_per_layer_input", 0), (
         "Gemma 4 adapter does not support per-layer embeddings (PLE); "
