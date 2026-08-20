@@ -76,18 +76,18 @@ from hf_adapters.hf_common import (
 )
 
 
-def _patch_gemma3_rmsnorm(rmsnorm_cls):
-    """Patch a Gemma3 ``RMSNorm`` class to stay in fp16 on Spyre.
+def _patch_gemma_rmsnorm(rmsnorm_cls):
+    """Patch a Gemma 2/3 unit-offset ``RMSNorm`` class for Spyre.
 
-    Mirrors ``hf_common.patch_rmsnorm`` but for Gemma3's RMSNorm, which:
+    Mirrors ``hf_common.patch_rmsnorm`` but for Gemma 2/3 RMSNorm, which:
       - uses ``self.eps`` (not ``variance_epsilon``),
       - is **unit-offset**: scales by ``(1.0 + weight)`` rather than ``weight``
         (Gemma stores norm weights centered at 0),
       - is always scaled (no scale-free variant — there is no V-norm).
 
-    On Spyre we stay in fp16; on CPU we upcast to fp32 to match stock HF, whose
-    ``Gemma3RMSNorm`` computes the norm and the ``(1.0 + weight)`` multiply in
-    fp32 before casting back.
+    On Spyre the reduction stays at input dtype; on CPU it upcasts to fp32 to
+    match stock HF, whose Gemma RMSNorm computes the norm and the
+    ``(1.0 + weight)`` multiply in fp32 before casting back.
     """
 
     def _forward_fp16(self, hidden_states):
@@ -371,7 +371,7 @@ def prepare_for_spyre(model):
     # Patch whichever concrete RMSNorm class this model uses. The norm module
     # closest to a decoder layer's input_layernorm is representative.
     rmsnorm_cls = type(backbone.layers[0].input_layernorm)
-    _patch_gemma3_rmsnorm(rmsnorm_cls)
+    _patch_gemma_rmsnorm(rmsnorm_cls)
 
     head_dim = cfg.head_dim
     num_q_heads = cfg.num_attention_heads

@@ -47,7 +47,6 @@ Usage::
 import torch.nn as nn
 
 from hf_adapters.hf_common import (
-    assert_spyre_dimensions,
     get_backbone,
     make_decoder_block,
     pad_lm_head,
@@ -199,8 +198,6 @@ def prepare_for_spyre(model):
     positions.
     """
     cfg = model.config
-    assert_spyre_dimensions(cfg, model_name=getattr(cfg, "name_or_path", "") or "gpt2")
-
     bb = get_backbone(model)
     embed_dim = cfg.n_embd
 

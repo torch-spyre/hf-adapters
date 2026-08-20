@@ -58,6 +58,13 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_gpt_neo.py",
         "size": "0.1b",
     },
+    # hf_opt.py
+    "opt": {
+        "name": "OPT 125M",
+        "path": "facebook/opt-125m",
+        "adapter": "hf_opt.py",
+        "size": "0.1b",
+    },
     # hf_gpt_neox.py
     "pythia_410m": {
         "name": "Pythia 410M",
@@ -125,6 +132,13 @@ CAUSAL_LM_MODELS = {
         "path": "HuggingFaceTB/SmolLM3-3B-Base",
         "adapter": "hf_smollm3.py",
         "size": "3b",
+    },
+    # hf_lfm2.py
+    "lfm2_350m": {
+        "name": "LFM2 350M",
+        "path": "LiquidAI/LFM2-350M",
+        "adapter": "hf_lfm2.py",
+        "size": "0.35b",
     },
     # hf_llama.py
     "tiny_llama": {
@@ -224,6 +238,13 @@ CAUSAL_LM_MODELS = {
         "path": "allenai/OLMo-2-0425-1B",
         "adapter": "hf_olmo2.py",
         "size": "1b",
+    },
+    # hf_gemma2.py
+    "gemma2_unsloth": {
+        "name": "Gemma 2 2B",
+        "path": "unsloth/gemma-2-2b-it",
+        "adapter": "hf_gemma2.py",
+        "size": "2b",
     },
     # hf_gemma3.py
     "gemma3_unsloth": {
