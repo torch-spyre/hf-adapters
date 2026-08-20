@@ -130,8 +130,8 @@ _WEIGHT_SUFFIXES = (
 # amortize per-child spawn + import + kernel-teardown cost (~15 s currently)
 # across more work. Lower values reduce the blast radius when the Spyre
 # driver/state gets into a bad shape mid-batch.
-GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS: int = 10
-EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS: int = 90
+GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS: int = 5
+EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS: int = 5
 
 
 def _repos_with_weights(repo_ids: list[str]) -> set[str]:
