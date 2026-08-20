@@ -40,6 +40,7 @@ from tests.model_registry import (
 )
 
 
+@pytest.mark.model_harness("causal")
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 def test_load_causal_lm(model_path):
     auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
@@ -55,6 +56,7 @@ def test_load_causal_lm(model_path):
     gc.collect()
 
 
+@pytest.mark.model_harness("embedding")
 @pytest.mark.parametrize("model_path", EMBED_PATHS, ids=EMBED_PATHS)
 def test_load_embedding(model_path):
     model = load_embedding(model_path=model_path)
@@ -70,6 +72,7 @@ def load_embedding(model_path: str) -> Any:
     return model
 
 
+@pytest.mark.model_harness("masked_lm")
 @pytest.mark.parametrize("model_path", MASKED_LM_PATHS, ids=MASKED_LM_PATHS)
 def test_load_masked_lm(model_path):
     auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
@@ -81,6 +84,7 @@ def test_load_masked_lm(model_path):
     gc.collect()
 
 
+@pytest.mark.model_harness("question_answering")
 @pytest.mark.parametrize(
     "model_path", QUESTION_ANSWERING_PATHS, ids=QUESTION_ANSWERING_PATHS
 )

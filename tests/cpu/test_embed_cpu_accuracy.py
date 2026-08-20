@@ -55,6 +55,8 @@ from tests.conftest import (
 from tests.cpu.conftest import _unwrap_compiled_blocks, encode_padded, min_cosine
 from tests.model_registry import EMBED_PATHS
 
+pytestmark = pytest.mark.model_harness("embedding")
+
 PROMPTS: list[str] = [
     "The capital of France is Paris.",
     "Sentence embeddings are useful.",

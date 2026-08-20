@@ -45,6 +45,8 @@ from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
 from tests.conftest import get_dtype_for_cpu
 from tests.model_registry import EMBED_PATHS
 
+pytestmark = pytest.mark.model_harness("embedding")
+
 PROMPTS = [
     "Hi.",
     "The capital of France is Paris.",
