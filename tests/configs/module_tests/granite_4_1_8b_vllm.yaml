@@ -17,7 +17,7 @@ test_suite_config:
           edits:
             modules:
               include:
-                - name: LogitsProcessor_506b0b58
+                - name: LogitsProcessor_layer0
                   module_path: vllm.model_executor.layers.logits_processor.LogitsProcessor
                   description: 'Module: vllm.model_executor.layers.logits_processor.LogitsProcessor (path: logits_processor)'
                   constructor_inputs:
@@ -38,7 +38,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: VocabParallelEmbedding_94b4aa0a
+                - name: VocabParallelEmbedding_layer0
                   module_path: vllm.model_executor.layers.vocab_parallel_embedding.VocabParallelEmbedding
                   description: 'Module: vllm.model_executor.layers.vocab_parallel_embedding.VocabParallelEmbedding (path: model.embed_tokens)'
                   constructor_inputs:
@@ -60,7 +60,7 @@ test_suite_config:
                             init_args:
                               high: 128
                       kwargs: {}
-                - name: GraniteDecoderLayer_4ac2ab33
+                - name: GraniteDecoderLayer_layer0
                   module_path: vllm.model_executor.models.granite.GraniteDecoderLayer
                   description: 'Module: vllm.model_executor.models.granite.GraniteDecoderLayer (path: model.layers.0)'
                   constructor_inputs:
@@ -87,7 +87,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: RMSNorm_9c64c418
+                - name: RMSNorm_input_layernorm_layer0
                   module_path: vllm.model_executor.layers.layernorm.RMSNorm
                   description: 'Module: vllm.model_executor.layers.layernorm.RMSNorm (path: model.layers.0.input_layernorm)'
                   constructor_inputs:
@@ -106,7 +106,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: GraniteMLP_e1ec3283
+                - name: GraniteMLP_layer0
                   module_path: vllm.model_executor.models.granite.GraniteMLP
                   description: 'Module: vllm.model_executor.models.granite.GraniteMLP (path: model.layers.0.mlp)'
                   constructor_inputs:
@@ -124,7 +124,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: SiluAndMul_93cac031
+                - name: SiluAndMul_layer0
                   module_path: vllm.model_executor.layers.activation.SiluAndMul
                   description: 'Module: vllm.model_executor.layers.activation.SiluAndMul (path: model.layers.0.mlp.act_fn)'
                   constructor_inputs:
@@ -140,7 +140,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: RowParallelLinear_34e90083
+                - name: RowParallelLinear_mlp_down_proj_layer0
                   module_path: vllm.model_executor.layers.linear.RowParallelLinear
                   description: 'Module: vllm.model_executor.layers.linear.RowParallelLinear (path: model.layers.0.mlp.down_proj)'
                   constructor_inputs:
@@ -164,7 +164,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: MergedColumnParallelLinear_ae5dcf73
+                - name: MergedColumnParallelLinear_layer0
                   module_path: vllm.model_executor.layers.linear.MergedColumnParallelLinear
                   description: 'Module: vllm.model_executor.layers.linear.MergedColumnParallelLinear (path: model.layers.0.mlp.gate_up_proj)'
                   constructor_inputs:
@@ -187,7 +187,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: RMSNorm_add57f92
+                - name: RMSNorm_post_attention_layernorm_layer0
                   module_path: vllm.model_executor.layers.layernorm.RMSNorm
                   description: 'Module: vllm.model_executor.layers.layernorm.RMSNorm (path: model.layers.0.post_attention_layernorm)'
                   constructor_inputs:
@@ -206,7 +206,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: GraniteAttention_f97035fd
+                - name: GraniteAttention_layer0
                   module_path: vllm.model_executor.models.granite.GraniteAttention
                   description: 'Module: vllm.model_executor.models.granite.GraniteAttention (path: model.layers.0.self_attn)'
                   constructor_inputs:
@@ -235,7 +235,7 @@ test_suite_config:
                             dtype: torch.bfloat16
                             device: spyre
                             init: xavier
-                - name: Attention_3cc07454
+                - name: Attention_layer0
                   module_path: vllm.model_executor.layers.attention.attention.Attention
                   description: 'Module: vllm.model_executor.layers.attention.attention.Attention (path: model.layers.0.self_attn.attn)'
                   constructor_inputs:
@@ -267,7 +267,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: RowParallelLinear_a49adad3
+                - name: RowParallelLinear_self_attn_o_proj_layer0
                   module_path: vllm.model_executor.layers.linear.RowParallelLinear
                   description: 'Module: vllm.model_executor.layers.linear.RowParallelLinear (path: model.layers.0.self_attn.o_proj)'
                   constructor_inputs:
@@ -291,7 +291,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: QKVParallelLinear_26328dd9
+                - name: QKVParallelLinear_layer0
                   module_path: vllm.model_executor.layers.linear.QKVParallelLinear
                   description: 'Module: vllm.model_executor.layers.linear.QKVParallelLinear (path: model.layers.0.self_attn.qkv_proj)'
                   constructor_inputs:
@@ -316,7 +316,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: RotaryEmbedding_2a3a323d
+                - name: RotaryEmbedding_layer0
                   module_path: vllm.model_executor.layers.rotary_embedding.base.RotaryEmbedding
                   description: 'Module: vllm.model_executor.layers.rotary_embedding.base.RotaryEmbedding (path: model.layers.0.self_attn.rotary_emb)'
                   constructor_inputs:
@@ -354,7 +354,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: RMSNorm_e640da2e
+                - name: RMSNorm_norm
                   module_path: vllm.model_executor.layers.layernorm.RMSNorm
                   description: 'Module: vllm.model_executor.layers.layernorm.RMSNorm (path: model.norm)'
                   constructor_inputs:

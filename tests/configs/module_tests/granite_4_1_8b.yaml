@@ -16,7 +16,7 @@ test_suite_config:
           edits:
             modules:
               include: &id001
-                - name: GraniteRotaryEmbedding_64892356
+                - name: GraniteRotaryEmbedding_layer0
                   module_path: transformers.models.granite.modeling_granite.GraniteRotaryEmbedding
                   description: 'Module: transformers.models.granite.modeling_granite.GraniteRotaryEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/granite/modeling_granite.py#L302)'
                   constructor_inputs:
@@ -187,7 +187,7 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
-                - name: GraniteRMSNorm_4096
+                - name: GraniteRMSNorm_layer0
                   module_path: transformers.models.granite.modeling_granite.GraniteRMSNorm
                   description: 'Module: transformers.models.granite.modeling_granite.GraniteRMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/granite/modeling_granite.py#L182)'
                   constructor_inputs:
@@ -333,7 +333,7 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
-                - name: GraniteMLP_77d2613c
+                - name: GraniteMLP_layer0
                   module_path: transformers.models.granite.modeling_granite.GraniteMLP
                   description: 'Module: transformers.models.granite.modeling_granite.GraniteMLP (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/granite/modeling_granite.py#L203)'
                   constructor_inputs:
@@ -366,7 +366,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: SiLUActivation_d2f532e9
+                - name: SiLUActivation_layer0
                   module_path: transformers.activations.SiLUActivation
                   description: 'Module: transformers.activations.SiLUActivation (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/activations.py#L92)'
                   constructor_inputs:

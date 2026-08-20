@@ -16,7 +16,7 @@ test_suite_config:
           edits:
             modules:
               include: &id001
-                - name: Qwen2RotaryEmbedding_99b30225
+                - name: Qwen2RotaryEmbedding_layer0
                   module_path: transformers.models.qwen2.modeling_qwen2.Qwen2RotaryEmbedding
                   description: 'Module: transformers.models.qwen2.modeling_qwen2.Qwen2RotaryEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/qwen2/modeling_qwen2.py#L51)'
                   constructor_inputs:
@@ -185,7 +185,7 @@ test_suite_config:
                               num_key_value_heads: 4
                               num_hidden_layers: 1
                               max_position_embeddings: 32768
-                - name: Qwen2RMSNorm_3584
+                - name: Qwen2RMSNorm_layer0
                   module_path: transformers.models.qwen2.modeling_qwen2.Qwen2RMSNorm
                   description: 'Module: transformers.models.qwen2.modeling_qwen2.Qwen2RMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/qwen2/modeling_qwen2.py#L248)'
                   constructor_inputs:
@@ -331,7 +331,7 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
-                - name: Qwen2MLP_ce0fbd40
+                - name: Qwen2MLP_layer0
                   module_path: transformers.models.qwen2.modeling_qwen2.Qwen2MLP
                   description: 'Module: transformers.models.qwen2.modeling_qwen2.Qwen2MLP (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/qwen2/modeling_qwen2.py#L35)'
                   constructor_inputs:
@@ -364,7 +364,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: SiLUActivation_d2f532e9
+                - name: SiLUActivation_layer0
                   module_path: transformers.activations.SiLUActivation
                   description: 'Module: transformers.activations.SiLUActivation (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/activations.py#L92)'
                   constructor_inputs:

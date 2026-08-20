@@ -16,7 +16,7 @@ test_suite_config:
           edits:
             modules:
               include: &id001
-                - name: LlamaRotaryEmbedding_b501b76c
+                - name: LlamaRotaryEmbedding_layer0
                   module_path: transformers.models.llama.modeling_llama.LlamaRotaryEmbedding
                   description: 'Module: transformers.models.llama.modeling_llama.LlamaRotaryEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/llama/modeling_llama.py#L73)'
                   constructor_inputs:
@@ -188,7 +188,7 @@ test_suite_config:
                               head_dim: 128
                               num_hidden_layers: 1
                               max_position_embeddings: 131072
-                - name: LlamaRMSNorm_4096
+                - name: LlamaRMSNorm_layer0
                   module_path: transformers.models.llama.modeling_llama.LlamaRMSNorm
                   description: 'Module: transformers.models.llama.modeling_llama.LlamaRMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/llama/modeling_llama.py#L52)'
                   constructor_inputs:
@@ -335,7 +335,7 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
-                - name: LlamaMLP_231f37b9
+                - name: LlamaMLP_layer0
                   module_path: transformers.models.llama.modeling_llama.LlamaMLP
                   description: 'Module: transformers.models.llama.modeling_llama.LlamaMLP (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/llama/modeling_llama.py#L171)'
                   constructor_inputs:
@@ -368,7 +368,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: SiLUActivation_d2f532e9
+                - name: SiLUActivation_layer0
                   module_path: transformers.activations.SiLUActivation
                   description: 'Module: transformers.activations.SiLUActivation (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/activations.py#L92)'
                   constructor_inputs:

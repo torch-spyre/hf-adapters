@@ -16,7 +16,7 @@ test_suite_config:
           edits:
             modules:
               include: &id001
-                - name: GptOssRotaryEmbedding_39c59122
+                - name: GptOssRotaryEmbedding_layer0
                   module_path: transformers.models.gpt_oss.modeling_gpt_oss.GptOssRotaryEmbedding
                   description: 'Module: transformers.models.gpt_oss.modeling_gpt_oss.GptOssRotaryEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/gpt_oss/modeling_gpt_oss.py#L154)'
                   constructor_inputs:
@@ -309,7 +309,7 @@ test_suite_config:
                               head_dim: 64
                               num_hidden_layers: 1
                               max_position_embeddings: 131072
-                - name: GptOssRMSNorm_2880
+                - name: GptOssRMSNorm_layer0
                   module_path: transformers.models.gpt_oss.modeling_gpt_oss.GptOssRMSNorm
                   description: 'Module: transformers.models.gpt_oss.modeling_gpt_oss.GptOssRMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/gpt_oss/modeling_gpt_oss.py#L52)'
                   constructor_inputs:
@@ -581,7 +581,7 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
-                - name: GptOssMLP_ac9bcb56
+                - name: GptOssMLP_layer0
                   module_path: transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP
                   description: 'Module: transformers.models.gpt_oss.modeling_gpt_oss.GptOssMLP (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/gpt_oss/modeling_gpt_oss.py#L138)'
                   constructor_inputs:
@@ -606,7 +606,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: GptOssTopKRouter_dab87a5a
+                - name: GptOssTopKRouter_layer0
                   module_path: transformers.models.gpt_oss.modeling_gpt_oss.GptOssTopKRouter
                   description: 'Module: transformers.models.gpt_oss.modeling_gpt_oss.GptOssTopKRouter (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/gpt_oss/modeling_gpt_oss.py#L122)'
                   constructor_inputs:
@@ -631,7 +631,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: GptOssExperts_03652cd6
+                - name: GptOssExperts_layer0
                   module_path: transformers.models.gpt_oss.modeling_gpt_oss.GptOssExperts
                   description: 'Module: transformers.models.gpt_oss.modeling_gpt_oss.GptOssExperts (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/gpt_oss/modeling_gpt_oss.py#L73)'
                   constructor_inputs:

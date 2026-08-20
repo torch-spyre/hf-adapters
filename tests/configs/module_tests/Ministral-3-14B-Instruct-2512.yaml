@@ -19,7 +19,7 @@ test_suite_config:
           edits:
             modules:
               include: &id001
-                - name: Ministral3Model_d7945082
+                - name: Ministral3Model_layer0
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3Model
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3Model (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/ministral3/modeling_ministral3.py#L338)'
                   constructor_inputs:
@@ -75,7 +75,7 @@ test_suite_config:
                             dtype: torch.bfloat16
                             device: spyre
                             init: xavier
-                - name: Ministral3RotaryEmbedding_483e0b9c
+                - name: Ministral3RotaryEmbedding_layer0
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3RotaryEmbedding
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3RotaryEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/ministral3/modeling_ministral3.py#L273)'
                   constructor_inputs:
@@ -249,7 +249,7 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
-                - name: Ministral3RMSNorm_4096
+                - name: Ministral3RMSNorm_layer0
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3RMSNorm
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3RMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/ministral3/modeling_ministral3.py#L192)'
                   constructor_inputs:
@@ -397,7 +397,7 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
-                - name: Ministral3MLP_eb806b7d
+                - name: Ministral3MLP_layer0
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3MLP
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3MLP (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/models/ministral3/modeling_ministral3.py#L176)'
                   constructor_inputs:
@@ -431,7 +431,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: SiLUActivation_d2f532e9
+                - name: SiLUActivation_layer0
                   module_path: transformers.activations.SiLUActivation
                   description: 'Module: transformers.activations.SiLUActivation (defined at https://github.com/huggingface/transformers/blob/v5.14.1/src/transformers/activations.py#L92)'
                   constructor_inputs:

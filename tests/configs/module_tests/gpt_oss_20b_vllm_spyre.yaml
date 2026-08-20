@@ -17,7 +17,7 @@ test_suite_config:
           edits:
             modules:
               include:
-                - name: LogitsProcessor_506b0b58
+                - name: LogitsProcessor_layer0
                   module_path: vllm.model_executor.layers.logits_processor.LogitsProcessor
                   description: 'Module: vllm.model_executor.layers.logits_processor.LogitsProcessor (path: logits_processor)'
                   constructor_inputs:
@@ -38,7 +38,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: VocabParallelEmbedding_658bda9e
+                - name: VocabParallelEmbedding_layer0
                   module_path: vllm.model_executor.layers.vocab_parallel_embedding.VocabParallelEmbedding
                   description: 'Module: vllm.model_executor.layers.vocab_parallel_embedding.VocabParallelEmbedding (path: model.embedding)'
                   constructor_inputs:
@@ -60,7 +60,7 @@ test_suite_config:
                             init_args:
                               high: 128
                       kwargs: {}
-                - name: TransformerBlock_4ac2ab33
+                - name: TransformerBlock_layer0
                   module_path: vllm.model_executor.models.gpt_oss.TransformerBlock
                   description: 'Module: vllm.model_executor.models.gpt_oss.TransformerBlock (path: model.layers.0)'
                   constructor_inputs:
@@ -87,7 +87,7 @@ test_suite_config:
                             init_args:
                               high: 128
                       kwargs: {}
-                - name: OAIAttention_1dba0edf
+                - name: OAIAttention_layer0
                   module_path: vllm.model_executor.models.gpt_oss.OAIAttention
                   description: 'Module: vllm.model_executor.models.gpt_oss.OAIAttention (path: model.layers.0.attn)'
                   constructor_inputs:
@@ -114,7 +114,7 @@ test_suite_config:
                             init_args:
                               high: 128
                       kwargs: {}
-                - name: Attention_cee21803
+                - name: Attention_layer0
                   module_path: vllm.model_executor.layers.attention.attention.Attention
                   description: 'Module: vllm.model_executor.layers.attention.attention.Attention (path: model.layers.0.attn.attn)'
                   constructor_inputs:
@@ -146,7 +146,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: RowParallelLinear_87cad9d3
+                - name: RowParallelLinear_layer0
                   module_path: vllm.model_executor.layers.linear.RowParallelLinear
                   description: 'Module: vllm.model_executor.layers.linear.RowParallelLinear (path: model.layers.0.attn.o_proj)'
                   constructor_inputs:
@@ -170,7 +170,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: QKVParallelLinear_a5acc50e
+                - name: QKVParallelLinear_layer0
                   module_path: vllm.model_executor.layers.linear.QKVParallelLinear
                   description: 'Module: vllm.model_executor.layers.linear.QKVParallelLinear (path: model.layers.0.attn.qkv_proj)'
                   constructor_inputs:
@@ -195,7 +195,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: YaRNScalingRotaryEmbedding_8f03f6f1
+                - name: YaRNScalingRotaryEmbedding_layer0
                   module_path: vllm.model_executor.layers.rotary_embedding.yarn_scaling_rope.YaRNScalingRotaryEmbedding
                   description: 'Module: vllm.model_executor.layers.rotary_embedding.yarn_scaling_rope.YaRNScalingRotaryEmbedding (path: model.layers.0.attn.rotary_emb)'
                   constructor_inputs:
@@ -239,7 +239,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: RMSNorm_9c64c418
+                - name: RMSNorm_input_layernorm_layer0
                   module_path: vllm.model_executor.layers.layernorm.RMSNorm
                   description: 'Module: vllm.model_executor.layers.layernorm.RMSNorm (path: model.layers.0.input_layernorm)'
                   constructor_inputs:
@@ -258,7 +258,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: MLPBlock_e1ec3283
+                - name: MLPBlock_layer0
                   module_path: vllm.model_executor.models.gpt_oss.MLPBlock
                   description: 'Module: vllm.model_executor.models.gpt_oss.MLPBlock (path: model.layers.0.mlp)'
                   constructor_inputs:
@@ -276,7 +276,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: MoERunner_1ace13a8
+                - name: MoERunner_layer0
                   module_path: vllm.model_executor.layers.fused_moe.runner.moe_runner.MoERunner
                   description: 'Module: vllm.model_executor.layers.fused_moe.runner.moe_runner.MoERunner (path: model.layers.0.mlp.experts)'
                   constructor_inputs:
@@ -303,7 +303,7 @@ test_suite_config:
                             dtype: torch.bfloat16
                             device: spyre
                             init: xavier
-                - name: ReplicatedLinear_d94b684e
+                - name: ReplicatedLinear_layer0
                   module_path: vllm.model_executor.layers.linear.ReplicatedLinear
                   description: 'Module: vllm.model_executor.layers.linear.ReplicatedLinear (path: model.layers.0.mlp.router)'
                   constructor_inputs:
@@ -325,7 +325,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: RMSNorm_add57f92
+                - name: RMSNorm_post_attention_layernorm_layer0
                   module_path: vllm.model_executor.layers.layernorm.RMSNorm
                   description: 'Module: vllm.model_executor.layers.layernorm.RMSNorm (path: model.layers.0.post_attention_layernorm)'
                   constructor_inputs:
@@ -351,7 +351,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: RMSNorm_e640da2e
+                - name: RMSNorm_norm
                   module_path: vllm.model_executor.layers.layernorm.RMSNorm
                   description: 'Module: vllm.model_executor.layers.layernorm.RMSNorm (path: model.norm)'
                   constructor_inputs:
