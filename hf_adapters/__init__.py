@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import torch  # noqa: F401  (should happen before first torch_spyre import)
+
 try:
     from torch_spyre._inductor import (  # type: ignore[import-not-found]
         config as spyre_config,
