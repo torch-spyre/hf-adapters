@@ -29,15 +29,16 @@ Usage::
 
 The model is automatically prepared for Spyre (RoPE precomputation, RMSNorm
 patching, LM head padding, compiled blocks) and moved to the Spyre device.
-A `generate` method is attached to the model that handles the 64-block
-padded decode generation loop.
+A `generate` method is attached to the model that handles the block-padded
+prefill + single-token decode generation loop.
 """
 
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from types import MethodType, ModuleType
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 import torch
 from transformers import (
@@ -45,6 +46,8 @@ from transformers import (
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
+    AutoModelForMaskedLM,
+    AutoModelForQuestionAnswering,
     AutoModelForSequenceClassification,
     BertConfig,
     Gemma3Config,
@@ -59,6 +62,7 @@ from transformers import (
     Granite4VisionConfig,
     GraniteConfig,
     GraniteMoeHybridConfig,
+    GraniteSWAConfig,
     LlamaConfig,
     MistralConfig,
     ModernBertConfig,
@@ -66,6 +70,7 @@ from transformers import (
     Olmo2Config,
     OlmoConfig,
     Phi3Config,
+    PreTrainedModel,
     Qwen2Config,
     Qwen3Config,
     RobertaConfig,
@@ -73,9 +78,11 @@ from transformers import (
     XLMRobertaConfig,
 )
 from transformers.configuration_utils import PretrainedConfig
+from transformers.modeling_outputs import MaskedLMOutput, QuestionAnsweringModelOutput
 from transformers.models.ministral.configuration_ministral import MinistralConfig
 from transformers.models.mistral3.configuration_mistral3 import Mistral3Config
 
+import hf_adapters.hf_common as hf_common
 from hf_adapters import (
     hf_bert,
     hf_dspark_gemma4,
@@ -88,6 +95,7 @@ from hf_adapters import (
     hf_gpt_neo,
     hf_gpt_neox,
     hf_granite,
+    hf_granite_swa,
     hf_granite_vision,
     hf_granite_vision_mm,
     hf_granitemoehybrid,
@@ -108,6 +116,7 @@ from hf_adapters import (
 )
 from hf_adapters.hf_common import (
     SpyreNoAdapterError,
+    SpyreUnsupportedFeatureError,
     SpyreUnsupportedModelError,
     assert_spyre_dimensions,
     load_model_common,
@@ -128,6 +137,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     Granite4VisionConfig: hf_granite_vision,
     GraniteConfig: hf_granite,
     GraniteMoeHybridConfig: hf_granitemoehybrid,
+    GraniteSWAConfig: hf_granite_swa,
     LlamaConfig: hf_llama,
     MistralConfig: hf_mistral,
     MinistralConfig: hf_ministral,
@@ -179,17 +189,43 @@ SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     RobertaConfig: hf_xlm_roberta,
 }
 
-MODEL_PATH_TO_TORCH_DTYPE: dict[str, torch.dtype] = {
-    "mistralai/Ministral-3-3B-Instruct-2512": torch.bfloat16,
-    "mistralai/Ministral-3-8B-Instruct-2512": torch.bfloat16,
-    "mistralai/Ministral-3-14B-Instruct-2512": torch.bfloat16,
-    "google/embeddinggemma-300m": torch.bfloat16,
-    "google/gemma-4-12b": torch.bfloat16,
-    "google/gemma-4-12B-it": torch.bfloat16,
-    "google/gemma-4-31b": torch.bfloat16,
-    "ibm-granite/granite-4.0-1b-base": torch.float32,
-    "ibm-granite/granite-4.0-1b": torch.float32,
+
+@dataclass(frozen=True)
+class ModelDTypePolicy:
+    dtype: torch.dtype | None = None
+    cpu_dtype: torch.dtype | None = None
+
+
+MODEL_DTYPE_POLICIES: dict[str, ModelDTypePolicy] = {
+    "google/embeddinggemma-300m": ModelDTypePolicy(dtype=torch.bfloat16),
+    "ibm-granite/granite-4.0-1b-base": ModelDTypePolicy(cpu_dtype=torch.float32),
+    "ibm-granite/granite-4.0-1b": ModelDTypePolicy(cpu_dtype=torch.float32),
 }
+
+
+def dtype_for_model_path(
+    model_name_or_path: Union[str, os.PathLike[str]],
+    target_device: str | torch.device,
+) -> torch.dtype:
+    """Resolve one concrete dtype before loading a model."""
+    device_str = (
+        target_device.type
+        if isinstance(target_device, torch.device)
+        else target_device.split(":", 1)[0]
+    )
+    policy = MODEL_DTYPE_POLICIES.get(os.fspath(model_name_or_path), ModelDTypePolicy())
+    if device_str == "cpu" and policy.cpu_dtype is not None:
+        dtype = policy.cpu_dtype
+    elif policy.dtype is not None:
+        dtype = policy.dtype
+    else:
+        config = AutoConfig.from_pretrained(model_name_or_path)
+        dtype = getattr(config, "dtype", None) or torch.float16
+
+    if dtype == torch.float32 and device_str == "spyre":
+        dtype = torch.float16
+
+    return dtype
 
 
 def resolve_adapter_module(
@@ -238,17 +274,24 @@ class AutoSpyreModel:
     def from_pretrained(
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
-        dtype: torch.dtype = torch.float16,
-    ) -> torch.nn.Module:
+        dtype: torch.dtype | None = None,
+        tp_plan: Optional[Union[dict, str]] = None,
+    ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
             model_name_or_path=model_name_or_path, mapping=cls._module_mapping
         )
+        if dtype is None:
+            dtype = dtype_for_model_path(
+                model_name_or_path,
+                target_device=hf_common.DEVICE,
+            )
 
-        model: torch.nn.Module = load_model_common(
+        model: PreTrainedModel = load_model_common(
             model_name_or_path,
             module,
             dtype,
             auto_model_cls=cls._auto_model_cls,
+            tp_plan=tp_plan,
         )
         move_model_to_spyre(model, module, dtype)
         return model
@@ -257,8 +300,8 @@ class AutoSpyreModel:
 class AutoSpyreModelForCausalLM(AutoSpyreModel):
     """Load an HF causal-LM model and prepare it for Spyre.
 
-    Attaches a Spyre-aware ``generate`` method that runs the 64-block padded
-    decode loop.
+    Attaches a Spyre-aware ``generate`` method that runs the block-padded
+    prefill + single-token decode loop.
     """
 
     _auto_model_cls = AutoModelForCausalLM  # type: ignore[assignment]
@@ -267,20 +310,21 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
     def from_pretrained(
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
-        dtype: torch.dtype = torch.float16,
-    ) -> torch.nn.Module:
+        dtype: torch.dtype | None = None,
+        tp_plan: Optional[Union[dict, str]] = None,
+    ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(model_name_or_path)
         if getattr(module, "_is_encoder_only", False):
             raise SpyreUnsupportedModelError(
                 "Generation is not currently supported for encoder-only architectures"
             )
 
-        model: torch.nn.Module = super().from_pretrained(
-            model_name_or_path, dtype=dtype
+        model: PreTrainedModel = super().from_pretrained(
+            model_name_or_path, dtype=dtype, tp_plan=tp_plan
         )
 
         def model_generate(
-            self: torch.nn.Module, tokenizer: Any, prompts: list[str], **kwargs: Any
+            self: PreTrainedModel, tokenizer: Any, prompts: list[str], **kwargs: Any
         ):
             from hf_adapters.hf_common import generate
 
@@ -288,6 +332,199 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
 
         model.generate = MethodType(model_generate, model)  # type: ignore[assignment]
 
+        return model
+
+
+def _validate_encoder_task_forward(
+    model: PreTrainedModel,
+    input_ids: torch.Tensor | None,
+    *,
+    position_ids: torch.Tensor | None = None,
+    head_mask: torch.Tensor | None = None,
+    inputs_embeds: torch.Tensor | None = None,
+    labels: torch.Tensor | None = None,
+    output_attentions: bool | None = None,
+    output_hidden_states: bool | None = None,
+) -> None:
+    """Validate the inference-only forward contract shared by encoder tasks."""
+    if inputs_embeds is not None:
+        raise SpyreUnsupportedFeatureError(
+            "inputs_embeds is not currently supported on Spyre"
+        )
+    if input_ids is None:
+        raise ValueError("input_ids must be provided")
+    if position_ids is not None:
+        raise SpyreUnsupportedFeatureError(
+            "Custom position_ids are not currently supported on Spyre"
+        )
+    if head_mask is not None:
+        raise SpyreUnsupportedFeatureError(
+            "head_mask is not currently supported on Spyre"
+        )
+    if labels is not None or model.training:
+        raise SpyreUnsupportedFeatureError(
+            "Loss computation and training are not currently supported"
+        )
+    if output_attentions:
+        raise SpyreUnsupportedFeatureError(
+            "output_attentions is not currently supported on Spyre"
+        )
+    if output_hidden_states:
+        raise SpyreUnsupportedFeatureError(
+            "output_hidden_states is not currently supported on Spyre"
+        )
+
+
+class AutoSpyreModelForMaskedLM(AutoSpyreModel):
+    """Load an HF masked-LM model with its encoder on Spyre.
+
+    The complete masked-LM task head remains on CPU. The native forward returns
+    a ``MaskedLMOutput`` whose logits are on CPU.
+    """
+
+    _auto_model_cls = AutoModelForMaskedLM  # type: ignore[assignment]
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_name_or_path: Union[str, os.PathLike[str]],
+        dtype: torch.dtype | None = None,
+        tp_plan: Optional[Union[dict, str]] = None,
+    ) -> PreTrainedModel:
+        module: ModuleType = resolve_adapter_module(
+            model_name_or_path, mapping=cls._module_mapping
+        )
+        model: PreTrainedModel = super().from_pretrained(
+            model_name_or_path, dtype=dtype, tp_plan=tp_plan
+        )
+
+        def model_forward(
+            self: PreTrainedModel,
+            input_ids: torch.Tensor | None = None,
+            attention_mask: torch.Tensor | None = None,
+            token_type_ids: torch.Tensor | None = None,
+            position_ids: torch.Tensor | None = None,
+            head_mask: torch.Tensor | None = None,
+            inputs_embeds: torch.Tensor | None = None,
+            encoder_hidden_states: torch.Tensor | None = None,
+            encoder_attention_mask: torch.Tensor | None = None,
+            labels: torch.Tensor | None = None,
+            output_attentions: bool | None = None,
+            output_hidden_states: bool | None = None,
+            return_dict: bool | None = None,
+            **kwargs: Any,
+        ):
+            from hf_adapters.hf_common import prefill_masked_lm
+
+            if encoder_hidden_states is not None or encoder_attention_mask is not None:
+                raise SpyreUnsupportedFeatureError(
+                    "Cross-attention inputs are not supported"
+                )
+            if kwargs:
+                raise TypeError(f"Unsupported forward arguments: {sorted(kwargs)}")
+            _validate_encoder_task_forward(
+                self,
+                input_ids,
+                position_ids=position_ids,
+                head_mask=head_mask,
+                inputs_embeds=inputs_embeds,
+                labels=labels,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+            )
+            if attention_mask is None and input_ids is not None:
+                attention_mask = torch.ones_like(input_ids)
+
+            logits = prefill_masked_lm(
+                module._run_backbone_forward,
+                self,
+                input_ids,
+                attention_mask,
+                token_type_ids=token_type_ids,
+            )
+            use_return_dict = (
+                return_dict if return_dict is not None else self.config.use_return_dict
+            )
+            if use_return_dict:
+                return MaskedLMOutput(logits=logits)  # type: ignore[arg-type]
+            return (logits,)
+
+        model.forward = MethodType(model_forward, model)  # type: ignore[assignment]
+        return model
+
+
+class AutoSpyreModelForQuestionAnswering(AutoSpyreModel):
+    """Load an extractive-QA model with its encoder on Spyre and head on CPU."""
+
+    _auto_model_cls = AutoModelForQuestionAnswering  # type: ignore[assignment]
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_name_or_path: Union[str, os.PathLike[str]],
+        dtype: torch.dtype | None = None,
+        tp_plan: Optional[Union[dict, str]] = None,
+    ) -> PreTrainedModel:
+        module: ModuleType = resolve_adapter_module(model_name_or_path)
+        model: PreTrainedModel = super().from_pretrained(
+            model_name_or_path, dtype=dtype, tp_plan=tp_plan
+        )
+        if model.config.num_labels != 2:
+            raise SpyreUnsupportedModelError(
+                "Extractive question answering requires config.num_labels=2"
+            )
+
+        def model_forward(
+            self: PreTrainedModel,
+            input_ids: torch.Tensor | None = None,
+            attention_mask: torch.Tensor | None = None,
+            token_type_ids: torch.Tensor | None = None,
+            position_ids: torch.Tensor | None = None,
+            head_mask: torch.Tensor | None = None,
+            inputs_embeds: torch.Tensor | None = None,
+            start_positions: torch.Tensor | None = None,
+            end_positions: torch.Tensor | None = None,
+            output_attentions: bool | None = None,
+            output_hidden_states: bool | None = None,
+            return_dict: bool | None = None,
+            **kwargs: Any,
+        ):
+            from hf_adapters.hf_common import prefill_question_answering
+
+            if kwargs:
+                raise TypeError(f"Unsupported forward arguments: {sorted(kwargs)}")
+            positions = (
+                start_positions if start_positions is not None else end_positions
+            )
+            _validate_encoder_task_forward(
+                self,
+                input_ids,
+                position_ids=position_ids,
+                head_mask=head_mask,
+                inputs_embeds=inputs_embeds,
+                labels=positions,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+            )
+            if attention_mask is None and input_ids is not None:
+                attention_mask = torch.ones_like(input_ids)
+            start_logits, end_logits = prefill_question_answering(
+                module._run_backbone_forward,
+                self,
+                input_ids,
+                attention_mask,
+                token_type_ids=token_type_ids,
+            )
+            use_return_dict = (
+                return_dict if return_dict is not None else self.config.use_return_dict
+            )
+            if use_return_dict:
+                return QuestionAnsweringModelOutput(
+                    start_logits=start_logits, end_logits=end_logits
+                )
+            return start_logits, end_logits
+
+        model.forward = MethodType(model_forward, model)  # type: ignore[assignment]
         return model
 
 
@@ -318,17 +555,18 @@ class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
     def from_pretrained(
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
-        dtype: torch.dtype = torch.float16,
-    ) -> torch.nn.Module:
+        dtype: torch.dtype | None = None,
+        tp_plan: Optional[Union[dict, str]] = None,
+    ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
             model_name_or_path, mapping=cls._module_mapping
         )
-        model: torch.nn.Module = super().from_pretrained(
-            model_name_or_path, dtype=dtype
+        model: PreTrainedModel = super().from_pretrained(
+            model_name_or_path, dtype=dtype, tp_plan=tp_plan
         )
 
         def model_rerank(
-            self: torch.nn.Module,
+            self: PreTrainedModel,
             tokenizer: Any,
             pairs: list[tuple[str, str]],
             **kwargs: Any,
@@ -375,18 +613,19 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
     def from_pretrained(
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
-        dtype: torch.dtype = torch.float16,
+        dtype: torch.dtype | None = None,
+        tp_plan: Optional[Union[dict, str]] = None,
     ):
         module: ModuleType = resolve_adapter_module(
             model_name_or_path,
             mapping=cls._module_mapping,
         )
-        model: torch.nn.Module = super().from_pretrained(
-            model_name_or_path, dtype=dtype
+        model: PreTrainedModel = super().from_pretrained(
+            model_name_or_path, dtype=dtype, tp_plan=tp_plan
         )
 
         def model_prefill_logits(
-            self: torch.nn.Module,
+            self: PreTrainedModel,
             input_ids: torch.Tensor,
             attention_mask: torch.Tensor,
             pixel_values: torch.Tensor,
@@ -401,7 +640,7 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
             )
 
         def model_generate(
-            self: torch.nn.Module,
+            self: PreTrainedModel,
             processor: Any,
             input_ids: torch.Tensor,
             attention_mask: torch.Tensor,
@@ -420,19 +659,3 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
         model.prefill_logits = MethodType(model_prefill_logits, model)  # type: ignore[assignment]
         model.generate = MethodType(model_generate, model)  # type: ignore[assignment]
         return model
-
-
-def torch_dtype_for_model_path(model_path: str) -> torch.dtype:
-    """Resolve the Spyre-safe torch dtype for *model_path*.
-
-    Looks up *model_path* in ``MODEL_PATH_TO_TORCH_DTYPE``; defaults to
-    ``torch.float16`` when no entry is found. Registry entries of
-    ``torch.float32`` (e.g. Granite 4 1B, where fp16 overflows on CPU) are
-    downcast to ``torch.float16`` because Spyre does not support float32;
-    ``torch.bfloat16`` entries (e.g. EmbeddingGemma) are passed through
-    unchanged.
-    """
-    dtype = MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
-    if dtype == torch.float32:
-        return torch.float16
-    return dtype

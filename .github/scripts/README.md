@@ -10,12 +10,11 @@ This script ensures that CI test matrices stay synchronized with the model regis
 
 ### How It Works
 
-1. Imports `select_representative_models()` from `tests/model_registry.py`
-2. Generates three JSON arrays:
-   - `causal_matrix`: Causal LM models only (one per adapter)
-   - `embed_matrix`: Embedding models only (one per adapter)
-   - `combined_matrix`: All models (causal + embedding)
-3. Outputs matrices in GitHub Actions format for consumption by test jobs
+1. Imports the representative path lists from `tests/model_registry.py`.
+2. Generates one JSON array per task suite, including `causal_matrix`,
+   `embed_matrix`, `masked_lm_matrix`, `vision_matrix`, and `reranker_matrix`.
+   `combined_matrix` remains the causal + embedding matrix used by shared jobs.
+3. Outputs matrices in GitHub Actions format for consumption by test jobs.
 
 ### Usage
 
@@ -48,7 +47,7 @@ To temporarily exclude models from all test matrices:
 
 To add a new model to CI:
 
-1. Add the model to `tests/model_registry.py` (either `CAUSAL_LM_MODELS` or `EMBEDDING_MODELS`)
+1. Add the model to the appropriate task registry in `tests/model_registry.py`.
 2. Ensure the model's adapter is in `hf_adapters/auto_spyre_model.py::CONFIG_TO_ADAPTER_MODULE_MAPPING`
 3. The CI will automatically include it in the next run
 

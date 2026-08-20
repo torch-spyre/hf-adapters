@@ -12,6 +12,7 @@ from utils.fetch_curated_models_metadata import _create_fetch_metadata, keep_all
 from utils.hf_model_catalog import (
     EXPAND_FIELDS,
     RESOURCES_DIR,
+    _guarded,
     build_catalog,
     contains_remote_code,
     has_loadable_weights,
@@ -33,32 +34,53 @@ def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
         lambda: api.list_models(
             pipeline_tag="text-generation",
             sort="downloads",
-            limit=int(limit * 2),
+            limit=int(limit * 2.5),
             expand=EXPAND_FIELDS,
         ),
         description="list_models[text-generation]",
     )
 
 
-def keep(model: ModelInfo, token: str | bool) -> bool:
+def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
     """Keep predicate for the generative fetcher.
 
     Ordering matters: the cheap metadata-only checks run first.
+    Returns a (keep, reason) tuple where reason describes why the model was
+    rejected (empty string when kept).
     """
-    if not is_baseline_keep(model):
-        return False
-    if model.gated:
-        return False
-    if not has_loadable_weights(model):
-        return False
-    if contains_remote_code(model):
-        return False
-    return True
+    try:
+        keep_flag, reason = is_baseline_keep(model)
+        if not keep_flag:
+            return False, reason
+    except Exception:
+        return False, "exception during is_baseline_keep"
+
+    checks: list[tuple[Callable[[], bool], str, str]] = [
+        (lambda: model.gated, "model.gated", "model is gated"),
+        (
+            lambda: not has_loadable_weights(model),
+            "has_loadable_weights",
+            "no loadable weights",
+        ),
+        (
+            lambda: contains_remote_code(model),
+            "contains_remote_code",
+            "requires trust_remote_code",
+        ),
+    ]
+    for predicate, name, rejection in checks:
+        result, err = _guarded(predicate, name)
+        if err:
+            return False, err
+        if result:
+            return False, rejection
+
+    return True, ""
 
 
-def fetch_generative_models(
+def _fetch_generative_models(
     fetcher: Callable[[HfApi, int], list[ModelInfo]],
-    keeper: Callable[[ModelInfo, str | bool], bool],
+    keeper: Callable[[ModelInfo, str | bool], tuple[bool, str]],
     limit: int,
     output_csv: Path | str | None = None,
 ) -> list[dict]:
@@ -77,7 +99,7 @@ def fetch_generative_models(
 def fetch_top_generative_models(
     limit: int, output_csv: Path | str | None = None
 ) -> list[dict[str, object]]:
-    return fetch_generative_models(
+    return _fetch_generative_models(
         fetcher=_fetch, keeper=keep, limit=limit, output_csv=output_csv
     )
 
@@ -85,7 +107,7 @@ def fetch_top_generative_models(
 def fetch_curated_generative_models_metadata(
     model_ids: list[str], output_csv: Path | str | None = None
 ) -> list[dict[str, object]]:
-    return fetch_generative_models(
+    return _fetch_generative_models(
         fetcher=_create_fetch_metadata(model_ids),
         keeper=keep_all,
         limit=len(model_ids),

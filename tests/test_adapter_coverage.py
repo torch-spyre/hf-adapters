@@ -24,6 +24,8 @@ from pathlib import Path
 from tests.model_registry import (
     CAUSAL_LM_MODELS,
     EMBEDDING_MODELS,
+    MASKED_LM_MODELS,
+    QUESTION_ANSWERING_MODELS,
     RERANKER_MODELS,
     VISION_MODELS,
 )
@@ -68,6 +70,18 @@ def get_registered_adapters():
 
     # Collect adapters from EMBEDDING_MODELS
     for model_info in EMBEDDING_MODELS.values():
+        adapter = model_info.get("adapter")
+        if adapter:
+            registered_adapters.add(adapter)
+
+    # Collect adapters from MASKED_LM_MODELS
+    for model_info in MASKED_LM_MODELS.values():
+        adapter = model_info.get("adapter")
+        if adapter:
+            registered_adapters.add(adapter)
+
+    # Collect adapters from QUESTION_ANSWERING_MODELS
+    for model_info in QUESTION_ANSWERING_MODELS.values():
         adapter = model_info.get("adapter")
         if adapter:
             registered_adapters.add(adapter)
@@ -152,6 +166,8 @@ def test_adapter_coverage_details():
     for model_info in (
         list(CAUSAL_LM_MODELS.values())
         + list(EMBEDDING_MODELS.values())
+        + list(MASKED_LM_MODELS.values())
+        + list(QUESTION_ANSWERING_MODELS.values())
         + list(VISION_MODELS.values())
         + list(RERANKER_MODELS.values())
     ):

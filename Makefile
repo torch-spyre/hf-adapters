@@ -2,24 +2,41 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 # TEST_TYPE selects which subset of tests to run (uniform knob across the
-# product repos: torch-spyre, hf-adapters, spyre-inference):
-#   smoke — fast per-op unit tests only
-#   core  — all spyre-native tests (excludes the heavy upstream suites)
-#   full  — everything
-#   trunk — same coverage as full; push-to-main CI label (see resolve_test_type.sh)
-#   perf  — SCAFFOLD ONLY: no benchmark harness yet, writes a placeholder empty
-#           JUnit XML (no .benchmark classname, so ingest reads it as 0 rows).
-#           A real producer (like torch-spyre's spyre-perf-suite) is a follow-up.
-# Also accepts the user-facing tier aliases unit (= core), integration (= smoke),
-# regression (= full) -- same mapping as _test_matrix.yaml's resolve-test-type job.
+# product repos: torch-spyre, hf-adapters, spyre-inference). These tier names
+# are literal, first-class values -- there is no alias-resolution layer:
+#   unit        — all spyre-native tests (excludes the heavy upstream suites)
+#   integration — the token_compare suite. This is the ONLY valid top-level tier for
+#                 that suite -- TEST_TYPE=token_compare by itself is rejected (see the
+#                 `tests` target below); "token_compare" is just the individual suite
+#                 key "integration" maps to, still usable inside a
+#                 multi-suite combo (e.g. TEST_TYPE="token_compare load").
+#   regression  — everything
+#   trunk       — same coverage as regression; push-to-main CI label (see
+#                 resolve_test_type.sh)
+#   perf        — SCAFFOLD ONLY: no benchmark harness yet, writes a placeholder
+#                 empty JUnit XML (no .benchmark classname, so ingest reads it
+#                 as 0 rows). A real producer (like torch-spyre's
+#                 spyre-perf-suite) is a follow-up.
 # Also accepts a space-separated list of individual suite keys (matches
 # _test_matrix.yaml's `test_type` semantics), e.g. TEST_TYPE="smoke load".
-# Empty / unset defaults to "regression" (= full: every suite).
+# Empty / unset defaults to "regression" (every suite).
 TEST_TYPE ?= regression
 
-# MODEL_KEY narrows a suite to one model via pytest's -k filter (matrix-style
-# per-model CI jobs pass this); empty = run every model in the suite.
+# MODEL_KEY narrows a suite to one model via pytest's -k substring filter
+# (local dev use, e.g. `make tests MODEL_KEY=granite` to match several paths
+# at once); empty = run every model in the suite.
 MODEL_KEY ?=
+
+# MODEL_PATH narrows a suite to a specific set of models via pytest's --model-path
+# (see tests/conftest.py's pytest_generate_tests), which replaces the
+# registry-derived parametrization outright rather than filtering it -- so it
+# works for any model path, including ones that lost the smallest-per-adapter
+# CAUSAL_PATHS/EMBED_PATHS/VISION_PATHS representative slot. Matrix-style
+# per-model CI jobs pass this (see _test_matrix.yaml); empty = no override.
+MODEL_PATH ?= Qwen/Qwen3-0.6B \
+  mistralai/Ministral-3-8B-Instruct-2512 \
+  ibm-granite/granite-4.1-8b \
+  ibm-granite/granite-3.3-8b-instruct
 
 # Flags passed verbatim to pytest, mirroring _test_matrix.yaml's extra_test_flags.
 PYTEST_ARGS ?= -s -vvv
@@ -45,15 +62,22 @@ else
 K_ARGS :=
 endif
 
+ifneq ($(strip $(MODEL_PATH)),)
+MODEL_PATH_ARGS := $(foreach model,$(MODEL_PATH),--model-path "$(model)")
+else
+MODEL_PATH_ARGS :=
+endif
+
 .PHONY: help test tests adapter-coverage-tests smoke-tests load-tests \
-        token-compare-tests embed-compare-tests vlm-tests model-module-tests
+        token-compare-tests embed-compare-tests vlm-tests reranker-tests model-module-tests \
+        masked-lm-compare-tests question-answering-compare-tests edge-cases-tests
 
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-24s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
-	@echo "Variables: TEST_TYPE=smoke|core|full|trunk|unit|integration|regression|<space-separated suite keys> (default regression),"
-	@echo "  MODEL_KEY (pytest -k filter, default all), PYTEST_ARGS (default '$(PYTEST_ARGS)'),"
-	@echo "  JUNIT_XML (single-suite targets only), RESULTS_DIR (default '$(RESULTS_DIR)')"
+	@echo "Variables: TEST_TYPE=unit|integration|regression|trunk|<space-separated suite keys, e.g. smoke> (default regression),"
+	@echo "  MODEL_KEY (pytest -k filter, default all), MODEL_PATH (exact model path via --model-path, overrides registry parametrization),"
+	@echo "  PYTEST_ARGS (default '$(PYTEST_ARGS)'), JUNIT_XML (single-suite targets only), RESULTS_DIR (default '$(RESULTS_DIR)')"
 
 # Suite keys, one target each -- same vocabulary and test_types membership as
 # _test_matrix.yaml. Each is independently runnable with its own JUNIT_XML.
@@ -61,19 +85,44 @@ adapter-coverage-tests: ## Run adapter registry coverage check (suite key: adapt
 	$(PYTEST) -v --noconftest tests/test_adapter_coverage.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 smoke-tests: ## Run e2e smoke tests (suite key: smoke)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_smoke_spyre.py $(K_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_smoke_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 load-tests: ## Run load tests (suite key: load)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_load_spyre.py $(K_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	# test_load_spyre.py is the one suite file with FOUR model_path-parametrized
+	# functions (causal/embed/masked-LM/QA) sharing that fixture name. conftest's
+	# --model-path override reparametrizes every function with a model_path
+	# fixture, not just the one whose registry the model belongs to -- so it
+	# would force the other three to load the model through the wrong auto-class
+	# and fail. Filter via -k (substring on the test ID) instead, which only
+	# selects the one matching parametrization, same as every other suite target
+	# gets from --model-path (safe here because MODEL_PATH is always one exact
+	# registry path, never an attacker-controlled or ambiguous substring).
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_load_spyre.py $(if $(MODEL_PATH),-k "$(MODEL_PATH)",$(K_ARGS)) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 token-compare-tests: ## Run token-compare tests (suite key: token_compare)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_token_compare_spyre.py $(K_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_token_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 embed-compare-tests: ## Run embed-compare tests (suite key: embed_compare)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_embed_compare_spyre.py $(K_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_embed_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 vlm-tests: ## Run VLM e2e tests (suite key: vlm)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_vlm_e2e_spyre.py $(K_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_vlm_e2e_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+
+reranker-tests: ## Run reranker compare tests (suite key: reranker_compare)
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_reranker_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+
+masked-lm-compare-tests: ## Run masked-LM compare tests (suite key: masked_lm_compare)
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_masked_lm_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+
+question-answering-compare-tests: ## Run question-answering compare tests (suite key: question_answering_compare)
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_question_answering_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+
+# EDGE_CASE_FILE narrows edge-cases-tests to one file under tests/spyre/edge_cases/
+# (matrix-style per-file CI jobs pass this); empty = run every file in the directory.
+# All edge-case tests are @pytest.mark.slow, so --run-slow is passed unconditionally.
+EDGE_CASE_FILE ?=
+edge-cases-tests: ## Run edge-case tests (suite key: edge_cases; EDGE_CASE_FILE=<file>.py narrows to one)
+	$(PYTEST) $(PYTEST_ARGS) --run-slow $(if $(EDGE_CASE_FILE),tests/spyre/edge_cases/$(EDGE_CASE_FILE),tests/spyre/edge_cases/) $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 # MODULE_CONFIG narrows model-module-tests to one YAML config (matrix-style
 # per-config CI jobs pass this); empty = run every config in tests/configs/module_tests.
@@ -91,7 +140,10 @@ model-module-tests: ## Run oot_framework module tests (suite key: model_module; 
 	source /etc/profile.d/ibm-aiu-setup.sh; \
 	set -e; \
 	_run_test=$$(uv run --active --no-sync python3 -c \
-	  "import oot_framework, os; print(os.path.join(os.path.dirname(oot_framework.__file__), 'run_test.sh'))"); \
+	  "import oot_framework, os; print(os.path.join(os.path.dirname(oot_framework.__file__), 'run_test.sh'))") || { \
+	  echo "ERROR: oot_framework is not installed in the active venv. Run 'uv sync --group oot' (see CLAUDE.md) and retry."; \
+	  exit 1; \
+	}; \
 	configs="$(MODULE_CONFIG)"; \
 	if [[ -z "$$configs" ]]; then \
 	  configs=$$(cd tests/configs/module_tests && ls *.yaml); \
@@ -107,21 +159,23 @@ model-module-tests: ## Run oot_framework module tests (suite key: model_module; 
 	done; \
 	exit $$rc
 
-# Aggregate target: every suite named in TEST_TYPE (smoke|core|full|space-separated
-# keys), each writing its own flat JUnit file into RESULTS_DIR so a caller can glob
-# the whole directory in one ClickHouse push. One failing suite doesn't skip the
-# rest; the aggregate's exit code still reflects any failure.
+# Aggregate target: every suite named in TEST_TYPE (unit|integration|
+# regression|trunk|space-separated suite keys), each writing its own flat
+# JUnit file into RESULTS_DIR so a caller can glob the whole directory in one
+# ClickHouse push. One failing suite doesn't skip the rest; the aggregate's
+# exit code still reflects any failure.
 tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite)
-	@# Resolve the user-facing tier aliases (unit/integration/regression) via the
-	@# shared script -- same source of truth as _test_matrix.yaml's
-	@# resolve-test-type job, so `make tests TEST_TYPE=unit` matches what CI runs
-	@# for the "unit" tier via GHA.
+	@# Apply the shared default (empty -> regression) and pass literal tier
+	@# names / suite keys through unchanged -- same source of truth as
+	@# _test_matrix.yaml's resolve-test-type job, so `make tests TEST_TYPE=unit`
+	@# matches what CI runs for the "unit" tier via GHA.
 	resolved="$$(scripts/resolve_test_type.sh $(TEST_TYPE))"; \
 	case " $$resolved " in \
-	  *" full "*|*" trunk "*) suites="adapter_coverage smoke load token_compare embed_compare vlm model_module" ;; \
-	  *" core "*) suites="adapter_coverage load token_compare embed_compare vlm model_module" ;; \
-	  " smoke ") suites="smoke" ;; \
+	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare model_module" ;; \
+	  *" unit "*) suites="adapter_coverage load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare model_module" ;; \
+	  " integration ") suites="token_compare" ;; \
 	  " perf ") suites="perf" ;; \
+	  " token_compare ") echo "TEST_TYPE=token_compare is not a valid tier -- use TEST_TYPE=integration to run the token_compare suite alone, or include 'token_compare' in a multi-suite combo (e.g. TEST_TYPE=\"token_compare load\")."; exit 1 ;; \
 	  *) suites="$$resolved" ;; \
 	esac; \
 	mkdir -p "$(RESULTS_DIR)"; \
@@ -129,20 +183,30 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	for suite in $$suites; do \
 	  echo "=== running suite: $$suite ==="; \
 	  case "$$suite" in \
-	    adapter_coverage) $(MAKE) adapter-coverage-tests JUNIT_XML="$(RESULTS_DIR)/adapter-coverage.xml" || rc=1 ;; \
-	    smoke)            $(MAKE) smoke-tests            JUNIT_XML="$(RESULTS_DIR)/spyre-smoke-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    load)             $(MAKE) load-tests             JUNIT_XML="$(RESULTS_DIR)/spyre-load-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    token_compare)    $(MAKE) token-compare-tests     JUNIT_XML="$(RESULTS_DIR)/spyre-token-compare-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    embed_compare)    $(MAKE) embed-compare-tests     JUNIT_XML="$(RESULTS_DIR)/spyre-embed-compare-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    vlm)              $(MAKE) vlm-tests               JUNIT_XML="$(RESULTS_DIR)/spyre-vlm-e2e-tests.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
-	    model_module)     $(MAKE) model-module-tests      JUNIT_XML=1 RESULTS_DIR="$(RESULTS_DIR)" MODULE_CONFIG="$(MODULE_CONFIG)" || rc=1 ;; \
+	    adapter_coverage) mkdir -p "$(RESULTS_DIR)/junit-adapter-coverage" && $(MAKE) adapter-coverage-tests JUNIT_XML="$(RESULTS_DIR)/junit-adapter-coverage/junit-adapter-coverage.xml" || rc=1 ;; \
+	    smoke)            mkdir -p "$(RESULTS_DIR)/junit-smoke" && $(MAKE) smoke-tests            JUNIT_XML="$(RESULTS_DIR)/junit-smoke/junit-smoke.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    load)             mkdir -p "$(RESULTS_DIR)/junit-load" && $(MAKE) load-tests             JUNIT_XML="$(RESULTS_DIR)/junit-load/junit-load.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    token_compare)    mkdir -p "$(RESULTS_DIR)/junit-token-compare" && $(MAKE) token-compare-tests     JUNIT_XML="$(RESULTS_DIR)/junit-token-compare/junit-token-compare.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    embed_compare)    mkdir -p "$(RESULTS_DIR)/junit-embed-compare" && $(MAKE) embed-compare-tests     JUNIT_XML="$(RESULTS_DIR)/junit-embed-compare/junit-embed-compare.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    vlm)              mkdir -p "$(RESULTS_DIR)/junit-vlm" && $(MAKE) vlm-tests               JUNIT_XML="$(RESULTS_DIR)/junit-vlm/junit-vlm.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    reranker_compare) mkdir -p "$(RESULTS_DIR)/junit-reranker-compare" && $(MAKE) reranker-tests          JUNIT_XML="$(RESULTS_DIR)/junit-reranker-compare/junit-reranker-compare.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    masked_lm_compare) mkdir -p "$(RESULTS_DIR)/junit-masked-lm-compare" && $(MAKE) masked-lm-compare-tests JUNIT_XML="$(RESULTS_DIR)/junit-masked-lm-compare/junit-masked-lm-compare.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    question_answering_compare) mkdir -p "$(RESULTS_DIR)/junit-question-answering-compare" && $(MAKE) question-answering-compare-tests JUNIT_XML="$(RESULTS_DIR)/junit-question-answering-compare/junit-question-answering-compare.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
+	    model_module)     $(MAKE) model-module-tests      JUNIT_XML=1 RESULTS_DIR="$(RESULTS_DIR)" MODULE_CONFIG="$(MODULE_CONFIG)" || rc=1; \
+	                      for f in "$(RESULTS_DIR)"/model-module-*.xml; do \
+	                        [ -e "$$f" ] || continue; \
+	                        base="junit-$$(basename "$$f" .xml)"; \
+	                        mkdir -p "$(RESULTS_DIR)/$$base"; \
+	                        mv "$$f" "$(RESULTS_DIR)/$$base/$$base.xml"; \
+	                      done ;; \
+	    edge_cases)       mkdir -p "$(RESULTS_DIR)/junit-edge-cases" && $(MAKE) edge-cases-tests        JUNIT_XML="$(RESULTS_DIR)/junit-edge-cases/junit-edge-cases.xml" MODEL_KEY="$(MODEL_KEY)" EDGE_CASE_FILE="$(EDGE_CASE_FILE)" || rc=1 ;; \
 	    perf)             printf '%s\n' \
 	                        '<?xml version="1.0" encoding="utf-8"?>' \
 	                        '<testsuites name="hf-adapters-perf">' \
 	                        '  <testsuite name="hf-adapters-perf" tests="0" skipped="0" failures="0" errors="0"/>' \
 	                        '</testsuites>' > "$(RESULTS_DIR)/report.xml"; \
 	                      echo "hf-adapters has no perf harness yet (scaffold stub): wrote placeholder $(RESULTS_DIR)/report.xml" ;; \
-	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare embed_compare vlm model_module perf"; rc=1 ;; \
+	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare model_module edge_cases perf"; rc=1 ;; \
 	  esac; \
 	done; \
 	exit $$rc

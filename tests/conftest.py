@@ -48,7 +48,6 @@ import types
 from typing import Union
 
 import pytest
-import torch
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.nodes import Item
@@ -58,8 +57,7 @@ from transformers import AutoModelForCausalLM, PretrainedConfig
 # NOTE: do NOT import hf_adapters at module top level. The CPU patch block below
 # rebuilds ``hf_adapters.hf_common`` with ``DEVICE='cpu'`` and asserts that no
 # import has materialized it yet; a top-level import here would always trip that
-# assert. ``MODEL_PATH_TO_TORCH_DTYPE`` / ``MODEL_PATH_WITH_LOAD_FN`` are pulled
-# in lazily inside the helpers that use them.
+# assert. Dtype policy and model-load helpers are imported lazily below.
 # CONFIG_TO_ADAPTER_MODULE_MAPPING / resolve_adapter_module are imported lazily
 # below (after the CPU patch) so the editable-install .pth cannot pre-load
 # hf_common before the patch runs.
@@ -152,6 +150,10 @@ def pytest_configure(config: Config) -> None:
         "markers",
         "requires_spyre: mark test as requiring the Spyre backend device",
     )
+    config.addinivalue_line(
+        "markers",
+        "model_harness(name): identify which model registry harness a test uses",
+    )
 
 
 def pytest_addoption(parser: Parser) -> None:
@@ -169,7 +171,7 @@ def pytest_addoption(parser: Parser) -> None:
             "Override the ``model_path`` parametrization for every test that "
             "takes it. Repeat the flag to run against multiple models, e.g. "
             "``--model-path foo/bar --model-path baz/qux``. When set, the "
-            "registry-derived CAUSAL_PATHS / EMBED_PATHS / VISION_PATHS lists "
+            "registry-derived CAUSAL / EMBED / MASKED_LM / VISION path lists "
             "in the test decorators are ignored."
         ),
     )
@@ -205,7 +207,37 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
         m for m in metafunc.definition.own_markers if m.name != "parametrize"
     ] + kept
 
-    metafunc.parametrize("model_path", overrides, ids=overrides)
+    # Re-apply non-blocking xfail(strict=False) only from this test's explicit
+    # harness table. A path may be shared by different harnesses with different
+    # expected outcomes, so these tables must never be merged.
+    import model_registry
+
+    harness_marker = metafunc.definition.get_closest_marker("model_harness")
+    harness = harness_marker.args[0] if harness_marker else None
+    non_blocking_tables = {
+        "causal": model_registry.NON_BLOCKING_CAUSAL_MODELS,
+        "vision": model_registry.NON_BLOCKING_VISION_MODELS,
+        "embedding": {},
+        "masked_lm": {},
+        "question_answering": {},
+        "reranker": {},
+    }
+    try:
+        non_blocking = non_blocking_tables[harness]
+    except (KeyError, TypeError):
+        raise pytest.UsageError(f"unknown model harness: {harness!r}") from None
+
+    params = [
+        (
+            pytest.param(
+                path, marks=pytest.mark.xfail(reason=non_blocking[path], strict=False)
+            )
+            if path in non_blocking
+            else path
+        )
+        for path in overrides
+    ]
+    metafunc.parametrize("model_path", params, ids=overrides)
 
 
 def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
@@ -244,20 +276,15 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
                 item.add_marker(skip_slow)
 
 
-def get_dtype_for_cpu(model_path: str) -> torch.dtype:
-    from hf_adapters.auto_spyre_model import MODEL_PATH_TO_TORCH_DTYPE
-
-    return MODEL_PATH_TO_TORCH_DTYPE.get(model_path, torch.float16)
-
-
 def load_ref_model(
     model_path: str,
     adapter_mod: types.ModuleType | None = None,
     auto_model_cls: type = AutoModelForCausalLM,
 ):
+    from hf_adapters.auto_spyre_model import dtype_for_model_path
     from hf_adapters.hf_common import load_model_common
 
-    dtype = get_dtype_for_cpu(model_path)
+    dtype = dtype_for_model_path(model_path, target_device="cpu")
 
     ref_model = load_model_common(
         model_path=model_path,

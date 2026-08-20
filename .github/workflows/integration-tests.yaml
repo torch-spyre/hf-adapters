@@ -1,13 +1,15 @@
 name: integration-tests
-run-name: integration-tests (${{ inputs.test_type || 'smoke' }})
-# NOTE: run-name intentionally shows the RAW, user-facing input (before
-# _test_matrix.yaml's resolve-test-type job resolves unit/integration/regression
-# to core/smoke/full) -- this is also what push-to-clickhouse.yaml's trigger_type
-# ends up recording, so ClickHouse sees the tier name callers actually asked for.
+run-name: integration-tests (${{ inputs.test_type || 'integration' }})
+# NOTE: run-name intentionally shows the RAW, user-facing input -- smoke/unit/
+# integration/regression/trunk are literal, first-class values (no
+# alias-resolution layer; see _test_matrix.yaml's resolve-test-type job,
+# which only applies the shared empty->regression default) -- this is also
+# what push-to-clickhouse.yaml's trigger_type ends up recording, so
+# ClickHouse sees the tier name callers actually asked for.
 
 # ---------------------------------------------------------------------------
 # Triggered by commits in upstream dependant repos (deeptools, flex, torch-spyre etc.) via
-# workflow_dispatch. Runs the smoke suite (test_type default) against a
+# workflow_dispatch. Runs the smoke suite (test_type default: "integration") against a
 # specified hf-adapters ref so regressions from upstream changes are caught
 # early without paying for the full matrix on every upstream commit; pass
 # test_type/models explicitly for a broader check.
@@ -66,45 +68,67 @@ on:
         default: ''
       test_type:
         description: >-
-          Test tier to run: smoke | core | full | trunk -- or the user-facing
-          tier aliases unit (= core) | integration (= smoke) | regression
-          (= full), for callers (e.g. spyre-frameworks config.yaml) that speak
-          in tier names rather than suite names. "smoke" runs only the smoke
-          suite; "core" runs every other suite (load, token_compare,
-          embed_compare, vlm, model_module); "full"/"trunk" run everything
-          (trunk mirrors this repo's push-to-main CI label — see
-          resolve_test_type.sh). This is a plain string underneath (see
+          Test tier to run: unit | integration | regression | trunk -- literal,
+          first-class values (no alias-resolution layer), for callers (e.g.
+          spyre-frameworks config.yaml) that speak in tier names. "unit" runs
+          every suite except smoke (load, token_compare, embed_compare, vlm,
+          model_module); "integration" runs only the smoke suite (there is no
+          separate "smoke" tier/dropdown option -- pick "integration" for
+          that suite; "smoke" is just the individual suite key it maps to
+          internally, still reachable via a raw space-separated combo through
+          the API/gh CLI, e.g. "smoke token_compare"); "regression"/"trunk"
+          run everything (trunk mirrors this repo's push-to-main CI label —
+          see resolve_test_type.sh). This is a plain string underneath (see
           _test_matrix.yaml's resolve-test-type job), so a caller using the
-          API/gh CLI can also pass an individual suite key or a
-          space-separated combo (e.g. "smoke token_compare") for finer
-          control than the dropdown offers -- but GitHub validates `choice`
-          options against the REST API dispatch too, not just the web UI
-          dropdown, so every value a real caller sends (like the "trunk" tier
-          above) must be listed explicitly below.
+          API/gh CLI can pass such a combo for finer control than the
+          dropdown offers -- but GitHub validates `choice` options against
+          the REST API dispatch too, not just the web UI dropdown, so every
+          value a real caller sends (like the "unit"/"trunk" tiers above)
+          must be listed explicitly below.
         required: false
         type: choice
-        default: smoke
+        default: integration
         options:
-          - smoke
-          - core
-          - full
+          - unit
+          - integration
+          - regression
           - trunk
       models:
         description: >-
           Space-separated list of model paths to restrict every matrix job
-          (smoke/load/token-compare/embed-compare/vision) to, e.g.
-          "Qwen/Qwen3-0.6B ministral/Ministral-3B-Instruct". Must match paths
-          exactly as they appear in tests/model_registry.py. Leave empty
-          (default) to fall back to a fixed 3-model spot-check -- see
-          run-tests below.
+          (smoke/load/token-compare/embed-compare/vision/reranker-compare) to, e.g.
+          "Qwen/Qwen3-0.6B mistralai/Ministral-3-8B-Instruct-2512". Must match
+          paths exactly as they appear in tests/model_registry.py -- any
+          registered path works, not just the smallest-per-adapter default
+          used when this input is left empty. Leave empty (default) to fall
+          back to a fixed 4-model (causal-only) spot-check when test_type is
+          "integration" (the default), or to every registered model per suite
+          for any other test_type -- see run-tests below. An explicit models
+          value applies to every test_type, including "integration".
         required: false
         type: string
-        default: 'Qwen/Qwen3-0.6B ministral/Ministral-3B-Instruct ibm-granite/granite-4.0-1b-base'
+        default: ''
 
 concurrency:
+  # PR-context runs (native pull_request, or workflow_dispatch carrying a
+  # pr_url_hash) key on the PR itself, so re-triggering the same PR cancels its
+  # own stale in-flight run -- unchanged from before.
+  #
+  # A non-PR dispatch (scheduled/main-push/nightly/weekly -- pr_url_hash empty)
+  # previously fell back to bare github.ref, so EVERY such dispatch of this
+  # workflow on the same ref shared one group regardless of test_type. Two
+  # unrelated dispatches landing close together (e.g. a nightly trunk run while
+  # a push-triggered trunk run is still going) then cancelled each other via
+  # cancel-in-progress, silently killing a run mid-job with no test failure and
+  # no error -- see the run/job-level symptoms this fixes. Disambiguating by
+  # test_type stops different suites from colliding at all.
   group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.pull_request.html_url) || (github.event_name == 'workflow_dispatch'
-    && inputs.pr_url_hash != '' && inputs.pr_url_hash) || github.ref }}
-  cancel-in-progress: true
+    && inputs.pr_url_hash != '' && inputs.pr_url_hash) || format('{0}-{1}', github.ref, inputs.test_type) }}
+  # Only cancel for a PR-context run (re-running the same PR should supersede
+  # its own stale run). A non-PR dispatch is never "the same PR re-triggered" --
+  # cancelling it destroys a run that has nothing superseding it, so a same
+  # test_type/ref collision QUEUES behind the in-flight run instead of killing it.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.pr_url_hash != '') }}
 
 permissions:
   contents: read
@@ -133,11 +157,19 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Delegates to the same reusable _test_matrix.yaml used by "run-tests" in
-  # torch_spyre_tests.yaml. `test_type` defaults to "smoke" and, if `models`
-  # is left empty, falls back to a fixed 3-model spot-check (Qwen3-0.6B,
-  # Ministral-3B-Instruct, granite-4.0-1b-base) -- so upstream-triggered runs
-  # stay fast by default. Pass test_type: full and/or an explicit models
-  # value for full coverage.
+  # torch_spyre_tests.yaml. `test_type` defaults to "integration" (the smoke
+  # suite); if `models` is left empty AND test_type is "integration", it falls
+  # back to a fixed 4-model spot-check (Qwen3-0.6B, Ministral-3-8B-Instruct-2512,
+  # Granite 4.1 8B, Granite 3.3 8B) -- all causal-only -- so upstream-triggered
+  # runs stay fast by default. For any other test_type (unit/regression/trunk/
+  # a suite-key combo), an empty `models` instead passes '' through to
+  # _test_matrix.yaml, which means "no restriction" there -- every suite (incl.
+  # vision/embed/reranker, which the 4-model spot-check has none of) runs its
+  # full registry. Without this split, the spot-check default would starve
+  # spyre-vlm-e2e-tests/spyre-embed-compare-tests of any matrix entries under
+  # test_type: regression (0-model matrix -> job never runs, not even a
+  # failure -- see the "run spyre unit tests" gate). An explicit `models`
+  # value always wins outright, for every test_type.
   # ---------------------------------------------------------------------------
   run-tests:
     needs: provenance
@@ -148,8 +180,8 @@ jobs:
       extra_test_flags_multi_spyre: -vvv -s
       ref: ${{ inputs.ref || '' }}
       repository: ${{ inputs.repository || '' }}
-      test_type: ${{ inputs.test_type || 'smoke' }}
-      models: ${{ inputs.models || 'Qwen/Qwen3-0.6B ministral/Ministral-3B-Instruct ibm-granite/granite-4.0-1b-base' }}
+      test_type: ${{ inputs.test_type || 'integration' }}
+      models: ${{ (inputs.models != '' && inputs.models) || ((inputs.test_type || 'integration') == 'integration' && 'Qwen/Qwen3-0.6B mistralai/Ministral-3-8B-Instruct-2512 ibm-granite/granite-4.1-8b ibm-granite/granite-3.3-8b-instruct') || '' }}
 
   # ----------------------------------------------------------------------------------
   # Fan-in gate job so callers can poll a single stable job name for pass/fail.

@@ -36,40 +36,48 @@ def generate_matrices(exclude_models=None, only_models=None):
             paths (applied after exclusions). Empty/None = no restriction.
 
     Returns:
-        dict: Dictionary with 'causal', 'embed', 'vision', and 'combined' matrix lists
+        dict: Dictionary containing the per-suite and combined matrix lists
     """
     exclude_models = set(exclude_models or [])
     only_models = set(only_models or [])
 
-    # Apply exclusions
-    causal_paths = [
-        k for k in tests.model_registry.CAUSAL_PATHS if k not in exclude_models
-    ]
-    embed_paths = [
-        k for k in tests.model_registry.EMBED_PATHS if k not in exclude_models
-    ]
-    vision_paths = [
-        k for k in tests.model_registry.VISION_PATHS if k not in exclude_models
-    ]
-    reranker_paths = [
-        k for k in tests.model_registry.RERANKER_PATHS if k not in exclude_models
-    ]
+    # Every category has a smallest-per-adapter representative list (default)
+    # and an unreduced "every registered path" list (ALL_*_PATHS, used by
+    # --only so a caller can target a non-representative checkpoint, e.g. a
+    # larger model sharing an adapter with a smaller default). Adding a new
+    # category later just means adding a row here.
+    registry = tests.model_registry
+    categories = {
+        "causal": (registry.CAUSAL_PATHS, registry.ALL_CAUSAL_PATHS),
+        "embed": (registry.EMBED_PATHS, registry.ALL_EMBED_PATHS),
+        "vision": (registry.VISION_PATHS, registry.ALL_VISION_PATHS),
+        "masked_lm": (registry.MASKED_LM_PATHS, registry.ALL_MASKED_LM_PATHS),
+        "question_answering": (
+            registry.QUESTION_ANSWERING_PATHS,
+            registry.ALL_QUESTION_ANSWERING_PATHS,
+        ),
+        "reranker": (registry.RERANKER_PATHS, registry.ALL_RERANKER_PATHS),
+    }
 
-    # Apply allowlist filter, if given
-    if only_models:
-        causal_paths = [k for k in causal_paths if k in only_models]
-        embed_paths = [k for k in embed_paths if k in only_models]
-        vision_paths = [k for k in vision_paths if k in only_models]
+    paths = {}
+    for name, (representative_paths, all_paths) in categories.items():
+        source = all_paths if only_models else representative_paths
+        selected = [p for p in source if p not in exclude_models]
+        if only_models:
+            selected = [p for p in selected if p in only_models]
+        paths[name] = selected
 
     # Combine for jobs that test both types
-    combined_paths = causal_paths + embed_paths
+    combined_paths = paths["causal"] + paths["embed"]
 
     return {
-        "causal": causal_paths,
-        "embed": embed_paths,
-        "vision": vision_paths,
+        "causal": paths["causal"],
+        "embed": paths["embed"],
+        "vision": paths["vision"],
+        "masked_lm": paths["masked_lm"],
+        "question_answering": paths["question_answering"],
         "combined": combined_paths,
-        "reranker": reranker_paths,
+        "reranker": paths["reranker"],
     }
 
 
@@ -87,6 +95,8 @@ def format_for_github_actions(matrices):
         "causal_matrix": json.dumps(matrices["causal"]),
         "embed_matrix": json.dumps(matrices["embed"]),
         "vision_matrix": json.dumps(matrices["vision"]),
+        "masked_lm_matrix": json.dumps(matrices["masked_lm"]),
+        "question_answering_matrix": json.dumps(matrices["question_answering"]),
         "combined_matrix": json.dumps(matrices["combined"]),
         "reranker_matrix": json.dumps(matrices["reranker"]),
     }
@@ -148,6 +158,13 @@ def main():
     )
     print(
         f"  Vision models ({len(matrices['vision'])}): {', '.join(matrices['vision'])}"
+    )
+    print(
+        f"  Masked-LM models ({len(matrices['masked_lm'])}): {', '.join(matrices['masked_lm'])}"
+    )
+    print(
+        f"  Question-answering models ({len(matrices['question_answering'])}): "
+        f"{', '.join(matrices['question_answering'])}"
     )
     print(
         f"  Combined ({len(matrices['combined'])}): {', '.join(matrices['combined'])}"

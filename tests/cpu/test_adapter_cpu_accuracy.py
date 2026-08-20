@@ -39,12 +39,13 @@ import torch
 from transformers import AutoTokenizer
 
 from tests.conftest import (
-    get_dtype_for_cpu,
     load_ref_model,
     resolve_adapter_module_for_test,
 )
 from tests.cpu.conftest import _unwrap_compiled_blocks
 from tests.model_registry import CAUSAL_PATHS
+
+pytestmark = pytest.mark.model_harness("causal")
 
 PROMPT = "The capital of France is"
 NUM_DECODE = 4
@@ -89,7 +90,7 @@ def hf_greedy_steps(model, input_ids, num_decode=NUM_DECODE):
 
 def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=NUM_DECODE):
     """Run adapter forward for prefill + N greedy decode steps on CPU."""
-    from hf_adapters.hf_common import allocate_kv_caches
+    from hf_adapters.hf_common import allocate_kv_caches, make_cache_index
 
     results = []
     batch_size = input_ids.shape[0]
@@ -123,9 +124,7 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=NUM_DECODE
             causal_mask,
             key_caches,
             value_caches,
-            is_filling=False,
-            token_index=0,
-            cache_position=0,
+            cache_index=make_cache_index(0, seq_len),
         )
 
     last_logits = logits[0, -1, :].float()[:vocab_size]
@@ -149,9 +148,7 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=NUM_DECODE
                 decode_mask,
                 key_caches,
                 value_caches,
-                is_filling=False,
-                token_index=0,
-                cache_position=cache_len,
+                cache_index=make_cache_index(cache_len, 1),
             )
 
         last_logits = logits[0, -1, :].float()[:vocab_size]
@@ -165,13 +162,10 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=NUM_DECODE
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 def test_auto_loader(model_path):
     auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
-    torch_dtype = get_dtype_for_cpu(model_path=model_path)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     # Phase 1: auto-loader generate
-    model = auto_spyre_model.AutoSpyreModelForCausalLM.from_pretrained(
-        model_path, dtype=torch_dtype
-    )
+    model = auto_spyre_model.AutoSpyreModelForCausalLM.from_pretrained(model_path)
     _unwrap_compiled_blocks(model)
     auto_outputs = model.generate(
         tokenizer, [PROMPT], max_new_tokens=NUM_DECODE, do_sample=False

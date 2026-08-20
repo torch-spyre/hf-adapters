@@ -32,4 +32,14 @@ print(p)
 }
 
 cd "$REPO_ROOT"
-TORCH_DEVICE_ROOT="$REPO_ROOT" bash "$_run_test" "$@"
+
+_EXTRA_CAPTURE=""
+_has_capture=0
+for _a in "$@"; do
+    case "$_a" in
+        -s|--capture=*) _has_capture=1; break ;;
+    esac
+done
+[[ $_has_capture -eq 0 ]] && _EXTRA_CAPTURE="--capture=sys"
+
+TORCH_DEVICE_ROOT="$REPO_ROOT" bash "$_run_test" "$@" ${_EXTRA_CAPTURE}

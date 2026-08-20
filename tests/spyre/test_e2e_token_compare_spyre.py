@@ -29,11 +29,9 @@ from typing import Any, Callable
 
 import pytest
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from transformers import PreTrainedModel
 
-from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
+from hf_adapters.auto_spyre_model import dtype_for_model_path
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
@@ -47,6 +45,8 @@ from tests.model_registry import (
     NON_BLOCKING_CAUSAL_MODELS,
     xfail_non_blocking,
 )
+
+pytestmark = pytest.mark.model_harness("causal")
 
 
 def hf_greedy_steps(
@@ -87,15 +87,16 @@ def hf_greedy_steps(
 
 def adapter_greedy_steps(
     run_forward_fn: Callable,
-    model: nn.Module,
+    model: PreTrainedModel,
     input_ids: torch.Tensor,
     num_decode: int = 4,
 ) -> list[dict[str, Any]]:
     """Run adapter forward on Spyre for prefill + N decode steps."""
     from hf_adapters.hf_common import (
         allocate_kv_caches,
-        build_expansion_mask,
+        build_decode_mask,
         build_prefill_mask,
+        make_cache_index,
     )
 
     batch_size = input_ids.shape[0]
@@ -136,84 +137,45 @@ def adapter_greedy_steps(
             prefill_mask.to(DEVICE),
             key_caches,
             value_caches,
-            is_filling=False,
-            token_index=0,
-            cache_position=0,
+            cache_index=make_cache_index(0, padded_len, DEVICE),
         )
     logits_cpu = logits.to("cpu")[0, -1, :].float()[:vocab_size]
     token = logits_cpu.argmax().item()
     results.append({"logits": logits_cpu, "token": token, "step": 0})
 
-    result = padded_ids.clone()
+    # Single-token decode, mirroring hf_common.generate: each step feeds the token
+    # the previous step produced and writes exactly one cache slot, so generated
+    # tokens are contiguous from padded_len. (This harness used to reproduce the
+    # FMS block walk — BLOCK_SIZE tokens in, one slot written — but generate() no
+    # longer does that, and a per-step logits comparison is only meaningful if it
+    # exercises the same path production uses.)
+    result = torch.cat([padded_ids, torch.tensor([[token]])], dim=1)
     current_cache_len = padded_len
-    tokens_in_block = BLOCK_SIZE - 1
-    decode_pos = torch.zeros((batch_size, BLOCK_SIZE), dtype=torch.long)
-    for j in range(BLOCK_SIZE):
-        decode_pos[:, j] = seq_len + j - BLOCK_SIZE
-    fill_mask_device = None
-
-    if tokens_in_block == BLOCK_SIZE - 1:
-        result = F.pad(result, (0, BLOCK_SIZE))
-    tokens_in_block = (tokens_in_block + 1) % BLOCK_SIZE
-    grab_idx = BLOCK_SIZE if tokens_in_block == 0 else BLOCK_SIZE - tokens_in_block
-    result[:, -grab_idx] = token
 
     for step in range(1, num_decode + 1):
-        is_filling = tokens_in_block > 0
-        next_input = result[:, -BLOCK_SIZE:].to(DEVICE)
-
-        if is_filling:
-            fill_pos = current_cache_len - BLOCK_SIZE + tokens_in_block
-            with torch.no_grad():
-                logits = run_forward_fn(
-                    model,
-                    next_input,
-                    decode_pos.to(DEVICE),
-                    fill_mask_device,
-                    key_caches,
-                    value_caches,
-                    is_filling=True,
-                    token_index=tokens_in_block,
-                    cache_position=fill_pos,
-                )
-            logits_cpu = logits.to("cpu")
-            grab_logit = BLOCK_SIZE - tokens_in_block
-            last_logits = logits_cpu[0, -grab_logit, :].float()[:vocab_size]
-        else:
-            current_cache_len += BLOCK_SIZE
-            decode_pos = decode_pos + BLOCK_SIZE
-            exp_mask = build_expansion_mask(
-                batch_size,
-                BLOCK_SIZE,
-                max_cache_len,
-                current_cache_len,
-                prompt_offset,
-                dtype=dtype,
+        next_input = result[:, -1:].to(DEVICE)
+        decode_pos = torch.full(
+            (batch_size, 1), current_cache_len - prompt_offset, dtype=torch.long
+        )
+        decode_mask = build_decode_mask(
+            batch_size, max_cache_len, current_cache_len, prompt_offset, dtype=dtype
+        )
+        with torch.no_grad():
+            logits = run_forward_fn(
+                model,
+                next_input,
+                decode_pos.to(DEVICE),
+                decode_mask.to(DEVICE),
+                key_caches,
+                value_caches,
+                cache_index=make_cache_index(current_cache_len, 1, DEVICE),
             )
-            with torch.no_grad():
-                logits = run_forward_fn(
-                    model,
-                    next_input,
-                    decode_pos.to(DEVICE),
-                    exp_mask.to(DEVICE),
-                    key_caches,
-                    value_caches,
-                    is_filling=False,
-                    token_index=0,
-                    cache_position=current_cache_len - BLOCK_SIZE,
-                )
-            logits_cpu = logits.to("cpu")
-            last_logits = logits_cpu[0, -BLOCK_SIZE, :].float()[:vocab_size]
-            fill_mask_device = exp_mask.to(DEVICE)
+        last_logits = logits.to("cpu")[0, -1, :].float()[:vocab_size]
+        current_cache_len += 1
 
         token = last_logits.argmax().item()
         results.append({"logits": last_logits, "token": token, "step": step})
-
-        if tokens_in_block == BLOCK_SIZE - 1:
-            result = F.pad(result, (0, BLOCK_SIZE))
-        tokens_in_block = (tokens_in_block + 1) % BLOCK_SIZE
-        grab_idx = BLOCK_SIZE if tokens_in_block == 0 else BLOCK_SIZE - tokens_in_block
-        result[:, -grab_idx] = token
+        result = torch.cat([result, torch.tensor([[token]])], dim=1)
 
     return results
 
@@ -309,9 +271,9 @@ def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]
     print("  Running HF reference on CPU ...")
     hf_results = hf_greedy_steps(model, input_ids, num_decode=num_decode)
 
-    # Use bfloat16 on Spyre when the registry requests it; otherwise float16.
-    # (Spyre does not support float32, so float32 registry entries still use float16.)
-    spyre_dtype = torch_dtype_for_model_path(model_path)
+    # Use bf16/fp16 dtype, requested by the registry or based on the model config.
+    # (Spyre does not support float32, so float32 entries will use fp16.)
+    spyre_dtype = dtype_for_model_path(model_path, target_device="spyre")
     move_model_to_spyre(model=model, module=adapter, dtype=spyre_dtype)
     print("  Running adapter on Spyre ...")
     adapter_results = adapter_greedy_steps(
@@ -337,6 +299,7 @@ def token_compare_spyre(
 )
 def test_e2e_token_compare_spyre(model_path: str) -> None:
     mismatches, rows = token_compare_spyre(model_path)
+    _print_table(rows)
     n_match = sum(1 for r in rows if r["top1_match"])
     print(f"\nTop-1 agreement: {n_match}/{len(rows)} steps")
     assert not mismatches, mismatches

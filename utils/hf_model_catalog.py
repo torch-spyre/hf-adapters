@@ -198,18 +198,31 @@ def is_nsfw(model: ModelInfo) -> bool:
 NON_NATIVE_ID_SUBSTRINGS: tuple[str, ...] = ("onnx", "gguf", "mlx")
 
 
-def is_baseline_keep(model: ModelInfo) -> bool:
-    """Shared inclusion gate: drop config-less, and ONNX/GGUF/MLX id checkpoints."""
-    if not model.config:
-        return False
+def is_baseline_keep(model: ModelInfo) -> tuple[bool, str]:
+    """Shared inclusion gate: drop config-less, and ONNX/GGUF/MLX id checkpoints.
+
+    Returns (keep, reason) where reason describes why the model was rejected
+    (empty string when kept).
+    """
+    failure_constant = "failed baseline keep: "
     if model.library_name in NON_NATIVE_ID_SUBSTRINGS:
-        return False
+        return False, failure_constant + "non-native library (ONNX/GGUF/MLX)"
     model_id_lower: str = model.id.lower()
     if any(sub in model_id_lower for sub in NON_NATIVE_ID_SUBSTRINGS):
-        return False
+        return False, failure_constant + "non-native format in model id (ONNX/GGUF/MLX)"
     if "nsfw" in tags(model):
-        return False
-    return True
+        return False, failure_constant + "NSFW tag"
+    if not model.config:
+        return False, failure_constant + "no config"
+    return True, ""
+
+
+def _guarded(fn: Callable[[], bool], name: str) -> tuple[bool, str]:
+    """Call fn(); return (result, "") on success or (False, "exception during <name>") on error."""
+    try:
+        return fn(), ""
+    except Exception:
+        return False, f"exception during {name}"
 
 
 def contains_remote_code(model: ModelInfo) -> bool:
@@ -346,7 +359,7 @@ def _resolve_param_columns(
 def build_catalog(
     *,
     fetch_fn: Callable[[int], Iterable[ModelInfo]],
-    filter_fn: Callable[[ModelInfo], bool],
+    filter_fn: Callable[[ModelInfo], tuple[bool, str]],
     limit: int,
     output_csv: Path | str | None,
     label: str,
@@ -360,7 +373,7 @@ def build_catalog(
 
     Args:
         fetch_fn: callable(limit) -> list of raw model objects (over-fetched).
-        filter_fn: callable(model) -> bool, keep the model if True.
+        filter_fn: callable(model) -> (keep, reason), keep the model if keep is True.
         limit: number of rows to write after filtering.
         output_csv: destination path, or None to skip writing.
         label: human-readable noun for log lines (e.g. "generative").
@@ -374,12 +387,11 @@ def build_catalog(
     """
     extra_columns = extra_columns or []
 
-    def _safe_filter(model: ModelInfo) -> bool:
+    def _safe_filter(model: ModelInfo) -> tuple[bool, str]:
         try:
             return filter_fn(model)
-        except Exception as e:
-            logging.warning("filter_fn failed for %s: %s", model.id, e)
-            return False
+        except Exception:
+            return False, "_safe_filter raised an exception"
 
     timings: dict[str, float] = {}
     t_total = time.perf_counter()
@@ -390,17 +402,34 @@ def build_catalog(
     print(f"Retrieved {len(candidates)} raw {label} candidates.")
 
     t0 = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=16) as ex:
-        keep_flags: list[bool] = list(
+    with ThreadPoolExecutor(max_workers=32) as ex:
+        keep_flags: list[tuple[bool, str]] = list(
             tqdm(
                 ex.map(_safe_filter, candidates),
                 total=len(candidates),
                 desc="Filtering candidates",
+                miniters=1000,
+                mininterval=10,
             )
         )
-    models: list[ModelInfo] = [m for m, keep in zip(candidates, keep_flags) if keep]
+    models: list[ModelInfo] = [
+        m for m, (keep, _) in zip(candidates, keep_flags) if keep
+    ]
     timings["filter (filter_fn)"] = time.perf_counter() - t0
     print(f"Kept {len(models)} {label} models after filtering.")
+
+    reason_counts: dict[str, int] = {}
+    for keep, reason in keep_flags:
+        if not keep:
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    if reason_counts:
+        total_filtered_out: int = sum(reason_counts.values())
+        print(f"Filtered out {total_filtered_out} {label} models by reason:")
+        count_width: int = len(f"{limit:,}")
+        for reason, count in sorted(
+            reason_counts.items(), key=lambda kv: kv[1], reverse=True
+        ):
+            print(f"\t{count:>{count_width},} - {reason}")
 
     models = models[:limit]
 
@@ -422,12 +451,14 @@ def build_catalog(
     header: list[str] = base_head + extra_head + tail_head
 
     t0 = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=16) as ex:
+    with ThreadPoolExecutor(max_workers=32) as ex:
         config_classes: list[str | None] = list(
             tqdm(
                 ex.map(lambda m: get_config_type(m.id, token), models),
                 total=len(models),
                 desc="Fetching config classes",
+                miniters=1000,
+                mininterval=10,
             )
         )
     timings["config classes (AutoConfig)"] = time.perf_counter() - t0

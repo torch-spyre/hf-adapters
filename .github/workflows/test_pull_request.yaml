@@ -3,11 +3,12 @@ name: test_pull_request
 # Doubles as hf-adapters' "trunk" (push-to-main) workflow -- on push this
 # still runs every job unconditionally (job-selection for trunk == full,
 # which is already this workflow's only mode), so the run-name below is
-# purely a labeling change. Full delegation to _test_matrix.yaml's
-# test_type-gated suites (like integration-tests.yaml uses) is deferred --
-# this file defines its jobs inline and lacks _test_matrix.yaml's reranker
-# suite and RPM-build inputs, so reconciling them is a separate effort.
-run-name: ${{ github.event_name == 'push' && 'trunk' || 'test_pull_request' }}
+# purely a labeling change. Delegates its suite jobs to the same reusable
+# _test_matrix.yaml used by integration-tests.yaml, keeping only what's
+# specific to the PR/trunk trigger inline: the "integration-test" label
+# detection, which skips the whole suite when Jenkins owns this commit's
+# testing (via _test_matrix.yaml's skip_tests input).
+run-name: ${{ github.event_name == 'push' && 'trunk' || 'regression' }}
 
 on:
   push:
@@ -21,17 +22,23 @@ on:
   workflow_dispatch:
     inputs:
       torch_spyre_ref:
-        description: Branch, tag, or SHA of torch-spyre to check out and test
+        description: >-
+          Accepted for dispatch-contract parity with torch-spyre; unused
+          here (build-hf-adapters does not consume it).
         required: false
         type: string
         default: ""
       rpm_location:
-        description: The Artifactory location where to download the RPM from
+        description: >-
+          Accepted for dispatch-contract parity with torch-spyre; unused
+          here (build-hf-adapters does not consume it).
         required: false
         type: string
         default: ""
       rpm_names:
-        description: A space separated list of RPM names to download and install
+        description: >-
+          Accepted for dispatch-contract parity with torch-spyre; unused
+          here (build-hf-adapters does not consume it).
         required: false
         type: string
         default: ""
@@ -76,582 +83,76 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
-defaults:
-  run:
-    shell: bash
-    working-directory: /home/senuser
-
 permissions:
   contents: read
   checks: write
 
-env:
-  # The CI env var is very important.
-  # GitHub actions automatically sets CI=true
-  # which causes the pytest inductor tests to fail with AssertionError
-  # due to a mix of fallbacks and decompositions.
-  # Here we set it to an empty string (or we could also unset it).
-  CI: ""
-  CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
-  STORAGE_1_DIR: /storage-1/hf-adapters
-  HF_HOME: /storage-1/hf-adapters/.cache/huggingface
-  # Single source of truth for the set of models exercised by the CPU
-  # test matrix's `-k` filter. PR is the fast smoke — qwen3 (causal LM) and
-  # bge_base (embedding) on CPU; the same bge_base runs on the Spyre
-  # embed-compare matrix below so CPU and hardware embedding coverage stay
-  # aligned. Daily and weekly cover the broader model set.
-  # Invariant: every model_key used in a Spyre matrix below must have its
-  # substring present here so CPU sanity-checks anything that runs on hardware.
-  # MODELS_FILTER: "qwen3 or bge_base"
-
 jobs:
-  pre-commit:
-    name: pre-commit
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Run pre-commit
-        uses: pre-commit/action@v3.0.1
-        with:
-          # Skip the local mypy hook — it requires the project venv with
-          # torch/transformers installed, which we don't set up in this lint job.
-          extra_args: --all-files --hook-stage commit --show-diff-on-failure
-        env:
-          SKIP: mypy
-
-  # ===========================================================================
-  # Dynamic matrix generation
+  # Resolves the `integration-test` label for BOTH pull_request and merge_group.
+  # A merge_group payload has no pull_request object, so the label cannot be read
+  # inline there -- the previous `github.event_name == 'pull_request' && ...` form
+  # was always false in the queue, so every suite below re-ran on a commit whose
+  # testing the label had already handed to the Jenkins integration run.
   #
-  # This job generates test matrices dynamically from tests/model_registry.py
-  # using the select_representative_models() function. This ensures that:
-  # 1. The CI automatically tests new adapters added to CONFIG_TO_ADAPTER_MODULE_MAPPING
-  # 2. We maintain a single source of truth for model selection
-  # 3. Manual exclusions can be specified below (e.g., for temporarily broken models)
-  #
-  # To exclude models from all test matrices, add them to the --exclude list below.
-  # ===========================================================================
-  generate-matrix:
-    name: Generate test matrices
+  # Every gated suite `needs` this job, so a FAILURE here would skip all of them
+  # regardless of their own `if:` -- which is why it is also listed in
+  # run-spyre-unit-tests' failure predicates below: the required check then goes red
+  # rather than reporting a false green over suites that never ran.
+  detect-label:
+    name: Detect integration-test label
     runs-on: ubuntu-latest
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
     outputs:
-      causal_matrix: ${{ steps.generate.outputs.causal_matrix }}
-      embed_matrix: ${{ steps.generate.outputs.embed_matrix }}
-      vision_matrix: ${{ steps.generate.outputs.vision_matrix }}
-      combined_matrix: ${{ steps.generate.outputs.combined_matrix }}
-      reranker_matrix: ${{ steps.generate.outputs.reranker_matrix }}
-    defaults:
-      run:
-        working-directory: .
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install transformers torch pytest
-
-      - name: Generate matrices
-        id: generate
-        run: |
-          # Manually exclude models here by adding them to --exclude
-          # Example: python .github/scripts/generate_test_matrix.py --exclude ibm-granite/granite-vision-4.1-4b tiiuae/Falcon3-1B-Base
-
-          # We exclude these models - See https://github.com/torch-spyre/hf-adapters/issues/89
-          python .github/scripts/generate_test_matrix.py --exclude tiiuae/Falcon3-1B-Base mistralai/Mistral-Small-3.1-24B-Instruct-2503
-
-  adapter-coverage:
-    name: adapter coverage
-    runs-on: ubuntu-latest
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
-    defaults:
-      run:
-        working-directory: .
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Run adapter coverage test
-        run: |
-          echo "Checking that all adapter files are registered in model_registry.py..."
-          python -m pip install --quiet pytest
-          python -m pytest -v --noconftest tests/test_adapter_coverage.py
-          echo "Adapter coverage check passed."
-
-#  cpu-tests:
-#    name: CPU tests (${{ matrix.test_file }})
-#    runs-on:
-#      - x86_64
-#      - spyre_pf_x0__pvc_1tb_x1
-#      - linux
-#      - ${{ inputs.runner_label || 'image_torch_spyre' }}
-#    timeout-minutes: 120
-#    strategy:
-#      matrix:
-#        # Tests marked `@pytest.mark.slow` are dropped from PR runs (see the
-#        # `-m "not slow"` flag below) and instead exercised by the weekly cron.
-#        test_file:
-#          - test_load_cpu.py
-#          - test_adapter_cpu_accuracy.py
-#          - test_embed_cpu_accuracy.py
-#          - test_generate_edge_cases_cpu.py
-#          - test_multibatch_generate_cpu.py
-#          - test_st_backend_cpu.py
-#
-#    steps:
-#      - name: Checkout composite actions
-#        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-#        with:
-#          sparse-checkout: .github/actions
-#          sparse-checkout-cone-mode: false
-#
-#      - uses: ./.github/actions/build-hf-adapters
-#        with:
-#          uv_groups: "dev test"
-#          rpm_names: ${{ inputs.rpm_names }}
-#          rpm_location: ${{ inputs.rpm_location }}
-#          output_dir: ${{ inputs.output_dir }}
-#          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-#          ref: ${{ inputs.ref }}
-#          repository: ${{ inputs.repository }}
-#          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-#          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-#          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-#          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
-#
-#      - name: Run ${{ matrix.test_file }}
-#        env:
-#          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-#        run: |
-#          unset _IBM_AIU_SETUP
-#          rm -f /tmp/etc/ibm/spyre/topo.json
-#          source "$HOME/.bashrc"
-#          source /etc/profile.d/ibm-aiu-setup.sh
-#          cd "$CLONED_HF_ADAPTERS_DIR"
-#          echo "Running ${{ matrix.test_file }}..."
-#          uv run pytest -s -vvv -m "not slow" -k "$MODELS_FILTER" "tests/${{ matrix.test_file }}"
-#          echo "tests done"
-
-  spyre-load-tests:
-    name: Spyre load (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
-    runs-on:
-      - x86_64
-      - spyre_pf_x1__pvc_1tb_x1
-      - linux
-      - ${{ inputs.runner_label || 'image_torch_spyre' }}
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        # Dynamic matrix: all causal-LM and embedding models from tests/model_registry.py
-        # Generated by select_representative_models() - one model per adapter
-        # To exclude models, add them to the --exclude list in the generate-matrix job
-        model_key: ${{ fromJSON(needs.generate-matrix.outputs.combined_matrix) }}
-
+      labeled: ${{ steps.label.outputs.labeled }}
     steps:
       - name: Checkout composite actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@v4
         with:
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
+      - name: Resolve label
+        id: label
+        uses: ./.github/actions/detect-integration-test-label
 
-      - uses: ./.github/actions/build-hf-adapters
-        with:
-          uv_groups: "dev spyre test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          output_dir: ${{ inputs.output_dir }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          ref: ${{ inputs.ref }}
-          repository: ${{ inputs.repository }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+  # ---------------------------------------------------------------------------
+  # Delegates to the shared _test_matrix.yaml (pre-commit, mypy, check-uv-lock,
+  # adapter-coverage, matrix generation, and every spyre-*-tests /
+  # spyre-model-module-tests suite). test_type is left at its default
+  # ("regression" -- everything), matching this workflow's historical
+  # behavior of always running the full suite. skip_tests carries the
+  # "integration-test" label decision through: it skips matrix generation,
+  # adapter-coverage, and every spyre suite (leaving pre-commit/mypy/
+  # check-uv-lock running, same as before) when Jenkins owns this commit's
+  # testing.
+  # ---------------------------------------------------------------------------
+  run-tests:
+    needs: [detect-label]
+    uses: ./.github/workflows/_test_matrix.yaml
+    with:
+      image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
+      extra_test_flags: -vvv -s
+      extra_test_flags_multi_spyre: -vvv -s
+      ref: ${{ inputs.ref || '' }}
+      repository: ${{ inputs.repository || '' }}
+      skip_tests: ${{ needs.detect-label.outputs.labeled == 'true' }}
 
-      - name: Run test_load_spyre.py for ${{ matrix.model_key }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running test_load_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_load_spyre.py -k "${{ matrix.model_key }}"
-          echo "tests done"
-
-  spyre-smoke-tests:
-    name: Spyre smoke (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
-    runs-on:
-      - x86_64
-      - spyre_pf_x1__pvc_1tb_x1
-      - linux
-      - ${{ inputs.runner_label || 'image_torch_spyre' }}
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        # Dynamic matrix: causal-LM models only from tests/model_registry.py
-        # Generated by select_representative_models() - one model per adapter
-        model_key: ${{ fromJSON(needs.generate-matrix.outputs.causal_matrix) }}
-
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: .github/actions
-          sparse-checkout-cone-mode: false
-
-      - uses: ./.github/actions/build-hf-adapters
-        with:
-          uv_groups: "dev spyre test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          output_dir: ${{ inputs.output_dir }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          ref: ${{ inputs.ref }}
-          repository: ${{ inputs.repository }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
-
-      - name: Run test_e2e_smoke_spyre.py for ${{ matrix.model_key }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k "${{ matrix.model_key }}"
-          echo "tests done"
-
-  spyre-token-compare-tests:
-    name: Spyre token compare (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
-    runs-on:
-      - x86_64
-      - spyre_pf_x1__pvc_1tb_x1
-      - linux
-      - ${{ inputs.runner_label || 'image_torch_spyre' }}
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        # Dynamic matrix: causal-LM models only from tests/model_registry.py
-        # Generated by select_representative_models() - one model per adapter
-        model_key: ${{ fromJSON(needs.generate-matrix.outputs.causal_matrix) }}
-
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: .github/actions
-          sparse-checkout-cone-mode: false
-
-      - uses: ./.github/actions/build-hf-adapters
-        with:
-          uv_groups: "dev spyre test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          output_dir: ${{ inputs.output_dir }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          ref: ${{ inputs.ref }}
-          repository: ${{ inputs.repository }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
-
-      - name: Run test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k "${{ matrix.model_key }}"
-          echo "tests done"
-
-  spyre-embed-compare-tests:
-    name: Spyre embed compare (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
-    runs-on:
-      - x86_64
-      - spyre_pf_x1__pvc_1tb_x1
-      - linux
-      - ${{ inputs.runner_label || 'image_torch_spyre' }}
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        # Dynamic matrix: embedding models only from tests/model_registry.py
-        # Generated by select_representative_models() - one model per adapter
-        model_key: ${{ fromJSON(needs.generate-matrix.outputs.embed_matrix) }}
-
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: .github/actions
-          sparse-checkout-cone-mode: false
-
-      - uses: ./.github/actions/build-hf-adapters
-        with:
-          uv_groups: "dev spyre test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          output_dir: ${{ inputs.output_dir }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          ref: ${{ inputs.ref }}
-          repository: ${{ inputs.repository }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
-
-      - name: Run test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k "${{ matrix.model_key }}"
-          echo "tests done"
-
-  spyre-reranker-compare-tests:
-    name: Spyre reranker compare (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
-    runs-on:
-      - x86_64
-      - spyre_pf_x1__pvc_1tb_x1
-      - linux
-      - ${{ inputs.runner_label || 'image_torch_spyre' }}
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        model_key: ${{ fromJSON(needs.generate-matrix.outputs.reranker_matrix) }}
-
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: .github/actions
-          sparse-checkout-cone-mode: false
-
-      - uses: ./.github/actions/build-hf-adapters
-        with:
-          uv_groups: "dev spyre test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          output_dir: ${{ inputs.output_dir }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          ref: ${{ inputs.ref }}
-          repository: ${{ inputs.repository }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
-
-      - name: Run test_e2e_reranker_compare_spyre.py for ${{ matrix.model_key }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running test_e2e_reranker_compare_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_e2e_reranker_compare_spyre.py -k "${{ matrix.model_key }}"
-          echo "tests done"
-
-  spyre-vlm-e2e-tests:
-    name: Spyre VLM e2e (${{ matrix.model_key }})
-    needs: [generate-matrix]
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
-    runs-on:
-      - x86_64
-      - spyre_pf_x1__pvc_1tb_x1
-      - linux
-      - ${{ inputs.runner_label || 'image_torch_spyre' }}
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        # Dynamic matrix: VLM (kind="vlm") models from tests/model_registry.py
-        # Generated from VISION_PATHS - one entry per VLM adapter
-        # To exclude models, add them to the --exclude list in the generate-matrix job
-        model_key: ${{ fromJSON(needs.generate-matrix.outputs.vision_matrix) }}
-
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: .github/actions
-          sparse-checkout-cone-mode: false
-
-      - uses: ./.github/actions/build-hf-adapters
-        with:
-          uv_groups: "dev spyre test"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          output_dir: ${{ inputs.output_dir }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          ref: ${{ inputs.ref }}
-          repository: ${{ inputs.repository }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
-
-      - name: Run test_vlm_e2e_spyre.py for ${{ matrix.model_key }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          echo "Running test_vlm_e2e_spyre.py for ${{ matrix.model_key }}..."
-          uv run pytest -s -vvv tests/spyre/test_vlm_e2e_spyre.py -k "${{ matrix.model_key }}"
-          echo "tests done"
-
-  spyre-model-module-tests:
-    name: Spyre model-module tests (${{ matrix.config }})
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'integration-test')) }}
-    runs-on:
-      - x86_64
-      - spyre_pf_x1__pvc_1tb_x1
-      - linux
-      - ${{ inputs.runner_label || 'image_torch_spyre' }}
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        config:
-          - granite_4_1_8b_spyre.yaml
-          - granite_3_3_8b_instruct_spyre.yaml
-          - Ministral-3-14B-Instruct-2512.yaml
-          - Mistral-Small-3.2-24B-Instruct-2506.yaml
-
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          sparse-checkout: .github/actions
-          sparse-checkout-cone-mode: false
-
-      - uses: ./.github/actions/build-hf-adapters
-        with:
-          uv_groups: "dev spyre test oot"
-          rpm_names: ${{ inputs.rpm_names }}
-          rpm_location: ${{ inputs.rpm_location }}
-          output_dir: ${{ inputs.output_dir }}
-          torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
-          ref: ${{ inputs.ref }}
-          repository: ${{ inputs.repository }}
-          artifactory_user: ${{ secrets.ARTIFACTORY_USER }}
-          artifactory_api_key: ${{ secrets.ARTIFACTORY_API_KEY }}
-          artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
-          artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
-
-      - name: Run module tests for ${{ matrix.config }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          # TORCH_DEVICE_ROOT must point to the hf-adapters repo root so that
-          # ${TORCH_DEVICE_ROOT}/tests/test_modules_custom.py in the YAML configs
-          # resolves to hf-adapters/tests/test_modules_custom.py (not torch-spyre).
-          TORCH_DEVICE_ROOT: ${{ env.CLONED_HF_ADAPTERS_DIR }}
-        run: |
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          source .venv/bin/activate
-          _run_test=$(python3 -c \
-            "import oot_framework, os; print(os.path.join(os.path.dirname(oot_framework.__file__), 'run_test.sh'))")
-          echo "Using oot-framework runner: $_run_test"
-          bash "$_run_test" \
-            "tests/configs/module_tests/${{ matrix.config }}" \
-            -v
-
-  # ===========================================================================
-  # Required check gate — fans in all matrix jobs so a single branch
-  # protection rule ("tests / run spyre unit tests") passes only when every
-  # suite passes.
-  #
-  # All upstream jobs are individually skipped (via `if:`) when the PR is
-  # labeled "integration-test" -- that flow is handled elsewhere. `needs.*`
-  # then resolve to `skipped`, which is not `failure`/`cancelled`, so this
-  # gate still passes (green, near-instant) rather than blocking the merge.
-  # ===========================================================================
+  # ----------------------------------------------------------------------------------
+  # Required check gate -- fans in detect-label and the delegated suite run so a
+  # single branch protection rule ("tests / run spyre unit tests") passes only
+  # when both succeed. A labeled PR still gets a green run-tests result (its
+  # jobs report "skipped", not "failure") -- that flow is handled by Jenkins.
+  # ----------------------------------------------------------------------------------
   run-spyre-unit-tests:
     name: run spyre unit tests
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
     needs:
-      - pre-commit
-      - generate-matrix
-      - adapter-coverage
-#      - cpu-tests
-      - spyre-load-tests
-      - spyre-smoke-tests
-      - spyre-token-compare-tests
-      - spyre-embed-compare-tests
-      - spyre-reranker-compare-tests
-      - spyre-vlm-e2e-tests
-      - spyre-model-module-tests #updated to run model centric HF module tests
+      - detect-label
+      - run-tests
     if: always()
     steps:
       - name: Check all suites passed
-        # NOTE: the `cpu-tests` predicates are
-        # intentionally omitted from the `if` below while those jobs are
-        # commented out. Re-add the corresponding
-        #   contains(needs.<job>.result, 'failure') || contains(needs.<job>.result, 'cancelled') ||
-        # lines when restoring either job.
         run: |-
-          if ${{ contains(needs.pre-commit.result, 'failure') || contains(needs.pre-commit.result, 'cancelled') ||
-                 contains(needs.generate-matrix.result, 'failure') || contains(needs.generate-matrix.result, 'cancelled') ||
-                 contains(needs.adapter-coverage.result, 'failure') || contains(needs.adapter-coverage.result, 'cancelled') ||
-                 contains(needs.spyre-load-tests.result, 'failure') || contains(needs.spyre-load-tests.result, 'cancelled') ||
-                 contains(needs.spyre-smoke-tests.result, 'failure') || contains(needs.spyre-smoke-tests.result, 'cancelled') ||
-                 contains(needs.spyre-token-compare-tests.result, 'failure') || contains(needs.spyre-token-compare-tests.result, 'cancelled') ||
-                 contains(needs.spyre-embed-compare-tests.result, 'failure') || contains(needs.spyre-embed-compare-tests.result, 'cancelled') ||
-                 contains(needs.spyre-reranker-compare-tests.result, 'failure') || contains(needs.spyre-reranker-compare-tests.result, 'cancelled') ||
-                 contains(needs.spyre-vlm-e2e-tests.result, 'failure') || contains(needs.spyre-vlm-e2e-tests.result, 'cancelled') ||
-                 contains(needs.spyre-model-module-tests.result, 'failure') || contains(needs.spyre-model-module-tests.result, 'cancelled') }}; then
+          if ${{ contains(needs.detect-label.result, 'failure') || contains(needs.detect-label.result, 'cancelled') ||
+                 contains(needs.run-tests.result, 'failure') || contains(needs.run-tests.result, 'cancelled') }}; then
             echo "One or more test suites failed."
             exit 1
           fi

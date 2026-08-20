@@ -45,7 +45,7 @@ def main():
     model = Mistral3ForConditionalGeneration.from_pretrained(
         model_path,
         device_map=device,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,
         trust_remote_code=False,
     )
     tokenizer = MistralCommonBackend.from_pretrained(model_path)

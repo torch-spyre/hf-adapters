@@ -97,6 +97,21 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_granitemoehybrid.py",
         "size": "3b",
     },
+    "granite41_8b": {
+        "name": "Granite 4.1 8B",
+        "path": "ibm-granite/granite-4.1-8b",
+        "adapter": "hf_granitemoehybrid.py",
+        "size": "8b",
+    },
+    # hf_granite_swa.py
+    "granite41_20b": {
+        "name": "Granite 4.1 20B",
+        "path": "ibm-research/granite-4.1-20b",
+        "adapter": "hf_granite_swa.py",
+        "size": "20b",
+        # Not yet publicly accessible on the HF Hub -- drop this once the model ships.
+        "is_gated": True,
+    },
     # hf_granite_vision.py
     "granite-vision": {
         "name": "Granite Vision 4.1 4B",
@@ -189,6 +204,12 @@ CAUSAL_LM_MODELS = {
         "path": "mistralai/Ministral-3-14B-Instruct-2512",
         "adapter": "hf_mistral3.py",
         "size": "14b",
+    },
+    "ministral3_8b": {
+        "name": "Ministral-3-8B-Instruct-2512",
+        "path": "mistralai/Ministral-3-8B-Instruct-2512",
+        "adapter": "hf_mistral3.py",
+        "size": "8b",
     },
     # hf_olmo.py
     "olmo1b": {
@@ -384,6 +405,56 @@ EMBEDDING_MODELS = {
 }
 
 
+QUESTION_ANSWERING_MODELS = {
+    "bert_qa": {
+        "name": "BERT base cased SQuAD 2",
+        "path": "deepset/bert-base-cased-squad2",
+        "adapter": "hf_bert.py",
+        "size": "0.1b",
+    },
+    "roberta_qa": {
+        "name": "RoBERTa base SQuAD 2",
+        "path": "deepset/roberta-base-squad2",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.1b",
+    },
+}
+
+
+MASKED_LM_MODELS = {
+    "bert_mlm": {
+        "name": "BERT base uncased",
+        "path": "google-bert/bert-base-uncased",
+        "adapter": "hf_bert.py",
+        "size": "0.1b",
+    },
+    "modernbert_mlm": {
+        "name": "ModernBERT base",
+        "path": "answerdotai/ModernBERT-base",
+        "adapter": "hf_modernbert.py",
+        "size": "0.1b",
+    },
+    "mpnet_mlm": {
+        "name": "MPNet base",
+        "path": "microsoft/mpnet-base",
+        "adapter": "hf_mpnet.py",
+        "size": "0.1b",
+    },
+    "roberta_mlm": {
+        "name": "RoBERTa base",
+        "path": "FacebookAI/roberta-base",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.1b",
+    },
+    "xlm_roberta_mlm": {
+        "name": "XLM-RoBERTa base",
+        "path": "FacebookAI/xlm-roberta-base",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.3b",
+    },
+}
+
+
 # Vision models. ``kind="tower"`` adapters are encoder-only; ``kind="vlm"`` adapters
 # are full multimodal models with a causal text decoder, RoPE, KV caches, and ``generate``.
 VISION_MODELS = {
@@ -523,7 +594,59 @@ DSPARK_PATHS: list[str] = _select_representative_paths(
 EMBED_PATHS: list[str] = _select_representative_paths(
     EMBEDDING_MODELS, include_gated=_include_gated_flag
 )
+MASKED_LM_PATHS: list[str] = _select_representative_paths(
+    MASKED_LM_MODELS, include_gated=_include_gated_flag
+)
+QUESTION_ANSWERING_PATHS: list[str] = _select_representative_paths(
+    QUESTION_ANSWERING_MODELS, include_gated=_include_gated_flag
+)
 VISION_PATHS: list[str] = _select_representative_paths(
+    VISION_MODELS,
+    include_gated=_include_gated_flag,
+    predicate=lambda info: info.get("kind") == "vlm",
+)
+
+
+def _all_paths(
+    models: dict[str, dict],
+    *,
+    include_gated: bool,
+    predicate=None,
+) -> list[str]:
+    """All registered paths (no per-adapter reduction), for explicit selection.
+
+    Unlike ``_select_representative_paths``, this keeps every model in ``models``
+    -- used to let an explicit ``--only`` allowlist (see generate_test_matrix.py)
+    target a non-representative checkpoint, e.g. a larger model that shares an
+    adapter with a smaller default.
+    """
+    return [
+        info["path"]
+        for info in models.values()
+        if (include_gated or not info.get("is_gated", False))
+        and (predicate is None or predicate(info))
+    ]
+
+
+# Every registered path per category, bypassing the smallest-per-adapter
+# reduction above -- used by generate_test_matrix.py's ``--only`` allowlist so
+# a caller can target any registered checkpoint, not just the adapter's
+# default representative.
+ALL_CAUSAL_PATHS: list[str] = _all_paths(
+    CAUSAL_LM_MODELS,
+    include_gated=_include_gated_flag,
+    predicate=lambda info: info.get("kind") != "dspark_draft",
+)
+ALL_EMBED_PATHS: list[str] = _all_paths(
+    EMBEDDING_MODELS, include_gated=_include_gated_flag
+)
+ALL_MASKED_LM_PATHS: list[str] = _all_paths(
+    MASKED_LM_MODELS, include_gated=_include_gated_flag
+)
+ALL_QUESTION_ANSWERING_PATHS: list[str] = _all_paths(
+    QUESTION_ANSWERING_MODELS, include_gated=_include_gated_flag
+)
+ALL_VISION_PATHS: list[str] = _all_paths(
     VISION_MODELS,
     include_gated=_include_gated_flag,
     predicate=lambda info: info.get("kind") == "vlm",
@@ -549,12 +672,9 @@ def _non_blocking(models: dict[str, dict], keys: tuple[str, ...]) -> dict[str, s
 NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = _non_blocking(
     CAUSAL_LM_MODELS,
     (
-        "smollm3",
-        "gemma3_unsloth",
-        "ministral3",
-        "pythia_410m",
-        "gemma4_google",
+        "gemma4_google",  # gemma4 responds poorly to prompt without template
         "gemma4_base",
+        "smollm3",
     ),
 )
 
@@ -595,3 +715,5 @@ RERANKER_MODELS = {
 }
 
 RERANKER_PATHS: list[str] = [m["path"] for m in RERANKER_MODELS.values()]
+# No per-adapter reduction for rerankers yet, so this equals RERANKER_PATHS -- kept separate so every category (see ALL_CAUSAL_PATHS et al.) follows the same pattern.
+ALL_RERANKER_PATHS: list[str] = list(RERANKER_PATHS)

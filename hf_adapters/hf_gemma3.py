@@ -113,7 +113,7 @@ def _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim):
 
         block_forward(hidden_states, selected_freqs, attn_mask,
                       key_cache, value_cache,
-                      is_filling, token_index, cache_position)
+                      cache_index)
             -> (hidden_states, key_cache, value_cache)
 
     Gemma applies Q/K RMSNorm before RoPE and uses the four-norm "sandwich"
@@ -141,9 +141,7 @@ def _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim):
         attn_mask,
         key_cache,
         value_cache,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     ):
         residual = hidden_states
         h = input_ln(hidden_states)
@@ -169,9 +167,7 @@ def _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim):
             v,
             key_cache,
             value_cache,
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
 
         attn_out = F.scaled_dot_product_attention(
@@ -254,9 +250,7 @@ def _run_backbone_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     """Gemma 3 backbone: scaled embedding, per-type RoPE + masks, blocks, norm.
 
@@ -264,7 +258,7 @@ def _run_backbone_forward(
     cache slot): causal for the LM path, bidirectional for embedders
     (``use_bidirectional_attention=True``). Sliding layers intersect it with a
     sliding-window band using each query row's cache coordinate ``block_base +
-    j`` where ``block_base = cache_position - token_index`` (see ``hf_gemma4``).
+    j`` where ``block_base = int(cache_index[0])`` (see ``hf_gemma4``).
     The band is one-sided causal (``add_causal_sliding_window_band``) for the LM
     path and symmetric (``_add_bidirectional_sliding_window_band``) for embedders;
     global layers use the base mask as-is.
@@ -286,7 +280,16 @@ def _run_backbone_forward(
     # additive mask on attn_mask's device. Direction matches the base mask:
     # causal (backward) for the LM path, symmetric for bidirectional embedders.
     bsz, seq_len = input_ids.shape[0], input_ids.shape[1]
-    block_base = cache_position - token_index
+    # block_base is the cache column this block's row 0 occupies. Decode writes one
+    # token per step, so that is simply the written slot.
+    #
+    # These two reads sync a scalar back from the device. That is fine here and
+    # deliberately not optimized: this runs once per step (not per layer) in
+    # eager code outside the compiled block, and the band helpers below already
+    # round-trip the whole mask through CPU because Spyre's Inductor backend
+    # rejects int64 compare-to-constant and bool intermediates. Gemma 3/4 are the
+    # only adapters that read a scalar out of cache_index at all.
+    block_base = int(cache_index[0])
     query_coords = (torch.arange(seq_len)[None, :] + block_base).expand(bsz, seq_len)
     if getattr(cfg, "use_bidirectional_attention", False):
         sliding_mask = _add_bidirectional_sliding_window_band(
@@ -306,9 +309,7 @@ def _run_backbone_forward(
             masks[lt],
             key_caches[i],
             value_caches[i],
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
 
     h = backbone.norm(h)
@@ -322,9 +323,7 @@ def _run_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     """Gemma 3 causal-LM forward: backbone + LM head + optional softcap."""
     h = _run_backbone_forward(
@@ -334,9 +333,7 @@ def _run_forward(
         attn_mask,
         key_caches,
         value_caches,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     )
 
     logits = model.lm_head(h)

@@ -427,6 +427,17 @@ def main(
             print(f"{ts()} Loading model list from '{model_list_file}'.")
             rows = json.loads(model_list_file.read_text())
 
+        already_recorded: set[str] = sink.get_models_at_snapshot_date(
+            snapshot_date=snapshot_date
+        )
+        if already_recorded:
+            before = len(rows)
+            rows = [r for r in rows if r["model_id"] not in already_recorded]
+            print(
+                f"{ts()} Skipping {before - len(rows)} model(s) already recorded "
+                f"for {snapshot_date} ({len(rows)} remaining)."
+            )
+
         total = len(rows)
         print(f"{ts()} Will evaluate {total} model(s).")
 

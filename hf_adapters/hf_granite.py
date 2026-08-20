@@ -28,10 +28,10 @@ Usage::
 
 from hf_adapters.hf_common import (
     get_backbone,
-    make_standard_gqa_block,
     pad_lm_head,
     patch_rmsnorm,
     prepare_rope_and_heads,
+    prepare_standard_gqa_blocks,
     text_config,
 )
 
@@ -43,9 +43,7 @@ def _run_backbone_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     """Granite 3.3 backbone: embedding * multiplier, blocks, norm."""
     backbone = get_backbone(model)
@@ -61,9 +59,7 @@ def _run_backbone_forward(
             attn_mask,
             key_caches[i],
             value_caches[i],
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
 
     h = backbone.norm(h)
@@ -77,9 +73,7 @@ def _run_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     """Granite 3.3 causal-LM forward: backbone + head / scaling."""
     h = _run_backbone_forward(
@@ -89,9 +83,7 @@ def _run_forward(
         attn_mask,
         key_caches,
         value_caches,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     )
     logits = model.lm_head(h)
     return logits / text_config(model.config).logits_scaling
@@ -104,6 +96,6 @@ def prepare_for_spyre(model):
     prepare_rope_and_heads(model)
     patch_rmsnorm(GraniteRMSNorm)
     pad_lm_head(model)
-    model._spyre_compiled_blocks = [
-        make_standard_gqa_block(layer, True) for layer in get_backbone(model).layers
-    ]
+    model._spyre_compiled_blocks = prepare_standard_gqa_blocks(
+        get_backbone(model).layers, True
+    )

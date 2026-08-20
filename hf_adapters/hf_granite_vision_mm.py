@@ -58,21 +58,21 @@ import torch
 
 from hf_adapters import hf_siglip_vision
 from hf_adapters.hf_common import (
-    BLOCK_SIZE,
     DEVICE,
     _resolve_generation_params,
     allocate_kv_caches,
-    build_expansion_mask,
+    build_decode_mask,
     build_prefill_mask,
     decode_block_walk,
     generation_cache_len,
     get_backbone,
     get_model_dtype,
-    make_standard_gqa_block,
+    make_cache_index,
     pad_and_position,
     pad_lm_head,
     patch_rmsnorm,
     prepare_rope_and_heads,
+    prepare_standard_gqa_blocks,
     select_next_token,
 )
 
@@ -97,15 +97,13 @@ def prepare_for_spyre(model):
     patch_rmsnorm(Granite4VisionTextRMSNorm)
     pad_lm_head(model)
     backbone = get_backbone(model)
-    model._spyre_text_blocks = [
-        make_standard_gqa_block(layer, True) for layer in backbone.layers
-    ]
+    model._spyre_text_blocks = prepare_standard_gqa_blocks(backbone.layers, True)
 
 
 def _embed_text(model, input_ids):
     """Token embeddings * embedding_multiplier (Granite scales its embeddings).
 
-    The gather runs on ``embed_tokens``' device — after ``_move_to_spyre_with_layout``
+    The gather runs on ``embed_tokens``' device — after the Spyre device move
     the table lives on Spyre, so ``input_ids`` is moved to match (mirrors the
     decode-step ``embed_ids``). Returns embeddings on the embedding's device.
     """
@@ -146,7 +144,7 @@ def _deepstack_features(model, pixel_values, image_sizes):
 
     # The deepstack/spatial projectors (Blip2 QFormers) and the image_newline
     # parameter are stock CPU modules: _project_and_pack / pack_image_features run
-    # them on CPU (vision features are moved to CPU first). _move_to_spyre_with_layout
+    # them on CPU (vision features are moved to CPU first). load_model_to_spyre
     # blanket-moves every param to Spyre, so re-pin these to CPU before use — the
     # same CPU-fallback contract as the patch-embed conv (idempotent; .to(cpu) on an
     # already-CPU module is a no-op).
@@ -244,9 +242,7 @@ def _run_text_backbone(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
     deepstack=None,
     vision_mask=None,
 ):
@@ -271,9 +267,7 @@ def _run_text_backbone(
             attn_mask,
             key_caches[i],
             value_caches[i],
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
     return backbone.norm(h)
 
@@ -326,9 +320,7 @@ def _prefill_forward(
         prefill_mask.to(DEVICE),
         key_caches,
         value_caches,
-        is_filling=False,
-        token_index=0,
-        cache_position=0,
+        cache_index=make_cache_index(0, padded_len, DEVICE),
         deepstack=deepstack,
         vision_mask=vision_mask,  # kept on CPU: _inject_deepstack scatters on CPU
     )
@@ -372,13 +364,16 @@ def _logits_from_embeds(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
     deepstack=None,
     vision_mask=None,
 ):
-    """Run text backbone over embeds + LM head / logits scaling -> logits."""
+    """Run text backbone over embeds + LM head / logits scaling -> logits.
+
+    ``cache_index`` is the KV-write coordinate forwarded verbatim to the
+    backbone: the int64 destination positions along the cache's sequence dim
+    (``0..padded_len`` at prefill, a single slot per decode step).
+    """
     h = _run_text_backbone(
         model,
         inputs_embeds,
@@ -386,9 +381,7 @@ def _logits_from_embeds(
         attn_mask,
         key_caches,
         value_caches,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
         deepstack=deepstack,
         vision_mask=vision_mask,
     )
@@ -410,15 +403,16 @@ def generate(
 ):
     """Autoregressive image→text generation on Spyre (greedy / top-k/p sampling).
 
-    Mirrors ``hf_common.generate``'s 64-block padded decode, but the model is
+    Mirrors ``hf_common.generate``'s single-token decode, but the model is
     driven by **embeddings** rather than token ids so the prefill step can carry
     the deepstack image injection:
 
     - **Prefill** (step 0): build text embeddings, zero the ``<image>`` slots,
       build the deepstack/spatial features, and run the Granite decoder once with
       injection at the mapped layers.
-    - **Decode** (steps ≥1): each newly generated token id is embedded with the
-      same ``embedding_multiplier`` and fed back — pure text, no image.
+    - **Decode** (steps ≥1): the single token the previous step produced is
+      embedded with the same ``embedding_multiplier`` and fed back — pure text,
+      no image — writing exactly one KV cache slot.
 
     Inputs come pre-tokenized from the checkpoint's ``AutoProcessor`` (which
     handles the chat template + image-token expansion), so this takes
@@ -461,11 +455,11 @@ def generate(
         model, batch_size, max_cache_len, model_d_type
     )
 
+    # Decode state. Every decode step writes exactly one token at
+    # ``current_cache_len``, so generated tokens are contiguous from ``padded_len``
+    # and ``result`` just grows by one column per step.
     result = input_ids.clone()
     current_cache_len = padded_len
-    tokens_in_block = BLOCK_SIZE - 1
-    decode_pos = None
-    fill_mask_device = None
     finished = torch.zeros(batch_size, dtype=torch.bool)
     num_generated = torch.zeros(batch_size, dtype=torch.long)
 
@@ -491,70 +485,46 @@ def generate(
             )
             next_logits = logits.to("cpu")[:, -1, :]
             current_cache_len = padded_len
-            decode_pos = torch.zeros((batch_size, BLOCK_SIZE), dtype=torch.long)
-            for b in range(batch_size):
-                actual_len = actual_prompt_lengths[b].item()
-                for j in range(BLOCK_SIZE):
-                    decode_pos[b, j] = actual_len + j - BLOCK_SIZE
         else:
-            is_filling = tokens_in_block > 0
-            next_input = result[:, -BLOCK_SIZE:].to(DEVICE)
+            # --- DECODE: one token in, one cache slot written (pure text) ---
+            # The token to feed is the one the previous step appended.
+            next_input = result[:, -1:].to(DEVICE)
             next_embeds = embed_ids(next_input)
-            if is_filling:
-                fill_pos = current_cache_len - BLOCK_SIZE + tokens_in_block
-                logits = _logits_from_embeds(
-                    model,
-                    next_embeds,
-                    decode_pos.to(DEVICE),
-                    fill_mask_device,
-                    key_caches,
-                    value_caches,
-                    is_filling=True,
-                    token_index=tokens_in_block,
-                    cache_position=fill_pos,
-                )
-                grab_idx = BLOCK_SIZE - tokens_in_block
-                next_logits = logits.to("cpu")[:, -grab_idx, :]
-            else:
-                current_cache_len += BLOCK_SIZE
-                decode_pos = decode_pos + BLOCK_SIZE
-                exp_mask = build_expansion_mask(
-                    batch_size,
-                    BLOCK_SIZE,
-                    max_cache_len,
-                    current_cache_len,
-                    prompt_offsets,
-                    dtype=model_d_type,
-                )
-                logits = _logits_from_embeds(
-                    model,
-                    next_embeds,
-                    decode_pos.to(DEVICE),
-                    exp_mask.to(DEVICE),
-                    key_caches,
-                    value_caches,
-                    is_filling=False,
-                    token_index=0,
-                    cache_position=current_cache_len - BLOCK_SIZE,
-                )
-                next_logits = logits.to("cpu")[:, -BLOCK_SIZE, :]
-                fill_mask_device = exp_mask.to(DEVICE)
+            # Absolute position of that token per sequence: its cache column
+            # minus the sequence's left-padding offset.
+            decode_pos = (current_cache_len - prompt_offsets).unsqueeze(1)  # [B, 1]
+            decode_mask = build_decode_mask(
+                batch_size,
+                max_cache_len,
+                current_cache_len,
+                prompt_offsets,
+                dtype=model_d_type,
+            )
+            logits = _logits_from_embeds(
+                model,
+                next_embeds,
+                decode_pos.to(DEVICE),
+                decode_mask.to(DEVICE),
+                key_caches,
+                value_caches,
+                cache_index=make_cache_index(current_cache_len, 1, DEVICE),
+            )
+            next_logits = logits.to("cpu")[:, -1, :]
+            current_cache_len += 1
 
         # Token selection (CPU) — mirrors hf_common.generate.
         next_tokens = select_next_token(
             next_logits, do_sample, temperature, top_k, top_p
         )
 
-        tokens_in_block = (tokens_in_block + 1) % BLOCK_SIZE
-        if tokens_in_block == 0:
-            result = torch.nn.functional.pad(result, (0, BLOCK_SIZE))
-        grab_idx = (BLOCK_SIZE - tokens_in_block) if tokens_in_block > 0 else BLOCK_SIZE
-        result[:, -grab_idx] = next_tokens
+        # Append the token: generated slots are contiguous from padded_len.
+        result = torch.cat([result, next_tokens.unsqueeze(1)], dim=1)
         if eos_ids is not None:
             finished |= torch.isin(next_tokens, eos_ids)
         num_generated += (~finished).long()
         if finished.all():
             break
 
-    # Decode generated tokens per sequence (same block-walk as hf_common.generate).
+    # Decode generated tokens per sequence — contiguous from padded_len, same
+    # helper hf_common.generate uses.
     return decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer)

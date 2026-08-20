@@ -142,9 +142,7 @@ def _make_compiled_block(layer, q_proj, k_proj, v_proj, head_dim, num_heads, sca
         attn_mask,
         key_cache,
         value_cache,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     ):
         residual = hidden_states
 
@@ -161,7 +159,7 @@ def _make_compiled_block(layer, q_proj, k_proj, v_proj, head_dim, num_heads, sca
         k = apply_rope_matmul(k, selected_freqs)
 
         key_cache, value_cache = kv_cache_update(
-            k, v, key_cache, value_cache, is_filling, token_index, cache_position
+            k, v, key_cache, value_cache, cache_index
         )
 
         attn_out = F.scaled_dot_product_attention(
@@ -195,9 +193,7 @@ def _run_backbone_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     """GPT-NeoX backbone: token embedding, RoPE, compiled blocks, final_layer_norm."""
     bb = get_backbone(model)
@@ -211,9 +207,7 @@ def _run_backbone_forward(
             attn_mask,
             key_caches[i],
             value_caches[i],
-            is_filling,
-            token_index,
-            cache_position,
+            cache_index,
         )
 
     h = bb.final_layer_norm(h)
@@ -227,9 +221,7 @@ def _run_forward(
     attn_mask,
     key_caches,
     value_caches,
-    is_filling,
-    token_index,
-    cache_position,
+    cache_index,
 ):
     """GPT-NeoX causal-LM forward: backbone + LM head."""
     h = _run_backbone_forward(
@@ -239,9 +231,7 @@ def _run_forward(
         attn_mask,
         key_caches,
         value_caches,
-        is_filling,
-        token_index,
-        cache_position,
+        cache_index,
     )
     logits = model._spyre_lm_head(h)
     return logits[..., : model.config.vocab_size]

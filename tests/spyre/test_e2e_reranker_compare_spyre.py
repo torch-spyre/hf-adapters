@@ -38,10 +38,12 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from hf_adapters.auto_spyre_model import (
     SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+    dtype_for_model_path,
     resolve_adapter_module,
-    torch_dtype_for_model_path,
 )
 from hf_adapters.hf_common import move_model_to_spyre, prefill_reranker
+
+pytestmark = pytest.mark.model_harness("reranker")
 
 # Pairs that span a range of relevance scores — ensures ranking order is
 # meaningful, not just that all scores are close to zero.
@@ -72,7 +74,7 @@ def _run_reranker_test(model_path: str) -> dict:
         model_path,
         mapping=SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING,
     )
-    dtype = torch_dtype_for_model_path(model_path)
+    dtype = dtype_for_model_path(model_path, target_device="spyre")
 
     print(f"\n{'=' * 70}")
     print(f"  {model_path}")

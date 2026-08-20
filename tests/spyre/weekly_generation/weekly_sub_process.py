@@ -36,6 +36,7 @@ from tests.spyre.weekly_generation.failure_categories import (
     FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
     FAILURE_CATEGORY_QUANTIZED_MODEL,
     FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION,
+    FAILURE_CATEGORY_UNSUPPORTED_CHECKPOINT,
     FAILURE_CATEGORY_VERIFICATION_FAILED,
 )
 from tests.spyre.weekly_generation.model_type import ModelType
@@ -119,8 +120,13 @@ def _process_batch(
         try:
             try:
                 adapter_module = resolve_adapter_module_for_test(model_path)
-            except Exception:
-                rec["failure_category"] = FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER
+            except Exception as _adapter_exc:
+                from hf_adapters.hf_common import SpyreUnsupportedModelError
+
+                if isinstance(_adapter_exc, SpyreUnsupportedModelError):
+                    rec["failure_category"] = FAILURE_CATEGORY_UNSUPPORTED_CHECKPOINT
+                else:
+                    rec["failure_category"] = FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER
                 raise
             adapter_name: str = os.path.splitext(
                 os.path.basename(adapter_module.__file__)
@@ -142,6 +148,7 @@ def _process_batch(
             # failure_category itself is fully self-describing.
             if rec["failure_category"] not in (
                 FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
+                FAILURE_CATEGORY_UNSUPPORTED_CHECKPOINT,
                 FAILURE_CATEGORY_MODEL_TOO_LARGE,
             ):
                 rec["error"] = (
@@ -310,20 +317,16 @@ def _load_on_cpu(
     import hf_adapters.hf_common as _hf_common
     from hf_adapters import AutoSpyreModelForCausalLM
     from hf_adapters.auto_spyre_model import AutoSpyreModel
-    from tests.conftest import get_dtype_for_cpu
 
     _orig_device = _hf_common.DEVICE  # save
     _hf_common.DEVICE = "cpu"  # patch
     try:
-        dtype = get_dtype_for_cpu(model_path)
         model = None
         match model_type:
             case ModelType.EMBEDDING:
-                model = AutoSpyreModel.from_pretrained(model_path, dtype=dtype)
+                model = AutoSpyreModel.from_pretrained(model_path)
             case ModelType.GENERATIVE:
-                model = AutoSpyreModelForCausalLM.from_pretrained(
-                    model_path, dtype=dtype
-                )
+                model = AutoSpyreModelForCausalLM.from_pretrained(model_path)
 
         return model is not None, None
     except HfHubHTTPError as e:
