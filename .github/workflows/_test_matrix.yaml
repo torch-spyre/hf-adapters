@@ -67,7 +67,7 @@ on:
           alias-resolution layer. "unit" runs every suite except smoke (load,
           token_compare, embed_compare, vlm, reranker_compare, masked_lm_compare,
           question_answering_compare, model_module); "integration" runs only the
-          smoke suite; "regression"/"trunk" (default: regression) run the
+          token_compare suite; "regression"/"trunk" (default: regression) run the
           standard Spyre suite set. The tests/spyre/edge_cases/ suite is opted
           into separately via the edge_cases_only boolean input below -- it
           is deliberately outside this shared test_type contract so callers
@@ -520,7 +520,7 @@ jobs:
     # only job that tier runs). Same allowlist mechanism as spyre-load-tests
     # above -- to add a new suite later, give the new job its own key and
     # copy this `if:` line with that key; no existing job needs to change.
-    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'integration' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' smoke ')) }}
+    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' smoke ')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -578,7 +578,7 @@ jobs:
     name: Spyre token compare (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type]
     # Suite key: "token_compare". Part of the "unit" coarse tier.
-    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_compare ')) }}
+    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'integration' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_compare ')) }}
     runs-on:
       - x86_64
       - spyre_pf_x1

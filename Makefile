@@ -5,11 +5,11 @@ SHELL := /bin/bash
 # product repos: torch-spyre, hf-adapters, spyre-inference). These tier names
 # are literal, first-class values -- there is no alias-resolution layer:
 #   unit        — all spyre-native tests (excludes the heavy upstream suites)
-#   integration — the smoke suite. This is the ONLY valid top-level tier for
-#                 that suite -- TEST_TYPE=smoke by itself is rejected (see the
-#                 `tests` target below); "smoke" is just the individual suite
+#   integration — the token_compare suite. This is the ONLY valid top-level tier for
+#                 that suite -- TEST_TYPE=token_compare by itself is rejected (see the
+#                 `tests` target below); "token_compare" is just the individual suite
 #                 key "integration" maps to, still usable inside a
-#                 multi-suite combo (e.g. TEST_TYPE="smoke load").
+#                 multi-suite combo (e.g. TEST_TYPE="token_compare load").
 #   regression  — everything
 #   trunk       — same coverage as regression; push-to-main CI label (see
 #                 resolve_test_type.sh)
@@ -27,13 +27,16 @@ TEST_TYPE ?= regression
 # at once); empty = run every model in the suite.
 MODEL_KEY ?=
 
-# MODEL_PATH narrows a suite to exactly one model via pytest's --model-path
+# MODEL_PATH narrows a suite to a specific set of models via pytest's --model-path
 # (see tests/conftest.py's pytest_generate_tests), which replaces the
 # registry-derived parametrization outright rather than filtering it -- so it
 # works for any model path, including ones that lost the smallest-per-adapter
 # CAUSAL_PATHS/EMBED_PATHS/VISION_PATHS representative slot. Matrix-style
 # per-model CI jobs pass this (see _test_matrix.yaml); empty = no override.
-MODEL_PATH ?=
+MODEL_PATH ?= Qwen/Qwen3-0.6B \
+  mistralai/Ministral-3-8B-Instruct-2512 \
+  ibm-granite/granite-4.1-8b \
+  ibm-granite/granite-3.3-8b-instruct
 
 # Flags passed verbatim to pytest, mirroring _test_matrix.yaml's extra_test_flags.
 PYTEST_ARGS ?= -s -vvv
@@ -59,8 +62,8 @@ else
 K_ARGS :=
 endif
 
-ifneq ($(MODEL_PATH),)
-MODEL_PATH_ARGS := --model-path "$(MODEL_PATH)"
+ifneq ($(strip $(MODEL_PATH)),)
+MODEL_PATH_ARGS := $(foreach model,$(MODEL_PATH),--model-path "$(model)")
 else
 MODEL_PATH_ARGS :=
 endif
@@ -170,9 +173,9 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	case " $$resolved " in \
 	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare model_module" ;; \
 	  *" unit "*) suites="adapter_coverage load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare model_module" ;; \
-	  " integration ") suites="smoke" ;; \
+	  " integration ") suites="token_compare" ;; \
 	  " perf ") suites="perf" ;; \
-	  " smoke ") echo "TEST_TYPE=smoke is not a valid tier -- use TEST_TYPE=integration to run the smoke suite alone, or include 'smoke' in a multi-suite combo (e.g. TEST_TYPE=\"smoke load\")."; exit 1 ;; \
+	  " token_compare ") echo "TEST_TYPE=token_compare is not a valid tier -- use TEST_TYPE=integration to run the token_compare suite alone, or include 'token_compare' in a multi-suite combo (e.g. TEST_TYPE=\"token_compare load\")."; exit 1 ;; \
 	  *) suites="$$resolved" ;; \
 	esac; \
 	mkdir -p "$(RESULTS_DIR)"; \
