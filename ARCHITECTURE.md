@@ -30,6 +30,7 @@ which models are supported on Spyre.
 | Yi 1.5 6B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite Vision 4.1 4B (text backbone) | granite (text) | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | Gemma 4 12B | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
+| Gemma 4 26B-A4B (MoE)\* | gemma4 (MoE, `enable_moe_block`) | 256 / 512 | 128 / 256 | Yes | No\* | Yes | Yes |
 | Gemma 3 1B | gemma3\_text | 256 | 128 | Yes | Yes | Yes | Yes |
 | GPT-2 124M | gpt2 | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
 | GPT-Neo 125M | gpt_neo | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
@@ -43,6 +44,18 @@ which models are supported on Spyre.
 **Spyre Runs** = block produces output (no crash/NaN).
 
 Unless a row notes otherwise (e.g. `(bf16)`), **verified means verified in fp16** — this holds even for bf16-native checkpoints. A bf16-native model that is only verified in fp16 may behave differently in bf16 on Spyre (and vice versa); the dtype actually tested is what the table certifies.
+
+\* **Gemma 4 26B-A4B (MoE) is not a verified checkpoint** in the sense the rest of
+this table certifies — it is included with an explicit "No" in CPU Accurate to be
+transparent about scope, not to claim a pass. The adapter (`hf_gemma4_moe.py`)
+compiles and runs end-to-end on Spyre (30-block model, no crash/NaN, smoke and
+load tests xpass) and is numerically validated at the **single-layer** level only
+(compiled block vs. CPU fp32 reference, `mean_rel=0.11%`, both forced to the same
+top-4 routing). The **full-model** token-compare is a deliberate bring-up
+**xfail** (0/5 top-1 agreement vs. stock HF greedy decode): top-k experts is
+pinned to `K=4` for bring-up while the trained model routes top-8, and fp16
+decode drift compounds on top of that. This is a tracked open item, not a
+regression — see spec §9 and `hf_gemma4.py`'s own PLE/MoE exclusion note below.
 
 ### Vision-Language (image→text)
 
@@ -111,7 +124,7 @@ single-token decode path (seq_len=1), not an adapter issue.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 28 adapters · 45 verified checkpoints · 100+ compatible models.
+**Coverage:** 29 adapters · 45 verified checkpoints · 100+ compatible models.
 The 45 verified rows are 28 generative + 13 embedding + 4 vision-language (see the
 Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are
 vision-tower components used by VLM adapters rather than standalone model adapters.
@@ -141,8 +154,9 @@ pattern, norms, and weight layout.
 | hf\_granitemoehybrid.py | granitemoehybrid | 2 | Granite 4.0 Micro |
 | hf\_granite\_swa.py | granite\_swa | 1 | Granite 4.1 8B (unverified), Granite 4.1 20B |
 | hf\_smollm3.py | smollm3 | 1 | — |
-| hf\_gemma4.py | gemma4\_unified / gemma4 (dense) | 1 | Gemma 4 31B (dense). Not E2B/E4B (PLE) or 26B-A4B (MoE). |
-| hf\_gemma4\_mm.py | gemma4\_unified (multimodal) | 1 | Gemma 4 31B (dense unified VLM). Not E2B/E4B (PLE) or 26B-A4B (MoE). |
+| hf\_gemma4.py | gemma4\_unified / gemma4 (dense) | 1 | Gemma 4 31B (dense). Not E2B/E4B (PLE). The MoE variant (26B-A4B) has its own dedicated adapter, `hf_gemma4_moe.py`, below. |
+| hf\_gemma4\_mm.py | gemma4\_unified (multimodal) | 1 | Gemma 4 31B (dense unified VLM). Not E2B/E4B (PLE). MoE (26B-A4B) is text-only and covered by `hf_gemma4_moe.py`, not this VLM adapter. |
+| hf\_gemma4\_moe.py | gemma4 (MoE, `enable_moe_block`) | 0 | Gemma 4 26B-A4B — compiles and runs end-to-end on Spyre; single-layer numerically validated (`mean_rel=0.11%`); full-model token-compare is a bring-up xfail (K=4-vs-trained-top-8 routing + fp16 decode drift), so not counted as verified. See the Verified Checkpoints footnote above and spec §9. |
 | hf\_gemma3.py | gemma3\_text / gemma3 (dense) | 2 | Gemma 3 4B/12B/27B (text decoder of the multimodal checkpoints); EmbeddingGemma (bidirectional embedder). Not Gemma 3n (PLE). |
 | hf\_olmo.py | olmo | 1 | OLMo 7B |
 | hf\_olmo2.py | olmo2 | 1 | OLMo 2 7B |

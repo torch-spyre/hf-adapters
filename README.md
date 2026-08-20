@@ -1,6 +1,6 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-30-blue)
+![adapters](https://img.shields.io/badge/adapters-31-blue)
 ![verified](https://img.shields.io/badge/verified_checkpoints-46-green)
 ![compatible](https://img.shields.io/badge/compatible_models-100%2B-orange)
 
@@ -14,7 +14,7 @@ from `transformers`.
 
 ## Supported Models
 
-**30 adapters · 46 verified checkpoints · 100+ compatible models**
+**31 adapters · 46 verified checkpoints · 100+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
 **vision-language** (image→text), and **speculative-decoding drafter** models — from

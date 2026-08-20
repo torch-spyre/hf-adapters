@@ -443,16 +443,27 @@ def _run_forward(
     return logits
 
 
-def prepare_text_decoder_for_spyre(model):
-    """Prepare ONLY the Gemma 4 text decoder for Spyre (in-place).
+def _setup_gemma4_text_decoder(model, *, allow_moe=False):
+    """Shared attention-side Spyre prep for the Gemma 4 text decoder (in-place).
 
-    1. Assert the unsupported (E2B / MoE) features are absent.
-    2. Patch ``Gemma4RMSNorm`` for the fp16 Spyre path.
-    3. Build one ``PrecomputedRotaryEmbedding`` per layer type from the model's
-       per-type ``inv_freq`` buffers (no head padding — D/2 >= 64 already).
-    4. Record per-layer KV-cache shapes (sliding vs global differ).
-    5. Chunk the LM head for the large vocab.
-    6. Compile each decoder layer's block.
+    Factored out of ``prepare_text_decoder_for_spyre`` so the MoE adapter
+    (``hf_gemma4_moe``) can reuse the identical RMSNorm patch, per-type RoPE,
+    per-layer KV-cache shapes, and LM-head padding without duplicating them or
+    inheriting the dense path's MoE assert / dense-block compile. This helper
+    does everything EXCEPT build ``model._spyre_compiled_blocks`` — the caller
+    owns that (dense vs. MoE blocks differ).
+
+    Steps:
+      1. Assert the unsupported (E2B / KV-share) features are absent. The MoE
+         gate is caller-controlled via ``allow_moe`` (the dense path forbids
+         MoE; the MoE path requires it and asserts that separately).
+      2. Patch ``Gemma4RMSNorm`` for the fp16 Spyre path.
+      3. Build one ``PrecomputedRotaryEmbedding`` per layer type.
+      4. Record per-layer KV-cache shapes (sliding vs global differ).
+      5. Chunk the LM head for the large vocab.
+
+    Returns ``(num_q_heads_per_layer, kv_shapes, is_kv_eq_v_per_layer)`` — the
+    per-layer geometry the caller needs to compile its blocks.
     """
     backbone = _gemma4_backbone(model)
     cfg = text_config(model.config)
@@ -466,9 +477,11 @@ def prepare_text_decoder_for_spyre(model):
         "Gemma 4 adapter does not support KV-sharing across layers; "
         f"num_kv_shared_layers={cfg.num_kv_shared_layers}."
     )
-    assert not getattr(
-        cfg, "enable_moe_block", False
-    ), "Gemma 4 adapter does not support MoE blocks (enable_moe_block=True)."
+    if not allow_moe:
+        assert not getattr(cfg, "enable_moe_block", False), (
+            "Gemma 4 dense adapter does not support MoE blocks "
+            "(enable_moe_block=True); use hf_gemma4_moe."
+        )
 
     # Patch whichever concrete RMSNorm class this model uses. The norm module
     # closest to a decoder layer's input_layernorm is representative.
@@ -507,6 +520,23 @@ def prepare_text_decoder_for_spyre(model):
     # LM head: smooth-padded to a stick-aligned vocab whose per-core span fits
     # the 256 MB EAR limit (see hf_common.pad_lm_head).
     pad_lm_head(model)
+
+    return num_q_heads_per_layer, kv_shapes, is_kv_eq_v_per_layer
+
+
+def prepare_text_decoder_for_spyre(model):
+    """Prepare ONLY the Gemma 4 **dense** text decoder for Spyre (in-place).
+
+    Runs the shared attention-side setup (``_setup_gemma4_text_decoder``:
+    MoE/E2B/KV-share asserts, RMSNorm patch, per-type RoPE, KV shapes, LM-head
+    padding) then compiles a dense ``Gemma4Block`` per decoder layer. The MoE
+    adapter (``hf_gemma4_moe``) calls the same seam with ``allow_moe=True`` and
+    compiles its own MoE blocks instead.
+    """
+    backbone = _gemma4_backbone(model)
+    num_q_heads_per_layer, kv_shapes, is_kv_eq_v_per_layer = (
+        _setup_gemma4_text_decoder(model, allow_moe=False)
+    )
 
     model._spyre_compiled_blocks = prepare_gemma4_blocks(
         backbone.layers,
