@@ -25,6 +25,8 @@ from _generate_edge_case_helpers import (
 from _shared import _setup, _teardown, run_eos_case
 from model_registry import CAUSAL_PATHS
 
+from hf_adapters.hf_common import encode_prompts
+
 pytestmark = pytest.mark.model_harness("causal")
 
 
@@ -97,7 +99,7 @@ def test_no_eos_runs_full_budget_spyre(model_path: str) -> None:
         no_eos_max_new = 64 + 7
         no_eos_refs = []
         for prompt in no_eos_prompts:
-            encoded = tokenizer(prompt, return_tensors="pt")
+            encoded = encode_prompts(tokenizer, prompt)
             with torch.no_grad():
                 out = ref_model.generate(
                     **encoded,

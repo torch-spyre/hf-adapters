@@ -121,6 +121,65 @@ def text_config(config):
     return getattr(config, "text_config", None) or config
 
 
+def encode_prompts(
+    tokenizer,
+    prompts,
+    *,
+    padding_side: str = "left",
+    add_generation_prompt: bool = True,
+    chat: bool | None = None,
+):
+    """Tokenize prompt(s) following the model's own canonical scheme.
+
+    Rather than force a family-specific special token (the old Gemma-only
+    ``ensure_leading_bos``), this follows whatever tokenization each model
+    actually ships, so every model is fed in-distribution input:
+
+    * Chat/instruct models (``tokenizer.chat_template`` present, or
+      ``chat=True``): each prompt is wrapped as a single user turn and run
+      through ``apply_chat_template`` with a trailing generation prompt.
+    * Base models (no chat template, or ``chat=False``): plain
+      ``tokenizer(...)``, letting the tokenizer's own post-processor add
+      whatever special tokens it defines (e.g. Gemma base prepends ``<bos>``,
+      GPT-2 adds none).
+
+    ``chat=None`` (default) auto-selects by chat-template presence; pass a bool
+    to force one path. No ``enable_thinking`` is passed — each template's own
+    default is used, which is the most faithful to its canonical tokenization.
+
+    Always returns a left-padded ``BatchEncoding`` with ``input_ids`` and
+    ``attention_mask`` ``[B, L]``; ``attention_mask.sum(dim=1)`` gives the real
+    per-row prompt lengths. A single-string ``prompts`` yields a 1-row batch
+    (so ``input_ids.shape[1]`` is that prompt's length).
+    """
+    single = isinstance(prompts, str)
+    prompt_list = [prompts] if single else list(prompts)
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    use_chat = (tokenizer.chat_template is not None) if chat is None else chat
+
+    if use_chat:
+        convs = [[{"role": "user", "content": p}] for p in prompt_list]
+        return tokenizer.apply_chat_template(
+            convs,
+            add_generation_prompt=add_generation_prompt,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+            padding=True,
+            padding_side=padding_side,
+        )
+    return tokenizer(
+        prompt_list,
+        return_tensors="pt",
+        padding=True,
+        padding_side=padding_side,
+        return_attention_mask=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # RoPE: precompute rotation matrices on CPU
 # ---------------------------------------------------------------------------
@@ -1572,6 +1631,7 @@ def generate(
     top_p=None,
     eos_token_id=_UNSET,
     timing=False,
+    chat=None,
 ):
     """Model-agnostic generation: block-padded prefill, then single-token decode.
 
@@ -1611,6 +1671,10 @@ def generate(
             config/tokenizer eos; pass ``None`` to disable EOS stopping (matches
             stock ``generate()``).
         timing: Print per-token latency.
+        chat: Tokenization mode. ``None`` (default) auto-selects the model's
+            chat template when it has one, else plain completion tokenization.
+            ``True`` forces the chat template; ``False`` forces raw completion
+            tokenization even on an instruct model. See ``encode_prompts``.
     """
     overrides = {
         "do_sample": do_sample,
@@ -1629,18 +1693,14 @@ def generate(
     top_p = params["top_p"]
     eos_ids = params["eos_ids"]
 
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    # Force left-padding: with right-padding, shorter sequences end with
-    # padding tokens, and logits[:, -1, :] would predict from a pad position.
-    # Left-padding aligns all sequences to end at the same position.
-    encoded = tokenizer(
-        prompts,
-        return_tensors="pt",
-        padding=True,
-        padding_side="left",
-        return_attention_mask=True,
-    )
+    # Tokenize following each model's own canonical scheme (chat template for
+    # chat/instruct models, plain post-processor tokenization for base models),
+    # so prompts are always in-distribution. Force left-padding: with
+    # right-padding, shorter sequences end with padding tokens and
+    # logits[:, -1, :] would predict from a pad position; left-padding aligns
+    # all sequences to end at the same position. ``chat`` overrides the
+    # auto-detection (None=auto, True=force chat, False=force raw completion).
+    encoded = encode_prompts(tokenizer, prompts, chat=chat)
     input_ids = encoded["input_ids"]
     attention_mask = encoded["attention_mask"]
     batch_size = input_ids.shape[0]
