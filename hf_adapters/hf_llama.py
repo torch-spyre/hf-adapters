@@ -40,6 +40,4 @@ _run_backbone_forward = standard_gqa_backbone_forward
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to Llama model in-place."""
-    from transformers.models.llama.modeling_llama import LlamaRMSNorm
-
-    prepare_standard_gqa(model, LlamaRMSNorm)
+    prepare_standard_gqa(model)

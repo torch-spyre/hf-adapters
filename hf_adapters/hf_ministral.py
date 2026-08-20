@@ -44,6 +44,4 @@ _run_backbone_forward = standard_gqa_backbone_forward
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to a Ministral causal-LM in-place."""
-    from transformers.models.ministral.modeling_ministral import MinistralRMSNorm
-
-    prepare_standard_gqa(model, MinistralRMSNorm)
+    prepare_standard_gqa(model)
