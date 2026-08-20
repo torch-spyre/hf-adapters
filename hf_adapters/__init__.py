@@ -12,6 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+try:
+    from torch_spyre._inductor import (  # type: ignore[import-not-found]
+        config as spyre_config,
+    )
+
+    # Bundle-scoped HBM pool planning currently corrupts
+    # outputs of multiple models.
+    setattr(spyre_config, "hbm_pool_planning", False)
+except ImportError:
+    pass
+
 from hf_adapters.auto_spyre_model import (
     AutoSpyreModel,
     AutoSpyreModelForCausalLM,
