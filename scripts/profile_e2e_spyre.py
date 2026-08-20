@@ -151,13 +151,19 @@ def run_profile(
     print(f"  Load time: {time.time() - t0:.1f}s")
     print(f"  Prompt: {prompt!r}")
 
-    gen_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False, timing=True)
+    encoded = tokenizer(prompt, return_tensors="pt")
+    gen_kwargs = dict(
+        **encoded,
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+        timing=True,
+    )
 
     # --- Warmup: first generate triggers torch.compile; NOT profiled. This
     #     is what "warms the compiler cache" so the profiled run below measures
     #     steady-state execution rather than compile time.
     print("\n[warmup] compiling (this run is not profiled)...")
-    model.generate(tokenizer, [prompt], **gen_kwargs)
+    model.generate(**gen_kwargs)
 
     # --- Profiled run: cache is warm. CPU + PrivateUse1 (Spyre device) activity.
     #     NOTE(#114): do NOT call prof.events() / prof.key_averages().table() —
@@ -174,11 +180,13 @@ def run_profile(
         with_stack=with_stack,
         with_modules=with_stack,
     ) as prof:
-        outputs = model.generate(tokenizer, [prompt], **gen_kwargs)
+        outputs = model.generate(**gen_kwargs)
 
     prof.export_chrome_trace(out_path)
 
-    output_text = outputs[0] if outputs else ""
+    output_text = tokenizer.decode(
+        outputs[0, encoded["input_ids"].shape[1] :], skip_special_tokens=True
+    )
     print(f"\n  Output: {output_text!r}")
     print(f"  trace → {out_path}")
     print("  open in https://ui.perfetto.dev/ or chrome://tracing")

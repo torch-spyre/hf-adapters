@@ -413,6 +413,7 @@ def generate(
     temperature=None,
     top_k=None,
     top_p=None,
+    generation_config=None,
 ):
     """Autoregressive image→text generation on Spyre (greedy / top-k/p sampling).
 
@@ -433,21 +434,21 @@ def generate(
     Returns a list of decoded strings (one per batch row), EOS-trimmed.
     """
     tokenizer = processor.tokenizer
-    params = _resolve_generation_params(
+    cfg, eos_ids, _ = _resolve_generation_params(
         model,
-        tokenizer,
+        generation_config,
         {
             "do_sample": do_sample,
             "temperature": temperature,
             "top_k": top_k,
             "top_p": top_p,
         },
+        {},
     )
-    do_sample = params["do_sample"]
-    temperature = params["temperature"]
-    top_k = params["top_k"]
-    top_p = params["top_p"]
-    eos_ids = params["eos_ids"]
+    do_sample = cfg.do_sample
+    temperature = cfg.temperature
+    top_k = cfg.top_k
+    top_p = cfg.top_p
 
     backbone = get_backbone(model)
     model_dtype = get_model_dtype(model)
@@ -522,7 +523,14 @@ def generate(
 
         # Token selection (CPU) — mirrors hf_common.generate.
         next_tokens = select_next_token(
-            next_logits, do_sample, temperature, top_k, top_p
+            next_logits,
+            do_sample,
+            temperature,
+            top_k,
+            top_p,
+            cfg.suppress_tokens,
+            cfg.begin_suppress_tokens,
+            is_first_step=i == 0,
         )
 
         # Append the token: generated slots are contiguous from padded_len.

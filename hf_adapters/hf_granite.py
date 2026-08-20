@@ -23,7 +23,8 @@ Usage::
     model = AutoSpyreModelForCausalLM.from_pretrained(
         "/path/to/granite-3.3-8b-instruct")
     tokenizer = AutoTokenizer.from_pretrained("/path/to/granite-3.3-8b-instruct")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
 from hf_adapters.hf_common import (

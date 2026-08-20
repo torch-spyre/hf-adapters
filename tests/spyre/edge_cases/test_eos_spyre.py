@@ -17,13 +17,16 @@
 import time
 
 import pytest
-from _generate_edge_case_helpers import (
+import torch
+
+from tests._generate_edge_case_helpers import (
     hf_reference_outputs,
     make_prompt_with_eos_inside,
     make_prompts,
 )
-from _shared import _setup, _teardown, run_eos_case
-from model_registry import CAUSAL_PATHS
+from tests.conftest import encode_generation_inputs
+from tests.model_registry import CAUSAL_PATHS
+from tests.spyre.edge_cases._shared import _setup, _teardown, run_eos_case
 
 pytestmark = pytest.mark.model_harness("causal")
 
@@ -56,15 +59,18 @@ def test_eos_inside_prompt_spyre(model_path: str) -> None:
         eos_in_prompt_refs = hf_reference_outputs(
             ref_model, tokenizer, [eos_in_prompt], eos_in_prompt_max_new
         )
+        encoded = encode_generation_inputs(tokenizer, [eos_in_prompt])
         t0 = time.time()
         out = model.generate(
-            tokenizer,
-            [eos_in_prompt],
+            **encoded,
             max_new_tokens=eos_in_prompt_max_new,
             do_sample=False,
         )
+        spyre_output = tokenizer.decode(
+            out[0, encoded["input_ids"].shape[1] :], skip_special_tokens=True
+        )
         elapsed = time.time() - t0
-        ok = eos_in_prompt_refs[0].strip() == out[0].strip()
+        ok = eos_in_prompt_refs[0].strip() == spyre_output.strip()
         detail = "" if ok else f"hf={eos_in_prompt_refs!r} spyre={out!r}"
         print(f"  eos_inside_prompt: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
         assert ok, detail
@@ -90,8 +96,6 @@ def test_eos_on_last_step_spyre(model_path: str) -> None:
 @pytest.mark.slow
 def test_no_eos_runs_full_budget_spyre(model_path: str) -> None:
     info, tokenizer, ref_model, model = _setup(model_path, need_ref=True)
-    import torch
-
     try:
         no_eos_prompts = make_prompts(tokenizer, [5, 12])
         no_eos_max_new = 64 + 7
@@ -112,16 +116,19 @@ def test_no_eos_runs_full_budget_spyre(model_path: str) -> None:
                 )
             new_ids = out[0][encoded["input_ids"].shape[1] :]
             no_eos_refs.append(tokenizer.decode(new_ids, skip_special_tokens=True))
+        encoded = encode_generation_inputs(tokenizer, no_eos_prompts)
         t0 = time.time()
         out = model.generate(
-            tokenizer,
-            no_eos_prompts,
+            **encoded,
             max_new_tokens=no_eos_max_new,
             do_sample=False,
             eos_token_id=None,
         )
+        spyre_outputs = tokenizer.batch_decode(
+            out[:, encoded["input_ids"].shape[1] :], skip_special_tokens=True
+        )
         elapsed = time.time() - t0
-        ok = all(hf.strip() == sp.strip() for hf, sp in zip(no_eos_refs, out))
+        ok = all(hf.strip() == sp.strip() for hf, sp in zip(no_eos_refs, spyre_outputs))
         detail = "" if ok else f"hf={no_eos_refs!r} spyre={out!r}"
         print(f"  no_eos_runs_full_budget: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
         assert ok, detail

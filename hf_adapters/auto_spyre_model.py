@@ -25,7 +25,11 @@ Usage::
 
     model = AutoSpyreModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-3B")
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-3B")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt", padding=True)
+    sequences = model.generate(**encoded, max_new_tokens=32)
+    outputs = tokenizer.batch_decode(
+        sequences[:, encoded["input_ids"].shape[1] :], skip_special_tokens=True
+    )
 
 The model is automatically prepared for Spyre (RoPE precomputation, RMSNorm
 patching, LM head padding, compiled blocks) and moved to the Spyre device.
@@ -292,11 +296,20 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
         )
 
         def model_generate(
-            self: PreTrainedModel, tokenizer: Any, prompts: list[str], **kwargs: Any
+            self: PreTrainedModel,
+            input_ids: torch.Tensor,
+            attention_mask: torch.Tensor | None = None,
+            **kwargs: Any,
         ):
             from hf_adapters.hf_common import generate
 
-            return generate(module._run_forward, self, tokenizer, prompts, **kwargs)
+            return generate(
+                module._run_forward,
+                self,
+                input_ids,
+                attention_mask=attention_mask,
+                **kwargs,
+            )
 
         model.generate = MethodType(model_generate, model)  # type: ignore[assignment]
 

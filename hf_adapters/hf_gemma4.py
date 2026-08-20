@@ -66,7 +66,8 @@ Usage::
 
     model = AutoSpyreModelForCausalLM.from_pretrained("google/gemma-4-12B-it")
     tokenizer = AutoTokenizer.from_pretrained("google/gemma-4-12B-it")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
 import torch

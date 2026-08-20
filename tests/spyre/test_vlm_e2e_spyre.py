@@ -62,12 +62,6 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from _vision_helpers import (
-    build_vlm_batch,
-    extra_image_inputs,
-    stock_vlm_generate,
-)
-from model_registry import NON_BLOCKING_VISION_MODELS, VISION_PATHS, xfail_non_blocking
 
 from hf_adapters import AutoSpyreModelForImageTextToText
 from hf_adapters.auto_spyre_model import (
@@ -84,7 +78,17 @@ from hf_adapters.hf_common import (
     make_cache_index,
     pad_and_position,
 )
+from tests._vision_helpers import (
+    build_vlm_batch,
+    extra_image_inputs,
+    stock_vlm_generate,
+)
 from tests.conftest import load_ref_model
+from tests.model_registry import (
+    NON_BLOCKING_VISION_MODELS,
+    VISION_PATHS,
+    xfail_non_blocking,
+)
 
 pytestmark = pytest.mark.model_harness("vision")
 

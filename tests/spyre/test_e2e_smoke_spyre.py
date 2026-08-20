@@ -30,9 +30,14 @@ import time
 from typing import Any
 
 import pytest
-from model_registry import CAUSAL_PATHS, NON_BLOCKING_CAUSAL_MODELS, xfail_non_blocking
 
 from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
+from tests.conftest import encode_generation_inputs
+from tests.model_registry import (
+    CAUSAL_PATHS,
+    NON_BLOCKING_CAUSAL_MODELS,
+    xfail_non_blocking,
+)
 
 pytestmark = pytest.mark.model_harness("causal")
 
@@ -57,17 +62,19 @@ def run_smoke_test(model_path: str) -> dict[str, Any]:
     prompt = "The capital of France is"
     print(f"  Prompt: {prompt!r}")
 
+    encoded = encode_generation_inputs(tokenizer, [prompt])
     t0 = time.time()
-    outputs = model.generate(
-        tokenizer,
-        [prompt],
+    sequences = model.generate(
+        **encoded,
         max_new_tokens=5,
         do_sample=False,
         timing=True,
     )
     gen_time = time.time() - t0
 
-    output_text = outputs[0] if outputs else ""
+    output_text = tokenizer.decode(
+        sequences[0, encoded["input_ids"].shape[1] :], skip_special_tokens=True
+    )
     print(f"  Output: {output_text!r}")
     print(f"  Generate time: {gen_time:.1f}s")
 

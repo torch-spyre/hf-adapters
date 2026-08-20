@@ -52,7 +52,7 @@ Spyre; the projector / patch-embed / feature-merge ops that don't lower run on
 CPU (see Multimodal VLM Path below).
 
 | Model | model\_type | Towers | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
-|-------|-----------|--------|-----------|--------------|-------------|---------------|-----------|
+|-------|-----------|--------|-----------|--------------|-------------|-----------|
 | Granite Vision 4.1 4B | granite4\_vision | SigLIP vision + Granite text | Yes (padded) | Yes | Yes | Yes |
 | Mistral-Small-3.1-24B-Instruct-2503 | mistral3 | Pixtral + Mistral text | Yes (padded) | Yes | Yes | Yes |
 | Ministral-3-14B-Instruct-2512 (bf16) | mistral3 | Pixtral + Ministral3 text | Yes (padded) | Yes | Yes | Yes |
@@ -175,7 +175,12 @@ from transformers import AutoTokenizer
 
 model = AutoSpyreModelForCausalLM.from_pretrained("ibm-granite/granite-3.3-8b-instruct")
 tokenizer = AutoTokenizer.from_pretrained("ibm-granite/granite-3.3-8b-instruct")
-outputs = model.generate(tokenizer, ["What is 2+2?"], max_new_tokens=128)
+inputs = tokenizer(["What is 2+2?"], return_tensors="pt", padding=True)
+sequences = model.generate(**inputs, max_new_tokens=5)
+outputs = tokenizer.batch_decode(
+    sequences[:, inputs["input_ids"].shape[1] :],
+    skip_special_tokens=True,
+)
 ```
 
 `AutoSpyreModelForCausalLM` automatically selects the correct adapter based on the model's config type.
