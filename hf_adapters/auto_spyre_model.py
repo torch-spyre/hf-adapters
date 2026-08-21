@@ -641,7 +641,7 @@ class AutoSpyreModelForTokenClassification(AutoSpyreModel):
     def from_pretrained(
         cls,
         model_name_or_path: Union[str, os.PathLike[str]],
-        dtype: torch.dtype = torch.float16,
+        dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(

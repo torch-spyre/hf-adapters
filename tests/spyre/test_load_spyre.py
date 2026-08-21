@@ -152,11 +152,8 @@ def test_load_question_answering(model_path: str) -> None:
 def load_token_classification(model_path: str) -> tuple[Any, Any, float]:
     from hf_adapters import AutoSpyreModelForTokenClassification
 
-    dtype = torch_dtype_for_model_path(model_path)
     t0 = time.time()
-    model: Any = AutoSpyreModelForTokenClassification.from_pretrained(
-        model_path, dtype=dtype
-    )
+    model: Any = AutoSpyreModelForTokenClassification.from_pretrained(model_path)
     load_s = time.time() - t0
     head_on_cpu = next(model.classifier.parameters()).device.type == "cpu"
     return model is not None, callable(model.forward) and head_on_cpu, load_s

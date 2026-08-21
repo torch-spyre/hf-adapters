@@ -103,7 +103,7 @@ def test_load_question_answering(model_path):
 def test_load_token_classification(model_path):
     auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
     model = auto_spyre_model.AutoSpyreModelForTokenClassification.from_pretrained(
-        model_path, dtype=get_dtype_for_cpu(model_path)
+        model_path
     )
     assert callable(model.forward)
     assert next(model.classifier.parameters()).device.type == "cpu"
