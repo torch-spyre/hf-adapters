@@ -219,6 +219,7 @@ jobs:
       question_answering_matrix: ${{ steps.generate.outputs.question_answering_matrix }}
       combined_matrix: ${{ steps.generate.outputs.combined_matrix }}
       reranker_matrix: ${{ steps.generate.outputs.reranker_matrix }}
+      token_classification_matrix: ${{ steps.generate.outputs.token_classification_matrix }}
     defaults:
       run:
         working-directory: .
@@ -972,6 +973,61 @@ jobs:
           path: junit-question-answering-compare-${{ matrix.model_key }}.xml
           retention-days: 14
 
+  spyre-token-classification-compare-tests:
+    name: Spyre token-classification compare (${{ matrix.model_key }})
+    needs: [generate-matrix, resolve-test-type]
+    # Suite key: "token_classification_compare". Part of the "unit" coarse tier.
+    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_classification_compare ')) }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Dynamic matrix: token-classification models from tests/model_registry.py
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.token_classification_matrix) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+
+      - name: Run test_e2e_token_classification_compare_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_e2e_token_classification_compare_spyre.py for ${{ matrix.model_key }}..."
+          make token-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-classification-compare-${{ matrix.model_key }}.xml
+          echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-token-classification-compare-${{ env.SAFE_MODEL_KEY }}
+          path: junit-token-classification-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
+
   # ---------------------------------------------------------------------------
   # Edge-case suite (daily-only).
   #
@@ -1140,6 +1196,7 @@ jobs:
       - spyre-reranker-compare-tests
       - spyre-masked-lm-compare-tests
       - spyre-question-answering-compare-tests
+      - spyre-token-classification-compare-tests
       - spyre-edge-cases-tests
       - spyre-model-module-tests #updated to run model centric HF module tests
     if: always()
@@ -1165,6 +1222,7 @@ jobs:
                  contains(needs.spyre-reranker-compare-tests.result, 'failure') || contains(needs.spyre-reranker-compare-tests.result, 'cancelled') ||
                  contains(needs.spyre-masked-lm-compare-tests.result, 'failure') || contains(needs.spyre-masked-lm-compare-tests.result, 'cancelled') ||
                  contains(needs.spyre-question-answering-compare-tests.result, 'failure') || contains(needs.spyre-question-answering-compare-tests.result, 'cancelled') ||
+                 contains(needs.spyre-token-classification-compare-tests.result, 'failure') || contains(needs.spyre-token-classification-compare-tests.result, 'cancelled') ||
                  contains(needs.spyre-edge-cases-tests.result, 'failure') || contains(needs.spyre-edge-cases-tests.result, 'cancelled') ||
                  contains(needs.spyre-model-module-tests.result, 'failure') || contains(needs.spyre-model-module-tests.result, 'cancelled') }}; then
             echo "One or more test suites failed."

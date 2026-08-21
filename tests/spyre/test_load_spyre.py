@@ -166,6 +166,7 @@ def load_token_classification(model_path: str) -> tuple[Any, Any, float]:
     return model is not None, callable(model.forward) and head_on_cpu, load_s
 
 
+@pytest.mark.model_harness("token_classification")
 @pytest.mark.parametrize(
     "model_path", TOKEN_CLASSIFICATION_PATHS, ids=TOKEN_CLASSIFICATION_PATHS
 )

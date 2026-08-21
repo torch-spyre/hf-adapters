@@ -24,6 +24,8 @@ from tests.conftest import (
 from tests.cpu.conftest import _unwrap_compiled_blocks
 from tests.model_registry import TOKEN_CLASSIFICATION_PATHS
 
+pytestmark = pytest.mark.model_harness("token_classification")
+
 SENTENCES = [
     "John lives in New York and works at IBM.",
     "The Eiffel Tower is located in Paris, France.",

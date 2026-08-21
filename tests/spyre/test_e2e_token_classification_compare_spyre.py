@@ -41,6 +41,8 @@ from transformers import AutoModelForTokenClassification, AutoTokenizer
 from hf_adapters import AutoSpyreModelForTokenClassification
 from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
 
+pytestmark = pytest.mark.model_harness("token_classification")
+
 # NER-targeted sentences covering a mix of entity types (PER, LOC, ORG).
 # Kept consistent with the CPU accuracy test so results are directly comparable.
 SENTENCES = [
@@ -91,12 +93,8 @@ def test_e2e_token_classification_compare_spyre(model_path: str) -> None:
     id2label = model.config.id2label
 
     print("\n## Token-Classification Comparison: CPU vs Spyre\n")
-    print(
-        "| Sentence | CPU Labels | Spyre Labels | Min Cosine | Match |"
-    )
-    print(
-        "|----------|------------|--------------|-----------|-------|"
-    )
+    print("| Sentence | CPU Labels | Spyre Labels | Min Cosine | Match |")
+    print("|----------|------------|--------------|-----------|-------|")
     for i, sentence in enumerate(SENTENCES):
         mask = real_tokens[i]
         ref_tags = [id2label[t] for t in ref_label_ids[i][mask].tolist()]

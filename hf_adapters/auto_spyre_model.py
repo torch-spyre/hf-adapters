@@ -661,7 +661,7 @@ class AutoSpyreModelForTokenClassification(AutoSpyreModel):
                 return_dict if return_dict is not None else self.config.use_return_dict
             )
             if use_return_dict:
-                return TokenClassifierOutput(logits=logits)
+                return TokenClassifierOutput(logits=logits.float())  # type: ignore[arg-type]
             return (logits,)
 
         model.forward = MethodType(model_forward, model)  # type: ignore[assignment]

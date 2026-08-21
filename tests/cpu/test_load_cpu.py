@@ -99,6 +99,7 @@ def test_load_question_answering(model_path):
     gc.collect()
 
 
+@pytest.mark.model_harness("token_classification")
 @pytest.mark.parametrize(
     "model_path", TOKEN_CLASSIFICATION_PATHS, ids=TOKEN_CLASSIFICATION_PATHS
 )
