@@ -48,7 +48,7 @@ from hf_adapters.auto_spyre_model import (
     resolve_adapter_module,
 )
 from hf_adapters.hf_common import prefill_reranker
-from tests.conftest import get_dtype_for_cpu, load_ref_model
+from tests.conftest import load_ref_model
 from tests.cpu.conftest import _unwrap_compiled_blocks
 from tests.model_registry import RERANKER_PATHS
 
@@ -72,7 +72,6 @@ SCORE_ATOL: float = 0.05
 def _hf_reference_scores(
     model_path: str,
     pairs: list[tuple[str, str]],
-    dtype: torch.dtype,
 ) -> torch.Tensor:
     """Run stock HF forward on CPU and return raw logit scores ``[B]``."""
     tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -103,7 +102,6 @@ def _hf_reference_scores(
 @pytest.mark.parametrize("model_path", RERANKER_PATHS, ids=RERANKER_PATHS)
 def test_manual_path(model_path: str) -> None:
     """Adapter scores via prepare_for_spyre + prefill_reranker match HF reference."""
-    dtype = get_dtype_for_cpu(model_path)
     adapter_module = resolve_adapter_module(
         model_path,
         mapping=SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING,
@@ -111,7 +109,7 @@ def test_manual_path(model_path: str) -> None:
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     # --- HF reference ---
-    ref_scores = _hf_reference_scores(model_path, PAIRS, dtype)
+    ref_scores = _hf_reference_scores(model_path, PAIRS)
     gc.collect()
 
     # --- Adapter path ---
@@ -165,17 +163,16 @@ def test_auto_loader(model_path: str) -> None:
     import sys
 
     auto_spyre_model_mod = sys.modules["hf_adapters.auto_spyre_model"]
-    dtype = get_dtype_for_cpu(model_path)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     # --- HF reference ---
-    ref_scores = _hf_reference_scores(model_path, PAIRS, dtype)
+    ref_scores = _hf_reference_scores(model_path, PAIRS)
     gc.collect()
 
     # --- Auto-loader path ---
     model = (
         auto_spyre_model_mod.AutoSpyreModelForSequenceClassification.from_pretrained(
-            model_path, dtype=dtype
+            model_path
         )
     )
     _unwrap_compiled_blocks(model)

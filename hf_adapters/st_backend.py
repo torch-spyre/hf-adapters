@@ -82,7 +82,9 @@ def _spyre_load_model(
             **model_kwargs,
         )
 
-    dtype = model_kwargs.pop("torch_dtype", torch.float16)
+    dtype = model_kwargs.pop("dtype", None)
+    if dtype is None:
+        dtype = model_kwargs.pop("torch_dtype", None)
     model = AutoSpyreModel.from_pretrained(model_name_or_path, dtype=dtype)
 
     adapter_module = resolve_adapter_module(model_name_or_path)

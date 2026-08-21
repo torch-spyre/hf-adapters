@@ -39,8 +39,6 @@ from model_registry import (
     xfail_non_blocking,
 )
 
-from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
-
 
 @pytest.mark.model_harness("causal")
 @pytest.mark.parametrize(
@@ -64,10 +62,8 @@ def test_load_causal_lm(model_path: str) -> None:
 def load_causal_lm(model_path: str) -> tuple[Any, Any, float]:
     from hf_adapters import AutoSpyreModelForCausalLM
 
-    dtype = torch_dtype_for_model_path(model_path)
-
     t0 = time.time()
-    model = AutoSpyreModelForCausalLM.from_pretrained(model_path, dtype=dtype)
+    model = AutoSpyreModelForCausalLM.from_pretrained(model_path)
     load_s = time.time() - t0
 
     model_is_not_none = model is not None
@@ -79,10 +75,8 @@ def load_causal_lm(model_path: str) -> tuple[Any, Any, float]:
 def load_embedding(model_path: str) -> tuple[Any, float]:
     from hf_adapters import AutoSpyreModel
 
-    dtype = torch_dtype_for_model_path(model_path)
-
     t0 = time.time()
-    model = AutoSpyreModel.from_pretrained(model_path, dtype=dtype)
+    model = AutoSpyreModel.from_pretrained(model_path)
     load_s = time.time() - t0
     return model is not None, load_s
 
@@ -102,8 +96,9 @@ def test_load_embedding(model_path: str) -> None:
 
 def load_masked_lm(model_path: str) -> tuple[Any, Any, float]:
     from hf_adapters import AutoSpyreModelForMaskedLM
+    from hf_adapters.auto_spyre_model import dtype_for_model_path
 
-    dtype = torch_dtype_for_model_path(model_path)
+    dtype = dtype_for_model_path(model_path, target_device="spyre")
 
     t0 = time.time()
     model = AutoSpyreModelForMaskedLM.from_pretrained(model_path, dtype=dtype)
@@ -131,8 +126,9 @@ def test_load_masked_lm(model_path: str) -> None:
 
 def load_question_answering(model_path: str) -> tuple[Any, Any, float]:
     from hf_adapters import AutoSpyreModelForQuestionAnswering
+    from hf_adapters.auto_spyre_model import dtype_for_model_path
 
-    dtype = torch_dtype_for_model_path(model_path)
+    dtype = dtype_for_model_path(model_path, target_device="spyre")
     t0 = time.time()
     model: Any = AutoSpyreModelForQuestionAnswering.from_pretrained(
         model_path, dtype=dtype

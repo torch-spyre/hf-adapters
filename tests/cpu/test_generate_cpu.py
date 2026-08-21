@@ -31,7 +31,6 @@ import pytest
 from transformers import AutoTokenizer
 
 from tests.conftest import (
-    get_dtype_for_cpu,
     load_ref_model,
     resolve_adapter_module_for_test,
 )
@@ -54,6 +53,8 @@ pytestmark = pytest.mark.model_harness("causal")
     "model_path", xfail_non_blocking(CAUSAL_PATHS, table=NON_BLOCKING_CAUSAL_MODELS)
 )
 def test_multibatch(model_path: str) -> None:
+    from hf_adapters.auto_spyre_model import dtype_for_model_path
+
     hf_common_mod = sys.modules["hf_adapters.hf_common"]
     adapter_mod = resolve_adapter_module_for_test(model_path)
 
@@ -69,7 +70,8 @@ def test_multibatch(model_path: str) -> None:
     model = load_ref_model(model_path, adapter_mod)
     adapter_mod.prepare_for_spyre(model)
     _unwrap_compiled_blocks(model)
-    _set_rope_dtype(model, get_dtype_for_cpu(model_path))
+    dtype = dtype_for_model_path(model_path, target_device="cpu")
+    _set_rope_dtype(model, dtype)
     adapter_outputs = hf_common_mod.generate(
         adapter_mod._run_forward,
         model,

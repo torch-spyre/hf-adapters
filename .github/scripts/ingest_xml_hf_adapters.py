@@ -300,6 +300,20 @@ def insert_properties(client, run_id: str, cases: list[dict]):
 # ---------------------------------------------------------------------------
 
 
+def _threaded_run_id(args) -> str:
+    """--run-id when it is a real UUID, else "" so the caller mints one.
+
+    The flag has always carried a Jenkins BUILD_NUMBER historically (see this module's usage
+    example), which is not a UUID and must not land in a UUID column. Only a well-formed
+    uuid is honoured.
+    """
+    raw = (getattr(args, "run_id", "") or "").strip()
+    try:
+        return str(uuid.UUID(raw))
+    except (ValueError, AttributeError, TypeError):
+        return ""
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--xml-dir", default=None)
@@ -386,7 +400,13 @@ def main():
             print(f"  Already ingested — skipping {run['filename']}")
             continue
 
-        run_id = str(uuid.uuid4())
+        # One run_id per TEST RUN, not per XML file: the dispatching orchestrator generates
+        # a uuid and threads it down as --run-id, stamping the SAME value on
+        # artifact_results, so the two tables join. `filename` stays the per-file
+        # discriminator among the rows that share it. Falls back to a fresh uuid4 when
+        # --run-id is absent or not a uuid (standalone / GHA-only run): the rows are still
+        # valid, just not linked to an artifact.
+        run_id = _threaded_run_id(args) or str(uuid.uuid4())
         print(
             f"  run_id={run_id}  tests={run['total_tests']}  "
             f"passed={run['passed']}  failed={run['failed']}  "

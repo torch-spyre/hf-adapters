@@ -30,9 +30,12 @@ import time
 from typing import Any
 
 import pytest
-from model_registry import CAUSAL_PATHS, NON_BLOCKING_CAUSAL_MODELS, xfail_non_blocking
 
-from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
+from tests.model_registry import (
+    CAUSAL_PATHS,
+    NON_BLOCKING_CAUSAL_MODELS,
+    xfail_non_blocking,
+)
 
 pytestmark = pytest.mark.model_harness("causal")
 
@@ -47,9 +50,8 @@ def run_smoke_test(model_path: str) -> dict[str, Any]:
     print(f"  loading from {model_path}")
     print(f"{'=' * 70}")
 
-    dtype = torch_dtype_for_model_path(model_path)
     t0 = time.time()
-    model = AutoSpyreModelForCausalLM.from_pretrained(model_path, dtype=dtype)
+    model = AutoSpyreModelForCausalLM.from_pretrained(model_path)
     load_time = time.time() - t0
     print(f"  Load time: {load_time:.1f}s")
 

@@ -1002,7 +1002,7 @@ def build_prefill_mask_right_padded(
     return mask
 
 
-def add_sliding_window_band(mask, sliding_window, dtype=torch.float16):
+def add_sliding_window_band(mask, sliding_window):
     """Restrict an additive bidirectional mask to a local ``±sliding_window`` band.
 
     ModernBERT alternates global (full) attention layers with local
@@ -1022,7 +1022,7 @@ def add_sliding_window_band(mask, sliding_window, dtype=torch.float16):
     padded_len = mask.shape[-1]
     idx = torch.arange(padded_len)
     off_band = (idx[:, None] - idx[None, :]).abs() > sliding_window  # [L, L]
-    band = torch.zeros((padded_len, padded_len), dtype=dtype)
+    band = torch.zeros((padded_len, padded_len), dtype=mask.dtype)
     band[off_band] = -torch.inf
     return mask + band[None, None, :, :]
 
@@ -2524,9 +2524,14 @@ def prefill_encoder(
             else token_type_ids
         )
 
-    # Bidirectional mask: real tokens attend to all other real tokens
+    # Bidirectional mask: real tokens attend to all other real tokens. Match the
+    # model dtype because SDPA requires a floating-point mask to match q/k/v.
     mask = build_prefill_mask_right_padded(
-        bsz, padded_len, actual_lengths, is_causal=False
+        bsz,
+        padded_len,
+        actual_lengths,
+        is_causal=False,
+        dtype=get_model_dtype(model),
     )
 
     h = run_encoder_forward_fn(
