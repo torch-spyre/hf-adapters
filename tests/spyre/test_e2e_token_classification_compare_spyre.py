@@ -34,12 +34,11 @@ import gc
 import pytest
 import torch
 import torch.nn.functional as F
-from conftest import get_dtype_for_cpu
 from model_registry import TOKEN_CLASSIFICATION_PATHS
 from transformers import AutoModelForTokenClassification, AutoTokenizer
 
 from hf_adapters import AutoSpyreModelForTokenClassification
-from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
+from hf_adapters.auto_spyre_model import dtype_for_model_path
 
 pytestmark = pytest.mark.model_harness("token_classification")
 
@@ -65,7 +64,9 @@ def test_e2e_token_classification_compare_spyre(model_path: str) -> None:
     )
 
     ref_model = AutoModelForTokenClassification.from_pretrained(
-        model_path, dtype=get_dtype_for_cpu(model_path), device_map="cpu"
+        model_path,
+        dtype=dtype_for_model_path(model_path, target_device="cpu"),
+        device_map="cpu",
     ).eval()
     with torch.no_grad():
         ref_logits = ref_model(**encoded, return_dict=True).logits.float()
@@ -73,7 +74,7 @@ def test_e2e_token_classification_compare_spyre(model_path: str) -> None:
     gc.collect()
 
     model = AutoSpyreModelForTokenClassification.from_pretrained(
-        model_path, dtype=torch_dtype_for_model_path(model_path)
+        model_path, dtype=dtype_for_model_path(model_path, target_device="spyre")
     )
     with torch.no_grad():
         logits = model(**encoded, return_dict=True).logits.float()
