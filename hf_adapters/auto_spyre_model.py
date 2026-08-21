@@ -49,6 +49,7 @@ from transformers import (
     AutoModelForMaskedLM,
     AutoModelForQuestionAnswering,
     AutoModelForSequenceClassification,
+    AutoModelForTokenClassification,
     BertConfig,
     Gemma3Config,
     Gemma3TextConfig,
@@ -78,7 +79,11 @@ from transformers import (
     XLMRobertaConfig,
 )
 from transformers.configuration_utils import PretrainedConfig
-from transformers.modeling_outputs import MaskedLMOutput, QuestionAnsweringModelOutput
+from transformers.modeling_outputs import (
+    MaskedLMOutput,
+    QuestionAnsweringModelOutput,
+    TokenClassifierOutput,
+)
 from transformers.models.ministral.configuration_ministral import MinistralConfig
 from transformers.models.mistral3.configuration_mistral3 import Mistral3Config
 
@@ -187,6 +192,14 @@ SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
 ] = {
     XLMRobertaConfig: hf_xlm_roberta,
     RobertaConfig: hf_xlm_roberta,
+}
+
+# Token-classification (NER / POS) mapping — used by
+# ``AutoSpyreModelForTokenClassification``.
+TOKEN_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
+    type[PretrainedConfig], ModuleType
+] = {
+    BertConfig: hf_bert,
 }
 
 
@@ -592,6 +605,98 @@ class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
             )
 
         model.rerank = MethodType(model_rerank, model)  # type: ignore[assignment]
+        return model
+
+
+class AutoSpyreModelForTokenClassification(AutoSpyreModel):
+    """Load a token-classification model with its encoder on Spyre and head on CPU.
+
+    Loads via ``AutoModelForTokenClassification``, compiles the encoder
+    backbone on Spyre, and attaches a native ``forward`` that takes
+    right-padded ``input_ids`` / ``attention_mask`` and returns a standard
+    ``TokenClassifierOutput`` with per-token ``logits`` on CPU.
+
+    The ``classifier`` linear head is automatically pinned to CPU by
+    ``prepare_for_spyre`` (via ``_spyre_cpu_submodules``), so Dropout and
+    any non-stick-aligned head dimensions never enter the Spyre graph.
+
+    Example::
+
+        model = AutoSpyreModelForTokenClassification.from_pretrained(
+            "dslim/bert-base-NER"
+        )
+        tokenizer = AutoTokenizer.from_pretrained("dslim/bert-base-NER")
+        encoded = tokenizer(["John lives in New York"], return_tensors="pt",
+                            padding=True, return_attention_mask=True)
+        outputs = model(**encoded, return_dict=True)
+        # outputs.logits: [B, L, num_labels] on CPU
+    """
+
+    _auto_model_cls = AutoModelForTokenClassification  # type: ignore[assignment]
+    _module_mapping: dict[type[PretrainedConfig], ModuleType] = (
+        TOKEN_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING
+    )
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_name_or_path: Union[str, os.PathLike[str]],
+        dtype: torch.dtype | None = None,
+        tp_plan: Optional[Union[dict, str]] = None,
+    ) -> PreTrainedModel:
+        module: ModuleType = resolve_adapter_module(
+            model_name_or_path, mapping=cls._module_mapping
+        )
+        model: PreTrainedModel = super().from_pretrained(
+            model_name_or_path, dtype=dtype, tp_plan=tp_plan
+        )
+
+        def model_forward(
+            self: PreTrainedModel,
+            input_ids: torch.Tensor | None = None,
+            attention_mask: torch.Tensor | None = None,
+            token_type_ids: torch.Tensor | None = None,
+            position_ids: torch.Tensor | None = None,
+            head_mask: torch.Tensor | None = None,
+            inputs_embeds: torch.Tensor | None = None,
+            labels: torch.Tensor | None = None,
+            output_attentions: bool | None = None,
+            output_hidden_states: bool | None = None,
+            return_dict: bool | None = None,
+            **kwargs: Any,
+        ):
+            from hf_adapters.hf_common import prefill_token_classification
+
+            if kwargs:
+                raise TypeError(f"Unsupported forward arguments: {sorted(kwargs)}")
+            _validate_encoder_task_forward(
+                self,
+                input_ids,
+                position_ids=position_ids,
+                head_mask=head_mask,
+                inputs_embeds=inputs_embeds,
+                labels=labels,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+            )
+            if attention_mask is None and input_ids is not None:
+                attention_mask = torch.ones_like(input_ids)
+
+            logits = prefill_token_classification(
+                module._run_backbone_forward,
+                self,
+                input_ids,
+                attention_mask,
+                token_type_ids=token_type_ids,
+            )
+            use_return_dict = (
+                return_dict if return_dict is not None else self.config.use_return_dict
+            )
+            if use_return_dict:
+                return TokenClassifierOutput(logits=logits.float())  # type: ignore[arg-type]
+            return (logits,)
+
+        model.forward = MethodType(model_forward, model)  # type: ignore[assignment]
         return model
 
 
