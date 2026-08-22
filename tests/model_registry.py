@@ -571,15 +571,7 @@ def _select_representative_paths(
 
 
 def _load_excluded_paths() -> frozenset[str]:
-    """Model paths excluded from every list below (representative and ALL_*).
-
-    Reads ``tests/model_lists/exclude.yaml`` -- a flat ``models:`` list, same
-    lightweight format (and same grep/sed-free-parsing philosophy) as
-    ``tests/model_lists/integration.yaml``, so no YAML library is required.
-    This is the single point every registry-derived suite passes through
-    (GHA's generate_test_matrix.py and every ``make`` suite target alike),
-    so excluding a model here excludes it everywhere with one edit.
-    """
+    """Load excluded model paths from tests/model_lists/exclude.yaml."""
     exclude_file = os.path.join(
         os.path.dirname(__file__), "model_lists", "exclude.yaml"
     )
@@ -671,9 +663,7 @@ def _all_paths(
 # Every registered path per category, bypassing the smallest-per-adapter
 # reduction above -- used by generate_test_matrix.py's ``--only`` allowlist so
 # a caller can target any registered checkpoint, not just the adapter's
-# default representative. Still passes through _exclude(): an excluded path
-# stays excluded even when named explicitly via --only (matches prior
-# behavior, back when --exclude was applied after this same list).
+# default representative. _exclude() applies here too, so --only can't override it.
 ALL_CAUSAL_PATHS: list[str] = _exclude(
     _all_paths(
         CAUSAL_LM_MODELS,

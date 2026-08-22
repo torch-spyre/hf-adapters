@@ -1,10 +1,4 @@
-# Models excluded from every registry-derived suite -- read once by
-# tests/model_registry.py and applied to CAUSAL_PATHS/EMBED_PATHS/etc (and
-# their ALL_*_PATHS counterparts), so it's respected by every caller that
-# parametrizes from those lists: GHA's dynamic matrix generation
-# (.github/scripts/generate_test_matrix.py) AND every `make` suite target
-# that runs unfiltered (Jenkins `make tests`/`make load-tests`, local dev).
-# Update here only -- nowhere else.
+# Models excluded everywhere (GHA matrix + `make tests`) -- read by tests/model_registry.py.
 models:
   # See https://github.com/torch-spyre/hf-adapters/issues/89
   - tiiuae/Falcon3-1B-Base
