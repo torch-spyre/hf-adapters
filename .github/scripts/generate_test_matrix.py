@@ -67,8 +67,18 @@ def generate_matrices(exclude_models=None, only_models=None):
             selected = [p for p in selected if p in only_models]
         paths[name] = selected
 
-    # Combine for jobs that test both types
-    combined_paths = paths["causal"] + paths["embed"]
+    # Feeds spyre-load-tests, whose matrix drives `make load-tests
+    # MODEL_PATH=<path>` -- one -k substring selection against
+    # tests/spyre/test_load_spyre.py's four model_path-parametrized functions
+    # (test_load_causal_lm/embedding/masked_lm/question_answering). All four
+    # categories belong here so that job's per-model coverage matches what
+    # `make tests TEST_TYPE=trunk` already runs unfiltered on Jenkins.
+    combined_paths = (
+        paths["causal"]
+        + paths["embed"]
+        + paths["masked_lm"]
+        + paths["question_answering"]
+    )
 
     return {
         "causal": paths["causal"],

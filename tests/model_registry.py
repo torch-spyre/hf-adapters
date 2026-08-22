@@ -570,6 +570,38 @@ def _select_representative_paths(
     return paths
 
 
+def _load_excluded_paths() -> frozenset[str]:
+    """Model paths excluded from every list below (representative and ALL_*).
+
+    Reads ``tests/model_lists/exclude.yaml`` -- a flat ``models:`` list, same
+    lightweight format (and same grep/sed-free-parsing philosophy) as
+    ``tests/model_lists/integration.yaml``, so no YAML library is required.
+    This is the single point every registry-derived suite passes through
+    (GHA's generate_test_matrix.py and every ``make`` suite target alike),
+    so excluding a model here excludes it everywhere with one edit.
+    """
+    exclude_file = os.path.join(
+        os.path.dirname(__file__), "model_lists", "exclude.yaml"
+    )
+    if not os.path.isfile(exclude_file):
+        return frozenset()
+    excluded: set[str] = set()
+    with open(exclude_file) as f:
+        for line in f:
+            stripped = line.split("#", 1)[0].strip()
+            if stripped.startswith("- "):
+                excluded.add(stripped[2:].strip())
+    return frozenset(excluded)
+
+
+_EXCLUDED_PATHS = _load_excluded_paths()
+
+
+def _exclude(paths: list[str]) -> list[str]:
+    """Drop any path listed in tests/model_lists/exclude.yaml."""
+    return [p for p in paths if p not in _EXCLUDED_PATHS]
+
+
 # One representative model per adapter module (smallest by size), so tests
 # automatically cover new adapters. A single ``_include_gated()`` snapshot is
 # shared across all three selections. ``kind == "vlm"`` excludes bare vision towers.
@@ -579,31 +611,39 @@ _include_gated_flag = _include_gated()
 # proposers, driven by ``_run_draft_block`` — no ``generate``), so they are
 # registered for adapter-coverage but excluded from the generate-based CPU/Spyre
 # causal-LM harnesses; they are exercised by tests/spyre/test_dspark_draft_spyre.py.
-CAUSAL_PATHS: list[str] = _select_representative_paths(
-    CAUSAL_LM_MODELS,
-    include_gated=_include_gated_flag,
-    predicate=lambda info: info.get("kind") != "dspark_draft",
+CAUSAL_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        CAUSAL_LM_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") != "dspark_draft",
+    )
 )
 # The DSpark drafter checkpoints (block proposers), one per adapter — exercised by
 # tests/spyre/test_dspark_draft_spyre.py via the block-propose ``_run_draft_block``.
-DSPARK_PATHS: list[str] = _select_representative_paths(
-    CAUSAL_LM_MODELS,
-    include_gated=_include_gated_flag,
-    predicate=lambda info: info.get("kind") == "dspark_draft",
+DSPARK_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        CAUSAL_LM_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") == "dspark_draft",
+    )
 )
-EMBED_PATHS: list[str] = _select_representative_paths(
-    EMBEDDING_MODELS, include_gated=_include_gated_flag
+EMBED_PATHS: list[str] = _exclude(
+    _select_representative_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)
 )
-MASKED_LM_PATHS: list[str] = _select_representative_paths(
-    MASKED_LM_MODELS, include_gated=_include_gated_flag
+MASKED_LM_PATHS: list[str] = _exclude(
+    _select_representative_paths(MASKED_LM_MODELS, include_gated=_include_gated_flag)
 )
-QUESTION_ANSWERING_PATHS: list[str] = _select_representative_paths(
-    QUESTION_ANSWERING_MODELS, include_gated=_include_gated_flag
+QUESTION_ANSWERING_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        QUESTION_ANSWERING_MODELS, include_gated=_include_gated_flag
+    )
 )
-VISION_PATHS: list[str] = _select_representative_paths(
-    VISION_MODELS,
-    include_gated=_include_gated_flag,
-    predicate=lambda info: info.get("kind") == "vlm",
+VISION_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        VISION_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") == "vlm",
+    )
 )
 
 
@@ -631,25 +671,31 @@ def _all_paths(
 # Every registered path per category, bypassing the smallest-per-adapter
 # reduction above -- used by generate_test_matrix.py's ``--only`` allowlist so
 # a caller can target any registered checkpoint, not just the adapter's
-# default representative.
-ALL_CAUSAL_PATHS: list[str] = _all_paths(
-    CAUSAL_LM_MODELS,
-    include_gated=_include_gated_flag,
-    predicate=lambda info: info.get("kind") != "dspark_draft",
+# default representative. Still passes through _exclude(): an excluded path
+# stays excluded even when named explicitly via --only (matches prior
+# behavior, back when --exclude was applied after this same list).
+ALL_CAUSAL_PATHS: list[str] = _exclude(
+    _all_paths(
+        CAUSAL_LM_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") != "dspark_draft",
+    )
 )
-ALL_EMBED_PATHS: list[str] = _all_paths(
-    EMBEDDING_MODELS, include_gated=_include_gated_flag
+ALL_EMBED_PATHS: list[str] = _exclude(
+    _all_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)
 )
-ALL_MASKED_LM_PATHS: list[str] = _all_paths(
-    MASKED_LM_MODELS, include_gated=_include_gated_flag
+ALL_MASKED_LM_PATHS: list[str] = _exclude(
+    _all_paths(MASKED_LM_MODELS, include_gated=_include_gated_flag)
 )
-ALL_QUESTION_ANSWERING_PATHS: list[str] = _all_paths(
-    QUESTION_ANSWERING_MODELS, include_gated=_include_gated_flag
+ALL_QUESTION_ANSWERING_PATHS: list[str] = _exclude(
+    _all_paths(QUESTION_ANSWERING_MODELS, include_gated=_include_gated_flag)
 )
-ALL_VISION_PATHS: list[str] = _all_paths(
-    VISION_MODELS,
-    include_gated=_include_gated_flag,
-    predicate=lambda info: info.get("kind") == "vlm",
+ALL_VISION_PATHS: list[str] = _exclude(
+    _all_paths(
+        VISION_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") == "vlm",
+    )
 )
 
 
@@ -714,6 +760,6 @@ RERANKER_MODELS = {
     },
 }
 
-RERANKER_PATHS: list[str] = [m["path"] for m in RERANKER_MODELS.values()]
+RERANKER_PATHS: list[str] = _exclude([m["path"] for m in RERANKER_MODELS.values()])
 # No per-adapter reduction for rerankers yet, so this equals RERANKER_PATHS -- kept separate so every category (see ALL_CAUSAL_PATHS et al.) follows the same pattern.
 ALL_RERANKER_PATHS: list[str] = list(RERANKER_PATHS)
