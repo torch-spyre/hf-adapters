@@ -45,10 +45,9 @@ import types
 
 import pytest
 import torch
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, PreTrainedModel
 
 from tests.conftest import (
-    get_dtype_for_cpu,
     load_ref_model,
     resolve_adapter_module_for_test,
 )
@@ -67,7 +66,7 @@ COS_THRESHOLD: float = 0.999
 def _run_prefill(
     adapter_mod: types.ModuleType,
     hf_common_mod: types.ModuleType,
-    model: torch.nn.Module,
+    model: PreTrainedModel,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
 ) -> torch.Tensor:
@@ -86,7 +85,6 @@ def _run_prefill(
 def test_auto_loader(model_path: str) -> None:
     auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
     hf_common_mod = sys.modules["hf_adapters.hf_common"]
-    torch_dtype = get_dtype_for_cpu(model_path=model_path)
     adapter_module = resolve_adapter_module_for_test(model_path)
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -105,9 +103,7 @@ def test_auto_loader(model_path: str) -> None:
     gc.collect()
 
     # Auto-loader path
-    model = auto_spyre_model.AutoSpyreModel.from_pretrained(
-        model_path, dtype=torch_dtype
-    )
+    model = auto_spyre_model.AutoSpyreModel.from_pretrained(model_path)
     _unwrap_compiled_blocks(model)
     with torch.no_grad():
         adapter_hidden = _run_prefill(

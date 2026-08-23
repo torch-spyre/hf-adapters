@@ -1,0 +1,8 @@
+# Fast spot-check for TEST_TYPE=integration (see Makefile's `tests` target).
+# Every caller (GHA, Jenkins, local dev) picks this up automatically --
+# update here only, nowhere else.
+models:
+  - Qwen/Qwen3-0.6B
+  - mistralai/Ministral-3-8B-Instruct-2512
+  - ibm-granite/granite-4.1-8b
+  - ibm-granite/granite-3.3-8b-instruct

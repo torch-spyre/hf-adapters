@@ -16,8 +16,8 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForMaskedLM, AutoTokenizer
 
+from hf_adapters.auto_spyre_model import dtype_for_model_path
 from tests.conftest import (
-    get_dtype_for_cpu,
     load_ref_model,
     resolve_adapter_module_for_test,
 )
@@ -36,7 +36,7 @@ COSINE_THRESHOLD = 0.999
 @pytest.mark.parametrize("model_path", MASKED_LM_PATHS, ids=MASKED_LM_PATHS)
 def test_auto_loader(model_path: str) -> None:
     auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
-    dtype = get_dtype_for_cpu(model_path)
+    dtype = dtype_for_model_path(model_path, target_device="cpu")
     adapter_module = resolve_adapter_module_for_test(model_path)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     assert tokenizer.mask_token is not None

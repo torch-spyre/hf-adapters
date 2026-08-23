@@ -55,7 +55,7 @@ import pytest
 from transformers import AutoTokenizer
 
 from hf_adapters import AutoSpyreModelForCausalLM
-from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
+from hf_adapters.auto_spyre_model import dtype_for_model_path
 from tests.conftest import (
     encode_generation_inputs,
     load_ref_model,
@@ -116,7 +116,7 @@ def test_e2e_multibatch_spyre(model_path: str) -> None:
 
     # One Spyre model, reused for the batched run and each single run (generate
     # allocates a fresh KV cache per call, so runs do not contaminate each other).
-    spyre_dtype = torch_dtype_for_model_path(model_path)
+    spyre_dtype = dtype_for_model_path(model_path, target_device="spyre")
     model = AutoSpyreModelForCausalLM.from_pretrained(model_path, dtype=spyre_dtype)
 
     # Exercise the public tokenized-input API attached by AutoSpyreModel. Bind the

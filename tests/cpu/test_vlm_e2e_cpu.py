@@ -39,7 +39,7 @@ import types
 
 import pytest
 import torch
-from transformers import AutoModelForImageTextToText
+from transformers import AutoModelForImageTextToText, PreTrainedModel
 
 from hf_adapters.auto_spyre_model import (
     IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
@@ -50,7 +50,6 @@ from tests._vision_helpers import (
     stock_vlm_generate,
 )
 from tests.conftest import (
-    get_dtype_for_cpu,
     load_ref_model,
     resolve_adapter_module_for_test,
 )
@@ -65,7 +64,7 @@ PROMPT: str = "Briefly describe this image."
 
 def _adapter_generate(
     adapter: types.ModuleType,
-    model: torch.nn.Module,
+    model: PreTrainedModel,
     processor,
     batch: dict,
     max_new_tokens: int,
@@ -91,10 +90,12 @@ def _adapter_generate(
 
 @pytest.mark.parametrize("model_path", VISION_PATHS, ids=VISION_PATHS)
 def test_vlm_generate(model_path: str) -> None:
+    from hf_adapters.auto_spyre_model import dtype_for_model_path
+
     adapter = resolve_adapter_module_for_test(
         model_path, mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING
     )
-    dtype = get_dtype_for_cpu(model_path=model_path)
+    dtype = dtype_for_model_path(model_path, target_device="cpu")
 
     processor, batch = build_vlm_batch(model_path, PROMPT)
     batch["pixel_values"] = batch["pixel_values"].to(dtype)

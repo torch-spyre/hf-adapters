@@ -29,10 +29,9 @@ from typing import Any, Callable
 
 import pytest
 import torch
-import torch.nn as nn
 from transformers import PreTrainedModel
 
-from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
+from hf_adapters.auto_spyre_model import dtype_for_model_path
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
@@ -88,7 +87,7 @@ def hf_greedy_steps(
 
 def adapter_greedy_steps(
     run_forward_fn: Callable,
-    model: nn.Module,
+    model: PreTrainedModel,
     input_ids: torch.Tensor,
     num_decode: int = 4,
 ) -> list[dict[str, Any]]:
@@ -272,9 +271,9 @@ def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]
     print("  Running HF reference on CPU ...")
     hf_results = hf_greedy_steps(model, input_ids, num_decode=num_decode)
 
-    # Use bfloat16 on Spyre when the registry requests it; otherwise float16.
-    # (Spyre does not support float32, so float32 registry entries still use float16.)
-    spyre_dtype = torch_dtype_for_model_path(model_path)
+    # Use bf16/fp16 dtype, requested by the registry or based on the model config.
+    # (Spyre does not support float32, so float32 entries will use fp16.)
+    spyre_dtype = dtype_for_model_path(model_path, target_device="spyre")
     move_model_to_spyre(model=model, module=adapter, dtype=spyre_dtype)
     print("  Running adapter on Spyre ...")
     adapter_results = adapter_greedy_steps(

@@ -41,8 +41,7 @@ import torch.nn.functional as F
 
 # Registers the "spyre" backend with sentence_transformers on import.
 import hf_adapters.st_backend  # noqa: F401
-from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
-from tests.conftest import get_dtype_for_cpu
+from hf_adapters.auto_spyre_model import dtype_for_model_path
 from tests.model_registry import EMBED_PATHS
 
 pytestmark = pytest.mark.model_harness("embedding")
@@ -135,7 +134,7 @@ def _run_model_test(model_path: str) -> list[dict[str, Any]]:
     print(f"{'=' * 70}")
 
     print("  Loading stock SentenceTransformer on CPU ...")
-    cpu_dtype = get_dtype_for_cpu(model_path)
+    cpu_dtype = dtype_for_model_path(model_path, target_device="cpu")
     cpu_model = SentenceTransformer(
         model_path,
         device="cpu",
@@ -146,7 +145,7 @@ def _run_model_test(model_path: str) -> list[dict[str, Any]]:
     cpu_out = _encode(cpu_model, PROMPTS)
 
     # Match the Spyre-safe dtype the backend uses so the comparison is fair.
-    dtype = torch_dtype_for_model_path(model_path=model_path)
+    dtype = dtype_for_model_path(model_path, target_device="spyre")
     print(f"  Loading SentenceTransformer with backend='spyre' (dtype={dtype}) ...")
     spyre_model = SentenceTransformer(
         model_path,

@@ -29,7 +29,6 @@ from __future__ import annotations
 import gc
 import time
 
-from torch.nn import Module
 from transformers import (
     AutoTokenizer,
     PreTrainedModel,
@@ -51,7 +50,7 @@ from tests.conftest import (
 )
 
 
-def _load_spyre_model(model_path: str) -> Module:
+def _load_spyre_model(model_path: str) -> PreTrainedModel:
     print(f"  Loading {model_path} on Spyre ...")
     t0 = time.time()
     model = AutoSpyreModelForCausalLM.from_pretrained(model_path)

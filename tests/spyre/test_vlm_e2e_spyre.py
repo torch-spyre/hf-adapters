@@ -60,14 +60,14 @@ from typing import Any
 
 import pytest
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from transformers import PreTrainedModel
 
 from hf_adapters import AutoSpyreModelForImageTextToText
 from hf_adapters.auto_spyre_model import (
     IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+    dtype_for_model_path,
     resolve_adapter_module,
-    torch_dtype_for_model_path,
 )
 from hf_adapters.hf_common import (
     DEVICE,
@@ -106,7 +106,7 @@ PROMPT = "Briefly describe this image."
 
 def _adapter_generate(
     adapter: types.ModuleType,
-    model: nn.Module,
+    model: PreTrainedModel,
     processor: Any,
     batch: dict[str, torch.Tensor],
     max_new_tokens: int,
@@ -126,7 +126,7 @@ def _adapter_generate(
 
 def _adapter_teacher_forced_steps(
     adapter: types.ModuleType,
-    model: nn.Module,
+    model: PreTrainedModel,
     batch: dict[str, torch.Tensor],
     forced_tokens: list[int],
 ) -> list[torch.Tensor]:
@@ -286,7 +286,7 @@ def test_vlm_generate_spyre(model_path: str) -> None:
     adapter = resolve_adapter_module(
         model_path, mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING
     )
-    dtype = torch_dtype_for_model_path(model_path)
+    dtype = dtype_for_model_path(model_path, target_device="spyre")
 
     processor, batch = build_vlm_batch(model_path, PROMPT)
     batch["pixel_values"] = batch["pixel_values"].to(dtype)

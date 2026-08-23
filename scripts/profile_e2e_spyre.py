@@ -75,9 +75,8 @@ from transformers import AutoTokenizer  # noqa: E402
 from hf_adapters import AutoSpyreModelForCausalLM  # noqa: E402
 
 # Registry key -> (HF path, Spyre-safe dtype). Kept inline so this script has
-# no dependency on the tests/ package. Dtypes mirror
-# hf_adapters.auto_spyre_model.MODEL_PATH_TO_TORCH_DTYPE: Ministral 3 uses
-# bfloat16; Granite 3.3 8B has no entry there, so it takes the fp16 default.
+# no dependency on the tests/ package. These match the checkpoints' configured
+# dtypes resolved by hf_adapters.auto_spyre_model.dtype_for_model_path.
 MODELS: dict[str, tuple[str, "torch.dtype"]] = {
     "ministral3": ("mistralai/Ministral-3-14B-Instruct-2512", torch.bfloat16),
     "granite8b": ("ibm-granite/granite-3.3-8b-instruct", torch.float16),
