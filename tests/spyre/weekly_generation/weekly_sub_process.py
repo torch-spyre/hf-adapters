@@ -96,6 +96,11 @@ def _process_batch(
 
     from tests.conftest import resolve_adapter_module_for_test
 
+    print(
+        f"{ts()}       child[{os.getpid()}] import resolve_adapter_module_for_test done",
+        flush=True,
+    )
+
     results: list[dict] = []
     for row in batch:
         model_path: str = str(row["model_id"])
