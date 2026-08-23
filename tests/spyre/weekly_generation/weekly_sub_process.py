@@ -94,96 +94,114 @@ def _process_batch(
         flush=True,
     )
 
-    from tests.conftest import resolve_adapter_module_for_test
-
-    print(
-        f"{ts()}       child[{os.getpid()}] import resolve_adapter_module_for_test done",
-        flush=True,
-    )
-
+    # Belt-and-braces top-level guard. The per-model try/except below already
+    # catches anything from the eval pipeline, so this only fires on failures
+    # OUTSIDE that loop — a broken import, a bad row-dict field, a queue put()
+    # error, etc. Without it the child would die silently and the parent would
+    # block forever waiting for a result_queue message that never arrives, so
+    # we always try to put SOMETHING on the queue before returning.
     results: list[dict] = []
-    for row in batch:
-        model_path: str = str(row["model_id"])
-        rec: dict = {
-            "model_name": model_path,
-            "config_class": row.get("config_class"),
-            "adapter_name": "",
-            "added_date": None,
-            "snapshot_date": snapshot_date,
-            "verified_on_cpu": False,
-            "verified_on_gpu": False,
-            "verified_on_spyre": False,
-            "curated": bool(row["curated"]),
-            "num_downloads": int(row.get("downloads") or 0),
-            "family": str(row.get("model_type") or ""),
-            "architecture": str(row.get("architectures") or ""),
-            "parameters_number": int(row.get("parameters") or 0),
-            "error": None,
-            "failure_category": None,
-        }
-        print(f"{ts()} - {model_path} " + ("\t(curated)" if row["curated"] else ""))
-        try:
-            try:
-                adapter_module = resolve_adapter_module_for_test(model_path)
-            except Exception as _adapter_exc:
-                from hf_adapters.hf_common import SpyreUnsupportedModelError
+    try:
+        from tests.conftest import resolve_adapter_module_for_test
 
-                if isinstance(_adapter_exc, SpyreUnsupportedModelError):
-                    rec["failure_category"] = FAILURE_CATEGORY_UNSUPPORTED_CHECKPOINT
-                else:
-                    rec["failure_category"] = FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER
-                raise
-            adapter_name: str = os.path.splitext(
-                os.path.basename(adapter_module.__file__)
-            )[0]
-            rec["adapter_name"] = adapter_name
-            rec["added_date"] = adapter_dates.get(adapter_name)
-
-            metrics = eval_model(model_path, adapter_module, model_type)
-            rec["verified_on_cpu"] = bool(metrics.get("load", False))
-            rec["verified_on_spyre"] = bool(metrics.get("correct", False))
-            rec["error"] = metrics.get("error") or None
-            rec["failure_category"] = metrics.get("failure_category") or None
-            if not rec["verified_on_cpu"] and rec["failure_category"] is None:
-                rec["failure_category"] = _classify_failure(
-                    rec["error"] or "", FAILURE_CATEGORY_CPU_LOAD_FAILED
-                )
-        except Exception as e:
-            # Skip the error/traceback for shallow failure categories where the
-            # failure_category itself is fully self-describing.
-            if rec["failure_category"] not in (
-                FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
-                FAILURE_CATEGORY_UNSUPPORTED_CHECKPOINT,
-                FAILURE_CATEGORY_MODEL_TOO_LARGE,
-            ):
-                rec["error"] = (
-                    f"{type(e).__name__}: {e}\n"
-                    f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
-                )
-            if rec["failure_category"] is None:
-                rec["failure_category"] = FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
-        results.append(rec)
         print(
-            f"{ts()}       child[{os.getpid()}] finished model "
-            f"{len(results)}/{len(batch)}: {model_path!r}  "
-            f"(verified_on_cpu={rec['verified_on_cpu']}, "
-            f"verified_on_spyre={rec['verified_on_spyre']}, "
-            f"failure_category={rec['failure_category']}, "
-            f"error={rec['error']})",
+            f"{ts()}       child[{os.getpid()}] import resolve_adapter_module_for_test done",
             flush=True,
         )
-        # Bail out of the batch immediately on a hardware exception — the
-        # Spyre device is unreachable, so every remaining model in this
-        # batch would hit the same wall. The parent picks up the signal
-        # from the returned results and aborts the outer loop.
-        if rec["failure_category"] == FAILURE_CATEGORY_HARDWARE_EXCEPTION:
+
+        for row in batch:
+            model_path: str = str(row["model_id"])
+            rec: dict = {
+                "model_name": model_path,
+                "config_class": row.get("config_class"),
+                "adapter_name": "",
+                "added_date": None,
+                "snapshot_date": snapshot_date,
+                "verified_on_cpu": False,
+                "verified_on_gpu": False,
+                "verified_on_spyre": False,
+                "curated": bool(row["curated"]),
+                "num_downloads": int(row.get("downloads") or 0),
+                "family": str(row.get("model_type") or ""),
+                "architecture": str(row.get("architectures") or ""),
+                "parameters_number": int(row.get("parameters") or 0),
+                "error": None,
+                "failure_category": None,
+            }
+            print(f"{ts()} - {model_path} " + ("\t(curated)" if row["curated"] else ""))
+            try:
+                try:
+                    adapter_module = resolve_adapter_module_for_test(model_path)
+                except Exception as _adapter_exc:
+                    from hf_adapters.hf_common import SpyreUnsupportedModelError
+
+                    if isinstance(_adapter_exc, SpyreUnsupportedModelError):
+                        rec["failure_category"] = (
+                            FAILURE_CATEGORY_UNSUPPORTED_CHECKPOINT
+                        )
+                    else:
+                        rec["failure_category"] = (
+                            FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER
+                        )
+                    raise
+                adapter_name: str = os.path.splitext(
+                    os.path.basename(adapter_module.__file__)
+                )[0]
+                rec["adapter_name"] = adapter_name
+                rec["added_date"] = adapter_dates.get(adapter_name)
+
+                metrics = eval_model(model_path, adapter_module, model_type)
+                rec["verified_on_cpu"] = bool(metrics.get("load", False))
+                rec["verified_on_spyre"] = bool(metrics.get("correct", False))
+                rec["error"] = metrics.get("error") or None
+                rec["failure_category"] = metrics.get("failure_category") or None
+                if not rec["verified_on_cpu"] and rec["failure_category"] is None:
+                    rec["failure_category"] = _classify_failure(
+                        rec["error"] or "", FAILURE_CATEGORY_CPU_LOAD_FAILED
+                    )
+            except Exception as e:
+                # Skip the error/traceback for shallow failure categories where the
+                # failure_category itself is fully self-describing.
+                if rec["failure_category"] not in (
+                    FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
+                    FAILURE_CATEGORY_UNSUPPORTED_CHECKPOINT,
+                    FAILURE_CATEGORY_MODEL_TOO_LARGE,
+                ):
+                    rec["error"] = (
+                        f"{type(e).__name__}: {e}\n"
+                        f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
+                    )
+                if rec["failure_category"] is None:
+                    rec["failure_category"] = FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
+            results.append(rec)
             print(
-                f"{ts()}       child[{os.getpid()}] aborting batch — "
-                f"hardware_exception detected; "
-                f"{len(batch) - len(results)} model(s) not attempted",
+                f"{ts()}       child[{os.getpid()}] finished model "
+                f"{len(results)}/{len(batch)}: {model_path!r}  "
+                f"(verified_on_cpu={rec['verified_on_cpu']}, "
+                f"verified_on_spyre={rec['verified_on_spyre']}, "
+                f"failure_category={rec['failure_category']}, "
+                f"error={rec['error']})",
                 flush=True,
             )
-            break
+            # Bail out of the batch immediately on a hardware exception — the
+            # Spyre device is unreachable, so every remaining model in this
+            # batch would hit the same wall. The parent picks up the signal
+            # from the returned results and aborts the outer loop.
+            if rec["failure_category"] == FAILURE_CATEGORY_HARDWARE_EXCEPTION:
+                print(
+                    f"{ts()}       child[{os.getpid()}] aborting batch — "
+                    f"hardware_exception detected; "
+                    f"{len(batch) - len(results)} model(s) not attempted",
+                    flush=True,
+                )
+                break
+    except Exception as _batch_exc:
+        print(
+            f"{ts()}       child[{os.getpid()}] _process_batch aborted: "
+            f"{type(_batch_exc).__name__}: {_batch_exc}",
+            flush=True,
+        )
+        _traceback.print_exc()
 
     result_queue.put(results)
     print(
