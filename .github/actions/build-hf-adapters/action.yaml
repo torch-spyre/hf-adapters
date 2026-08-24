@@ -47,8 +47,9 @@ runs:
         pwd
         ls -la
         git log --oneline -n 1
-        git pull origin main
+        git reset --hard
         git checkout main
+        git pull origin main
         git log --oneline -n 1
 
     - name: Checkout target commit
