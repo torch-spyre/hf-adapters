@@ -30,6 +30,26 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: checkout latest torch-spyre
+      shell: bash
+      working-directory: /home/senuser
+      run: |
+        source "$HOME/.bashrc"
+        source /etc/profile.d/ibm-aiu-setup.sh
+        git config --global --add safe.directory '*'
+        pwd
+        ls -la
+        uv pip freeze
+        cd
+        pwd
+        ls -la
+        cd /home/senuser/torch-spyre
+        pwd
+        ls -la
+        git log --oneline -n 1
+        git pull
+        git log --oneline -n 1
+
     - name: Checkout target commit
       id: resolve-sha
       shell: bash
