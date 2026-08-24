@@ -48,8 +48,8 @@ runs:
         ls -la
         git log --oneline -n 1
         git reset --hard
-        git checkout main
         git pull origin main
+        git checkout main
         git log --oneline -n 1
 
     - name: Checkout target commit
