@@ -26,7 +26,7 @@ a reference forward, then loads via ``AutoSpyreModelForTokenClassification``
 Usage (on Spyre pod)::
 
     pytest -s -vvv tests/spyre/test_e2e_token_classification_compare_spyre.py
-    pytest -s -vvv tests/spyre/test_e2e_token_classification_compare_spyre.py -k bert_ner
+    pytest -s -vvv tests/spyre/test_e2e_token_classification_compare_spyre.py -k bert-base-NER
 """
 
 import gc
