@@ -52,7 +52,8 @@ Not supported:
 - **`num_return_sequences > 1`.**
 - **Logits processors / warpers** beyond top-k/top-p and EOS suppression for
   `min_new_tokens`: no `repetition_penalty`, `no_repeat_ngram_size`,
-  `bad_words_ids`, `min_p`, `typical_p`, etc.
+  `bad_words_ids`, `min_p`, `typical_p`, `epsilon_cutoff`, `eta_cutoff`,
+  `exponential_decay_length_penalty`, etc.
 - **Custom `StoppingCriteria` / `stopping_criteria`** — only EOS-token stopping
   is implemented (matching `EosTokenCriteria`); no stop-strings, no `max_time`.
 - **`LogitsProcessorList` / `logits_processor` injection**, `streamer`,
@@ -66,5 +67,6 @@ Not supported:
   does not return rich outputs.
 - Supported generation settings use stock precedence (explicit kwarg > caller
   `generation_config` > model config > HF default) through
-  `_prepare_generation_config`. Unknown arguments and active unsupported
-  generation-config options are rejected instead of being silently ignored.
+  `_prepare_generation_config`. Active settings are checked against an explicit
+  allowlist; unknown arguments and non-neutral unsupported generation-config
+  options are rejected instead of being silently ignored.

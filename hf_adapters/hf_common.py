@@ -30,6 +30,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sympy import factorint
+from transformers import GenerationConfig
 from transformers.generation import GenerateDecoderOnlyOutput
 
 # Rank-aware device for multi-Spyre (tensor-parallel) runs. torchrun sets
@@ -1466,37 +1467,45 @@ def _normalize_eos_ids(eos):
     return eos
 
 
+_SUPPORTED_GENERATION_OPTIONS = {
+    "max_length",
+    "max_new_tokens",
+    "min_new_tokens",
+    "do_sample",
+    "temperature",
+    "top_k",
+    "top_p",
+    "suppress_tokens",
+    "begin_suppress_tokens",
+    "eos_token_id",
+    "pad_token_id",
+    "return_dict_in_generate",
+    "output_scores",
+    "output_logits",
+    # Decoder-only callers provide the prompt, so these IDs are inert metadata.
+    "bos_token_id",
+    "decoder_start_token_id",
+}
+_GENERATION_CONFIG_METADATA = {"_from_model_config", "transformers_version"}
+_NEUTRAL_GENERATION_CONFIG = GenerationConfig().to_dict()
+_NEUTRAL_GENERATION_CONFIG.update(GenerationConfig._get_default_generation_params())
+_NEUTRAL_GENERATION_CONFIG.update(
+    output_attentions=False,
+    output_hidden_states=False,
+)
+
+
 def _validate_supported_generation_config(cfg):
-    """Reject active generation options the Spyre decode loop does not support."""
-    unsupported = {
-        "min_length": (None, 0),
-        "max_time": (None,),
-        "stop_strings": (None,),
-        "num_beams": (None, 1),
-        "num_beam_groups": (None, 1),
-        "num_return_sequences": (None, 1),
-        "penalty_alpha": (None,),
-        "typical_p": (None, 1.0),
-        "min_p": (None,),
-        "top_h": (None,),
-        "repetition_penalty": (None, 1.0),
-        "no_repeat_ngram_size": (None, 0),
-        "bad_words_ids": (None, []),
-        "force_words_ids": (None, []),
-        "constraints": (None, []),
-        "forced_bos_token_id": (None,),
-        "forced_eos_token_id": (None,),
-        "sequence_bias": (None, {}),
-        "output_attentions": (None, False),
-        "output_hidden_states": (None, False),
-    }
+    """Reject active generation options outside the Spyre loop's allowlist."""
     active = []
-    for name, neutral_values in unsupported.items():
-        value = getattr(cfg, name, None)
-        if value not in neutral_values:
+    for name, value in cfg.to_dict().items():
+        if name in _SUPPORTED_GENERATION_OPTIONS or name in _GENERATION_CONFIG_METADATA:
+            continue
+        neutral = _NEUTRAL_GENERATION_CONFIG.get(name)
+        if value is not None and value != neutral:
             active.append(name)
     if active:
-        options = ", ".join(f"`{name}`" for name in active)
+        options = ", ".join(f"`{name}`" for name in sorted(active))
         raise SpyreUnsupportedFeatureError(
             f"The following generation options are not supported on Spyre: {options}"
         )
