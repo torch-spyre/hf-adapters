@@ -53,11 +53,12 @@ Not supported:
 - **Logits processors / warpers** beyond top-k/top-p and EOS suppression for
   `min_new_tokens`: no `repetition_penalty`, `no_repeat_ngram_size`,
   `bad_words_ids`, `min_p`, `typical_p`, `epsilon_cutoff`, `eta_cutoff`,
-  `exponential_decay_length_penalty`, etc.
+  `exponential_decay_length_penalty`, etc. `forced_bos_token_id` is supported,
+  including its stock interaction with `begin_suppress_tokens`.
 - **Custom `StoppingCriteria` / `stopping_criteria`** — only EOS-token stopping
   is implemented (matching `EosTokenCriteria`); no stop-strings, no `max_time`.
 - **`LogitsProcessorList` / `logits_processor` injection**, `streamer`,
-  `prefix_allowed_tokens_fn`, `forced_bos/eos_token_id`, etc.
+  `prefix_allowed_tokens_fn`, `forced_eos_token_id`, etc.
 
 ## Other behavioral notes
 

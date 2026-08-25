@@ -64,6 +64,7 @@ from hf_adapters.hf_common import (
     build_decode_mask,
     build_prefill_mask,
     decode_block_walk,
+    generation_begin_index,
     generation_cache_len,
     get_backbone,
     get_model_dtype,
@@ -446,6 +447,9 @@ def generate(
 
     batch_size, prompt_length = input_ids.shape
     actual_prompt_lengths = attention_mask.sum(dim=1)  # [B]
+    begin_suppress_index = generation_begin_index(
+        prompt_length, cfg.forced_bos_token_id
+    )
 
     max_cache_len = generation_cache_len(prompt_length, max_new_tokens)
     input_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
@@ -522,7 +526,9 @@ def generate(
             top_p,
             cfg.suppress_tokens,
             cfg.begin_suppress_tokens,
-            is_first_step=i == 0,
+            cfg.forced_bos_token_id,
+            current_length=prompt_length + i,
+            begin_suppress_index=begin_suppress_index,
         )
 
         # Append the token: generated slots are contiguous from padded_len.

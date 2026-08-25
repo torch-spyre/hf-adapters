@@ -1477,6 +1477,7 @@ _SUPPORTED_GENERATION_OPTIONS = {
     "top_p",
     "suppress_tokens",
     "begin_suppress_tokens",
+    "forced_bos_token_id",
     "eos_token_id",
     "pad_token_id",
     "return_dict_in_generate",
@@ -1643,6 +1644,14 @@ def normalize_generation_inputs(input_ids, attention_mask=None):
     )
 
 
+def generation_begin_index(input_ids_seq_length, forced_bos_token_id):
+    """Return stock HF's sequence length for begin-token suppression."""
+    begin_index = input_ids_seq_length
+    if input_ids_seq_length == 1 and forced_bos_token_id is not None:
+        begin_index += 1
+    return begin_index
+
+
 def select_next_token(
     next_logits,
     do_sample,
@@ -1651,23 +1660,30 @@ def select_next_token(
     top_p,
     suppress_tokens=None,
     begin_suppress_tokens=None,
-    is_first_step=False,
+    forced_bos_token_id=None,
+    current_length=None,
+    begin_suppress_index=None,
     return_scores=False,
 ):
     """CPU token selection with supported HF processing and optional scores.
 
-    Returned scores are the fully processed values used for selection: token
-    suppression for greedy generation, plus temperature/top-k/top-p warping for
-    sampling. ``return_scores=False`` preserves the token-only API used by the
-    multimodal generation paths.
+    Returned scores are the fully processed values used for selection: forced
+    BOS and token suppression for greedy generation, plus temperature/top-k/top-p
+    warping for sampling. ``return_scores=False`` preserves the token-only API
+    used by the multimodal generation paths.
     """
+    force_bos = forced_bos_token_id is not None and current_length == 1
+    suppress_at_begin = begin_suppress_tokens and current_length == begin_suppress_index
     scores = next_logits
-    if suppress_tokens or (is_first_step and begin_suppress_tokens):
+    if force_bos:
+        scores = torch.full_like(scores, -torch.inf)
+        scores[:, forced_bos_token_id] = 0
+    elif suppress_tokens or suppress_at_begin:
         scores = scores.clone()
-        if suppress_tokens:
-            scores[:, suppress_tokens] = -torch.inf
-        if is_first_step and begin_suppress_tokens:
-            scores[:, begin_suppress_tokens] = -torch.inf
+    if suppress_tokens:
+        scores[:, suppress_tokens] = -torch.inf
+    if suppress_at_begin:
+        scores[:, begin_suppress_tokens] = -torch.inf
     if not do_sample:
         tokens = torch.argmax(scores, dim=-1)  # [B]
         return (tokens, scores) if return_scores else tokens
@@ -1829,6 +1845,7 @@ def generate(
     )
     effective_max_new_tokens = cfg.max_length - input_length
     min_new_tokens = cfg.min_new_tokens or 0
+    begin_suppress_index = generation_begin_index(input_length, cfg.forced_bos_token_id)
 
     batch_size = input_ids.shape[0]
     vocab_size = text_config(model.config).vocab_size
@@ -1935,7 +1952,9 @@ def generate(
             cfg.top_p,
             cfg.suppress_tokens,
             cfg.begin_suppress_tokens,
-            is_first_step=i == 0,
+            cfg.forced_bos_token_id,
+            current_length=input_length + i,
+            begin_suppress_index=begin_suppress_index,
             return_scores=True,
         )
         if collect_scores:
