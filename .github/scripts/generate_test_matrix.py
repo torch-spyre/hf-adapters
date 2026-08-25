@@ -71,8 +71,14 @@ def generate_matrices(exclude_models=None, only_models=None):
             selected = [p for p in selected if p in only_models]
         paths[name] = selected
 
-    # Combine for jobs that test both types
-    combined_paths = paths["causal"] + paths["embed"]
+    # Feeds spyre-load-tests' matrix: test_load_spyre.py's five model_path suites.
+    combined_paths = (
+        paths["causal"]
+        + paths["embed"]
+        + paths["masked_lm"]
+        + paths["question_answering"]
+        + paths["token_classification"]
+    )
 
     return {
         "causal": paths["causal"],
