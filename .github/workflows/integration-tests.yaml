@@ -101,10 +101,11 @@ on:
           paths exactly as they appear in tests/model_registry.py -- any
           registered path works, not just the smallest-per-adapter default
           used when this input is left empty. Leave empty (default) to fall
-          back to a fixed 4-model (causal-only) spot-check when test_type is
-          "integration" (the default), or to every registered model per suite
-          for any other test_type -- see run-tests below. An explicit models
-          value applies to every test_type, including "integration".
+          back to the model list in tests/model_lists/integration.yaml when
+          test_type is "integration" (the default), or to every registered
+          model per suite for any other test_type -- see run-tests below.
+          An explicit models value applies to every test_type, including
+          "integration".
         required: false
         type: string
         default: ''
@@ -156,23 +157,58 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
+  # Read tests/model_lists/integration.yaml and emit a space-separated model
+  # list as a step output. Only runs when test_type is "integration" (the
+  # default); for all other tiers the output is left empty so _test_matrix.yaml
+  # runs its full registry.
+  # ---------------------------------------------------------------------------
+  resolve-models:
+    name: Resolve integration model list
+    needs: provenance
+    runs-on: ubuntu-latest
+    outputs:
+      models: ${{ steps.read-models.outputs.models }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || '' }}
+          repository: ${{ inputs.repository != '' && inputs.repository || github.repository }}
+          sparse-checkout: tests/model_lists/integration.yaml
+          sparse-checkout-cone-mode: false
+      - name: Read integration model list
+        id: read-models
+        run: |
+          set -euo pipefail
+          if [[ "${{ inputs.test_type || 'integration' }}" != "integration" ]]; then
+            # Non-integration tiers get '' -> _test_matrix.yaml runs full registry.
+            echo "models=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # yq (mikefarah/yq) is preinstalled on ubuntu-latest runners.
+          models=$(yq '.models | join(" ")' tests/model_lists/integration.yaml)
+          if [[ -z "${models}" || "${models}" == "null" ]]; then
+            echo "tests/model_lists/integration.yaml has no models" >&2
+            exit 1
+          fi
+          echo "models=${models}" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
   # Delegates to the same reusable _test_matrix.yaml used by "run-tests" in
   # torch_spyre_tests.yaml. `test_type` defaults to "integration" (the smoke
   # suite); if `models` is left empty AND test_type is "integration", it falls
-  # back to a fixed 4-model spot-check (Qwen3-0.6B, Ministral-3-8B-Instruct-2512,
-  # Granite 4.1 8B, Granite 3.3 8B) -- all causal-only -- so upstream-triggered
-  # runs stay fast by default. For any other test_type (unit/regression/trunk/
-  # a suite-key combo), an empty `models` instead passes '' through to
-  # _test_matrix.yaml, which means "no restriction" there -- every suite (incl.
-  # vision/embed/reranker, which the 4-model spot-check has none of) runs its
-  # full registry. Without this split, the spot-check default would starve
-  # spyre-vlm-e2e-tests/spyre-embed-compare-tests of any matrix entries under
-  # test_type: regression (0-model matrix -> job never runs, not even a
-  # failure -- see the "run spyre unit tests" gate). An explicit `models`
-  # value always wins outright, for every test_type.
+  # back to the model list from tests/model_lists/integration.yaml (all causal-
+  # only) -- so upstream-triggered runs stay fast by default. For any other
+  # test_type (unit/regression/trunk/a suite-key combo), an empty `models`
+  # instead passes '' through to _test_matrix.yaml, which means "no restriction"
+  # there -- every suite (incl. vision/embed/reranker, which the integration
+  # spot-check has none of) runs its full registry. Without this split, the
+  # spot-check default would starve spyre-vlm-e2e-tests/spyre-embed-compare-tests
+  # of any matrix entries under test_type: regression (0-model matrix -> job
+  # never runs, not even a failure -- see the "run spyre unit tests" gate).
+  # An explicit `models` value always wins outright, for every test_type.
   # ---------------------------------------------------------------------------
   run-tests:
-    needs: provenance
+    needs: [provenance, resolve-models]
     uses: ./.github/workflows/_test_matrix.yaml
     with:
       image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
@@ -181,7 +217,7 @@ jobs:
       ref: ${{ inputs.ref || '' }}
       repository: ${{ inputs.repository || '' }}
       test_type: ${{ inputs.test_type || 'integration' }}
-      models: ${{ (inputs.models != '' && inputs.models) || ((inputs.test_type || 'integration') == 'integration' && 'Qwen/Qwen3-0.6B mistralai/Ministral-3-8B-Instruct-2512 ibm-granite/granite-4.1-8b ibm-granite/granite-3.3-8b-instruct') || '' }}
+      models: ${{ (inputs.models != '' && inputs.models) || needs.resolve-models.outputs.models || '' }}
 
   # ----------------------------------------------------------------------------------
   # Fan-in gate job so callers can poll a single stable job name for pass/fail.

@@ -156,17 +156,6 @@ def prepare_for_spyre(model):
         "this checkpoint has no vision_config."
     )
 
-    try:
-        from torch_spyre._inductor import (  # type: ignore[import-not-found]
-            config as spyre_config,
-        )
-
-        # Bundle-scoped HBM pool planning in torch-spyre d9c0301 corrupts
-        # Gemma outputs. Keep this disabled through lazy compilation.
-        setattr(spyre_config, "hbm_pool_planning", False)
-    except ImportError:
-        pass
-
     # Shared text decoder (mirrors hf_gemma4.prepare_for_spyre).
     hf_gemma4.prepare_text_decoder_for_spyre(model)
 
