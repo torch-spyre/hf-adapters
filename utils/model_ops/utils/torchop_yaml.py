@@ -416,7 +416,7 @@ class TorchOpCollector:
         "torch.index_select",
         "torch.select_scatter",
     ]
-    _SPECIAL_INTLIMIT_OPS = _INDEX_INTLIMIT_OPS + ["torch.getitem"]
+    _SPECIAL_INTLIMIT_OPS = _INDEX_INTLIMIT_OPS + ["torch.getitem", "torch.setitem"]
 
     @staticmethod
     def _compute_randintlimit(op_name, i, dtype, saved_shape, san_args):
@@ -424,11 +424,17 @@ class TorchOpCollector:
             return 1000
         if i == 0:
             return 1000
-        if op_name == "torch.getitem" and "int" in str(dtype):
-            TorchOpCollector.log_function[TorchOpCollector.log_mthd](
-                f"i: {i}, saved_shape: {saved_shape}, op_name: {op_name}, dtype: {dtype}, san_args: {san_args}"
-            )
-            return saved_shape[0]
+        # getitem/setitem: ``a[idx]`` / ``a[idx] = v`` index dim 0 of arg 0, so the
+        # index tensor at i == 1 is bounded by saved_shape[0]. Guard on i to avoid
+        # bounding setitem's value tensor (i == 2), which carries no index
+        # semantics even when its dtype is integral.
+        if op_name in ("torch.getitem", "torch.setitem"):
+            if i == 1 and "int" in str(dtype) and saved_shape:
+                TorchOpCollector.log_function[TorchOpCollector.log_mthd](
+                    f"i: {i}, saved_shape: {saved_shape}, op_name: {op_name}, dtype: {dtype}, san_args: {san_args}"
+                )
+                return saved_shape[0]
+            return 1000
         if op_name in TorchOpCollector._INDEX_INTLIMIT_OPS:
             dim_index = 2 if op_name == "torch.select_scatter" else 1
             if i == dim_index + 1 and "int" in str(dtype):
