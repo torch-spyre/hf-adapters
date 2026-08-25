@@ -1916,7 +1916,8 @@ def generate(
 
         # Crop away Spyre LM-head padding before exposing logits or selecting a
         # token. Stock generation only sees the model's configured vocabulary.
-        raw_next_logits = next_logits[:, :vocab_size]
+        # Upcast to float32, mirroring HF behavior.
+        raw_next_logits = next_logits[:, :vocab_size].float()
         if collect_logits:
             generation_logits.append(raw_next_logits)
 
