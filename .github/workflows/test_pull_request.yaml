@@ -15,7 +15,11 @@ on:
     branches: [main]
     tags: ["*"]
   pull_request:
-    branches: [main]
+    # TEMPORARY: ci/path-sensitive-pr-tests added alongside main to let a
+    # stacked test PR (base=ci/path-sensitive-pr-tests) trigger this workflow
+    # for manual verification before #415 merges. Revert to just [main]
+    # before merging.
+    branches: [main, ci/path-sensitive-pr-tests]
     types: [opened, synchronize, reopened]
   merge_group:
     types: [checks_requested]
@@ -86,6 +90,7 @@ concurrency:
 permissions:
   contents: read
   checks: write
+  pull-requests: read # so that gh pr view can fetch the changed-file list (select-changed-models)
   # actions: read is required by _test_matrix.yaml's collect-failed-suites job to list/download failed-suite-* artifacts via the REST API; reusable workflows can only narrow the caller's permissions, so this must be granted here too.
   actions: read
 
@@ -115,19 +120,79 @@ jobs:
         id: label
         uses: ./.github/actions/detect-integration-test-label
 
+  # Path-sensitive selection (pull_request only; push/merge_group/workflow_dispatch always get the full matrix): diffs the PR against its base and sets run-tests' `models` to the changed adapter(s) plus their dependents, or `skip_tests` for doc/weekly-scan-only diffs, else falls back to the full matrix -- see .github/scripts/select_changed_models.py.
+  select-changed-models:
+    name: Select changed models
+    runs-on: ubuntu-latest
+    outputs:
+      # steps.default only runs (and only has outputs) on non-pull_request
+      # events, and steps.select only on pull_request -- exactly one side of
+      # each `||` is ever populated, so this always resolves to whichever one
+      # ran. Using each step's own `if:` (rather than testing
+      # github.event_name inside a run: script) avoids a template expression
+      # getting textually substituted into a shell comparison, which reads
+      # oddly once expanded (e.g. `[[ "pull_request" != "pull_request" ]]`
+      # on the very event it's meant to detect).
+      models: ${{ steps.select.outputs.models || steps.default.outputs.models }}
+      skip_tests: ${{ steps.select.outputs.skip_tests || steps.default.outputs.skip_tests }}
+    steps:
+      - name: Default (non-pull_request events always run everything)
+        id: default
+        if: github.event_name != 'pull_request'
+        run: |
+          printf 'models=\nskip_tests=false\n' | tee -a "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        if: github.event_name == 'pull_request'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Same technique as torch-spyre's detect-doc-only-change composite
+      # action: `gh pr view --json files` reads the changed-file list from
+      # the GitHub API instead of diffing locally, so no checkout history
+      # (fetch-depth) is needed for it.
+      - name: Determine changed files
+        id: changed
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr view "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" \
+            --json files --jq '.files[].path' > changed_files.txt
+          echo "Changed files:"
+          cat changed_files.txt
+
+      - name: Select models
+        id: select
+        if: github.event_name == 'pull_request'
+        run: |
+          python -m pip install --quiet pytest
+          # tee both prints the selection to the job log and appends it to
+          # GITHUB_OUTPUT, so `models=`/`skip_tests=` are visible without
+          # having to inspect run-tests' inputs.
+          python .github/scripts/select_changed_models.py changed_files.txt | tee -a "$GITHUB_OUTPUT"
+
   # ---------------------------------------------------------------------------
   # Delegates to the shared _test_matrix.yaml (pre-commit, mypy, check-uv-lock,
   # adapter-coverage, matrix generation, and every spyre-*-tests /
   # spyre-model-module-tests suite). test_type is left at its default
   # ("regression" -- everything), matching this workflow's historical
-  # behavior of always running the full suite. skip_tests carries the
-  # "integration-test" label decision through: it skips matrix generation,
-  # adapter-coverage, and every spyre suite (leaving pre-commit/mypy/
-  # check-uv-lock running, same as before) when Jenkins owns this commit's
-  # testing.
+  # behavior of always running the full suite. skip_tests carries both the
+  # "integration-test" label decision AND select-changed-models' doc/weekly-only
+  # decision through: it skips matrix generation, adapter-coverage, and every
+  # spyre suite (leaving pre-commit/mypy/check-uv-lock running, same as before)
+  # when Jenkins owns this commit's testing, or when the diff can't affect any
+  # of them. models carries select-changed-models' single-adapter restriction
+  # through, when applicable.
   # ---------------------------------------------------------------------------
   run-tests:
-    needs: [detect-label]
+    needs: [detect-label, select-changed-models]
     uses: ./.github/workflows/_test_matrix.yaml
     with:
       image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
@@ -135,25 +200,31 @@ jobs:
       extra_test_flags_multi_spyre: -vvv -s
       ref: ${{ inputs.ref || '' }}
       repository: ${{ inputs.repository || '' }}
-      skip_tests: ${{ needs.detect-label.outputs.labeled == 'true' }}
+      models: ${{ needs.select-changed-models.outputs.models }}
+      skip_tests: ${{ needs.detect-label.outputs.labeled == 'true' || needs.select-changed-models.outputs.skip_tests == 'true' }}
 
   # ----------------------------------------------------------------------------------
-  # Required check gate -- fans in detect-label and the delegated suite run so a
-  # single branch protection rule ("tests / run spyre unit tests") passes only
-  # when both succeed. A labeled PR still gets a green run-tests result (its
-  # jobs report "skipped", not "failure") -- that flow is handled by Jenkins.
+  # Required check gate -- fans in detect-label, select-changed-models, and the
+  # delegated suite run so a single branch protection rule ("tests / run spyre
+  # unit tests") passes only when all succeed. A labeled PR still gets a green
+  # run-tests result (its jobs report "skipped", not "failure") -- that flow is
+  # handled by Jenkins. select-changed-models is checked explicitly for the same
+  # reason detect-label is: a FAILURE there would skip run-tests outright (not
+  # fail it), which contains(needs.run-tests.result, 'failure') would miss.
   # ----------------------------------------------------------------------------------
   run-spyre-unit-tests:
     name: run spyre unit tests
     runs-on: ubuntu-latest
     needs:
       - detect-label
+      - select-changed-models
       - run-tests
     if: always()
     steps:
       - name: Check all suites passed
         run: |-
           if ${{ contains(needs.detect-label.result, 'failure') || contains(needs.detect-label.result, 'cancelled') ||
+                 contains(needs.select-changed-models.result, 'failure') || contains(needs.select-changed-models.result, 'cancelled') ||
                  contains(needs.run-tests.result, 'failure') || contains(needs.run-tests.result, 'cancelled') }}; then
             echo "One or more test suites failed."
             exit 1
