@@ -84,6 +84,23 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 **CPU Accurate** = adapter hidden-states have cosine similarity ≥ 0.999 vs stock HF on CPU (the bound accommodates the bf16-native EmbeddingGemma; fp16 models clear it with wide margin).
 **Spyre Compiles / Spyre Runs** = via `test_e2e_embed_compare_spyre.py`. GTE-Qwen2 compiles and executes end-to-end on Spyre but its pooled embeddings drift from the CPU reference; the Qwen3/Mistral/BERT/XLM-RoBERTa/MPNet/ModernBERT encoder paths match within fp16 noise. EmbeddingGemma runs in **bf16** (fp16 overflows its residual stream) and matches the bf16 CPU reference within bf16 noise (per-token cosine ≥ 0.999; pooled ≥ 0.99).
 
+### Token Classification (NER)
+
+Encoder models fine-tuned for token-level label prediction (NER, POS, chunking).
+The encoder backbone runs on Spyre via the existing adapter; the linear
+`classifier` head runs on CPU (pinned via `_spyre_cpu_submodules`).
+Use `AutoSpyreModelForTokenClassification`; returns a standard
+`TokenClassifierOutput` with per-token `logits [B, L, num_labels]` on CPU.
+
+| Model | model\_type | head\_dim | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
+|-------|-----------|---------|--------------|-------------|---------------|-----------|
+| BERT-base NER (dslim/bert-base-NER) | bert | 64 | Yes | Yes | Yes | Yes |
+
+**CPU Accurate** = per-token argmax label matches stock HF exactly; per-token
+logit cosine ≥ 0.999 vs stock HF on CPU (`test_token_classification_cpu_accuracy.py`).
+**Spyre Runs** = via `test_e2e_token_classification_compare_spyre.py`;
+per-token logit cosine ≥ 0.99 and exact label match vs CPU reference.
+
 ### Spyre Numerical Accuracy (torch-spyre @ 7c6ef99)
 
 Per-layer block comparison (`test_block_cpu_vs_spyre.py`) with random
@@ -111,8 +128,8 @@ single-token decode path (seq_len=1), not an adapter issue.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 28 adapters · 45 verified checkpoints · 100+ compatible models.
-The 45 verified rows are 28 generative + 13 embedding + 4 vision-language (see the
+**Coverage:** 28 adapters · 46 verified checkpoints · 100+ compatible models.
+The 46 verified rows are 28 generative + 13 embedding + 1 token-classification + 4 vision-language (see the
 Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are
 vision-tower components used by VLM adapters rather than standalone model adapters.
 Granite Vision 4.1 is verified both as a text backbone (generative) and as a full VLM.
@@ -154,7 +171,7 @@ pattern, norms, and weight layout.
 | hf\_siglip\_vision.py | SigLIP vision tower | 1 | SigLIP towers of other VLMs (extracted as a bare `SiglipVisionModel`) |
 | hf\_mistral3\_vision\_mm.py | mistral3 (multimodal) | 2 | Mistral-Small-3.1/3.2 Vision; Ministral-3-14B-Instruct-2512 (ministral3 text backbone, bf16) |
 | hf\_pixtral\_vision.py | Pixtral vision tower | 1 | Pixtral towers of Mistral3 Vision checkpoints |
-| hf\_bert.py | bert | 2 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants |
+| hf\_bert.py | bert | 3 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants, BERT NER/POS/chunking fine-tunes |
 | hf\_xlm\_roberta.py | xlm-roberta | 1 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes |
 | hf\_mpnet.py | mpnet | 1 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base, all-mpnet-base-v1 |
 | hf\_modernbert.py | modernbert | 3 | answerdotai/ModernBERT-base, answerdotai/ModernBERT-large, other ModernBERT embed/classifier fine-tunes |

@@ -1,0 +1,48 @@
+name: Save failed-suite descriptor
+description: >-
+  Call with if: failure() from a continue-on-error matrix leg. Writes a
+  job_key-tagged suite descriptor and uploads it as a uniquely-named
+  artifact, so _test_matrix.yaml's collect-failed-suites job can rebuild a
+  pod-level retry matrix without relying on the calling job's own
+  (continue-on-error-muddied) conclusion.
+
+inputs:
+  job_key:
+    description: Suite-type key matching one of collect-failed-suites' expected keys (load/smoke/token_compare/embed_compare/vlm/reranker/masked_lm/qa/edge_cases/model_module)
+    required: true
+  payload:
+    description: >-
+      JSON object (as a string) with the suite-identifying fields, e.g.
+      '{"model_key": "..."}'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Write descriptor
+      shell: bash
+      env:
+        JOB_KEY: ${{ inputs.job_key }}
+        PAYLOAD: ${{ inputs.payload }}
+      run: |
+        mkdir -p "${RUNNER_TEMP}/failed_suite"
+        python3 -c '
+        import json, os
+
+        payload = json.loads(os.environ["PAYLOAD"])
+        payload["job_key"] = os.environ["JOB_KEY"]
+        out_path = os.path.join(os.environ["RUNNER_TEMP"], "failed_suite", "suite.json")
+        with open(out_path, "w") as f:
+            json.dump(payload, f)
+        '
+
+    # github.run_attempt in the name: the artifacts API is run-scoped not
+    # attempt-scoped, so without it a later attempt would retry a suite that
+    # already passed.
+    - name: Upload descriptor artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: failed-suite-${{ github.run_attempt }}-${{ inputs.job_key }}-${{ strategy.job-index }}
+        path: ${{ runner.temp }}/failed_suite/suite.json
+        if-no-files-found: error
+        retention-days: 1

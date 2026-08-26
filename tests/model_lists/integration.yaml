@@ -5,4 +5,4 @@ models:
   - Qwen/Qwen3-0.6B
   - mistralai/Ministral-3-8B-Instruct-2512
   - ibm-granite/granite-4.1-8b
-  - ibm-granite/granite-3.3-8b-instruct
+  - google/gemma-4-12B-it

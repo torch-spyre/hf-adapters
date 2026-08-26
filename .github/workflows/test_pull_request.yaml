@@ -86,6 +86,8 @@ concurrency:
 permissions:
   contents: read
   checks: write
+  # actions: read is required by _test_matrix.yaml's collect-failed-suites job to list/download failed-suite-* artifacts via the REST API; reusable workflows can only narrow the caller's permissions, so this must be granted here too.
+  actions: read
 
 jobs:
   # Resolves the `integration-test` label for BOTH pull_request and merge_group.

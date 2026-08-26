@@ -100,17 +100,6 @@ def prepare_for_spyre(model):
     from transformers.models.ministral3.modeling_ministral3 import Ministral3RMSNorm
     from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
-    try:
-        from torch_spyre._inductor import (  # type: ignore[import-not-found]
-            config as spyre_config,
-        )
-
-        # Bundle-scoped HBM pool planning in torch-spyre d9c0301 corrupts
-        # Ministral outputs. Keep this disabled through lazy compilation.
-        setattr(spyre_config, "hbm_pool_planning", False)
-    except ImportError:
-        pass
-
     # Decide the correct RMSNorm class in one place by inspecting the first
     # decoder layer's norm — Ministral3 uses Ministral3RMSNorm, Mistral-Small
     # uses MistralRMSNorm.

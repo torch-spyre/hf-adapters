@@ -27,6 +27,7 @@ from tests.model_registry import (
     MASKED_LM_MODELS,
     QUESTION_ANSWERING_MODELS,
     RERANKER_MODELS,
+    TOKEN_CLASSIFICATION_MODELS,
     VISION_MODELS,
 )
 
@@ -94,6 +95,12 @@ def get_registered_adapters():
 
     # Collect adapters from RERANKER_MODELS
     for model_info in RERANKER_MODELS.values():
+        adapter = model_info.get("adapter")
+        if adapter:
+            registered_adapters.add(adapter)
+
+    # Collect adapters from TOKEN_CLASSIFICATION_MODELS
+    for model_info in TOKEN_CLASSIFICATION_MODELS.values():
         adapter = model_info.get("adapter")
         if adapter:
             registered_adapters.add(adapter)
@@ -170,6 +177,7 @@ def test_adapter_coverage_details():
         + list(QUESTION_ANSWERING_MODELS.values())
         + list(VISION_MODELS.values())
         + list(RERANKER_MODELS.values())
+        + list(TOKEN_CLASSIFICATION_MODELS.values())
     ):
         adapter = model_info.get("adapter")
         if adapter:

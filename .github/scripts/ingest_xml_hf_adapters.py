@@ -9,7 +9,8 @@ Usage (called by the GHA workflow):
         --workflow "test_pull_request" \
         --branch   "main" \
         --sha      "abcdef1234..." \
-        --run-id   "12345678" \
+        --run-id   "3f2b9c1e-...-uuid" \
+        --gha-run-id "12345678" \
         --triggered-at "2026-04-25T14:20:45Z" \
         --pr-number 2271 \
         --platform "x86_64"
@@ -185,7 +186,7 @@ def insert_run(client, run_id: str, run: dict, args):
                 args.branch,
                 (args.sha or "").ljust(40)[:40],
                 int(args.pr_number) if args.pr_number.strip() else 0,
-                int(args.run_id or 0),
+                _gha_run_id(args),
                 run["triggered_at"].replace(tzinfo=None),
                 run["total_tests"],
                 run["passed"],
@@ -300,12 +301,24 @@ def insert_properties(client, run_id: str, cases: list[dict]):
 # ---------------------------------------------------------------------------
 
 
+def _gha_run_id(args) -> int:
+    """The numeric GitHub Actions run id for the gha_run_id column / dedup key.
+
+    Kept strictly separate from --run-id, which carries a UUID identifying the test run;
+    a non-numeric value here must degrade to 0 rather than abort the whole ingest.
+    """
+    raw = (getattr(args, "gha_run_id", "") or "").strip()
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return 0
+
+
 def _threaded_run_id(args) -> str:
     """--run-id when it is a real UUID, else "" so the caller mints one.
 
-    The flag has always carried a Jenkins BUILD_NUMBER historically (see this module's usage
-    example), which is not a UUID and must not land in a UUID column. Only a well-formed
-    uuid is honoured.
+    Only a well-formed uuid is honoured: the column is a UUID join key, so any
+    other value (a build number, a GHA run id) must be ignored, not stored.
     """
     raw = (getattr(args, "run_id", "") or "").strip()
     try:
@@ -322,6 +335,7 @@ def main():
     parser.add_argument("--branch", default="")
     parser.add_argument("--sha", default="")
     parser.add_argument("--run-id", default="")
+    parser.add_argument("--gha-run-id", default="")
     parser.add_argument("--triggered-at", default="")
     parser.add_argument("--pr-number", default="")
     parser.add_argument(
@@ -387,19 +401,6 @@ def main():
         # `filename` actually unique for both dedup and storage.
         run["filename"] = str(xml_path.relative_to(xml_root))
 
-        # Deduplication
-        existing = client.query(
-            "SELECT count() FROM hf_test_runs "
-            "WHERE gha_run_id = {gha_run_id:UInt64} AND filename = {filename:String}",
-            parameters={
-                "gha_run_id": int(args.run_id or 0),
-                "filename": run["filename"],
-            },
-        )
-        if existing.result_rows[0][0] > 0:
-            print(f"  Already ingested — skipping {run['filename']}")
-            continue
-
         # One run_id per TEST RUN, not per XML file: the dispatching orchestrator generates
         # a uuid and threads it down as --run-id, stamping the SAME value on
         # artifact_results, so the two tables join. `filename` stays the per-file
@@ -407,6 +408,28 @@ def main():
         # --run-id is absent or not a uuid (standalone / GHA-only run): the rows are still
         # valid, just not linked to an artifact.
         run_id = _threaded_run_id(args) or str(uuid.uuid4())
+
+        # Dedup on (run_id, filename): a re-ingest of the SAME test run must be
+        # idempotent, but two distinct runs must never collapse. gha_run_id alone
+        # cannot do this -- it is 0 on Jenkins legs, which carry a uuid instead.
+        gha_run_id = _gha_run_id(args)
+        existing = client.query(
+            "SELECT count() FROM hf_test_runs "
+            "WHERE run_id = {run_id:String} AND filename = {filename:String}",
+            parameters={"run_id": run_id, "filename": run["filename"]},
+        )
+        if existing.result_rows[0][0] == 0 and gha_run_id:
+            # A GHA re-ingest mints a fresh uuid4, so fall back to the numeric
+            # run id to keep that path idempotent.
+            existing = client.query(
+                "SELECT count() FROM hf_test_runs WHERE "
+                "gha_run_id = {gha_run_id:UInt64} AND filename = {filename:String}",
+                parameters={"gha_run_id": gha_run_id, "filename": run["filename"]},
+            )
+        if existing.result_rows[0][0] > 0:
+            print(f"  Already ingested — skipping {run['filename']}")
+            continue
+
         print(
             f"  run_id={run_id}  tests={run['total_tests']}  "
             f"passed={run['passed']}  failed={run['failed']}  "

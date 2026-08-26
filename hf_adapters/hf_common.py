@@ -2667,6 +2667,54 @@ def prefill_reranker(
 
 
 # ---------------------------------------------------------------------------
+# Token-classification prefill driver (NER / POS / chunking families)
+# ---------------------------------------------------------------------------
+
+
+def prefill_token_classification(
+    run_encoder_forward_fn: Callable,
+    model,
+    input_ids,
+    attention_mask,
+    token_type_ids=None,
+) -> torch.Tensor:
+    """Run an encoder on Spyre and its token-classification head on CPU.
+
+    Drives the encoder backbone via ``prefill_encoder``, then applies
+    ``model.classifier`` (a single linear layer whose output dim equals
+    ``config.num_labels``) to every token position.  The head is kept on
+    CPU (via ``_spyre_cpu_submodules``) to avoid:
+
+    - ``aten.slice`` (index operations that don't lower on Spyre).
+    - Any Dropout path that uses ``torch.bernoulli``.
+
+    Args:
+        run_encoder_forward_fn: ``fn(model, input_ids, attn_mask, position_ids,
+            token_type_ids) -> [B, padded_len, H]``.
+        model: Prepared ``BertForTokenClassification`` (or compatible) on Spyre.
+        input_ids: ``[B, L]`` token ids on CPU. Right-padded by the tokenizer.
+        attention_mask: ``[B, L]`` mask on CPU; 1 for real tokens, 0 for pad.
+        token_type_ids: Optional ``[B, L]`` on CPU. Defaults to all-zeros when
+            None.
+
+    Returns:
+        ``logits``: ``[B, L, num_labels]`` float32 tensor on CPU.
+    """
+    last_hidden_state = prefill_encoder(
+        run_encoder_forward_fn,
+        model,
+        input_ids,
+        attention_mask,
+        token_type_ids=token_type_ids,
+    )
+
+    classifier = model.classifier
+    head_device = next(classifier.parameters()).device
+    logits: torch.Tensor = classifier(last_hidden_state.to(head_device))
+    return logits.to("cpu")
+
+
+# ---------------------------------------------------------------------------
 # Vision-encoder prefill driver
 # ---------------------------------------------------------------------------
 

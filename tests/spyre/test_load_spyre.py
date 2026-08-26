@@ -35,6 +35,7 @@ from model_registry import (
     MASKED_LM_PATHS,
     NON_BLOCKING_CAUSAL_MODELS,
     QUESTION_ANSWERING_PATHS,
+    TOKEN_CLASSIFICATION_PATHS,
     xfail_non_blocking,
 )
 
@@ -146,3 +147,28 @@ def test_load_question_answering(model_path: str) -> None:
     print(f"  [{model_path}] question-answering load time: {load_s:.1f}s")
     assert model_is_not_none, f"{model_path}: from_pretrained returned None"
     assert ready, f"{model_path}: native forward or CPU QA head is not ready"
+
+
+def load_token_classification(model_path: str) -> tuple[Any, Any, float]:
+    from hf_adapters import AutoSpyreModelForTokenClassification
+
+    t0 = time.time()
+    model: Any = AutoSpyreModelForTokenClassification.from_pretrained(model_path)
+    load_s = time.time() - t0
+    head_on_cpu = next(model.classifier.parameters()).device.type == "cpu"
+    return model is not None, callable(model.forward) and head_on_cpu, load_s
+
+
+@pytest.mark.model_harness("token_classification")
+@pytest.mark.parametrize(
+    "model_path", TOKEN_CLASSIFICATION_PATHS, ids=TOKEN_CLASSIFICATION_PATHS
+)
+def test_load_token_classification(model_path: str) -> None:
+    model_is_not_none, ready, load_s = load_token_classification(model_path)
+    print(f"  [{model_path}] token-classification load time: {load_s:.1f}s")
+    print("\n## Spyre Load Test Results\n")
+    print("| Path | Kind | Status | Load (s) |")
+    print("|------|------|--------|----------|")
+    print(f"| {model_path} | token-classification | PASS | {load_s:.1f} |")
+    assert model_is_not_none, f"{model_path}: from_pretrained returned None"
+    assert ready, f"{model_path}: native forward or CPU classifier head is not ready"
