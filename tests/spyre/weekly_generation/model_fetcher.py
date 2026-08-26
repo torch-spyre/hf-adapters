@@ -49,16 +49,15 @@ def fetch(model_type: ModelType, top_k: int) -> list[dict]:
     and shard chunker downstream both assume it, and the pre-filter preserves it.
 
     Each row is a plain dict keyed as the catalog CSV header is (``model_id``,
-    ``downloads``, ``parameters``, ``is_supported``, ``is_moe``,
-    ``config_class``, ``model_type``, ``architectures``) — JSON-serializable, so
-    it survives being written to a shard file and read back by another process.
+    ``downloads``, ``parameters``, ``config_class``, ``model_type``,
+    ``architectures``) — JSON-serializable, so it survives being written to a
+    shard file and read back by another process.
     """
     models: list[dict] = all_fetchers[model_type](limit=top_k)
 
     # model_info is a live huggingface_hub.ModelInfo object attached by
-    # build_catalog — not JSON-serializable, and no longer needed since
-    # is_moe is precomputed onto each model (see utils/hf_model_catalog.py).
-    # Dropped here rather than at each call site because every consumer either
+    # build_catalog and is not JSON-serializable. Dropped here rather than at
+    # each call site because every consumer either
     # JSON-dumps these rows into a shard file or hands them to a spawned child
     # (which pickles them); both break on a ModelInfo.
     # we also indicate that the model is not a curated model
@@ -77,15 +76,14 @@ def load_curated(model_type: ModelType) -> list[dict]:
     The curated ids are known up front, so this skips the ``list_models`` ranking
     query the two fetchers use and asks the Hub for each repo directly via
     ``model_info``. Everything after that — config class, param count,
-    architectures, is_moe, is_multimodal — is the shared ``build_catalog`` path, so
-    a curated row and a fetched row are interchangeable to the pre-filter
-    downstream.
+    architectures, is_multimodal — is the shared ``build_catalog`` path, so a
+    curated row and a fetched row are interchangeable to the pre-filter downstream.
 
     Deliberately *not* filtered: a curated id is one someone asked for by name, so the
     gates the ranked scan applies (embedding signal, gated, remote code, loadable
     weights) must not silently drop it — the curated callers pass an accept-everything
-    keep predicate. The terminal gates in ``prefilter_models`` still apply downstream,
-    and record why they skipped it.
+    keep predicate. The parameter-limit gate in ``prefilter_models`` still applies
+    downstream and records why it skipped a model.
 
     Ids the Hub does not return (typo, private, deleted) are dropped with a
     warning rather than raising: one bad line in a hand-maintained file should not

@@ -21,9 +21,6 @@ from huggingface_hub.hf_api import ExpandModelProperty_T, ModelInfo
 from tqdm import tqdm
 from transformers import AutoConfig
 
-# Import the mapping to get supported config classes dynamically
-from hf_adapters.auto_spyre_model import CONFIG_TO_ADAPTER_MODULE_MAPPING
-
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
 
@@ -123,62 +120,9 @@ def with_transient_retry(
     raise last_error
 
 
-MOE_MODEL_TYPES: set[str] = {
-    "mixtral",
-    "qwen2_moe",
-    "qwen3_moe",
-    "dbrx",
-    "jamba",
-    "arctic",
-    "olmoe",
-    "gpt_oss",
-}
-
-MOE_MODEL_TYPE_PREFIXES: tuple[str, ...] = ("deepseek_v2", "deepseek_v3", "deepseek_v4")
-
-MOE_ARCH_SUBSTRINGS: list[str] = [
-    "mixtral",
-    "moe",
-    "dbrx",
-    "jamba",
-    "arctic",
-    "olmoe",
-    "deepseek",
-    "gptoss",
-]
-
-# Get supported config class names dynamically from the mapping
-SUPPORTED_CONFIG_CLASSES: set[str] = {
-    config_class.__name__ for config_class in CONFIG_TO_ADAPTER_MODULE_MAPPING.keys()
-}
-
-
 def tags(model: ModelInfo) -> set[str]:
     """Lower-cased set of a model's tags (empty set if none)."""
     return {t.lower() for t in (getattr(model, "tags", None) or [])}
-
-
-def is_supported_config(config_class_name: str | None) -> bool:
-    """Check if the config class is supported by our adapter code."""
-    if config_class_name is None:
-        return False
-    return config_class_name in SUPPORTED_CONFIG_CLASSES
-
-
-def is_moe(model: ModelInfo) -> bool:
-    if any("moe" in t for t in tags(model)):
-        return True
-
-    config: dict = model.config or {}
-    model_type: str = (config.get("model_type") or "").lower()
-    if model_type in MOE_MODEL_TYPES:
-        return True
-    if model_type.startswith(MOE_MODEL_TYPE_PREFIXES):
-        return True
-
-    architectures: list[str] = config.get("architectures") or []
-    arch_lower: str = " ".join(architectures).lower()
-    return any(sub in arch_lower for sub in MOE_ARCH_SUBSTRINGS)
 
 
 def is_custom_code(model: ModelInfo) -> bool:
@@ -444,10 +388,9 @@ def build_catalog(
         "parameters",
         "library",
         # "is_gated",
-        # "is_moe",
     ]
     extra_head: list[str] = [h for h, _ in extra_columns]
-    tail_head: list[str] = ["is_custom_code", "config_class", "is_supported", "Year"]
+    tail_head: list[str] = ["is_custom_code", "config_class", "Year"]
     header: list[str] = base_head + extra_head + tail_head
 
     t0 = time.perf_counter()
@@ -485,11 +428,9 @@ def build_catalog(
                         param_int,
                         m.library_name,
                         # bool(m.gated),
-                        # is_moe(m),
                         *extra_vals,
                         is_custom_code(m),
                         config_class,
-                        is_supported_config(config_class),
                         m.created_at.year if m.created_at else None,
                     ],
                 )
@@ -511,15 +452,10 @@ def build_catalog(
     # runtime-only field (not serializable, and never part of the schema),
     # useful for callers that need metadata the row dict does not expose —
     # e.g. safetensors.parameters, gated, sha, siblings.
-    #
-    # is_moe is precomputed here (a pure function of data already fetched —
-    # tags, config.model_type, config.architectures) so callers that need it
-    # don't have to carry the non-serializable ModelInfo object forward.
     t0 = time.perf_counter()
     for row, m in zip(rows, models):
         row["model_info"] = m
-        row["is_moe"] = is_moe(m)
-    timings["attach model_info / is_moe"] = time.perf_counter() - t0
+    timings["attach model_info"] = time.perf_counter() - t0
 
     timings["other"] = (time.perf_counter() - t_total) - sum(timings.values())
 

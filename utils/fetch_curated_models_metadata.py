@@ -9,8 +9,8 @@ accepted only to satisfy that signature and is deliberately ignored.
 Those wrappers take their keep predicate as a parameter, and the curated callers pass
 an accept-everything one. That is deliberate: a curated id was requested by name, so
 the gates the ranked scan applies (embedding signal, gated, remote code, loadable
-weights) must not silently drop it. The terminal gates in ``prefilter_models``
-(no adapter, too large, MoE) still apply downstream and record why they skipped it.
+weights) must not silently drop it. The parameter-limit gate in
+``prefilter_models`` still applies downstream and records why it skipped a model.
 """
 
 from typing import Callable
@@ -41,8 +41,8 @@ def _create_fetch_metadata(
         """Resolve each curated id to a ModelInfo, preserving file order.
 
         ``expand`` mirrors the fetchers' ``EXPAND_FIELDS`` so downstream helpers
-        (is_moe, get_param_count, is_custom_code) see the same populated
-        attributes they do on a ``list_models`` result.
+        (get_param_count, is_custom_code) see the same populated attributes they
+        do on a ``list_models`` result.
         """
         infos: list[ModelInfo] = []
         for model_id in _model_ids:
