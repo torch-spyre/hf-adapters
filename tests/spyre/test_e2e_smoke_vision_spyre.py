@@ -62,7 +62,7 @@ from hf_adapters import AutoSpyreModelForImageTextToText
 from hf_adapters.auto_spyre_model import (
     IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
     resolve_adapter_module,
-    torch_dtype_for_model_path,
+    dtype_for_model_path,
 )
 
 # Number of tokens to generate per image. Must be ≥2 so that ITL
@@ -171,7 +171,7 @@ def run_vision_smoke_test(model_path: str) -> dict[str, Any]:
     print(f"  loading from {model_path}")
     print(f"{'=' * 70}")
 
-    dtype = torch_dtype_for_model_path(model_path)
+    dtype = dtype_for_model_path(model_path, target_device="spyre")
     adapter = resolve_adapter_module(
         model_path, mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING
     )
