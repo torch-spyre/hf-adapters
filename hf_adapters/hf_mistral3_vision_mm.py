@@ -68,6 +68,8 @@ Verified on CPU to match stock ``Mistral3ForConditionalGeneration.generate``
 for both ``mistral`` and ``ministral3`` text-backbone variants.
 """
 
+import time
+
 import torch
 
 from hf_adapters import hf_pixtral_vision
@@ -402,6 +404,7 @@ def generate(
     temperature=None,
     top_k=None,
     top_p=None,
+    timing=False,
 ):
     """Autoregressive image→text generation on Spyre (greedy / top-k/p sampling).
 
@@ -460,12 +463,14 @@ def generate(
     current_cache_len = padded_len
     finished = torch.zeros(batch_size, dtype=torch.bool)
     num_generated = torch.zeros(batch_size, dtype=torch.long)
+    times_list: list[float] = []
 
     def embed_ids(ids):
         """Token ids → embeddings (decode steps; pure text, no multiplier)."""
         return backbone.embed_tokens(ids)
 
     for i in range(max_new_tokens):
+        t0 = time.time()
         if i == 0:
             # --- PREFILL: text embeds with image slots zeroed, flat injection ---
             logits = _prefill_forward(
@@ -514,6 +519,9 @@ def generate(
             next_logits, do_sample, temperature, top_k, top_p
         )
 
+        if timing:
+            times_list.append(time.time() - t0)
+
         # Append the token: generated slots are contiguous from padded_len.
         result = torch.cat([result, next_tokens.unsqueeze(1)], dim=1)
         if eos_ids is not None:
@@ -521,5 +529,13 @@ def generate(
         num_generated += (~finished).long()
         if finished.all():
             break
+
+    # Timing — mirrors hf_common.generate format.
+    if timing and times_list:
+        print(f"\nFirst-token latency: {times_list[0]*1000:.3f} ms")
+        if len(times_list) > 1:
+            avg = sum(times_list[1:]) / len(times_list[1:])
+            print(f"Avg next-token latency: {avg*1000:.3f} ms")
+        print("Per-token: " + ", ".join(f"{t*1000:.1f}" for t in times_list) + " ms")
 
     return decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer)
