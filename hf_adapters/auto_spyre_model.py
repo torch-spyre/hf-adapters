@@ -200,6 +200,7 @@ TOKEN_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     type[PretrainedConfig], ModuleType
 ] = {
     BertConfig: hf_bert,
+    RobertaConfig: hf_xlm_roberta,
 }
 
 
