@@ -98,7 +98,6 @@ dev = [
     "ruff>=0.15.6",
     "mypy>=2.3.0,<3",
     "typing-extensions",
-    "nicegui",
     "clickhouse-connect>=1.4.1",
     "lxml",
     "clickhouse-driver"

@@ -1,20 +1,12 @@
-"""Decide which fetched models are worth handing to a Spyre worker.
+"""Remove models that are too large to hand to a Spyre worker.
 
-Three checks, applied in the order ``weekly_test.main`` used to apply them
-in-process. All three are terminal properties of the checkpoint itself
-(no adapter, too large, mixture-of-experts) and produce a row recording that
-verdict, so a dropped model is never silently absent from a run's output.
-
-Running this **upstream of sharding** is the point. ``generate_weekly_shards``
-chunks a downloads-ordered list into fixed-size shards, and filtered-out models
-cluster heavily — config-class families cluster by download count, so a single
-unsupported family can hollow out one shard while leaving the next untouched.
-Filtering after chunking left shards with wildly different amounts of real work:
-some CI jobs finished in minutes, others ran for hours. Filtering first means
-shard size maps to evaluations.
+Running this **upstream of sharding** keeps known oversized checkpoints from
+occupying shard slots when they cannot fit on Spyre. Adapter resolution and MoE
+classification happen in the worker so every supported and unsupported model
+contributes to the runtime failure breakdown.
 
 ``weekly_test --fetch`` calls this too, for manual runs with no shard file, so
-both entry points share one definition of "worth handing to a Spyre worker".
+both entry points apply the same parameter limit.
 """
 
 from __future__ import annotations
@@ -25,8 +17,6 @@ from datetime import date
 from tests.spyre.weekly_generation import model_fetcher
 from tests.spyre.weekly_generation.failure_categories import (
     FAILURE_CATEGORY_MODEL_TOO_LARGE,
-    FAILURE_CATEGORY_MOE,
-    FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
 )
 from tests.spyre.weekly_generation.model_type import ModelType
 from tests.spyre.weekly_generation.sink.result_sink import ResultSink
@@ -101,11 +91,11 @@ def prefilter_models(
 
     Args:
         models: one dict per model as fetched from the HuggingFace Hub by
-            ``build_catalog``, keyed as the catalog CSV header is (``model_id``,
-            ``downloads``, ``parameters``, ``is_supported``, ``is_moe``,
-            ``config_class``, ``model_type``, ``architectures``). Callers should
-            ``pop("model_info")`` first — the returned lists hold the same dict
-            objects, and that field is not JSON-serializable.
+            ``build_catalog``, including ``model_id``, ``downloads``,
+            ``parameters``, ``is_moe``, ``config_class``, ``model_type``, and
+            ``architectures``. Callers should ``pop("model_info")`` first — the
+            returned lists hold the same dict objects, and that field is not
+            JSON-serializable.
         max_params: parameter ceiling above which a model cannot be brought up
             on Spyre.
 
@@ -116,21 +106,6 @@ def prefilter_models(
     result = PrefilterResult()
 
     for row in models:
-        # No adapter registered for this config class — the same terminal
-        # decision resolve_adapter_module_for_test would reach in the worker,
-        # reached without spawning one. `is False` rather than falsy: a missing
-        # key or None means the fetcher could not determine the config class,
-        # which is not the same as knowing it is unsupported.
-        if row.get("is_supported") is False:
-            result.skipped.append(
-                SkippedModel(
-                    row=row,
-                    failure_category=FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
-                    reason=f"no adapter for config_class={row.get('config_class')!r}",
-                )
-            )
-            continue
-
         params = _parameter_count(row)
         if params is not None and params > max_params:
             result.skipped.append(
@@ -138,19 +113,6 @@ def prefilter_models(
                     row=row,
                     failure_category=FAILURE_CATEGORY_MODEL_TOO_LARGE,
                     reason=(f"{params:,} parameters exceeds the {max_params:,} limit"),
-                )
-            )
-            continue
-
-        # MoE models aren't supported on Spyre yet. is_moe is precomputed at
-        # fetch time (utils/hf_model_catalog.py) so it survives the JSON
-        # round-trip through the model-list file.
-        if row.get("is_moe"):
-            result.skipped.append(
-                SkippedModel(
-                    row=row,
-                    failure_category=FAILURE_CATEGORY_MOE,
-                    reason="MoE model",
                 )
             )
             continue
@@ -200,7 +162,7 @@ def fetch_and_filter(
     # concatenate and dedup while giving precedence to the curated
     models = concat_and_dedup_dicts(first=curated_models, second=fetched_models)
 
-    # filter unsupported - MoE / no adapter / too large
+    # Filter checkpoints known to exceed Spyre's parameter limit.
     result: PrefilterResult = prefilter_models(models, max_params=max_params)
 
     # write the skipped models to the sink; these won't be tested

@@ -412,6 +412,12 @@ TOKEN_CLASSIFICATION_MODELS = {
         "adapter": "hf_bert.py",
         "size": "0.1b",
     },
+    "roberta_large_ner": {
+        "name": "RoBERTa large NER English",
+        "path": "Jean-Baptiste/roberta-large-ner-english",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.3b",
+    },
 }
 
 

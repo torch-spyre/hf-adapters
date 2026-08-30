@@ -6,7 +6,9 @@ This file contains additional test methods for modules defined in YAML configs:
   each other and with CPU (all three run in a single pass)
 - test_with_cpu: Use CPU as the golden reference and compare device output against it;
   which device mode(s) to run (compile and/or eager) is selectable via env vars
-- test_layout_stride: Validate real YAML-specified SpyreTensorLayouts and strides (CPU vs Spyre)
+- test_layout_stride: Validate real YAML-specified SpyreTensorLayouts and strides (CPU vs
+  Spyre); for entries with apply_device_layout, also allocate the module's own
+  parameters with the adapter path's device layout
 - test_vllm: Standalone-run a vLLM-native module (built from AutoConfig under a VllmConfig +
   TP=1 distributed group, NOT via LLM()) and compare CPU eager vs device compile
 
@@ -49,13 +51,37 @@ def _extract_all_tensors(output):
 
 
 def _construct_module(
-    module_info, module_input, *, dtype=None, device=None, training=False
+    module_info,
+    module_input,
+    *,
+    dtype=None,
+    device=None,
+    training=False,
+    apply_device_layout=False,
+    state_dict=None,
 ):
     """Construct a module from a module_input's constructor args/kwargs.
 
     Optionally casts to ``dtype`` and/or moves to ``device``, then sets train/eval
     mode. All of ``dtype``/``device``/``training`` are optional so every test method
     can reuse this regardless of whether it casts dtype or only calls ``.eval()``.
+
+    ``apply_device_layout`` transfers to Spyre via
+    ``torch_spyre.model_utils.load_model_to_spyre`` instead of a plain
+    ``.to(device)``, so each ``nn.Linear`` weight lands with ``dim_order=[1, 0]``
+    (out_features stickified, optimal for Spyre matmul) as the production loading
+    path does. A device layout is fixed at allocation time, so a plain
+    ``.to(device)`` cannot express one -- the moved tensor silently keeps the
+    default layout. ``load_model_to_spyre`` performs the host-to-device transfer
+    itself and skips tensors already on Spyre, so it REPLACES the ``.to(device)``
+    move rather than following it; calling it afterwards would be a no-op.
+
+    ``state_dict`` loads given weights (e.g. a CPU reference module's, so both
+    sides run identical weights). It MUST be passed here rather than loaded by the
+    caller afterwards: ``load_state_dict`` copies into existing storage, so
+    loading after the device transfer would overwrite the laid-out parameters with
+    default-layout ones -- leaving the test green while proving nothing. Doing both
+    here keeps that ordering in one place.
     """
     module = module_info.module_cls(
         *module_input.constructor_input.args,
@@ -63,8 +89,18 @@ def _construct_module(
     )
     if dtype is not None:
         module = module.to(dtype)
+    if state_dict is not None:
+        module.load_state_dict(state_dict)
     if device is not None:
-        module = module.to(device)
+        use_spyre_layout = apply_device_layout and torch.device(device).type == "spyre"
+        if use_spyre_layout:
+            from torch_spyre.model_utils import load_model_to_spyre
+
+            # Does the CPU->Spyre transfer itself, with the optimal per-Linear
+            # layout; must be reached with the module still on CPU.
+            module = load_model_to_spyre(module, dtype=dtype)
+        else:
+            module = module.to(device)
     module.train(training)
     return module
 
@@ -86,7 +122,8 @@ def _move_inputs(module_input, *, dtype=None, device=None):
         if not isinstance(x, torch.Tensor):
             return x
         if device is not None and is_interesting_dtype(x.dtype):
-            return x.to(device, dtype)
+            x = x.to(dtype)
+            return x.to(device)
         if device is not None:
             return x.to(device)
         if is_interesting_dtype(x.dtype):
@@ -527,6 +564,12 @@ class TestModuleCustom(TestCase):
         3. Runs module in compile mode on Spyre
         4. Compares outputs between eager CPU, eager Spyre, and compile Spyre
         """
+
+        # A module whose YAML entry sets apply_device_layout: true has its
+        # parameters allocated with the adapter path's device layout instead of a
+        # plain .to(device), so both device modules match production.
+        want_layout = getattr(module_info, "apply_device_layout", False)
+
         module_inputs = module_info.module_inputs_func(
             module_info, device=device, dtype=dtype, requires_grad=False, training=False
         )
@@ -550,32 +593,32 @@ class TestModuleCustom(TestCase):
 
         for module_input in module_inputs:
             # Create module on CPU (eager)
-            module_cpu = module_info.module_cls(
-                *module_input.constructor_input.args,
-                **module_input.constructor_input.kwargs,
-            )
-            module_cpu.to(dtype)
-            module_cpu.eval()
+            module_cpu = _construct_module(module_info, module_input, dtype=dtype)
+            cpu_state_dict = module_cpu.state_dict()
 
-            # Create module on device (eager)
-            module_device_eager = module_info.module_cls(
-                *module_input.constructor_input.args,
-                **module_input.constructor_input.kwargs,
+            # Create module on device (eager), from the SAME CPU weights. The
+            # weights go through _construct_module rather than a load_state_dict
+            # afterwards so they are in place BEFORE any device-layout
+            # reallocation -- see the note in _construct_module.
+            module_device_eager = _construct_module(
+                module_info,
+                module_input,
+                dtype=dtype,
+                device=device,
+                apply_device_layout=want_layout,
+                state_dict=cpu_state_dict,
             )
-            module_device_eager.to(device).to(dtype)
-            module_device_eager.eval()
 
-            # Copy weights from CPU to device
-            module_device_eager.load_state_dict(module_cpu.state_dict())
-
-            # Create compiled version
-            module_device_compile_base = module_info.module_cls(
-                *module_input.constructor_input.args,
-                **module_input.constructor_input.kwargs,
+            # Create compiled version (a separate instance, so the eager module
+            # above is never traced).
+            module_device_compile_base = _construct_module(
+                module_info,
+                module_input,
+                dtype=dtype,
+                device=device,
+                apply_device_layout=want_layout,
+                state_dict=cpu_state_dict,
             )
-            module_device_compile_base.to(device).to(dtype)
-            module_device_compile_base.eval()
-            module_device_compile_base.load_state_dict(module_cpu.state_dict())
             module_device_compile = torch.compile(module_device_compile_base)
 
             # module_input.forward_input tensors are already placed on `device`
@@ -674,6 +717,12 @@ class TestModuleCustom(TestCase):
         """
         run_compile = os.getenv("TEST_COMPILE_WITH_CPU", "1") == "1"
         run_eager = os.getenv("TEST_EAGER_WITH_CPU", "0") == "1"
+
+        # A module whose YAML entry sets apply_device_layout: true has its
+        # parameters allocated with the adapter path's device layout instead of a
+        # plain .to(device), so the device side under test matches production.
+        want_layout = getattr(module_info, "apply_device_layout", False)
+
         module_inputs = module_info.module_inputs_func(
             module_info,
             device=device,
@@ -727,6 +776,9 @@ class TestModuleCustom(TestCase):
                 cpu_tensors = _run_forward(module_cpu, args_cpu, kwargs_cpu)
 
                 # === Instantiate the module on device with the same weights. ===
+                # The weights go through _construct_module (not a load_state_dict
+                # afterwards) so they are in place BEFORE any device-layout
+                # reallocation -- see the note in _construct_module.
                 torch._dynamo.reset_code_caches()
                 torch._inductor.codecache.FxGraphCache.clear()
                 module_device = _construct_module(
@@ -735,8 +787,9 @@ class TestModuleCustom(TestCase):
                     dtype=dtype,
                     device=device,
                     training=training,
+                    apply_device_layout=want_layout,
+                    state_dict=cpu_state_dict,
                 )
-                module_device.load_state_dict(cpu_state_dict)
                 if mode == "compiled":
                     module_device = torch.compile(module_device)
 
@@ -768,9 +821,14 @@ class TestModuleCustom(TestCase):
     def test_layout_stride(self, device, dtype, module_info, training):
         """Test module with real YAML-specified layouts and strides.
 
-        Validates modules work correctly with actual SpyreTensorLayouts from YAML config.
-        Compares CPU vs device outputs for correctness.
+        Input-tensor layouts come from the YAML's ``device_layout`` specs, applied
+        by the OOT framework when it builds them. A module whose YAML entry sets
+        ``apply_device_layout: true`` additionally has its *parameters* allocated
+        with the layout the adapter path uses (row-major [1, 0] dim_order on 2-D
+        matmul weights) instead of a plain ``.to(device)``, which cannot express a
+        dim_order. Compares CPU vs device outputs for correctness.
         """
+        want_layout = getattr(module_info, "apply_device_layout", False)
         module_inputs = module_info.module_inputs_func(
             module_info, device=device, dtype=dtype, requires_grad=False, training=False
         )
@@ -794,23 +852,19 @@ class TestModuleCustom(TestCase):
 
         for module_input in module_inputs:
             # Create module on CPU
-            module_cpu = module_info.module_cls(
-                *module_input.constructor_input.args,
-                **module_input.constructor_input.kwargs,
-            )
-            module_cpu.to(dtype)
-            module_cpu.eval()
+            module_cpu = _construct_module(module_info, module_input, dtype=dtype)
 
-            # Create module on device
-            module_device = module_info.module_cls(
-                *module_input.constructor_input.args,
-                **module_input.constructor_input.kwargs,
+            # Build the device module from the SAME CPU weights, with the device
+            # layout applied after the weights are in place (_construct_module
+            # enforces that ordering -- see its docstring).
+            module_device = _construct_module(
+                module_info,
+                module_input,
+                dtype=dtype,
+                device=device,
+                apply_device_layout=want_layout,
+                state_dict=module_cpu.state_dict(),
             )
-            module_device.to(device).to(dtype)
-            module_device.eval()
-
-            # Copy weights from CPU to device
-            module_device.load_state_dict(module_cpu.state_dict())
 
             # module_input.forward_input tensors are already placed on `device`
             # by the OOT framework's module_inputs_func (it builds on CPU, then
