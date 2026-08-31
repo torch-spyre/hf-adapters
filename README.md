@@ -1,7 +1,7 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-28-blue)
-![verified](https://img.shields.io/badge/verified_checkpoints-47-green)
+![adapters](https://img.shields.io/badge/adapters-29-blue)
+![verified](https://img.shields.io/badge/verified_checkpoints-49-green)
 ![compatible](https://img.shields.io/badge/compatible_models-100%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -14,9 +14,10 @@ from `transformers`.
 
 ## Supported Models
 
-**28 adapters · 47 verified checkpoints · 100+ compatible models**
+**29 adapters · 49 verified checkpoints · 100+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
+**sequence classification** (sentiment / text categorisation),
 **token classification** (NER/POS), **vision-language** (image→text), and
 **speculative-decoding drafter** models — from
 Llama / Qwen / Granite / Mistral / Phi / Gemma / OLMo / GPT decoders to BERT /
@@ -143,6 +144,32 @@ Encoder task inputs must be right-padded. Masked-LM and question-answering
 support inference from `input_ids`; training/loss, `inputs_embeds`, attentions,
 and hidden-state collection are not currently supported.
 
+## Sequence Classification
+
+Use `AutoSpyreModelForSequenceClassification` for models that return a single
+label per input (sentiment analysis, topic classification, natural language
+inference). The encoder runs on Spyre; the classification head runs on CPU.
+Returns a standard HuggingFace `SequenceClassifierOutput` with
+`logits [B, num_labels]` on CPU:
+
+```python
+from transformers import AutoTokenizer
+from hf_adapters import AutoSpyreModelForSequenceClassification
+
+model_path = "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+model = AutoSpyreModelForSequenceClassification.from_pretrained(model_path)
+batch = tokenizer(
+    ["I really enjoyed this film!", "The plot was confusing and dull."],
+    return_tensors="pt",
+    padding=True,
+)
+outputs = model(**batch)
+label_ids = outputs.logits.argmax(dim=-1)
+labels = [model.config.id2label[i.item()] for i in label_ids]
+print(labels)  # → ['POSITIVE', 'NEGATIVE']
+```
+
 ## Token Classification (NER / POS)
 
 Use `AutoSpyreModelForTokenClassification` for token-level label prediction
@@ -239,6 +266,7 @@ tests/                                 CPU tests (no Spyre required)
     ├── test_e2e_smoke_spyre.py        E2E: load + generate on Spyre
     ├── test_e2e_token_compare_spyre.py E2E: HF CPU vs adapter Spyre tokens
     ├── test_e2e_embed_compare_spyre.py E2E: HF CPU vs adapter Spyre embeddings
+    ├── test_e2e_seq_classification_compare_spyre.py E2E: HF CPU vs adapter Spyre seq-classification logits
     ├── test_vlm_e2e_spyre.py          E2E: multimodal adapter on Spyre (teacher-forced)
     └── test_load_spyre.py             Spyre: models load without errors
 ```

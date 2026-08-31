@@ -234,6 +234,7 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
         "masked_lm": {},
         "question_answering": {},
         "reranker": {},
+        "seq_classification": {},
         "token_classification": {},
     }
     try:

@@ -84,6 +84,25 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 **CPU Accurate** = adapter hidden-states have cosine similarity ≥ 0.999 vs stock HF on CPU (the bound accommodates the bf16-native EmbeddingGemma; fp16 models clear it with wide margin).
 **Spyre Compiles / Spyre Runs** = via `test_e2e_embed_compare_spyre.py`. GTE-Qwen2 compiles and executes end-to-end on Spyre but its pooled embeddings drift from the CPU reference; the Qwen3/Mistral/BERT/XLM-RoBERTa/MPNet/ModernBERT encoder paths match within fp16 noise. EmbeddingGemma runs in **bf16** (fp16 overflows its residual stream) and matches the bf16 CPU reference within bf16 noise (per-token cosine ≥ 0.999; pooled ≥ 0.99).
 
+### Sequence Classification
+
+Encoder models fine-tuned for sequence-level label prediction (sentiment
+analysis, topic classification, NLI). The encoder backbone runs on Spyre;
+the two-stage classification head (`pre_classifier` + `classifier`) runs on
+CPU (pinned via `_spyre_cpu_submodules`). Use `AutoSpyreModelForSequenceClassification`;
+returns a standard `SequenceClassifierOutput` with `logits [B, num_labels]` on CPU.
+
+| Model | model\_type | head\_dim | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
+|-------|-----------|---------|--------------|-------------|---------------|-----------|
+| DistilBERT base uncased finetuned SST-2 (distilbert/distilbert-base-uncased-finetuned-sst-2-english) | distilbert | 64 | Yes | Yes | Yes | Yes |
+| RoBERTa large MNLI (FacebookAI/roberta-large-mnli) | roberta | 64 | Yes | Yes | Yes | Yes |
+
+**CPU Accurate** = per-sequence argmax label matches stock HF exactly; per-sequence
+logit cosine ≥ 0.999 vs stock HF on CPU (`test_seq_classification_cpu_accuracy.py`).
+**Spyre Runs** = via `test_e2e_seq_classification_compare_spyre.py`;
+per-sequence logit cosine ≥ 0.99 and exact label match vs CPU reference.
+RoBERTa large MNLI uses `hf_xlm_roberta.py` (shared with the XLM-RoBERTa and reranker adapters); `RobertaConfig` is already registered in `SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING`.
+
 ### Token Classification (NER)
 
 Encoder models fine-tuned for token-level label prediction (NER, POS, chunking).
@@ -129,8 +148,8 @@ single-token decode path (seq_len=1), not an adapter issue.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 28 adapters · 47 verified checkpoints · 100+ compatible models.
-The 47 verified rows are 28 generative + 13 embedding + 2 token-classification + 4 vision-language (see the
+**Coverage:** 29 adapters · 49 verified checkpoints · 100+ compatible models.
+The 49 verified rows are 28 generative + 13 embedding + 2 seq-classification + 2 token-classification + 4 vision-language (see the
 Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are
 vision-tower components used by VLM adapters rather than standalone model adapters.
 Granite Vision 4.1 is verified both as a text backbone (generative) and as a full VLM.
@@ -173,7 +192,8 @@ pattern, norms, and weight layout.
 | hf\_mistral3\_vision\_mm.py | mistral3 (multimodal) | 2 | Mistral-Small-3.1/3.2 Vision; Ministral-3-14B-Instruct-2512 (ministral3 text backbone, bf16) |
 | hf\_pixtral\_vision.py | Pixtral vision tower | 1 | Pixtral towers of Mistral3 Vision checkpoints |
 | hf\_bert.py | bert | 3 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants, BERT NER/POS/chunking fine-tunes |
-| hf\_xlm\_roberta.py | xlm-roberta | 2 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes, RoBERTa NER/QA fine-tunes |
+| hf\_distilbert.py | distilbert | 2 | DistilBERT-base fine-tunes (QA, NER, sentiment, other classifier heads) |
+| hf\_xlm\_roberta.py | xlm-roberta / roberta | 3 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes, RoBERTa NER/QA/classifier fine-tunes |
 | hf\_mpnet.py | mpnet | 1 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base, all-mpnet-base-v1 |
 | hf\_modernbert.py | modernbert | 3 | answerdotai/ModernBERT-base, answerdotai/ModernBERT-large, other ModernBERT embed/classifier fine-tunes |
 
@@ -209,6 +229,18 @@ outputs = tokenizer.batch_decode(
 Calling `model(**inputs)` returns a standard `MaskedLMOutput`. The
 bidirectional encoder runs on Spyre and the complete
 model-specific MLM head runs on CPU.
+
+### Sequence-Classification Auto API
+
+`AutoSpyreModelForSequenceClassification` loads encoder models through
+`AutoModelForSequenceClassification`. Calling `model(**inputs)` returns a
+standard `SequenceClassifierOutput` with CPU `logits [B, num_labels]`. The
+bidirectional encoder runs on Spyre; the task head runs on CPU. For DistilBERT
+the two-stage head (`pre_classifier` Linear + ReLU, then `classifier` Linear with
+CLS extraction) is wrapped into a single `_DistilBertClassifierHead` so the
+`prefill_sequence_classification` call-site is uniform across all adapters.
+Same encoder-task constraints apply: right-padded, `input_ids`-based inference
+only (no training/loss, no custom embeddings, attentions, or hidden-state collection).
 
 ### Extractive Question-Answering Auto API
 

@@ -62,6 +62,13 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = "sentence_transformers.*"
 ignore_missing_imports = true
+follow_imports = "skip"
+
+# transformers.models.granite_swa is added in transformers ≥5.15 but may not
+# be present in the installed version used by the mypy job.
+[[tool.mypy.overrides]]
+module = "transformers.models.granite_swa.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -54,7 +54,7 @@ class SpyreNoAdapterError(ValueError):
 
 
 def assert_spyre_dimensions(config, model_name):
-    """Reject configs whose ``hidden_size``/``intermediate_size`` is stick-misaligned.
+    """Reject configs whose hidden / intermediate dimensions are stick-misaligned.
 
     The Spyre compiler lays tensors out in ``BLOCK_SIZE``-element sticks.
     Matmuls over a dimension that is not a multiple of ``BLOCK_SIZE`` produce
@@ -64,16 +64,33 @@ def assert_spyre_dimensions(config, model_name):
     and misaligned ones (e.g. ``hidden_size=312``).
 
     ``head_dim`` is not checked — adapters auto-pad it to a stick boundary (see
-    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``);
-    ``hidden_size``/``intermediate_size`` can't be padded without changing the
-    model's arithmetic. Real models clear this bar; it fires on tiny test
-    fixtures (e.g. ``trl-internal-testing/tiny-*``, ``cointegrated/rubert-tiny2``).
+    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``); hidden and
+    intermediate dims can't be padded without changing the model's arithmetic.
+    Real models clear this bar; it fires on tiny test fixtures (e.g.
+    ``trl-internal-testing/tiny-*``, ``cointegrated/rubert-tiny2``).
+
+    Checks ``hidden_size`` (falling back to DistilBERT's ``dim``) and
+    ``intermediate_size`` (falling back to DistilBERT's ``hidden_dim``).
     """
     dim_config = text_config(config)
     misaligned = [
-        (f, v)
-        for f in ("hidden_size", "intermediate_size")
-        if (v := getattr(dim_config, f, None)) is not None and v % BLOCK_SIZE != 0
+        (label, v)
+        for label, candidates in (
+            ("hidden_size", ("hidden_size", "dim")),
+            ("intermediate_size", ("intermediate_size", "hidden_dim")),
+        )
+        if (
+            v := next(
+                (
+                    getattr(dim_config, f)
+                    for f in candidates
+                    if getattr(dim_config, f, None) is not None
+                ),
+                None,
+            )
+        )
+        is not None
+        and v % BLOCK_SIZE != 0
     ]
     if misaligned:
         details = ", ".join(f"{f}={v}" for f, v in misaligned)
@@ -103,7 +120,15 @@ def get_backbone(model):
     inner = next(
         (
             backbone
-            for name in ("model", "transformer", "gpt_neox", "bert", "mpnet", "roberta")
+            for name in (
+                "model",
+                "gpt_neox",
+                "bert",
+                "distilbert",
+                "mpnet",
+                "roberta",
+                "transformer",
+            )
             if (backbone := getattr(model, name, None)) is not None
         ),
         model,
@@ -1234,7 +1259,7 @@ def allocate_kv_caches(model, batch_size, max_cache_len, dtype, device=None):
         shape = (batch_size, n_kv, max_cache_len, head_dim)
         if stl is None:
             return torch.zeros(shape, dtype=dtype, device=device)
-        cache: torch.Tensor = torch.empty(  # type: ignore[call-overload]
+        cache: torch.Tensor = torch.empty(  # type: ignore[call-overload, annotation-unchecked]
             shape,
             device=torch.device(device),
             device_layout=stl,
@@ -2860,39 +2885,18 @@ def prefill_question_answering(
 
 
 # ---------------------------------------------------------------------------
-# Cross-encoder reranker prefill driver (XLM-RoBERTa / BGE reranker family)
+# Sequence-classification prefill driver
 # ---------------------------------------------------------------------------
 
 
-def prefill_reranker(
+def prefill_sequence_classification(
     run_encoder_forward_fn: Callable,
     model,
     input_ids,
     attention_mask,
     token_type_ids=None,
-):
-    """One-shot prefill for cross-encoder reranker models.
-
-    Runs the encoder backbone on Spyre via ``prefill_encoder``,
-    then applies the classification head (``model.classifier``) to produce a
-    scalar relevance score per query-document pair.
-
-    The classification head is run outside torch.compile on CPU to avoid:
-    - ``torch.bernoulli`` (Dropout) which the Spyre backend cannot lower.
-    - ``aten.slice`` for CLS extraction which does not lower on Spyre.
-    - ``out_proj: Linear(hidden, 1)`` whose output dim=1 is not stick-aligned.
-
-    Args:
-        run_encoder_forward_fn: ``fn(model, input_ids, attn_mask, position_ids,
-            token_type_ids) -> [B, padded_len, H]``.
-        model: Prepared ``XLMRobertaForSequenceClassification`` on Spyre.
-        input_ids: ``[B, L]`` token ids on CPU.
-        attention_mask: ``[B, L]`` mask on CPU.
-        token_type_ids: Optional ``[B, L]``. Defaults to all-zeros when None.
-
-    Returns:
-        ``scores``: ``[B]`` float32 tensor on CPU — raw logits.
-    """
+) -> torch.Tensor:
+    """Run an encoder on Spyre and its sequence-classification head on CPU."""
     last_hidden_state = prefill_encoder(
         run_encoder_forward_fn,
         model,
@@ -2901,17 +2905,10 @@ def prefill_reranker(
         token_type_ids=token_type_ids,
     )
 
-    # Pass the full [B, L, H] hidden state to the classifier; .to(cls_device)
-    # moves it off Spyre to avoid aten.slice. The classification head does its
-    # own [:, 0, :] CLS extraction internally.
-
-    # Run the classification head on the same device it lives on
-    # (CPU — kept off Spyre via _spyre_cpu_submodules in prepare_for_spyre).
     classifier = model.classifier
     cls_device = next(classifier.parameters()).device
-    scores = classifier(last_hidden_state.to(cls_device))  # [B, 1]
-
-    return scores[:, 0].to("cpu")  # [B] raw logits on CPU
+    logits: torch.Tensor = classifier(last_hidden_state.to(cls_device))
+    return logits.to("cpu")
 
 
 # ---------------------------------------------------------------------------

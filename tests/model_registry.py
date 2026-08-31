@@ -434,6 +434,19 @@ QUESTION_ANSWERING_MODELS = {
         "adapter": "hf_xlm_roberta.py",
         "size": "0.1b",
     },
+    # hf_distilbert.py
+    "distilbert_qa_uncased": {
+        "name": "DistilBERT base uncased distilled SQuAD",
+        "path": "distilbert/distilbert-base-uncased-distilled-squad",
+        "adapter": "hf_distilbert.py",
+        "size": "0.07b",
+    },
+    "distilbert_qa_cased": {
+        "name": "DistilBERT base cased distilled SQuAD",
+        "path": "distilbert/distilbert-base-cased-distilled-squad",
+        "adapter": "hf_distilbert.py",
+        "size": "0.07b",
+    },
 }
 
 
@@ -777,3 +790,33 @@ RERANKER_MODELS = {
 RERANKER_PATHS: list[str] = _exclude([m["path"] for m in RERANKER_MODELS.values()])
 # No per-adapter reduction for rerankers yet, so this equals RERANKER_PATHS -- kept separate so every category (see ALL_CAUSAL_PATHS et al.) follows the same pattern.
 ALL_RERANKER_PATHS: list[str] = list(RERANKER_PATHS)
+
+
+# Sequence-classification models — multi-label classifiers that return
+# ``[B, num_labels]`` logits.  Exercised by
+# ``tests/cpu/test_seq_classification_cpu_accuracy.py``.
+SEQ_CLASSIFICATION_MODELS = {
+    # hf_distilbert.py
+    "distilbert_sst2": {
+        "name": "DistilBERT base uncased finetuned SST-2",
+        "path": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+        "adapter": "hf_distilbert.py",
+        "size": "0.07b",
+    },
+    # hf_xlm_roberta.py (RobertaConfig → same adapter as XLM-R / reranker)
+    "roberta_mnli": {
+        "name": "RoBERTa large MNLI",
+        "path": "FacebookAI/roberta-large-mnli",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.36b",
+    },
+}
+
+SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        SEQ_CLASSIFICATION_MODELS, include_gated=_include_gated_flag
+    )
+)
+ALL_SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
+    _all_paths(SEQ_CLASSIFICATION_MODELS, include_gated=_include_gated_flag)
+)
