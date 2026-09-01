@@ -1643,6 +1643,7 @@ def pad_and_position(input_ids, actual_lengths):
 class NormalizedGenerationInputs:
     """Block-normalized prompt geometry shared by text and multimodal generation."""
 
+    original_input_ids: torch.Tensor
     input_ids: torch.Tensor
     actual_lengths: torch.Tensor
     padded_len: int
@@ -1740,6 +1741,7 @@ def normalize_generation_inputs(input_ids, attention_mask=None):
         compact_ids, actual_lengths
     )
     return NormalizedGenerationInputs(
+        original_input_ids=input_ids_cpu,
         input_ids=padded_ids,
         actual_lengths=actual_lengths,
         padded_len=padded_len,
@@ -1913,7 +1915,7 @@ def generate(
     )
 
     normalized = normalize_generation_inputs(input_ids, attention_mask)
-    orig_input_ids = input_ids.detach().to("cpu").clone()
+    orig_input_ids = normalized.original_input_ids
     input_ids = normalized.input_ids
     actual_prompt_lengths = normalized.actual_lengths
     padded_len = normalized.padded_len
@@ -1969,9 +1971,8 @@ def generate(
     )
 
     # Decode state. Every decode step writes exactly one token at
-    # ``current_cache_len``, so generated tokens are contiguous from ``padded_len``
-    # and ``result`` grows by one column per step.
-    result = input_ids.clone()
+    # ``current_cache_len``, so generated tokens are contiguous from ``padded_len``.
+    previous_tokens = None
     current_cache_len = padded_len
 
     times_list = []
@@ -2012,14 +2013,14 @@ def generate(
                     cache_index=cache_index,
                     **normalized_token_inputs,
                 )
-            logits_cpu = logits.to("cpu")
-            next_logits = logits_cpu[:, -1, :]
+            next_logits = logits[:, -1, :].to("cpu")
             current_cache_len = padded_len
 
         else:
             # --- DECODE: one token in, one cache slot written ---
-            # The token to feed is the one the previous step appended.
-            next_input = result[:, -1:].to(DEVICE)
+            # The token to feed is the one selected by the previous step.
+            assert previous_tokens is not None
+            next_input = previous_tokens.unsqueeze(1).to(DEVICE)
             # Absolute position of that token per sequence: it follows the
             # prompt's real tokens plus everything generated so far. Equivalent to
             # its cache column minus the sequence's left-padding offset.
@@ -2052,8 +2053,7 @@ def generate(
                     value_caches=value_caches,
                     cache_index=cache_index,
                 )
-            logits_cpu = logits.to("cpu")
-            next_logits = logits_cpu[:, -1, :]
+            next_logits = logits[:, -1, :].to("cpu")
             current_cache_len += 1
 
         # Crop away Spyre LM-head padding before exposing logits or selecting a
@@ -2096,9 +2096,8 @@ def generate(
                 )
             next_tokens = next_tokens.masked_fill(finished, pad_token_id)
         generated_columns.append(next_tokens.clone())
+        previous_tokens = next_tokens
 
-        # Append the token: generated slots are contiguous from padded_len.
-        result = torch.cat([result, next_tokens.unsqueeze(1)], dim=1)
         if eos_ids is not None:
             finished |= torch.isin(next_tokens, eos_ids)
 
