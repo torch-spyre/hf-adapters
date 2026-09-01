@@ -68,7 +68,7 @@ SMOKE_TEST_IMAGES: list[dict] = [
         "repo_id": "huggingface/documentation-images",
         "filename": "bee.jpg",
         "repo_type": "dataset",
-        "prompt": "What type of insect is shown in the image?", 
+        "prompt": "What type of insect is shown in the image?",
     },
     {
         "label": "car",

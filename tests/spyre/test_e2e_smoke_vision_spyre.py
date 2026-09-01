@@ -61,8 +61,8 @@ from model_registry import NON_BLOCKING_VISION_MODELS, VISION_PATHS, xfail_non_b
 from hf_adapters import AutoSpyreModelForImageTextToText
 from hf_adapters.auto_spyre_model import (
     IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
-    resolve_adapter_module,
     dtype_for_model_path,
+    resolve_adapter_module,
 )
 
 pytestmark = pytest.mark.model_harness("vision")
