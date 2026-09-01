@@ -1599,6 +1599,7 @@ def load_model_common(
         # Check whether this adapter's custom loader explicitly supports tp_plan
         # (by accepting it as a kwarg). Adapters that don't support TP still raise.
         import inspect as _inspect
+
         _sig = _inspect.signature(module.load_hf_model)
         if "tp_plan" not in _sig.parameters:
             raise SpyreUnsupportedModelError(
@@ -1609,6 +1610,7 @@ def load_model_common(
         # _sig was already inspected above (for the tp_plan support check).
         # Re-inspect here to determine which optional kwargs this loader accepts.
         import inspect as _inspect
+
         _sig = _inspect.signature(module.load_hf_model)
         _kwargs: dict = {}
         if tp_plan is not None and "tp_plan" in _sig.parameters:

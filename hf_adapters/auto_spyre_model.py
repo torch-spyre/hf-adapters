@@ -95,7 +95,9 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutput,
     TokenClassifierOutput,
 )
-from transformers.models.diffusion_gemma.configuration_diffusion_gemma import DiffusionGemmaConfig
+from transformers.models.diffusion_gemma.configuration_diffusion_gemma import (
+    DiffusionGemmaConfig,
+)
 from transformers.models.ministral.configuration_ministral import MinistralConfig
 from transformers.models.mistral3.configuration_mistral3 import Mistral3Config
 

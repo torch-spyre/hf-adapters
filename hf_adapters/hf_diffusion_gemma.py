@@ -161,7 +161,9 @@ class _DiffGemmaAttn(nn.Module):
     - ``is_kv_eq_v`` mirrors the Gemma 4 global-layer pattern.
     """
 
-    def __init__(self, attn, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v, encoder_mode: bool):
+    def __init__(
+        self, attn, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v, encoder_mode: bool
+    ):
         super().__init__()
         self.q_proj = attn.q_proj
         self.k_proj = attn.k_proj
@@ -189,14 +191,20 @@ class _DiffGemmaAttn(nn.Module):
     ):
         bsz, seq_len, _ = hidden_states.shape
 
-        q = self.q_proj(hidden_states).view(bsz, seq_len, self.num_q_heads, self.head_dim)
-        k_lin = self.k_proj(hidden_states).view(bsz, seq_len, self.num_kv_heads, self.head_dim)
+        q = self.q_proj(hidden_states).view(
+            bsz, seq_len, self.num_q_heads, self.head_dim
+        )
+        k_lin = self.k_proj(hidden_states).view(
+            bsz, seq_len, self.num_kv_heads, self.head_dim
+        )
 
         if self.is_kv_eq_v:
             # Global layers: V reuses k_proj output (pre-k_norm, pre-RoPE) through v_norm.
             v = self.v_norm(k_lin).transpose(1, 2)
         else:
-            v = self.v_proj(hidden_states).view(bsz, seq_len, self.num_kv_heads, self.head_dim)
+            v = self.v_proj(hidden_states).view(
+                bsz, seq_len, self.num_kv_heads, self.head_dim
+            )
             v = self.v_norm(v).transpose(1, 2)
 
         q = self.q_norm(q).transpose(1, 2)
@@ -206,7 +214,9 @@ class _DiffGemmaAttn(nn.Module):
 
         if self.encoder_mode:
             # Encoder writes the KV cache (standard AR-style).
-            key_cache, value_cache = kv_cache_update(k, v, key_cache, value_cache, cache_index)
+            key_cache, value_cache = kv_cache_update(
+                k, v, key_cache, value_cache, cache_index
+            )
             attn_k, attn_v = key_cache, value_cache
         else:
             # Decoder: write the current canvas K/V into the slots immediately
@@ -244,11 +254,18 @@ class _DiffGemmaBlock(nn.Module):
     cache, decoder blocks read it without writing.
     """
 
-    def __init__(self, layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v, encoder_mode: bool):
+    def __init__(
+        self, layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v, encoder_mode: bool
+    ):
         super().__init__()
         self.encoder_mode = encoder_mode
         self.self_attn = _DiffGemmaAttn(
-            layer.self_attn, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v, encoder_mode
+            layer.self_attn,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            is_kv_eq_v,
+            encoder_mode,
         )
         self.mlp = layer.mlp
         self.input_layernorm = layer.input_layernorm
@@ -290,8 +307,12 @@ class _DiffGemmaBlock(nn.Module):
         return dense_1, residual, key_cache, value_cache
 
 
-def _compile_block(layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v, encoder_mode):
-    block = _DiffGemmaBlock(layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v, encoder_mode)
+def _compile_block(
+    layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v, encoder_mode
+):
+    block = _DiffGemmaBlock(
+        layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v, encoder_mode
+    )
     return block, torch.compile(block, dynamic=False)
 
 
@@ -333,12 +354,18 @@ def _kv_shapes_for_model(model, cfg):
 
 def _build_encoder_masks(model, attn_mask, seq_len, batch_size, block_base, cfg):
     """Per-layer-type causal (+ optional sliding) masks for the encoder."""
-    query_coords = (torch.arange(seq_len)[None, :] + block_base).expand(batch_size, seq_len)
-    sliding_mask = add_causal_sliding_window_band(attn_mask, query_coords, cfg.sliding_window)
+    query_coords = (torch.arange(seq_len)[None, :] + block_base).expand(
+        batch_size, seq_len
+    )
+    sliding_mask = add_causal_sliding_window_band(
+        attn_mask, query_coords, cfg.sliding_window
+    )
     return {"full_attention": attn_mask, "sliding_attention": sliding_mask}
 
 
-def _build_decoder_mask(seq_len, batch_size, encoder_cache_len, prompt_offsets, dtype, max_cache_len):
+def _build_decoder_mask(
+    seq_len, batch_size, encoder_cache_len, prompt_offsets, dtype, max_cache_len
+):
     """Bidirectional decoder mask: canvas attends to all encoder keys + itself.
 
     Shape: ``[B, 1, canvas_len, max_cache_len]``.
@@ -415,8 +442,7 @@ def _run_encoder_blocks(
     enc_text = model.model.encoder.language_model
 
     freqs = {
-        lt: model._spyre_enc_rope[lt](h, position_ids)
-        for lt in model._spyre_enc_rope
+        lt: model._spyre_enc_rope[lt](h, position_ids) for lt in model._spyre_enc_rope
     }
 
     bsz, seq_len = h.shape[0], h.shape[1]
@@ -431,7 +457,7 @@ def _run_encoder_blocks(
         )
         h = _finish_layer(enc_text.layers[i], dense_1, residual, ls)
 
-    enc_text.norm(h)   # final encoder norm — result discarded, KV caches are the output
+    enc_text.norm(h)  # final encoder norm — result discarded, KV caches are the output
     return h
 
 
@@ -448,10 +474,13 @@ def _make_soft_embeddings(model, logits_cpu, dtype):
     dec = model.model.decoder
     embed_w = dec.embed_tokens.weight.to("cpu")
     embed_scale = float(dec.embed_tokens.embed_scale)
-    soft = torch.matmul(
-        logits_cpu.softmax(dim=-1, dtype=torch.float32).to(embed_w.dtype),
-        embed_w,
-    ) * embed_scale
+    soft = (
+        torch.matmul(
+            logits_cpu.softmax(dim=-1, dtype=torch.float32).to(embed_w.dtype),
+            embed_w,
+        )
+        * embed_scale
+    )
     return soft.to(dtype).contiguous()
 
 
@@ -463,7 +492,7 @@ def _run_decoder_blocks(
     key_caches,
     value_caches,
     decoder_cache_index,  # [canvas_len] pointing at [cache_len, cache_len+canvas_len)
-    soft_conditioning,   # [B, 256, H] on device, or None
+    soft_conditioning,  # [B, 256, H] on device, or None
 ):
     """Run compiled decoder blocks (attention + dense MLP on Spyre, MoE on CPU)."""
     cfg = text_config(model.config)
@@ -480,8 +509,7 @@ def _run_decoder_blocks(
     h = dec.self_conditioning(h, soft_conditioning)
 
     freqs = {
-        lt: model._spyre_dec_rope[lt](h, position_ids)
-        for lt in model._spyre_dec_rope
+        lt: model._spyre_dec_rope[lt](h, position_ids) for lt in model._spyre_dec_rope
     }
 
     for i, compiled_block in enumerate(model._spyre_dec_compiled_blocks):
@@ -536,7 +564,7 @@ def _run_decoder_forward(
     key_caches,
     value_caches,
     decoder_cache_index,  # [canvas_len] pointing at [cache_len, cache_len+canvas_len)
-    soft_conditioning,   # [B, 256, H] on device, or None
+    soft_conditioning,  # [B, 256, H] on device, or None
 ):
     """Run the bidirectional decoder over a canvas, return logits."""
     # embed_tokens lives directly on model.model.decoder
@@ -561,7 +589,9 @@ def _run_decoder_forward(
 # ---------------------------------------------------------------------------
 
 
-def generate(model, tokenizer, prompts, max_new_tokens=256, max_denoising_steps=48, **kwargs):
+def generate(
+    model, tokenizer, prompts, max_new_tokens=256, max_denoising_steps=48, **kwargs
+):
     """Spyre block-diffusion generate loop for DiffusionGemma.
 
     Outer loop: AR canvas generation (encode + N denoising steps per canvas).
@@ -584,6 +614,12 @@ def generate(model, tokenizer, prompts, max_new_tokens=256, max_denoising_steps=
     Returns:
         list[str]: decoded outputs (one per prompt).
     """
+    from transformers import StableAndConfidentStoppingCriteria
+    from transformers.models.diffusion_gemma.generation_diffusion_gemma import (
+        EntropyBoundSampler,
+        EntropyBoundSamplerConfig,
+    )
+
     from hf_adapters.hf_common import (
         BLOCK_SIZE,
         allocate_kv_caches,
@@ -591,11 +627,6 @@ def generate(model, tokenizer, prompts, max_new_tokens=256, max_denoising_steps=
         generation_cache_len,
         make_cache_index,
     )
-    from transformers.models.diffusion_gemma.generation_diffusion_gemma import (
-        EntropyBoundSampler,
-        EntropyBoundSamplerConfig,
-    )
-    from transformers import StableAndConfidentStoppingCriteria
 
     entropy_bound = kwargs.pop("entropy_bound", 0.1)
     stability_threshold = kwargs.pop("stability_threshold", 1)
@@ -627,18 +658,22 @@ def generate(model, tokenizer, prompts, max_new_tokens=256, max_denoising_steps=
     padded_len = math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
     block_pad = padded_len - prompt_length
     if block_pad > 0:
-        input_ids = torch.cat([input_ids.new_zeros((batch_size, block_pad)), input_ids], dim=1)
+        input_ids = torch.cat(
+            [input_ids.new_zeros((batch_size, block_pad)), input_ids], dim=1
+        )
     prompt_offsets = padded_len - actual_lengths  # [B] left-pad counts
 
     position_ids_prompt = torch.zeros((batch_size, padded_len), dtype=torch.long)
     for b in range(batch_size):
         n = int(actual_lengths[b])
-        position_ids_prompt[b, int(prompt_offsets[b]):] = torch.arange(n)
+        position_ids_prompt[b, int(prompt_offsets[b]) :] = torch.arange(n)
 
     # KV caches
     max_canvases = math.ceil(max_new_tokens / canvas_length)
     max_cache_len = generation_cache_len(padded_len, max_new_tokens + canvas_length)
-    key_caches, value_caches = allocate_kv_caches(model, batch_size, max_cache_len, dtype)
+    key_caches, value_caches = allocate_kv_caches(
+        model, batch_size, max_cache_len, dtype
+    )
 
     # HF sampler + stopping criteria (CPU, pure Python — identical to stock HF)
     sampler = EntropyBoundSampler(
@@ -680,8 +715,12 @@ def generate(model, tokenizer, prompts, max_new_tokens=256, max_denoising_steps=
 
         canvas_pos_start = cache_len
         canvas_position_ids = (
-            torch.arange(canvas_pos_start, canvas_pos_start + canvas_length, dtype=torch.long)
-            .unsqueeze(0).expand(batch_size, -1).to(DEVICE)
+            torch.arange(
+                canvas_pos_start, canvas_pos_start + canvas_length, dtype=torch.long
+            )
+            .unsqueeze(0)
+            .expand(batch_size, -1)
+            .to(DEVICE)
         )
         decoder_attn_mask = _build_decoder_mask(
             canvas_length, batch_size, cache_len, prompt_offsets, dtype, max_cache_len
@@ -692,8 +731,10 @@ def generate(model, tokenizer, prompts, max_new_tokens=256, max_denoising_steps=
         decoder_cache_index = make_cache_index(cache_len, canvas_length, device=DEVICE)
 
         # Initialize canvas + reset stopping criteria
-        current_canvas = sampler.initialize_canvas(batch_size, device="cpu").to(DEVICE).contiguous()
-        soft_conditioning = None   # [B, 256, H] CPU→Spyre, built each step
+        current_canvas = (
+            sampler.initialize_canvas(batch_size, device="cpu").to(DEVICE).contiguous()
+        )
+        soft_conditioning = None  # [B, 256, H] CPU→Spyre, built each step
         argmax_canvas = current_canvas.clone()
         stopping_criteria.reset()
 
@@ -718,22 +759,30 @@ def generate(model, tokenizer, prompts, max_new_tokens=256, max_denoising_steps=
 
             # Sample denoiser canvas with temperature-scaled logits
             probs = torch.softmax(processed_logits, dim=-1, dtype=torch.float32)
-            denoiser_canvas = torch.multinomial(
-                probs.view(-1, vocab_size), num_samples=1
-            ).squeeze(-1).view(batch_size, canvas_length)
+            denoiser_canvas = (
+                torch.multinomial(probs.view(-1, vocab_size), num_samples=1)
+                .squeeze(-1)
+                .view(batch_size, canvas_length)
+            )
             new_argmax = torch.argmax(processed_logits, dim=-1)
 
             # HF acceptance + renoising (uses processed logits for entropy bound)
             accepted = sampler.accept_canvas(
                 current_canvas.cpu(), denoiser_canvas, processed_logits, step_idx
             )
-            current_canvas = sampler.renoise_canvas(accepted, step_idx).to(DEVICE).contiguous()
+            current_canvas = (
+                sampler.renoise_canvas(accepted, step_idx).to(DEVICE).contiguous()
+            )
             argmax_canvas = new_argmax.to(DEVICE)
 
             # Self-conditioning: build soft embeddings on CPU from processed logits,
             # then move to Spyre as a plain [B, 256, H] tensor — avoids the
             # RetileWarning that fired when moving vocab-sized logits to Spyre.
-            soft_conditioning = _make_soft_embeddings(model, processed_logits, dtype).to(DEVICE).contiguous()
+            soft_conditioning = (
+                _make_soft_embeddings(model, processed_logits, dtype)
+                .to(DEVICE)
+                .contiguous()
+            )
 
             # HF stopping criteria (uses processed logits)
             if stopping_criteria(new_argmax, processed_logits):
@@ -787,6 +836,7 @@ def _apply_tp_sharding(model):
         return
 
     import os
+
     rank = int(os.environ.get("LOCAL_RANK", "0"))
     tp_size = model._spyre_tp_size
 
@@ -817,8 +867,6 @@ def _apply_tp_sharding(model):
             submod.weight = nn.Parameter(w[:, start:end].clone(), requires_grad=False)
 
 
-
-
 def load_hf_model(model_path, dtype, tp_plan=None):
     """Custom loader: ``DiffusionGemmaForBlockDiffusion`` is not in AutoModelForCausalLM.
 
@@ -844,8 +892,9 @@ def load_hf_model(model_path, dtype, tp_plan=None):
     model.requires_grad_(False)
 
     if tp_plan is not None:
-        from hf_adapters.hf_common import _resolve_tp_size
         from transformers import AutoConfig
+
+        from hf_adapters.hf_common import _resolve_tp_size
 
         if tp_plan == "auto":
             # DiffusionGemmaForBlockDiffusion has no public ``from_config``;
@@ -1013,7 +1062,7 @@ def prepare_for_spyre(model):
                 setattr(layer, attr, nn.Module())
 
     def _restore_moe():
-        for (layer, attr, real) in _moe_saved.values():
+        for layer, attr, real in _moe_saved.values():
             setattr(layer, attr, real)
 
     model._spyre_post_move = _restore_moe
