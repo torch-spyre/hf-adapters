@@ -139,11 +139,13 @@ def prepare_for_spyre(model):
     sliding_window = model.config.sliding_window
     prepare_rope_and_heads(model)
     pad_lm_head(model)
+    backbone = get_backbone(model)
     model._spyre_compiled_blocks = [
         (
             _make_compiled_block(layer, sliding_window)
             if getattr(layer, "layer_type", "full_attention") == "sliding_attention"
             else make_standard_gqa_block(layer, True)
         )
-        for layer in get_backbone(model).layers
+        for layer in backbone.layers
     ]
+    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
