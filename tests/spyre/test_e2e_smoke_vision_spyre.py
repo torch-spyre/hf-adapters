@@ -65,6 +65,8 @@ from hf_adapters.auto_spyre_model import (
     dtype_for_model_path,
 )
 
+pytestmark = pytest.mark.model_harness("vision")
+
 # Number of tokens to generate per image. Must be ≥2 so that ITL
 # (avg of tokens 2..N) is well-defined.
 MAX_NEW_TOKENS = 16
