@@ -69,6 +69,12 @@ on:
           - dev
           - prod
         default: dev
+      verbose:
+        description: >-
+          Emit per-step timing logs from each child process (WEEKLY_VERBOSE=1).
+        required: false
+        type: boolean
+        default: true
 
 concurrency:
   # Scoped per-ref: a new commit on a given branch cancels and supersedes
@@ -400,6 +406,13 @@ jobs:
           PY
 
       - name: Run weekly ${{ matrix.mode }} model scan (shard ${{ matrix.shard_index }})
+        env:
+          # On by default for both scheduled and manual runs; a manual dispatch
+          # can turn it off by unchecking the "verbose" box on Run workflow.
+          # Written as `inputs.verbose == false` (not `!inputs.verbose`) so
+          # scheduled runs — where `inputs` is empty and `inputs.verbose` is
+          # null-ish — fall through to '1' instead of ''.
+          WEEKLY_VERBOSE: ${{ inputs.verbose == false && '' || '1' }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -489,6 +502,13 @@ jobs:
           PY
 
       - name: Run weekly ${{ matrix.mode }} model scan (shard ${{ matrix.shard_index }})
+        env:
+          # On by default for both scheduled and manual runs; a manual dispatch
+          # can turn it off by unchecking the "verbose" box on Run workflow.
+          # Written as `inputs.verbose == false` (not `!inputs.verbose`) so
+          # scheduled runs — where `inputs` is empty and `inputs.verbose` is
+          # null-ish — fall through to '1' instead of ''.
+          WEEKLY_VERBOSE: ${{ inputs.verbose == false && '' || '1' }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -578,6 +598,13 @@ jobs:
           PY
 
       - name: Run weekly ${{ matrix.mode }} model scan (shard ${{ matrix.shard_index }})
+        env:
+          # On by default for both scheduled and manual runs; a manual dispatch
+          # can turn it off by unchecking the "verbose" box on Run workflow.
+          # Written as `inputs.verbose == false` (not `!inputs.verbose`) so
+          # scheduled runs — where `inputs` is empty and `inputs.verbose` is
+          # null-ish — fall through to '1' instead of ''.
+          WEEKLY_VERBOSE: ${{ inputs.verbose == false && '' || '1' }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh

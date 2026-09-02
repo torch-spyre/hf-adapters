@@ -43,6 +43,16 @@ from tests.spyre.weekly_generation.failure_categories import (
 from tests.spyre.weekly_generation.model_type import ModelType
 from utils.utilities import ts
 
+# Set WEEKLY_VERBOSE=1 to emit per-step timing logs from the child processes.
+# Off by default: a full weekly run over hundreds of models otherwise produces
+# ~10 log lines per model on top of the baseline start/finish pair.
+_VERBOSE: bool = os.getenv("WEEKLY_VERBOSE", "").lower() in ("1", "true", "yes")
+
+
+def _vprint(msg: str) -> None:
+    if _VERBOSE:
+        print(msg, flush=True)
+
 
 def _process_batch(
     batch: list[dict],
@@ -100,6 +110,13 @@ def _process_batch(
     results: list[dict] = []
     for row in batch:
         model_path: str = str(row["model_id"])
+        _model_start: float = _t.monotonic()
+        _model_elapsed: float = _model_start - _child_entered
+        _vprint(
+            f"{ts()}       child[{os.getpid()}] processing model "
+            f"{len(results) + 1}/{len(batch)}: {model_path!r}  "
+            f"(child elapsed: {_model_elapsed:.1f}s)"
+        )
         rec: dict = {
             "model_name": model_path,
             "config_class": row.get("config_class"),
@@ -120,7 +137,15 @@ def _process_batch(
         print(f"{ts()} - {model_path} " + ("\t(curated)" if row["curated"] else ""))
         try:
             try:
+                _vprint(
+                    f"{ts()}       child[{os.getpid()}] [{model_path}] step=resolve_adapter_module"
+                )
+                _resolve_start: float = _t.monotonic()
                 adapter_module = resolve_adapter_module_for_test(model_path)
+                _vprint(
+                    f"{ts()}       child[{os.getpid()}] [{model_path}] step=resolve_adapter_module done "
+                    f"({_t.monotonic() - _resolve_start:.1f}s)"
+                )
             except Exception as _adapter_exc:
                 from hf_adapters.hf_common import SpyreUnsupportedModelError
 
@@ -137,6 +162,7 @@ def _process_batch(
             rec["adapter_name"] = adapter_name
             rec["added_date"] = adapter_dates.get(adapter_name)
 
+            _vprint(f"{ts()}       child[{os.getpid()}] [{model_path}] step=eval_model")
             metrics = eval_model(model_path, adapter_module, model_type)
             rec["verified_on_cpu"] = bool(metrics.get("load", False))
             rec["verified_on_spyre"] = bool(metrics.get("correct", False))
@@ -165,7 +191,8 @@ def _process_batch(
         print(
             f"{ts()}       child[{os.getpid()}] finished model "
             f"{len(results)}/{len(batch)}: {model_path!r}  "
-            f"(verified_on_cpu={rec['verified_on_cpu']}, "
+            f"(elapsed: {_t.monotonic() - _model_start:.1f}s, "
+            f"verified_on_cpu={rec['verified_on_cpu']}, "
             f"verified_on_spyre={rec['verified_on_spyre']}, "
             f"failure_category={rec['failure_category']}, "
             f"error={rec['error']})",
@@ -249,15 +276,28 @@ def eval_model(model_id: str, adapter, model_type: ModelType) -> dict:
     — in embedding mode there is no smoke step, so ``smoke_passed`` is
     treated as True and the outcome reduces to ``not mismatches``.
     """
+    import time as _t
+
+    _eval_start: float = _t.monotonic()
     load_on_cpu = False
     smoke_passed = model_type == ModelType.EMBEDDING
     mismatches = True
     result: dict = {"error": "", "failure_category": None}
 
+    def _elapsed() -> str:
+        return f"{_t.monotonic() - _eval_start:.1f}s"
+
     try:
         if adapter is not None:
+            _vprint(
+                f"{ts()}       child[{os.getpid()}] [{model_id}] step=load_on_cpu (elapsed={_elapsed()})"
+            )
             load_on_cpu, load_error = _load_on_cpu(
                 model_path=model_id, model_type=model_type
+            )
+            _vprint(
+                f"{ts()}       child[{os.getpid()}] [{model_id}] step=load_on_cpu done: "
+                f"loaded={load_on_cpu} (elapsed={_elapsed()})"
             )
             if load_error and not result["error"]:
                 result["error"] = load_error
@@ -266,7 +306,14 @@ def eval_model(model_id: str, adapter, model_type: ModelType) -> dict:
                     # Extra CPU-generate step — a load that succeeds but crashes
                     # here means the checkpoint is malformed in a way that only
                     # surfaces during forward. Stop before we waste Spyre time.
+                    _vprint(
+                        f"{ts()}       child[{os.getpid()}] [{model_id}] step=cpu_generate (elapsed={_elapsed()})"
+                    )
                     generate_ok, generate_error = _cpu_generate(model_path=model_id)
+                    _vprint(
+                        f"{ts()}       child[{os.getpid()}] [{model_id}] step=cpu_generate done: "
+                        f"ok={generate_ok} (elapsed={_elapsed()})"
+                    )
                     if not generate_ok:
                         if generate_error and not result["error"]:
                             result["error"] = generate_error
@@ -280,16 +327,36 @@ def eval_model(model_id: str, adapter, model_type: ModelType) -> dict:
                             token_compare_spyre,
                         )
 
-                        smoke_passed = (
-                            run_smoke_test(model_path=model_id)["status"] == "PASS"
+                        _vprint(
+                            f"{ts()}       child[{os.getpid()}] [{model_id}] step=run_smoke_test (elapsed={_elapsed()})"
+                        )
+                        smoke_result = run_smoke_test(model_path=model_id)
+                        smoke_passed = smoke_result["status"] == "PASS"
+                        _vprint(
+                            f"{ts()}       child[{os.getpid()}] [{model_id}] step=run_smoke_test done: "
+                            f"status={smoke_result['status']!r} (elapsed={_elapsed()})"
+                        )
+                        _vprint(
+                            f"{ts()}       child[{os.getpid()}] [{model_id}] step=token_compare_spyre (elapsed={_elapsed()})"
                         )
                         mismatches, _ = token_compare_spyre(model_id)
+                        _vprint(
+                            f"{ts()}       child[{os.getpid()}] [{model_id}] step=token_compare_spyre done: "
+                            f"mismatches={mismatches} (elapsed={_elapsed()})"
+                        )
                 else:
                     from tests.spyre.test_e2e_embed_compare_spyre import (
                         embed_compare_spyre,
                     )
 
+                    _vprint(
+                        f"{ts()}       child[{os.getpid()}] [{model_id}] step=embed_compare_spyre (elapsed={_elapsed()})"
+                    )
                     mismatches, _ = embed_compare_spyre(model_id)
+                    _vprint(
+                        f"{ts()}       child[{os.getpid()}] [{model_id}] step=embed_compare_spyre done: "
+                        f"mismatches={mismatches} (elapsed={_elapsed()})"
+                    )
     except Exception as e:
         err: str = (
             f"{type(e).__name__}: {e}\n"
