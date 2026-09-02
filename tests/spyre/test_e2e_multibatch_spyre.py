@@ -49,15 +49,18 @@ Usage (on Spyre pod)::
 """
 
 import gc
-import sys
 from typing import Any
 
 import pytest
 from transformers import AutoTokenizer
 
-from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
-from hf_adapters.hf_common import move_model_to_spyre
-from tests.conftest import load_ref_model, resolve_adapter_module_for_test
+from hf_adapters import AutoSpyreModelForCausalLM
+from hf_adapters.auto_spyre_model import dtype_for_model_path
+from tests.conftest import (
+    encode_generation_inputs,
+    load_ref_model,
+    resolve_adapter_module_for_test,
+)
 from tests.cpu._generate_helpers import (
     MAX_NEW_TOKENS,
     PROMPTS,
@@ -93,9 +96,6 @@ def _print_table(model_path: str, rows: list[dict[str, Any]]) -> None:
     "model_path", xfail_non_blocking(CAUSAL_PATHS, table=NON_BLOCKING_CAUSAL_MODELS)
 )
 def test_e2e_multibatch_spyre(model_path: str) -> None:
-    # ``generate`` is looked up off the live (possibly DEVICE-patched) module,
-    # matching tests/cpu/test_generate_cpu.py.
-    hf_common_mod = sys.modules["hf_adapters.hf_common"]
     adapter_mod = resolve_adapter_module_for_test(model_path)
 
     assert len(PROMPTS) > 1, "multi-batch test needs batch_size > 1"
@@ -116,21 +116,20 @@ def test_e2e_multibatch_spyre(model_path: str) -> None:
 
     # One Spyre model, reused for the batched run and each single run (generate
     # allocates a fresh KV cache per call, so runs do not contaminate each other).
-    spyre_dtype = torch_dtype_for_model_path(model_path)
-    model = load_ref_model(model_path, adapter_mod)
-    move_model_to_spyre(model=model, module=adapter_mod, dtype=spyre_dtype)
+    spyre_dtype = dtype_for_model_path(model_path, target_device="spyre")
+    model = AutoSpyreModelForCausalLM.from_pretrained(model_path, dtype=spyre_dtype)
 
-    # Bind the model as a default arg so the closure holds a local, not a free
-    # variable: ``model`` is ``del``-ed below, and ruff resolves closure free
-    # vars against the scope's final state (unbound) and flags F821.
+    # Exercise the public tokenized-input API attached by AutoSpyreModel. Bind the
+    # model as a default arg because the local name is deleted after the runs.
     def spyre_generate(prompts: list[str], _model=model) -> list[str]:
-        return hf_common_mod.generate(
-            adapter_mod._run_forward,
-            _model,
-            tokenizer,
-            prompts,
+        encoded = encode_generation_inputs(tokenizer, prompts)
+        sequences = _model.generate(
+            **encoded,
             max_new_tokens=MAX_NEW_TOKENS,
             do_sample=False,
+        )
+        return tokenizer.batch_decode(
+            sequences[:, encoded["input_ids"].shape[1] :], skip_special_tokens=True
         )
 
     # Path under test: batched (left-padded, shared cache).

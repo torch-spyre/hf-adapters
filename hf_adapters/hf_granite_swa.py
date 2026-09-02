@@ -29,7 +29,8 @@ Usage::
     model = AutoSpyreModelForCausalLM.from_pretrained(
         "/tmp/models/granite-4.1-20b")
     tokenizer = AutoTokenizer.from_pretrained("/tmp/models/granite-4.1-20b")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
 import torch
@@ -135,7 +136,9 @@ def _make_compiled_block(layer, sliding_window: int):
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to a GraniteSWA model in-place."""
-    from transformers.models.granite_swa.modeling_granite_swa import GraniteSWARMSNorm
+    from transformers.models.granite_swa.modeling_granite_swa import (
+        GraniteSWARMSNorm,  # type: ignore[import-not-found]
+    )
 
     sliding_window = model.config.sliding_window
     prepare_rope_and_heads(model)

@@ -24,12 +24,15 @@ compiled block functions.
 import math
 import os
 import time
-from typing import Callable, Optional
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sympy import factorint
+from transformers import GenerationConfig
+from transformers.generation import GenerateDecoderOnlyOutput
 
 # Rank-aware device for multi-Spyre (tensor-parallel) runs. torchrun sets
 # LOCAL_RANK before this module is imported, so each process binds to its local
@@ -51,8 +54,23 @@ class SpyreNoAdapterError(ValueError):
     """No Spyre adapter is registered for this model's architecture."""
 
 
+@contextmanager
+def optional_spyre_config_patch(options: dict[str, Any]) -> Iterator[None]:
+    """Apply a torch-spyre config patch when torch-spyre is available."""
+    try:
+        from torch_spyre._inductor import config as spyre_config
+    except ModuleNotFoundError as error:
+        if error.name != "torch_spyre":
+            raise
+        yield
+        return
+
+    with spyre_config.patch(options):
+        yield
+
+
 def assert_spyre_dimensions(config, model_name):
-    """Reject configs whose ``hidden_size``/``intermediate_size`` is stick-misaligned.
+    """Reject configs whose hidden / intermediate dimensions are stick-misaligned.
 
     The Spyre compiler lays tensors out in ``BLOCK_SIZE``-element sticks.
     Matmuls over a dimension that is not a multiple of ``BLOCK_SIZE`` produce
@@ -62,16 +80,33 @@ def assert_spyre_dimensions(config, model_name):
     and misaligned ones (e.g. ``hidden_size=312``).
 
     ``head_dim`` is not checked — adapters auto-pad it to a stick boundary (see
-    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``);
-    ``hidden_size``/``intermediate_size`` can't be padded without changing the
-    model's arithmetic. Real models clear this bar; it fires on tiny test
-    fixtures (e.g. ``trl-internal-testing/tiny-*``, ``cointegrated/rubert-tiny2``).
+    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``); hidden and
+    intermediate dims can't be padded without changing the model's arithmetic.
+    Real models clear this bar; it fires on tiny test fixtures (e.g.
+    ``trl-internal-testing/tiny-*``, ``cointegrated/rubert-tiny2``).
+
+    Checks ``hidden_size`` (falling back to DistilBERT's ``dim``) and
+    ``intermediate_size`` (falling back to DistilBERT's ``hidden_dim``).
     """
     dim_config = text_config(config)
     misaligned = [
-        (f, v)
-        for f in ("hidden_size", "intermediate_size")
-        if (v := getattr(dim_config, f, None)) is not None and v % BLOCK_SIZE != 0
+        (label, v)
+        for label, candidates in (
+            ("hidden_size", ("hidden_size", "dim")),
+            ("intermediate_size", ("intermediate_size", "hidden_dim")),
+        )
+        if (
+            v := next(
+                (
+                    getattr(dim_config, f)
+                    for f in candidates
+                    if getattr(dim_config, f, None) is not None
+                ),
+                None,
+            )
+        )
+        is not None
+        and v % BLOCK_SIZE != 0
     ]
     if misaligned:
         details = ", ".join(f"{f}={v}" for f, v in misaligned)
@@ -101,7 +136,15 @@ def get_backbone(model):
     inner = next(
         (
             backbone
-            for name in ("model", "transformer", "gpt_neox", "bert", "mpnet", "roberta")
+            for name in (
+                "model",
+                "gpt_neox",
+                "bert",
+                "distilbert",
+                "mpnet",
+                "roberta",
+                "transformer",
+            )
             if (backbone := getattr(model, name, None)) is not None
         ),
         model,
@@ -119,6 +162,50 @@ def text_config(config):
     them, so the shared RoPE/KV/head helpers read dims.
     """
     return getattr(config, "text_config", None) or config
+
+
+def encode_prompts(
+    tokenizer,
+    prompts,
+    *,
+    padding_side: str = "left",
+    add_generation_prompt: bool = True,
+    chat: bool | None = None,
+):
+    """Tokenize prompt(s) following the model's canonical input scheme.
+
+    Chat/instruct models use their chat template with one user turn and a
+    trailing generation prompt. Base models use the tokenizer directly, which
+    preserves the checkpoint's own special-token post-processor. ``chat`` can
+    force either behavior; by default, the presence of a chat template decides.
+
+    Returns a padded ``BatchEncoding`` containing ``input_ids`` and
+    ``attention_mask``. A single string is normalized to a one-row batch.
+    """
+    prompt_list = [prompts] if isinstance(prompts, str) else list(prompts)
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    use_chat = (tokenizer.chat_template is not None) if chat is None else chat
+    if use_chat:
+        conversations = [[{"role": "user", "content": p}] for p in prompt_list]
+        return tokenizer.apply_chat_template(
+            conversations,
+            add_generation_prompt=add_generation_prompt,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+            padding=True,
+            padding_side=padding_side,
+        )
+    return tokenizer(
+        prompt_list,
+        return_tensors="pt",
+        padding=True,
+        padding_side=padding_side,
+        return_attention_mask=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1114,7 +1201,8 @@ def kv_cache_shapes(model):
         or getattr(cfg, "head_dim", None)
         or cfg.hidden_size // cfg.num_attention_heads
     )
-    k_proj = getattr(get_backbone(model).layers[0].self_attn, "k_proj", None)
+    layers = getattr(get_backbone(model), "layers", None)
+    k_proj = getattr(layers[0].self_attn, "k_proj", None) if layers else None
     if k_proj is not None:
         # Under tensor parallelism, this will differ from the config count
         num_kv_heads = k_proj.weight.shape[0] // head_dim
@@ -1231,7 +1319,7 @@ def allocate_kv_caches(model, batch_size, max_cache_len, dtype, device=None):
         shape = (batch_size, n_kv, max_cache_len, head_dim)
         if stl is None:
             return torch.zeros(shape, dtype=dtype, device=device)
-        cache: torch.Tensor = torch.empty(  # type: ignore[call-overload]
+        cache: torch.Tensor = torch.empty(  # type: ignore[call-overload, annotation-unchecked]
             shape,
             device=torch.device(device),
             device_layout=stl,
@@ -1464,35 +1552,75 @@ def _normalize_eos_ids(eos):
     return eos
 
 
-def _resolve_generation_params(model, tokenizer, overrides):
-    """Resolve sampling + stop params via HF's ``_prepare_generation_config``.
+_SUPPORTED_GENERATION_OPTIONS = {
+    "max_length",
+    "max_new_tokens",
+    "min_new_tokens",
+    "do_sample",
+    "temperature",
+    "top_k",
+    "top_p",
+    "suppress_tokens",
+    "begin_suppress_tokens",
+    "forced_bos_token_id",
+    "eos_token_id",
+    "pad_token_id",
+    "return_dict_in_generate",
+    "output_scores",
+    "output_logits",
+    # Decoder-only callers provide the prompt, so these IDs are inert metadata.
+    "bos_token_id",
+    "decoder_start_token_id",
+}
+_GENERATION_CONFIG_METADATA = {"_from_model_config", "transformers_version"}
+_NEUTRAL_GENERATION_CONFIG = GenerationConfig().to_dict()
+_NEUTRAL_GENERATION_CONFIG.update(GenerationConfig._get_default_generation_params())
+_NEUTRAL_GENERATION_CONFIG.update(
+    output_attentions=False,
+    output_hidden_states=False,
+)
 
-    Precedence matches stock HF: ``explicit kwarg > model.generation_config >
-    HF global defaults``. Parameters with ``None`` are dropped so HF
-    fills them. EOS is normalized to a tensor.
 
-    Returns a dict with keys ``do_sample, temperature, top_k, top_p`` plus
-    ``eos_ids`` (a long tensor or ``None``).
-    """
-    eos_specified = "eos_token_id" in overrides
+def _validate_supported_generation_config(cfg):
+    """Reject active generation options outside the Spyre loop's allowlist."""
+    active = []
+    for name, value in cfg.to_dict().items():
+        if name in _SUPPORTED_GENERATION_OPTIONS or name in _GENERATION_CONFIG_METADATA:
+            continue
+        neutral = _NEUTRAL_GENERATION_CONFIG.get(name)
+        if value is not None and value != neutral:
+            active.append(name)
+    if active:
+        options = ", ".join(f"`{name}`" for name in sorted(active))
+        raise SpyreUnsupportedFeatureError(
+            f"The following generation options are not supported on Spyre: {options}"
+        )
+
+
+def _resolve_generation_params(model, generation_config, overrides, model_kwargs):
+    """Resolve supported parameters via the stock HF generation-config merge."""
     explicit = {
         k: v for k, v in overrides.items() if k == "eos_token_id" or v is not None
     }
-    cfg, _ = model._prepare_generation_config(None, **explicit)
+    explicit.update(model_kwargs)
+    cfg, unused = model._prepare_generation_config(generation_config, **explicit)
+    if unused:
+        names = sorted(unused)
+        raise ValueError(
+            f"The following `model_kwargs` are not used by the model: {names} "
+            "(note: typos in the generate arguments will also show up in this list)"
+        )
+    _validate_supported_generation_config(cfg)
 
-    eos = cfg.eos_token_id
-    # Fall back to the tokenizer only when EOS was unspecified — an explicit
-    # eos_token_id=None means "disable EOS" and must not be re-enabled.
-    if eos is None and not eos_specified:
-        eos = getattr(tokenizer, "eos_token_id", None)
+    eos_ids = _normalize_eos_ids(cfg.eos_token_id)
+    if eos_ids is not None:
+        eos_ids = eos_ids.to(device="cpu", dtype=torch.long).reshape(-1)
 
-    return {
-        "do_sample": cfg.do_sample,
-        "temperature": cfg.temperature,
-        "top_k": cfg.top_k,
-        "top_p": cfg.top_p,
-        "eos_ids": _normalize_eos_ids(eos),
-    }
+    pad_token_id = cfg.pad_token_id
+    if pad_token_id is None and eos_ids is not None:
+        pad_token_id = eos_ids[0].item()
+
+    return cfg, eos_ids, pad_token_id
 
 
 def pad_and_position(input_ids, actual_lengths):
@@ -1518,28 +1646,148 @@ def pad_and_position(input_ids, actual_lengths):
     return input_ids, padded_len, prompt_offsets, position_ids
 
 
-def select_next_token(next_logits, do_sample, temperature, top_k, top_p):
-    """CPU token selection: greedy argmax, or temperature/top-k/top-p sampling.
+def normalize_generation_inputs(input_ids, attention_mask=None):
+    """Validate and normalize tokenized decoder inputs for block generation.
 
-    The top-p path mirrors HF's ``TopPLogitsWarper.__call__``.
+    Caller padding is removed according to ``attention_mask``. Each row's real
+    tokens are then right-aligned in a compact batch and left-padded to a
+    ``BLOCK_SIZE`` multiple, which is the physical layout expected by the
+    generation masks and KV-cache scheduler.
+
+    Returns ``(padded_ids, actual_lengths, padded_len, prompt_offsets,
+    position_ids)``. Inputs are copied to CPU and are not modified.
     """
+    if not isinstance(input_ids, torch.Tensor):
+        raise TypeError("input_ids must be a torch.Tensor")
+    if input_ids.ndim != 2:
+        raise ValueError("input_ids must have shape [batch_size, sequence_length]")
+    if input_ids.dtype not in (
+        torch.uint8,
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+    ):
+        raise TypeError("input_ids must have an integer dtype")
+
+    batch_size, sequence_length = input_ids.shape
+    if batch_size == 0:
+        raise ValueError("input_ids must contain at least one sequence")
+    if sequence_length == 0:
+        raise ValueError("input_ids sequences must contain at least one token")
+
+    input_ids_cpu = input_ids.detach().to("cpu")
+    if attention_mask is None:
+        mask = torch.ones_like(input_ids_cpu, dtype=torch.bool)
+    else:
+        if not isinstance(attention_mask, torch.Tensor):
+            raise TypeError("attention_mask must be a torch.Tensor")
+        if attention_mask.shape != input_ids.shape:
+            raise ValueError("attention_mask must have the same shape as input_ids")
+        attention_mask_cpu = attention_mask.detach().to("cpu")
+        if not (
+            attention_mask_cpu.dtype.is_floating_point
+            or attention_mask_cpu.dtype == torch.bool
+            or attention_mask_cpu.dtype
+            in (torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64)
+        ):
+            raise TypeError("attention_mask must have a boolean or numeric dtype")
+        is_binary = torch.all((attention_mask_cpu == 0) | (attention_mask_cpu == 1))
+        if not is_binary.item():
+            raise ValueError("attention_mask values must be 0 or 1")
+        mask = attention_mask_cpu.to(dtype=torch.bool)
+
+    actual_lengths = mask.sum(dim=1, dtype=torch.long)
+    if torch.any(actual_lengths == 0):
+        raise ValueError("each input sequence must contain at least one unmasked token")
+
+    valid_rows = []
+    for b in range(batch_size):
+        valid_indices = mask[b].nonzero(as_tuple=True)[0]
+        first = valid_indices[0].item()
+        last = valid_indices[-1].item()
+        if last - first + 1 != actual_lengths[b].item():
+            raise ValueError(
+                "attention_mask must contain one contiguous span of unmasked tokens per row"
+            )
+        valid_rows.append(input_ids_cpu[b, first : last + 1])
+
+    compact_len = actual_lengths.max().item()
+    compact_ids = input_ids_cpu.new_zeros((batch_size, compact_len))
+    for b, valid_ids in enumerate(valid_rows):
+        compact_ids[b, compact_len - valid_ids.numel() :] = valid_ids
+
+    padded_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
+        compact_ids, actual_lengths
+    )
+    return (
+        padded_ids,
+        actual_lengths,
+        padded_len,
+        prompt_offsets,
+        position_ids,
+    )
+
+
+def generation_begin_index(input_ids_seq_length, forced_bos_token_id):
+    """Return stock HF's sequence length for begin-token suppression."""
+    begin_index = input_ids_seq_length
+    if input_ids_seq_length == 1 and forced_bos_token_id is not None:
+        begin_index += 1
+    return begin_index
+
+
+def select_next_token(
+    next_logits,
+    do_sample,
+    temperature,
+    top_k,
+    top_p,
+    suppress_tokens=None,
+    begin_suppress_tokens=None,
+    forced_bos_token_id=None,
+    current_length=None,
+    begin_suppress_index=None,
+    return_scores=False,
+):
+    """CPU token selection with supported HF processing and optional scores.
+
+    Returned scores are the fully processed values used for selection: forced
+    BOS and token suppression for greedy generation, plus temperature/top-k/top-p
+    warping for sampling. ``return_scores=False`` preserves the token-only API
+    used by the multimodal generation paths.
+    """
+    force_bos = forced_bos_token_id is not None and current_length == 1
+    suppress_at_begin = begin_suppress_tokens and current_length == begin_suppress_index
+    scores = next_logits
+    if force_bos:
+        scores = torch.full_like(scores, -torch.inf)
+        scores[:, forced_bos_token_id] = 0
+    elif suppress_tokens or suppress_at_begin:
+        scores = scores.clone()
+    if suppress_tokens:
+        scores[:, suppress_tokens] = -torch.inf
+    if suppress_at_begin:
+        scores[:, begin_suppress_tokens] = -torch.inf
     if not do_sample:
-        return torch.argmax(next_logits, dim=-1)  # [B]
-    scaled = next_logits / temperature
+        tokens = torch.argmax(scores, dim=-1)  # [B]
+        return (tokens, scores) if return_scores else tokens
+    scores = scores / temperature
     if top_k and top_k > 0:
-        v, _ = torch.topk(scaled, min(top_k, scaled.size(-1)), dim=-1)
-        scaled[scaled < v[:, -1:]] = -torch.inf
+        v, _ = torch.topk(scores, min(top_k, scores.size(-1)), dim=-1)
+        scores[scores < v[:, -1:]] = -torch.inf
     if top_p is not None and top_p < 1.0:
-        sorted_logits, sorted_indices = torch.sort(scaled, descending=False)
+        sorted_logits, sorted_indices = torch.sort(scores, descending=False)
         cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
         sorted_indices_to_remove = cumulative_probs <= (1 - top_p)
         sorted_indices_to_remove[..., -1:] = 0  # keep at least one token
         indices_to_remove = sorted_indices_to_remove.scatter(
             1, sorted_indices, sorted_indices_to_remove
         )
-        scaled = scaled.masked_fill(indices_to_remove, -torch.inf)
-    probs = F.softmax(scaled, dim=-1)
-    return torch.multinomial(probs, num_samples=1).squeeze(-1)  # [B]
+        scores = scores.masked_fill(indices_to_remove, -torch.inf)
+    probs = F.softmax(scores, dim=-1)
+    tokens = torch.multinomial(probs, num_samples=1).squeeze(-1)  # [B]
+    return (tokens, scores) if return_scores else tokens
 
 
 def decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer):
@@ -1563,24 +1811,37 @@ def decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer):
 def generate(
     run_forward_fn: Callable,
     model,
-    tokenizer,
-    prompts,
-    max_new_tokens,
+    input_ids,
+    max_new_tokens=None,
+    *,
+    attention_mask=None,
+    generation_config=None,
+    max_length=None,
+    min_new_tokens=None,
     do_sample=None,
     temperature=None,
     top_k=None,
     top_p=None,
     eos_token_id=_UNSET,
     timing=False,
+    **kwargs,
 ):
-    """Model-agnostic generation: block-padded prefill, then single-token decode.
+    """Model-agnostic generation from tokenized inputs with single-token decode.
 
     When attached to a model via ``auto_spyre_model.py`` (which binds
-    ``run_forward_fn`` to the adapter module's ``_run_forward``), the
-    ``run_forward_fn`` parameter drops out of the public signature, so callers
-    invoke it as::
+    ``run_forward_fn`` to the adapter module's ``_run_forward``), callers use
+    the stock input and tensor-output shape::
 
-        model.generate(tokenizer, ["Hello!"], max_new_tokens=32, **kwargs)
+        encoded = tokenizer(["Hello!"], return_tensors="pt", padding=True)
+        sequences = model.generate(**encoded, max_new_tokens=32, **kwargs)
+
+    Ordinary contiguous left or right caller padding is removed according to
+    ``attention_mask``. Real tokens are then right-aligned and left block-padded
+    for the Spyre scheduler. Returned sequences preserve the caller's original
+    input prefix and append logical generated tokens; internal block padding is
+    never returned. With ``return_dict_in_generate=True``, returns stock HF's
+    ``GenerateDecoderOnlyOutput`` and optionally per-step processed ``scores``
+    and raw ``logits`` on CPU, cropped to the configured vocabulary size.
 
     Sampling and stop parameters follow stock-HF precedence:
     ``explicit kwarg > model.generation_config > HF global default``. Leaving a
@@ -1591,28 +1852,35 @@ def generate(
     config (e.g. ``do_sample=False`` for deterministic greedy on a model whose
     config bakes in sampling).
 
-    ``max_new_tokens`` is REQUIRED and is not resolved from config: HF's
-    default length goes through ``max_length`` (total prompt+new), which this
-    decode loop does not implement. Callers must state the new-token budget.
+    Length parameters use stock semantics: ``max_new_tokens`` takes precedence,
+    while ``max_length`` limits the total caller-visible sequence length. If
+    neither is configured, the HF model-agnostic default generates 20 tokens.
+    ``min_new_tokens`` suppresses EOS until the requested minimum is reached.
 
     Args:
         run_forward_fn: ``fn(model, input_ids, position_ids, attn_mask,
             key_caches, value_caches, cache_index)
             -> logits``
         model: Prepared HF model on Spyre (supplies ``generation_config``).
-        tokenizer: HF tokenizer.
-        prompts: List of prompt strings.
-        max_new_tokens: Number of tokens to generate (required).
+        input_ids: Integer token IDs with shape ``[batch, sequence]``.
+        max_new_tokens: Maximum number of continuation tokens.
+        attention_mask: Optional binary mask with the same shape as ``input_ids``.
+        generation_config: Optional HF ``GenerationConfig`` override.
+        max_length: Maximum total returned sequence length.
+        min_new_tokens: Minimum continuation length before EOS stopping.
         do_sample: Sampling vs greedy.
         temperature: Sampling temperature.
         top_k: Top-k filtering (0/None disables).
         top_p: Nucleus (top-p) filtering (1.0 disables).
         eos_token_id: Override stop token(s); scalar or list. Omit to defer to
-            config/tokenizer eos; pass ``None`` to disable EOS stopping (matches
+            generation config; pass ``None`` to disable EOS stopping (matches
             stock ``generate()``).
         timing: Print per-token latency.
     """
     overrides = {
+        "max_new_tokens": max_new_tokens,
+        "max_length": max_length,
+        "min_new_tokens": min_new_tokens,
         "do_sample": do_sample,
         "temperature": temperature,
         "top_k": top_k,
@@ -1622,38 +1890,58 @@ def generate(
     # (disable EOS) is distinguishable from "unspecified" (defer to config).
     if eos_token_id is not _UNSET:
         overrides["eos_token_id"] = eos_token_id
-    params = _resolve_generation_params(model, tokenizer, overrides)
-    do_sample = params["do_sample"]
-    temperature = params["temperature"]
-    top_k = params["top_k"]
-    top_p = params["top_p"]
-    eos_ids = params["eos_ids"]
 
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    # Force left-padding: with right-padding, shorter sequences end with
-    # padding tokens, and logits[:, -1, :] would predict from a pad position.
-    # Left-padding aligns all sequences to end at the same position.
-    encoded = tokenizer(
-        prompts,
-        return_tensors="pt",
-        padding=True,
-        padding_side="left",
-        return_attention_mask=True,
+    has_default_max_length = (
+        max_length is None
+        and (generation_config is None or generation_config.max_length is None)
+        and model.generation_config.max_length is None
     )
-    input_ids = encoded["input_ids"]
-    attention_mask = encoded["attention_mask"]
+    has_default_min_length = (
+        "min_length" not in kwargs
+        and (generation_config is None or generation_config.min_length is None)
+        and model.generation_config.min_length is None
+    )
+    cfg, eos_ids, pad_token_id = _resolve_generation_params(
+        model, generation_config, overrides, kwargs
+    )
+
+    orig_input_ids = input_ids.detach().to("cpu").clone()
+    (
+        input_ids,
+        actual_prompt_lengths,
+        padded_len,
+        prompt_offsets,
+        position_ids,
+    ) = normalize_generation_inputs(orig_input_ids, attention_mask)
+
+    input_length = orig_input_ids.shape[1]
+    cfg = model._prepare_generated_length(
+        generation_config=cfg,
+        has_default_max_length=has_default_max_length,
+        has_default_min_length=has_default_min_length,
+        model_input_name="input_ids",
+        input_ids_length=input_length,
+        inputs_tensor=orig_input_ids,
+    )
+    model._validate_generated_length(
+        cfg,
+        input_ids_length=input_length,
+        has_default_max_length=has_default_max_length,
+    )
+    effective_max_new_tokens = cfg.max_length - input_length
+    min_new_tokens = cfg.min_new_tokens or 0
+    begin_suppress_index = generation_begin_index(input_length, cfg.forced_bos_token_id)
+
     batch_size = input_ids.shape[0]
-    prompt_length = input_ids.shape[1]
+    vocab_size = text_config(model.config).vocab_size
+    collect_scores = bool(cfg.return_dict_in_generate and cfg.output_scores)
+    collect_logits = bool(cfg.return_dict_in_generate and cfg.output_logits)
+    generation_scores = []
+    generation_logits = []
 
-    # Per-sequence actual prompt length (excluding tokenizer left-padding)
-    actual_prompt_lengths = attention_mask.sum(dim=1)  # [B]
-
-    # Block-pad to a BLOCK_SIZE multiple; real tokens right-aligned (positions
-    # 0..actual_len-1 at padded indices prompt_offsets[b]..padded_len-1).
-    max_cache_len = generation_cache_len(prompt_length, max_new_tokens)
-    input_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
-        input_ids, actual_prompt_lengths
+    # Cache capacity is based on compacted logical prompts, not caller padding.
+    max_cache_len = generation_cache_len(
+        actual_prompt_lengths.max().item(), effective_max_new_tokens
     )
 
     # Initialize empty KV caches. Per-layer shapes come from the model
@@ -1673,9 +1961,9 @@ def generate(
 
     times_list = []
     finished = torch.zeros(batch_size, dtype=torch.bool)
-    num_generated = torch.zeros(batch_size, dtype=torch.long)
+    generated_columns = []
 
-    for i in range(max_new_tokens):
+    for i in range(effective_max_new_tokens):
         t0 = time.time()
 
         if i == 0:
@@ -1728,18 +2016,51 @@ def generate(
             next_logits = logits_cpu[:, -1, :]
             current_cache_len += 1
 
-        next_tokens = select_next_token(
-            next_logits, do_sample, temperature, top_k, top_p
-        )
+        # Crop away Spyre LM-head padding before exposing logits or selecting a
+        # token. Stock generation only sees the model's configured vocabulary.
+        # Upcast to float32, mirroring HF behavior.
+        raw_next_logits = next_logits[:, :vocab_size].float()
+        if collect_logits:
+            generation_logits.append(raw_next_logits)
 
+        # Token selection (CPU). Match HF's MinNewTokensLengthLogitsProcessor
+        # by suppressing every EOS id until the minimum continuation is emitted.
+        processed_logits = raw_next_logits
+        if eos_ids is not None and i < min_new_tokens:
+            processed_logits = processed_logits.clone()
+            processed_logits[:, eos_ids] = -torch.inf
+        next_tokens, processed_scores = select_next_token(
+            processed_logits,
+            cfg.do_sample,
+            cfg.temperature,
+            cfg.top_k,
+            cfg.top_p,
+            cfg.suppress_tokens,
+            cfg.begin_suppress_tokens,
+            cfg.forced_bos_token_id,
+            current_length=input_length + i,
+            begin_suppress_index=begin_suppress_index,
+            return_scores=True,
+        )
+        if collect_scores:
+            generation_scores.append(processed_scores)
         if timing:
             times_list.append(time.time() - t0)
+
+        # Finished rows emit padding while unfinished rows continue. Mask using
+        # the previous state so the first EOS token remains in the output.
+        if finished.any():
+            if pad_token_id is None:
+                raise ValueError(
+                    "pad_token_id must be configured when batch rows finish at different steps"
+                )
+            next_tokens = next_tokens.masked_fill(finished, pad_token_id)
+        generated_columns.append(next_tokens.clone())
 
         # Append the token: generated slots are contiguous from padded_len.
         result = torch.cat([result, next_tokens.unsqueeze(1)], dim=1)
         if eos_ids is not None:
             finished |= torch.isin(next_tokens, eos_ids)
-        num_generated += (~finished).long()
 
         if finished.all():
             break
@@ -1751,7 +2072,19 @@ def generate(
             print(f"Avg next-token latency: {avg*1000:.3f} ms")
         print("Per-token: " + ", ".join(f"{t*1000:.1f}" for t in times_list) + " ms")
 
-    return decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer)
+    if generated_columns:
+        generated_ids = torch.stack(generated_columns, dim=1)
+        sequences = torch.cat([orig_input_ids, generated_ids], dim=1).to(torch.long)
+    else:
+        sequences = orig_input_ids.to(torch.long)
+    if not cfg.return_dict_in_generate:
+        return sequences
+    return GenerateDecoderOnlyOutput(
+        sequences=sequences,  # type: ignore[arg-type]
+        scores=tuple(generation_scores) if generation_scores else None,
+        logits=tuple(generation_logits) if generation_logits else None,
+        past_key_values=None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2612,38 +2945,65 @@ def prefill_question_answering(
 
 
 # ---------------------------------------------------------------------------
-# Cross-encoder reranker prefill driver (XLM-RoBERTa / BGE reranker family)
+# Sequence-classification prefill driver
 # ---------------------------------------------------------------------------
 
 
-def prefill_reranker(
+def prefill_sequence_classification(
     run_encoder_forward_fn: Callable,
     model,
     input_ids,
     attention_mask,
     token_type_ids=None,
-):
-    """One-shot prefill for cross-encoder reranker models.
+) -> torch.Tensor:
+    """Run an encoder on Spyre and its sequence-classification head on CPU."""
+    last_hidden_state = prefill_encoder(
+        run_encoder_forward_fn,
+        model,
+        input_ids,
+        attention_mask,
+        token_type_ids=token_type_ids,
+    )
 
-    Runs the encoder backbone on Spyre via ``prefill_encoder``,
-    then applies the classification head (``model.classifier``) to produce a
-    scalar relevance score per query-document pair.
+    classifier = model.classifier
+    cls_device = next(classifier.parameters()).device
+    logits: torch.Tensor = classifier(last_hidden_state.to(cls_device))
+    return logits.to("cpu")
 
-    The classification head is run outside torch.compile on CPU to avoid:
-    - ``torch.bernoulli`` (Dropout) which the Spyre backend cannot lower.
-    - ``aten.slice`` for CLS extraction which does not lower on Spyre.
-    - ``out_proj: Linear(hidden, 1)`` whose output dim=1 is not stick-aligned.
+
+# ---------------------------------------------------------------------------
+# Token-classification prefill driver (NER / POS / chunking families)
+# ---------------------------------------------------------------------------
+
+
+def prefill_token_classification(
+    run_encoder_forward_fn: Callable,
+    model,
+    input_ids,
+    attention_mask,
+    token_type_ids=None,
+) -> torch.Tensor:
+    """Run an encoder on Spyre and its token-classification head on CPU.
+
+    Drives the encoder backbone via ``prefill_encoder``, then applies
+    ``model.classifier`` (a single linear layer whose output dim equals
+    ``config.num_labels``) to every token position.  The head is kept on
+    CPU (via ``_spyre_cpu_submodules``) to avoid:
+
+    - ``aten.slice`` (index operations that don't lower on Spyre).
+    - Any Dropout path that uses ``torch.bernoulli``.
 
     Args:
         run_encoder_forward_fn: ``fn(model, input_ids, attn_mask, position_ids,
             token_type_ids) -> [B, padded_len, H]``.
-        model: Prepared ``XLMRobertaForSequenceClassification`` on Spyre.
-        input_ids: ``[B, L]`` token ids on CPU.
-        attention_mask: ``[B, L]`` mask on CPU.
-        token_type_ids: Optional ``[B, L]``. Defaults to all-zeros when None.
+        model: Prepared ``BertForTokenClassification`` (or compatible) on Spyre.
+        input_ids: ``[B, L]`` token ids on CPU. Right-padded by the tokenizer.
+        attention_mask: ``[B, L]`` mask on CPU; 1 for real tokens, 0 for pad.
+        token_type_ids: Optional ``[B, L]`` on CPU. Defaults to all-zeros when
+            None.
 
     Returns:
-        ``scores``: ``[B]`` float32 tensor on CPU — raw logits.
+        ``logits``: ``[B, L, num_labels]`` float32 tensor on CPU.
     """
     last_hidden_state = prefill_encoder(
         run_encoder_forward_fn,
@@ -2653,17 +3013,10 @@ def prefill_reranker(
         token_type_ids=token_type_ids,
     )
 
-    # Pass the full [B, L, H] hidden state to the classifier; .to(cls_device)
-    # moves it off Spyre to avoid aten.slice. The classification head does its
-    # own [:, 0, :] CLS extraction internally.
-
-    # Run the classification head on the same device it lives on
-    # (CPU — kept off Spyre via _spyre_cpu_submodules in prepare_for_spyre).
     classifier = model.classifier
-    cls_device = next(classifier.parameters()).device
-    scores = classifier(last_hidden_state.to(cls_device))  # [B, 1]
-
-    return scores[:, 0].to("cpu")  # [B] raw logits on CPU
+    head_device = next(classifier.parameters()).device
+    logits: torch.Tensor = classifier(last_hidden_state.to(head_device))
+    return logits.to("cpu")
 
 
 # ---------------------------------------------------------------------------

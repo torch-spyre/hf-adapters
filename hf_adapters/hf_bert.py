@@ -106,7 +106,9 @@ def prepare_for_spyre(model):
             cfg.num_attention_heads,
         )
 
-    cpu_submodules = [name for name in ("cls", "qa_outputs") if hasattr(model, name)]
+    cpu_submodules = [
+        name for name in ("cls", "qa_outputs", "classifier") if hasattr(model, name)
+    ]
     if cpu_submodules:
         model._spyre_cpu_submodules = cpu_submodules
 

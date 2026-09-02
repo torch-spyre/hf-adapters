@@ -45,7 +45,7 @@ import importlib.util
 import os
 import sys
 import types
-from typing import Union
+from typing import Any, Union
 
 import pytest
 from _pytest.config import Config
@@ -145,6 +145,13 @@ from hf_adapters.auto_spyre_model import (  # noqa: E402
 )
 
 
+def encode_generation_inputs(tokenizer: Any, prompts: list[str]):
+    """Tokenize canonically, using right padding to exercise input normalization."""
+    from hf_adapters.hf_common import encode_prompts
+
+    return encode_prompts(tokenizer, prompts, padding_side="right")
+
+
 def pytest_configure(config: Config) -> None:
     config.addinivalue_line(
         "markers",
@@ -221,6 +228,8 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
         "masked_lm": {},
         "question_answering": {},
         "reranker": {},
+        "seq_classification": {},
+        "token_classification": {},
     }
     try:
         non_blocking = non_blocking_tables[harness]

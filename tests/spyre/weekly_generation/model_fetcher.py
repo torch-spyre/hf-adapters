@@ -48,10 +48,10 @@ def fetch(model_type: ModelType, top_k: int) -> list[dict]:
     Descending download order is a contract, not an incidental: the tier router
     and shard chunker downstream both assume it, and the pre-filter preserves it.
 
-    Each row is a plain dict keyed as the catalog CSV header is (``model_id``,
-    ``downloads``, ``parameters``, ``is_supported``, ``is_moe``,
-    ``config_class``, ``model_type``, ``architectures``) — JSON-serializable, so
-    it survives being written to a shard file and read back by another process.
+    Each row is a plain dict containing ``model_id``, ``downloads``,
+    ``parameters``, ``is_moe``, ``config_class``, ``model_type``, and
+    ``architectures``. It is JSON-serializable, so it survives being written to
+    a shard file and read back by another process.
     """
     models: list[dict] = all_fetchers[model_type](limit=top_k)
 

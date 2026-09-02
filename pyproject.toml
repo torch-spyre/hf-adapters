@@ -56,11 +56,23 @@ ignore_missing_imports = true
 module = "deepspec.*"
 ignore_missing_imports = true
 
+# torch-spyre is available on device but not installed in the mypy CI job.
+[[tool.mypy.overrides]]
+module = "torch_spyre.*"
+ignore_missing_imports = true
+
 # sentence_transformers is a runtime dependency (see [project].dependencies)
 # but is not installed in the CI mypy job to keep that job cheap, and it
 # ships no py.typed marker either — so mypy can't resolve its stubs.
 [[tool.mypy.overrides]]
 module = "sentence_transformers.*"
+ignore_missing_imports = true
+follow_imports = "skip"
+
+# transformers.models.granite_swa is added in transformers ≥5.15 but may not
+# be present in the installed version used by the mypy job.
+[[tool.mypy.overrides]]
+module = "transformers.models.granite_swa.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -98,7 +110,6 @@ dev = [
     "ruff>=0.15.6",
     "mypy>=2.3.0,<3",
     "typing-extensions",
-    "nicegui",
     "clickhouse-connect>=1.4.1",
     "lxml",
     "clickhouse-driver"

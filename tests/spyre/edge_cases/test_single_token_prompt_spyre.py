@@ -15,8 +15,9 @@
 """Spyre edge case: ``single_token_prompt`` (extreme left-padding)."""
 
 import pytest
-from _shared import run_greedy_case
-from model_registry import CAUSAL_PATHS
+
+from tests.model_registry import CAUSAL_PATHS
+from tests.spyre.edge_cases._shared import run_greedy_case
 
 pytestmark = pytest.mark.model_harness("causal")
 

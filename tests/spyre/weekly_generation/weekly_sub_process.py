@@ -33,6 +33,7 @@ from tests.spyre.weekly_generation.failure_categories import (
     FAILURE_CATEGORY_HARDWARE_EXCEPTION,
     FAILURE_CATEGORY_MISFORMED_HF_FAILED,
     FAILURE_CATEGORY_MODEL_TOO_LARGE,
+    FAILURE_CATEGORY_MOE,
     FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
     FAILURE_CATEGORY_QUANTIZED_MODEL,
     FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION,
@@ -123,7 +124,9 @@ def _process_batch(
             except Exception as _adapter_exc:
                 from hf_adapters.hf_common import SpyreUnsupportedModelError
 
-                if isinstance(_adapter_exc, SpyreUnsupportedModelError):
+                if row.get("is_moe"):
+                    rec["failure_category"] = FAILURE_CATEGORY_MOE
+                elif isinstance(_adapter_exc, SpyreUnsupportedModelError):
                     rec["failure_category"] = FAILURE_CATEGORY_UNSUPPORTED_CHECKPOINT
                 else:
                     rec["failure_category"] = FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER
@@ -147,6 +150,7 @@ def _process_batch(
             # Skip the error/traceback for shallow failure categories where the
             # failure_category itself is fully self-describing.
             if rec["failure_category"] not in (
+                FAILURE_CATEGORY_MOE,
                 FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
                 FAILURE_CATEGORY_UNSUPPORTED_CHECKPOINT,
                 FAILURE_CATEGORY_MODEL_TOO_LARGE,

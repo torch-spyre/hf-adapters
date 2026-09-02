@@ -86,6 +86,7 @@ from hf_adapters.hf_common import (
     build_decode_mask,
     build_prefill_mask,
     decode_block_walk,
+    generation_begin_index,
     generation_cache_len,
     get_backbone,
     get_model_dtype,
@@ -155,17 +156,6 @@ def prepare_for_spyre(model):
         "hf_gemma4_mm requires a vision embedder (model.model.embed_vision); "
         "this checkpoint has no vision_config."
     )
-
-    try:
-        from torch_spyre._inductor import (  # type: ignore[import-not-found]
-            config as spyre_config,
-        )
-
-        # Bundle-scoped HBM pool planning in torch-spyre d9c0301 corrupts
-        # Gemma outputs. Keep this disabled through lazy compilation.
-        setattr(spyre_config, "hbm_pool_planning", False)
-    except ImportError:
-        pass
 
     # Shared text decoder (mirrors hf_gemma4.prepare_for_spyre).
     hf_gemma4.prepare_text_decoder_for_spyre(model)
@@ -304,16 +294,22 @@ def _blockwise_band(mm_token_type_ids, padded_len, max_cache_len, dtype):
 
 
 def _sliding_window_lower_band(mask, sliding_window):
-    """Restrict an additive prefill mask to the sliding-window *lower bound* only.
+    """Add stock's sliding-window *lower bound* to an additive causal prefill mask.
 
     Masks keys further back than ``sliding_window`` (``q - k >= window``) but —
     unlike ``hf_common.add_causal_sliding_window_band`` — does NOT mask future
     keys (``q - k < 0``). This is stock's ``sliding_window_overlay``
-    (``kv_idx > q_idx - window``), an ``and_mask`` applied *after* the base
-    ``OR(causal, blockwise)`` composition: the causal upper bound already lives
-    in that base, so the window only supplies the backward cutoff. Applying the
-    causal window band instead would re-mask the forward-attending bidirectional
-    image pairs.
+    (``kv_idx > q_idx - window``), an ``and_mask`` over the *causal* base: the
+    causal upper bound already lives in ``mask``, so the window only supplies the
+    backward cutoff.
+
+    NOTE: this must be applied to the causal base *before* the blockwise vision
+    band is OR-ed on top — stock composes the sliding mask as
+    ``OR(AND(sliding_window_overlay, causal), blockwise)`` with the blockwise
+    overlay as the OUTERMOST op (``masking_utils.create_sliding_window_causal_mask``,
+    line 1189 then 1222), so the window must NOT gate the bidirectional image
+    pairs. Applying it after the OR would clip intra-image-block attention to the
+    window (wrong for a single image/video block longer than ``sliding_window``).
 
     Prefill only (``cache_index`` starts at cache slot 0), so a query row's cache
     coordinate is its row index ``q`` and the key column is the cache slot ``k``.
@@ -335,23 +331,42 @@ def _sliding_window_lower_band(mask, sliding_window):
 def _build_mm_masks(prefill_mask, blockwise_band, sliding_window):
     """Per-layer-type masks for a multimodal prefill: {full, sliding}.
 
-    Stock builds every mask type via ``create_causal_mask(block_sequence_ids)``,
-    which OR-s the blockwise vision overlay into the causal mask for **both** full
-    and sliding layers (traced through ``create_masks_for_generate`` →
-    ``create_causal_mask``):
+    Stock builds each mask type from the same blockwise vision overlay, but ORs
+    it in as the OUTERMOST op for **both** full and sliding layers (traced through
+    ``create_masks_for_generate`` → ``create_causal_mask`` /
+    ``create_sliding_window_causal_mask``, ``masking_utils.py`` L997 / L1222):
 
       - full_attention  = OR(causal, blockwise)
-      - sliding_attention = AND(sliding_window_lowerbound, OR(causal, blockwise))
+      - sliding_attention = OR(AND(sliding_window_lowerbound, causal), blockwise)
 
-    The OR is an elementwise ``max`` of the two additive (0 / -inf) masks, done on
-    CPU to avoid the bf16 ``-inf + -inf`` NaN hazard. Prefill only.
-    ``prefill_mask``/``blockwise_band`` are ``[B, 1, padded_len, max_cache_len]``.
+    Crucially the sliding window is AND-ed onto the *causal base only* and the
+    blockwise band is OR-ed on *after* — the window never gates the bidirectional
+    image pairs. (An earlier version AND-ed the window over ``OR(causal,
+    blockwise)``, which wrongly clipped intra-image-block attention to the window
+    for image/video blocks longer than ``sliding_window``.)
+
+    ``prefill_mask`` is the additive causal base (``build_prefill_mask``: causal +
+    left-pad + unused-cache masking). ``blockwise_band`` is the additive 0/-inf
+    image band; its allowed cells are only within a same image group, and padded
+    columns are group ``-1`` so the band never re-admits a padded key. The OR is an
+    elementwise ``max`` of the two additive masks, the AND (window) an elementwise
+    add; both done on CPU to avoid the bf16 ``-inf + -inf`` NaN hazard. Prefill
+    only. ``prefill_mask``/``blockwise_band`` are ``[B, 1, padded_len,
+    max_cache_len]``.
     """
     orig_device = prefill_mask.device
-    full_mask = torch.maximum(prefill_mask.to("cpu"), blockwise_band.to("cpu")).to(
+    prefill_cpu = prefill_mask.to("cpu")
+    blockwise_cpu = blockwise_band.to("cpu")
+
+    # full_attention = OR(causal, blockwise)
+    full_mask = torch.maximum(prefill_cpu, blockwise_cpu).to(orig_device)
+
+    # sliding_attention = OR(AND(window, causal), blockwise): window gates only the
+    # causal base, then the image band is OR-ed back on top (ungated by the window).
+    windowed_causal = _sliding_window_lower_band(prefill_cpu, sliding_window)
+    sliding_mask = torch.maximum(windowed_causal.to("cpu"), blockwise_cpu).to(
         orig_device
     )
-    sliding_mask = _sliding_window_lower_band(full_mask, sliding_window)
     return {"full_attention": full_mask, "sliding_attention": sliding_mask}
 
 
@@ -504,6 +519,7 @@ def generate(
     temperature=None,
     top_k=None,
     top_p=None,
+    generation_config=None,
 ):
     """Autoregressive image→text generation on Spyre (greedy / top-k/p sampling).
 
@@ -522,27 +538,30 @@ def generate(
     (``processor.tokenizer.padding_side='left'``). Returns EOS-trimmed strings.
     """
     tokenizer = processor.tokenizer
-    params = _resolve_generation_params(
+    cfg, eos_ids, _ = _resolve_generation_params(
         model,
-        tokenizer,
+        generation_config,
         {
             "do_sample": do_sample,
             "temperature": temperature,
             "top_k": top_k,
             "top_p": top_p,
         },
+        {},
     )
-    do_sample = params["do_sample"]
-    temperature = params["temperature"]
-    top_k = params["top_k"]
-    top_p = params["top_p"]
-    eos_ids = params["eos_ids"]
+    do_sample = cfg.do_sample
+    temperature = cfg.temperature
+    top_k = cfg.top_k
+    top_p = cfg.top_p
 
     backbone = get_backbone(model)
     model_d_type = get_model_dtype(model)
 
     batch_size, prompt_length = input_ids.shape
     actual_prompt_lengths = attention_mask.sum(dim=1)  # [B]
+    begin_suppress_index = generation_begin_index(
+        prompt_length, cfg.forced_bos_token_id
+    )
 
     max_cache_len = generation_cache_len(prompt_length, max_new_tokens)
     input_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
@@ -611,7 +630,16 @@ def generate(
             current_cache_len += 1
 
         next_tokens = select_next_token(
-            next_logits, do_sample, temperature, top_k, top_p
+            next_logits,
+            do_sample,
+            temperature,
+            top_k,
+            top_p,
+            cfg.suppress_tokens,
+            cfg.begin_suppress_tokens,
+            cfg.forced_bos_token_id,
+            current_length=prompt_length + i,
+            begin_suppress_index=begin_suppress_index,
         )
 
         # Append the token: generated slots are contiguous from padded_len.

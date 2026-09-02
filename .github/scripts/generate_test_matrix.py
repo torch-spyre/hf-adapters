@@ -57,6 +57,14 @@ def generate_matrices(exclude_models=None, only_models=None):
             registry.ALL_QUESTION_ANSWERING_PATHS,
         ),
         "reranker": (registry.RERANKER_PATHS, registry.ALL_RERANKER_PATHS),
+        "seq_classification": (
+            registry.SEQ_CLASSIFICATION_PATHS,
+            registry.ALL_SEQ_CLASSIFICATION_PATHS,
+        ),
+        "token_classification": (
+            registry.TOKEN_CLASSIFICATION_PATHS,
+            registry.ALL_TOKEN_CLASSIFICATION_PATHS,
+        ),
     }
 
     paths = {}
@@ -67,8 +75,15 @@ def generate_matrices(exclude_models=None, only_models=None):
             selected = [p for p in selected if p in only_models]
         paths[name] = selected
 
-    # Combine for jobs that test both types
-    combined_paths = paths["causal"] + paths["embed"]
+    # Feeds spyre-load-tests' matrix: test_load_spyre.py's five model_path suites.
+    combined_paths = (
+        paths["causal"]
+        + paths["embed"]
+        + paths["masked_lm"]
+        + paths["question_answering"]
+        + paths["seq_classification"]
+        + paths["token_classification"]
+    )
 
     return {
         "causal": paths["causal"],
@@ -78,6 +93,8 @@ def generate_matrices(exclude_models=None, only_models=None):
         "question_answering": paths["question_answering"],
         "combined": combined_paths,
         "reranker": paths["reranker"],
+        "seq_classification": paths["seq_classification"],
+        "token_classification": paths["token_classification"],
     }
 
 
@@ -99,6 +116,8 @@ def format_for_github_actions(matrices):
         "question_answering_matrix": json.dumps(matrices["question_answering"]),
         "combined_matrix": json.dumps(matrices["combined"]),
         "reranker_matrix": json.dumps(matrices["reranker"]),
+        "seq_classification_matrix": json.dumps(matrices["seq_classification"]),
+        "token_classification_matrix": json.dumps(matrices["token_classification"]),
     }
 
 
@@ -171,6 +190,14 @@ def main():
     )
     print(
         f"  Reranker models ({len(matrices['reranker'])}): {', '.join(matrices['reranker'])}"
+    )
+    print(
+        f"  Seq-classification models ({len(matrices['seq_classification'])}): "
+        f"{', '.join(matrices['seq_classification'])}"
+    )
+    print(
+        f"  Token-classification models ({len(matrices['token_classification'])}): "
+        f"{', '.join(matrices['token_classification'])}"
     )
 
     if args.exclude:

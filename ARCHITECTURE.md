@@ -30,6 +30,7 @@ which models are supported on Spyre.
 | Yi 1.5 6B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite Vision 4.1 4B (text backbone) | granite (text) | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | Gemma 4 12B | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
+| Gemma 4 26B-A4B (MoE) | gemma4 (MoE, `enable_moe_block`) | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 3 1B | gemma3\_text | 256 | 128 | Yes | Yes | Yes | Yes |
 | GPT-2 124M | gpt2 | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
 | GPT-Neo 125M | gpt_neo | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
@@ -44,6 +45,13 @@ which models are supported on Spyre.
 
 Unless a row notes otherwise (e.g. `(bf16)`), **verified means verified in fp16** — this holds even for bf16-native checkpoints. A bf16-native model that is only verified in fp16 may behave differently in bf16 on Spyre (and vice versa); the dtype actually tested is what the table certifies.
 
+**Gemma 4 26B-A4B (MoE):** 128 experts, top-8 routing. Prefill uses a persistent
+expert loop (all experts evaluated, routed via `keep_by_index` + coarse-tile
+carried sum). Decode uses per-token expert gather with BMM. Both paths compile
+and run end-to-end; the decode path is a single compiled graph (attention +
+layernorms + FFN/MoE fused). Token-compare: 5/5 top-1 agreement with proper
+chat-template tokenization (PR#385).
+
 ### Vision-Language (image→text)
 
 Full multimodal VLMs: a vision tower (image → patch features) plus a causal text
@@ -52,7 +60,7 @@ Spyre; the projector / patch-embed / feature-merge ops that don't lower run on
 CPU (see Multimodal VLM Path below).
 
 | Model | model\_type | Towers | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
-|-------|-----------|--------|-----------|--------------|-------------|---------------|-----------|
+|-------|-----------|--------|-----------|--------------|-------------|-----------|
 | Granite Vision 4.1 4B | granite4\_vision | SigLIP vision + Granite text | Yes (padded) | Yes | Yes | Yes |
 | Mistral-Small-3.1-24B-Instruct-2503 | mistral3 | Pixtral + Mistral text | Yes (padded) | Yes | Yes | Yes |
 | Ministral-3-14B-Instruct-2512 (bf16) | mistral3 | Pixtral + Ministral3 text | Yes (padded) | Yes | Yes | Yes |
@@ -84,6 +92,43 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 **CPU Accurate** = adapter hidden-states have cosine similarity ≥ 0.999 vs stock HF on CPU (the bound accommodates the bf16-native EmbeddingGemma; fp16 models clear it with wide margin).
 **Spyre Compiles / Spyre Runs** = via `test_e2e_embed_compare_spyre.py`. GTE-Qwen2 compiles and executes end-to-end on Spyre but its pooled embeddings drift from the CPU reference; the Qwen3/Mistral/BERT/XLM-RoBERTa/MPNet/ModernBERT encoder paths match within fp16 noise. EmbeddingGemma runs in **bf16** (fp16 overflows its residual stream) and matches the bf16 CPU reference within bf16 noise (per-token cosine ≥ 0.999; pooled ≥ 0.99).
 
+### Sequence Classification
+
+Encoder models fine-tuned for sequence-level label prediction (sentiment
+analysis, topic classification, NLI). The encoder backbone runs on Spyre;
+the two-stage classification head (`pre_classifier` + `classifier`) runs on
+CPU (pinned via `_spyre_cpu_submodules`). Use `AutoSpyreModelForSequenceClassification`;
+returns a standard `SequenceClassifierOutput` with `logits [B, num_labels]` on CPU.
+
+| Model | model\_type | head\_dim | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
+|-------|-----------|---------|--------------|-------------|---------------|-----------|
+| DistilBERT base uncased finetuned SST-2 (distilbert/distilbert-base-uncased-finetuned-sst-2-english) | distilbert | 64 | Yes | Yes | Yes | Yes |
+| RoBERTa large MNLI (FacebookAI/roberta-large-mnli) | roberta | 64 | Yes | Yes | Yes | Yes |
+
+**CPU Accurate** = per-sequence argmax label matches stock HF exactly; per-sequence
+logit cosine ≥ 0.999 vs stock HF on CPU (`test_seq_classification_cpu_accuracy.py`).
+**Spyre Runs** = via `test_e2e_seq_classification_compare_spyre.py`;
+per-sequence logit cosine ≥ 0.99 and exact label match vs CPU reference.
+RoBERTa large MNLI uses `hf_xlm_roberta.py` (shared with the XLM-RoBERTa and reranker adapters); `RobertaConfig` is already registered in `SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING`.
+
+### Token Classification (NER)
+
+Encoder models fine-tuned for token-level label prediction (NER, POS, chunking).
+The encoder backbone runs on Spyre via the existing adapter; the linear
+`classifier` head runs on CPU (pinned via `_spyre_cpu_submodules`).
+Use `AutoSpyreModelForTokenClassification`; returns a standard
+`TokenClassifierOutput` with per-token `logits [B, L, num_labels]` on CPU.
+
+| Model | model\_type | head\_dim | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
+|-------|-----------|---------|--------------|-------------|---------------|-----------|
+| BERT-base NER (dslim/bert-base-NER) | bert | 64 | Yes | Yes | Yes | Yes |
+| RoBERTa-large NER (Jean-Baptiste/roberta-large-ner-english) | roberta | 64 | Yes | Yes | Yes | Yes |
+
+**CPU Accurate** = per-token argmax label matches stock HF exactly; per-token
+logit cosine ≥ 0.999 vs stock HF on CPU (`test_token_classification_cpu_accuracy.py`).
+**Spyre Runs** = via `test_e2e_token_classification_compare_spyre.py`;
+per-token logit cosine ≥ 0.99 and exact label match vs CPU reference.
+
 ### Spyre Numerical Accuracy (torch-spyre @ 7c6ef99)
 
 Per-layer block comparison (`test_block_cpu_vs_spyre.py`) with random
@@ -111,8 +156,8 @@ single-token decode path (seq_len=1), not an adapter issue.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 28 adapters · 45 verified checkpoints · 100+ compatible models.
-The 45 verified rows are 28 generative + 13 embedding + 4 vision-language (see the
+**Coverage:** 29 adapters · 51 verified checkpoints · 100+ compatible models.
+The 51 verified rows are 30 generative + 13 embedding + 2 seq-classification + 2 token-classification + 4 vision-language (see the
 Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are
 vision-tower components used by VLM adapters rather than standalone model adapters.
 Granite Vision 4.1 is verified both as a text backbone (generative) and as a full VLM.
@@ -141,8 +186,9 @@ pattern, norms, and weight layout.
 | hf\_granitemoehybrid.py | granitemoehybrid | 2 | Granite 4.0 Micro |
 | hf\_granite\_swa.py | granite\_swa | 1 | Granite 4.1 8B (unverified), Granite 4.1 20B |
 | hf\_smollm3.py | smollm3 | 1 | — |
-| hf\_gemma4.py | gemma4\_unified / gemma4 (dense) | 1 | Gemma 4 31B (dense). Not E2B/E4B (PLE) or 26B-A4B (MoE). |
-| hf\_gemma4\_mm.py | gemma4\_unified (multimodal) | 1 | Gemma 4 31B (dense unified VLM). Not E2B/E4B (PLE) or 26B-A4B (MoE). |
+| hf\_gemma4.py | gemma4\_unified / gemma4 (dense) | 1 | Gemma 4 31B (dense). Not E2B/E4B (PLE). The MoE variant (26B-A4B) has its own dedicated adapter, `hf_gemma4_moe.py`, below. |
+| hf\_gemma4\_mm.py | gemma4\_unified (multimodal) | 1 | Gemma 4 31B (dense unified VLM). Not E2B/E4B (PLE). MoE (26B-A4B) is text-only and covered by `hf_gemma4_moe.py`, not this VLM adapter. |
+| hf\_gemma4\_moe.py | gemma4 (MoE, `enable_moe_block`) | 1 | Gemma 4 26B-A4B (128 experts, top-8 routing). Persistent prefill + gathered decode, 5/5 token match. |
 | hf\_gemma3.py | gemma3\_text / gemma3 (dense) | 2 | Gemma 3 4B/12B/27B (text decoder of the multimodal checkpoints); EmbeddingGemma (bidirectional embedder). Not Gemma 3n (PLE). |
 | hf\_olmo.py | olmo | 1 | OLMo 7B |
 | hf\_olmo2.py | olmo2 | 1 | OLMo 2 7B |
@@ -154,8 +200,9 @@ pattern, norms, and weight layout.
 | hf\_siglip\_vision.py | SigLIP vision tower | 1 | SigLIP towers of other VLMs (extracted as a bare `SiglipVisionModel`) |
 | hf\_mistral3\_vision\_mm.py | mistral3 (multimodal) | 2 | Mistral-Small-3.1/3.2 Vision; Ministral-3-14B-Instruct-2512 (ministral3 text backbone, bf16) |
 | hf\_pixtral\_vision.py | Pixtral vision tower | 1 | Pixtral towers of Mistral3 Vision checkpoints |
-| hf\_bert.py | bert | 2 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants |
-| hf\_xlm\_roberta.py | xlm-roberta | 1 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes |
+| hf\_bert.py | bert | 3 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants, BERT NER/POS/chunking fine-tunes |
+| hf\_distilbert.py | distilbert | 2 | DistilBERT-base fine-tunes (QA, NER, sentiment, other classifier heads) |
+| hf\_xlm\_roberta.py | xlm-roberta / roberta | 3 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes, RoBERTa NER/QA/classifier fine-tunes |
 | hf\_mpnet.py | mpnet | 1 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base, all-mpnet-base-v1 |
 | hf\_modernbert.py | modernbert | 3 | answerdotai/ModernBERT-base, answerdotai/ModernBERT-large, other ModernBERT embed/classifier fine-tunes |
 
@@ -175,7 +222,12 @@ from transformers import AutoTokenizer
 
 model = AutoSpyreModelForCausalLM.from_pretrained("ibm-granite/granite-3.3-8b-instruct")
 tokenizer = AutoTokenizer.from_pretrained("ibm-granite/granite-3.3-8b-instruct")
-outputs = model.generate(tokenizer, ["What is 2+2?"], max_new_tokens=128)
+inputs = tokenizer(["What is 2+2?"], return_tensors="pt", padding=True)
+sequences = model.generate(**inputs, max_new_tokens=5)
+outputs = tokenizer.batch_decode(
+    sequences[:, inputs["input_ids"].shape[1] :],
+    skip_special_tokens=True,
+)
 ```
 
 `AutoSpyreModelForCausalLM` automatically selects the correct adapter based on the model's config type.
@@ -186,6 +238,18 @@ outputs = model.generate(tokenizer, ["What is 2+2?"], max_new_tokens=128)
 Calling `model(**inputs)` returns a standard `MaskedLMOutput`. The
 bidirectional encoder runs on Spyre and the complete
 model-specific MLM head runs on CPU.
+
+### Sequence-Classification Auto API
+
+`AutoSpyreModelForSequenceClassification` loads encoder models through
+`AutoModelForSequenceClassification`. Calling `model(**inputs)` returns a
+standard `SequenceClassifierOutput` with CPU `logits [B, num_labels]`. The
+bidirectional encoder runs on Spyre; the task head runs on CPU. For DistilBERT
+the two-stage head (`pre_classifier` Linear + ReLU, then `classifier` Linear with
+CLS extraction) is wrapped into a single `_DistilBertClassifierHead` so the
+`prefill_sequence_classification` call-site is uniform across all adapters.
+Same encoder-task constraints apply: right-padded, `input_ids`-based inference
+only (no training/loss, no custom embeddings, attentions, or hidden-state collection).
 
 ### Extractive Question-Answering Auto API
 

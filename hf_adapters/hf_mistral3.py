@@ -40,13 +40,15 @@ Usage::
         "mistralai/Mistral-Small-3.2-24B-Instruct-2506")
     tokenizer = AutoTokenizer.from_pretrained(
         "mistralai/Mistral-Small-3.2-24B-Instruct-2506")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 
     model = AutoSpyreModelForCausalLM.from_pretrained(
         "mistralai/Ministral-3-14B-Instruct-2512")
     tokenizer = AutoTokenizer.from_pretrained(
         "mistralai/Ministral-3-14B-Instruct-2512")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
 from hf_adapters import hf_mistral
@@ -99,17 +101,6 @@ def prepare_for_spyre(model):
     """Apply Spyre adaptations to a Mistral-3-family model in-place."""
     from transformers.models.ministral3.modeling_ministral3 import Ministral3RMSNorm
     from transformers.models.mistral.modeling_mistral import MistralRMSNorm
-
-    try:
-        from torch_spyre._inductor import (  # type: ignore[import-not-found]
-            config as spyre_config,
-        )
-
-        # Bundle-scoped HBM pool planning in torch-spyre d9c0301 corrupts
-        # Ministral outputs. Keep this disabled through lazy compilation.
-        setattr(spyre_config, "hbm_pool_planning", False)
-    except ImportError:
-        pass
 
     # Decide the correct RMSNorm class in one place by inspecting the first
     # decoder layer's norm — Ministral3 uses Ministral3RMSNorm, Mistral-Small

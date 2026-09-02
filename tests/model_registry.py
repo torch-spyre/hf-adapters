@@ -261,6 +261,14 @@ CAUSAL_LM_MODELS = {
         "dtype": "bfloat16",
         "is_gated": True,
     },
+    # hf_gemma4_moe.py
+    "gemma4_moe": {
+        "name": "Gemma 4 26B-A4B (MoE)",
+        "path": "google/gemma-4-26B-A4B-it",
+        "adapter": "hf_gemma4_moe.py",
+        "size": "26b",
+        "dtype": "bfloat16",
+    },
     # DSpark speculative-decoding drafters (block proposers). kind="dspark_draft"
     # keeps them out of the generate-based causal-LM harnesses (see CAUSAL_PATHS);
     # tests/spyre/test_dspark_draft_spyre.py exercises the block-propose path.
@@ -405,6 +413,22 @@ EMBEDDING_MODELS = {
 }
 
 
+TOKEN_CLASSIFICATION_MODELS = {
+    "bert_ner": {
+        "name": "BERT base NER",
+        "path": "dslim/bert-base-NER",
+        "adapter": "hf_bert.py",
+        "size": "0.1b",
+    },
+    "roberta_large_ner": {
+        "name": "RoBERTa large NER English",
+        "path": "Jean-Baptiste/roberta-large-ner-english",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.3b",
+    },
+}
+
+
 QUESTION_ANSWERING_MODELS = {
     "bert_qa": {
         "name": "BERT base cased SQuAD 2",
@@ -417,6 +441,19 @@ QUESTION_ANSWERING_MODELS = {
         "path": "deepset/roberta-base-squad2",
         "adapter": "hf_xlm_roberta.py",
         "size": "0.1b",
+    },
+    # hf_distilbert.py
+    "distilbert_qa_uncased": {
+        "name": "DistilBERT base uncased distilled SQuAD",
+        "path": "distilbert/distilbert-base-uncased-distilled-squad",
+        "adapter": "hf_distilbert.py",
+        "size": "0.07b",
+    },
+    "distilbert_qa_cased": {
+        "name": "DistilBERT base cased distilled SQuAD",
+        "path": "distilbert/distilbert-base-cased-distilled-squad",
+        "adapter": "hf_distilbert.py",
+        "size": "0.07b",
     },
 }
 
@@ -570,6 +607,30 @@ def _select_representative_paths(
     return paths
 
 
+def _load_excluded_paths() -> frozenset[str]:
+    """Load excluded model paths from tests/model_lists/exclude.yaml."""
+    exclude_file = os.path.join(
+        os.path.dirname(__file__), "model_lists", "exclude.yaml"
+    )
+    if not os.path.isfile(exclude_file):
+        return frozenset()
+    excluded: set[str] = set()
+    with open(exclude_file) as f:
+        for line in f:
+            stripped = line.split("#", 1)[0].strip()
+            if stripped.startswith("- "):
+                excluded.add(stripped[2:].strip())
+    return frozenset(excluded)
+
+
+_EXCLUDED_PATHS = _load_excluded_paths()
+
+
+def _exclude(paths: list[str]) -> list[str]:
+    """Drop any path listed in tests/model_lists/exclude.yaml."""
+    return [p for p in paths if p not in _EXCLUDED_PATHS]
+
+
 # One representative model per adapter module (smallest by size), so tests
 # automatically cover new adapters. A single ``_include_gated()`` snapshot is
 # shared across all three selections. ``kind == "vlm"`` excludes bare vision towers.
@@ -579,31 +640,44 @@ _include_gated_flag = _include_gated()
 # proposers, driven by ``_run_draft_block`` — no ``generate``), so they are
 # registered for adapter-coverage but excluded from the generate-based CPU/Spyre
 # causal-LM harnesses; they are exercised by tests/spyre/test_dspark_draft_spyre.py.
-CAUSAL_PATHS: list[str] = _select_representative_paths(
-    CAUSAL_LM_MODELS,
-    include_gated=_include_gated_flag,
-    predicate=lambda info: info.get("kind") != "dspark_draft",
+CAUSAL_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        CAUSAL_LM_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") != "dspark_draft",
+    )
 )
 # The DSpark drafter checkpoints (block proposers), one per adapter — exercised by
 # tests/spyre/test_dspark_draft_spyre.py via the block-propose ``_run_draft_block``.
-DSPARK_PATHS: list[str] = _select_representative_paths(
-    CAUSAL_LM_MODELS,
-    include_gated=_include_gated_flag,
-    predicate=lambda info: info.get("kind") == "dspark_draft",
+DSPARK_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        CAUSAL_LM_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") == "dspark_draft",
+    )
 )
-EMBED_PATHS: list[str] = _select_representative_paths(
-    EMBEDDING_MODELS, include_gated=_include_gated_flag
+EMBED_PATHS: list[str] = _exclude(
+    _select_representative_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)
 )
-MASKED_LM_PATHS: list[str] = _select_representative_paths(
-    MASKED_LM_MODELS, include_gated=_include_gated_flag
+MASKED_LM_PATHS: list[str] = _exclude(
+    _select_representative_paths(MASKED_LM_MODELS, include_gated=_include_gated_flag)
 )
-QUESTION_ANSWERING_PATHS: list[str] = _select_representative_paths(
-    QUESTION_ANSWERING_MODELS, include_gated=_include_gated_flag
+QUESTION_ANSWERING_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        QUESTION_ANSWERING_MODELS, include_gated=_include_gated_flag
+    )
 )
-VISION_PATHS: list[str] = _select_representative_paths(
-    VISION_MODELS,
-    include_gated=_include_gated_flag,
-    predicate=lambda info: info.get("kind") == "vlm",
+TOKEN_CLASSIFICATION_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        TOKEN_CLASSIFICATION_MODELS, include_gated=_include_gated_flag
+    )
+)
+VISION_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        VISION_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") == "vlm",
+    )
 )
 
 
@@ -631,25 +705,32 @@ def _all_paths(
 # Every registered path per category, bypassing the smallest-per-adapter
 # reduction above -- used by generate_test_matrix.py's ``--only`` allowlist so
 # a caller can target any registered checkpoint, not just the adapter's
-# default representative.
-ALL_CAUSAL_PATHS: list[str] = _all_paths(
-    CAUSAL_LM_MODELS,
-    include_gated=_include_gated_flag,
-    predicate=lambda info: info.get("kind") != "dspark_draft",
+# default representative. _exclude() applies here too, so --only can't override it.
+ALL_CAUSAL_PATHS: list[str] = _exclude(
+    _all_paths(
+        CAUSAL_LM_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") != "dspark_draft",
+    )
 )
-ALL_EMBED_PATHS: list[str] = _all_paths(
-    EMBEDDING_MODELS, include_gated=_include_gated_flag
+ALL_EMBED_PATHS: list[str] = _exclude(
+    _all_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)
 )
-ALL_MASKED_LM_PATHS: list[str] = _all_paths(
-    MASKED_LM_MODELS, include_gated=_include_gated_flag
+ALL_MASKED_LM_PATHS: list[str] = _exclude(
+    _all_paths(MASKED_LM_MODELS, include_gated=_include_gated_flag)
 )
-ALL_QUESTION_ANSWERING_PATHS: list[str] = _all_paths(
-    QUESTION_ANSWERING_MODELS, include_gated=_include_gated_flag
+ALL_QUESTION_ANSWERING_PATHS: list[str] = _exclude(
+    _all_paths(QUESTION_ANSWERING_MODELS, include_gated=_include_gated_flag)
 )
-ALL_VISION_PATHS: list[str] = _all_paths(
-    VISION_MODELS,
-    include_gated=_include_gated_flag,
-    predicate=lambda info: info.get("kind") == "vlm",
+ALL_TOKEN_CLASSIFICATION_PATHS: list[str] = _exclude(
+    _all_paths(TOKEN_CLASSIFICATION_MODELS, include_gated=_include_gated_flag)
+)
+ALL_VISION_PATHS: list[str] = _exclude(
+    _all_paths(
+        VISION_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") == "vlm",
+    )
 )
 
 
@@ -671,16 +752,12 @@ def _non_blocking(models: dict[str, dict], keys: tuple[str, ...]) -> dict[str, s
 # and ``gemma4_mm`` (VLM).
 NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = _non_blocking(
     CAUSAL_LM_MODELS,
-    (
-        "gemma4_google",  # gemma4 responds poorly to prompt without template
-        "gemma4_base",
-        "smollm3",
-    ),
+    ("smollm3",),
 )
 
 NON_BLOCKING_VISION_MODELS: dict[str, str] = _non_blocking(
     VISION_MODELS,
-    ("gemma4_mm",),
+    (),
 )
 
 
@@ -714,6 +791,36 @@ RERANKER_MODELS = {
     },
 }
 
-RERANKER_PATHS: list[str] = [m["path"] for m in RERANKER_MODELS.values()]
+RERANKER_PATHS: list[str] = _exclude([m["path"] for m in RERANKER_MODELS.values()])
 # No per-adapter reduction for rerankers yet, so this equals RERANKER_PATHS -- kept separate so every category (see ALL_CAUSAL_PATHS et al.) follows the same pattern.
 ALL_RERANKER_PATHS: list[str] = list(RERANKER_PATHS)
+
+
+# Sequence-classification models — multi-label classifiers that return
+# ``[B, num_labels]`` logits.  Exercised by
+# ``tests/cpu/test_seq_classification_cpu_accuracy.py``.
+SEQ_CLASSIFICATION_MODELS = {
+    # hf_distilbert.py
+    "distilbert_sst2": {
+        "name": "DistilBERT base uncased finetuned SST-2",
+        "path": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+        "adapter": "hf_distilbert.py",
+        "size": "0.07b",
+    },
+    # hf_xlm_roberta.py (RobertaConfig → same adapter as XLM-R / reranker)
+    "roberta_mnli": {
+        "name": "RoBERTa large MNLI",
+        "path": "FacebookAI/roberta-large-mnli",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.36b",
+    },
+}
+
+SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        SEQ_CLASSIFICATION_MODELS, include_gated=_include_gated_flag
+    )
+)
+ALL_SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
+    _all_paths(SEQ_CLASSIFICATION_MODELS, include_gated=_include_gated_flag)
+)

@@ -23,6 +23,7 @@ import gc
 import torch
 from transformers import AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
+from hf_adapters.hf_common import encode_prompts
 from tests.conftest import load_ref_model, resolve_adapter_module_for_test
 
 PROMPTS: list[str] = [
@@ -41,7 +42,7 @@ def hf_reference_outputs(
     """Run HF native generate() on each prompt individually."""
     results: list[str] = []
     for prompt in prompts:
-        encoded = tokenizer(prompt, return_tensors="pt")
+        encoded = encode_prompts(tokenizer, prompt)
         with torch.no_grad():
             out = model.generate(
                 **encoded, max_new_tokens=max_new_tokens, do_sample=False

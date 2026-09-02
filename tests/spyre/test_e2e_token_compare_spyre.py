@@ -35,6 +35,7 @@ from hf_adapters.auto_spyre_model import dtype_for_model_path
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
+    encode_prompts,
     generation_cache_len,
     get_model_dtype,
     move_model_to_spyre,
@@ -264,7 +265,10 @@ def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]
     model = load_ref_model(model_path=model_path, adapter_mod=adapter)
 
     prompt = "The capital of France is"
-    encoded = tokenizer(prompt, return_tensors="pt")
+    # Tokenize following the model's canonical scheme (chat template for
+    # instruct models, plain post-processing for base models). The same IDs feed
+    # the HF reference and Spyre adapter, keeping the comparison symmetric.
+    encoded = encode_prompts(tokenizer, prompt)
     input_ids = encoded["input_ids"]
     print(f"  Prompt: {prompt!r} ({input_ids.shape[1]} tokens)")
 

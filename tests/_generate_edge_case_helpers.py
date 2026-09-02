@@ -26,6 +26,8 @@ from typing import Any, Optional
 
 import torch
 
+from hf_adapters.hf_common import encode_prompts
+
 BLOCK_SIZE = 64  # mirrors hf_common.BLOCK_SIZE; kept local so case ids are stable
 
 
@@ -179,7 +181,7 @@ def hf_reference_outputs(
         return ["" for _ in prompts]
     results: list[str] = []
     for prompt in prompts:
-        encoded = tokenizer(prompt, return_tensors="pt")
+        encoded = encode_prompts(tokenizer, prompt)
         with torch.no_grad():
             out = model.generate(
                 **encoded, max_new_tokens=max_new_tokens, do_sample=False
@@ -196,7 +198,7 @@ def greedy_token_ids(
     max_new_tokens: int,
 ) -> list[int]:
     """Return the list of token IDs HF ``generate(do_sample=False)`` emits."""
-    encoded = tokenizer(prompt, return_tensors="pt")
+    encoded = encode_prompts(tokenizer, prompt)
     with torch.no_grad():
         out = model.generate(**encoded, max_new_tokens=max_new_tokens, do_sample=False)
     return out[0][encoded["input_ids"].shape[1] :].tolist()

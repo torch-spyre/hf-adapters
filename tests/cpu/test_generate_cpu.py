@@ -31,6 +31,7 @@ import pytest
 from transformers import AutoTokenizer
 
 from tests.conftest import (
+    encode_generation_inputs,
     load_ref_model,
     resolve_adapter_module_for_test,
 )
@@ -67,18 +68,21 @@ def test_multibatch(model_path: str) -> None:
     gc.collect()
 
     # Adapter batched generate
+    encoded = encode_generation_inputs(tokenizer, PROMPTS)
     model = load_ref_model(model_path, adapter_mod)
     adapter_mod.prepare_for_spyre(model)
     _unwrap_compiled_blocks(model)
     dtype = dtype_for_model_path(model_path, target_device="cpu")
     _set_rope_dtype(model, dtype)
-    adapter_outputs = hf_common_mod.generate(
+    sequences = hf_common_mod.generate(
         adapter_mod._run_forward,
         model,
-        tokenizer,
-        PROMPTS,
+        **encoded,
         max_new_tokens=MAX_NEW_TOKENS,
         do_sample=False,
+    )
+    adapter_outputs = tokenizer.batch_decode(
+        sequences[:, encoded["input_ids"].shape[1] :], skip_special_tokens=True
     )
     del model
     gc.collect()

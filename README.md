@@ -1,7 +1,7 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-30-blue)
-![verified](https://img.shields.io/badge/verified_checkpoints-46-green)
+![adapters](https://img.shields.io/badge/adapters-29-blue)
+![verified](https://img.shields.io/badge/verified_checkpoints-51-green)
 ![compatible](https://img.shields.io/badge/compatible_models-100%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -14,10 +14,12 @@ from `transformers`.
 
 ## Supported Models
 
-**30 adapters · 46 verified checkpoints · 100+ compatible models**
+**29 adapters · 51 verified checkpoints · 100+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
-**vision-language** (image→text), and **speculative-decoding drafter** models — from
+**sequence classification** (sentiment / text categorisation),
+**token classification** (NER/POS), **vision-language** (image→text), and
+**speculative-decoding drafter** models — from
 Llama / Qwen / Granite / Mistral / Phi / Gemma / OLMo / GPT decoders to BERT /
 XLM-RoBERTa / MPNet / ModernBERT encoders, the Granite Vision 4.1 (SigLIP tower +
 Granite text), Mistral3 Vision (Pixtral tower + Mistral text), and Gemma 4
@@ -57,13 +59,34 @@ from transformers import AutoTokenizer
 model = AutoSpyreModelForCausalLM.from_pretrained("ibm-granite/granite-3.3-8b-instruct")
 tokenizer = AutoTokenizer.from_pretrained("ibm-granite/granite-3.3-8b-instruct")
 
-outputs = model.generate(tokenizer, ["What is 2+2?"], max_new_tokens=128)
+inputs = tokenizer(["What is 2+2?"], return_tensors="pt", padding=True)
+sequences = model.generate(**inputs, max_new_tokens=5)
+outputs = tokenizer.batch_decode(
+    sequences[:, inputs["input_ids"].shape[1] :],
+    skip_special_tokens=True,
+)
 print(outputs[0])
 ```
 
-The `AutoSpyreModelForCausalLM` class automatically selects the correct adapter module based on the model's config type.
+The only change from a stock Hugging Face script is the model class —
+`AutoSpyreModelForCausalLM` instead of `AutoModelForCausalLM`. Tokenization,
+generation arguments, and decoding all work the same way.
 
-Note that `model.generate()` is a modified version of the stock HF `generate()` method, with a different signature and functionality (See [docs/generate_vs_stock_hf.md](docs/generate_vs_stock_hf.md)).
+`model.generate()` follows the stock Hugging Face input and basic tensor-output
+conventions, but supports a smaller set of generation features (see
+[docs/generate_vs_stock_hf.md](docs/generate_vs_stock_hf.md)).
+
+For instruct checkpoints, the convenience helper `encode_prompts()` applies the
+model's chat template automatically (or plain tokenizer post-processing for base
+models). It is recommended when you want canonical tokenization without manual
+template handling:
+
+```python
+from hf_adapters import AutoSpyreModelForCausalLM, encode_prompts
+
+inputs = encode_prompts(tokenizer, ["What is 2+2?"])
+sequences = model.generate(**inputs, max_new_tokens=5)
+```
 
 ## Embedding Models
 
@@ -137,6 +160,58 @@ Encoder task inputs must be right-padded. Masked-LM and question-answering
 support inference from `input_ids`; training/loss, `inputs_embeds`, attentions,
 and hidden-state collection are not currently supported.
 
+## Sequence Classification
+
+Use `AutoSpyreModelForSequenceClassification` for models that return a single
+label per input (sentiment analysis, topic classification, natural language
+inference). The encoder runs on Spyre; the classification head runs on CPU.
+Returns a standard HuggingFace `SequenceClassifierOutput` with
+`logits [B, num_labels]` on CPU:
+
+```python
+from transformers import AutoTokenizer
+from hf_adapters import AutoSpyreModelForSequenceClassification
+
+model_path = "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+model = AutoSpyreModelForSequenceClassification.from_pretrained(model_path)
+batch = tokenizer(
+    ["I really enjoyed this film!", "The plot was confusing and dull."],
+    return_tensors="pt",
+    padding=True,
+)
+outputs = model(**batch)
+label_ids = outputs.logits.argmax(dim=-1)
+labels = [model.config.id2label[i.item()] for i in label_ids]
+print(labels)  # → ['POSITIVE', 'NEGATIVE']
+```
+
+## Token Classification (NER / POS)
+
+Use `AutoSpyreModelForTokenClassification` for token-level label prediction
+(named-entity recognition, part-of-speech tagging, chunking). The encoder runs on
+Spyre; the linear `classifier` head runs on CPU. Returns a standard HuggingFace
+`TokenClassifierOutput` with `logits [B, L, num_labels]`:
+
+```python
+from transformers import AutoTokenizer
+from hf_adapters import AutoSpyreModelForTokenClassification
+
+model_path = "dslim/bert-base-NER"
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+model = AutoSpyreModelForTokenClassification.from_pretrained(model_path)
+batch = tokenizer(
+    ["John lives in New York and works at IBM."],
+    return_tensors="pt",
+    padding=True,
+    return_attention_mask=True,
+)
+outputs = model(**batch)
+label_ids = outputs.logits.argmax(dim=-1)
+labels = [model.config.id2label[i] for i in label_ids[0].tolist()]
+print(list(zip(tokenizer.convert_ids_to_tokens(batch["input_ids"][0]), labels)))
+```
+
 ## Multimodal Models (image → text)
 
 For vision-language models, use `AutoSpyreModelForImageTextToText`. It loads the
@@ -207,6 +282,7 @@ tests/                                 CPU tests (no Spyre required)
     ├── test_e2e_smoke_spyre.py        E2E: load + generate on Spyre
     ├── test_e2e_token_compare_spyre.py E2E: HF CPU vs adapter Spyre tokens
     ├── test_e2e_embed_compare_spyre.py E2E: HF CPU vs adapter Spyre embeddings
+    ├── test_e2e_seq_classification_compare_spyre.py E2E: HF CPU vs adapter Spyre seq-classification logits
     ├── test_vlm_e2e_spyre.py          E2E: multimodal adapter on Spyre (teacher-forced)
     └── test_load_spyre.py             Spyre: models load without errors
 ```
