@@ -24,8 +24,9 @@ compiled block functions.
 import math
 import os
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 import torch
 import torch.nn as nn
@@ -52,6 +53,21 @@ class SpyreUnsupportedFeatureError(ValueError):
 
 class SpyreNoAdapterError(ValueError):
     """No Spyre adapter is registered for this model's architecture."""
+
+
+@contextmanager
+def optional_spyre_config_patch(options: dict[str, Any]) -> Iterator[None]:
+    """Apply a torch-spyre config patch when torch-spyre is available."""
+    try:
+        from torch_spyre._inductor import config as spyre_config
+    except ModuleNotFoundError as error:
+        if error.name != "torch_spyre":
+            raise
+        yield
+        return
+
+    with spyre_config.patch(options):
+        yield
 
 
 def assert_spyre_dimensions(config, model_name):
