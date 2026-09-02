@@ -103,6 +103,7 @@ from hf_adapters import (
     hf_gemma3,
     hf_gemma4,
     hf_gemma4_mm,
+    hf_gemma4_moe,
     hf_gpt2,
     hf_gpt_neo,
     hf_gpt_neox,
@@ -275,8 +276,15 @@ def resolve_adapter_module(
             f"Model {model_name_or_path} of type {type(model_config)} "
             "is not supported"
         )
+
+    adapter_module = mapping[type(model_config)]
+    if adapter_module is hf_gemma4:
+        text_cfg = getattr(model_config, "text_config", model_config)
+        if getattr(text_cfg, "enable_moe_block", False):
+            adapter_module = hf_gemma4_moe
+
     assert_spyre_dimensions(model_config, model_name=str(model_name_or_path))
-    return mapping[type(model_config)]
+    return adapter_module
 
 
 class AutoSpyreModel:
