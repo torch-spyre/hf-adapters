@@ -56,6 +56,11 @@ ignore_missing_imports = true
 module = "deepspec.*"
 ignore_missing_imports = true
 
+# torch-spyre is available on device but not installed in the mypy CI job.
+[[tool.mypy.overrides]]
+module = "torch_spyre.*"
+ignore_missing_imports = true
+
 # sentence_transformers is a runtime dependency (see [project].dependencies)
 # but is not installed in the CI mypy job to keep that job cheap, and it
 # ships no py.typed marker either — so mypy can't resolve its stubs.
