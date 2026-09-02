@@ -33,7 +33,6 @@ from hf_adapters.hf_common import (
     kv_cache_update,
     pad_attention_heads,
     pad_lm_head,
-    patch_rmsnorm,
 )
 
 
@@ -306,8 +305,8 @@ def _run_backbone_forward(
             h = post_conv(h_for_conv, C, conv_out)
             if decode:
                 h = h[:, :1]
-
-    return backbone.embedding_norm(h)
+    h = model._spyre_compiled_norm(h)
+    return h
 
 
 def _run_forward(
@@ -374,7 +373,6 @@ def _allocate_caches(model, batch_size, max_cache_len, dtype, device):
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to a dense LFM2 causal LM in-place."""
-    from transformers.models.lfm2.modeling_lfm2 import Lfm2RMSNorm
 
     cfg = model.config
     unsupported = set(cfg.layer_types) - {"full_attention", "conv"}
@@ -420,7 +418,6 @@ def prepare_for_spyre(model):
                 attn.k_layernorm, original_head_dim, padded_head_dim
             )
 
-    patch_rmsnorm(Lfm2RMSNorm)
     pad_lm_head(model)
     model._spyre_cache_allocator = _allocate_caches
     model._spyre_compiled_blocks = [
@@ -431,3 +428,4 @@ def prepare_for_spyre(model):
         )
         for layer in backbone.layers
     ]
+    model._spyre_compiled_norm = torch.compile(backbone.embedding_norm, dynamic=False)
