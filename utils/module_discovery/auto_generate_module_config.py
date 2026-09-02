@@ -899,6 +899,20 @@ def _source_reference(
     return f"{rel}:{lineno}" if lineno else rel
 
 
+def _cache_max_length(past_key_values: Any) -> int | None:
+    """Return a ``Cache``'s fixed allocation length, or ``None`` if it has none.
+
+    transformers 5.15 deprecated the ``Cache.max_cache_len`` property in favour
+    of ``get_max_length()`` (removal in 5.16), and merely reading the old
+    property emits a warning. Prefer the new API and fall back to the property
+    for older transformers, which lack ``get_max_length``.
+    """
+    get_max_length = getattr(past_key_values, "get_max_length", None)
+    if callable(get_max_length):
+        return get_max_length()
+    return getattr(past_key_values, "max_cache_len", None)
+
+
 def _extract_cache_info(
     past_key_values: Any, name: str, layer_idx: int, config: Any = None
 ) -> Dict[str, Any] | None:
@@ -993,7 +1007,7 @@ def _extract_cache_info(
         # StaticCache.__init__ needs max_cache_len (the fixed allocation), which
         # is not derivable from the (sliced) K/V shape. Record it so the test
         # side rebuilds a cache of the same allocation before priming it.
-        "max_cache_len": getattr(past_key_values, "max_cache_len", None),
+        "max_cache_len": _cache_max_length(past_key_values),
         # keys/values carry real past tokens; the test rebuilds a cache of the
         # same seq length via update(). "key"/"value" are not special tensor
         # names, so they default to random init (see _is_special_tensor).
@@ -2257,8 +2271,8 @@ def load_model_only(
             an explicit architecture class such as
             ``Mistral3ForConditionalGeneration`` for VLMs.
         **from_pretrained_kwargs: Extra kwargs forwarded to
-            ``from_pretrained`` (e.g. ``torch_dtype``, ``device_map``,
-            ``quantization_config``, ``trust_remote_code``). ``torch_dtype``
+            ``from_pretrained`` (e.g. ``dtype``, ``device_map``,
+            ``quantization_config``, ``trust_remote_code``). ``dtype``
             defaults to :data:`DEFAULT_FLOAT_DTYPE` (bfloat16, the dtype Spyre
             runs in) rather than ``from_pretrained``'s float32; pass it
             explicitly to override.
@@ -2267,8 +2281,8 @@ def load_model_only(
         The loaded, ``.eval()``-mode model.
     """
     # Capture in bfloat16 by default so the recorded floating-point tensors match
-    # the dtype Spyre executes in. Callers may still override torch_dtype.
-    from_pretrained_kwargs.setdefault("torch_dtype", DEFAULT_FLOAT_DTYPE)
+    # the dtype Spyre executes in. Callers may still override dtype.
+    from_pretrained_kwargs.setdefault("dtype", DEFAULT_FLOAT_DTYPE)
     logger.info(f"Loading model: {model_path} via {model_cls.__name__}")
     return model_cls.from_pretrained(model_path, **from_pretrained_kwargs).eval()
 
@@ -2380,7 +2394,7 @@ def load_spyre_model_and_tokenizer(
     # provenance the Spyre attention entries need. Freed immediately to bound the
     # peak of holding two copies of the weights.
     probe = load_model_only(
-        model_path, model_cls=AutoModelForCausalLM, torch_dtype=dtype
+        model_path, model_cls=AutoModelForCausalLM, dtype=dtype
     )
     snapshot = _snapshot_hf_attention_classes(probe)
     del probe
@@ -2398,6 +2412,7 @@ def run_spyre_capture_forward(
     adapter_module,
     seq_len: int,
     max_new_tokens: int = 3,
+    device: Optional[str] = None,
 ):
     """Drive the Spyre execution path so the capture hooks see every forward shape.
 
@@ -2419,26 +2434,12 @@ def run_spyre_capture_forward(
 
     Returns the generated text, or ``None`` if the forward raised.
     """
-    ###from hf_adapters.hf_common import generate
-
-    prompt = "This is a test input for capturing module information. " * (
-        seq_len // 10 + 1
-    )
     try:
         with torch.no_grad():
-            """
-            return generate(
-                adapter_module._run_forward,
-                model,
-                tokenizer,
-                [prompt],
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-            )
-            """
+            inputs = build_dummy_inputs(tokenizer, seq_len, device=device)
+
             return model.generate(
-                tokenizer,
-                [prompt],
+                **inputs,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
                 timing=True,
@@ -2494,7 +2495,7 @@ def generate_spyre_module_config(
     handles = register_capture_hooks(model, capture, excluded_types=excluded_types)
     try:
         run_spyre_capture_forward(
-            model, tokenizer, adapter_module, seq_len, max_new_tokens
+            model, tokenizer, adapter_module, seq_len, max_new_tokens, device
         )
     finally:
         for handle in handles:
@@ -2709,7 +2710,7 @@ def generate_module_config(
     device = resolve_capture_device(device)
     from_pretrained_kwargs: Dict[str, Any] = {}
     if dtype is not None:
-        from_pretrained_kwargs["torch_dtype"] = dtype
+        from_pretrained_kwargs["dtype"] = dtype
     if device is not None:
         # device_map places the weights at load time, avoiding a CPU copy that a
         # post-hoc .to(device) would make.
