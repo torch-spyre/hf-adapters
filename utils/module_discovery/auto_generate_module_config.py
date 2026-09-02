@@ -18,6 +18,7 @@ import inspect
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -117,13 +118,94 @@ def _resolve_attn_implementation(config: Any) -> str:
     return impl
 
 
-def _extract_config_kwargs(config: Any) -> Dict[str, Any]:
+def _layer_config(config: Any, layer_index: Optional[int]) -> Any:
+    """Return the config to read a layer's dimensions from.
+
+    A heterogeneous config (``per_layer_config``, e.g. a model whose layers differ
+    in ``num_key_value_heads``) refuses to serve per-layer attributes off the
+    global object: ``HeterogeneousConfigMixin.__getattribute__`` raises
+    ``AmbiguousGlobalPerLayerAttributeError`` and directs the caller to
+    ``config.per_layer_config[i].<attr>``. That exception is a ``RuntimeError``,
+    NOT an ``AttributeError``, so even ``hasattr(config, attr)`` propagates it --
+    a plain global read crashes rather than silently returning a wrong value.
+
+    Returns the per-layer config when this config is heterogeneous and the layer is
+    known, otherwise ``config`` unchanged. The per-layer entries are themselves
+    homogeneous instances of the same config class, so callers can read them
+    normally.
+    """
+    if layer_index is None:
+        return config
+    if not getattr(config, "is_heterogeneous", False):
+        return config
+    per_layer = getattr(config, "per_layer_config", None)
+    if not per_layer or layer_index >= len(per_layer):
+        logger.warning(
+            "Config is heterogeneous but has no per_layer_config entry for layer "
+            "%s; falling back to the global config, whose per-layer attributes may "
+            "raise or be wrong.",
+            layer_index,
+        )
+        return config
+    return per_layer[layer_index]
+
+
+# Sentinel distinguishing "attribute absent" from a legitimate ``None`` value.
+_CONFIG_ATTR_MISSING = object()
+
+
+def _read_config_attr(config: Any, attr: str) -> Any:
+    """Read one config attribute, tolerating heterogeneous per-layer attributes.
+
+    Returns :data:`_CONFIG_ATTR_MISSING` when the attribute cannot be read.
+
+    ``hasattr``/``getattr`` are not enough on a heterogeneous config. Reading a
+    per-layer attribute (e.g. ``num_key_value_heads`` on Gemma 4, whose layers mix
+    full and sliding attention) raises ``AmbiguousGlobalPerLayerAttributeError``,
+    and because that is a ``RuntimeError`` rather than an ``AttributeError`` even
+    ``hasattr`` propagates it.
+
+    :func:`_layer_config` handles the case where the layer is known. It cannot help
+    here: a module may legitimately own the heterogeneous config without belonging
+    to one layer -- Gemma 4's ``language_model`` is the whole decoder stack, so it
+    has no layer index, yet its config carries the per-layer attributes. For those,
+    the only correct answer is "there is no single value", so the attribute is
+    dropped and the framework falls back to the config's own default when
+    rebuilding. Dropping is safer than recording one layer's value as if it were
+    global.
+    """
+    try:
+        return getattr(config, attr)
+    except AttributeError:
+        return _CONFIG_ATTR_MISSING
+    except RuntimeError as exc:
+        # AmbiguousGlobalPerLayerAttributeError and anything else the config raises
+        # to say "this value is not well defined globally".
+        logger.debug(
+            "Skipping config attribute %r: not readable off this config (%s)",
+            attr,
+            type(exc).__name__,
+        )
+        return _CONFIG_ATTR_MISSING
+
+
+def _extract_config_kwargs(
+    config: Any, layer_index: Optional[int] = None
+) -> Dict[str, Any]:
     """Extract the config parameters the framework needs to rebuild a module.
 
     ``_attn_implementation`` is resolved to a concrete implementation (never
     ``None``) so a module reconstructed from the YAML dispatches attention the
     same way it did during capture.
+
+    ``layer_index`` selects which layer's values to read on a heterogeneous config
+    (see :func:`_layer_config`). Without it, reading a per-layer attribute such as
+    ``num_key_value_heads`` off the global config raises
+    ``AmbiguousGlobalPerLayerAttributeError``. It is optional so the out-of-layer
+    callers (and homogeneous models, i.e. every model today) are unaffected.
     """
+    config = _layer_config(config, layer_index)
+
     config_kwargs: Dict[str, Any] = {}
     for attr in [
         "hidden_size",
@@ -132,10 +214,11 @@ def _extract_config_kwargs(config: Any) -> Dict[str, Any]:
         "intermediate_size",
         "max_position_embeddings",
     ]:
-        if hasattr(config, attr):
-            config_kwargs[attr] = getattr(config, attr)
+        value = _read_config_attr(config, attr)
+        if value is not _CONFIG_ATTR_MISSING:
+            config_kwargs[attr] = value
 
-    if hasattr(config, "_attn_implementation"):
+    if _read_config_attr(config, "_attn_implementation") is not _CONFIG_ATTR_MISSING:
         config_kwargs["_attn_implementation"] = _resolve_attn_implementation(config)
 
     return config_kwargs
@@ -244,30 +327,83 @@ PHASE_PREFILL = "prefill"
 PHASE_DECODE = "decode"
 
 
-def _invocation_seq_len(invocation_inputs: List[Dict[str, Any]]) -> Optional[int]:
-    """Sequence length of an invocation: dim 1 of its first 3-D or 2-D tensor.
+# Integer dtypes mark a 2-D tensor as token ids / indices (``[batch, seq_len]``)
+# rather than a flattened activation (``[tokens, hidden]``). Recorded by
+# ``_extract_tensor_info`` as a bare name (no "torch." prefix).
+_INT_DTYPE_NAMES = frozenset(
+    {
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint8",
+        "uint16",
+        "uint32",
+        "uint64",
+        "long",
+        "int",
+        "short",
+        "bool",
+    }
+)
 
-    Activations reach a decoder submodule as ``[batch, seq_len, hidden]`` and token
-    ids as ``[batch, seq_len]``, so dim 1 is the sequence length in both cases. 3-D
-    is preferred over 2-D: where both are present the 3-D one is the activation,
-    while a 2-D tensor could be an unrelated 2-D argument.
+
+def _is_int_dtype_name(dtype: Any) -> bool:
+    """True when a recorded dtype string names an integer/bool dtype."""
+    if not isinstance(dtype, str):
+        return False
+    return dtype.replace("torch.", "") in _INT_DTYPE_NAMES
+
+
+def _invocation_seq_len(invocation_inputs: List[Dict[str, Any]]) -> Optional[int]:
+    """Sequence length of an invocation, read from its first 3-D or 2-D tensor.
+
+    A 3-D activation is ``[batch, seq_len, hidden]``, so dim 1 is the sequence
+    length. 3-D is preferred over 2-D: where both are present the 3-D one is the
+    activation, while a 2-D tensor could be an unrelated 2-D argument.
+
+    2-D needs the dtype to be read correctly, because two different layouts arrive
+    at that rank and dim 1 means something different in each:
+
+    - ``[batch, seq_len]`` token ids / positions -- an INTEGER dtype. seq_len is
+      dim 1.
+    - ``[tokens, hidden]`` a flattened activation -- a FLOAT dtype. Some modules are
+      called with the batch and sequence axes already folded together, so the
+      sequence axis is dim 0 and dim 1 is the hidden size. ``GptOssMLP`` does
+      exactly this before calling its router and experts
+      (``hidden_states.reshape(-1, hidden_dim)``); reading dim 1 there returns
+      hidden_size (2880) for BOTH the prompt and the per-token pass, which then
+      compare equal and label both invocations ``prefill`` -- so the decode entry
+      is lost and the two collide under one name.
 
     Returns ``None`` when neither rank is present (e.g. a 4-D-only module), leaving
     that module unsplit rather than risking a wrong label.
     """
 
-    def _dim1(rank: int) -> Optional[int]:
+    def _seq_len_of(shape: List[int], dtype: Any, rank: int) -> Optional[int]:
+        if len(shape) != rank:
+            return None
+        if rank == 2 and not _is_int_dtype_name(dtype):
+            # Flattened activation [tokens, hidden]: the sequence axis is dim 0.
+            return shape[0]
+        return shape[1]
+
+    def _scan(rank: int) -> Optional[int]:
         for inp in invocation_inputs:
             shape = inp.get("shape")
-            if isinstance(shape, list) and len(shape) == rank:
-                return shape[1]
+            if isinstance(shape, list):
+                found = _seq_len_of(shape, inp.get("dtype"), rank)
+                if found is not None:
+                    return found
             for item in inp.get("items", []) or []:
                 shape = item.get("shape")
-                if isinstance(shape, list) and len(shape) == rank:
-                    return shape[1]
+                if isinstance(shape, list):
+                    found = _seq_len_of(shape, item.get("dtype"), rank)
+                    if found is not None:
+                        return found
         return None
 
-    return _dim1(3) if _dim1(3) is not None else _dim1(2)
+    return _scan(3) if _scan(3) is not None else _scan(2)
 
 
 def _invocation_feature_width(
@@ -291,6 +427,80 @@ def _invocation_feature_width(
             if isinstance(shape, list) and len(shape) == 3:
                 return shape[-1]
     return None
+
+
+def _invocation_scalar_values(
+    invocation_inputs: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Scalar (non-tensor) forward args of one invocation, as ``{arg name: value}``.
+
+    ``_extract_scalar_info`` records these alongside the tensors in the same
+    ``invocation_inputs`` list, tagged ``type: "value"``, so they only need reading
+    back -- see :func:`_scalar_disambiguator` for why they are useful.
+    """
+    return {
+        inp["name"]: inp.get("value")
+        for inp in invocation_inputs
+        if isinstance(inp, dict) and inp.get("type") == "value" and "name" in inp
+    }
+
+
+def _scalar_token(value: Any) -> str:
+    """Render a scalar value as a short, filename/test-id-safe name fragment."""
+    text = "None" if value is None else str(value)
+    safe = re.sub(r"[^0-9A-Za-z]+", "_", text).strip("_")
+    return safe[:32] or "value"
+
+
+def _scalar_disambiguator(
+    invocation_inputs: List[Dict[str, Any]],
+    differing_keys: List[str],
+) -> Optional[str]:
+    """Name fragment built from the scalar args that differ across a colliding group.
+
+    Some modules are called several times with identical tensor shapes and differ
+    only in a scalar argument, so neither the phase label nor the feature width can
+    separate them. Gemma 4's ``Gemma4UnifiedTextRotaryEmbedding`` is the case in
+    hand: one instance lives outside the decoder stack
+    (``model.rotary_emb``) and is called once per layer *type*
+    (``rotary_emb(hidden_states, position_ids, layer_type)``), where ``layer_type``
+    selects a different frequency table (``<layer_type>_inv_freq``). The two calls
+    therefore compute different values from the same shapes, and a layer index
+    cannot tell them apart -- there is only one instance, outside any layer.
+
+    Only keys whose value actually VARIES within the colliding group are used
+    (``differing_keys``, computed by the caller). Scalars that are constant across
+    the group -- ``use_cache=True``, ``attention_mask=None``, ``return_dict=True``,
+    present in nearly every captured config -- carry no information here and would
+    rename entries for every model while separating nothing.
+
+    Returns ``None`` when the group has no differing scalar, leaving the caller to
+    keep its existing behaviour (one entry plus a warning).
+    """
+    if not differing_keys:
+        return None
+    scalars = _invocation_scalar_values(invocation_inputs)
+    parts = [
+        _scalar_token(scalars[key]) for key in differing_keys if key in scalars
+    ]
+    return "_".join(parts) if parts else None
+
+
+def _differing_scalar_keys(
+    invocations: List[List[Dict[str, Any]]],
+) -> List[str]:
+    """Scalar arg names whose value is not the same across every invocation given.
+
+    Sorted for a deterministic suffix order, so a name does not change between runs.
+    """
+    per_invocation = [_invocation_scalar_values(inv) for inv in invocations]
+    keys = {key for scalars in per_invocation for key in scalars}
+    differing = [
+        key
+        for key in keys
+        if len({repr(scalars.get(key)) for scalars in per_invocation}) > 1
+    ]
+    return sorted(differing)
 
 
 def _phase_label(
@@ -335,6 +545,12 @@ def split_module_data_by_phase(capture: "ModuleInfoCapture") -> None:
     12800->4096 halves of a gated MLP, and both are captured under one config
     signature. Those get the feature width appended (``..._decode_h4096``) so each
     still lands in its own entry with its own test id.
+
+    Where the shapes are identical too, a differing scalar argument is appended
+    instead (``..._prefill_sliding_attention``); see
+    :func:`_scalar_disambiguator`. Only scalars that actually vary within the
+    colliding group are used, so the constant ones every model records
+    (``use_cache``, ``attention_mask=None``) never enter a name.
     """
     split: Dict[str, Dict[str, Any]] = {}
 
@@ -362,12 +578,31 @@ def split_module_data_by_phase(capture: "ModuleInfoCapture") -> None:
         # keeps the short ``<name>_<phase>`` form.
         duplicated = {lbl for lbl in labels if labels.count(lbl) > 1}
 
+        # Scalars that vary within a reused label are the last axis available when
+        # the shapes match as well. Computed per label group, not over the whole
+        # module: a scalar that differs only between prefill and decode is already
+        # covered by the phase label and must not also enter the name.
+        differing_scalars = {
+            label: _differing_scalar_keys(
+                [inv for lbl, inv in zip(labels, invocations) if lbl == label]
+            )
+            for label in duplicated
+        }
+
         for label, inv in zip(labels, invocations):
             phase_name = f"{name}_{label}"
             if label in duplicated:
                 width = _invocation_feature_width(inv)
                 if width is not None:
                     phase_name = f"{phase_name}_h{width}"
+                # Append a scalar fragment only where it is needed to separate this
+                # group -- appending it unconditionally would rename entries whose
+                # width already distinguishes them.
+                scalar_suffix = _scalar_disambiguator(
+                    inv, differing_scalars.get(label, [])
+                )
+                if scalar_suffix is not None:
+                    phase_name = f"{phase_name}_{scalar_suffix}"
             if phase_name in split:
                 # Still colliding: two invocations share a label AND a width. Keep
                 # both rather than dropping one, and say so -- the test id cannot
@@ -546,6 +781,45 @@ def _resolve_layer_idx(module: Any) -> int | None:
     if self_attn is not None:
         return getattr(self_attn, "layer_idx", None)
     return None
+
+
+# Decoder-stack path segments across HF architectures: ``model.layers.N``
+# (Llama/Granite/Qwen/Mistral), ``transformer.h.N`` (GPT-2), ``blocks.N``,
+# ``encoder.layer.N`` (BERT). The captured group is the layer index.
+_LAYER_PATH_RE = re.compile(
+    r"(?:^|\.)(?:layers|h|block|blocks|encoder\.layer)\.(\d+)(?:\.|$)"
+)
+
+
+def _layer_index_from_path(module_name: str) -> Optional[int]:
+    """Return the decoder-layer index a module lives under, or ``None`` if outside one.
+
+    Derived from the ``named_modules()`` path rather than a ``layer_idx``
+    attribute, because only the attention module carries that attribute --
+    verified on Granite 3.3, where ``mlp`` / ``input_layernorm`` / the
+    ``DecoderLayer`` itself have none. An attribute-based approach therefore
+    cannot attribute most modules to a layer.
+
+    Returning ``None`` for a module outside any layer is load-bearing: an RMSNorm
+    exists both inside a layer and as the backbone's final ``model.norm``, and only
+    the former should be named per layer. Note the converse also occurs -- a
+    ``RotaryEmbedding`` sits outside the stack in Granite (``model.rotary_emb``) but
+    inside it in others (RecurrentGemma's ``layers.N.temporal_block.rotary_emb``),
+    so no module type may be assumed to be on one side or the other.
+    """
+    match = _LAYER_PATH_RE.search(module_name)
+    return None if match is None else int(match.group(1))
+
+
+def _compose_module_name(base: str, *suffixes: Optional[str]) -> str:
+    """Join a module base name with the suffixes that distinguish this entry.
+
+    Suffixes are appended in a fixed order so a name stays stable as new axes are
+    added (layer today; execution phase is appended later by
+    :func:`split_module_data_by_phase`). ``None`` suffixes are dropped, so a module
+    outside any decoder layer keeps exactly the name it has today.
+    """
+    return "_".join([base, *(s for s in suffixes if s)])
 
 
 def _class_source_location(cls: type) -> Tuple[Optional[str], Optional[int]]:
@@ -735,6 +1009,11 @@ def _extract_cache_info(
         config = getattr(past_key_values, "config", None)
     if config is not None:
         config_cls = type(config)
+        # Read the dimensions off this layer's config: a heterogeneous config
+        # raises AmbiguousGlobalPerLayerAttributeError for per-layer attributes
+        # such as num_key_value_heads, and that exception is a RuntimeError, so
+        # even hasattr() below would propagate it (see _layer_config).
+        dim_config = _layer_config(config, layer_idx)
         config_kwargs = {}
         for attr in [
             "hidden_size",
@@ -744,22 +1023,35 @@ def _extract_cache_info(
             "num_hidden_layers",
             "max_position_embeddings",
         ]:
-            if hasattr(config, attr):
-                config_kwargs[attr] = getattr(config, attr)
-        # The module test rebuilds only a single decoder layer, so pin
-        # num_hidden_layers to 1: the real model depth would size a KV
-        # cache / layer stack the standalone module never populates.
-        config_kwargs["num_hidden_layers"] = 1
+            value = _read_config_attr(dim_config, attr)
+            if value is not _CONFIG_ATTR_MISSING:
+                config_kwargs[attr] = value
+        # num_hidden_layers must cover layer_idx: the framework primes the cache
+        # with cache.update(key, value, layer_idx), so a cache sized to 1 layer
+        # raises IndexError for any layer_idx > 0 (e.g. --capture_layers 0,5).
+        # Size it to layer_idx + 1 -- the layers below the captured one stay empty
+        # and are never read, so this costs allocation only, not correctness.
+        config_kwargs["num_hidden_layers"] = layer_idx + 1
         cache_info["config_path"] = f"{config_cls.__module__}.{config_cls.__name__}"
         cache_info["config_kwargs"] = config_kwargs
 
     return cache_info
 
 
+# Sentinel for "record every layer" -- distinct from ``None``, which selects the
+# default of layer 0 only. An empty frozenset reads as "no filtering".
+CAPTURE_ALL_LAYERS: frozenset = frozenset()
+
+
 class ModuleInfoCapture:
     """Captures module information during forward pass using hooks."""
 
-    def __init__(self, spyre_attn_snapshot=None, spyre_model=None):
+    def __init__(
+        self,
+        spyre_attn_snapshot=None,
+        spyre_model=None,
+        capture_layers: Optional[Set[int]] = None,
+    ):
         self.module_data: Dict[str, Dict[str, Any]] = {}
         self.seen_module_configs: Set[str] = (
             set()
@@ -774,6 +1066,14 @@ class ModuleInfoCapture:
         # The prepared model, read for _spyre_head_dim (the padded head_dim the
         # adapter actually runs). None on the HF path.
         self.spyre_model = spyre_model
+        # Layers to record, by index. ``None`` -> {0}: a decoder stack repeats the
+        # same module shapes per layer, so recording all 40 of an 8B model would
+        # multiply the YAML -- and, on Spyre, the number of compiled binaries in
+        # the module test -- for little extra coverage. Pass CAPTURE_ALL_LAYERS to
+        # record every layer.
+        self.capture_layers: Set[int] = (
+            {0} if capture_layers is None else set(capture_layers)
+        )
 
     def _resolve_spyre_attn_source(self, module_name: str):
         """Look up the pre-Spyre HF attention for a wrapper's ``named_modules`` path.
@@ -792,10 +1092,18 @@ class ModuleInfoCapture:
         return None if best is None else best[1]
 
     def capture_constructor_info(
-        self, module, module_name: str, module_type: str
+        self,
+        module,
+        module_name: str,
+        module_type: str,
+        layer_index: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Capture constructor information from an instantiated module.
+
+        ``layer_index`` selects which layer's dimensions to read on a heterogeneous
+        config (see :func:`_layer_config`); it is optional so out-of-layer modules
+        and homogeneous models behave exactly as before.
 
         This inspects the module to infer what constructor args were used.
         For Transformers modules, we look for config objects and layer_idx.
@@ -858,7 +1166,7 @@ class ModuleInfoCapture:
                 config_module = type(config).__module__
 
                 # Extract key config parameters
-                config_kwargs = _extract_config_kwargs(config)
+                config_kwargs = _extract_config_kwargs(config, layer_index)
 
                 constructor_args.append(
                     {
@@ -869,10 +1177,20 @@ class ModuleInfoCapture:
                 )
 
                 # Decoder layers typically need layer_idx as kwarg
-                # Always add it for decoder layers, even if not found as attribute
+                # Always add it for decoder layers, even if not found as attribute.
+                #
+                # A DecoderLayer carries no layer_idx attribute of its own (only
+                # its attention submodule does), so fall back to the index in the
+                # module path before defaulting to 0. Without the path fallback,
+                # every captured layer would be rebuilt as layer 0 -- silently
+                # wrong once more than one layer is captured.
                 layer_idx_value = 0  # Default to 0
                 if hasattr(module, "layer_idx") and module.layer_idx is not None:
                     layer_idx_value = module.layer_idx
+                else:
+                    path_layer_idx = _layer_index_from_path(module_name)
+                    if path_layer_idx is not None:
+                        layer_idx_value = path_layer_idx
                 constructor_kwargs["layer_idx"] = {
                     "type": "int",
                     "value": layer_idx_value,
@@ -884,7 +1202,7 @@ class ModuleInfoCapture:
             config_module = type(config).__module__
 
             # Extract key config parameters
-            config_kwargs = _extract_config_kwargs(config)
+            config_kwargs = _extract_config_kwargs(config, layer_index)
 
             constructor_args.append(
                 {
@@ -897,9 +1215,12 @@ class ModuleInfoCapture:
             # Check for layer_idx (common in decoder layers with config)
             # Note: layer_idx can be 0, so check for attribute existence, not truthiness
             if hasattr(module, "layer_idx"):
-                layer_idx_value = (
-                    module.layer_idx if module.layer_idx is not None else 0
-                )
+                layer_idx_value = module.layer_idx
+                if layer_idx_value is None:
+                    # Present but unset: prefer the index in the module path over a
+                    # blanket 0, so a captured layer is rebuilt as itself.
+                    path_layer_idx = _layer_index_from_path(module_name)
+                    layer_idx_value = 0 if path_layer_idx is None else path_layer_idx
                 constructor_kwargs["layer_idx"] = {
                     "type": "int",
                     "value": layer_idx_value,
@@ -967,20 +1288,32 @@ class ModuleInfoCapture:
         """
 
         def hook(module, args, kwargs):
+            # Attribute this module to a decoder layer, and skip layers the caller
+            # did not ask for. A module outside any layer (model.norm, lm_head,
+            # rotary_emb on most architectures) is always recorded: it exists
+            # once, not once per layer.
+            layer_index = _layer_index_from_path(module_name)
+            if (
+                layer_index is not None
+                and self.capture_layers
+                and layer_index not in self.capture_layers
+            ):
+                return
+
             # Capture constructor information to create unique config identifier
             constructor_info = self.capture_constructor_info(
-                module, module_name, module_type
+                module, module_name, module_type, layer_index
             )
 
             # Create a unique identifier based on module type + constructor args
             # This allows us to capture multiple variants of the same module type
             config_signature = self._create_config_signature(
-                module_type, constructor_info
+                module_type, constructor_info, layer_index
             )
 
             # Create unique module name for this variant
             unique_module_name = self._create_unique_module_name(
-                module_type, constructor_info, config_signature
+                module_type, constructor_info, config_signature, layer_index
             )
 
             # Initialize module_info if this is the first invocation
@@ -996,6 +1329,7 @@ class ModuleInfoCapture:
                     "source_file": source_file,
                     "source_lineno": source_lineno,
                     "example_instance": module_name,
+                    "layer_index": layer_index,
                     "constructor_args": constructor_info["constructor_args"],
                     "constructor_kwargs": constructor_info["constructor_kwargs"],
                     "invocations": [],  # List of unique invocations
@@ -1076,12 +1410,19 @@ class ModuleInfoCapture:
         return hook
 
     def _create_config_signature(
-        self, module_type: str, constructor_info: Dict[str, Any]
+        self,
+        module_type: str,
+        constructor_info: Dict[str, Any],
+        layer_index: Optional[int] = None,
     ) -> str:
         """Create a unique signature for a module configuration.
 
         This signature is used to detect duplicate configurations.
-        layer_idx is EXCLUDED because we only need one representative layer.
+
+        The layer index IS part of the signature: how many layers get recorded is
+        bounded by ``capture_layers``, so distinct layers must not collapse here.
+        ``layer_index=None`` (a module outside any layer) reproduces the previous
+        signature exactly, keeping those entries unchanged.
         """
         # Build signature from constructor args
         sig_parts = [module_type]
@@ -1094,46 +1435,62 @@ class ModuleInfoCapture:
             else:
                 sig_parts.append(f"{arg['type']}")
 
-        # IMPORTANT: Exclude layer_idx from signature
-        # We only need one representative layer, not all 40 decoder layers
+        # layer_idx is skipped here because the layer is represented by
+        # layer_index below, taken from the module path -- which covers the
+        # modules that have no layer_idx attribute (mlp, norms, the layer itself).
         for key, kwarg in constructor_info.get("constructor_kwargs", {}).items():
             if key == "layer_idx":
-                continue  # Skip layer_idx - treat all layers as same config
+                continue
             if kwarg["type"] == "int":
                 sig_parts.append(f"{key}_{kwarg['value']}")
+
+        if layer_index is not None:
+            sig_parts.append(f"layer_{layer_index}")
 
         return "__".join(sig_parts)
 
     def _create_unique_module_name(
-        self, module_type: str, constructor_info: Dict[str, Any], config_signature: str
+        self,
+        module_type: str,
+        constructor_info: Dict[str, Any],
+        config_signature: str,
+        layer_index: Optional[int] = None,
     ) -> str:
         """Create a unique, human-readable name for a module variant.
 
-        Names are based on the config signature (which excludes layer_idx),
-        ensuring that modules with identical configs get the same name and
-        their invocations are grouped together.
+        A module inside a decoder layer is suffixed with its layer index, so each
+        captured layer gets its own entry. A module outside any layer keeps the
+        name it has today.
+
+        The layer suffix replaces the old hash fallback for in-layer modules. That
+        hash carried almost no information -- ``_create_config_signature`` records
+        only the config CLASS path, not its dimensions, so ``SiLUActivation``'s
+        hash was ``sha256("SiLUActivation")[:8]``, a constant -- and ``_layer0``
+        is both meaningful and readable. The hash remains for out-of-layer modules
+        that still need disambiguating.
 
         Examples:
             MyRMSNorm with dim=4096 -> MyRMSNorm_4096
-            MyRMSNorm with dim=2048 -> MyRMSNorm_2048
-            GraniteDecoderLayer (all layers same config) -> GraniteDecoderLayer_layer0
+            MyRMSNorm with dim=4096, inside layer 3 -> MyRMSNorm_4096_layer3
+            GraniteMLP inside layer 0 -> GraniteMLP_layer0
+            GraniteDecoderLayer inside layer 3 -> GraniteDecoderLayer_layer3
         """
+        layer_suffix = None if layer_index is None else f"layer{layer_index}"
+
         # Check if there's a simple int arg (common for norm layers)
         args = constructor_info.get("constructor_args", [])
         if len(args) == 1 and args[0]["type"] == "int":
-            return f"{module_type}_{args[0]['value']}"
+            return _compose_module_name(
+                module_type, str(args[0]["value"]), layer_suffix
+            )
 
-        # For modules with layer_idx, use "layer0" as representative name
-        # since all layers have the same config (layer_idx excluded from signature)
-        kwargs = constructor_info.get("constructor_kwargs", {})
-        if "layer_idx" in kwargs:
-            # Use layer0 as the canonical name for all layers
-            return f"{module_type}_layer0"
+        # Inside a layer the index alone disambiguates; no hash needed.
+        if layer_suffix is not None:
+            return _compose_module_name(module_type, layer_suffix)
 
-        # If no simple identifier, use a hash of the config signature
-        # This ensures uniqueness while keeping names readable
+        # Outside any layer, fall back to a hash of the config signature.
         sig_hash = hashlib.sha256(config_signature.encode()).hexdigest()[:8]
-        return f"{module_type}_{sig_hash}"
+        return _compose_module_name(module_type, sig_hash)
 
     def _create_invocation_signature(
         self, invocation_inputs: List[Dict[str, Any]]
@@ -1223,7 +1580,9 @@ class ModuleInfoCapture:
 
 
 def get_all_custom_modules(
-    model, excluded_types: frozenset = frozenset()
+    model,
+    excluded_types: frozenset = frozenset(),
+    capture_layers: Optional[Set[int]] = None,
 ) -> List[Tuple[str, str, Any]]:
     """
     Get ALL custom module instances from the model (not just unique types).
@@ -1235,6 +1594,10 @@ def get_all_custom_modules(
             SPYRE_EXCLUDED_MODULE_TYPES). Empty by default, so the HF path is
             unchanged. Excluding a container does NOT exclude its children: they
             appear in named_modules() in their own right and are still captured.
+        capture_layers: When given, in-layer modules outside these indices are
+            skipped, so hooks are registered on one layer's worth of modules
+            instead of all 40. Modules outside any layer are always kept. The hook
+            itself re-checks, so this is purely an optimization.
 
     Returns:
         List of (module_name, module_type, module_instance) tuples
@@ -1252,6 +1615,11 @@ def get_all_custom_modules(
         # Skip if already in upstream module_db
         if module_type in existing_modules:
             continue
+
+        if capture_layers:
+            layer_index = _layer_index_from_path(name)
+            if layer_index is not None and layer_index not in capture_layers:
+                continue
 
         # Keep ALL instances (not just first of each type)
         custom_modules.append((name, module_type, module))
@@ -1687,16 +2055,22 @@ def run_prefill(model, inputs) -> Any:
 
 
 def _build_decode_inputs(inputs, past_key_values) -> Dict[str, Any]:
-    """Build the forward kwargs for a single decode step from prefill state."""
+    """Build the forward kwargs for a single decode step from prefill state.
+
+    The new tensors are created on the same device as the prefill inputs, so a
+    capture running on cuda/spyre does not mix an on-device prefill with CPU decode
+    tensors (``torch.cat`` and the forward would both raise).
+    """
     batch_size = inputs["input_ids"].shape[0]
+    device = inputs["input_ids"].device
     # Single new token for decode
-    next_token = torch.zeros((batch_size, 1), dtype=torch.long)
+    next_token = torch.zeros((batch_size, 1), dtype=torch.long, device=device)
     return {
         "input_ids": next_token,  # Shape: [B, 1]
         "attention_mask": torch.cat(
             [
                 inputs["attention_mask"],
-                torch.ones((batch_size, 1), dtype=torch.long),
+                torch.ones((batch_size, 1), dtype=torch.long, device=device),
             ],
             dim=1,
         ),
@@ -1759,7 +2133,11 @@ def register_capture_hooks(
     same instrumentation instead of a divergent copy. The caller owns removal and
     must do it in a ``finally``.
     """
-    all_custom_modules = get_all_custom_modules(model, excluded_types=excluded_types)
+    all_custom_modules = get_all_custom_modules(
+        model,
+        excluded_types=excluded_types,
+        capture_layers=capture.capture_layers,
+    )
     logger.info(f"Found {len(all_custom_modules)} custom module instances")
 
     # This hook sets context that module-level hooks will read
@@ -1795,6 +2173,69 @@ def capture_module_invocations(model, capture: ModuleInfoCapture, inputs) -> Non
         # Remove hooks even if a forward pass raised
         for handle in handles:
             handle.remove()
+
+
+def resolve_capture_device(device: Optional[str]) -> Optional[str]:
+    """Validate the device the HF capture forward pass will run on.
+
+    ``None`` keeps the historical behaviour: ``from_pretrained`` leaves the model on
+    CPU. Any other value is checked for availability up front, so an unavailable
+    accelerator fails with a clear message here rather than deep inside the forward
+    pass. ``"spyre"`` additionally needs ``torch_spyre`` imported to register the
+    backend.
+
+    This is the ``--loader hf`` capture device (``--capture_device``), distinct from
+    ``--device``, which the ``--loader spyre`` path uses to patch
+    ``hf_common.DEVICE``.
+    """
+    if device is None:
+        return None
+
+    # "spyre" is handled BEFORE torch.device(): torch does not know the backend
+    # until torch_spyre is imported, so torch.device("spyre") would raise
+    # "Expected one of cpu, cuda, ..." and mask the real cause.
+    if device.split(":")[0] == "spyre":
+        try:
+            import torch_spyre  # noqa: F401  (registers the "spyre" backend)
+        except ImportError as exc:
+            raise RuntimeError(
+                f"--capture_device {device!r} requested but torch_spyre is not "
+                f"installed ({exc}). Run on the Spyre pod or use "
+                f"--capture_device cpu."
+            ) from exc
+        # Importing is not enough: the source tree imports fine without its
+        # compiled extension, leaving the backend unregistered. Allocate a tensor
+        # to confirm the device actually works before loading a whole model onto it.
+        try:
+            torch.zeros(1, device=device)
+        except Exception as exc:
+            raise RuntimeError(
+                f"--capture_device {device!r} requested and torch_spyre imported, "
+                f"but the device is not usable ({exc}). The backend extension is "
+                f"probably missing; run on the Spyre pod or use "
+                f"--capture_device cpu."
+            ) from exc
+        return device
+
+    device_type = torch.device(device).type
+    if device_type == "cpu":
+        return device
+    if device_type == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                f"--capture_device {device!r} requested but "
+                f"torch.cuda.is_available() is False. Run on a CUDA host or use "
+                f"--capture_device cpu."
+            )
+        return device
+
+    # Anything else is passed through: torch may know a backend we do not.
+    logger.warning(
+        "Capture device %r is not one of cpu/cuda/spyre; passing it through "
+        "unchecked.",
+        device,
+    )
+    return device
 
 
 def load_model_only(
@@ -1855,19 +2296,32 @@ def load_model_and_tokenizer(
     return model, tokenizer
 
 
-def build_dummy_inputs(tokenizer, seq_len: int) -> Dict[str, Any]:
-    """Tokenize placeholder text padded/truncated to ``seq_len``."""
+def build_dummy_inputs(
+    tokenizer, seq_len: int, device: Optional[str] = None
+) -> Dict[str, Any]:
+    """Tokenize placeholder text padded/truncated to ``seq_len``.
+
+    ``device`` relocates the tokenized tensors, which must sit on the same device
+    as the model or the forward pass raises a device mismatch. ``None`` leaves them
+    on CPU (the tokenizer's default).
+    """
     # Generate enough text to reach desired seq_len
     text = "This is a test input for capturing module information. " * (
         seq_len // 10 + 1
     )
-    return tokenizer(
+    encoded = tokenizer(
         text,
         return_tensors="pt",
         max_length=seq_len,
         truncation=True,
         padding="max_length",
     )
+    if device is not None:
+        encoded = {
+            key: value.to(device) if isinstance(value, torch.Tensor) else value
+            for key, value in encoded.items()
+        }
+    return encoded
 
 
 def load_spyre_model_and_tokenizer(
@@ -2002,6 +2456,7 @@ def generate_spyre_module_config(
     device: str = SPYRE_DEVICE,
     max_new_tokens: int = 3,
     excluded_types: frozenset = SPYRE_EXCLUDED_MODULE_TYPES,
+    capture_layers: Optional[Set[int]] = None,
 ):
     """Capture a module-test YAML from an ``AutoSpyreModelForCausalLM`` model.
 
@@ -2013,6 +2468,14 @@ def generate_spyre_module_config(
     wrapped as a nested module arg, and carry ``apply_device_layout: true`` so the
     module test allocates parameters with the adapter's device layout.
 
+    ``capture_layers`` selects which decoder layers to record, by index, exactly as
+    on the HF path -- the adapter replaces ``layers[i]`` in place, so the
+    ``named_modules()`` paths stay ``…layers.N…`` and the same filter applies.
+    ``None`` records only layer 0. Note this bounds only what the YAML lists:
+    ``prepare_for_spyre()`` has already compiled every layer by the time the hooks
+    are registered, so narrowing it shrinks the emitted config (and the module
+    test's own compiles), never this capture run.
+
     NOTE: importing hf_adapters patches the RMSNorm class globally
     (``patch_rmsnorm``), so a single process must not also run the HF loader path.
 
@@ -2023,7 +2486,11 @@ def generate_spyre_module_config(
         model_path, dtype=dtype, device=device
     )
 
-    capture = ModuleInfoCapture(spyre_attn_snapshot=snapshot, spyre_model=model)
+    capture = ModuleInfoCapture(
+        spyre_attn_snapshot=snapshot,
+        spyre_model=model,
+        capture_layers=capture_layers,
+    )
     handles = register_capture_hooks(model, capture, excluded_types=excluded_types)
     try:
         run_spyre_capture_forward(
@@ -2171,7 +2638,99 @@ def parse_args():
         help="--loader hf only. max_cache_len for the StaticCache (default: 2048). "
         "Ignored when --no_static_cache is set.",
     )
+    parser.add_argument(
+        "--capture_layers",
+        type=str,
+        default="0",
+        help="Comma-separated decoder layer indices to capture, or 'all' "
+        "(default: 0). Applies to both loaders. Each captured layer emits its own "
+        "entries, named <Module>_layer<N>. A decoder stack repeats the same shapes "
+        "per layer, so capturing many layers multiplies the YAML and the number of "
+        "compiled binaries in the module test -- prefer a couple of "
+        "representatives.",
+    )
+    parser.add_argument(
+        "--capture_device",
+        type=str,
+        default=None,
+        help="--loader hf only. Device to RUN the capture forward pass on, e.g. "
+        "cpu / cuda / cuda:1 / spyre (default: leave the model on CPU). This is "
+        "where the model executes while its inputs are recorded; it does not "
+        "change the 'device' written into the generated tensor specs, which stays "
+        "spyre because that is where the module test runs. Distinct from --device, "
+        "which applies to --loader spyre.",
+    )
     return parser.parse_args()
+
+
+def _parse_capture_layers(spec: str) -> Optional[Set[int]]:
+    """Parse ``--capture_layers`` into a set of indices.
+
+    ``'all'`` maps to :data:`CAPTURE_ALL_LAYERS` (no filtering), NOT to ``None``:
+    ``None`` means "use the default", which is layer 0 only.
+    """
+    if spec.strip().lower() == "all":
+        return CAPTURE_ALL_LAYERS
+    layers = {int(x) for x in spec.split(",") if x.strip()}
+    if not layers:
+        raise ValueError(
+            f"--capture_layers={spec!r} selected no layers; pass indices "
+            f"(e.g. '0,1') or 'all'."
+        )
+    return layers
+
+
+def generate_module_config(
+    model_path: str,
+    seq_len: int = 128,
+    output: Optional[str] = None,
+    capture_layers: Optional[Set[int]] = None,
+    use_static_cache: bool = True,
+    max_cache_len: int = 2048,
+    device: Optional[str] = None,
+    dtype: Optional[torch.dtype] = None,
+):
+    """Capture a module-test YAML from a HuggingFace model (the ``--loader hf`` path).
+
+    The programmatic entry point; :func:`main` is a thin CLI wrapper over it, so
+    both routes share one implementation.
+
+    ``capture_layers`` selects which decoder layers to record, by index. ``None``
+    records only layer 0; pass :data:`CAPTURE_ALL_LAYERS` to record every layer.
+
+    ``device`` is where the capture forward pass RUNS (e.g. ``"cpu"``, ``"cuda"``,
+    ``"spyre"``); ``None`` leaves the model on CPU, as before. This is independent
+    of the ``device`` recorded in the generated tensor specs, which stays ``spyre``
+    because that is where the module test will run.
+
+    Returns:
+        The written YAML path.
+    """
+    device = resolve_capture_device(device)
+    from_pretrained_kwargs: Dict[str, Any] = {}
+    if dtype is not None:
+        from_pretrained_kwargs["torch_dtype"] = dtype
+    if device is not None:
+        # device_map places the weights at load time, avoiding a CPU copy that a
+        # post-hoc .to(device) would make.
+        from_pretrained_kwargs["device_map"] = device
+        logger.info("Running capture forward pass on device: %s", device)
+
+    model, tokenizer = load_model_and_tokenizer(model_path, **from_pretrained_kwargs)
+    inputs = build_dummy_inputs(tokenizer, seq_len, device=device)
+
+    # Use a StaticCache by default; disabling it falls back to the model's default
+    # dynamic cache. The (empty) StaticCache is passed into the prefill forward
+    # and reused for decode.
+    if use_static_cache:
+        inputs["past_key_values"] = StaticCache(
+            config=model.config, max_cache_len=max_cache_len
+        )
+
+    capture = ModuleInfoCapture(capture_layers=capture_layers)
+    capture_module_invocations(model, capture, inputs)
+
+    return write_module_config(capture, model_path, output)
 
 
 def _resolve_dtype(name: Optional[str], model_path: str, loader: str) -> torch.dtype:
@@ -2194,6 +2753,7 @@ def _resolve_dtype(name: Optional[str], model_path: str, loader: str) -> torch.d
 def main():
     args = parse_args()
     dtype = _resolve_dtype(args.dtype, args.model_path, args.loader)
+    print("### START for", args.model_path, "###")
 
     if args.loader == "spyre":
         # These only shape the HF path's StaticCache; the Spyre path's KV caches
@@ -2203,6 +2763,10 @@ def main():
             logger.warning("--no_static_cache is ignored with --loader spyre.")
         if args.max_cache_len != 2048:
             logger.warning("--max_cache_len is ignored with --loader spyre.")
+        if args.capture_device is not None:
+            logger.warning(
+                "--capture_device is ignored with --loader spyre; use --device."
+            )
         generate_spyre_module_config(
             args.model_path,
             seq_len=args.seq_len,
@@ -2210,24 +2774,22 @@ def main():
             dtype=dtype,
             device=args.device,
             max_new_tokens=args.max_new_tokens,
+            capture_layers=_parse_capture_layers(args.capture_layers),
         )
+        print("### FINISHED ###")
         return
 
-    model, tokenizer = load_model_and_tokenizer(args.model_path, torch_dtype=dtype)
-    inputs = build_dummy_inputs(tokenizer, args.seq_len)
-
-    # Use a StaticCache by default; --no_static_cache falls back to the model's
-    # default dynamic cache. The (empty) StaticCache is passed into the prefill
-    # forward and reused for decode.
-    if not args.no_static_cache:
-        inputs["past_key_values"] = StaticCache(
-            config=model.config, max_cache_len=args.max_cache_len
-        )
-
-    capture = ModuleInfoCapture()
-    capture_module_invocations(model, capture, inputs)
-
-    write_module_config(capture, args.model_path, args.output)
+    generate_module_config(
+        args.model_path,
+        seq_len=args.seq_len,
+        output=args.output,
+        capture_layers=_parse_capture_layers(args.capture_layers),
+        use_static_cache=not args.no_static_cache,
+        max_cache_len=args.max_cache_len,
+        device=args.capture_device,
+        dtype=dtype,
+    )
+    print("### FINISHED ###")
 
 
 if __name__ == "__main__":
