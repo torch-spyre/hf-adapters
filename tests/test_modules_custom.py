@@ -184,7 +184,8 @@ def _log_forward_inputs(module_name, label, args, kwargs, variant=0):
         "",  # blank line separator between consecutive module entries
         f"  module  : {module_name}",
         f"  label   : {label}",
-        f"  variant : {variant} ({variant_label})",
+        #f"  variant : {variant} ({variant_label})",
+        f"  variant : {variant}",
     ]
     if payload["args"]:
         lines.append("  args    :")

@@ -2589,7 +2589,9 @@ def parse_args():
         "--output",
         type=str,
         default=None,
-        help="Output YAML file path (default: ./tests/configs/<model>_spyre.yaml)",
+        help="Output YAML file path (default: "
+        "./tests/configs/module_tests/<model>.yaml for --loader hf, "
+        "<model>_adapter.yaml for --loader spyre)",
     )
     parser.add_argument(
         "--loader",
