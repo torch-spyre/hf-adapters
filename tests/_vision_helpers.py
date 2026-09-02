@@ -24,6 +24,8 @@ fully deterministic across runs.
 
 from __future__ import annotations
 
+import inspect
+
 import torch
 from huggingface_hub import hf_hub_download
 from PIL import Image
@@ -160,7 +162,6 @@ def build_vlm_batch(
         processor = AutoProcessor.from_pretrained(model_path, fix_mistral_regex=True)
     else:
         processor = AutoProcessor.from_pretrained(model_path)
-    # processor = AutoProcessor.from_pretrained(model_path)
     processor.tokenizer.padding_side = "left"
 
     if image is None:
