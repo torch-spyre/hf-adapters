@@ -303,6 +303,64 @@ jobs:
           path: shards/
           retention-days: 7
 
+  # ---------------------------------------------------------------------------
+  # Resolve the torch-spyre revision ONCE and pin it for the whole scan (#449).
+  #
+  # torch-spyre is a git checkout baked into each runner POD IMAGE at
+  # /home/senuser/torch-spyre, and the weekly scan fans out over dozens of shards
+  # that each land on a different pod -- so without this, one scan mixed several
+  # torch-spyre commits (issue #449's example: 75 jobs across 6 commits) and its
+  # ClickHouse rows weren't comparable. This job resolves origin/main to a single
+  # SHA that every weekly-model-scan-* job checks out (via build-hf-adapters'
+  # torch_spyre_sha input) before `uv add`.
+  #
+  # It CANNOT live in generate-matrix: that job runs on spyre_pf_x0 /
+  # image_spyre_backend with working-directory `.` and has no
+  # /home/senuser/torch-spyre (see the comment on that job). This job runs on the
+  # scan runners' combo (spyre_pf_x1 / image_torch_spyre), where the baked
+  # checkout -- and its origin remote, the only place the torch-spyre URL exists
+  # -- is present. It runs in parallel with generate-matrix and needs no
+  # HF/ClickHouse credentials.
+  # ---------------------------------------------------------------------------
+  resolve-torch-spyre:
+    name: Resolve torch-spyre revision
+    runs-on: [x86_64, spyre_pf_x1, linux, image_torch_spyre]
+    timeout-minutes: 15
+    outputs:
+      torch_spyre_sha: ${{ steps.resolve.outputs.torch_spyre_sha }}
+    steps:
+      - name: Resolve origin/main to a pinned SHA
+        id: resolve
+        working-directory: /home/senuser/torch-spyre
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          git config --global --add safe.directory '*'
+          # `git fetch origin` updates refs/remotes/origin/main to what origin
+          # advertises NOW; `git rev-parse origin/main` reads that ref, NOT this
+          # pod's stale checked-out HEAD -- which is what makes the pin immune to
+          # per-pod image drift.
+          git fetch --force origin
+          SHA="$(git rev-parse origin/main)"
+          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "resolve-torch-spyre: origin/main did not resolve to a 40-char SHA (got '$SHA')" >&2
+            exit 1
+          fi
+          echo "Resolved torch-spyre origin/main -> ${SHA}"
+          echo "torch_spyre_sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Record pinned SHA in the run summary
+        run: |
+          {
+            echo "## Pinned torch-spyre revision (weekly scan)"
+            echo ""
+            echo "Every model-scan job installs torch-spyre at this exact commit:"
+            echo ""
+            echo '```'
+            echo "${{ steps.resolve.outputs.torch_spyre_sha }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Split by runner tier so max-parallel caps total cards held at once. The cap
   # depends on who dispatched the run:
   #   - manual workflow_dispatch shares the fleet with PR/daily CI, so it stays
@@ -323,7 +381,7 @@ jobs:
   # This showed up in testing as matrix_x4=[].
   weekly-model-scan-x1:
     name: Weekly model scan x1 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
-    needs: generate-matrix
+    needs: [generate-matrix, resolve-torch-spyre]
     if: needs.generate-matrix.outputs.matrix_x1 != '[]'
     runs-on: [x86_64, spyre_pf_x1, linux, image_torch_spyre]
     timeout-minutes: 4320
@@ -349,6 +407,23 @@ jobs:
       - uses: ./.github/actions/build-hf-adapters
         with:
           uv_groups: "dev spyre test models-ops"
+          # Pin torch-spyre to the SHA resolved once for this scan (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+
+      # Assert this shard's checked-out torch-spyre HEAD == the run's pinned SHA
+      # (issue #449). gather-runner-info runs BEFORE build-hf-adapters in these
+      # jobs, so the pin check rides on this dedicated post-build step instead.
+      - name: Verify torch-spyre pin
+        run: |
+          ACTUAL="$(git -C /home/senuser/torch-spyre rev-parse HEAD)"
+          PINNED="${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}"
+          echo "pinned:  $PINNED"
+          echo "checked: $ACTUAL"
+          if [[ "$ACTUAL" != "$PINNED" ]]; then
+            echo "::error::torch-spyre HEAD ($ACTUAL) != pinned SHA ($PINNED)"
+            exit 1
+          fi
+          echo "| ${{ matrix.mode }} shard ${{ matrix.shard_index }} | ${ACTUAL} |" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Download shard
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -412,7 +487,7 @@ jobs:
 
   weekly-model-scan-x2:
     name: Weekly model scan x2 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
-    needs: generate-matrix
+    needs: [generate-matrix, resolve-torch-spyre]
     if: needs.generate-matrix.outputs.matrix_x2 != '[]'
     runs-on: [x86_64, spyre_pf_x2, linux, image_torch_spyre]
     timeout-minutes: 4320
@@ -438,6 +513,23 @@ jobs:
       - uses: ./.github/actions/build-hf-adapters
         with:
           uv_groups: "dev spyre test models-ops"
+          # Pin torch-spyre to the SHA resolved once for this scan (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+
+      # Assert this shard's checked-out torch-spyre HEAD == the run's pinned SHA
+      # (issue #449). gather-runner-info runs BEFORE build-hf-adapters in these
+      # jobs, so the pin check rides on this dedicated post-build step instead.
+      - name: Verify torch-spyre pin
+        run: |
+          ACTUAL="$(git -C /home/senuser/torch-spyre rev-parse HEAD)"
+          PINNED="${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}"
+          echo "pinned:  $PINNED"
+          echo "checked: $ACTUAL"
+          if [[ "$ACTUAL" != "$PINNED" ]]; then
+            echo "::error::torch-spyre HEAD ($ACTUAL) != pinned SHA ($PINNED)"
+            exit 1
+          fi
+          echo "| ${{ matrix.mode }} shard ${{ matrix.shard_index }} | ${ACTUAL} |" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Download shard
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -501,7 +593,7 @@ jobs:
 
   weekly-model-scan-x4:
     name: Weekly model scan x4 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
-    needs: generate-matrix
+    needs: [generate-matrix, resolve-torch-spyre]
     if: needs.generate-matrix.outputs.matrix_x4 != '[]'
     runs-on: [x86_64, spyre_pf_x4, linux, image_torch_spyre]
     timeout-minutes: 4320
@@ -527,6 +619,23 @@ jobs:
       - uses: ./.github/actions/build-hf-adapters
         with:
           uv_groups: "dev spyre test models-ops"
+          # Pin torch-spyre to the SHA resolved once for this scan (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+
+      # Assert this shard's checked-out torch-spyre HEAD == the run's pinned SHA
+      # (issue #449). gather-runner-info runs BEFORE build-hf-adapters in these
+      # jobs, so the pin check rides on this dedicated post-build step instead.
+      - name: Verify torch-spyre pin
+        run: |
+          ACTUAL="$(git -C /home/senuser/torch-spyre rev-parse HEAD)"
+          PINNED="${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}"
+          echo "pinned:  $PINNED"
+          echo "checked: $ACTUAL"
+          if [[ "$ACTUAL" != "$PINNED" ]]; then
+            echo "::error::torch-spyre HEAD ($ACTUAL) != pinned SHA ($PINNED)"
+            exit 1
+          fi
+          echo "| ${{ matrix.mode }} shard ${{ matrix.shard_index }} | ${ACTUAL} |" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Download shard
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
