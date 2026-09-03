@@ -37,7 +37,19 @@ try:
 except Exception:
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 
-prompts = [args.prompt]
+# Apply chat template if available (instruct models require it), then tokenize.
+# Reuse the same tensors for warmup and timed run.
+if getattr(tokenizer, "chat_template", None) is not None:
+    prompt_text = tokenizer.apply_chat_template(
+        [{"role": "user", "content": args.prompt}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+else:
+    prompt_text = args.prompt
+enc = tokenizer([prompt_text], return_tensors="pt", padding=True)
+input_ids = enc["input_ids"]
+attention_mask = enc["attention_mask"]
 gen_kwargs = dict(
     max_new_tokens=args.max_new_tokens,
     max_denoising_steps=args.max_denoising_steps,
@@ -48,7 +60,7 @@ gen_kwargs = dict(
 if not args.no_warmup:
     if local_rank == 0:
         print(f"Warming up (compiling graphs, max_denoising_steps={args.max_denoising_steps})...", flush=True)
-    model.generate(tokenizer, prompts, **gen_kwargs)
+    model.generate(input_ids, attention_mask, **gen_kwargs)
     if local_rank == 0:
         print("Warmup done.", flush=True)
 
@@ -56,13 +68,14 @@ if not args.no_warmup:
 if local_rank == 0:
     print("Running timed generate...", flush=True)
 t0 = time.perf_counter()
-outputs = model.generate(tokenizer, prompts, **gen_kwargs)
+output_ids = model.generate(input_ids, attention_mask, **gen_kwargs)
 elapsed = time.perf_counter() - t0
 
-# Re-encode decoded text for an exact token count (early stopping means
-# output may be shorter than max_new_tokens).
-output_text = outputs[0]
-output_token_count = len(tokenizer.encode(output_text, add_special_tokens=False))
+# generate() returns only the generated tokens (prompt already stripped).
+output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+# Count non-pad tokens: output tensor is zero-padded to uniform length, so
+# nonzero entries are actual generated token ids (including EOS).
+output_token_count = (output_ids[0] != 0).sum().item()
 toks_per_sec = output_token_count / elapsed
 
 # Only rank 0 prints to avoid duplicate lines under TP.

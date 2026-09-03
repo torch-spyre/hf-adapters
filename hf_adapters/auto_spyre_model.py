@@ -428,17 +428,12 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
 
         def model_generate(
             self: PreTrainedModel,
-            input_ids_or_tokenizer: Any,
-            prompts_or_attention_mask: Any = None,
+            input_ids: torch.Tensor,
+            attention_mask: torch.Tensor | None = None,
             **kwargs: Any,
         ):
-            # DiffusionGemma uses a block-diffusion loop, not the standard AR generate.
-            if module is hf_diffusion_gemma:
-                return hf_diffusion_gemma.generate(
-                    self, input_ids_or_tokenizer, prompts_or_attention_mask, **kwargs
-                )
-            input_ids = input_ids_or_tokenizer
-            attention_mask = prompts_or_attention_mask
+            if hasattr(module, "generate"):
+                return module.generate(self, input_ids, attention_mask, **kwargs)
 
             from hf_adapters.hf_common import generate
 

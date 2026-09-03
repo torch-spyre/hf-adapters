@@ -544,7 +544,6 @@ def _run_encoder_forward(
     cache_index,
 ):
     """Encode ``input_ids`` into the KV cache and return hidden states."""
-    # embed_tokens lives under encoder.language_model
     h = model.model.encoder.language_model.embed_tokens(input_ids)
     return _run_encoder_blocks(
         model, h, position_ids, attn_mask, key_caches, value_caches, cache_index
@@ -567,7 +566,6 @@ def _run_decoder_forward(
     soft_conditioning,  # [B, 256, H] on device, or None
 ):
     """Run the bidirectional decoder over a canvas, return logits."""
-    # embed_tokens lives directly on model.model.decoder
     canvas_embeds = model.model.decoder.embed_tokens(canvas_ids)
 
     h = _run_decoder_blocks(
@@ -590,9 +588,14 @@ def _run_decoder_forward(
 
 
 def generate(
-    model, tokenizer, prompts, max_new_tokens=256, max_denoising_steps=48, **kwargs
+    model, input_ids, attention_mask=None, max_new_tokens=256, max_denoising_steps=48, **kwargs
 ):
     """Spyre block-diffusion generate loop for DiffusionGemma.
+
+    Uses the standard HF generate API: accepts tokenized ``input_ids`` and
+    ``attention_mask`` and returns a ``[B, prompt_len + new_tokens]`` integer
+    tensor of output ids (prompt + generated), matching the shape contract of
+    ``model.generate()`` for all other adapters.
 
     Outer loop: AR canvas generation (encode + N denoising steps per canvas).
     Inner loop: ``max_denoising_steps`` denoising passes per canvas.
@@ -603,8 +606,9 @@ def generate(
 
     Args:
         model: prepared DiffusionGemma model on Spyre.
-        tokenizer: HF tokenizer.
-        prompts: list of str prompts.
+        input_ids: ``[B, L]`` token ids on CPU (left-padded by the tokenizer).
+        attention_mask: ``[B, L]`` mask on CPU (1 for real tokens, 0 for pad).
+            If ``None``, all tokens are treated as real.
         max_new_tokens: total number of new tokens to generate.
         max_denoising_steps: denoising steps per canvas (default 48).
         entropy_bound: entropy bound for the EB sampler (default 0.1).
@@ -612,7 +616,8 @@ def generate(
         confidence_threshold: confidence threshold for stopping (default 0.005).
 
     Returns:
-        list[str]: decoded outputs (one per prompt).
+        ``torch.LongTensor`` of shape ``[B, generated_tokens]``: only the
+        generated token ids (prompt is stripped from the output).
     """
     from transformers import StableAndConfidentStoppingCriteria
     from transformers.models.diffusion_gemma.generation_diffusion_gemma import (
@@ -637,23 +642,15 @@ def generate(
     canvas_length = model.config.canvas_length  # 256
     vocab_size = text_config(model.config).vocab_size
     dtype = next(model.parameters()).dtype
-    batch_size = len(prompts)
+    batch_size = input_ids.shape[0]
 
-    # Apply chat template for instruct models (Gemma chat format).
-    if getattr(tokenizer, "chat_template", None) is not None:
-        prompts = [
-            tokenizer.apply_chat_template(
-                [{"role": "user", "content": p}],
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-            for p in prompts
-        ]
+    # Derive actual token lengths from the attention mask (or assume all real).
+    if attention_mask is not None:
+        actual_lengths = attention_mask.sum(dim=1).long()
+    else:
+        actual_lengths = torch.full((batch_size,), input_ids.shape[1], dtype=torch.long)
 
-    # Tokenize + left-pad to BLOCK_SIZE multiple
-    enc = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True)
-    input_ids = enc["input_ids"]
-    actual_lengths = enc["attention_mask"].sum(dim=1).long()
+    # Block-align the prompt length (left-pad with zeros to a BLOCK_SIZE multiple).
     prompt_length = input_ids.shape[1]
     padded_len = math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
     block_pad = padded_len - prompt_length
@@ -687,7 +684,7 @@ def generate(
         confidence_threshold=confidence_threshold,
     )
 
-    eos_ids = getattr(tokenizer, "eos_token_id", None)
+    eos_ids = getattr(model.config, "eos_token_id", None)
     if isinstance(eos_ids, int):
         eos_ids = [eos_ids]
     finished = [False] * batch_size
@@ -810,11 +807,14 @@ def generate(
         )
         cache_len += canvas_length
 
-    # Decode — strip the padded prompt, return only generated tokens
-    return [
-        tokenizer.decode(generated_ids[b][padded_len:], skip_special_tokens=True)
-        for b in range(batch_size)
-    ]
+    # Return only the generated tokens (strip the block-padded prompt prefix)
+    # as a tensor of shape [B, total_generated_tokens].
+    generated_only = [ids[padded_len:] for ids in generated_ids]
+    max_len = max(len(ids) for ids in generated_only)
+    out = torch.zeros(batch_size, max_len, dtype=torch.long)
+    for b, ids in enumerate(generated_only):
+        out[b, : len(ids)] = torch.tensor(ids, dtype=torch.long)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1034,19 +1034,9 @@ def prepare_for_spyre(model):
 
     model._spyre_dec_head = _dec_head
 
-    # Keep MoE submodules on CPU — they run via the stock HF eager dispatch
-    # (nonzero + Python loop) which is not compatible with Spyre.
-    #
-    # Strategy: detach them from the module tree NOW (before move_model_to_spyre
-    # calls model.to(DEVICE)) by replacing each with a bare nn.Module()
-    # placeholder.  The real objects are saved in a dict keyed by
-    # (parent_module, attr_name).  After the device move, _spyre_post_move
-    # restores every real module back so _finish_layer can call them.
-    #
-    # This avoids trying to DMA ~24 GB of expert weights to Spyre only to move
-    # them back — which OOMs before _spyre_cpu_submodules would have a chance
-    # to run.
-    _moe_saved: dict = {}
+    # Keep MoE submodules on CPU — they use nonzero() + a Python expert loop
+    # which cannot run on Spyre. Register them with _spyre_cpu_submodules.
+    cpu_submodules = []
     _moe_attr_names = [
         "router",
         "experts",
@@ -1054,16 +1044,9 @@ def prepare_for_spyre(model):
         "post_feedforward_layernorm_2",
         "post_feedforward_layernorm",
     ]
-    for i, (layer_enc, layer_dec) in enumerate(zip(enc_text.layers, dec.layers)):
-        for layer in (layer_enc, layer_dec):
-            for attr in _moe_attr_names:
-                real = getattr(layer, attr)
-                _moe_saved[(id(layer), attr)] = (layer, attr, real)
-                setattr(layer, attr, nn.Module())
+    for i in range(len(enc_text.layers)):
+        for attr in _moe_attr_names:
+            cpu_submodules.append(f"model.encoder.language_model.layers.{i}.{attr}")
+            cpu_submodules.append(f"model.decoder.layers.{i}.{attr}")
 
-    def _restore_moe():
-        for layer, attr, real in _moe_saved.values():
-            setattr(layer, attr, real)
-
-    model._spyre_post_move = _restore_moe
-    model._spyre_cpu_submodules = []
+    model._spyre_cpu_submodules = cpu_submodules

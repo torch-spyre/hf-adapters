@@ -1595,17 +1595,6 @@ def load_model_common(
 
         auto_model_cls = AutoModel
 
-    if tp_plan is not None and hasattr(module, "load_hf_model"):
-        # Check whether this adapter's custom loader explicitly supports tp_plan
-        # (by accepting it as a kwarg). Adapters that don't support TP still raise.
-        import inspect as _inspect
-
-        _sig = _inspect.signature(module.load_hf_model)
-        if "tp_plan" not in _sig.parameters:
-            raise SpyreUnsupportedModelError(
-                "tensor-parallel loading is not supported by this adapter's custom loader"
-            )
-
     if hasattr(module, "load_hf_model"):
         # _sig was already inspected above (for the tp_plan support check).
         # Re-inspect here to determine which optional kwargs this loader accepts.
@@ -1647,11 +1636,18 @@ def load_model_common(
 def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
     untie_embedding_and_lm_head(model)
     module.prepare_for_spyre(model)
+    cpu_submodules = getattr(model, "_spyre_cpu_submodules", [])
+    saved_cpu_modules = {}
+    for path in cpu_submodules:
+        parent_path, _, attr = path.rpartition(".")
+        parent = model.get_submodule(parent_path) if parent_path else model
+        saved_cpu_modules[path] = (parent, attr, getattr(parent, attr))
+        setattr(parent, attr, torch.nn.Module())
+
     _move_to_spyre_with_layout(model, dtype)
-    for submod_name in getattr(model, "_spyre_cpu_submodules", []):
-        model.get_submodule(submod_name).to("cpu")
-    if callable(getattr(model, "_spyre_post_move", None)):
-        model._spyre_post_move()
+
+    for parent, attr, submod in saved_cpu_modules.values():
+        setattr(parent, attr, submod)
     print("Model on Spyre ready.")
 
 
