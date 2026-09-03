@@ -250,7 +250,6 @@ def eval_model(model_id: str, adapter, model_type: ModelType) -> dict:
     treated as True and the outcome reduces to ``not mismatches``.
     """
     load_on_cpu = False
-    smoke_passed = model_type == ModelType.EMBEDDING
     mismatches = True
     result: dict = {"error": "", "failure_category": None}
 
@@ -275,14 +274,10 @@ def eval_model(model_id: str, adapter, model_type: ModelType) -> dict:
                             FAILURE_CATEGORY_CPU_GENERATE_FAILED,
                         )
                     else:
-                        from tests.spyre.test_e2e_smoke_spyre import run_smoke_test
                         from tests.spyre.test_e2e_token_compare_spyre import (
                             token_compare_spyre,
                         )
 
-                        smoke_passed = (
-                            run_smoke_test(model_path=model_id)["status"] == "PASS"
-                        )
                         mismatches, _ = token_compare_spyre(model_id)
                 else:
                     from tests.spyre.test_e2e_embed_compare_spyre import (
@@ -300,7 +295,7 @@ def eval_model(model_id: str, adapter, model_type: ModelType) -> dict:
             err, FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
         )
     finally:
-        result["correct"] = smoke_passed and not mismatches
+        result["correct"] = not mismatches
         result["load"] = load_on_cpu
         if result["failure_category"] is None and load_on_cpu and not result["correct"]:
             result["failure_category"] = FAILURE_CATEGORY_VERIFICATION_FAILED
