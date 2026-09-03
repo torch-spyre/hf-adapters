@@ -47,12 +47,6 @@ CTX_PAD = 56
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to the Qwen3 DSpark drafter in-place."""
-    from deepspec.modeling.dspark.qwen3.modeling import (  # type: ignore[import-not-found]
-        Qwen3RMSNorm,
-    )
-
     block_size = int(model.block_size)
     kv_pad = ((CTX_PAD + block_size + 31) // 32) * 32
-    prepare_dspark_common(
-        model, Qwen3RMSNorm, ctx_pad=CTX_PAD, kv_pad=kv_pad, use_qk_norm=True
-    )
+    prepare_dspark_common(model, ctx_pad=CTX_PAD, kv_pad=kv_pad, use_qk_norm=True)

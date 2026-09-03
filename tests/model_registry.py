@@ -752,12 +752,12 @@ def _non_blocking(models: dict[str, dict], keys: tuple[str, ...]) -> dict[str, s
 # and ``gemma4_mm`` (VLM).
 NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = _non_blocking(
     CAUSAL_LM_MODELS,
-    ("smollm3",),
+    ("smollm3", "gemma4_base", "gemma4_google", "gemma4_31b", "gemma4_moe"),
 )
 
 NON_BLOCKING_VISION_MODELS: dict[str, str] = _non_blocking(
     VISION_MODELS,
-    (),
+    ("gemma4_mm",),
 )
 
 
