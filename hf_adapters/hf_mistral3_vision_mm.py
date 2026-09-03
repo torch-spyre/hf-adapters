@@ -43,10 +43,6 @@ both sharing the Pixtral vision tower but distinguished by their
 - ``"ministral3"``  — e.g. ``mistralai/Ministral-3-14B-Instruct-2512``
   (blocked-FP8 checkpoint, dequantized on load; uses ``Ministral3RMSNorm``)
 
-``prepare_for_spyre`` auto-detects the RMSNorm class by inspecting the first
-decoder layer — the same strategy used by ``hf_mistral3.prepare_for_spyre``
-for the text-only path.
-
 Mistral3 uses a **flat single-injection** pattern (contrast with Granite
 Vision's deepstack multi-layer injection):
 
@@ -85,7 +81,6 @@ from hf_adapters.hf_common import (
     make_cache_index,
     pad_and_position,
     pad_lm_head,
-    patch_rmsnorm,
     prepare_rope_and_heads,
     prepare_standard_gqa_blocks,
     select_next_token,
@@ -103,14 +98,9 @@ def prepare_for_spyre(model):
     blocks, head padding, CPU patch-embed, 2D RoPE matrices).
     Text decoder → standard-GQA RoPE/head prep + compiled Mistral blocks +
     padded LM head, mirroring ``hf_mistral3.prepare_for_spyre`` but applied
-    against the VLM's nested text backbone.
-
-    The RMSNorm class is auto-detected from the first decoder layer to cover
-    both the ``mistral`` variant (``MistralRMSNorm``) and the ``ministral3``
-    variant (``Ministral3RMSNorm``, e.g. Ministral-3-14B-Instruct-2512).
+    against the VLM's nested text backbone. Covers both the ``mistral`` and
+    ``ministral3`` text variants.
     """
-    from transformers.models.ministral3.modeling_ministral3 import Ministral3RMSNorm
-    from transformers.models.mistral.modeling_mistral import MistralRMSNorm
 
     # --- Vision tower ---
     hf_pixtral_vision.prepare_for_spyre(model)
@@ -129,21 +119,11 @@ def prepare_for_spyre(model):
     # does: call the constituent parts individually and store text blocks in
     # model._spyre_text_blocks.
     prepare_rope_and_heads(model)
-
-    # Detect the correct RMSNorm class from the first decoder layer's norm.
-    # Ministral3 text backbone uses Ministral3RMSNorm; Mistral-Small uses
-    # MistralRMSNorm.  Checking the live instance avoids hard-coding the
-    # text_config.model_type string and mirrors hf_mistral3.prepare_for_spyre.
-    first_norm = get_backbone(model).layers[0].input_layernorm
-    rmsnorm_cls = (
-        MistralRMSNorm if isinstance(first_norm, MistralRMSNorm) else Ministral3RMSNorm
-    )
-    patch_rmsnorm(rmsnorm_cls)
-
     pad_lm_head(model)
 
     backbone = get_backbone(model)
     model._spyre_text_blocks = prepare_standard_gqa_blocks(backbone.layers)
+    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +234,6 @@ def _run_text_backbone(
     a CPU additive scatter before the first decoder layer. Decode steps pass
     ``image_features=None`` (pure text).
     """
-    backbone = get_backbone(model)
     h = inputs_embeds
 
     # Single flat injection before layer 0 (unlike Granite's per-layer deepstack)
@@ -271,7 +250,7 @@ def _run_text_backbone(
             value_caches[i],
             cache_index,
         )
-    return backbone.norm(h)
+    return model._spyre_compiled_norm(h)
 
 
 def _logits_from_embeds(
