@@ -1,8 +1,7 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-29-blue)
-![verified](https://img.shields.io/badge/verified_checkpoints-51-green)
-![compatible](https://img.shields.io/badge/compatible_models-100%2B-orange)
+![adapters](https://img.shields.io/badge/adapters-34-blue)
+![compatible](https://img.shields.io/badge/compatible_models-10K%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
 
@@ -14,7 +13,7 @@ from `transformers`.
 
 ## Supported Models
 
-**29 adapters · 51 verified checkpoints · 100+ compatible models**
+**34 adapters · 10K+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
 **sequence classification** (sentiment / text categorisation),
