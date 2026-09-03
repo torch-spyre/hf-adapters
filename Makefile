@@ -5,11 +5,9 @@ SHELL := /bin/bash
 # product repos: torch-spyre, hf-adapters, spyre-inference). These tier names
 # are literal, first-class values -- there is no alias-resolution layer:
 #   unit        — all spyre-native tests (excludes the heavy upstream suites)
-#   integration — the token_compare suite. This is the ONLY valid top-level tier for
-#                 that suite -- TEST_TYPE=token_compare by itself is rejected (see the
-#                 `tests` target below); "token_compare" is just the individual suite
-#                 key "integration" maps to, still usable inside a
-#                 multi-suite combo (e.g. TEST_TYPE="token_compare load").
+#   integration — the token_compare and model_components suites. TEST_TYPE=token_compare
+#                 by itself is rejected (see the `tests` target below); suite keys remain
+#                 usable inside multi-suite combos (e.g. TEST_TYPE="token_compare load").
 #   regression  — everything
 #   trunk       — same coverage as regression; push-to-main CI label (see
 #                 resolve_test_type.sh)
@@ -72,7 +70,7 @@ endif
 .PHONY: help test tests adapter-coverage-tests smoke-tests load-tests \
         token-compare-tests embed-compare-tests vlm-tests reranker-tests model-module-tests \
         masked-lm-compare-tests question-answering-compare-tests seq-classification-compare-tests \
-        token-classification-compare-tests edge-cases-tests
+        token-classification-compare-tests model-components-tests edge-cases-tests
 
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-24s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -103,6 +101,9 @@ load-tests: ## Run load tests (suite key: load)
 
 token-compare-tests: ## Run token-compare tests (suite key: token_compare)
 	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_token_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+
+model-components-tests: ## Run model component tests (suite key: model_components)
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_model_components_spyre.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 embed-compare-tests: ## Run embed-compare tests (suite key: embed_compare)
 	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_embed_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
@@ -185,11 +186,11 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	  model_path="$$(grep -E '^[[:space:]]*-[[:space:]]' "tests/model_lists/$${resolved}.yaml" | sed -E 's/^[[:space:]]*-[[:space:]]*//' | tr '\n' ' ')"; \
 	fi; \
 	case " $$resolved " in \
-	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module" ;; \
+	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare model_components embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module" ;; \
 	  *" unit "*) suites="adapter_coverage load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module" ;; \
 	  " integration ") suites="token_compare" ;; \
 	  " perf ") suites="perf" ;; \
-	  " token_compare ") echo "TEST_TYPE=token_compare is not a valid tier -- use TEST_TYPE=integration to run the token_compare suite alone, or include 'token_compare' in a multi-suite combo (e.g. TEST_TYPE=\"token_compare load\")."; exit 1 ;; \
+	  " token_compare ") echo "TEST_TYPE=token_compare is not a valid tier -- use TEST_TYPE=integration to run integration coverage, or include 'token_compare' in a multi-suite combo (e.g. TEST_TYPE=\"token_compare load\")."; exit 1 ;; \
 	  *) suites="$$resolved" ;; \
 	esac; \
 	mkdir -p "$(RESULTS_DIR)"; \
@@ -201,6 +202,7 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	    smoke)            mkdir -p "$(RESULTS_DIR)/junit-smoke" && $(MAKE) smoke-tests            JUNIT_XML="$(RESULTS_DIR)/junit-smoke/junit-smoke.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    load)             mkdir -p "$(RESULTS_DIR)/junit-load" && $(MAKE) load-tests             JUNIT_XML="$(RESULTS_DIR)/junit-load/junit-load.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    token_compare)    mkdir -p "$(RESULTS_DIR)/junit-token-compare" && $(MAKE) token-compare-tests     JUNIT_XML="$(RESULTS_DIR)/junit-token-compare/junit-token-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
+	    model_components) mkdir -p "$(RESULTS_DIR)/junit-model-components" && $(MAKE) model-components-tests JUNIT_XML="$(RESULTS_DIR)/junit-model-components/junit-model-components.xml" || rc=1 ;; \
 	    embed_compare)    mkdir -p "$(RESULTS_DIR)/junit-embed-compare" && $(MAKE) embed-compare-tests     JUNIT_XML="$(RESULTS_DIR)/junit-embed-compare/junit-embed-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    vlm)              mkdir -p "$(RESULTS_DIR)/junit-vlm" && $(MAKE) vlm-tests               JUNIT_XML="$(RESULTS_DIR)/junit-vlm/junit-vlm.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    reranker_compare) mkdir -p "$(RESULTS_DIR)/junit-reranker-compare" && $(MAKE) reranker-tests          JUNIT_XML="$(RESULTS_DIR)/junit-reranker-compare/junit-reranker-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
@@ -222,7 +224,7 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	                        '  <testsuite name="hf-adapters-perf" tests="0" skipped="0" failures="0" errors="0"/>' \
 	                        '</testsuites>' > "$(RESULTS_DIR)/report.xml"; \
 	                      echo "hf-adapters has no perf harness yet (scaffold stub): wrote placeholder $(RESULTS_DIR)/report.xml" ;; \
-	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module edge_cases perf"; rc=1 ;; \
+	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare model_components embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module edge_cases perf"; rc=1 ;; \
 	  esac; \
 	done; \
 	exit $$rc

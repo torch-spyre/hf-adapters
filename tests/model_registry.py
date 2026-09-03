@@ -782,12 +782,16 @@ NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = _non_blocking(
     (
         "smollm3",
         "gemma2_2b_unsloth",  # small gap that happens to flip token for test prompt
+        "gemma4_base",
+        "gemma4_google",
+        "gemma4_31b",
+        "gemma4_moe",
     ),
 )
 
 NON_BLOCKING_VISION_MODELS: dict[str, str] = _non_blocking(
     VISION_MODELS,
-    (),
+    ("gemma4_mm",),
 )
 
 
