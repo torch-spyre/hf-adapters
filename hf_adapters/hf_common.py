@@ -727,31 +727,6 @@ def pad_attention_heads_simple(
     model._spyre_head_dim = padded_head_dim
 
 
-def patch_rmsnorm(rmsnorm_cls):
-    """Patch any RMSNorm class: variance reduction at input dtype on Spyre, fp32
-    on CPU (to match stock HF).
-
-    Args:
-        rmsnorm_cls: The RMSNorm class to patch (e.g. GraniteRMSNorm, Qwen3RMSNorm).
-    """
-
-    def _forward_fp16(self, hidden_states):
-        if hidden_states.device.type == "spyre":
-            # Spyre path: variance reduction at input dtype (see the note above).
-            variance = (hidden_states * hidden_states).mean(-1, keepdim=True)
-            return self.weight * (
-                hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-            )
-        else:
-            # CPU path: use float32 for numerical stability (matches stock HF)
-            xf = hidden_states.float()
-            variance = (xf * xf).mean(-1, keepdim=True)
-            xf = xf * torch.rsqrt(variance + self.variance_epsilon)
-            return self.weight * xf.to(hidden_states.dtype)
-
-    rmsnorm_cls.forward = _forward_fp16
-
-
 def patch_layernorm(*layernorms):
     """Patch ``nn.LayerNorm`` *instances* to a manual decomposition on Spyre.
 
@@ -2346,7 +2321,7 @@ def standard_gqa_backbone_forward(
             cache_index,
         )
 
-    h = backbone.norm(h)
+    h = model._spyre_compiled_norm(h)
     return h
 
 
@@ -2648,19 +2623,17 @@ def prepare_rope_and_heads(model):
     )
 
 
-def prepare_standard_gqa(model, rmsnorm_cls):
+def prepare_standard_gqa(model):
     """Apply Spyre adaptations for standard GQA models in-place.
 
     Args:
         model: HF model (on CPU, eval mode, requires_grad=False).
-        rmsnorm_cls: The model's RMSNorm class to patch.
     """
     prepare_rope_and_heads(model)
-    patch_rmsnorm(rmsnorm_cls)
     pad_lm_head(model)
-    model._spyre_compiled_blocks = prepare_standard_gqa_blocks(
-        get_backbone(model).layers
-    )
+    backbone = get_backbone(model)
+    model._spyre_compiled_blocks = prepare_standard_gqa_blocks(backbone.layers)
+    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
 
 
 # ---------------------------------------------------------------------------

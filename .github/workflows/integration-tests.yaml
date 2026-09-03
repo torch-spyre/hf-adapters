@@ -71,12 +71,14 @@ on:
           Test tier to run: unit | integration | regression | trunk -- literal,
           first-class values (no alias-resolution layer), for callers (e.g.
           spyre-frameworks config.yaml) that speak in tier names. "unit" runs
-          every suite except smoke (load, token_compare, embed_compare, vlm,
-          model_module); "integration" runs only the smoke suite (there is no
-          separate "smoke" tier/dropdown option -- pick "integration" for
-          that suite; "smoke" is just the individual suite key it maps to
-          internally, still reachable via a raw space-separated combo through
-          the API/gh CLI, e.g. "smoke token_compare"); "regression"/"trunk"
+          every suite except smoke (load, token_compare, model_components,
+          embed_compare, vlm, reranker_compare, masked_lm_compare,
+          question_answering_compare, token_classification_compare,
+          model_module); "integration" runs token_compare
+          and model_components (there is no separate "smoke" tier/dropdown
+          option; "smoke" remains reachable as an individual suite key through
+          a raw space-separated combo via the API/gh CLI, e.g.
+          "smoke token_compare"); "regression"/"trunk"
           run everything (trunk mirrors this repo's push-to-main CI label —
           see resolve_test_type.sh). This is a plain string underneath (see
           _test_matrix.yaml's resolve-test-type job), so a caller using the
@@ -196,9 +198,9 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Delegates to the same reusable _test_matrix.yaml used by "run-tests" in
-  # torch_spyre_tests.yaml. `test_type` defaults to "integration" (the smoke
-  # suite); if `models` is left empty AND test_type is "integration", it falls
-  # back to the model list from tests/model_lists/integration.yaml (all causal-
+  # torch_spyre_tests.yaml. `test_type` defaults to "integration" (token compare
+  # plus model components); if `models` is left empty AND test_type is
+  # "integration", it falls back to tests/model_lists/integration.yaml (all causal-
   # only) -- so upstream-triggered runs stay fast by default. For any other
   # test_type (unit/regression/trunk/a suite-key combo), an empty `models`
   # instead passes '' through to _test_matrix.yaml, which means "no restriction"
