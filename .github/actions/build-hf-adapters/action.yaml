@@ -28,7 +28,7 @@ inputs:
       exactly this commit before `uv add`, so every job in a run installs the
       identical torch-spyre instead of whatever HEAD each pod's image happened
       to bake in. Empty (default) keeps today's behaviour, so callers that omit
-      it (e.g. push-to-clickhouse's scan jobs) are unaffected. Named
+      it are unaffected. Named
       torch_spyre_sha -- NOT torch_spyre_ref (an unrelated, unused dispatch
       input elsewhere) and NOT the Checkout step's INPUT_REF (= inputs.ref, the
       hf-adapters ref) -- so the three never get confused.
