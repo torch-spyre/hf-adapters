@@ -15,8 +15,8 @@ test_suite_config:
           no_grad: true
           edits:
             modules:
-              include: &id001
-                - name: Embedding_4c1a0852
+              include: &id006
+                - name: Embedding_4c1a0852_prefill
                   module_path: torch.nn.modules.sparse.Embedding
                   description: 'Module: torch.nn.modules.sparse.Embedding (defined at torch/nn/modules/sparse.py:14)'
                   constructor_inputs:
@@ -34,6 +34,13 @@ test_suite_config:
                             init_args:
                               high: 1
                       kwargs: {}
+                - name: Embedding_4c1a0852_decode
+                  module_path: torch.nn.modules.sparse.Embedding
+                  description: 'Module: torch.nn.modules.sparse.Embedding (defined at torch/nn/modules/sparse.py:14)'
+                  constructor_inputs:
+                    args: []
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1]
@@ -45,13 +52,13 @@ test_suite_config:
                             init_args:
                               high: 1
                       kwargs: {}
-                - name: Ministral3Model_d7945082
+                - name: Ministral3Model_d7945082_prefill
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3Model
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3Model (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/ministral3/modeling_ministral3.py#L330)'
                   constructor_inputs:
                     args:
                       - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
-                        config_kwargs:
+                        config_kwargs: &id001
                           hidden_size: 5120
                           num_attention_heads: 32
                           num_key_value_heads: 8
@@ -72,6 +79,8 @@ test_suite_config:
                             init: randint
                             init_args:
                               high: 1
+                        position_ids:
+                          value: null
                         inputs_embeds:
                           tensor:
                             shape: [1, 128, 5120]
@@ -80,6 +89,17 @@ test_suite_config:
                             dtype: torch.bfloat16
                             device: spyre
                             init: xavier
+                        use_cache:
+                          value: true
+                - name: Ministral3Model_d7945082_decode
+                  module_path: transformers.models.ministral3.modeling_ministral3.Ministral3Model
+                  description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3Model (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/ministral3/modeling_ministral3.py#L330)'
+                  constructor_inputs:
+                    args:
+                      - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
+                        config_kwargs: *id001
+                    kwargs: {}
+                  forward_inputs:
                     - args: []
                       kwargs:
                         attention_mask:
@@ -92,6 +112,8 @@ test_suite_config:
                             init: randint
                             init_args:
                               high: 1
+                        position_ids:
+                          value: null
                         inputs_embeds:
                           tensor:
                             shape: [1, 1, 5120]
@@ -100,13 +122,15 @@ test_suite_config:
                             dtype: torch.bfloat16
                             device: spyre
                             init: xavier
-                - name: Ministral3RotaryEmbedding_483e0b9c
+                        use_cache:
+                          value: true
+                - name: Ministral3RotaryEmbedding_483e0b9c_prefill
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3RotaryEmbedding
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3RotaryEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/ministral3/modeling_ministral3.py#L273)'
                   constructor_inputs:
                     args:
                       - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
-                        config_kwargs:
+                        config_kwargs: &id002
                           hidden_size: 5120
                           num_attention_heads: 32
                           num_key_value_heads: 8
@@ -134,6 +158,15 @@ test_suite_config:
                             init: randint
                             init_args:
                               high: 1
+                - name: Ministral3RotaryEmbedding_483e0b9c_decode
+                  module_path: transformers.models.ministral3.modeling_ministral3.Ministral3RotaryEmbedding
+                  description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3RotaryEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/ministral3/modeling_ministral3.py#L273)'
+                  constructor_inputs:
+                    args:
+                      - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
+                        config_kwargs: *id002
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 5120]
@@ -153,13 +186,13 @@ test_suite_config:
                             init: randint
                             init_args:
                               high: 1
-                - name: Ministral3DecoderLayer_layer0
+                - name: Ministral3DecoderLayer_layer0_prefill
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3DecoderLayer
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3DecoderLayer (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/ministral3/modeling_ministral3.py#L213)'
                   constructor_inputs:
                     args:
                       - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
-                        config_kwargs:
+                        config_kwargs: &id003
                           hidden_size: 5120
                           num_attention_heads: 32
                           num_key_value_heads: 8
@@ -178,6 +211,8 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs:
+                        attention_mask:
+                          value: null
                         position_ids:
                           tensor:
                             shape: [1, 128]
@@ -188,6 +223,8 @@ test_suite_config:
                             init: randint
                             init_args:
                               high: 1
+                        use_cache:
+                          value: true
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 128, 128]
@@ -202,6 +239,16 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
+                - name: Ministral3DecoderLayer_layer0_decode
+                  module_path: transformers.models.ministral3.modeling_ministral3.Ministral3DecoderLayer
+                  description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3DecoderLayer (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/ministral3/modeling_ministral3.py#L213)'
+                  constructor_inputs:
+                    args:
+                      - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
+                        config_kwargs: *id003
+                    kwargs:
+                      layer_idx: 0
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 5120]
@@ -258,6 +305,8 @@ test_suite_config:
                               head_dim: 128
                               num_hidden_layers: 1
                               max_position_embeddings: 262144
+                        use_cache:
+                          value: true
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 1, 128]
@@ -272,7 +321,7 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
-                - name: Ministral3RMSNorm_5120_layer0
+                - name: Ministral3RMSNorm_5120_layer0_prefill
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3RMSNorm
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3RMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/ministral3/modeling_ministral3.py#L192)'
                   constructor_inputs:
@@ -289,6 +338,14 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: Ministral3RMSNorm_5120_layer0_decode
+                  module_path: transformers.models.ministral3.modeling_ministral3.Ministral3RMSNorm
+                  description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3RMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/ministral3/modeling_ministral3.py#L192)'
+                  constructor_inputs:
+                    args:
+                      - value: 5120
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 5120]
@@ -298,13 +355,13 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: Ministral3Attention_layer0
+                - name: Ministral3Attention_layer0_prefill
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3Attention
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3Attention (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/ministral3/modeling_ministral3.py#L110)'
                   constructor_inputs:
                     args:
                       - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
-                        config_kwargs:
+                        config_kwargs: &id004
                           hidden_size: 5120
                           num_attention_heads: 32
                           num_key_value_heads: 8
@@ -324,6 +381,8 @@ test_suite_config:
                             dtype: torch.bfloat16
                             device: spyre
                             init: xavier
+                        attention_mask:
+                          value: null
                         position_ids:
                           tensor:
                             shape: [1, 128]
@@ -334,6 +393,8 @@ test_suite_config:
                             init: randint
                             init_args:
                               high: 1
+                        use_cache:
+                          value: true
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 128, 128]
@@ -348,6 +409,16 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
+                - name: Ministral3Attention_layer0_decode
+                  module_path: transformers.models.ministral3.modeling_ministral3.Ministral3Attention
+                  description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3Attention (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/ministral3/modeling_ministral3.py#L110)'
+                  constructor_inputs:
+                    args:
+                      - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
+                        config_kwargs: *id004
+                    kwargs:
+                      layer_idx: 0
+                  forward_inputs:
                     - args: []
                       kwargs:
                         hidden_states:
@@ -405,6 +476,8 @@ test_suite_config:
                               head_dim: 128
                               num_hidden_layers: 1
                               max_position_embeddings: 262144
+                        use_cache:
+                          value: true
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 1, 128]
@@ -419,7 +492,7 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
-                - name: Linear_layer0
+                - name: Linear_layer0_prefill_h5120
                   module_path: torch.nn.modules.linear.Linear
                   description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
                   constructor_inputs:
@@ -435,6 +508,13 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: Linear_layer0_prefill_h4096
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args: []
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 128, 4096]
@@ -444,6 +524,13 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: Linear_layer0_prefill_h16384
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args: []
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 128, 16384]
@@ -453,6 +540,13 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: Linear_layer0_decode_h5120
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args: []
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 5120]
@@ -462,6 +556,13 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: Linear_layer0_decode_h4096
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args: []
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 4096]
@@ -471,6 +572,13 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: Linear_layer0_decode_h16384
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args: []
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 16384]
@@ -480,13 +588,13 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: Ministral3MLP_layer0
+                - name: Ministral3MLP_layer0_prefill
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3MLP
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3MLP (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/ministral3/modeling_ministral3.py#L176)'
                   constructor_inputs:
                     args:
                       - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
-                        config_kwargs:
+                        config_kwargs: &id005
                           hidden_size: 5120
                           num_attention_heads: 32
                           num_key_value_heads: 8
@@ -504,6 +612,15 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: Ministral3MLP_layer0_decode
+                  module_path: transformers.models.ministral3.modeling_ministral3.Ministral3MLP
+                  description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3MLP (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/ministral3/modeling_ministral3.py#L176)'
+                  constructor_inputs:
+                    args:
+                      - config_path: transformers.models.ministral3.configuration_ministral3.Ministral3Config
+                        config_kwargs: *id005
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 5120]
@@ -513,7 +630,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: SiLUActivation_layer0
+                - name: SiLUActivation_layer0_prefill
                   module_path: transformers.activations.SiLUActivation
                   description: 'Module: transformers.activations.SiLUActivation (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/activations.py#L92)'
                   constructor_inputs:
@@ -529,6 +646,13 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: SiLUActivation_layer0_decode
+                  module_path: transformers.activations.SiLUActivation
+                  description: 'Module: transformers.activations.SiLUActivation (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/activations.py#L92)'
+                  constructor_inputs:
+                    args: []
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 16384]
@@ -538,7 +662,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: Ministral3RMSNorm_5120
+                - name: Ministral3RMSNorm_5120_prefill
                   module_path: transformers.models.ministral3.modeling_ministral3.Ministral3RMSNorm
                   description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3RMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/ministral3/modeling_ministral3.py#L192)'
                   constructor_inputs:
@@ -555,6 +679,14 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: Ministral3RMSNorm_5120_decode
+                  module_path: transformers.models.ministral3.modeling_ministral3.Ministral3RMSNorm
+                  description: 'Module: transformers.models.ministral3.modeling_ministral3.Ministral3RMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/ministral3/modeling_ministral3.py#L192)'
+                  constructor_inputs:
+                    args:
+                      - value: 5120
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 5120]
@@ -578,7 +710,7 @@ test_suite_config:
           no_grad: true
           edits:
             modules:
-              include: *id001
+              include: *id006
   global:
     supported_dtypes:
       - name: float16

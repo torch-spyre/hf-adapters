@@ -15,8 +15,8 @@ test_suite_config:
           no_grad: true
           edits:
             modules:
-              include: &id001
-                - name: Embedding_4c1a0852
+              include: &id005
+                - name: Embedding_4c1a0852_prefill
                   module_path: torch.nn.modules.sparse.Embedding
                   description: 'Module: torch.nn.modules.sparse.Embedding (defined at torch/nn/modules/sparse.py:14)'
                   constructor_inputs:
@@ -34,6 +34,13 @@ test_suite_config:
                             init_args:
                               high: 1
                       kwargs: {}
+                - name: Embedding_4c1a0852_decode
+                  module_path: torch.nn.modules.sparse.Embedding
+                  description: 'Module: torch.nn.modules.sparse.Embedding (defined at torch/nn/modules/sparse.py:14)'
+                  constructor_inputs:
+                    args: []
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1]
@@ -45,13 +52,13 @@ test_suite_config:
                             init_args:
                               high: 1
                       kwargs: {}
-                - name: GraniteRotaryEmbedding_64892356
+                - name: GraniteRotaryEmbedding_64892356_prefill
                   module_path: transformers.models.granite.modeling_granite.GraniteRotaryEmbedding
                   description: 'Module: transformers.models.granite.modeling_granite.GraniteRotaryEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/granite/modeling_granite.py#L302)'
                   constructor_inputs:
                     args:
                       - config_path: transformers.models.granite.configuration_granite.GraniteConfig
-                        config_kwargs:
+                        config_kwargs: &id001
                           hidden_size: 4096
                           num_attention_heads: 32
                           num_key_value_heads: 8
@@ -79,6 +86,15 @@ test_suite_config:
                             init: randint
                             init_args:
                               high: 1
+                - name: GraniteRotaryEmbedding_64892356_decode
+                  module_path: transformers.models.granite.modeling_granite.GraniteRotaryEmbedding
+                  description: 'Module: transformers.models.granite.modeling_granite.GraniteRotaryEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/granite/modeling_granite.py#L302)'
+                  constructor_inputs:
+                    args:
+                      - config_path: transformers.models.granite.configuration_granite.GraniteConfig
+                        config_kwargs: *id001
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 4096]
@@ -98,13 +114,13 @@ test_suite_config:
                             init: randint
                             init_args:
                               high: 1
-                - name: GraniteDecoderLayer_layer0
+                - name: GraniteDecoderLayer_layer0_prefill
                   module_path: transformers.models.granite.modeling_granite.GraniteDecoderLayer
                   description: 'Module: transformers.models.granite.modeling_granite.GraniteDecoderLayer (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/granite/modeling_granite.py#L219)'
                   constructor_inputs:
                     args:
                       - config_path: transformers.models.granite.configuration_granite.GraniteConfig
-                        config_kwargs:
+                        config_kwargs: &id002
                           hidden_size: 4096
                           num_attention_heads: 32
                           num_key_value_heads: 8
@@ -123,6 +139,8 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs:
+                        attention_mask:
+                          value: null
                         position_ids:
                           tensor:
                             shape: [1, 128]
@@ -133,6 +151,8 @@ test_suite_config:
                             init: randint
                             init_args:
                               high: 1
+                        use_cache:
+                          value: true
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 128, 128]
@@ -147,6 +167,16 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
+                - name: GraniteDecoderLayer_layer0_decode
+                  module_path: transformers.models.granite.modeling_granite.GraniteDecoderLayer
+                  description: 'Module: transformers.models.granite.modeling_granite.GraniteDecoderLayer (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/granite/modeling_granite.py#L219)'
+                  constructor_inputs:
+                    args:
+                      - config_path: transformers.models.granite.configuration_granite.GraniteConfig
+                        config_kwargs: *id002
+                    kwargs:
+                      layer_idx: 0
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 4096]
@@ -202,6 +232,8 @@ test_suite_config:
                               num_key_value_heads: 8
                               num_hidden_layers: 1
                               max_position_embeddings: 131072
+                        use_cache:
+                          value: true
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 1, 128]
@@ -216,7 +248,7 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
-                - name: GraniteRMSNorm_4096_layer0
+                - name: GraniteRMSNorm_4096_layer0_prefill
                   module_path: transformers.models.granite.modeling_granite.GraniteRMSNorm
                   description: 'Module: transformers.models.granite.modeling_granite.GraniteRMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/granite/modeling_granite.py#L182)'
                   constructor_inputs:
@@ -233,6 +265,14 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: GraniteRMSNorm_4096_layer0_decode
+                  module_path: transformers.models.granite.modeling_granite.GraniteRMSNorm
+                  description: 'Module: transformers.models.granite.modeling_granite.GraniteRMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/granite/modeling_granite.py#L182)'
+                  constructor_inputs:
+                    args:
+                      - value: 4096
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 4096]
@@ -242,13 +282,13 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: GraniteAttention_layer0
+                - name: GraniteAttention_layer0_prefill
                   module_path: transformers.models.granite.modeling_granite.GraniteAttention
                   description: 'Module: transformers.models.granite.modeling_granite.GraniteAttention (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/granite/modeling_granite.py#L114)'
                   constructor_inputs:
                     args:
                       - config_path: transformers.models.granite.configuration_granite.GraniteConfig
-                        config_kwargs:
+                        config_kwargs: &id003
                           hidden_size: 4096
                           num_attention_heads: 32
                           num_key_value_heads: 8
@@ -268,6 +308,8 @@ test_suite_config:
                             dtype: torch.bfloat16
                             device: spyre
                             init: xavier
+                        attention_mask:
+                          value: null
                         position_ids:
                           tensor:
                             shape: [1, 128]
@@ -278,6 +320,8 @@ test_suite_config:
                             init: randint
                             init_args:
                               high: 1
+                        use_cache:
+                          value: true
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 128, 128]
@@ -292,6 +336,16 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
+                - name: GraniteAttention_layer0_decode
+                  module_path: transformers.models.granite.modeling_granite.GraniteAttention
+                  description: 'Module: transformers.models.granite.modeling_granite.GraniteAttention (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/granite/modeling_granite.py#L114)'
+                  constructor_inputs:
+                    args:
+                      - config_path: transformers.models.granite.configuration_granite.GraniteConfig
+                        config_kwargs: *id003
+                    kwargs:
+                      layer_idx: 0
+                  forward_inputs:
                     - args: []
                       kwargs:
                         hidden_states:
@@ -348,6 +402,8 @@ test_suite_config:
                               num_key_value_heads: 8
                               num_hidden_layers: 1
                               max_position_embeddings: 131072
+                        use_cache:
+                          value: true
                         position_embeddings:
                           tensor_list:
                             - shape: [1, 1, 128]
@@ -362,7 +418,7 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
-                - name: Linear_layer0
+                - name: Linear_layer0_prefill_h4096
                   module_path: torch.nn.modules.linear.Linear
                   description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
                   constructor_inputs:
@@ -378,6 +434,13 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: Linear_layer0_prefill_h12800
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args: []
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 128, 12800]
@@ -387,6 +450,13 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: Linear_layer0_decode_h4096
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args: []
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 4096]
@@ -396,6 +466,13 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: Linear_layer0_decode_h12800
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args: []
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 12800]
@@ -405,13 +482,13 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: GraniteMLP_layer0
+                - name: GraniteMLP_layer0_prefill
                   module_path: transformers.models.granite.modeling_granite.GraniteMLP
                   description: 'Module: transformers.models.granite.modeling_granite.GraniteMLP (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/granite/modeling_granite.py#L203)'
                   constructor_inputs:
                     args:
                       - config_path: transformers.models.granite.configuration_granite.GraniteConfig
-                        config_kwargs:
+                        config_kwargs: &id004
                           hidden_size: 4096
                           num_attention_heads: 32
                           num_key_value_heads: 8
@@ -429,6 +506,15 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: GraniteMLP_layer0_decode
+                  module_path: transformers.models.granite.modeling_granite.GraniteMLP
+                  description: 'Module: transformers.models.granite.modeling_granite.GraniteMLP (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/granite/modeling_granite.py#L203)'
+                  constructor_inputs:
+                    args:
+                      - config_path: transformers.models.granite.configuration_granite.GraniteConfig
+                        config_kwargs: *id004
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 4096]
@@ -438,7 +524,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: SiLUActivation_layer0
+                - name: SiLUActivation_layer0_prefill
                   module_path: transformers.activations.SiLUActivation
                   description: 'Module: transformers.activations.SiLUActivation (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/activations.py#L92)'
                   constructor_inputs:
@@ -454,6 +540,13 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: SiLUActivation_layer0_decode
+                  module_path: transformers.activations.SiLUActivation
+                  description: 'Module: transformers.activations.SiLUActivation (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/activations.py#L92)'
+                  constructor_inputs:
+                    args: []
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 12800]
@@ -463,7 +556,7 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: GraniteRMSNorm_4096
+                - name: GraniteRMSNorm_4096_prefill
                   module_path: transformers.models.granite.modeling_granite.GraniteRMSNorm
                   description: 'Module: transformers.models.granite.modeling_granite.GraniteRMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/granite/modeling_granite.py#L182)'
                   constructor_inputs:
@@ -480,6 +573,14 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: GraniteRMSNorm_4096_decode
+                  module_path: transformers.models.granite.modeling_granite.GraniteRMSNorm
+                  description: 'Module: transformers.models.granite.modeling_granite.GraniteRMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/granite/modeling_granite.py#L182)'
+                  constructor_inputs:
+                    args:
+                      - value: 4096
+                    kwargs: {}
+                  forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 4096]
@@ -503,7 +604,7 @@ test_suite_config:
           no_grad: true
           edits:
             modules:
-              include: *id001
+              include: *id005
   global:
     supported_dtypes:
       - name: float16
