@@ -144,7 +144,7 @@ runs:
           cd "$CLONED_HF_ADAPTERS_DIR"
           uv add torch-spyre /home/senuser/torch-spyre
           uv sync --verbose --refresh $GROUP_FLAGS
-          # Keep the prebaked --active venv (what `make`/pytest actually runs against) in sync with the lock, sans torch (see Makefile's PYTEST comment).
+          # Keep the prebaked --active venv (what `make`/pytest actually runs against) in sync with the lock, except torch (see Makefile's PYTEST comment).
           uv sync --active --verbose --refresh --no-install-package torch $GROUP_FLAGS
         else
           cd "$CLONED_HF_ADAPTERS_DIR"
@@ -155,7 +155,7 @@ runs:
           uv add torch-spyre /home/senuser/torch-spyre
           uv lock --upgrade-package torch-spyre
           uv sync --frozen --verbose --refresh $GROUP_FLAGS
-          # Keep the prebaked --active venv (what `make`/pytest actually runs against) in sync with the lock, sans torch (see Makefile's PYTEST comment).
+          # Keep the prebaked --active venv (what `make`/pytest actually runs against) in sync with the lock, except torch (see Makefile's PYTEST comment).
           uv sync --active --frozen --verbose --refresh --no-install-package torch $GROUP_FLAGS
         fi
         uv pip show torch
