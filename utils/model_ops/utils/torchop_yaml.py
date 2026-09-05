@@ -1637,6 +1637,7 @@ class TorchOpCollector:
             seed = 123
             config = {
                 "test_suite_config": {
+                    "labels": ["trunk"],
                     "global": {
                         "supported_dtypes": [
                             {"name": dt, "precision": {"atol": 0.005, "rtol": 0.005}}
