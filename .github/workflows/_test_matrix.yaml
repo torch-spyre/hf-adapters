@@ -1263,7 +1263,6 @@ jobs:
           - test_mixed_spyre.py
           - test_no_pad_token_fallback_spyre.py
           - test_sampling_spyre.py
-          - test_zero_new_tokens_spyre.py
 
     steps:
       - name: Checkout composite actions

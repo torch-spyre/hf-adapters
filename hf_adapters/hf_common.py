@@ -25,6 +25,7 @@ import math
 import os
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Optional
 
 import torch
@@ -150,6 +151,14 @@ def get_backbone(model):
         model,
     )
     return getattr(inner, "language_model", inner)
+
+
+def embed_text_tokens(model, input_ids):
+    """Embed text token ids using the model backbone's embedding policy."""
+    backbone = get_backbone(model)
+    input_ids = input_ids.to(backbone.embed_tokens.weight.device)
+    hidden_states = backbone.embed_tokens(input_ids)
+    return hidden_states * getattr(backbone, "embedding_multiplier", 1.0)
 
 
 def text_config(config):
@@ -1672,29 +1681,54 @@ def pad_and_position(input_ids, actual_lengths):
     return input_ids, padded_len, prompt_offsets, position_ids
 
 
+@dataclass
+class NormalizedGenerationInputs:
+    """Block-normalized prompt geometry shared by text and multimodal generation."""
+
+    original_input_ids: torch.Tensor
+    input_ids: torch.Tensor
+    actual_lengths: torch.Tensor
+    padded_len: int
+    prompt_offsets: torch.Tensor
+    position_ids: torch.Tensor
+    valid_spans: tuple[tuple[int, int], ...]
+    compact_len: int
+    original_shape: tuple[int, int]
+
+    def normalize_token_aligned(self, value, *, pad_value=0):
+        """Apply the prompt's span compaction and block padding to side data."""
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(
+                "token-aligned generation inputs must be torch.Tensor values"
+            )
+        if value.ndim < 2 or tuple(value.shape[:2]) != self.original_shape:
+            raise ValueError(
+                "token-aligned generation inputs must match input_ids in their first two dimensions"
+            )
+
+        value_cpu = value.detach().to("cpu")
+        compact_shape = (self.original_shape[0], self.compact_len, *value.shape[2:])
+        compact = value_cpu.new_full(compact_shape, pad_value)
+        for b, (first, last) in enumerate(self.valid_spans):
+            row = value_cpu[b, first:last]
+            compact[b, self.compact_len - row.shape[0] :] = row
+
+        block_pad = self.padded_len - self.compact_len
+        if block_pad == 0:
+            return compact
+        pad_shape = (self.original_shape[0], block_pad, *value.shape[2:])
+        pad = value_cpu.new_full(pad_shape, pad_value)
+        return torch.cat([pad, compact], dim=1)
+
+
 def normalize_generation_inputs(input_ids, attention_mask=None):
-    """Validate and normalize tokenized decoder inputs for block generation.
-
-    Caller padding is removed according to ``attention_mask``. Each row's real
-    tokens are then right-aligned in a compact batch and left-padded to a
-    ``BLOCK_SIZE`` multiple, which is the physical layout expected by the
-    generation masks and KV-cache scheduler.
-
-    Returns ``(padded_ids, actual_lengths, padded_len, prompt_offsets,
-    position_ids)``. Inputs are copied to CPU and are not modified.
-    """
+    """Validate and normalize tokenized decoder inputs for block generation."""
     if not isinstance(input_ids, torch.Tensor):
         raise TypeError("input_ids must be a torch.Tensor")
     if input_ids.ndim != 2:
         raise ValueError("input_ids must have shape [batch_size, sequence_length]")
-    if input_ids.dtype not in (
-        torch.uint8,
-        torch.int8,
-        torch.int16,
-        torch.int32,
-        torch.int64,
-    ):
-        raise TypeError("input_ids must have an integer dtype")
+    if input_ids.dtype not in (torch.int32, torch.int64):
+        raise TypeError("input_ids must have integer dtype torch.int32 or torch.int64")
 
     batch_size, sequence_length = input_ids.shape
     if batch_size == 0:
@@ -1727,16 +1761,18 @@ def normalize_generation_inputs(input_ids, attention_mask=None):
     if torch.any(actual_lengths == 0):
         raise ValueError("each input sequence must contain at least one unmasked token")
 
+    valid_spans = []
     valid_rows = []
     for b in range(batch_size):
         valid_indices = mask[b].nonzero(as_tuple=True)[0]
         first = valid_indices[0].item()
-        last = valid_indices[-1].item()
-        if last - first + 1 != actual_lengths[b].item():
+        last = valid_indices[-1].item() + 1
+        if last - first != actual_lengths[b].item():
             raise ValueError(
                 "attention_mask must contain one contiguous span of unmasked tokens per row"
             )
-        valid_rows.append(input_ids_cpu[b, first : last + 1])
+        valid_spans.append((first, last))
+        valid_rows.append(input_ids_cpu[b, first:last])
 
     compact_len = actual_lengths.max().item()
     compact_ids = input_ids_cpu.new_zeros((batch_size, compact_len))
@@ -1746,12 +1782,16 @@ def normalize_generation_inputs(input_ids, attention_mask=None):
     padded_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
         compact_ids, actual_lengths
     )
-    return (
-        padded_ids,
-        actual_lengths,
-        padded_len,
-        prompt_offsets,
-        position_ids,
+    return NormalizedGenerationInputs(
+        original_input_ids=input_ids_cpu,
+        input_ids=padded_ids,
+        actual_lengths=actual_lengths,
+        padded_len=padded_len,
+        prompt_offsets=prompt_offsets,
+        position_ids=position_ids,
+        valid_spans=tuple(valid_spans),
+        compact_len=compact_len,
+        original_shape=(batch_size, sequence_length),
     )
 
 
@@ -1816,26 +1856,8 @@ def select_next_token(
     return (tokens, scores) if return_scores else tokens
 
 
-def decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer):
-    """Per-sequence generated slots → EOS-trimmed decoded strings.
-
-    Single-token decode steps append contiguously, so each sequence's generated
-    tokens are ``result[b, padded_len : padded_len + num_generated[b]]`` — no gaps.
-    """
-    results = []
-    for b in range(result.shape[0]):
-        n = int(num_generated[b].item())
-        gen_ids = result[b, padded_len : padded_len + n]
-        if eos_ids is not None:
-            eos_pos = torch.isin(gen_ids, eos_ids).nonzero(as_tuple=True)[0]
-            if len(eos_pos) > 0:
-                gen_ids = gen_ids[: eos_pos[0].item()]
-        results.append(tokenizer.decode(gen_ids, skip_special_tokens=True))
-    return results
-
-
 def generate(
-    run_forward_fn: Callable,
+    run_forward_fn: Optional[Callable],
     model,
     input_ids,
     max_new_tokens=None,
@@ -1850,6 +1872,9 @@ def generate(
     top_p=None,
     eos_token_id=_UNSET,
     timing=False,
+    prefill_fn: Optional[Callable] = None,
+    decode_fn: Optional[Callable] = None,
+    token_aligned_inputs: Optional[dict[str, tuple[torch.Tensor, Any]]] = None,
     **kwargs,
 ):
     """Model-agnostic generation from tokenized inputs with single-token decode.
@@ -1931,14 +1956,17 @@ def generate(
         model, generation_config, overrides, kwargs
     )
 
-    orig_input_ids = input_ids.detach().to("cpu").clone()
-    (
-        input_ids,
-        actual_prompt_lengths,
-        padded_len,
-        prompt_offsets,
-        position_ids,
-    ) = normalize_generation_inputs(orig_input_ids, attention_mask)
+    normalized = normalize_generation_inputs(input_ids, attention_mask)
+    orig_input_ids = normalized.original_input_ids
+    input_ids = normalized.input_ids
+    actual_prompt_lengths = normalized.actual_lengths
+    padded_len = normalized.padded_len
+    prompt_offsets = normalized.prompt_offsets
+    position_ids = normalized.position_ids
+    normalized_token_inputs = {
+        name: normalized.normalize_token_aligned(value, pad_value=pad_value)
+        for name, (value, pad_value) in (token_aligned_inputs or {}).items()
+    }
 
     input_length = orig_input_ids.shape[1]
     cfg = model._prepare_generated_length(
@@ -1957,6 +1985,11 @@ def generate(
     effective_max_new_tokens = cfg.max_length - input_length
     min_new_tokens = cfg.min_new_tokens or 0
     begin_suppress_index = generation_begin_index(input_length, cfg.forced_bos_token_id)
+
+    if prefill_fn is None and run_forward_fn is None:
+        raise ValueError("run_forward_fn or prefill_fn must be provided")
+    if decode_fn is None and run_forward_fn is None and effective_max_new_tokens > 1:
+        raise ValueError("run_forward_fn or decode_fn must be provided")
 
     batch_size = input_ids.shape[0]
     vocab_size = text_config(model.config).vocab_size
@@ -1980,9 +2013,8 @@ def generate(
     )
 
     # Decode state. Every decode step writes exactly one token at
-    # ``current_cache_len``, so generated tokens are contiguous from ``padded_len``
-    # and ``result`` grows by one column per step.
-    result = input_ids.clone()
+    # ``current_cache_len``, so generated tokens are contiguous from ``padded_len``.
+    previous_tokens = None
     current_cache_len = padded_len
 
     times_list = []
@@ -2001,23 +2033,36 @@ def generate(
                 prompt_offsets,
                 dtype=model_d_type,
             )
-            logits = run_forward_fn(
-                model,
-                input_ids.to(DEVICE),
-                position_ids.to(DEVICE),
-                prefill_mask.to(DEVICE),
-                key_caches,
-                value_caches,
-                cache_index=make_cache_index(0, padded_len, DEVICE),
-            )
-            logits_cpu = logits.to("cpu")
-            next_logits = logits_cpu[:, -1, :]
+            cache_index = make_cache_index(0, padded_len, DEVICE)
+            if prefill_fn is None:
+                logits = run_forward_fn(  # type: ignore[misc]
+                    model,
+                    input_ids.to(DEVICE),
+                    position_ids.to(DEVICE),
+                    prefill_mask.to(DEVICE),
+                    key_caches,
+                    value_caches,
+                    cache_index=cache_index,
+                )
+            else:
+                logits = prefill_fn(
+                    model=model,
+                    input_ids=input_ids,
+                    position_ids=position_ids,
+                    attention_mask=prefill_mask,
+                    key_caches=key_caches,
+                    value_caches=value_caches,
+                    cache_index=cache_index,
+                    **normalized_token_inputs,
+                )
+            next_logits = logits[:, -1, :].to("cpu")
             current_cache_len = padded_len
 
         else:
             # --- DECODE: one token in, one cache slot written ---
-            # The token to feed is the one the previous step appended.
-            next_input = result[:, -1:].to(DEVICE)
+            # The token to feed is the one selected by the previous step.
+            assert previous_tokens is not None
+            next_input = previous_tokens.unsqueeze(1).to(DEVICE)
             # Absolute position of that token per sequence: it follows the
             # prompt's real tokens plus everything generated so far. Equivalent to
             # its cache column minus the sequence's left-padding offset.
@@ -2029,17 +2074,28 @@ def generate(
                 prompt_offsets,
                 dtype=model_d_type,
             )
-            logits = run_forward_fn(
-                model,
-                next_input,
-                decode_pos.to(DEVICE),
-                decode_mask.to(DEVICE),
-                key_caches,
-                value_caches,
-                cache_index=make_cache_index(current_cache_len, 1, DEVICE),
-            )
-            logits_cpu = logits.to("cpu")
-            next_logits = logits_cpu[:, -1, :]
+            cache_index = make_cache_index(current_cache_len, 1, DEVICE)
+            if decode_fn is None:
+                logits = run_forward_fn(  # type: ignore[misc]
+                    model,
+                    next_input,
+                    decode_pos.to(DEVICE),
+                    decode_mask.to(DEVICE),
+                    key_caches,
+                    value_caches,
+                    cache_index=cache_index,
+                )
+            else:
+                logits = decode_fn(
+                    model=model,
+                    input_ids=next_input,
+                    position_ids=decode_pos.to(DEVICE),
+                    attention_mask=decode_mask.to(DEVICE),
+                    key_caches=key_caches,
+                    value_caches=value_caches,
+                    cache_index=cache_index,
+                )
+            next_logits = logits[:, -1, :].to("cpu")
             current_cache_len += 1
 
         # Crop away Spyre LM-head padding before exposing logits or selecting a
@@ -2082,9 +2138,8 @@ def generate(
                 )
             next_tokens = next_tokens.masked_fill(finished, pad_token_id)
         generated_columns.append(next_tokens.clone())
+        previous_tokens = next_tokens
 
-        # Append the token: generated slots are contiguous from padded_len.
-        result = torch.cat([result, next_tokens.unsqueeze(1)], dim=1)
         if eos_ids is not None:
             finished |= torch.isin(next_tokens, eos_ids)
 

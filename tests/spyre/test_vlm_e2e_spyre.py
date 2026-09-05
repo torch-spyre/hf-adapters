@@ -51,12 +51,11 @@ Parametrized off ``VISION_MODELS``; selects ``kind="vlm"`` entries.
 Usage (on Spyre pod)::
 
     pytest -s -vvv tests/spyre/test_vlm_e2e_spyre.py
-    pytest -s -vvv tests/spyre/test_vlm_e2e_spyre.py -k granite_vision_mm
+    pytest -s -vvv tests/spyre/test_vlm_e2e_spyre.py -k granite-vision-4.1
 """
 
 import gc
 import types
-from typing import Any
 
 import pytest
 import torch
@@ -73,16 +72,14 @@ from hf_adapters.hf_common import (
     DEVICE,
     allocate_kv_caches,
     build_decode_mask,
+    build_prefill_mask,
+    embed_text_tokens,
     generation_cache_len,
     get_model_dtype,
     make_cache_index,
-    pad_and_position,
+    normalize_generation_inputs,
 )
-from tests._vision_helpers import (
-    build_vlm_batch,
-    extra_image_inputs,
-    stock_vlm_generate,
-)
+from tests._vision_helpers import build_vlm_batch, stock_vlm_generate
 from tests.conftest import load_ref_model
 from tests.model_registry import (
     NON_BLOCKING_VISION_MODELS,
@@ -104,26 +101,6 @@ MIN_COSINE = 0.99
 PROMPT = "Briefly describe this image."
 
 
-def _adapter_generate(
-    adapter: types.ModuleType,
-    model: PreTrainedModel,
-    processor: Any,
-    batch: dict[str, torch.Tensor],
-    max_new_tokens: int,
-) -> list[str]:
-    """Drive an adapter's multimodal ``generate`` from a processor batch."""
-    return adapter.generate(
-        model,
-        processor,
-        batch["input_ids"],
-        batch["attention_mask"],
-        batch["pixel_values"],
-        max_new_tokens=max_new_tokens,
-        do_sample=False,
-        **extra_image_inputs(adapter.generate, batch),
-    )
-
-
 def _adapter_teacher_forced_steps(
     adapter: types.ModuleType,
     model: PreTrainedModel,
@@ -138,31 +115,33 @@ def _adapter_teacher_forced_steps(
     ``forced_tokens[i]`` back at each decode step instead of the adapter's own
     argmax — so the adapter sees the *same* prefix as stock and the comparison is
     free of greedy-fork drift. Step 0 is the deepstack prefill (the same
-    ``_prefill_forward`` that ``generate`` / ``prefill_logits`` use).
+    ``_prefill_forward`` that ``generate`` uses).
 
     Returns ``[logits_step0, logits_step1, ...]`` (CPU, ``[vocab]`` each) of
     length ``len(forced_tokens)`` — prefill plus one per forced decode token.
     """
     input_ids = batch["input_ids"]
     attention_mask = batch["attention_mask"]
-    pixel_values = batch["pixel_values"]
-    # Extra image inputs vary by adapter (Granite/Mistral: image_sizes; Gemma 4:
-    # image_position_ids + mm_token_type_ids); matched against _prefill_forward.
-    extra_inputs = extra_image_inputs(adapter._prefill_forward, batch)
+    adapter_inputs = {name: batch[name] for name in adapter._GENERATION_INPUT_NAMES}
 
     model_d_type = get_model_dtype(model)
-    backbone = adapter.get_backbone(model)
-    # Falls back to 1.0 for models (Mistral) that don't scale embeddings
-    emb_mult = getattr(backbone, "embedding_multiplier", 1.0)
 
-    batch_size, prompt_length = input_ids.shape
-    actual_prompt_lengths = attention_mask.sum(dim=1)
+    batch_size = input_ids.shape[0]
     n_steps = len(forced_tokens)
+    normalized = normalize_generation_inputs(input_ids, attention_mask)
+    padded_ids = normalized.input_ids
+    actual_prompt_lengths = normalized.actual_lengths
+    padded_len = normalized.padded_len
+    prompt_offsets = normalized.prompt_offsets
+    position_ids = normalized.position_ids
+    token_aligned_inputs = {
+        name: normalized.normalize_token_aligned(
+            adapter_inputs.pop(name), pad_value=pad_value
+        )
+        for name, pad_value in adapter._GENERATION_TOKEN_ALIGNED_INPUTS.items()
+    }
 
-    max_cache_len = generation_cache_len(prompt_length, n_steps)
-    padded_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
-        input_ids, actual_prompt_lengths
-    )
+    max_cache_len = generation_cache_len(actual_prompt_lengths.max().item(), n_steps)
     key_caches, value_caches = allocate_kv_caches(
         model, batch_size, max_cache_len, model_d_type
     )
@@ -174,29 +153,25 @@ def _adapter_teacher_forced_steps(
     current_cache_len = padded_len
     per_step_logits = []
 
-    def embed_ids(ids):
-        return backbone.embed_tokens(ids) * emb_mult
-
     def _write_token(tok_id):
         nonlocal result
         col = torch.full((batch_size, 1), tok_id, dtype=result.dtype)
         result = torch.cat([result, col], dim=1)
 
     # --- Step 0: multimodal prefill ---
-    # Adapters differ in how many image inputs _prefill_forward takes before the
-    # KV caches (Granite/Mistral: image_sizes; Gemma 4: image_position_ids +
-    # mm_token_type_ids), so pass those + the caches by keyword.
+    prefill_mask = build_prefill_mask(
+        batch_size, padded_len, max_cache_len, prompt_offsets, dtype=model_d_type
+    )
     logits = adapter._prefill_forward(
-        model,
-        padded_ids,
-        padded_len,
-        prompt_offsets,
-        position_ids,
-        pixel_values,
-        **extra_inputs,
+        model=model,
+        input_ids=padded_ids,
+        position_ids=position_ids,
+        attention_mask=prefill_mask,
         key_caches=key_caches,
         value_caches=value_caches,
-        max_cache_len=max_cache_len,
+        cache_index=make_cache_index(0, padded_len, DEVICE),
+        **adapter_inputs,
+        **token_aligned_inputs,
     )
     per_step_logits.append(logits.to("cpu")[0, -1, :].float())
     _write_token(forced_tokens[0])
@@ -206,7 +181,7 @@ def _adapter_teacher_forced_steps(
     for i in range(1, n_steps):
         # The token to feed is the one appended by the previous step.
         next_input = result[:, -1:].to(DEVICE)
-        next_embeds = embed_ids(next_input)
+        next_embeds = embed_text_tokens(model, next_input)
         # Absolute position of that token per sequence: its cache column minus
         # the sequence's left-padding offset.
         decode_pos = (current_cache_len - prompt_offsets).unsqueeze(1)  # [B, 1]
@@ -341,10 +316,16 @@ def test_vlm_generate_spyre(model_path: str) -> None:
 
     # Free-run caption — human-eyeball diagnostic + non-degeneracy check only.
     print("  Running adapter free-run generate (diagnostic) ...")
+    prompt_len = batch["input_ids"].shape[1]
     with torch.no_grad():
-        adapter_text = _adapter_generate(
-            adapter, model, processor, batch, MAX_NEW_TOKENS
+        adapter_sequences = model.generate(
+            max_new_tokens=MAX_NEW_TOKENS,
+            do_sample=False,
+            **batch,
         )
+    adapter_text = tokenizer.decode(
+        adapter_sequences[0, prompt_len:], skip_special_tokens=True
+    )
     del model
     gc.collect()
 
@@ -376,9 +357,9 @@ def test_vlm_generate_spyre(model_path: str) -> None:
             low_cosine.append((label, cosine))
     print(f"  top-1 agreement: {n_top1_match}/{len(ref_logits)} steps (reported)")
     print(f"  stock:   {ref_text!r}")
-    print(f"  adapter free-run: {adapter_text[0]!r}")
+    print(f"  adapter free-run: {adapter_text!r}")
 
-    assert len(adapter_text[0]) > 0, "adapter generated an empty string"
+    assert len(adapter_text) > 0, "adapter generated an empty string"
     assert not low_cosine, (
         f"adapter logits drifted below cosine {MIN_COSINE} (teacher-forced) at: "
         + ", ".join(f"{lab}: {c:.6f}" for lab, c in low_cosine)

@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from functools import partial
 from types import MethodType, ModuleType
 from typing import Any, Optional, Union
 
@@ -745,13 +746,81 @@ class AutoSpyreModelForTokenClassification(AutoSpyreModel):
         return model
 
 
+def _run_vlm_text_forward(
+    module: ModuleType,
+    model: PreTrainedModel,
+    input_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    key_caches,
+    value_caches,
+    cache_index: torch.Tensor,
+):
+    """Run one text-only VLM decoder step through the adapter's shared backbone."""
+    return module._logits_from_embeds(
+        model,
+        hf_common.embed_text_tokens(model, input_ids),
+        position_ids,
+        attention_mask,
+        key_caches,
+        value_caches,
+        cache_index,
+    )
+
+
+def _generate_image_text_to_text(
+    module: ModuleType,
+    model: PreTrainedModel,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor | None = None,
+    **kwargs: Any,
+):
+    """Run multimodal prefill and text decode through the shared generation loop."""
+    # Processor outputs consumed by this adapter rather than by generation config.
+    adapter_input_names = module._GENERATION_INPUT_NAMES
+    missing = set(adapter_input_names) - set(kwargs)
+    if missing:
+        raise TypeError(
+            f"Missing processor inputs for {module.__name__}: {sorted(missing)}"
+        )
+    adapter_inputs = {name: kwargs.pop(name) for name in adapter_input_names}
+
+    # Inputs keyed by token position need the same compaction/padding as input_ids.
+    # The mapping value is the padding value for each tensor.
+    aligned_specs = module._GENERATION_TOKEN_ALIGNED_INPUTS
+    token_aligned_inputs = {
+        name: (adapter_inputs[name], pad_value)
+        for name, pad_value in aligned_specs.items()
+    }
+    # Image tensors and metadata are passed to prefill unchanged.
+    pass_through_inputs = {
+        name: value
+        for name, value in adapter_inputs.items()
+        if name not in aligned_specs
+    }
+
+    # Only prefill is multimodal; subsequent decode steps are ordinary text.
+    prefill_fn = partial(module._prefill_forward, **pass_through_inputs)
+    run_forward_fn = partial(_run_vlm_text_forward, module)
+
+    return hf_common.generate(
+        run_forward_fn,
+        model,
+        input_ids,
+        attention_mask=attention_mask,
+        prefill_fn=prefill_fn,
+        token_aligned_inputs=token_aligned_inputs,
+        **kwargs,
+    )
+
+
 class AutoSpyreModelForImageTextToText(AutoSpyreModel):
     """Load a multimodal (image-text-to-text) model and prepare BOTH towers.
 
     Selects the combined two-tower adapter (vision tower + text decoder),
     loads the full VLM via ``AutoModelForImageTextToText``, and prepares both
-    for Spyre. Attaches Spyre-aware ``prefill_logits`` (image + text → logits)
-    and ``generate`` (full image→text decode) methods.
+    for Spyre and attaches a Spyre-aware ``generate`` method for full
+    image-to-text decoding.
     """
 
     _auto_model_cls = AutoModelForImageTextToText  # type: ignore[assignment]
@@ -774,38 +843,19 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
             model_name_or_path, dtype=dtype, tp_plan=tp_plan
         )
 
-        def model_prefill_logits(
-            self: PreTrainedModel,
-            input_ids: torch.Tensor,
-            attention_mask: torch.Tensor,
-            pixel_values: torch.Tensor,
-            **kwargs: Any,
-        ):
-            # Extra multimodal inputs vary by model: Granite Vision needs
-            # ``image_sizes`` (anyres tiling); Gemma 4 unified needs
-            # ``image_position_ids`` + ``mm_token_type_ids``. Forward whatever
-            # the processor produced as keyword args so each adapter takes its own.
-            return module.prefill_logits(
-                self, input_ids, attention_mask, pixel_values, **kwargs
-            )
-
         def model_generate(
             self: PreTrainedModel,
-            processor: Any,
             input_ids: torch.Tensor,
-            attention_mask: torch.Tensor,
-            pixel_values: torch.Tensor,
+            attention_mask: torch.Tensor | None = None,
             **kwargs: Any,
         ):
-            return module.generate(
+            return _generate_image_text_to_text(
+                module,
                 self,
-                processor,
                 input_ids,
-                attention_mask,
-                pixel_values,
+                attention_mask=attention_mask,
                 **kwargs,
             )
 
-        model.prefill_logits = MethodType(model_prefill_logits, model)  # type: ignore[assignment]
         model.generate = MethodType(model_generate, model)  # type: ignore[assignment]
         return model

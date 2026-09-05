@@ -68,9 +68,8 @@ The CPU-built per-patch positional-embedding tensor is passed into the compiled
 core as a device argument.
 
 The text decoder reuses ``hf_gemma4`` unchanged. Both towers live under the one loaded VLM, so a
-single ``prepare_for_spyre`` covers them. Exposes ``prefill_logits``
-(first-token forward) and ``generate`` (full autoregressive decode — image
-features scattered at prefill; decode steps are pure text).
+single ``prepare_for_spyre`` covers them. Exposes the private prefill/decode
+hooks used by the auto model's generation loop.
 
 Scope: **text + image**. Audio and video are asserted out loudly
 (``prepare_for_spyre`` / forward raise if audio/video inputs are present).
@@ -81,21 +80,18 @@ import torch
 from hf_adapters import hf_gemma4
 from hf_adapters.hf_common import (
     DEVICE,
-    _resolve_generation_params,
-    allocate_kv_caches,
-    build_decode_mask,
-    build_prefill_mask,
-    decode_block_walk,
-    generation_begin_index,
-    generation_cache_len,
     get_backbone,
     get_model_dtype,
-    make_cache_index,
-    pad_and_position,
     patch_layernorm,
-    select_next_token,
     text_config,
 )
+
+_GENERATION_INPUT_NAMES: tuple = (
+    "pixel_values",
+    "image_position_ids",
+    "mm_token_type_ids",
+)
+_GENERATION_TOKEN_ALIGNED_INPUTS: dict = {"mm_token_type_ids": 0}
 
 
 def _vision_embedder(model):
@@ -418,240 +414,43 @@ def _logits_from_embeds(
 
 
 def _prefill_forward(
+    *,
     model,
-    padded_ids,
-    padded_len,
-    prompt_offsets,
+    input_ids,
     position_ids,
+    attention_mask,
+    key_caches,
+    value_caches,
+    cache_index,
     pixel_values,
     image_position_ids,
     mm_token_type_ids,
-    key_caches,
-    value_caches,
-    max_cache_len,
 ):
     """Shared multimodal prefill: padded ids + image → full-sequence logits.
 
     Builds scaled text embeddings with the image features scattered into the
     ``<image>`` slots, then the per-layer-type masks with the bidirectional
     vision overlay OR-ed into both full and sliding layers, and runs the decoder
-    once (writing the KV caches). ``mm_token_type_ids`` is the *unpadded* batch
-    tensor; it is left-padded here to match ``padded_ids``.
+    once (writing the KV caches). ``mm_token_type_ids`` has already undergone
+    the same prompt compaction and block padding as ``input_ids``.
     """
     dtype = get_model_dtype(model)
     cfg = text_config(model.config)
     image_features = _image_features(model, pixel_values, image_position_ids)
-    inputs_embeds = _embed_and_scatter(model, padded_ids, image_features)
+    inputs_embeds = _embed_and_scatter(model, input_ids, image_features)
 
-    mm_padded = _pad_mm_token_type_ids(mm_token_type_ids, padded_len)
-    prefill_mask = build_prefill_mask(
-        padded_ids.shape[0], padded_len, max_cache_len, prompt_offsets, dtype=dtype
-    )
-    blockwise = _blockwise_band(mm_padded, padded_len, max_cache_len, dtype)
-    masks = _build_mm_masks(prefill_mask, blockwise, cfg.sliding_window)
+    padded_len = input_ids.shape[1]
+    max_cache_len = attention_mask.shape[-1]
+    blockwise = _blockwise_band(mm_token_type_ids, padded_len, max_cache_len, dtype)
+    masks = _build_mm_masks(attention_mask, blockwise, cfg.sliding_window)
     masks = {lt: m.to(DEVICE) for lt, m in masks.items()}
     return _logits_from_embeds(
         model,
         inputs_embeds.to(DEVICE),
         position_ids.to(DEVICE),
-        prefill_mask.to(DEVICE),
+        attention_mask.to(DEVICE),
         key_caches,
         value_caches,
-        cache_index=make_cache_index(0, padded_len, DEVICE),
+        cache_index=cache_index,
         masks=masks,
     )
-
-
-def _pad_mm_token_type_ids(mm_token_type_ids, padded_len):
-    """Left-pad ``mm_token_type_ids`` to ``padded_len`` with 0 (text), matching
-    ``pad_and_position``'s left block-pad of ``input_ids``."""
-    bsz, seq = mm_token_type_ids.shape
-    if padded_len == seq:
-        return mm_token_type_ids
-    pad = mm_token_type_ids.new_zeros((bsz, padded_len - seq))
-    return torch.cat([pad, mm_token_type_ids], dim=1)
-
-
-def prefill_logits(
-    model,
-    input_ids,
-    attention_mask,
-    pixel_values,
-    image_position_ids,
-    mm_token_type_ids,
-):
-    """One-shot prefill of the (text + scattered image) sequence → logits.
-
-    Left-pads to a BLOCK_SIZE multiple (same convention as ``generate``),
-    scatters image features into ``<image>`` slots, runs the decoder once with
-    the bidirectional vision band on sliding layers, and returns full-sequence
-    logits ``[B, L, padded_vocab]`` (callers take ``[:, -1, :true_vocab]``).
-    """
-    actual_lengths = attention_mask.sum(dim=1)
-    padded_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
-        input_ids, actual_lengths
-    )
-    key_caches, value_caches = allocate_kv_caches(
-        model, padded_ids.shape[0], padded_len, get_model_dtype(model)
-    )
-    logits = _prefill_forward(
-        model,
-        padded_ids,
-        padded_len,
-        prompt_offsets,
-        position_ids,
-        pixel_values,
-        image_position_ids,
-        mm_token_type_ids,
-        key_caches,
-        value_caches,
-        max_cache_len=padded_len,
-    )
-    return logits, padded_len, input_ids.shape[1]
-
-
-def generate(
-    model,
-    processor,
-    input_ids,
-    attention_mask,
-    pixel_values,
-    image_position_ids,
-    mm_token_type_ids,
-    max_new_tokens,
-    do_sample=None,
-    temperature=None,
-    top_k=None,
-    top_p=None,
-    generation_config=None,
-):
-    """Autoregressive image→text generation on Spyre (greedy / top-k/p sampling).
-
-    Mirrors ``hf_common.generate``'s single-token decode, driven by embeddings so
-    the prefill step carries the image scatter + bidirectional vision mask:
-
-    - **Prefill** (step 0): scaled text embeds with ``<image>`` slots filled by
-      the vision features; decoder runs once with the blockwise band on sliding
-      layers.
-    - **Decode** (steps ≥1): the single token the previous step produced is
-      embedded (scaled) and fed back, writing one cache slot — pure text, causal,
-      no image band. Generated tokens are therefore contiguous from ``padded_len``.
-
-    Inputs come pre-tokenized from the checkpoint's ``AutoProcessor`` (chat
-    template + image-token expansion). Assumes **left-padded** input
-    (``processor.tokenizer.padding_side='left'``). Returns EOS-trimmed strings.
-    """
-    tokenizer = processor.tokenizer
-    cfg, eos_ids, _ = _resolve_generation_params(
-        model,
-        generation_config,
-        {
-            "do_sample": do_sample,
-            "temperature": temperature,
-            "top_k": top_k,
-            "top_p": top_p,
-        },
-        {},
-    )
-    do_sample = cfg.do_sample
-    temperature = cfg.temperature
-    top_k = cfg.top_k
-    top_p = cfg.top_p
-
-    backbone = get_backbone(model)
-    model_d_type = get_model_dtype(model)
-
-    batch_size, prompt_length = input_ids.shape
-    actual_prompt_lengths = attention_mask.sum(dim=1)  # [B]
-    begin_suppress_index = generation_begin_index(
-        prompt_length, cfg.forced_bos_token_id
-    )
-
-    max_cache_len = generation_cache_len(prompt_length, max_new_tokens)
-    input_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
-        input_ids, actual_prompt_lengths
-    )
-
-    key_caches, value_caches = allocate_kv_caches(
-        model, batch_size, max_cache_len, model_d_type
-    )
-
-    # Decode state. Every decode step writes exactly one token at
-    # ``current_cache_len``, so generated tokens are contiguous from ``padded_len``
-    # and ``result`` just grows by one column per step.
-    result = input_ids.clone()
-    current_cache_len = padded_len
-    finished = torch.zeros(batch_size, dtype=torch.bool)
-    num_generated = torch.zeros(batch_size, dtype=torch.long)
-
-    def embed_ids(ids):
-        """Token ids -> scaled embeddings (decode steps; pure text)."""
-        return backbone.embed_tokens(ids)
-
-    for i in range(max_new_tokens):
-        if i == 0:
-            # --- PREFILL: text embeds with image scatter + blockwise vision band ---
-            logits = _prefill_forward(
-                model,
-                input_ids,
-                padded_len,
-                prompt_offsets,
-                position_ids,
-                pixel_values,
-                image_position_ids,
-                mm_token_type_ids,
-                key_caches,
-                value_caches,
-                max_cache_len,
-            )
-            next_logits = logits.to("cpu")[:, -1, :]
-            current_cache_len = padded_len
-        else:
-            # --- DECODE: one token in, one cache slot written (pure text) ---
-            # The token to feed is the one the previous step appended.
-            next_input = result[:, -1:].to(DEVICE)
-            next_embeds = embed_ids(next_input)
-            # Absolute position of that token per sequence: its cache column
-            # minus the sequence's left-padding offset.
-            decode_pos = (current_cache_len - prompt_offsets).unsqueeze(1)  # [B, 1]
-            decode_mask = build_decode_mask(
-                batch_size,
-                max_cache_len,
-                current_cache_len,
-                prompt_offsets,
-                dtype=model_d_type,
-            )
-            logits = _logits_from_embeds(
-                model,
-                next_embeds,
-                decode_pos.to(DEVICE),
-                decode_mask.to(DEVICE),
-                key_caches,
-                value_caches,
-                cache_index=make_cache_index(current_cache_len, 1, DEVICE),
-            )
-            next_logits = logits.to("cpu")[:, -1, :]
-            current_cache_len += 1
-
-        next_tokens = select_next_token(
-            next_logits,
-            do_sample,
-            temperature,
-            top_k,
-            top_p,
-            cfg.suppress_tokens,
-            cfg.begin_suppress_tokens,
-            cfg.forced_bos_token_id,
-            current_length=prompt_length + i,
-            begin_suppress_index=begin_suppress_index,
-        )
-
-        # Append the token: generated slots are contiguous from padded_len.
-        result = torch.cat([result, next_tokens.unsqueeze(1)], dim=1)
-        if eos_ids is not None:
-            finished |= torch.isin(next_tokens, eos_ids)
-        num_generated += (~finished).long()
-        if finished.all():
-            break
-
-    return decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer)

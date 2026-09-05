@@ -19,6 +19,7 @@ This test ensures that every hf_*.py adapter file has at least one corresponding
 entry in either CAUSAL_LM_MODELS or EMBEDDING_MODELS dictionaries.
 """
 
+import ast
 from pathlib import Path
 
 from tests.model_registry import (
@@ -178,6 +179,44 @@ def test_no_invalid_adapter_references():
         f"{sorted(invalid_references)}\n\n"
         f"Please either create the adapter files or remove the invalid references."
     )
+
+
+def test_vlm_adapters_implement_generation_hooks():
+    """Ensure every VLM adapter implements the generic generation protocol."""
+    required_functions = {"_prefill_forward", "_logits_from_embeds"}
+    required_metadata = {
+        "_GENERATION_INPUT_NAMES",
+        "_GENERATION_TOKEN_ALIGNED_INPUTS",
+    }
+    adapter_files = {
+        info["adapter"] for info in VISION_MODELS.values() if info.get("kind") == "vlm"
+    }
+    adapter_dir = Path(__file__).parent.parent / "hf_adapters"
+
+    for adapter_file in adapter_files:
+        tree = ast.parse((adapter_dir / adapter_file).read_text())
+        functions = {
+            node.name
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        metadata = {
+            target.id
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        metadata.update(
+            node.target.id
+            for node in tree.body
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+        )
+        missing = (required_functions - functions) | (required_metadata - metadata)
+        assert not missing, (
+            f"{adapter_file} is missing VLM generation protocol members "
+            f"{sorted(missing)}"
+        )
 
 
 def test_adapter_coverage_details():

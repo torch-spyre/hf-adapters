@@ -225,8 +225,6 @@ from PIL import Image
 # --- Granite Vision 4.1 ---
 model = AutoSpyreModelForImageTextToText.from_pretrained("ibm-granite/granite-vision-4.1-4b")
 processor = AutoProcessor.from_pretrained("ibm-granite/granite-vision-4.1-4b")
-processor.tokenizer.padding_side = "left"  # matches the decode loop's right-aligned prompts
-
 # Build the batch the official way — the chat template tokenizes and expands the
 # image tokens in one call (the two-step text/images path mis-tiles anyres images).
 image = Image.open("cat.jpg").convert("RGB")
@@ -238,12 +236,9 @@ batch = processor.apply_chat_template(
     conv, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt"
 )
 
-texts = model.generate(
-    processor,
-    batch["input_ids"], batch["attention_mask"],
-    batch["pixel_values"], batch["image_sizes"],
-    max_new_tokens=64,
-)
+sequences = model.generate(**batch, max_new_tokens=64)
+prompt_len = batch["input_ids"].shape[1]
+texts = processor.batch_decode(sequences[:, prompt_len:], skip_special_tokens=True)
 print(texts[0])
 
 ```
