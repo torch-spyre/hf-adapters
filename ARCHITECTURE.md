@@ -47,6 +47,17 @@ which models are supported on Spyre.
 **Spyre Compiles** = `torch.compile(block_forward)` succeeds on Spyre.
 **Spyre Runs** = block produces output (no crash/NaN).
 
+### Diffusion LM (block-diffusion)
+
+| Model | model\_type | head\_dim | D/2 | Stick Aligned | Spyre Compiles | Spyre Runs |
+|-------|-----------|---------|-----|--------------|---------------|-----------|
+| DiffusionGemma 26B-A4B-it (bf16, TP=2) | diffusion\_gemma | 256 / 512 | 128 / 256 | Yes | Yes | Yes |
+
+**Spyre Compiles** = `torch.compile(encoder_block)` and `torch.compile(decoder_block)` succeed on Spyre.
+**Spyre Runs** = block-diffusion generate loop produces coherent text (verified: "Why is the sky blue?" → multi-paragraph Rayleigh scattering answer, bf16, TP=2).
+
+CPU Accurate does not apply: DiffusionGemma has no greedy AR token sequence to compare — correctness is assessed by output coherence on Spyre directly. MoE router + experts run on CPU at every layer by design (nonzero + Python loop over alive experts, not compilable).
+
 **Gemma 4 26B-A4B (MoE):** 128 experts, top-8 routing. Prefill uses a persistent
 expert loop (all experts evaluated, routed via `keep_by_index` + coarse-tile
 carried sum). Decode uses per-token expert gather with BMM. Both paths compile
@@ -192,6 +203,7 @@ pattern, norms, and weight layout.
 | hf\_gemma4.py | gemma4\_unified / gemma4 (dense + PLE/KV-share) | 3 | Gemma 4 31B (dense). Not 26B-A4B (MoE). |
 | hf\_gemma4\_mm.py | gemma4\_unified (multimodal) | 1 | Gemma 4 31B (dense unified VLM). Not E2B/E4B (PLE) or 26B-A4B (MoE). |
 | hf\_gemma4\_moe.py | gemma4 (MoE, `enable_moe_block`) | 1 | Gemma 4 26B-A4B (128 experts, top-8 routing). Persistent prefill + gathered decode, 5/5 token match. |
+| hf\_diffusion\_gemma.py | diffusion\_gemma | 1 | google/diffusiongemma-26B-A4B-it. MoE runs on CPU; attention + dense MLP compiled on Spyre. Block-diffusion generate loop. Gated. |
 | hf\_gemma3.py | gemma3\_text / gemma3 (dense) | 2 | Gemma 3 4B/12B/27B (text decoder of the multimodal checkpoints); EmbeddingGemma (bidirectional embedder). Not Gemma 3n (PLE). |
 | hf\_gemma2.py | gemma2 | 1 | Gemma 2 2B and Gemma 2 fine-tunes. |
 | hf\_olmo.py | olmo | 1 | OLMo 7B |

@@ -341,6 +341,16 @@ CAUSAL_LM_MODELS = {
         "size": "1b",
         "kind": "dspark_draft",
     },
+    # hf_diffusion_gemma.py — block-diffusion LLM (gated)
+    "diffusiongemma_26b": {
+        "name": "DiffusionGemma 26B-A4B-it",
+        "path": "google/diffusiongemma-26B-A4B-it",
+        "adapter": "hf_diffusion_gemma.py",
+        "size": "26b",
+        "dtype": "bfloat16",
+        "is_gated": True,
+        "kind": "diffusion",  # not AR; uses block-diffusion generate loop
+    },
 }
 
 EMBEDDING_MODELS = {
