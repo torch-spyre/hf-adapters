@@ -8,7 +8,7 @@ run-name: integration-tests (${{ inputs.test_type || 'integration' }})
 # ClickHouse sees the tier name callers actually asked for.
 
 # ---------------------------------------------------------------------------
-# Triggered by commits in upstream dependant repos (deeptools, flex, torch-spyre etc.) via
+# Triggered by commits in upstream dependent repos (deeptools, flex, torch-spyre etc.) via
 # workflow_dispatch. Runs the smoke suite (test_type default: "integration") against a
 # specified hf-adapters ref so regressions from upstream changes are caught
 # early without paying for the full matrix on every upstream commit; pass
@@ -144,7 +144,7 @@ jobs:
   # Print a summary of what triggered this run so it is tracked
   # ---------------------------------------------------------------------------
   provenance:
-    name: Log upstream dependant tool regression trigger
+    name: Log upstream dependent tool regression trigger
     runs-on: ubuntu-latest
     steps:
       - name: Show trigger info
