@@ -155,6 +155,10 @@ def prepare_for_spyre(model):
 
     # Shared text decoder (mirrors hf_gemma4.prepare_for_spyre).
     hf_gemma4.prepare_text_decoder_for_spyre(model)
+    assert not model._spyre_has_ple, (
+        "hf_gemma4_mm does not support PLE (E-variant) checkpoints; "
+        "the VLM embed path does not compute per_layer_inputs."
+    )
 
     # Vision projection core, compiled for Spyre. The three vision LayerNorms
     # (patch_ln1/patch_ln2/pos_norm) must be patched to the un-fused

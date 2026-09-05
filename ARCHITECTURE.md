@@ -29,8 +29,10 @@ which models are supported on Spyre.
 | DeepSeek-Coder 1.3B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | Yi 1.5 6B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite Vision 4.1 4B (text backbone) | granite (text) | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
-| Gemma 4 12B | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
+| Gemma 4 12B (bf16) | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 4 26B-A4B (MoE) | gemma4 (MoE, `enable_moe_block`) | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
+| Gemma 4 E2B (bf16) | gemma4 | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
+| Gemma 4 E4B (bf16) | gemma4 | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 3 1B | gemma3\_text | 256 | 128 | Yes | Yes | Yes | Yes |
 | Gemma 2 9B | gemma2 | 256 | 128 | Yes | Yes | Yes | Yes |
 | GPT-2 124M | gpt2 | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
@@ -129,7 +131,7 @@ logit cosine ≥ 0.999 vs stock HF on CPU (`test_token_classification_cpu_accura
 **Spyre Runs** = via `test_e2e_token_classification_compare_spyre.py`;
 per-token logit cosine ≥ 0.99 and exact label match vs CPU reference.
 
-### Spyre Numerical Accuracy (torch-spyre @ 7c6ef99)
+### Historical Spyre Numerical Snapshot (torch-spyre @ 7c6ef99)
 
 Per-layer block comparison (`test_block_cpu_vs_spyre.py`) with random
 weights, measured as max absolute diff between CPU and Spyre output:
@@ -139,14 +141,12 @@ weights, measured as max absolute diff between CPU and Spyre output:
 | Qwen3 0.6B | 0.01–0.02 | 0.3–5.5 |
 | Llama 3.2 3B | 0.07–0.08 | 1.9–6.0 |
 
-**Prefill is accurate** — errors are in the fp16 rounding range. The
-first generated token matches the CPU reference (verified with Qwen3
-E2E: `" Paris"` on both CPU and Spyre).
-
-**Decode has large errors** — max diffs of 1–6 per block accumulate
-across layers and autoregressive steps, causing token drift after the
-first token. This is a torch-spyre compiler issue specific to the
-single-token decode path (seq_len=1), not an adapter issue.
+At that revision, prefill errors were in the fp16 rounding range and the first
+Qwen3 token matched the CPU reference. Decode errors were substantially larger
+and caused token drift after the first token. These measurements are retained as
+historical context, not as the current status of every model: the blocking
+causal test lane now requires exact greedy top-1 agreement with CPU over prefill
+and four decode steps. Gemma 4 E2B and E4B both pass that check.
 
 ## Model Family Coverage
 
@@ -189,8 +189,8 @@ pattern, norms, and weight layout.
 | hf\_granite\_swa.py | granite\_swa | 1 | Granite 4.1 8B (unverified), Granite 4.1 20B |
 | hf\_smollm3.py | smollm3 | 1 | — |
 | hf\_lfm2.py | lfm2 | 1 | LFM2 700M/1.2B and dense LFM2 fine-tunes with hybrid convolution/attention layers |
-| hf\_gemma4.py | gemma4\_unified / gemma4 (dense) | 1 | Gemma 4 31B (dense). Not E2B/E4B (PLE). The MoE variant (26B-A4B) has its own dedicated adapter, `hf_gemma4_moe.py`, below. |
-| hf\_gemma4\_mm.py | gemma4\_unified (multimodal) | 1 | Gemma 4 31B (dense unified VLM). Not E2B/E4B (PLE). MoE (26B-A4B) is text-only and covered by `hf_gemma4_moe.py`, not this VLM adapter. |
+| hf\_gemma4.py | gemma4\_unified / gemma4 (dense + PLE/KV-share) | 3 | Gemma 4 31B (dense). Not 26B-A4B (MoE). |
+| hf\_gemma4\_mm.py | gemma4\_unified (multimodal) | 1 | Gemma 4 31B (dense unified VLM). Not E2B/E4B (PLE) or 26B-A4B (MoE). |
 | hf\_gemma4\_moe.py | gemma4 (MoE, `enable_moe_block`) | 1 | Gemma 4 26B-A4B (128 experts, top-8 routing). Persistent prefill + gathered decode, 5/5 token match. |
 | hf\_gemma3.py | gemma3\_text / gemma3 (dense) | 2 | Gemma 3 4B/12B/27B (text decoder of the multimodal checkpoints); EmbeddingGemma (bidirectional embedder). Not Gemma 3n (PLE). |
 | hf\_gemma2.py | gemma2 | 1 | Gemma 2 2B and Gemma 2 fine-tunes. |
@@ -555,16 +555,19 @@ so its RoPE freq cache is matched to bf16 via the explicit `set_rope_dtype`
 propagation, which handles Gemma's per-layer-type dict of RoPE modules.
 
 **Dual head_dim + proportional RoPE** (Gemma 4): `hf_gemma4.py` is Gemma 3
-plus its hardest features, targeting the **dense** decoders (12B / 31B). The
-sliding and global layers use a different `head_dim` each — sliding keeps full
-rotary over `head_dim`, global uses *proportional* RoPE
+plus its hardest features, targeting the dense decoders (12B / 31B) and the
+E2B / E4B variants. The sliding and global layers use a different `head_dim`
+each — sliding keeps full rotary over `head_dim`, global uses *proportional* RoPE
 (`partial_rotary_factor=0.25`, θ=1e6) over `global_head_dim` (the NoPE tail is
 zero frequencies, so the identity-rotation path applies). The two head_dims
 give two KV-cache shapes per model (`model._spyre_kv_shapes`). It further adds
 per-head V-norm (Q/K/V RMSNorm), a per-layer scalar, K==V projection sharing
 on global layers, unscaled attention (`scale=1.0`), and final-logit
-softcapping. PLE-based (E2B/E4B) and MoE (26B-A4B) variants are **not**
-supported — `prepare_for_spyre` asserts those features are absent.
+softcapping. E2B / E4B additionally use per-layer embeddings and trailing
+KV-sharing layers; each PLE slice is copied into fresh offset-zero storage
+before crossing a compiled-block boundary, including singleton decode steps.
+This is a small PLE copy, not a KV-cache copy. The MoE 26B-A4B variant uses the
+dedicated `hf_gemma4_moe.py` adapter, which shares this attention-side setup.
 
 **Learned absolute positions + Conv1D** (GPT-2): `hf_gpt2.py` is the first
 non-RoPE decoder — positions come from a learned `wpe` table added to `wte`, so
@@ -810,10 +813,9 @@ binaries against `accumulated_recompile_limit` as it advances.
 
 ### Open Work
 
-1. **Decode path numerical accuracy** — single-token decode (seq=1)
-   has max diffs of 1–6 per block vs CPU. Prefill (seq=64) is
-   accurate (0.01–0.08). Likely a torch-spyre stickify or layout
-   issue specific to seq_len=1. This is the primary blocker for
-   end-to-end correct generation on Spyre.
+1. **Decode path numerical accuracy** — device and CPU logits can differ more
+   during single-token decode than during prefill, so token-level comparison
+   remains part of the gating suite. The verified Gemma 4 E2B and E4B runs
+   match CPU top-1 across prefill and four decode steps.
 2. **Multi-iteration benchmarking** — run 5+ iterations to measure
    steady-state latency (after compilation cache is warm)

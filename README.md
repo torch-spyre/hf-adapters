@@ -347,10 +347,10 @@ uv run pytest -s -vvv tests/spyre/test_load_spyre.py
 `-s -vvv` matches each test's documented usage and shows the per-step comparison
 tables the token / embedding / VLM tests print.
 
-Note: Spyre has known numerical accuracy limitations. Greedy token mismatches
-between CPU and Spyre are expected on the single-token decode path until
-torch\_spyre fixes land — which is why the VLM lane asserts a per-step logit
-cosine floor rather than exact tokens (see
+Numerical gating depends on the workload. The blocking causal token-comparison
+lane requires exact greedy top-1 agreement with CPU over prefill and four decode
+steps. The VLM lane instead asserts a per-step logit cosine floor because its
+open-ended caption prompts can produce near-tied top-1 candidates (see
 [ARCHITECTURE.md](ARCHITECTURE.md#vision-language-imagetext)).
 
 ## Development

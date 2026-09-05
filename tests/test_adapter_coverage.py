@@ -24,14 +24,28 @@ from pathlib import Path
 
 from tests.model_registry import (
     CAUSAL_LM_MODELS,
+    CAUSAL_PATHS,
     EMBEDDING_MODELS,
     MASKED_LM_MODELS,
+    NON_BLOCKING_CAUSAL_MODELS,
     QUESTION_ANSWERING_MODELS,
     RERANKER_MODELS,
     SEQ_CLASSIFICATION_MODELS,
     TOKEN_CLASSIFICATION_MODELS,
     VISION_MODELS,
 )
+
+
+def test_always_test_causal_models_are_enabled_and_blocking():
+    """Every ``always_test`` causal model must gate the default test matrix."""
+    always_test_paths = {
+        info["path"]
+        for info in CAUSAL_LM_MODELS.values()
+        if info.get("always_test", False)
+    }
+
+    assert always_test_paths <= set(CAUSAL_PATHS)
+    assert always_test_paths.isdisjoint(NON_BLOCKING_CAUSAL_MODELS)
 
 
 def get_adapter_files():
