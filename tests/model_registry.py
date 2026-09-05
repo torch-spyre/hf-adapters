@@ -448,6 +448,13 @@ EMBEDDING_MODELS = {
         "adapter": "hf_xlm_roberta.py",
         "size": "0.1B",
     },
+    # hf_clip.py
+    "clip_vit_b_32": {
+        "name": "clip-ViT-B-32",
+        "path": "sentence-transformers/clip-ViT-B-32",
+        "adapter": "hf_clip.py",
+        "size": "0.15b",
+    },
     # hf_mpnet.py
     "mpnet": {
         "name": "all-mpnet-base-v2",
