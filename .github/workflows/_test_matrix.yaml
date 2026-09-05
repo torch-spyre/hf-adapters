@@ -178,6 +178,67 @@ jobs:
           RESOLVED="$(scripts/resolve_test_type.sh ${RAW_TEST_TYPE})"
           echo "test_type=${RESOLVED}" >> "${GITHUB_OUTPUT}"
 
+  # ---------------------------------------------------------------------------
+  # Resolve the torch-spyre revision ONCE per run and pin it (issue #449).
+  #
+  # torch-spyre lives as a git checkout baked into each runner POD IMAGE at
+  # /home/senuser/torch-spyre, and every matrix job below lands on a different
+  # pod whose image was built at a different time -- so without this, one run
+  # installs several different torch-spyre commits and its results aren't
+  # comparable. This job resolves origin/main to a single full SHA that every
+  # suite/retry job then checks out (via build-hf-adapters' torch_spyre_sha
+  # input) before `uv add`, so all jobs install the identical commit.
+  #
+  # Must run on a spyre runner that HAS the baked checkout (the image_label
+  # set), not ubuntu-latest: the torch-spyre origin remote lives inside that
+  # checkout's .git/config -- there is no torch-spyre URL anywhere in this repo.
+  # `git fetch origin` moves refs/remotes/origin/main to what origin advertises
+  # NOW; `git rev-parse origin/main` reads that ref, NOT this pod's stale HEAD,
+  # which is what makes the pin immune to per-pod image drift.
+  # ---------------------------------------------------------------------------
+  resolve-torch-spyre:
+    name: Resolve torch-spyre revision
+    if: ${{ !inputs.skip_tests }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 15
+    outputs:
+      torch_spyre_sha: ${{ steps.resolve.outputs.torch_spyre_sha }}
+    steps:
+      - name: Resolve origin/main to a pinned SHA
+        id: resolve
+        working-directory: /home/senuser/torch-spyre
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          git config --global --add safe.directory '*'
+          git fetch --force origin
+          SHA="$(git rev-parse origin/main)"
+          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "resolve-torch-spyre: origin/main did not resolve to a 40-char SHA (got '$SHA')" >&2
+            exit 1
+          fi
+          echo "Resolved torch-spyre origin/main -> ${SHA}"
+          echo "torch_spyre_sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Record pinned SHA in the run summary
+        run: |
+          {
+            echo "## Pinned torch-spyre revision"
+            echo ""
+            echo "All jobs in this run install torch-spyre at this exact commit:"
+            echo ""
+            echo '```'
+            echo "${{ steps.resolve.outputs.torch_spyre_sha }}"
+            echo '```'
+            echo ""
+            echo "| job | hf-adapters SHA | torch-spyre SHA |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   pre-commit:
     name: pre-commit
     runs-on: ubuntu-latest
@@ -400,6 +461,10 @@ jobs:
       - name: Run mypy
         run: mypy --config-file=pyproject.toml
 
+# NOTE (issue #449): if re-enabling cpu-tests, add `resolve-torch-spyre` to its
+# `needs:` and pass `torch_spyre_sha:
+# ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}` to build-hf-adapters
+# so it pins the same torch-spyre commit as the rest of the run.
 #  cpu-tests:
 #    name: CPU tests (${{ matrix.test_file }})
 #    runs-on:
@@ -448,7 +513,7 @@ jobs:
 
   spyre-load-tests:
     name: Spyre load (${{ matrix.model_key }})
-    needs: [generate-matrix, resolve-test-type]
+    needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
     # Suite key: "load". Runs on the "regression"/"trunk" or "unit" coarse
     # tiers (unit = every suite except smoke), or when "load" appears as a
     # space-separated word in test_type (e.g. "smoke load") for fine-grained
@@ -478,10 +543,13 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
@@ -489,6 +557,10 @@ jobs:
           verbose: 'true'
           # Echo the exact runner-label selectors this job's runs-on used.
           runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_load_spyre.py for ${{ matrix.model_key }}
         env:
@@ -519,7 +591,7 @@ jobs:
 
   spyre-smoke-tests:
     name: Spyre smoke (${{ matrix.model_key }})
-    needs: [generate-matrix, resolve-test-type]
+    needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
     # Suite key: "smoke" (used directly, e.g. TEST_TYPE=smoke, not as a tier
     # name), also the target of the "integration" coarse tier (this is the
     # only job that tier runs). Same allowlist mechanism as spyre-load-tests
@@ -549,10 +621,13 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
@@ -560,6 +635,10 @@ jobs:
           verbose: 'true'
           # Echo the exact runner-label selectors this job's runs-on used.
           runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_e2e_smoke_spyre.py for ${{ matrix.model_key }}
         env:
@@ -590,7 +669,7 @@ jobs:
 
   spyre-token-compare-tests:
     name: Spyre token compare (${{ matrix.model_key }})
-    needs: [generate-matrix, resolve-test-type]
+    needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
     # Suite key: "token_compare". Part of the "unit" coarse tier.
     if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'integration' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-token-compare-tests-retry) gets a shot on a fresh pod.
@@ -616,10 +695,13 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
@@ -627,6 +709,10 @@ jobs:
           verbose: 'true'
           # Echo the exact runner-label selectors this job's runs-on used.
           runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}
         env:
@@ -713,7 +799,7 @@ jobs:
 
   spyre-embed-compare-tests:
     name: Spyre embed compare (${{ matrix.model_key }})
-    needs: [generate-matrix, resolve-test-type]
+    needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
     # Suite key: "embed_compare". Part of the "unit" coarse tier.
     if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' embed_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-embed-compare-tests-retry) gets a shot on a fresh pod.
@@ -739,10 +825,13 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
@@ -750,6 +839,10 @@ jobs:
           verbose: 'true'
           # Echo the exact runner-label selectors this job's runs-on used.
           runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}
         env:
@@ -780,7 +873,7 @@ jobs:
 
   spyre-vlm-e2e-tests:
     name: Spyre VLM e2e (${{ matrix.model_key }})
-    needs: [generate-matrix, resolve-test-type]
+    needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
     # Suite key: "vlm". Part of the "unit" coarse tier.
     if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' vlm ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-vlm-e2e-tests-retry) gets a shot on a fresh pod.
@@ -807,10 +900,13 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
@@ -818,6 +914,10 @@ jobs:
           verbose: 'true'
           # Echo the exact runner-label selectors this job's runs-on used.
           runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_vlm_e2e_spyre.py for ${{ matrix.model_key }}
         env:
@@ -859,6 +959,11 @@ jobs:
   # previously documented to OOM -- watch that job if re-enabling this one too),
   # and the spyre_pf_x2 labels (actionlint.yaml) + extra_test_flags_multi_spyre
   # (callers) remain in place so re-enabling is just an uncomment.
+  # NOTE (issue #449): when re-enabling, also add `resolve-torch-spyre` to this
+  # job's `needs:` and pass `torch_spyre_sha:
+  # ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}` to build-hf-adapters
+  # (plus pinned_torch_spyre_sha/hf_adapters_sha to gather-runner-info), so it
+  # installs the same pinned torch-spyre commit as every other job.
   # spyre-vlm-e2e-tests-x2:
   #   name: Spyre VLM e2e x2 (${{ matrix.model_key }})
   #   needs: [generate-matrix, resolve-test-type]
@@ -906,7 +1011,7 @@ jobs:
 
   spyre-reranker-compare-tests:
     name: Spyre reranker compare (${{ matrix.model_key }})
-    needs: [generate-matrix, resolve-test-type]
+    needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
     # Suite key: "reranker_compare". Part of the "unit" coarse tier.
     if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' reranker_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-reranker-compare-tests-retry) gets a shot on a fresh pod.
@@ -931,15 +1036,22 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_e2e_reranker_compare_spyre.py for ${{ matrix.model_key }}
         env:
@@ -970,7 +1082,7 @@ jobs:
 
   spyre-masked-lm-compare-tests:
     name: Spyre masked-LM compare (${{ matrix.model_key }})
-    needs: [generate-matrix, resolve-test-type]
+    needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
     # Suite key: "masked_lm_compare". Part of the "unit" coarse tier.
     if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' masked_lm_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-masked-lm-compare-tests-retry) gets a shot on a fresh pod.
@@ -995,15 +1107,22 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_e2e_masked_lm_compare_spyre.py for ${{ matrix.model_key }}
         env:
@@ -1034,7 +1153,7 @@ jobs:
 
   spyre-question-answering-compare-tests:
     name: Spyre question-answering compare (${{ matrix.model_key }})
-    needs: [generate-matrix, resolve-test-type]
+    needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
     # Suite key: "question_answering_compare". Part of the "unit" coarse tier.
     if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' question_answering_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-question-answering-compare-tests-retry) gets a shot on a fresh pod.
@@ -1059,15 +1178,22 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_e2e_question_answering_compare_spyre.py for ${{ matrix.model_key }}
         env:
@@ -1098,7 +1224,7 @@ jobs:
 
   spyre-seq-classification-compare-tests:
     name: Spyre seq-classification compare (${{ matrix.model_key }})
-    needs: [generate-matrix, resolve-test-type]
+    needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
     # Suite key: "seq_classification_compare". Part of the "unit" coarse tier.
     if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' seq_classification_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-seq-classification-compare-tests-retry) gets a shot on a fresh pod.
@@ -1123,15 +1249,22 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_e2e_seq_classification_compare_spyre.py for ${{ matrix.model_key }}
         env:
@@ -1162,7 +1295,7 @@ jobs:
 
   spyre-token-classification-compare-tests:
     name: Spyre token-classification compare (${{ matrix.model_key }})
-    needs: [generate-matrix, resolve-test-type]
+    needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
     # Suite key: "token_classification_compare". Part of the "unit" coarse tier.
     if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_classification_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-token-classification-compare-tests-retry) gets a shot on a fresh pod.
@@ -1187,15 +1320,22 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_e2e_token_classification_compare_spyre.py for ${{ matrix.model_key }}
         env:
@@ -1240,7 +1380,7 @@ jobs:
   # ---------------------------------------------------------------------------
   spyre-edge-cases-tests:
     name: Spyre edge case ${{ matrix.test_file }} (${{ matrix.model_key }})
-    needs: [generate-matrix]
+    needs: [generate-matrix, resolve-torch-spyre]
     if: ${{ !inputs.skip_tests && inputs.edge_cases_only }}
     # Don't let one failed (model, test_file) leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-edge-cases-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
@@ -1273,15 +1413,22 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run ${{ matrix.test_file }} for ${{ matrix.model_key }}
         env:
@@ -1319,7 +1466,7 @@ jobs:
 
   spyre-model-module-tests:
     name: Spyre model-module tests (${{ matrix.config }})
-    needs: [resolve-test-type, generate-module-config-matrix]
+    needs: [resolve-test-type, generate-module-config-matrix, resolve-torch-spyre]
     # Suite key: "model_module". Part of the "unit" coarse tier.
     if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_module ')) }}
     # Don't let one failed config leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-model-module-tests-retry) gets a shot on a fresh pod.
@@ -1346,10 +1493,13 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test oot"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
@@ -1357,6 +1507,10 @@ jobs:
           verbose: 'true'
           # Echo the exact runner-label selectors this job's runs-on used.
           runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run module tests for ${{ matrix.config }}
         env:
@@ -1505,7 +1659,7 @@ jobs:
   # `!cancelled() &&` below is required on every *-retry job, not cosmetic: without a status-check function, GitHub applies an implicit success() gate on top of the condition and can skip the job outright.
   spyre-load-tests-retry:
     name: Spyre load (${{ matrix.model_key }}) (pod-level retry)
-    needs: [collect-failed-suites]
+    needs: [collect-failed-suites, resolve-torch-spyre]
     if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_load == 'true' }}
     runs-on:
       - x86_64
@@ -1525,16 +1679,23 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
           runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_load_spyre.py for ${{ matrix.model_key }} (pod-level retry)
         env:
@@ -1560,7 +1721,7 @@ jobs:
 
   spyre-smoke-tests-retry:
     name: Spyre smoke (${{ matrix.model_key }}) (pod-level retry)
-    needs: [collect-failed-suites]
+    needs: [collect-failed-suites, resolve-torch-spyre]
     if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_smoke == 'true' }}
     runs-on:
       - x86_64
@@ -1580,16 +1741,23 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
           runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_e2e_smoke_spyre.py for ${{ matrix.model_key }} (pod-level retry)
         env:
@@ -1614,7 +1782,7 @@ jobs:
 
   spyre-token-compare-tests-retry:
     name: Spyre token compare (${{ matrix.model_key }}) (pod-level retry)
-    needs: [collect-failed-suites]
+    needs: [collect-failed-suites, resolve-torch-spyre]
     if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_token_compare == 'true' }}
     runs-on:
       - x86_64
@@ -1634,16 +1802,23 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
           runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_e2e_token_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)
         env:
@@ -1718,7 +1893,7 @@ jobs:
 
   spyre-embed-compare-tests-retry:
     name: Spyre embed compare (${{ matrix.model_key }}) (pod-level retry)
-    needs: [collect-failed-suites]
+    needs: [collect-failed-suites, resolve-torch-spyre]
     if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_embed_compare == 'true' }}
     runs-on:
       - x86_64
@@ -1738,16 +1913,23 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
           runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)
         env:
@@ -1772,7 +1954,7 @@ jobs:
 
   spyre-vlm-e2e-tests-retry:
     name: Spyre VLM e2e (${{ matrix.model_key }}) (pod-level retry)
-    needs: [collect-failed-suites]
+    needs: [collect-failed-suites, resolve-torch-spyre]
     if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_vlm == 'true' }}
     runs-on:
       - x86_64
@@ -1792,16 +1974,23 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
           runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_vlm_e2e_spyre.py for ${{ matrix.model_key }} (pod-level retry)
         env:
@@ -1826,7 +2015,7 @@ jobs:
 
   spyre-reranker-compare-tests-retry:
     name: Spyre reranker compare (${{ matrix.model_key }}) (pod-level retry)
-    needs: [collect-failed-suites]
+    needs: [collect-failed-suites, resolve-torch-spyre]
     if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_reranker == 'true' }}
     runs-on:
       - x86_64
@@ -1846,15 +2035,22 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_e2e_reranker_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)
         env:
@@ -1879,7 +2075,7 @@ jobs:
 
   spyre-masked-lm-compare-tests-retry:
     name: Spyre masked-LM compare (${{ matrix.model_key }}) (pod-level retry)
-    needs: [collect-failed-suites]
+    needs: [collect-failed-suites, resolve-torch-spyre]
     if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_masked_lm == 'true' }}
     runs-on:
       - x86_64
@@ -1899,15 +2095,22 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_e2e_masked_lm_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)
         env:
@@ -1932,7 +2135,7 @@ jobs:
 
   spyre-question-answering-compare-tests-retry:
     name: Spyre question-answering compare (${{ matrix.model_key }}) (pod-level retry)
-    needs: [collect-failed-suites]
+    needs: [collect-failed-suites, resolve-torch-spyre]
     if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_qa == 'true' }}
     runs-on:
       - x86_64
@@ -1952,15 +2155,22 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_e2e_question_answering_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)
         env:
@@ -1985,7 +2195,7 @@ jobs:
 
   spyre-seq-classification-compare-tests-retry:
     name: Spyre seq-classification compare (${{ matrix.model_key }}) (pod-level retry)
-    needs: [collect-failed-suites]
+    needs: [collect-failed-suites, resolve-torch-spyre]
     if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_seq_classification == 'true' }}
     runs-on:
       - x86_64
@@ -2005,15 +2215,22 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_e2e_seq_classification_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)
         env:
@@ -2038,7 +2255,7 @@ jobs:
 
   spyre-token-classification-compare-tests-retry:
     name: Spyre token-classification compare (${{ matrix.model_key }}) (pod-level retry)
-    needs: [collect-failed-suites]
+    needs: [collect-failed-suites, resolve-torch-spyre]
     if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_token_classification == 'true' }}
     runs-on:
       - x86_64
@@ -2058,15 +2275,22 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_e2e_token_classification_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)
         env:
@@ -2091,7 +2315,7 @@ jobs:
 
   spyre-edge-cases-tests-retry:
     name: Spyre edge case ${{ matrix.test_file }} (${{ matrix.model_key }}) (pod-level retry)
-    needs: [collect-failed-suites]
+    needs: [collect-failed-suites, resolve-torch-spyre]
     if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_edge_cases == 'true' }}
     runs-on:
       - x86_64
@@ -2111,15 +2335,22 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run ${{ matrix.test_file }} for ${{ matrix.model_key }} (pod-level retry)
         env:
@@ -2151,7 +2382,7 @@ jobs:
 
   spyre-model-module-tests-retry:
     name: Spyre model-module tests (${{ matrix.config }}) (pod-level retry)
-    needs: [collect-failed-suites]
+    needs: [collect-failed-suites, resolve-torch-spyre]
     if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_model_module == 'true' }}
     runs-on:
       - x86_64
@@ -2171,16 +2402,23 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test oot"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
           runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run module tests for ${{ matrix.config }} (pod-level retry)
         env:
@@ -2271,6 +2509,12 @@ jobs:
       - adapter-coverage
       - check-uv-lock
 #      - cpu-tests
+      # resolve-torch-spyre gates the whole matrix (every suite/retry job needs
+      # it; issue #449). If it fails, those jobs skip, collect-failed-suites finds
+      # no failed descriptors and spyre-tests-result would pass -- a false green
+      # over a matrix that never ran. Listing it here (and in the predicate below)
+      # turns the required check red instead, same guard pattern as generate-matrix.
+      - resolve-torch-spyre
       # Depends on the aggregator, not the individual spyre-*-tests jobs, since those are continue-on-error and always report "success"; spyre-tests-result still transitively waits for the whole matrix via collect-failed-suites and the *-retry jobs.
       - spyre-tests-result
     if: always()
@@ -2288,6 +2532,7 @@ jobs:
                  contains(needs.generate-module-config-matrix.result, 'failure') || contains(needs.generate-module-config-matrix.result, 'cancelled') ||
                  contains(needs.adapter-coverage.result, 'failure') || contains(needs.adapter-coverage.result, 'cancelled') ||
                  contains(needs.check-uv-lock.result, 'failure') || contains(needs.check-uv-lock.result, 'cancelled') ||
+                 contains(needs.resolve-torch-spyre.result, 'failure') || contains(needs.resolve-torch-spyre.result, 'cancelled') ||
                  contains(needs.spyre-tests-result.result, 'failure') || contains(needs.spyre-tests-result.result, 'cancelled') }}; then
             echo "One or more test suites failed."
             exit 1

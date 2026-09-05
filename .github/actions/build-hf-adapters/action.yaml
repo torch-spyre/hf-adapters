@@ -21,6 +21,19 @@ inputs:
       ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY). Set by the Test-With: flow.
     required: false
     default: ''
+  torch_spyre_sha:
+    description: >
+      Full 40-char torch-spyre commit SHA to pin (issue #449). When set, the
+      baked /home/senuser/torch-spyre checkout is fetched + checked out at
+      exactly this commit before `uv add`, so every job in a run installs the
+      identical torch-spyre instead of whatever HEAD each pod's image happened
+      to bake in. Empty (default) keeps today's behaviour, so callers that omit
+      it (e.g. push-to-clickhouse's scan jobs) are unaffected. Named
+      torch_spyre_sha -- NOT torch_spyre_ref (an unrelated, unused dispatch
+      input elsewhere) and NOT the Checkout step's INPUT_REF (= inputs.ref, the
+      hf-adapters ref) -- so the three never get confused.
+    required: false
+    default: ''
 outputs:
   target_sha:
     description: The resolved commit SHA that was checked out
@@ -94,7 +107,11 @@ runs:
       working-directory: /home/senuser
       env:
         UV_GROUPS: "${{ inputs.uv_groups }}"
-        INPUT_REF: ""
+        # Pinned torch-spyre SHA (issue #449). Empty = today's behaviour (install
+        # whatever HEAD this pod's image baked in). Renamed from the previously
+        # hardcoded, dead `INPUT_REF: ""` here so it is never confused with the
+        # Checkout step's INPUT_REF (= inputs.ref, the hf-adapters ref).
+        TORCH_SPYRE_SHA: ${{ inputs.torch_spyre_sha }}
       run: |
         source "$HOME/.bashrc"
         source /etc/profile.d/ibm-aiu-setup.sh
@@ -129,21 +146,28 @@ runs:
           GROUP_FLAGS="$GROUP_FLAGS --group $group"
         done
 
-        if [[ -n "$INPUT_REF" ]]; then
+        if [[ -n "$TORCH_SPYRE_SHA" ]]; then
+          # Pinned mode (issue #449): install the exact torch-spyre commit the
+          # resolve-torch-spyre job picked, NOT whatever HEAD this pod's image
+          # baked in. `git fetch origin <sha>` retrieves that specific object even
+          # when this pod's checkout predates it (with a full-fetch fallback);
+          # then check it out and re-sync submodules so the working tree matches
+          # the pinned commit exactly before `uv add` builds from it.
           cd /home/senuser/torch-spyre
-          TARGET_SHA="$INPUT_REF"
-          TARGET_REF="$INPUT_REF"
-          echo "TARGET_REF=${TARGET_REF}"
-          echo "TARGET_SHA=${TARGET_SHA}"
-          git fetch --tags --force origin "+${TARGET_SHA}" || \
+          echo "Pinning torch-spyre to ${TORCH_SPYRE_SHA}"
+          git fetch --tags --force origin "${TORCH_SPYRE_SHA}" || \
             git fetch --tags --force origin
-          git checkout --force "${TARGET_SHA}"
+          git checkout --force "${TORCH_SPYRE_SHA}"
           git submodule sync --recursive
           git submodule update --init --recursive --force
           git log -1 --oneline
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # Same install tail as the unpinned branch below -- the ONLY difference
+          # is the fetch/checkout preamble above, so a pinned run behaves exactly
+          # like today's install, just at a fixed SHA.
           uv add torch-spyre /home/senuser/torch-spyre
-          uv sync --verbose --refresh $GROUP_FLAGS
+          uv lock --upgrade-package torch-spyre
+          uv sync --frozen --verbose --refresh $GROUP_FLAGS
         else
           cd "$CLONED_HF_ADAPTERS_DIR"
           # though we pin to main
