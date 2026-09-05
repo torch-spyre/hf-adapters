@@ -70,7 +70,9 @@ from hf_adapters.auto_spyre_model import (
     resolve_adapter_module,
 )
 from hf_adapters.hf_common import (
+    _SDPA_MAX_SEQUENCE_TILE_SIZE,
     DEVICE,
+    _materialize_decode_mask_heads,
     allocate_kv_caches,
     build_decode_mask,
     generation_cache_len,
@@ -159,10 +161,10 @@ def _adapter_teacher_forced_steps(
     actual_prompt_lengths = attention_mask.sum(dim=1)
     n_steps = len(forced_tokens)
 
-    max_cache_len = generation_cache_len(prompt_length, n_steps)
     padded_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
-        input_ids, actual_prompt_lengths
+        input_ids, actual_prompt_lengths, _SDPA_MAX_SEQUENCE_TILE_SIZE
     )
+    max_cache_len = generation_cache_len(padded_len, n_steps)
     key_caches, value_caches = allocate_kv_caches(
         model, batch_size, max_cache_len, model_d_type
     )
@@ -217,6 +219,8 @@ def _adapter_teacher_forced_steps(
             prompt_offsets,
             dtype=model_d_type,
         )
+        if decode_mask_heads := getattr(model, "_spyre_decode_mask_num_heads", None):
+            decode_mask = _materialize_decode_mask_heads(decode_mask, decode_mask_heads)
         logits = adapter._logits_from_embeds(
             model,
             next_embeds,

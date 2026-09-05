@@ -24,7 +24,6 @@ Usage (on Spyre pod)::
     pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k qwen3
 """
 
-import math
 from typing import Any, Callable
 
 import pytest
@@ -33,7 +32,6 @@ from transformers import PreTrainedModel
 
 from hf_adapters.auto_spyre_model import dtype_for_model_path
 from hf_adapters.hf_common import (
-    BLOCK_SIZE,
     DEVICE,
     encode_prompts,
     generation_cache_len,
@@ -94,10 +92,15 @@ def adapter_greedy_steps(
 ) -> list[dict[str, Any]]:
     """Run adapter forward on Spyre for prefill + N decode steps."""
     from hf_adapters.hf_common import (
+        BLOCK_SIZE,
+        _materialize_decode_mask_heads,
+        _prefill_cache_inputs,
+        _sdpa_compatible_kv_length,
         allocate_kv_caches,
         build_decode_mask,
         build_prefill_mask,
         make_cache_index,
+        pad_and_position,
     )
 
     batch_size = input_ids.shape[0]
@@ -106,28 +109,35 @@ def adapter_greedy_steps(
     cfg = model.config
     vocab_size = getattr(cfg, "vocab_size", None) or cfg.text_config.vocab_size
 
-    padded_len = math.ceil(seq_len / BLOCK_SIZE) * BLOCK_SIZE
-    prompt_offset = padded_len - seq_len
-    if prompt_offset > 0:
-        pad = input_ids.new_zeros((batch_size, prompt_offset))
-        padded_ids = torch.cat([pad, input_ids], dim=1)
-    else:
-        padded_ids = input_ids
+    actual_lengths = torch.full((batch_size,), seq_len, dtype=torch.long)
+    prefill_chunk_size = getattr(model, "_spyre_prefill_chunk_size", None)
+    padded_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
+        input_ids, actual_lengths, prefill_chunk_size or BLOCK_SIZE
+    )
+    prompt_offset = (
+        prompt_offsets if isinstance(prompt_offsets, int) else prompt_offsets[0].item()
+    )
 
-    position_ids = torch.zeros((batch_size, padded_len), dtype=torch.long)
-    position_ids[:, prompt_offset:] = torch.arange(seq_len)
-
-    max_cache_len = generation_cache_len(seq_len, num_decode + 1)
+    max_cache_len = generation_cache_len(padded_len, num_decode + 1)
+    prefill_kv_len = _sdpa_compatible_kv_length(padded_len)
     dtype = get_model_dtype(model)
 
     key_caches, value_caches = allocate_kv_caches(
         model, batch_size, max_cache_len, dtype
     )
+    chunked_prefill = prefill_chunk_size is not None
+    prefill_cache_len = prefill_kv_len if chunked_prefill else max_cache_len
+    prefill_key_caches = _prefill_cache_inputs(
+        key_caches, prefill_cache_len, chunked_prefill
+    )
+    prefill_value_caches = _prefill_cache_inputs(
+        value_caches, prefill_cache_len, chunked_prefill
+    )
 
     results = []
 
     prefill_mask = build_prefill_mask(
-        batch_size, padded_len, max_cache_len, prompt_offset, dtype=dtype
+        batch_size, padded_len, prefill_cache_len, prompt_offset, dtype=dtype
     )
 
     with torch.no_grad():
@@ -136,8 +146,8 @@ def adapter_greedy_steps(
             padded_ids.to(DEVICE),
             position_ids.to(DEVICE),
             prefill_mask.to(DEVICE),
-            key_caches,
-            value_caches,
+            prefill_key_caches,
+            prefill_value_caches,
             cache_index=make_cache_index(0, padded_len, DEVICE),
         )
     logits_cpu = logits.to("cpu")[0, -1, :].float()[:vocab_size]
@@ -161,6 +171,9 @@ def adapter_greedy_steps(
         decode_mask = build_decode_mask(
             batch_size, max_cache_len, current_cache_len, prompt_offset, dtype=dtype
         )
+        decode_mask_heads = getattr(model, "_spyre_decode_mask_num_heads", None)
+        if decode_mask_heads:
+            decode_mask = _materialize_decode_mask_heads(decode_mask, decode_mask_heads)
         with torch.no_grad():
             logits = run_forward_fn(
                 model,

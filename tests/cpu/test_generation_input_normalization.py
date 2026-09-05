@@ -16,10 +16,13 @@ import pytest
 import torch
 
 from hf_adapters.hf_common import (
+    _materialize_decode_mask_heads,
+    _prefill_cache_inputs,
     build_prefill_mask,
     encode_prompts,
     generation_cache_len,
     normalize_generation_inputs,
+    pad_and_position,
 )
 
 
@@ -147,7 +150,54 @@ def test_external_overpadding_does_not_inflate_cache_geometry():
     )
 
     assert padded_len == 64
-    assert generation_cache_len(lengths.max().item(), 1) == 128
+    assert lengths.max().item() == 20
+    assert generation_cache_len(padded_len, 1) == 512
+
+
+def test_cache_capacity_is_based_on_padded_prefill_extent():
+    prompt_length = 1433
+    input_ids = torch.ones((1, prompt_length), dtype=torch.long)
+    actual_lengths = torch.tensor([prompt_length])
+
+    _, padded_len, _, _ = pad_and_position(input_ids, actual_lengths, 512)
+    max_cache_len = generation_cache_len(padded_len, 5)
+
+    assert padded_len == 1536
+    assert max_cache_len == 2048
+    assert padded_len + 5 <= max_cache_len
+
+
+def test_one_shot_prefill_preserves_cache_tensor_identity():
+    caches = [torch.zeros(1, 2, 512, 128), torch.zeros(1, 64, 3)]
+
+    selected = _prefill_cache_inputs(caches, 512, chunked_prefill=False)
+
+    assert selected is caches
+    assert all(actual is expected for actual, expected in zip(selected, caches))
+
+
+def test_chunked_prefill_slices_only_attention_caches():
+    attention_cache = torch.zeros(1, 2, 1024, 128)
+    state_cache = torch.zeros(1, 64, 3)
+
+    selected = _prefill_cache_inputs(
+        [attention_cache, state_cache], 512, chunked_prefill=True
+    )
+
+    assert selected[0].shape == (1, 2, 512, 128)
+    assert selected[0]._base is attention_cache
+    assert selected[1] is state_cache
+
+
+def test_decode_mask_materialization_creates_real_head_storage():
+    mask = torch.arange(8).reshape(1, 1, 1, 8)
+
+    materialized = _materialize_decode_mask_heads(mask, 4)
+
+    assert materialized.shape == (1, 4, 1, 8)
+    assert materialized.is_contiguous()
+    assert materialized.stride(1) != 0
+    assert torch.equal(materialized[:, :1], mask)
 
 
 def test_missing_mask_treats_every_id_as_content():
