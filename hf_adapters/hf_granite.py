@@ -30,6 +30,7 @@ Usage::
 import torch
 
 from hf_adapters.hf_common import (
+    _SDPA_MAX_SEQUENCE_TILE_SIZE,
     get_backbone,
     pad_lm_head,
     prepare_rope_and_heads,
@@ -98,3 +99,4 @@ def prepare_for_spyre(model):
     backbone = get_backbone(model)
     model._spyre_compiled_blocks = prepare_standard_gqa_blocks(backbone.layers, True)
     model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
+    model._spyre_prefill_chunk_size = _SDPA_MAX_SEQUENCE_TILE_SIZE

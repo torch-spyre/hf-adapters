@@ -70,6 +70,7 @@ from hf_adapters.auto_spyre_model import (
 )
 from hf_adapters.hf_common import (
     DEVICE,
+    _materialize_decode_mask_heads,
     allocate_kv_caches,
     build_decode_mask,
     build_prefill_mask,
@@ -128,9 +129,10 @@ def _adapter_teacher_forced_steps(
 
     batch_size = input_ids.shape[0]
     n_steps = len(forced_tokens)
-    normalized = normalize_generation_inputs(input_ids, attention_mask)
+    normalized = normalize_generation_inputs(
+        input_ids, attention_mask, pad_to_multiple=512
+    )
     padded_ids = normalized.input_ids
-    actual_prompt_lengths = normalized.actual_lengths
     padded_len = normalized.padded_len
     prompt_offsets = normalized.prompt_offsets
     position_ids = normalized.position_ids
@@ -141,7 +143,7 @@ def _adapter_teacher_forced_steps(
         for name, pad_value in adapter._GENERATION_TOKEN_ALIGNED_INPUTS.items()
     }
 
-    max_cache_len = generation_cache_len(actual_prompt_lengths.max().item(), n_steps)
+    max_cache_len = generation_cache_len(padded_len, n_steps)
     key_caches, value_caches = allocate_kv_caches(
         model, batch_size, max_cache_len, model_d_type
     )
@@ -192,6 +194,8 @@ def _adapter_teacher_forced_steps(
             prompt_offsets,
             dtype=model_d_type,
         )
+        if decode_mask_heads := getattr(model, "_spyre_decode_mask_num_heads", None):
+            decode_mask = _materialize_decode_mask_heads(decode_mask, decode_mask_heads)
         logits = adapter._logits_from_embeds(
             model,
             next_embeds,

@@ -23,6 +23,7 @@ compiled block functions.
 
 import math
 import os
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -980,26 +981,13 @@ def split_fused_linear(w: torch.Tensor) -> tuple[nn.Linear, nn.Linear]:
 
 
 def _mask_fill_value(dtype):
-    """Additive-mask fill for disallowed attention positions -- NOT ``-inf``.
+    """Finite fill for masked attention positions (NOT ``-inf``).
 
-    On Spyre, host fp16 ``-inf`` is converted to the on-device dlfloat16 format
-    (``SEN169_FP16``) by an unconditional ``exponent > 31`` saturation branch
-    with no inf/nan detection (deeptools ``fp32Todl16.h`` /
-    ``PrecisionConversionLowering.cpp``): it lands at bits ``0xEFFF`` ~= -3.35e7,
-    a large *finite* negative ~500x past fp16's max finite (65504). That
-    out-of-range magnitude round-trips badly through fp16 materializations
-    (overflowing back to ``-inf``) and is picked up as ``+3.35e7`` by the
-    abs-max (``amax``) reduction inside the SDPA online-softmax, corrupting
-    attention for heavily left-padded rows (the batch>1 Qwen3 decode bug).
-
-    A moderate in-range finite fill avoids all of this: ``finfo(dtype).min / 2``
-    still underflows ``exp()`` to exactly 0 (same zero weight as ``-inf``), stays
-    well inside fp16 range so no materialization overflows, and never dominates
-    an abs-max. The ``/ 2`` leaves headroom so ``scores + fill`` cannot itself
-    overflow to ``-inf`` (which ``finfo.min`` alone can once summed -- see the
-    note in ``add_causal_sliding_window_band``).
+    Spyre stores fp16 and bf16 as SEN169_FP16, so use the fp16 range for both.
+    ``finfo(fp16).min / 2`` underflows ``exp()`` to zero and stays in range.
     """
-    return torch.finfo(dtype).min / 2
+    storage_dtype = torch.float16 if dtype in (torch.float16, torch.bfloat16) else dtype
+    return torch.finfo(storage_dtype).min / 2
 
 
 def build_prefill_mask(
@@ -1008,17 +996,25 @@ def build_prefill_mask(
     max_cache_len,
     prompt_offsets,
     dtype=torch.float16,
+    *,
+    query_start=0,
 ):
-    """Causal mask for prefill, masking left-padding and unused cache positions."""
+    """Causal prefill mask for a query window in the full KV-cache coordinates.
+
+    ``padded_len`` is the number of query rows in this invocation and
+    ``query_start`` is their first cache position.  The latter is zero for a
+    one-shot prefill and advances by the chunk size for chunked prefill.
+    """
     fill = _mask_fill_value(dtype)
     mask = torch.zeros((batch_size, 1, padded_len, max_cache_len), dtype=dtype)
+    # Left-padding columns are the same regardless of query_start.
     if isinstance(prompt_offsets, torch.Tensor):
         for b in range(batch_size):
             mask[b, :, :, : prompt_offsets[b].item()] = fill
     else:
         mask[:, :, :, :prompt_offsets] = fill
     for i in range(padded_len):
-        mask[:, :, i, i + 1 :] = fill
+        mask[:, :, i, query_start + i + 1 :] = fill
     return mask
 
 
@@ -1068,6 +1064,16 @@ def build_decode_mask(
         mask[:, :, :, :prompt_offsets] = fill
     mask[:, :, :, cache_len + 1 :] = fill
     return mask
+
+
+def _materialize_decode_mask_heads(mask, num_heads):
+    """Expand ``[B,1,1,Lk]`` decode mask to ``[B,H,1,Lk]`` (contiguous)."""
+    if mask.ndim != 4 or mask.shape[1] != 1 or mask.shape[2] != 1:
+        raise ValueError(
+            "decode mask head materialization requires [B,1,1,Lk], got "
+            f"{tuple(mask.shape)}"
+        )
+    return mask.expand(mask.shape[0], num_heads, 1, mask.shape[3]).contiguous()
 
 
 def build_prefill_mask_right_padded(
@@ -1196,19 +1202,51 @@ def add_causal_sliding_window_band(mask, query_cache_coords, sliding_window):
 # ---------------------------------------------------------------------------
 
 
+def _projection_head_count(proj, config_count, head_dim):
+    """Derive head count from a projection module, falling back to config.
+
+    Under tensor parallelism, ``out_features`` reflects the local output
+    contract; ``weight.shape[0]`` is the fallback for custom modules.
+    """
+    if head_dim <= 0:
+        raise ValueError(f"head_dim must be positive, got {head_dim}")
+    if proj is None:
+        count = int(config_count)
+        if count <= 0:
+            raise ValueError(f"head count must be positive, got {count}")
+        return count
+    projection_width = getattr(proj, "out_features", None)
+    if projection_width is None:
+        weight = getattr(proj, "weight", None)
+        if weight is None:
+            count = int(config_count)
+            if count <= 0:
+                raise ValueError(f"head count must be positive, got {count}")
+            return count
+        projection_width = weight.shape[0]
+    projection_width = int(projection_width)
+    if projection_width <= 0 or projection_width % head_dim != 0:
+        raise ValueError(
+            f"projection width must be a positive multiple of head_dim, "
+            f"got width={projection_width}, head_dim={head_dim}"
+        )
+    return projection_width // head_dim
+
+
+def _local_query_head_count(model, head_dim):
+    """Return the local query-head count (accounts for tensor parallelism)."""
+    cfg = text_config(model.config)
+    layers = getattr(get_backbone(model), "layers", None)
+    self_attn = getattr(layers[0], "self_attn", None) if layers else None
+    q_proj = getattr(self_attn, "q_proj", None)
+    return _projection_head_count(q_proj, cfg.num_attention_heads, head_dim)
+
+
 def kv_cache_shapes(model):
-    """Resolve the per-layer ``(num_kv_heads, head_dim, v_head_dim)`` KV shapes.
+    """Resolve per-layer ``(num_kv_heads, head_dim, v_head_dim)`` KV shapes.
 
-    Most models use one uniform shape across all layers, derived from
-    ``num_key_value_heads`` and ``head_dim`` (with optional ``_spyre_head_dim`` /
-    ``_spyre_v_head_dim`` overrides from head padding). Models whose layers
-    differ — e.g. Gemma 4, where global ("full_attention") layers use a larger
-    ``global_head_dim`` and a different KV-head count than the sliding layers —
-    set ``model._spyre_kv_shapes`` to an explicit per-layer list. When present,
-    that list wins and this returns it verbatim.
-
-    Returns a list of length ``num_hidden_layers`` of
-    ``(num_kv_heads, head_dim, v_head_dim)`` tuples.
+    Returns the explicit ``_spyre_kv_shapes`` when set (e.g. Gemma 4), otherwise
+    derives a uniform shape from the first layer's projection or config.
     """
     explicit = getattr(model, "_spyre_kv_shapes", None)
     if explicit is not None:
@@ -1222,25 +1260,49 @@ def kv_cache_shapes(model):
         or cfg.hidden_size // cfg.num_attention_heads
     )
     layers = getattr(get_backbone(model), "layers", None)
-    k_proj = getattr(layers[0].self_attn, "k_proj", None) if layers else None
-    if k_proj is not None:
-        # Under tensor parallelism, this will differ from the config count
-        num_kv_heads = k_proj.weight.shape[0] // head_dim
-    else:
-        num_kv_heads = cfg.num_key_value_heads
+    self_attn = getattr(layers[0], "self_attn", None) if layers else None
+    k_proj = getattr(self_attn, "k_proj", None)
+    num_kv_heads = _projection_head_count(k_proj, cfg.num_key_value_heads, head_dim)
     v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
     return [(num_kv_heads, head_dim, v_head_dim) for _ in range(num_layers)]
 
 
-def generation_cache_len(prompt_length: int, max_new_tokens: int) -> int:
-    """Compute KV cache size needed for prompt + generation tokens.
+# Mirrors torch_spyre._inductor.decompositions._SDPA_MAX_SEQUENCE_TILE_SIZE.
+_SDPA_MAX_SEQUENCE_TILE_SIZE = 512
 
-    Pads both prompt and generation length to BLOCK_SIZE multiples and sums them.
-    Used by ``generate`` and profiling scripts to size KV caches.
+
+def _sdpa_compatible_kv_length(min_length: int) -> int:
+    """Round *min_length* up to a multiple of the SDPA KV block size (512)."""
+    return (
+        math.ceil(min_length / _SDPA_MAX_SEQUENCE_TILE_SIZE)
+        * _SDPA_MAX_SEQUENCE_TILE_SIZE
+    )
+
+
+def generation_cache_len(prompt_length: int, max_new_tokens: int) -> int:
+    """Compute a compiler-compatible KV cache size for prompt plus generation.
+
+    Callers must pass the padded prefill extent, not the raw prompt length, so
+    the first decode position is inside the cache. The base requirement pads
+    prompt and generation capacity independently to one stick. The standard
+    SDPA lowering stages fixed-size KV blocks, whose extent must divide the
+    backing cache tensor. Add the minimum whole-stick padding that satisfies
+    that constraint; short generations normally need no extra space, while an
+    exact 8K/32K prompt gains one 512-token block.
     """
     padded_prompt = math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
     padded_generation = math.ceil(max_new_tokens / BLOCK_SIZE) * BLOCK_SIZE
-    return padded_prompt + padded_generation
+    return _sdpa_compatible_kv_length(padded_prompt + padded_generation)
+
+
+def _prefill_cache_inputs(caches, prefill_kv_len, chunked_prefill):
+    """Select cache tensors passed to prefill without wrapping one-shot caches."""
+    if not chunked_prefill:
+        return caches
+    return [
+        cache[:, :, :prefill_kv_len, :] if cache.ndim == 4 else cache
+        for cache in caches
+    ]
 
 
 def _cache_position_first_stl(batch_size, num_kv_heads, max_cache_len, head_dim, dtype):
@@ -1603,6 +1665,7 @@ _SUPPORTED_GENERATION_OPTIONS = {
     "return_dict_in_generate",
     "output_scores",
     "output_logits",
+    "prefill_chunk_size",
     # Decoder-only callers provide the prompt, so these IDs are inert metadata.
     "bos_token_id",
     "decoder_start_token_id",
@@ -1658,8 +1721,8 @@ def _resolve_generation_params(model, generation_config, overrides, model_kwargs
     return cfg, eos_ids, pad_token_id
 
 
-def pad_and_position(input_ids, actual_lengths):
-    """Left block-pad ``input_ids`` to a BLOCK_SIZE multiple and build positions.
+def pad_and_position(input_ids, actual_lengths, pad_to_multiple=BLOCK_SIZE):
+    """Left-pad ``input_ids`` to ``pad_to_multiple`` and build positions.
 
     Returns ``(padded_ids, padded_len, prompt_offsets, position_ids)``. Real
     tokens are right-aligned: each row's positions ``0..actual_len-1`` sit at
@@ -1667,7 +1730,17 @@ def pad_and_position(input_ids, actual_lengths):
     convention). Shared by ``generate`` and the VLM adapters' prefill arms.
     """
     batch_size, prompt_length = input_ids.shape
-    padded_len = math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
+    if (
+        isinstance(pad_to_multiple, bool)
+        or not isinstance(pad_to_multiple, int)
+        or pad_to_multiple <= 0
+        or pad_to_multiple % BLOCK_SIZE != 0
+    ):
+        raise ValueError(
+            f"pad_to_multiple must be a positive multiple of {BLOCK_SIZE}, "
+            f"got {pad_to_multiple!r}"
+        )
+    padded_len = math.ceil(prompt_length / pad_to_multiple) * pad_to_multiple
     block_pad = padded_len - prompt_length
     if block_pad > 0:
         pad = input_ids.new_zeros((batch_size, block_pad))
@@ -1721,7 +1794,9 @@ class NormalizedGenerationInputs:
         return torch.cat([pad, compact], dim=1)
 
 
-def normalize_generation_inputs(input_ids, attention_mask=None):
+def normalize_generation_inputs(
+    input_ids, attention_mask=None, pad_to_multiple=BLOCK_SIZE
+):
     """Validate and normalize tokenized decoder inputs for block generation."""
     if not isinstance(input_ids, torch.Tensor):
         raise TypeError("input_ids must be a torch.Tensor")
@@ -1780,7 +1855,7 @@ def normalize_generation_inputs(input_ids, attention_mask=None):
         compact_ids[b, compact_len - valid_ids.numel() :] = valid_ids
 
     padded_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
-        compact_ids, actual_lengths
+        compact_ids, actual_lengths, pad_to_multiple
     )
     return NormalizedGenerationInputs(
         original_input_ids=input_ids_cpu,
@@ -1877,7 +1952,7 @@ def generate(
     token_aligned_inputs: Optional[dict[str, tuple[torch.Tensor, Any]]] = None,
     **kwargs,
 ):
-    """Model-agnostic generation from tokenized inputs with single-token decode.
+    """Model-agnostic generation: optional chunked prefill, then token decode.
 
     When attached to a model via ``auto_spyre_model.py`` (which binds
     ``run_forward_fn`` to the adapter module's ``_run_forward``), callers use
@@ -1927,6 +2002,9 @@ def generate(
             generation config; pass ``None`` to disable EOS stopping (matches
             stock ``generate()``).
         timing: Print per-token latency.
+        prefill_chunk_size (via generation_config or kwargs): Query length for
+            each prefill chunk. Falls back to the adapter's configured chunk
+            size, or one-shot prefill when the adapter has no override.
     """
     overrides = {
         "max_new_tokens": max_new_tokens,
@@ -1956,10 +2034,34 @@ def generate(
         model, generation_config, overrides, kwargs
     )
 
-    normalized = normalize_generation_inputs(input_ids, attention_mask)
+    prefill_chunk_size = getattr(cfg, "prefill_chunk_size", None)
+    if prefill_chunk_size is None:
+        prefill_chunk_size = getattr(model, "_spyre_prefill_chunk_size", None)
+    if prefill_chunk_size is not None and (
+        isinstance(prefill_chunk_size, bool)
+        or not isinstance(prefill_chunk_size, int)
+        or prefill_chunk_size <= 0
+        or prefill_chunk_size % BLOCK_SIZE != 0
+    ):
+        raise ValueError(
+            f"prefill_chunk_size must be a positive multiple of {BLOCK_SIZE}, "
+            f"got {prefill_chunk_size!r}"
+        )
+
+    # Multimodal prefill hooks consume the complete prompt and token-aligned
+    # processor inputs together, so keep them one-shot and use the SDPA tile
+    # extent. Ordinary text models may opt into chunked prefill.
+    chunked_prefill = prefill_fn is None and prefill_chunk_size is not None
+    pad_to_multiple = (
+        _SDPA_MAX_SEQUENCE_TILE_SIZE
+        if prefill_fn is not None
+        else prefill_chunk_size or BLOCK_SIZE
+    )
+    normalized = normalize_generation_inputs(
+        input_ids, attention_mask, pad_to_multiple=pad_to_multiple
+    )
     orig_input_ids = normalized.original_input_ids
     input_ids = normalized.input_ids
-    actual_prompt_lengths = normalized.actual_lengths
     padded_len = normalized.padded_len
     prompt_offsets = normalized.prompt_offsets
     position_ids = normalized.position_ids
@@ -1998,9 +2100,12 @@ def generate(
     generation_scores = []
     generation_logits = []
 
-    # Cache capacity is based on compacted logical prompts, not caller padding.
-    max_cache_len = generation_cache_len(
-        actual_prompt_lengths.max().item(), effective_max_new_tokens
+    query_chunk_size = prefill_chunk_size if chunked_prefill else padded_len
+    assert query_chunk_size is not None
+
+    max_cache_len = generation_cache_len(padded_len, effective_max_new_tokens)
+    prefill_kv_len = (
+        _sdpa_compatible_kv_length(padded_len) if chunked_prefill else max_cache_len
     )
 
     # Initialize empty KV caches. Per-layer shapes come from the model
@@ -2026,36 +2131,66 @@ def generate(
 
         if i == 0:
             # --- PREFILL ---
-            prefill_mask = build_prefill_mask(
-                batch_size,
-                padded_len,
-                max_cache_len,
-                prompt_offsets,
-                dtype=model_d_type,
+            # Keep prefill independent of the larger decode capacity.  Most
+            # prompt lengths remain square (including exact 8K/32K); irregular
+            # lengths gain only enough inactive KV columns for the selected
+            # compiler block to divide Lk.  These prefix views share storage,
+            # so in-place KV updates still seed the full decode caches.
+            # Preserve the original tensors for one-shot prefill. Even a
+            # full-extent slice is a view, and an in-place compiled update
+            # through that view does not reliably seed the tensors consumed by
+            # decode on Spyre.
+            prefill_key_caches = _prefill_cache_inputs(
+                key_caches, prefill_kv_len, chunked_prefill
             )
-            cache_index = make_cache_index(0, padded_len, DEVICE)
-            if prefill_fn is None:
-                logits = run_forward_fn(  # type: ignore[misc]
-                    model,
-                    input_ids.to(DEVICE),
-                    position_ids.to(DEVICE),
-                    prefill_mask.to(DEVICE),
-                    key_caches,
-                    value_caches,
-                    cache_index=cache_index,
+            prefill_value_caches = _prefill_cache_inputs(
+                value_caches, prefill_kv_len, chunked_prefill
+            )
+            if prefill_fn is not None:
+                prefill_mask = build_prefill_mask(
+                    batch_size,
+                    padded_len,
+                    prefill_kv_len,
+                    prompt_offsets,
+                    dtype=model_d_type,
                 )
-            else:
                 logits = prefill_fn(
                     model=model,
                     input_ids=input_ids,
                     position_ids=position_ids,
                     attention_mask=prefill_mask,
-                    key_caches=key_caches,
-                    value_caches=value_caches,
-                    cache_index=cache_index,
+                    key_caches=prefill_key_caches,
+                    value_caches=prefill_value_caches,
+                    cache_index=make_cache_index(0, padded_len, DEVICE),
                     **normalized_token_inputs,
                 )
-            next_logits = logits[:, -1, :].to("cpu")
+            else:
+                # Keep Lk fixed at the complete prefill extent while advancing
+                # Lq. Future cache slots are zero and masked, and fixed shapes
+                # avoid compiling one attention graph for every prefix length.
+                for chunk_start in range(0, padded_len, query_chunk_size):
+                    chunk_end = chunk_start + query_chunk_size
+                    prefill_mask = build_prefill_mask(
+                        batch_size,
+                        query_chunk_size,
+                        prefill_kv_len,
+                        prompt_offsets,
+                        dtype=model_d_type,
+                        query_start=chunk_start,
+                    )
+                    logits = run_forward_fn(  # type: ignore[misc]
+                        model,
+                        input_ids[:, chunk_start:chunk_end].to(DEVICE),
+                        position_ids[:, chunk_start:chunk_end].to(DEVICE),
+                        prefill_mask.to(DEVICE),
+                        prefill_key_caches,
+                        prefill_value_caches,
+                        cache_index=make_cache_index(
+                            chunk_start, query_chunk_size, DEVICE
+                        ),
+                    )
+            # Only the last chunk's logits matter for next-token selection.
+            next_logits = logits.to("cpu")[:, -1, :]
             current_cache_len = padded_len
 
         else:
@@ -2074,6 +2209,12 @@ def generate(
                 prompt_offsets,
                 dtype=model_d_type,
             )
+            if decode_mask_heads := getattr(
+                model, "_spyre_decode_mask_num_heads", None
+            ):
+                decode_mask = _materialize_decode_mask_heads(
+                    decode_mask, decode_mask_heads
+                )
             cache_index = make_cache_index(current_cache_len, 1, DEVICE)
             if decode_fn is None:
                 logits = run_forward_fn(  # type: ignore[misc]
@@ -2095,7 +2236,7 @@ def generate(
                     value_caches=value_caches,
                     cache_index=cache_index,
                 )
-            next_logits = logits[:, -1, :].to("cpu")
+            next_logits = logits.to("cpu")[:, -1, :]
             current_cache_len += 1
 
         # Crop away Spyre LM-head padding before exposing logits or selecting a
@@ -2173,8 +2314,89 @@ def generate(
 # ---------------------------------------------------------------------------
 
 
+def _standard_gqa_attention_dim_names(query, key, value):
+    """Return named-dim declarations and per-tensor names for Spyre SDPA.
+
+    Names match ``spyre__sdpa_overrideable``; unit axes are omitted.
+    """
+    q_shape = tuple(int(d) for d in query.shape)
+    k_shape = tuple(int(d) for d in key.shape)
+    v_shape = tuple(int(d) for d in value.shape)
+    for name, shape in [("query", q_shape), ("key", k_shape), ("value", v_shape)]:
+        if len(shape) != 4:
+            raise ValueError(f"GQA requires rank-4 {name}, got {shape}")
+    if q_shape[0] != k_shape[0] or k_shape[:3] != v_shape[:3]:
+        raise ValueError(
+            f"Q/K/V batch or K/V prefix mismatch: {q_shape}, {k_shape}, {v_shape}"
+        )
+    if q_shape[3] != k_shape[3]:
+        raise ValueError(f"Q/K head_dim mismatch: {q_shape}, {k_shape}")
+    if q_shape[1] % k_shape[1] != 0:
+        raise ValueError(
+            f"num_kvheads must divide num_heads: {q_shape[1]}, {k_shape[1]}"
+        )
+
+    declarations = (
+        ("_b", q_shape[0]),
+        ("num_heads", q_shape[1]),
+        ("num_kvheads", k_shape[1]),
+        ("max_seqlen_q", q_shape[2]),
+        ("max_seqlen_kv", k_shape[2]),
+        ("head_dim", q_shape[3]),
+        ("value_head_dim", v_shape[3]),
+    )
+    logical_names = (
+        ("_b", "num_heads", "max_seqlen_q", "head_dim"),
+        ("_b", "num_kvheads", "max_seqlen_kv", "head_dim"),
+        ("_b", "num_kvheads", "max_seqlen_kv", "value_head_dim"),
+    )
+    tensor_names = tuple(
+        [name for size, name in zip(shape, names, strict=True) if size != 1]
+        for shape, names in zip((q_shape, k_shape, v_shape), logical_names, strict=True)
+    )
+    return declarations, tensor_names
+
+
+def _apply_standard_gqa_attention_dim_names(
+    query, key, value, declare_tensor_dim, name_tensor_dims
+):
+    declarations, tensor_names = _standard_gqa_attention_dim_names(query, key, value)
+    for name, size in declarations:
+        declare_tensor_dim(name, size)
+    for tensor, names in zip((query, key, value), tensor_names, strict=True):
+        name_tensor_dims(tensor, names)
+
+
+@contextmanager
+def _named_standard_gqa_attention_inputs(query, key, value):
+    """Name eager Q/K/V inputs for the immediately following compiled SDPA."""
+    if query.device.type != "spyre":
+        # CPU adapter tests exercise the same block without the Spyre package.
+        yield
+        return
+
+    # Access the module registered by PyTorch's Spyre backend auto-loader.
+    # Importing torch_spyre here can recurse through backend initialization.
+    named_dims = sys.modules["torch_spyre._inductor.wsr.propagate_named_dims"]
+
+    try:
+        _apply_standard_gqa_attention_dim_names(
+            query,
+            key,
+            value,
+            named_dims.declare_tensor_dim,
+            named_dims.name_tensor_dims,
+        )
+        yield
+    finally:
+        # Compilation consumes and clears these globals itself. A cache-hit
+        # execution does not, so clear them here to avoid leaking annotations
+        # into a later, unrelated compilation.
+        named_dims.reset()
+
+
 class StandardGQAAttention(nn.Module):
-    """Attention executed by the standard GQA Spyre adapter path."""
+    """Split into ``pre_attn`` and ``attn_core`` for eager dim-naming."""
 
     def __init__(self, attn):
         super().__init__()
@@ -2186,11 +2408,10 @@ class StandardGQAAttention(nn.Module):
         self.v_head_dim = getattr(attn, "v_head_dim", attn.head_dim)
         self.scaling = attn.scaling
 
-    def forward(
+    def pre_attn(
         self,
         hidden_states,
         selected_freqs,
-        attn_mask,
         key_cache,
         value_cache,
         cache_index,
@@ -2222,7 +2443,10 @@ class StandardGQAAttention(nn.Module):
             value_cache,
             cache_index,
         )
+        return q, key_cache, value_cache
 
+    def attn_core(self, q, key_cache, value_cache, attn_mask):
+        bsz, _, seq_len, _ = q.shape
         attn_out = F.scaled_dot_product_attention(
             q,
             key_cache,
@@ -2233,20 +2457,7 @@ class StandardGQAAttention(nn.Module):
             enable_gqa=True,
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
-        return self.o_proj(attn_out), key_cache, value_cache
-
-
-class StandardGQABlock(nn.Module):
-    """Registered decoder block used by standard GQA Spyre adapters."""
-
-    def __init__(self, layer, is_res_mul: bool | None = None):
-        super().__init__()
-        self.self_attn = StandardGQAAttention(layer.self_attn)
-        self.mlp = layer.mlp
-        self.input_layernorm = layer.input_layernorm
-        self.post_attention_layernorm = layer.post_attention_layernorm
-        self.residual_multiplier = layer.residual_multiplier if is_res_mul else None
-        self.train(layer.training)
+        return self.o_proj(attn_out)
 
     def forward(
         self,
@@ -2257,21 +2468,52 @@ class StandardGQABlock(nn.Module):
         value_cache,
         cache_index,
     ):
-        residual = hidden_states
+        q, key_cache, value_cache = self.pre_attn(
+            hidden_states, selected_freqs, key_cache, value_cache, cache_index
+        )
+        attn_out = self.attn_core(q, key_cache, value_cache, attn_mask)
+        return attn_out, key_cache, value_cache
+
+
+class StandardGQABlock(nn.Module):
+    """Two compiled regions with an eager dim-naming boundary between them."""
+
+    def __init__(self, layer, is_res_mul: bool | None = None):
+        super().__init__()
+        self.self_attn = StandardGQAAttention(layer.self_attn)
+        self.mlp = layer.mlp
+        self.input_layernorm = layer.input_layernorm
+        self.post_attention_layernorm = layer.post_attention_layernorm
+        self.residual_multiplier = layer.residual_multiplier if is_res_mul else None
+        self.train(layer.training)
+        # Compile the two regions independently. torch.compile is lazy, so
+        # tracing still happens on the first forward (after the model is moved
+        # to Spyre), exactly as when the whole block was compiled.
+        self._pre_attn = torch.compile(self._region_pre_attn, dynamic=False)
+        self._attention_tail = torch.compile(self._region_attention_tail, dynamic=False)
+
+    def _region_pre_attn(
+        self,
+        hidden_states,
+        selected_freqs,
+        key_cache,
+        value_cache,
+        cache_index,
+    ):
         h = self.input_layernorm(hidden_states)
-        attn_out, key_cache, value_cache = self.self_attn(
-            h,
-            selected_freqs,
-            attn_mask,
-            key_cache,
-            value_cache,
-            cache_index,
+        return self.self_attn.pre_attn(
+            h, selected_freqs, key_cache, value_cache, cache_index
         )
 
+    def _region_attention_tail(
+        self, hidden_states, q, key_cache, value_cache, attn_mask
+    ):
+        attn_out = self.self_attn.attn_core(q, key_cache, value_cache, attn_mask)
+
         if self.residual_multiplier is None:
-            h = residual + attn_out
+            h = hidden_states + attn_out
         else:
-            h = residual + attn_out * self.residual_multiplier
+            h = hidden_states + attn_out * self.residual_multiplier
 
         residual = h
         h = self.post_attention_layernorm(h)
@@ -2280,22 +2522,43 @@ class StandardGQABlock(nn.Module):
             h = residual + h
         else:
             h = residual + h * self.residual_multiplier
+        return h
 
+    def forward(
+        self,
+        hidden_states,
+        selected_freqs,
+        attn_mask,
+        key_cache,
+        value_cache,
+        cache_index,
+    ):
+        q, key_cache, value_cache = self._pre_attn(
+            hidden_states, selected_freqs, key_cache, value_cache, cache_index
+        )
+        with _named_standard_gqa_attention_inputs(q, key_cache, value_cache):
+            h = self._attention_tail(
+                hidden_states, q, key_cache, value_cache, attn_mask
+            )
         return h, key_cache, value_cache
 
 
 def make_standard_gqa_block(layer, is_res_mul: bool | None = None):
-    """Compile one standard GQA block without registering it on a parent model."""
-    return torch.compile(StandardGQABlock(layer, is_res_mul), dynamic=False)
+    """Build one standard GQA block; its two regions are compiled internally."""
+    return StandardGQABlock(layer, is_res_mul)
 
 
 def prepare_standard_gqa_blocks(layers, is_res_mul: bool | None = None):
-    """Replace decoder layers with registered Spyre blocks and compile them."""
+    """Replace decoder layers with registered Spyre blocks.
+
+    Each block compiles its two regions internally and is returned un-compiled
+    at the top level (the backbone driver still calls ``block(h, ...)``).
+    """
     blocks = []
     for i, layer in enumerate(list(layers)):
         block = StandardGQABlock(layer, is_res_mul)
         layers[i] = block
-        blocks.append(torch.compile(block, dynamic=False))
+        blocks.append(block)
     return blocks
 
 
@@ -2708,6 +2971,20 @@ def prepare_rope_and_heads(model):
     orig_head_dim = (
         getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
     )
+    local_query_heads = _local_query_head_count(model, orig_head_dim)
+    local_kv_heads = {shape[0] for shape in kv_cache_shapes(model)}
+    incompatible_kv_heads = sorted(
+        num_kv_heads
+        for num_kv_heads in local_kv_heads
+        if num_kv_heads <= 0 or local_query_heads % num_kv_heads != 0
+    )
+    if incompatible_kv_heads:
+        raise ValueError(
+            "local query heads must be divisible by every local KV-head count, "
+            f"got query_heads={local_query_heads}, "
+            f"kv_heads={incompatible_kv_heads}"
+        )
+    model._spyre_decode_mask_num_heads = local_query_heads
 
     # RoPE reshape [B,L,H,2,D/2] requires D/2 >= BLOCK_SIZE.
     # Compute minimum stick-aligned head_dim: round up to next multiple of 2*BLOCK_SIZE.
