@@ -289,6 +289,14 @@ CAUSAL_LM_MODELS = {
         "dtype": "bfloat16",
         "is_gated": True,
     },
+    "gemma4_31b_it": {
+        "name": "Gemma 4 31B Instruct",
+        "path": "google/gemma-4-31b-it",
+        "adapter": "hf_gemma4.py",
+        "size": "31b",
+        "dtype": "bfloat16",
+        "is_gated": True,
+    },
     # hf_gemma4_moe.py
     "gemma4_moe": {
         "name": "Gemma 4 26B-A4B (MoE)",
@@ -589,8 +597,12 @@ VISION_MODELS = {
         "size": "3b",
     },
     # hf_gemma4_mm.py — unified encoder-free VLM (image + text -> text)
+    # Note: google/gemma-4-12b (base, no chat template) also resolves via this
+    # adapter (Gemma4UnifiedConfig -> hf_gemma4_mm) but is tested via the
+    # causal-LM path (gemma4_base in CAUSAL_LM_MODELS); the VLM harness requires
+    # apply_chat_template, which the base model does not provide.
     "gemma4_mm": {
-        "name": "Gemma 4 12B (unified VLM)",
+        "name": "Gemma 4 12B IT (unified VLM)",
         "path": "google/gemma-4-12B-it",
         "adapter": "hf_gemma4_mm.py",
         "kind": "vlm",  # multimodal: image + text -> generated text
