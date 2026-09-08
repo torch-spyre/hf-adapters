@@ -76,6 +76,7 @@ from transformers import (
     MistralConfig,
     ModernBertConfig,
     MPNetConfig,
+    MuseGlimmerConfig,
     Olmo2Config,
     OlmoConfig,
     OPTConfig,
@@ -125,6 +126,7 @@ from hf_adapters import (
     hf_mistral3_vision_mm,
     hf_modernbert,
     hf_mpnet,
+    hf_muse_glimmer_mm,
     hf_olmo,
     hf_olmo2,
     hf_opt,
@@ -202,6 +204,7 @@ IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     Gemma4UnifiedConfig: hf_gemma4_mm,
     Granite4VisionConfig: hf_granite_vision_mm,
     Mistral3Config: hf_mistral3_vision_mm,
+    MuseGlimmerConfig: hf_muse_glimmer_mm,
 }
 
 # Sequence-classification mapping — used by
