@@ -616,6 +616,23 @@ VISION_MODELS = {
         "adapter": "hf_gemma4_mm.py",
         "kind": "vlm",  # multimodal: image + text -> generated text
         "size": "12b",
+        "always_test": True,
+    },
+    "gemma4_e2b_mm": {
+        "name": "Gemma 4 E2B (VLM with PLE)",
+        "path": "google/gemma-4-E2B-it",
+        "adapter": "hf_gemma4_mm.py",
+        "kind": "vlm",
+        "size": "2b",
+        "always_test": True,
+    },
+    "gemma4_moe_mm": {
+        "name": "Gemma 4 26B-A4B (MoE VLM)",
+        "path": "google/gemma-4-26B-A4B-it",
+        "adapter": "hf_gemma4_mm.py",
+        "kind": "vlm",
+        "size": "26b",
+        "always_test": True,
     },
     # hf_clip.py — CLIP dual-encoder (image + text -> embeddings via ST backend)
     "clip_vit_b_32": {

@@ -33,7 +33,12 @@ from hf_adapters.hf_gemma4 import (
     _setup_gemma4_text_decoder,
 )
 
-__all__ = ["prepare_for_spyre", "_run_forward", "_run_backbone_forward"]
+__all__ = [
+    "prepare_for_spyre",
+    "prepare_text_decoder_for_spyre",
+    "_run_forward",
+    "_run_backbone_forward",
+]
 
 _MOE_TILE = 32  # Decode gather requires tiles with at least two rows.
 
@@ -444,8 +449,8 @@ def _prepare_experts(experts):
     experts.down_proj = _move_expert_weight(down)
 
 
-def prepare_for_spyre(model):
-    """Prepare a Gemma 4 MoE causal LM for Spyre in place."""
+def prepare_text_decoder_for_spyre(model):
+    """Prepare only the Gemma 4 MoE text decoder for Spyre in place."""
     from torch_spyre._C import get_elem_in_stick
     from torch_spyre.model_utils import dma_moe_per_expert_scale_to_spyre
 
@@ -485,3 +490,8 @@ def prepare_for_spyre(model):
         blocks.append(block)
 
     model._spyre_compiled_blocks = blocks
+
+
+def prepare_for_spyre(model):
+    """Prepare a Gemma 4 MoE causal LM for Spyre in place."""
+    prepare_text_decoder_for_spyre(model)

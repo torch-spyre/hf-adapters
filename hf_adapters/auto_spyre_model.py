@@ -204,6 +204,7 @@ ARCH_TO_ADAPTER_MODULE_MAPPING: dict[str, ModuleType] = {
 IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     type[PretrainedConfig], ModuleType
 ] = {
+    Gemma4Config: hf_gemma4_mm,
     Gemma4UnifiedConfig: hf_gemma4_mm,
     Granite4VisionConfig: hf_granite_vision_mm,
     Mistral3Config: hf_mistral3_vision_mm,
@@ -846,6 +847,7 @@ def _run_vlm_text_forward(
         key_caches,
         value_caches,
         cache_index,
+        input_ids=input_ids,
     )
 
 

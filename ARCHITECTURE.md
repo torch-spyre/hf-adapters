@@ -29,10 +29,10 @@ which models are supported on Spyre.
 | DeepSeek-Coder 1.3B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | Yi 1.5 6B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite Vision 4.1 4B (text backbone) | granite (text) | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
-| Gemma 4 12B (bf16) | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
+| Gemma 4 12B | gemma4\_unified | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 4 26B-A4B (MoE) | gemma4 (MoE, `enable_moe_block`) | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
-| Gemma 4 E2B (bf16) | gemma4 | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
-| Gemma 4 E4B (bf16) | gemma4 | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
+| Gemma 4 E2B | gemma4 | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
+| Gemma 4 E4B | gemma4 | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 4 31B | gemma4 | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 4 31B Instruct | gemma4 | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 3 1B | gemma3\_text | 256 | 128 | Yes | Yes | Yes | Yes |
@@ -67,12 +67,13 @@ CPU (see Multimodal VLM Path below).
 |-------|-----------|--------|-----------|--------------|-------------|-----------|
 | Granite Vision 4.1 4B | granite4\_vision | SigLIP vision + Granite text | Yes (padded) | Yes | Yes | Yes |
 | Mistral-Small-3.1-24B-Instruct-2503 | mistral3 | Pixtral + Mistral text | Yes (padded) | Yes | Yes | Yes |
-| Ministral-3-14B-Instruct-2512 (bf16) | mistral3 | Pixtral + Ministral3 text | Yes (padded) | Yes | Yes | Yes |
-| Gemma 4 12B IT (bf16) | gemma4\_unified | Encoder-free vision embedder + Gemma 4 text | Yes | Yes | Yes | Yes |
-| Gemma 4 12B Base (bf16) | gemma4\_unified | Encoder-free vision embedder + Gemma 4 text | Yes | Yes | Yes | Yes |
+| Ministral-3-14B-Instruct-2512 | mistral3 | Pixtral + Ministral3 text | Yes (padded) | Yes | Yes | Yes |
+| Gemma 4 12B IT | gemma4\_unified | Encoder-free vision embedder + Gemma 4 text | Yes | Yes | Yes | Yes |
+| Gemma 4 E2B | gemma4 | Gemma 4 vision tower + PLE/KV-sharing text | Yes | Yes | Yes | Yes |
+| Gemma 4 26B-A4B | gemma4 | Gemma 4 vision tower + MoE text | Yes | Not run | Yes | Yes |
 
 **CPU Accurate** = adapter `generate` matches stock `model.generate` token-for-token on CPU (`test_vlm_e2e_cpu.py`).
-**Spyre Runs** = `test_vlm_e2e_spyre.py` drives the adapter teacher-forced on stock's tokens and asserts per-step logit cosine ≥ 0.999 vs the CPU reference over prefill + decode steps (top-1 agreement is reported, not asserted — an open-ended caption hits near-ties where the fp16-substrate winner is numerically arbitrary; see Multimodal VLM Path). granite-vision-4.1 holds cosine ≥ 0.99991 at every step and produces a correct, coherent caption. Gemma 4 12B IT runs in **bf16** (like the rest of the Gemma family, it overflows its residual stream in fp16) and holds cosine ≥ 0.99856 at every step with 5/5 top-1 agreement, producing a caption byte-identical to stock. Gemma 4 12B Base routes via the same adapter; its causal-LM path (text-decoder only) holds 5/5 top-1 on Spyre.
+**Spyre Runs** = `test_vlm_e2e_spyre.py` drives the adapter teacher-forced on stock's tokens and asserts per-step logit cosine ≥ 0.99 vs the CPU reference over prefill + decode steps (top-1 agreement is reported, not asserted — an open-ended caption hits near-ties where the bf16-substrate winner is numerically arbitrary; see Multimodal VLM Path). granite-vision-4.1 holds cosine ≥ 0.99991 at every step and produces a correct, coherent caption. Gemma 4 12B IT runs in **bf16** (like the rest of the Gemma family, it overflows its residual stream in fp16) and holds cosine ≥ 0.99856 at every step with 5/5 top-1 agreement, producing a caption byte-identical to stock. Gemma 4 E2B holds cosine ≥ 0.99995 with 5/5 top-1 agreement after preserving the split PLE semantics. Gemma 4 26B-A4B holds cosine ≥ 0.99871 with 4/5 top-1 agreement. Gemma 4 12B Base routes via the same adapter; its causal-LM path (text-decoder only) holds 5/5 top-1 on Spyre.
 
 ### Embedding
 
@@ -159,9 +160,9 @@ and four decode steps. Gemma 4 E2B and E4B both pass that check.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 33 adapters · 55 verified checkpoints · 10K+ compatible models.
-The 55 verified rows are 34 generative + 13 embedding + 2 seq-classification +
-2 token-classification + 4 vision-language (see the Verified Checkpoints tables
+**Coverage:** 33 adapters · 57 verified checkpoints · 10K+ compatible models.
+The 57 verified rows are 34 generative + 13 embedding + 2 seq-classification +
+2 token-classification + 6 vision-language (see the Verified Checkpoints tables
 above). `hf_siglip_vision` and `hf_pixtral_vision` are bare vision-tower components
 used by VLM adapters and are not included in the adapter count. The three DSpark
 speculative-decoding drafter adapters are included in the adapter count.
@@ -169,9 +170,10 @@ Granite Vision 4.1 is verified both as a text backbone (generative) and as a ful
 `hf_mistral3_vision_mm` covers both the ``mistral`` text-backbone variant
 (Mistral-Small-3.1/3.2) and the ``ministral3`` variant (Ministral-3-14B-Instruct-2512,
 blocked-FP8, bf16) — both share the Pixtral vision tower; CPU and Spyre verified
-(token-exact on CPU, 5/5 top-1 match on Spyre). `hf_gemma4_mm` is the first
-**encoder-free** VLM: no vision tower, just a projection of processor-merged pixel
-patches into the text embedding space (runs bf16; CPU and Spyre verified).
+(token-exact on CPU, 5/5 top-1 match on Spyre). `hf_gemma4_mm` supports both the encoder-free unified checkpoints and the full
+Gemma 4 multimodal architecture. The latter currently runs its stock vision tower
+on CPU, then feeds the projected features into the Spyre PLE/KV-sharing or MoE
+text decoder (bf16; CPU reference and Spyre verified).
 
 Each adapter handles a HuggingFace `model_type`. Once verified with
 one checkpoint, all size variants and fine-tunes of that architecture
@@ -193,7 +195,7 @@ pattern, norms, and weight layout.
 | hf\_smollm3.py | smollm3 | 1 | — |
 | hf\_lfm2.py | lfm2 | 1 | LFM2 700M/1.2B and dense LFM2 fine-tunes with hybrid convolution/attention layers |
 | hf\_gemma4.py | gemma4\_unified / gemma4 (dense + PLE/KV-share) | 4 | Gemma 4 31B (dense). Not 26B-A4B (MoE). |
-| hf\_gemma4\_mm.py | gemma4\_unified (multimodal) | 2 | Gemma 4 31B (dense unified VLM). Not E2B/E4B (PLE) or 26B-A4B (MoE). |
+| hf\_gemma4\_mm.py | gemma4\_unified / gemma4 (multimodal) | 4 | Encoder-free dense unified VLMs plus full-vision PLE/KV-share and MoE variants. Combined MoE+PLE/KV-share remains unsupported. |
 | hf\_gemma4\_moe.py | gemma4 (MoE, `enable_moe_block`) | 1 | Gemma 4 26B-A4B (128 experts, top-8 routing). Persistent prefill + gathered decode, 5/5 token match. |
 | hf\_gemma3.py | gemma3\_text / gemma3 (dense) | 2 | Gemma 3 4B/12B/27B (text decoder of the multimodal checkpoints); EmbeddingGemma (bidirectional embedder). Not Gemma 3n (PLE). |
 | hf\_gemma2.py | gemma2 | 1 | Gemma 2 2B and Gemma 2 fine-tunes. |
@@ -736,23 +738,30 @@ Multimodal-specific Spyre adaptations (beyond those shared with Granite VLM):
 - **`Mistral3PatchMerger`** (`nn.functional.unfold` + `merging_layer`) runs on
   CPU inside the projector — `unfold` doesn't lower on Spyre.
 
-**Encoder-free VLM — Gemma 4** (`hf_gemma4_mm.py`): the first VLM with **no
-vision tower**. Gemma 4 is unified (`model_type=gemma4_unified`); vision is a pure
-projection of processor-merged raw pixel patches (the image processor already
-merges `pooling_kernel_size²` 16×16 patches into each 48×48 merged patch, 1:1 to a
-soft token) into the LM embedding space — no attention, no RoPE, no KV cache. The
-adapter loads the full VLM via `AutoModelForImageTextToText`, projects the patches,
-scatters them into the `<image>` token slots, and runs the `hf_gemma4` text decoder
-unchanged (both towers live under the one model, so a single `prepare_for_spyre`
-covers them). Gemma4-specific Spyre adaptations:
+**Gemma 4 VLM** (`hf_gemma4_mm.py`) supports two vision architectures behind one
+multimodal frontend. `Gemma4UnifiedConfig` is encoder-free: it projects
+processor-merged raw pixel patches directly into the LM embedding space. The
+`Gemma4Config` checkpoints have a full Gemma 4 vision transformer; its
+stock vision tower and text-space projector currently run on CPU for correctness,
+then their features enter the same Spyre image-scatter and decoder path. Text
+preparation dispatches by the nested config: dense and PLE/KV-sharing checkpoints
+reuse `hf_gemma4`, while `enable_moe_block=True` reuses `hf_gemma4_moe`.
+Gemma4-specific Spyre adaptations:
 
-- **Vision embedder compiled on Spyre.** The attention-free projection core
-  (`LN₁ → Dense → LN₂ → +pos_embs → pos_norm → RMSNorm → Linear`) is
-  `torch.compile`d and runs on Spyre. Only the integer-XY positional-embedding
-  gather (with `-1` padding validity masking) and the final padding-patch strip run
-  on **CPU** — those integer-gather / boolean-index ops don't lower (same doctrine
-  as the SigLIP CPU patch-embed). The CPU-built per-patch positional-embedding
-  tensor is passed into the compiled core as a device argument.
+- **Encoder-free vision embedder compiled on Spyre.** For `gemma4_unified`, the
+  attention-free projection core (`LN₁ → Dense → LN₂ → +pos_embs → pos_norm →
+  RMSNorm → Linear`) is `torch.compile`d and runs on Spyre. Only the integer-XY
+  positional gather and padding strip run on CPU. For full `gemma4` checkpoints,
+  the stock vision transformer and `embed_vision` projection are re-pinned to CPU;
+  a native compiled Gemma 4 vision tower is future work.
+- **PLE preserves stock multimodal semantics.** The token-identity component uses
+  image-placeholder IDs replaced with the pad token, while the contextual component
+  projects the final image-scattered decoder embeddings. Decode passes each generated
+  token ID through the generic VLM hook so PLE can be recomputed per step. Existing
+  producer-cache mapping handles the trailing KV-sharing layers.
+- **MoE text composition.** `enable_moe_block=True` selects the existing persistent
+  prefill and gathered-decode MoE blocks. Checkpoints combining MoE with PLE or KV
+  sharing remain explicitly unsupported.
 - **Vision LayerNorms un-fused + fp32 reduction** (`patch_layernorm`). The three
   vision `nn.LayerNorm`s NaN on Spyre's fused lowering on near-constant (small but
   nonzero variance) rows — in **both** bf16 and fp16, so it's a genuine lowering

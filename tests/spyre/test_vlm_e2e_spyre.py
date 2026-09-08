@@ -204,6 +204,7 @@ def _adapter_teacher_forced_steps(
             key_caches,
             value_caches,
             cache_index=make_cache_index(current_cache_len, 1, DEVICE),
+            input_ids=next_input,
         )
         per_step_logits.append(logits.to("cpu")[0, -1, :].float())
         current_cache_len += 1
