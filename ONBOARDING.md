@@ -202,9 +202,16 @@ registry that every test file imports (`CAUSAL_LM_MODELS` for generative,
 ```
 
 Optional fields:
-- `"dtype": "bfloat16"` / `"float32"` — set the test dtype if fp16 is wrong for
-  the model (bf16-native models, or large multipliers that overflow fp16 on CPU)
-- `"load_fn": True` — use if your adapter has a custom `load_hf_model()` function
+
+- `"is_gated": True` — exclude the checkpoint unless `SPYRE_INCLUDE_GATED=1`.
+- `"always_test": True` — include the checkpoint in addition to the smallest
+  representative selected for its adapter. This does not override gating or
+  test exclusions.
+- `"kind": "dspark_draft"` — identify a causal-LM entry as a speculative-decoding
+  draft model instead of a normal generation model.
+
+For `VISION_MODELS`, `"kind"` is required: use `"tower"` for an encoder-only
+vision tower or `"vlm"` for a complete image-to-text model.
 
 ## Step 6: Run CPU Accuracy Test
 
