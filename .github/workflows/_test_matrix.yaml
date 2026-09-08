@@ -136,12 +136,6 @@ env:
   # due to a mix of fallbacks and decompositions.
   # Here we set it to an empty string (or we could also unset it).
   CI: ""
-  # The commit the ubuntu-latest helper jobs (matrix generation, pre-commit,
-  # mypy, adapter-coverage, ...) check out. Mirrors build-hf-adapters' resolution
-  # (${PR_HEAD_SHA:-$GITHUB_SHA}, plus the Test-With inputs.ref override) so those
-  # jobs run on the PR head rather than the synthetic merge commit GITHUB_SHA that
-  # bare actions/checkout defaults to. Defined once here; see issue #479.
-  TARGET_REF: ${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}
   CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
   STORAGE_1_DIR: /storage-1/hf-adapters
   HF_HOME: /storage-1/hf-adapters/.cache/huggingface
@@ -174,7 +168,6 @@ jobs:
       - name: Checkout (for the shared resolver script)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: scripts/resolve_test_type.sh
           sparse-checkout-cone-mode: false
       - name: Resolve
@@ -194,8 +187,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -240,12 +231,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          # Generate the matrix from the PR head (env.TARGET_REF), not the synthetic
-          # merge commit GITHUB_SHA. Otherwise the matrix can include models whose
-          # adapters exist only in the merge commit, whose legs then fail against the
-          # PR-head code; see issue #479.
-          ref: ${{ env.TARGET_REF }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -308,11 +293,10 @@ jobs:
       - name: List tests/configs/module_tests at the ref under test
         id: generate
         env:
-          # Same clone-URL resolution as build-hf-adapters/action.yaml's "Checkout
-          # target commit" step, so this always inspects the identical source tree
-          # that step is about to check out. TARGET_REF (the commit) comes from the
-          # workflow-level env, which mirrors build-hf-adapters' ${PR_HEAD_SHA:-$GITHUB_SHA}
-          # plus the Test-With inputs.ref override; see issue #479.
+          # Same inputs, same clone-URL resolution as build-hf-adapters/action.yaml's
+          # "Checkout target commit" step, so this always inspects the identical
+          # source tree that step is about to check out.
+          INPUT_REF: ${{ inputs.ref }}
           INPUT_REPOSITORY: ${{ inputs.repository }}
         run: |
           set -euo pipefail
@@ -320,6 +304,7 @@ jobs:
           if [[ -n "$INPUT_REPOSITORY" && "$CLONE_URL" != *"://"* ]]; then
             CLONE_URL="$GITHUB_SERVER_URL/${CLONE_URL%.git}.git"
           fi
+          TARGET_REF="${INPUT_REF:-$GITHUB_SHA}"
           git clone --filter=blob:none --no-checkout "$CLONE_URL" repo
           cd repo
           git checkout --force "$TARGET_REF"
@@ -339,8 +324,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -370,8 +353,6 @@ jobs:
         working-directory: .
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
 
       - name: Set up Python 3.12
         uses: astral-sh/setup-uv@v5
@@ -403,8 +384,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -495,7 +474,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -567,7 +545,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -635,7 +612,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -697,7 +673,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -760,7 +735,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -829,7 +803,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -954,7 +927,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -1019,7 +991,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -1084,7 +1055,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -1149,7 +1119,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -1214,7 +1183,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -1300,7 +1268,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -1374,7 +1341,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -1554,7 +1520,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -1610,7 +1575,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -1665,7 +1629,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -1720,7 +1683,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -1771,7 +1733,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -1826,7 +1787,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -1881,7 +1841,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -1935,7 +1894,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -1989,7 +1947,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -2043,7 +2000,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -2097,7 +2053,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -2151,7 +2106,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
@@ -2212,7 +2166,6 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ env.TARGET_REF }}  # PR head, not GITHUB_SHA; see issue #479
           sparse-checkout: .github/actions
           sparse-checkout-cone-mode: false
 
