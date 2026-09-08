@@ -217,6 +217,7 @@ jobs:
     if: ${{ !inputs.skip_tests }}
     outputs:
       causal_matrix: ${{ steps.generate.outputs.causal_matrix }}
+      multicard_smoke_matrix: ${{ steps.generate.outputs.multicard_smoke_matrix }}
       embed_matrix: ${{ steps.generate.outputs.embed_matrix }}
       vision_matrix: ${{ steps.generate.outputs.vision_matrix }}
       masked_lm_matrix: ${{ steps.generate.outputs.masked_lm_matrix }}
@@ -586,6 +587,73 @@ jobs:
         uses: ./.github/actions/save-failed-suite-descriptor
         with:
           job_key: smoke
+          payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
+
+  spyre-multicard-smoke-tests:
+    name: Spyre multicard smoke x2 (${{ matrix.model_key }})
+    needs: [generate-matrix, resolve-test-type]
+    # Suite key: "multicard_smoke". Runs in the unit, regression, and trunk
+    # tiers or when selected explicitly.
+    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && needs.generate-matrix.outputs.multicard_smoke_matrix != '[]' && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' multicard_smoke ')) }}
+    # Don't let the initial pod failure fail the workflow outright -- the
+    # fresh-pod retry and spyre-tests-result decide the authoritative result.
+    continue-on-error: true
+    runs-on:
+      - x86_64
+      - spyre_pf_x2
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.multicard_smoke_matrix) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+          runner_labels: ${{ format('["x86_64","spyre_pf_x2","linux","{0}"]', inputs.image_label) }}
+
+      - name: Run multicard smoke for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          MODEL_PATH: ${{ matrix.model_key }}
+          MODEL_DTYPE: float16
+          SPYRE_DEVICES: "0,1"
+          HF_DEACTIVATE_ASYNC_LOAD: "1"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv run --active --no-sync torchrun \
+            --standalone \
+            --nnodes=1 \
+            --nproc-per-node=2 \
+            --max-restarts=0 \
+            scripts/run_multicard_smoke.py \
+            --model "$MODEL_PATH" \
+            --dtype "$MODEL_DTYPE"
+
+      - name: Save suite descriptor for pod-level retry
+        if: failure()
+        uses: ./.github/actions/save-failed-suite-descriptor
+        with:
+          job_key: multicard_smoke
           payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
 
   spyre-token-compare-tests:
@@ -1388,6 +1456,7 @@ jobs:
     needs:
       - spyre-load-tests
       - spyre-smoke-tests
+      - spyre-multicard-smoke-tests
       - spyre-token-compare-tests
       - spyre-model-components-tests
       - spyre-embed-compare-tests
@@ -1409,6 +1478,8 @@ jobs:
       has_failed_load: ${{ steps.collect.outputs.has_failed_load }}
       matrix_smoke: ${{ steps.collect.outputs.matrix_smoke }}
       has_failed_smoke: ${{ steps.collect.outputs.has_failed_smoke }}
+      matrix_multicard_smoke: ${{ steps.collect.outputs.matrix_multicard_smoke }}
+      has_failed_multicard_smoke: ${{ steps.collect.outputs.has_failed_multicard_smoke }}
       matrix_token_compare: ${{ steps.collect.outputs.matrix_token_compare }}
       has_failed_token_compare: ${{ steps.collect.outputs.has_failed_token_compare }}
       matrix_model_components: ${{ steps.collect.outputs.matrix_model_components }}
@@ -1469,8 +1540,9 @@ jobs:
 
           # One key per spyre-*-tests job above -- must match the "job_key" each job's "Save suite descriptor" step stamps into suite.json.
           keys = [
-              "load", "smoke", "token_compare", "model_components", "embed_compare", "vlm",
-              "reranker", "masked_lm", "qa", "seq_classification", "token_classification", "edge_cases", "model_module",
+              "load", "smoke", "multicard_smoke", "token_compare", "model_components",
+              "embed_compare", "vlm", "reranker", "masked_lm", "qa",
+              "seq_classification", "token_classification", "edge_cases", "model_module",
           ]
           grouped = {key: [] for key in keys}
           for path in sorted(glob.glob("failed_suites/*/suite.json")):
@@ -1610,6 +1682,60 @@ jobs:
           path: junit-smoke-${{ matrix.model_key }}.xml
           retention-days: 14
           overwrite: true
+
+  spyre-multicard-smoke-tests-retry:
+    name: Spyre multicard smoke x2 (${{ matrix.model_key }}) (pod-level retry)
+    needs: [collect-failed-suites]
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_multicard_smoke == 'true' }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x2
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.collect-failed-suites.outputs.matrix_multicard_smoke) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+          runner_labels: ${{ format('["x86_64","spyre_pf_x2","linux","{0}"]', inputs.image_label) }}
+
+      - name: Run multicard smoke for ${{ matrix.model_key }} (pod-level retry)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          MODEL_PATH: ${{ matrix.model_key }}
+          MODEL_DTYPE: float16
+          SPYRE_DEVICES: "0,1"
+          HF_DEACTIVATE_ASYNC_LOAD: "1"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv run --active --no-sync torchrun \
+            --standalone \
+            --nnodes=1 \
+            --nproc-per-node=2 \
+            --max-restarts=0 \
+            scripts/run_multicard_smoke.py \
+            --model "$MODEL_PATH" \
+            --dtype "$MODEL_DTYPE"
 
   spyre-token-compare-tests-retry:
     name: Spyre token compare (${{ matrix.model_key }}) (pod-level retry)
@@ -2207,6 +2333,7 @@ jobs:
       - collect-failed-suites
       - spyre-load-tests-retry
       - spyre-smoke-tests-retry
+      - spyre-multicard-smoke-tests-retry
       - spyre-token-compare-tests-retry
       - spyre-model-components-tests-retry
       - spyre-embed-compare-tests-retry
@@ -2235,6 +2362,7 @@ jobs:
         run: |-
           if ${{ (needs.collect-failed-suites.outputs.has_failed_load == 'true' && needs.spyre-load-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_smoke == 'true' && needs.spyre-smoke-tests-retry.result != 'success') ||
+                 (needs.collect-failed-suites.outputs.has_failed_multicard_smoke == 'true' && needs.spyre-multicard-smoke-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_token_compare == 'true' && needs.spyre-token-compare-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_model_components == 'true' && needs.spyre-model-components-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_embed_compare == 'true' && needs.spyre-embed-compare-tests-retry.result != 'success') ||

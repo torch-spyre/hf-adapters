@@ -78,6 +78,7 @@ CAUSAL_LM_MODELS = {
         "path": "ibm-granite/granite-3.3-8b-instruct",
         "adapter": "hf_granite.py",
         "size": "8b",
+        "multicard_smoke": True,
     },
     "granite2b": {
         "name": "Granite 3.3 2B",
@@ -711,6 +712,14 @@ CAUSAL_PATHS: list[str] = _exclude(
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") != "dspark_draft",
     )
+)
+MULTICARD_SMOKE_PATHS: list[str] = _exclude(
+    [
+        info["path"]
+        for info in CAUSAL_LM_MODELS.values()
+        if info.get("multicard_smoke", False)
+        and (_include_gated_flag or not info.get("is_gated", False))
+    ]
 )
 # The DSpark drafter checkpoints (block proposers), one per adapter — exercised by
 # tests/spyre/test_dspark_draft_spyre.py via the block-propose ``_run_draft_block``.
