@@ -67,8 +67,8 @@ Not supported:
 
 - Rich output is deliberately minimal: attentions and hidden states remain
   unsupported, and `past_key_values` is `None` because the internal Spyre tensor
-  caches are not a stock HF `Cache`. Multimodal/VLM generation is unchanged and
-  does not return rich outputs.
+  caches are not a stock HF `Cache`. Text and multimodal generation share this
+  output contract; VLM callers decode the returned continuation with the processor.
 - Supported generation settings use stock precedence (explicit kwarg > caller
   `generation_config` > model config > HF default) through
   `_prepare_generation_config`. Active settings are checked against an explicit

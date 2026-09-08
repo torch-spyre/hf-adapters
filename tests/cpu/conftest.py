@@ -121,6 +121,9 @@ def _unwrap_compiled_blocks(model: types.ModuleType) -> None:
             continue
         unwrapped = []
         for cb in blocks:
+            if isinstance(cb, tuple):
+                unwrapped.append(tuple(_orig(part) or part for part in cb))
+                continue
             orig = _orig(cb)
             unwrapped.append(orig if orig is not None else cb)
         setattr(model, attr, unwrapped)

@@ -56,6 +56,7 @@ from hf_adapters.hf_common import (
     _pad_proj_input_simple,
     _pad_proj_output_simple,
     make_vision_encoder_block,
+    pad_attention_heads_linear,
     prefill_vision,
     vision_backbone_forward,
 )
@@ -96,29 +97,6 @@ def _get_inner(tower):
     if hasattr(tower, "encoder") and hasattr(tower, "embeddings"):
         return tower
     return getattr(tower, "vision_model", tower)
-
-
-def _pad_vision_heads(layers, num_heads, orig_head_dim, padded_head_dim):
-    """Zero-pad SigLIP per-layer Q/K/V/O projections to a stick boundary.
-
-    SigLIP attention lives at ``layer.self_attn.{q,k,v,out}_proj`` (vs BERT's
-    ``attention.self.*``), so we pad with the low-level helpers directly
-    instead of ``pad_attention_heads_simple`` (which is wired to BERT's layout).
-    """
-    for layer in layers:
-        attn = layer.self_attn
-        attn.q_proj = _pad_proj_output_simple(
-            attn.q_proj, num_heads, orig_head_dim, padded_head_dim
-        )
-        attn.k_proj = _pad_proj_output_simple(
-            attn.k_proj, num_heads, orig_head_dim, padded_head_dim
-        )
-        attn.v_proj = _pad_proj_output_simple(
-            attn.v_proj, num_heads, orig_head_dim, padded_head_dim
-        )
-        attn.out_proj = _pad_proj_input_simple(
-            attn.out_proj, num_heads, orig_head_dim, padded_head_dim
-        )
 
 
 def _pad_vision_mlp(layers, orig_inter, padded_inter):
@@ -189,7 +167,13 @@ def prepare_for_spyre(model):
 
     padded_head_dim = ((orig_head_dim + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
     if padded_head_dim > orig_head_dim:
-        _pad_vision_heads(layers, num_heads, orig_head_dim, padded_head_dim)
+        pad_attention_heads_linear(
+            model,
+            (layer.self_attn for layer in layers),
+            orig_head_dim,
+            padded_head_dim,
+            num_heads,
+        )
     head_dim = padded_head_dim
 
     # SigLIP's intermediate_size (e.g. 4304) is often not stick-aligned; the

@@ -8,12 +8,12 @@ description: >-
 
 inputs:
   job_key:
-    description: Suite-type key matching one of collect-failed-suites' expected keys (load/smoke/token_compare/embed_compare/vlm/reranker/masked_lm/qa/edge_cases/model_module)
+    description: Suite-type key matching one of collect-failed-suites' expected keys (load/smoke/token_compare/model_components/embed_compare/vlm/reranker/masked_lm/qa/token_classification/edge_cases/model_module)
     required: true
   payload:
     description: >-
       JSON object (as a string) with the suite-identifying fields, e.g.
-      '{"model_key": "..."}'
+      '{"model_key": "..."}', or '{}' for a singleton suite.
     required: true
 
 runs:

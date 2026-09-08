@@ -58,6 +58,13 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_gpt_neo.py",
         "size": "0.1b",
     },
+    # hf_opt.py
+    "opt": {
+        "name": "OPT 125M",
+        "path": "facebook/opt-125m",
+        "adapter": "hf_opt.py",
+        "size": "0.1b",
+    },
     # hf_gpt_neox.py
     "pythia_410m": {
         "name": "Pythia 410M",
@@ -125,6 +132,13 @@ CAUSAL_LM_MODELS = {
         "path": "HuggingFaceTB/SmolLM3-3B-Base",
         "adapter": "hf_smollm3.py",
         "size": "3b",
+    },
+    # hf_lfm2.py
+    "lfm2_350m": {
+        "name": "LFM2 350M",
+        "path": "LiquidAI/LFM2-350M",
+        "adapter": "hf_lfm2.py",
+        "size": "0.35b",
     },
     # hf_llama.py
     "tiny_llama": {
@@ -225,6 +239,19 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_olmo2.py",
         "size": "1b",
     },
+    # hf_gemma2.py
+    "gemma2_2b_unsloth": {
+        "name": "Gemma 2 2B",
+        "path": "unsloth/gemma-2-2b-it",
+        "adapter": "hf_gemma2.py",
+        "size": "2b",
+    },
+    "gemma2_9b_unsloth": {
+        "name": "Gemma 2 9B",
+        "path": "unsloth/gemma-2-9b-it",
+        "adapter": "hf_gemma2.py",
+        "size": "9b",
+    },
     # hf_gemma3.py
     "gemma3_unsloth": {
         "name": "Gemma 3 1B",
@@ -252,6 +279,7 @@ CAUSAL_LM_MODELS = {
         "path": "google/gemma-4-12B-it",
         "adapter": "hf_gemma4.py",
         "size": "12b",
+        "always_test": True,
     },
     "gemma4_31b": {
         "name": "Gemma 4 31B",
@@ -268,6 +296,23 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_gemma4_moe.py",
         "size": "26b",
         "dtype": "bfloat16",
+    },
+    # hf_gemma4.py E variants
+    "gemma4_e2b": {
+        "name": "Gemma 4 E2B",
+        "path": "google/gemma-4-E2B-it",
+        "adapter": "hf_gemma4.py",
+        "size": "2b",
+        # E2B and E4B exercise distinct released E-variant configurations; keep
+        # both in the default matrix even though they share one adapter.
+        "always_test": True,
+    },
+    "gemma4_e4b": {
+        "name": "Gemma 4 E4B",
+        "path": "google/gemma-4-E4B",
+        "adapter": "hf_gemma4.py",
+        "size": "4b",
+        "always_test": True,
     },
     # DSpark speculative-decoding drafters (block proposers). kind="dspark_draft"
     # keeps them out of the generate-based causal-LM harnesses (see CAUSAL_PATHS);
@@ -579,12 +624,14 @@ def _select_representative_paths(
     include_gated: bool,
     predicate=None,
 ) -> list[str]:
-    """Select one representative model path per adapter module.
+    """Select representative model paths for each adapter module.
 
     Groups ``models`` by adapter and picks the smallest (by ``size``) model in
-    each group, breaking ties by key name for determinism. Gated models are
-    skipped unless ``include_gated``. An optional ``predicate(info) -> bool``
-    filters which entries are eligible (e.g. ``kind == "vlm"`` for vision).
+    each group, breaking ties by key name for determinism. Entries marked
+    ``always_test`` are included in addition to that representative. Gated
+    models are skipped unless ``include_gated``. An optional
+    ``predicate(info) -> bool`` filters which entries are eligible (e.g.
+    ``kind == "vlm"`` for vision).
     """
     adapter_to_keys: dict[str, list[str]] = {}
     for key, info in models.items():
@@ -603,7 +650,11 @@ def _select_representative_paths(
             keys,
             key=lambda k: (_parse_size(models[k]["size"]), k),
         )
-        paths.append(models[sorted_keys[0]]["path"])
+        selected_keys = {sorted_keys[0]}
+        selected_keys.update(
+            key for key in sorted_keys if models[key].get("always_test", False)
+        )
+        paths.extend(models[key]["path"] for key in sorted_keys if key in selected_keys)
     return paths
 
 
@@ -631,9 +682,11 @@ def _exclude(paths: list[str]) -> list[str]:
     return [p for p in paths if p not in _EXCLUDED_PATHS]
 
 
-# One representative model per adapter module (smallest by size), so tests
-# automatically cover new adapters. A single ``_include_gated()`` snapshot is
-# shared across all three selections. ``kind == "vlm"`` excludes bare vision towers.
+# At least one representative model per adapter module (smallest by size), plus
+# any explicitly ``always_test`` configurations, so tests automatically cover
+# new adapters and materially distinct configurations. A single
+# ``_include_gated()`` snapshot is shared across all selections.
+# ``kind == "vlm"`` excludes bare vision towers.
 _include_gated_flag = _include_gated()
 
 # ``kind == "dspark_draft"`` entries are speculative-decoding drafters (block
@@ -752,7 +805,10 @@ def _non_blocking(models: dict[str, dict], keys: tuple[str, ...]) -> dict[str, s
 # and ``gemma4_mm`` (VLM).
 NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = _non_blocking(
     CAUSAL_LM_MODELS,
-    ("smollm3",),
+    (
+        "smollm3",
+        "gemma2_2b_unsloth",  # small gap that happens to flip token for test prompt
+    ),
 )
 
 NON_BLOCKING_VISION_MODELS: dict[str, str] = _non_blocking(

@@ -30,6 +30,7 @@ Usage::
     outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
+import torch
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
@@ -82,6 +83,6 @@ def prepare_for_spyre(model):
     prepare_rope_and_heads(model)
     _patch_olmo_layernorm(OlmoLayerNorm)
     pad_lm_head(model)
-    model._spyre_compiled_blocks = prepare_standard_gqa_blocks(
-        get_backbone(model).layers
-    )
+    backbone = get_backbone(model)
+    model._spyre_compiled_blocks = prepare_standard_gqa_blocks(backbone.layers)
+    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)

@@ -41,10 +41,10 @@ Every adapter follows the same pattern (see `hf_granite.py` as the canonical exa
 
 1. `_make_compiled_block(layer)` — closure over layer weights, returns `torch.compile(block_forward, dynamic=False)`
 2. `_run_forward(model, ...)` — embedding → RoPE → N compiled blocks → final norm → lm_head
-3. `prepare_for_spyre(model)` — patches RMSNorm, creates PrecomputedRotaryEmbedding, pads LM head, compiles blocks
+3. `prepare_for_spyre(model)` — creates PrecomputedRotaryEmbedding, pads LM head, compiles blocks, compiles the final norm (`model._spyre_compiled_norm`). RMSNorm is left as stock HF (PR #2927 lowers the fp32-upcast pattern inside compiled regions); Gemma is the exception via `_patch_gemma{3,4}_rmsnorm`.
 4. `load_model(model_path, dtype)` / `generate(model, tokenizer, prompts, **kwargs)` — thin wrappers
 
-Import shared utilities from `hf_common.py`: `PrecomputedRotaryEmbedding`, `apply_rope_matmul`, `kv_cache_update`, `patch_rmsnorm`, `pad_lm_head`, `pad_attention_heads`, `load_model_common`, `generate`.
+Import shared utilities from `hf_common.py`: `PrecomputedRotaryEmbedding`, `apply_rope_matmul`, `kv_cache_update`, `pad_lm_head`, `pad_attention_heads`, `load_model_common`, `generate`.
 
 ### Definition of Done (per adapter)
 

@@ -1,8 +1,7 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-29-blue)
-![verified](https://img.shields.io/badge/verified_checkpoints-51-green)
-![compatible](https://img.shields.io/badge/compatible_models-100%2B-orange)
+![adapters](https://img.shields.io/badge/adapters-34-blue)
+![compatible](https://img.shields.io/badge/compatible_models-10K%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
 
@@ -14,7 +13,7 @@ from `transformers`.
 
 ## Supported Models
 
-**29 adapters · 51 verified checkpoints · 100+ compatible models**
+**34 adapters · 10K+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
 **sequence classification** (sentiment / text categorisation),
@@ -226,8 +225,6 @@ from PIL import Image
 # --- Granite Vision 4.1 ---
 model = AutoSpyreModelForImageTextToText.from_pretrained("ibm-granite/granite-vision-4.1-4b")
 processor = AutoProcessor.from_pretrained("ibm-granite/granite-vision-4.1-4b")
-processor.tokenizer.padding_side = "left"  # matches the decode loop's right-aligned prompts
-
 # Build the batch the official way — the chat template tokenizes and expands the
 # image tokens in one call (the two-step text/images path mis-tiles anyres images).
 image = Image.open("cat.jpg").convert("RGB")
@@ -239,12 +236,9 @@ batch = processor.apply_chat_template(
     conv, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt"
 )
 
-texts = model.generate(
-    processor,
-    batch["input_ids"], batch["attention_mask"],
-    batch["pixel_values"], batch["image_sizes"],
-    max_new_tokens=64,
-)
+sequences = model.generate(**batch, max_new_tokens=64)
+prompt_len = batch["input_ids"].shape[1]
+texts = processor.batch_decode(sequences[:, prompt_len:], skip_special_tokens=True)
 print(texts[0])
 
 ```
@@ -353,10 +347,10 @@ uv run pytest -s -vvv tests/spyre/test_load_spyre.py
 `-s -vvv` matches each test's documented usage and shows the per-step comparison
 tables the token / embedding / VLM tests print.
 
-Note: Spyre has known numerical accuracy limitations. Greedy token mismatches
-between CPU and Spyre are expected on the single-token decode path until
-torch\_spyre fixes land — which is why the VLM lane asserts a per-step logit
-cosine floor rather than exact tokens (see
+Numerical gating depends on the workload. The blocking causal token-comparison
+lane requires exact greedy top-1 agreement with CPU over prefill and four decode
+steps. The VLM lane instead asserts a per-step logit cosine floor because its
+open-ended caption prompts can produce near-tied top-1 candidates (see
 [ARCHITECTURE.md](ARCHITECTURE.md#vision-language-imagetext)).
 
 ## Development

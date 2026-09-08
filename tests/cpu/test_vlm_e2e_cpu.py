@@ -30,27 +30,21 @@ adapters that load both towers and run a full generate).
 Marked ``slow``: loads the full VLM twice and runs an autoregressive decode on
 CPU. Run with ``--run-slow``.
 
-pytest -s -vvv tests/cpu/test_vlm_e2e_cpu.py -k granite_vision_mm
+pytest -s -vvv tests/cpu/test_vlm_e2e_cpu.py -k granite-vision-4.1
 
 """
 
 import gc
-import types
 
 import pytest
 import torch
-from transformers import AutoModelForImageTextToText, PreTrainedModel
 
 from hf_adapters.auto_spyre_model import (
     IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+    AutoSpyreModelForImageTextToText,
 )
-from tests._vision_helpers import (
-    build_vlm_batch,
-    extra_image_inputs,
-    stock_vlm_generate,
-)
+from tests._vision_helpers import build_vlm_batch, stock_vlm_generate
 from tests.conftest import (
-    load_ref_model,
     resolve_adapter_module_for_test,
 )
 from tests.cpu.conftest import _set_rope_dtype, _unwrap_compiled_blocks
@@ -60,32 +54,6 @@ pytestmark = pytest.mark.model_harness("vision")
 
 MAX_NEW_TOKENS: int = 16
 PROMPT: str = "Briefly describe this image."
-
-
-def _adapter_generate(
-    adapter: types.ModuleType,
-    model: PreTrainedModel,
-    processor,
-    batch: dict,
-    max_new_tokens: int,
-) -> list[str]:
-    """Drive an adapter's multimodal ``generate`` from a processor batch.
-
-    Adapters take ``input_ids, attention_mask, pixel_values`` positionally and
-    then whatever extra multimodal inputs their model needs; ``extra_image_inputs``
-    forwards those by keyword so this harness stays signature-agnostic across VLM
-    adapters (see ``tests/_vision_helpers``).
-    """
-    return adapter.generate(
-        model,
-        processor,
-        batch["input_ids"],
-        batch["attention_mask"],
-        batch["pixel_values"],
-        max_new_tokens=max_new_tokens,
-        do_sample=False,
-        **extra_image_inputs(adapter.generate, batch),
-    )
 
 
 @pytest.mark.parametrize("model_path", VISION_PATHS, ids=VISION_PATHS)
@@ -100,23 +68,8 @@ def test_vlm_generate(model_path: str) -> None:
     processor, batch = build_vlm_batch(model_path, PROMPT)
     batch["pixel_values"] = batch["pixel_values"].to(dtype)
 
-    # --- Adapter generate (greedy) ---
-    model = load_ref_model(
-        model_path=model_path,
-        adapter_mod=adapter,
-        auto_model_cls=AutoModelForImageTextToText,
-    )
-    adapter.prepare_for_spyre(model)
-    _set_rope_dtype(model, dtype)
-    _unwrap_compiled_blocks(model)
-    with torch.no_grad():
-        adapter_text = _adapter_generate(
-            adapter, model, processor, batch, MAX_NEW_TOKENS
-        )
-    del model
-    gc.collect()
-
     # --- Stock reference: the FULL model.generate() (real deepstack) ---
+    # Run this before adapter preparation, which patches model classes globally.
     ref_text = stock_vlm_generate(
         model_path=model_path,
         processor=processor,
@@ -126,15 +79,32 @@ def test_vlm_generate(model_path: str) -> None:
     )
     gc.collect()
 
+    # --- Adapter generate (greedy) ---
+    model = AutoSpyreModelForImageTextToText.from_pretrained(model_path, dtype=dtype)
+    _set_rope_dtype(model, dtype)
+    _unwrap_compiled_blocks(model)
+    prompt_len = batch["input_ids"].shape[1]
+    with torch.no_grad():
+        adapter_sequences = model.generate(
+            max_new_tokens=MAX_NEW_TOKENS,
+            do_sample=False,
+            **batch,
+        )
+    adapter_text = processor.tokenizer.decode(
+        adapter_sequences[0, prompt_len:], skip_special_tokens=True
+    )
+    del model
+    gc.collect()
+
     # Print both captions so a human can eyeball the result (visible with -s).
     print(f"\n[{model_path} e2e] prompt: {PROMPT!r}")
-    print(f"[{model_path} e2e] adapter: {adapter_text[0]!r}")
+    print(f"[{model_path} e2e] adapter: {adapter_text!r}")
     print(f"[{model_path} e2e] stock:   {ref_text!r}")
 
     # The adapter must match stock's REAL multimodal generate token-for-token.
-    assert adapter_text[0] == ref_text, (
+    assert adapter_text == ref_text, (
         f"adapter generate diverged from stock generate:\n"
-        f"  adapter: {adapter_text[0]!r}\n"
+        f"  adapter: {adapter_text!r}\n"
         f"  stock:   {ref_text!r}"
     )
-    assert len(adapter_text[0]) > 0, "adapter generated an empty string"
+    assert len(adapter_text) > 0, "adapter generated an empty string"

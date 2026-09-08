@@ -36,7 +36,7 @@ from tests.conftest import load_ref_model
 # ── VLM (image→text) end-to-end helpers ──────────────────────────────────────
 #
 # These drive a full multimodal adapter (both towers) the way an application
-# would: processor → adapter.generate → decoded text, compared against stock's
+# would: processor → bound model.generate → decoded text, compared against stock's
 # real ``model.generate``. They are model-agnostic given a model path — the only
 # convention they bake in is the modern single-call chat-template path, which
 # every current HF VLM processor supports and which (for anyres VLMs like Granite
@@ -162,7 +162,6 @@ def build_vlm_batch(
         processor = AutoProcessor.from_pretrained(model_path, fix_mistral_regex=True)
     else:
         processor = AutoProcessor.from_pretrained(model_path)
-    # processor = AutoProcessor.from_pretrained(model_path)
     processor.tokenizer.padding_side = "left"
 
     if image is None:

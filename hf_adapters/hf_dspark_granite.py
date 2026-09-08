@@ -42,12 +42,8 @@ CTX_PAD = 56
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to the Granite DSpark drafter in-place."""
-    from transformers.models.granite.modeling_granite import GraniteRMSNorm
-
     block_size = int(model.block_size)
     kv_pad = ((CTX_PAD + block_size + 31) // 32) * 32
     # Granite attention scale is the configured multiplier, not head_dim**-0.5.
     model._spyre_attn_scaling = float(model.config.attention_multiplier)
-    prepare_dspark_common(
-        model, GraniteRMSNorm, ctx_pad=CTX_PAD, kv_pad=kv_pad, use_qk_norm=False
-    )
+    prepare_dspark_common(model, ctx_pad=CTX_PAD, kv_pad=kv_pad, use_qk_norm=False)
