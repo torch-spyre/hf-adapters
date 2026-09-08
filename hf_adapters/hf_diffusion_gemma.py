@@ -106,6 +106,8 @@ from hf_adapters.hf_common import (
     text_config,
 )
 
+import fnmatch
+
 # ---------------------------------------------------------------------------
 # RMSNorm patch (Gemma4-style: ``self.eps``, optionally scale-free)
 # ---------------------------------------------------------------------------
@@ -822,6 +824,17 @@ def generate(
 # ---------------------------------------------------------------------------
 
 
+def _expand_tp_plan(model, tp_plan):
+    """Expand wildcard ``*`` entries in a TP plan to concrete per-layer paths."""
+    
+    all_module_names = [name for name, _ in model.named_modules()]
+    return {
+        concrete: style
+        for pattern, style in tp_plan.items()
+        for concrete in (fnmatch.filter(all_module_names, pattern) if "*" in pattern else [pattern])
+    }
+
+
 def _apply_tp_sharding(model):
     """Slice attention/MLP Linear weights in-place for this TP rank.
 
@@ -840,13 +853,12 @@ def _apply_tp_sharding(model):
     rank = int(os.environ.get("LOCAL_RANK", "0"))
     tp_size = model._spyre_tp_size
 
-    for module_path, style in tp_plan.items():
-        try:
-            parent_path, _, attr = module_path.rpartition(".")
-            parent = model.get_submodule(parent_path) if parent_path else model
-            submod = getattr(parent, attr)
-        except (AttributeError, ValueError):
-            continue
+    concrete_plan = _expand_tp_plan(model, tp_plan)
+
+    for module_path, style in concrete_plan.items():
+        parent_path, _, attr = module_path.rpartition(".")
+        parent = model.get_submodule(parent_path) if parent_path else model
+        submod = getattr(parent, attr)
         if not isinstance(submod, nn.Linear):
             continue
 
