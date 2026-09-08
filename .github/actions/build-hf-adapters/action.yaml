@@ -235,8 +235,8 @@ runs:
         # active venv, so target it with --active there. Non-fatal (|| true): a
         # failed probe must never fail the build.
         if [[ "$PREBAKED_IMAGE" == "true" ]]; then
-          uv pip show --active torch || true
-          uv pip freeze --active || true
+          uv pip show torch || true
+          uv pip freeze || true
         else
           uv pip show torch
           uv pip freeze
