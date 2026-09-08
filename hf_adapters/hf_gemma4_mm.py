@@ -13,21 +13,15 @@
 # limitations under the License.
 
 """
-Unified (encoder-free) HuggingFace adapter for Gemma 4 12B on Spyre — image→text.
+HuggingFace adapter for Gemma 4 multimodal models on Spyre — image→text.
 
-Supports both the base checkpoint (``google/gemma-4-12b``) and the instruction-tuned
-variant (``google/gemma-4-12B-it``); both use ``model_type=gemma4_unified`` and
-``Gemma4UnifiedForConditionalGeneration``.
+Supports both encoder-free ``Gemma4UnifiedConfig`` checkpoints and full-vision
+``Gemma4Config`` checkpoints. The shared multimodal frontend scatters projected
+image features into ``<image>`` token slots, then delegates to the existing
+Gemma 4 dense/PLE or MoE text implementation selected by the nested text config.
 
-Where ``hf_gemma4`` runs only the text decoder (``AutoSpyreModelForCausalLM``),
-this module loads the full unified multimodal model
-(``Gemma4UnifiedForConditionalGeneration``, ``model_type=gemma4_unified``) via
-``AutoModelForImageTextToText`` and runs the image→text pipeline. It is the
-adapter behind ``AutoSpyreModelForImageTextToText``.
-
-Gemma 4 is **encoder-free**: there is no vision tower. Vision is a pure
-projection of raw (processor-merged) pixel patches into the LM embedding space,
-scattered into the ``<image>`` token slots of the text embeddings:
+For encoder-free checkpoints, vision is a pure projection of raw
+(processor-merged) pixel patches into the LM embedding space:
 
     pixel_values [B, P, 48²·3]                    (processor already merged
       │   image_position_ids [B, P, 2]             pooling_kernel_size² raw
@@ -81,7 +75,7 @@ Scope: **text + image**. Audio and video are asserted out loudly
 
 import torch
 
-from hf_adapters import hf_gemma4
+from hf_adapters import hf_gemma4, hf_gemma4_moe
 from hf_adapters.hf_common import (
     DEVICE,
     get_backbone,
@@ -147,31 +141,38 @@ def prepare_for_spyre(model):
     vision-capable unified checkpoint and that audio is out of scope.
     """
     cfg = text_config(model.config)
-    assert getattr(cfg, "use_bidirectional_attention", None) == "vision", (
-        "hf_gemma4_mm expects a unified Gemma 4 with "
-        "use_bidirectional_attention='vision'; got "
-        f"{getattr(cfg, 'use_bidirectional_attention', None)!r}."
+    assert getattr(cfg, "use_bidirectional_attention", None) in (None, "vision"), (
+        "hf_gemma4_mm supports causal or vision-bidirectional Gemma 4 text; got "
+        f"use_bidirectional_attention={getattr(cfg, 'use_bidirectional_attention', None)!r}."
     )
     assert getattr(model.model, "embed_vision", None) is not None, (
         "hf_gemma4_mm requires a vision embedder (model.model.embed_vision); "
         "this checkpoint has no vision_config."
     )
 
-    # Shared text decoder (mirrors hf_gemma4.prepare_for_spyre).
-    hf_gemma4.prepare_text_decoder_for_spyre(model)
-    assert not model._spyre_has_ple, (
-        "hf_gemma4_mm does not support PLE (E-variant) checkpoints; "
-        "the VLM embed path does not compute per_layer_inputs."
-    )
+    # Reuse the text adapter selected by the nested decoder configuration.
+    if getattr(cfg, "enable_moe_block", False):
+        hf_gemma4_moe.prepare_text_decoder_for_spyre(model)
+    else:
+        hf_gemma4.prepare_text_decoder_for_spyre(model)
 
-    # Vision projection core, compiled for Spyre. The three vision LayerNorms
-    # (patch_ln1/patch_ln2/pos_norm) must be patched to the un-fused
-    # decomposition BEFORE compiling: the fused F.layer_norm lowering NaNs on
-    # near-constant patch rows (see patch_layernorm / the doc). Patch first, then
-    # compile so the core captures the patched forward.
-    embedder = _vision_embedder(model)
-    patch_layernorm(embedder.patch_ln1, embedder.patch_ln2, embedder.pos_norm)
-    model._spyre_vision_core = _make_compiled_vision_core(embedder)
+    if getattr(model.model, "vision_tower", None) is not None:
+        # Gemma4Config checkpoints have a full vision transformer. Keep the stock
+        # tower and its projection on CPU for the initial correctness path; the
+        # shared loader re-pins these after its blanket Spyre device move.
+        cpu_submodules = list(getattr(model, "_spyre_cpu_submodules", []))
+        cpu_submodules.extend(["model.vision_tower", "model.embed_vision"])
+        if getattr(model.model, "audio_tower", None) is not None:
+            cpu_submodules.extend(["model.audio_tower", "model.embed_audio"])
+        model._spyre_cpu_submodules = cpu_submodules
+        model._spyre_vision_core = None
+    else:
+        # Unified checkpoints use an attention-free projection core on Spyre.
+        # Patch the three LayerNorms before compiling so the graph captures the
+        # unfused fp32-reduction implementation.
+        embedder = _vision_embedder(model)
+        patch_layernorm(embedder.patch_ln1, embedder.patch_ln2, embedder.pos_norm)
+        model._spyre_vision_core = _make_compiled_vision_core(embedder)
 
 
 def _build_pos_embs(embedder, image_position_ids):
@@ -192,13 +193,15 @@ def _build_pos_embs(embedder, image_position_ids):
 
 
 def _image_features(model, pixel_values, image_position_ids):
-    """Run the Spyre vision core and return stripped features [valid_patches, H].
+    """Run the checkpoint's vision path and return flattened text-space features."""
+    if getattr(model.model, "vision_tower", None) is not None:
+        outputs = model.model.get_image_features(
+            pixel_values.to("cpu"),
+            image_position_ids.to("cpu"),
+            return_dict=True,
+        )
+        return torch.cat(outputs.pooler_output, dim=0)
 
-    CPU: build the positional embeddings and the padding mask. Spyre: the
-    LN/Dense/RMSNorm projection core. CPU: strip padding patches
-    (``image_position_ids == -1`` on both axes), matching stock
-    ``get_image_features``.
-    """
     embedder = _vision_embedder(model)
     dtype = get_model_dtype(model)
 
@@ -383,6 +386,7 @@ def _logits_from_embeds(
     value_caches,
     cache_index,
     masks=None,
+    input_ids=None,
 ):
     """Text decoder over image-scattered embeds → logits (+ softcap).
 
@@ -398,6 +402,35 @@ def _logits_from_embeds(
     position is written, so the shared walk's sliding-window ``block_base`` is
     simply ``cache_index[0]``: the cache column the (only) query row occupies.
     """
+    cfg = text_config(model.config)
+    query_row_mask = None
+    if inputs_embeds.shape[1] > 1 and not getattr(cfg, "enable_moe_block", False):
+        query_row_mask = hf_gemma4._query_row_mask(inputs_embeds, attn_mask)
+        inputs_embeds = inputs_embeds * query_row_mask
+
+    if model._spyre_has_ple:
+        if input_ids is None:
+            raise ValueError(
+                "Gemma 4 PLE decoding requires input_ids alongside inputs_embeds."
+            )
+
+        ple_input_ids = input_ids
+        if inputs_embeds.shape[1] > 1:
+            image_mask = input_ids.to("cpu") == model.config.image_token_id
+            if image_mask.any():
+                ple_input_ids = input_ids.to("cpu").clone()
+                ple_input_ids[image_mask] = cfg.pad_token_id
+                ple_input_ids = ple_input_ids.to(inputs_embeds.device)
+
+        # Stock computes the token-identity PLE from pad-replaced multimodal IDs,
+        # but projects its context component from the final image-scattered decoder
+        # embeddings. `_compute_per_layer_inputs` mirrors that split: input_ids feed
+        # embed_tokens_per_layer while inputs_embeds feed per_layer_model_projection.
+        per_layer_inputs = hf_gemma4._compute_per_layer_inputs(
+            model, inputs_embeds, ple_input_ids
+        )
+    else:
+        per_layer_inputs = None
     h = hf_gemma4._run_blocks_over_embeds(
         model,
         inputs_embeds,
@@ -407,6 +440,8 @@ def _logits_from_embeds(
         value_caches,
         cache_index,
         masks=masks,
+        per_layer_inputs=per_layer_inputs,
+        query_row_mask=query_row_mask,
     )
     logits = model.lm_head(h)
     cap = text_config(model.config).final_logit_softcapping
@@ -443,11 +478,13 @@ def _prefill_forward(
     image_features = _image_features(model, pixel_values, image_position_ids)
     inputs_embeds = _embed_and_scatter(model, input_ids, image_features)
 
-    padded_len = input_ids.shape[1]
-    max_cache_len = attention_mask.shape[-1]
-    blockwise = _blockwise_band(mm_token_type_ids, padded_len, max_cache_len, dtype)
-    masks = _build_mm_masks(attention_mask, blockwise, cfg.sliding_window)
-    masks = {lt: m.to(DEVICE) for lt, m in masks.items()}
+    masks = None
+    if getattr(cfg, "use_bidirectional_attention", None) == "vision":
+        padded_len = input_ids.shape[1]
+        max_cache_len = attention_mask.shape[-1]
+        blockwise = _blockwise_band(mm_token_type_ids, padded_len, max_cache_len, dtype)
+        masks = _build_mm_masks(attention_mask, blockwise, cfg.sliding_window)
+        masks = {lt: m.to(DEVICE) for lt, m in masks.items()}
     return _logits_from_embeds(
         model,
         inputs_embeds.to(DEVICE),
@@ -457,4 +494,5 @@ def _prefill_forward(
         value_caches,
         cache_index=cache_index,
         masks=masks,
+        input_ids=input_ids.to(DEVICE),
     )

@@ -13,7 +13,7 @@ from `transformers`.
 
 ## Supported Models
 
-**34 adapters · 55 verified checkpoints · 10K+ compatible models**
+**34 adapters · 10K+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
 **sequence classification** (sentiment / text categorisation),
@@ -22,7 +22,7 @@ Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers)
 Llama / Qwen / Granite / Mistral / Phi / Gemma / OLMo / GPT decoders to BERT /
 XLM-RoBERTa / MPNet / ModernBERT encoders, the Granite Vision 4.1 (SigLIP tower +
 Granite text), Mistral3 Vision (Pixtral tower + Mistral text), and Gemma 4
-(encoder-free) multimodal VLMs, plus the DSpark block-propose drafters for
+(encoder-free and full-vision) multimodal VLMs, plus the DSpark block-propose drafters for
 Qwen 3 / Granite / Gemma 4.
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
@@ -247,8 +247,9 @@ A multimodal checkpoint's config is registered under both auto classes:
 `AutoSpyreModelForCausalLM` selects the text-only adapter (vision tower
 discarded), while `AutoSpyreModelForImageTextToText` selects the combined
 multimodal adapter. This works for Granite Vision (`Granite4VisionConfig`),
-Mistral3 Vision (`Mistral3Config`), and Gemma 4 (`Gemma4UnifiedConfig`, an
-encoder-free VLM — no vision tower; see [ARCHITECTURE.md](ARCHITECTURE.md#multimodal-vlm-path-vision-tower--text-decoder)).
+Mistral3 Vision (`Mistral3Config`), and Gemma 4 (`Gemma4UnifiedConfig` for the
+encoder-free variant, or `Gemma4Config` for the full vision-tower variants; see
+[ARCHITECTURE.md](ARCHITECTURE.md#multimodal-vlm-path-vision-tower--text-decoder)).
 
 ## Repo Structure
 
