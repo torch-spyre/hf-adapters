@@ -78,6 +78,7 @@ CAUSAL_LM_MODELS = {
         "path": "ibm-granite/granite-3.3-8b-instruct",
         "adapter": "hf_granite.py",
         "size": "8b",
+        "multicard_smoke": True,
     },
     "granite2b": {
         "name": "Granite 3.3 2B",
@@ -164,6 +165,14 @@ CAUSAL_LM_MODELS = {
         "path": "01-ai/Yi-1.5-6B",
         "adapter": "hf_llama.py",
         "size": "6b",
+    },
+    # hf_bharatgen.py
+    "param_1_5b": {
+        "name": "BharatGen Param-1 5B",
+        "path": "bharatgenai/Param-1-5B",
+        "adapter": "hf_bharatgen.py",
+        "size": "5b",
+        "trust_remote_code": True,
     },
     # hf_phi3.py
     "phi4": {
@@ -285,6 +294,14 @@ CAUSAL_LM_MODELS = {
         "path": "google/gemma-4-31b",
         "adapter": "hf_gemma4.py",
         "size": "31b",
+        "is_gated": True,
+    },
+    "gemma4_31b_it": {
+        "name": "Gemma 4 31B Instruct",
+        "path": "google/gemma-4-31b-it",
+        "adapter": "hf_gemma4.py",
+        "size": "31b",
+        "dtype": "bfloat16",
         "is_gated": True,
     },
     # hf_gemma4_moe.py
@@ -584,12 +601,24 @@ VISION_MODELS = {
         "size": "3b",
     },
     # hf_gemma4_mm.py — unified encoder-free VLM (image + text -> text)
+    # Note: google/gemma-4-12b (base, no chat template) also resolves via this
+    # adapter (Gemma4UnifiedConfig -> hf_gemma4_mm) but is tested via the
+    # causal-LM path (gemma4_base in CAUSAL_LM_MODELS); the VLM harness requires
+    # apply_chat_template, which the base model does not provide.
     "gemma4_mm": {
-        "name": "Gemma 4 12B (unified VLM)",
+        "name": "Gemma 4 12B IT (unified VLM)",
         "path": "google/gemma-4-12B-it",
         "adapter": "hf_gemma4_mm.py",
         "kind": "vlm",  # multimodal: image + text -> generated text
         "size": "12b",
+    },
+    # hf_clip.py — CLIP dual-encoder (image + text -> embeddings via ST backend)
+    "clip_vit_b_32": {
+        "name": "clip-ViT-B-32",
+        "path": "sentence-transformers/clip-ViT-B-32",
+        "adapter": "hf_clip.py",
+        "kind": "clip",  # dual-encoder: image or text -> embedding
+        "size": "0.15b",
     },
     # hf_muse_glimmer_mm.py — Muse Glimmer perception + text towers
     "muse_glimmer_mm": {
@@ -703,6 +732,14 @@ CAUSAL_PATHS: list[str] = _exclude(
         predicate=lambda info: info.get("kind") != "dspark_draft",
     )
 )
+MULTICARD_SMOKE_PATHS: list[str] = _exclude(
+    [
+        info["path"]
+        for info in CAUSAL_LM_MODELS.values()
+        if info.get("multicard_smoke", False)
+        and (_include_gated_flag or not info.get("is_gated", False))
+    ]
+)
 # The DSpark drafter checkpoints (block proposers), one per adapter — exercised by
 # tests/spyre/test_dspark_draft_spyre.py via the block-propose ``_run_draft_block``.
 DSPARK_PATHS: list[str] = _exclude(
@@ -733,6 +770,13 @@ VISION_PATHS: list[str] = _exclude(
         VISION_MODELS,
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") == "vlm",
+    )
+)
+CLIP_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        VISION_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") == "clip",
     )
 )
 
@@ -786,6 +830,13 @@ ALL_VISION_PATHS: list[str] = _exclude(
         VISION_MODELS,
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") == "vlm",
+    )
+)
+ALL_CLIP_PATHS: list[str] = _exclude(
+    _all_paths(
+        VISION_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") == "clip",
     )
 )
 

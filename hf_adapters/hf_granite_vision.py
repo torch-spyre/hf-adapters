@@ -53,7 +53,7 @@ _run_backbone_forward = hf_granite._run_backbone_forward
 _run_forward = hf_granite._run_forward
 
 
-def load_hf_model(model_path, dtype=torch.float16):
+def load_hf_model(model_path, dtype=torch.float16, trust_remote_code=None):
     """Load the stock Granite Vision VLM (text-only reference for the harness).
 
     Returns the ``Granite4VisionForConditionalGeneration`` with the vision tower
@@ -65,7 +65,7 @@ def load_hf_model(model_path, dtype=torch.float16):
     from transformers import AutoModelForImageTextToText
 
     model = AutoModelForImageTextToText.from_pretrained(
-        model_path, dtype=dtype, device_map="cpu"
+        model_path, dtype=dtype, device_map="cpu", trust_remote_code=trust_remote_code
     )
     # Drop the SigLIP vision tower and the deepstack/spatial projectors — text-only
     # inference (the full image→text pipeline lives in hf_granite_vision_mm).

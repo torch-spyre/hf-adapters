@@ -8,7 +8,7 @@ description: >-
 
 inputs:
   job_key:
-    description: Suite-type key matching one of collect-failed-suites' expected keys (load/smoke/token_compare/model_components/embed_compare/vlm/reranker/masked_lm/qa/token_classification/edge_cases/model_module)
+    description: Suite-type key matching one of collect-failed-suites' expected keys (load/smoke/multicard_smoke/token_compare/model_components/embed_compare/vlm/reranker/masked_lm/qa/seq_classification/token_classification/edge_cases/model_module)
     required: true
   payload:
     description: >-

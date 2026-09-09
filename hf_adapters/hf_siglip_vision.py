@@ -53,10 +53,9 @@ import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
-    _pad_proj_input_simple,
-    _pad_proj_output_simple,
     make_vision_encoder_block,
     pad_attention_heads_linear,
+    pad_encoder_mlp,
     prefill_vision,
     vision_backbone_forward,
 )
@@ -97,20 +96,6 @@ def _get_inner(tower):
     if hasattr(tower, "encoder") and hasattr(tower, "embeddings"):
         return tower
     return getattr(tower, "vision_model", tower)
-
-
-def _pad_vision_mlp(layers, orig_inter, padded_inter):
-    """Zero-pad each SigLIP MLP's intermediate dim to a stick boundary.
-
-    SigLIP's ``intermediate_size`` (e.g. 4304 for Granite-Vision-4.1) is not a
-    multiple of ``BLOCK_SIZE``. The Spyre compiler lays matmul operands out in
-    64-element sticks and cannot identify/pad the contraction (K) dim of an
-    fc2 matmul over a stick-misaligned intermediate.
-    """
-    for layer in layers:
-        mlp = layer.mlp
-        mlp.fc1 = _pad_proj_output_simple(mlp.fc1, 1, orig_inter, padded_inter)
-        mlp.fc2 = _pad_proj_input_simple(mlp.fc2, 1, orig_inter, padded_inter)
 
 
 def _make_patch_embed(inner):
@@ -178,11 +163,11 @@ def prepare_for_spyre(model):
 
     # SigLIP's intermediate_size (e.g. 4304) is often not stick-aligned; the
     # Spyre compiler can't lower the fc2 matmul over a misaligned K dim. Zero-pad
-    # the FFN intermediate to a stick boundary (bit-exact — see _pad_vision_mlp).
+    # the FFN intermediate to a stick boundary (bit-exact — see pad_encoder_mlp).
     orig_inter = cfg.intermediate_size
     padded_inter = ((orig_inter + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
     if padded_inter > orig_inter:
-        _pad_vision_mlp(layers, orig_inter, padded_inter)
+        pad_encoder_mlp(layers, orig_inter, padded_inter)
 
     model._spyre_patch_embed = _make_patch_embed(inner)
     model._spyre_post_layernorm = inner.post_layernorm
@@ -205,7 +190,7 @@ def prepare_for_spyre(model):
     ]
 
 
-def load_hf_model(model_path, dtype=torch.float16):
+def load_hf_model(model_path, dtype=torch.float16, trust_remote_code=None):
     """Load the bare ``SiglipVisionModel`` reference (stock HF, for tests).
 
     Pulls just the vision tower out of the multimodal checkpoint by remapping
