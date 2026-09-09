@@ -514,10 +514,6 @@ def _run_decoder_blocks(
     dec = model.model.decoder
 
     h = canvas_embeds
-
-    # Fix #2: always run self_conditioning, even on the first denoising step.
-    # When there are no previous logits HF uses zeros, not an identity bypass.
-    # dec.self_conditioning ends with an RMSNorm that is NOT a no-op on zeros.
     if soft_conditioning is None:
         soft_conditioning = torch.zeros_like(h)
     h = dec.self_conditioning(h, soft_conditioning)
@@ -642,6 +638,7 @@ def generate(
         build_prefill_mask,
         generation_cache_len,
         make_cache_index,
+        normalize_generation_inputs,
     )
 
     entropy_bound = kwargs.pop("entropy_bound", 0.1)
@@ -653,28 +650,11 @@ def generate(
     canvas_length = model.config.canvas_length  # 256
     vocab_size = text_config(model.config).vocab_size
     dtype = next(model.parameters()).dtype
+
+    input_ids, actual_lengths, padded_len, prompt_offsets, position_ids_prompt = (
+        normalize_generation_inputs(input_ids, attention_mask)
+    )
     batch_size = input_ids.shape[0]
-
-    # Derive actual token lengths from the attention mask (or assume all real).
-    if attention_mask is not None:
-        actual_lengths = attention_mask.sum(dim=1).long()
-    else:
-        actual_lengths = torch.full((batch_size,), input_ids.shape[1], dtype=torch.long)
-
-    # Block-align the prompt length (left-pad with zeros to a BLOCK_SIZE multiple).
-    prompt_length = input_ids.shape[1]
-    padded_len = math.ceil(prompt_length / BLOCK_SIZE) * BLOCK_SIZE
-    block_pad = padded_len - prompt_length
-    if block_pad > 0:
-        input_ids = torch.cat(
-            [input_ids.new_zeros((batch_size, block_pad)), input_ids], dim=1
-        )
-    prompt_offsets = padded_len - actual_lengths  # [B] left-pad counts
-
-    position_ids_prompt = torch.zeros((batch_size, padded_len), dtype=torch.long)
-    for b in range(batch_size):
-        n = int(actual_lengths[b])
-        position_ids_prompt[b, int(prompt_offsets[b]) :] = torch.arange(n)
 
     # KV caches
     max_canvases = math.ceil(max_new_tokens / canvas_length)
@@ -734,8 +714,6 @@ def generate(
             canvas_length, batch_size, cache_len, prompt_offsets, dtype, max_cache_len
         ).to(DEVICE)
 
-        # Index pointing the decoder canvas writes at [cache_len, cache_len+canvas_len).
-        # Fix #1: the decoder uses this so SDPA sees [encoder KV | canvas KV].
         decoder_cache_index = make_cache_index(cache_len, canvas_length, device=DEVICE)
 
         # Initialize canvas + reset stopping criteria
@@ -758,9 +736,7 @@ def generate(
                 decoder_cache_index,
                 soft_conditioning,
             )
-            # All sampling runs on CPU with the HF classes.
-            # Fix #3: apply the HF temperature schedule before every downstream use
-            # (sampling, argmax, acceptance check, self-conditioning).
+
             logits_cpu = logits.to("cpu")
             temperature = t_min + (t_max - t_min) * (step_idx / max_denoising_steps)
             processed_logits = logits_cpu / temperature
