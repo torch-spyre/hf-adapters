@@ -19,6 +19,9 @@ parser.add_argument("--max-denoising-steps", type=int, default=48,
 parser.add_argument("--tp", action="store_true")
 parser.add_argument("--no-warmup", action="store_true",
                     help="Skip warmup run (use when inductor cache is already warm).")
+parser.add_argument("--batch-size", type=int, default=1,
+                    help="Repeat the prompt this many times to test batched generation "
+                         "(exercises the B>1 stopping-criteria path).")
 args = parser.parse_args()
 
 # TP: give each rank its own inductor cache to avoid bundle-path collisions.
@@ -47,7 +50,7 @@ if getattr(tokenizer, "chat_template", None) is not None:
     )
 else:
     prompt_text = args.prompt
-enc = tokenizer([prompt_text], return_tensors="pt", padding=True)
+enc = tokenizer([prompt_text] * args.batch_size, return_tensors="pt", padding=True)
 input_ids = enc["input_ids"]
 attention_mask = enc["attention_mask"]
 gen_kwargs = dict(
@@ -72,22 +75,23 @@ output_ids = model.generate(input_ids, attention_mask, **gen_kwargs)
 elapsed = time.perf_counter() - t0
 
 # generate() returns only the generated tokens (prompt already stripped).
-output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
 # Count non-pad tokens: output tensor is zero-padded to uniform length, so
 # nonzero entries are actual generated token ids (including EOS).
-output_token_count = (output_ids[0] != 0).sum().item()
-toks_per_sec = output_token_count / elapsed
-
-# Only rank 0 prints to avoid duplicate lines under TP.
 if local_rank == 0:
-    print(output_text)
-    print()
-    print(f"--- throughput ---")
-    print(f"  max_denoising_steps : {args.max_denoising_steps}")
-    print(f"  generated tokens    : {output_token_count}")
-    print(f"  wall time           : {elapsed:.2f}s")
-    print(f"  throughput          : {toks_per_sec:.1f} tok/s")
-    print()
+    for b in range(args.batch_size):
+        output_text = tokenizer.decode(output_ids[b], skip_special_tokens=True)
+        output_token_count = (output_ids[b] != 0).sum().item()
+        toks_per_sec = output_token_count / elapsed
+        print(f"=== batch item {b} ===")
+        print(output_text)
+        print()
+        print(f"--- throughput (batch item {b}) ---")
+        print(f"  batch_size          : {args.batch_size}")
+        print(f"  max_denoising_steps : {args.max_denoising_steps}")
+        print(f"  generated tokens    : {output_token_count}")
+        print(f"  wall time           : {elapsed:.2f}s")
+        print(f"  throughput          : {toks_per_sec:.1f} tok/s")
+        print()
     print("NOTE: throughput is dominated by Spyre↔CPU MoE round-trips.")
     print(f"  {args.max_denoising_steps} steps × 30 layers × 2 transfers/layer")
     print(f"  = {args.max_denoising_steps * 30 * 2} PCIe transfers per canvas.")
