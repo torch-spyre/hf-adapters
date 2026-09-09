@@ -467,7 +467,7 @@ def _build_rope_matrices(inv_freq, position_ids, padded_head_dim, dtype):
 def _build_attention_mask(valid, padded_len, dtype):
     bsz, seq_len = valid.shape
     key_mask = F.pad(valid, (0, padded_len - seq_len), value=False)
-    mask = torch.zeros((bsz, 1, padded_len, padded_len), dtype=dtype)
+    mask = torch.zeros((bsz, 1, 1, padded_len), dtype=dtype)
     return mask.masked_fill(~key_mask[:, None, None, :], -torch.inf)
 
 
