@@ -651,9 +651,11 @@ def generate(
     vocab_size = text_config(model.config).vocab_size
     dtype = next(model.parameters()).dtype
 
-    input_ids, actual_lengths, padded_len, prompt_offsets, position_ids_prompt = (
-        normalize_generation_inputs(input_ids, attention_mask)
-    )
+    _norm = normalize_generation_inputs(input_ids, attention_mask)
+    input_ids = _norm.input_ids
+    padded_len = _norm.padded_len
+    prompt_offsets = _norm.prompt_offsets
+    position_ids_prompt = _norm.position_ids
     batch_size = input_ids.shape[0]
 
     # KV caches
