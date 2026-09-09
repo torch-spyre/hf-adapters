@@ -15,6 +15,7 @@
 """Spyre execution for the transformer body of a full Gemma 4 vision tower."""
 
 import math
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -24,11 +25,12 @@ from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
     SpyreUnsupportedFeatureError,
+    SpyreUnsupportedModelError,
     _pad_proj_input_simple,
     _pad_proj_output_simple,
     apply_rope_matmul,
 )
-from hf_adapters.hf_gemma4 import _gemma4_rms_norm
+from hf_adapters.hf_gemma4 import _gemma4_mlp_activation, _gemma4_rms_norm
 
 
 def _pad_qk_linear(proj, num_heads, orig_head_dim, padded_head_dim):
@@ -48,10 +50,26 @@ def _pad_qk_linear(proj, num_heads, orig_head_dim, padded_head_dim):
     new_weight[:, padded_half + quarter : padded_half + 2 * quarter] = weight[
         :, 3 * quarter :
     ]
-    padded = nn.Linear(linear.in_features, num_heads * padded_head_dim, bias=False)
+    padded = nn.Linear(
+        linear.in_features,
+        num_heads * padded_head_dim,
+        bias=linear.bias is not None,
+    )
     padded.weight = nn.Parameter(
         new_weight.reshape(num_heads * padded_head_dim, -1), requires_grad=False
     )
+    if linear.bias is not None:
+        bias = linear.bias.detach().view(num_heads, orig_head_dim)
+        new_bias = torch.zeros(num_heads, padded_head_dim, dtype=bias.dtype)
+        new_bias[:, :quarter] = bias[:, :quarter]
+        new_bias[:, quarter : 2 * quarter] = bias[:, 2 * quarter : 3 * quarter]
+        new_bias[:, padded_half : padded_half + quarter] = bias[
+            :, quarter : 2 * quarter
+        ]
+        new_bias[:, padded_half + quarter : padded_half + 2 * quarter] = bias[
+            :, 3 * quarter :
+        ]
+        padded.bias = nn.Parameter(new_bias.reshape(-1), requires_grad=False)
     return padded
 
 
@@ -78,19 +96,10 @@ def _padded_rms_norm(hidden_states, weight, eps, orig_head_dim):
     return hidden_states.to(dtype)
 
 
-def _clip_bounds(module, which):
-    if not module.use_clipped_linears:
-        return None
-    return (
-        float(getattr(module, f"{which}_min").item()),
-        float(getattr(module, f"{which}_max").item()),
-    )
-
-
 def _clamp(hidden_states, bounds):
     if bounds is None:
         return hidden_states
-    return torch.clamp(hidden_states, min=bounds[0], max=bounds[1])
+    return torch.maximum(torch.minimum(hidden_states, bounds[1]), bounds[0])
 
 
 def _pad_mlp(layers, orig_intermediate, padded_intermediate):
@@ -107,62 +116,237 @@ def _pad_mlp(layers, orig_intermediate, padded_intermediate):
         )
 
 
-def _make_compiled_block(layer, num_heads, orig_head_dim, padded_head_dim):
+@dataclass(frozen=True)
+class _Gemma4VisionBlockSpec:
+    hidden_size: int
+    num_heads: int
+    orig_head_dim: int
+    padded_head_dim: int
+    intermediate_size: int
+    activation: str
+    scaling: float
+    input_norm_eps: float
+    q_norm_eps: float
+    k_norm_eps: float
+    v_norm_eps: float
+    post_attention_norm_eps: float
+    pre_feedforward_norm_eps: float
+    post_feedforward_norm_eps: float
+    projection_biases: tuple[bool, ...]
+    clipped_projections: tuple[bool, ...]
+
+
+def _prepare_clip_bounds(module):
+    if not module.use_clipped_linears:
+        return
+    for which in ("input", "output"):
+        for limit in ("min", "max"):
+            value = getattr(module, f"{which}_{limit}")
+            module.register_buffer(
+                f"_spyre_{which}_{limit}",
+                value.detach().clone(),
+                persistent=False,
+            )
+
+
+def _projection_state(module):
+    linear = module.linear
+    state = [linear.weight]
+    if linear.bias is not None:
+        state.append(linear.bias)
+    if module.use_clipped_linears:
+        state.extend(
+            [
+                module._spyre_input_min,
+                module._spyre_input_max,
+                module._spyre_output_min,
+                module._spyre_output_max,
+            ]
+        )
+    return tuple(state)
+
+
+def _vision_block_state(layer):
     attn = layer.self_attn
-    q_input_bounds = _clip_bounds(attn.q_proj, "input")
-    q_output_bounds = _clip_bounds(attn.q_proj, "output")
-    k_input_bounds = _clip_bounds(attn.k_proj, "input")
-    k_output_bounds = _clip_bounds(attn.k_proj, "output")
-    v_input_bounds = _clip_bounds(attn.v_proj, "input")
-    v_output_bounds = _clip_bounds(attn.v_proj, "output")
-    o_input_bounds = _clip_bounds(attn.o_proj, "input")
-    o_output_bounds = _clip_bounds(attn.o_proj, "output")
+    state = []
+    for module in (attn.q_proj, attn.k_proj, attn.v_proj, attn.o_proj):
+        state.extend(_projection_state(module))
+    state.extend([attn.q_norm.weight, attn.k_norm.weight])
+    for module in (layer.mlp.gate_proj, layer.mlp.up_proj, layer.mlp.down_proj):
+        state.extend(_projection_state(module))
+    state.extend(
+        [
+            layer.input_layernorm.weight,
+            layer.post_attention_layernorm.weight,
+            layer.pre_feedforward_layernorm.weight,
+            layer.post_feedforward_layernorm.weight,
+        ]
+    )
+    return tuple(state)
 
-    attn.q_proj.linear = _pad_qk_linear(
-        attn.q_proj, num_heads, orig_head_dim, padded_head_dim
-    )
-    attn.k_proj.linear = _pad_qk_linear(
-        attn.k_proj, num_heads, orig_head_dim, padded_head_dim
-    )
-    attn.v_proj.linear = _pad_proj_output_simple(
-        attn.v_proj.linear, num_heads, orig_head_dim, padded_head_dim
-    )
-    attn.o_proj.linear = _pad_proj_input_simple(
-        attn.o_proj.linear, num_heads, orig_head_dim, padded_head_dim
-    )
-    attn.q_norm.weight = _pad_norm_weight(attn.q_norm, orig_head_dim, padded_head_dim)
-    attn.k_norm.weight = _pad_norm_weight(attn.k_norm, orig_head_dim, padded_head_dim)
 
-    def block_forward(hidden_states, rope_matrices, attn_mask):
+def _vision_block_spec(layer, num_heads, orig_head_dim, padded_head_dim):
+    attn = layer.self_attn
+    projections = (
+        attn.q_proj,
+        attn.k_proj,
+        attn.v_proj,
+        attn.o_proj,
+        layer.mlp.gate_proj,
+        layer.mlp.up_proj,
+        layer.mlp.down_proj,
+    )
+    activation = layer.mlp.config.hidden_activation
+    if activation != "gelu_pytorch_tanh":
+        raise SpyreUnsupportedModelError(
+            "Gemma 4 vision checkpoints must use "
+            "hidden_activation='gelu_pytorch_tanh'; "
+            f"got {activation!r}"
+        )
+    if attn.v_norm.with_scale:
+        raise SpyreUnsupportedFeatureError(
+            "Scaled Gemma 4 vision V normalization is not supported on Spyre."
+        )
+    return _Gemma4VisionBlockSpec(
+        hidden_size=layer.input_layernorm.weight.numel(),
+        num_heads=num_heads,
+        orig_head_dim=orig_head_dim,
+        padded_head_dim=padded_head_dim,
+        intermediate_size=layer.mlp.gate_proj.linear.out_features,
+        activation=activation,
+        scaling=float(attn.scaling),
+        input_norm_eps=layer.input_layernorm.eps,
+        q_norm_eps=attn.q_norm.eps,
+        k_norm_eps=attn.k_norm.eps,
+        v_norm_eps=attn.v_norm.eps,
+        post_attention_norm_eps=layer.post_attention_layernorm.eps,
+        pre_feedforward_norm_eps=layer.pre_feedforward_layernorm.eps,
+        post_feedforward_norm_eps=layer.post_feedforward_layernorm.eps,
+        projection_biases=tuple(
+            module.linear.bias is not None for module in projections
+        ),
+        clipped_projections=tuple(module.use_clipped_linears for module in projections),
+    )
+
+
+def _take_projection(state, pos, has_bias, is_clipped):
+    weight = state[pos]
+    pos += 1
+    if has_bias:
+        bias = state[pos]
+        pos += 1
+    else:
+        bias = None
+    if is_clipped:
+        input_bounds = (state[pos], state[pos + 1])
+        output_bounds = (state[pos + 2], state[pos + 3])
+        pos += 4
+    else:
+        input_bounds = output_bounds = None
+    return weight, bias, input_bounds, output_bounds, pos
+
+
+def _make_vision_forward(spec):
+    def block_forward(state, hidden_states, rope_matrices, attn_mask):
+        pos = 0
+        (
+            q_weight,
+            q_bias,
+            q_input_bounds,
+            q_output_bounds,
+            pos,
+        ) = _take_projection(
+            state, pos, spec.projection_biases[0], spec.clipped_projections[0]
+        )
+        (
+            k_weight,
+            k_bias,
+            k_input_bounds,
+            k_output_bounds,
+            pos,
+        ) = _take_projection(
+            state, pos, spec.projection_biases[1], spec.clipped_projections[1]
+        )
+        (
+            v_weight,
+            v_bias,
+            v_input_bounds,
+            v_output_bounds,
+            pos,
+        ) = _take_projection(
+            state, pos, spec.projection_biases[2], spec.clipped_projections[2]
+        )
+        (
+            o_weight,
+            o_bias,
+            o_input_bounds,
+            o_output_bounds,
+            pos,
+        ) = _take_projection(
+            state, pos, spec.projection_biases[3], spec.clipped_projections[3]
+        )
+        q_norm_weight, k_norm_weight = state[pos : pos + 2]
+        pos += 2
+        (
+            gate_weight,
+            gate_bias,
+            gate_input_bounds,
+            gate_output_bounds,
+            pos,
+        ) = _take_projection(
+            state, pos, spec.projection_biases[4], spec.clipped_projections[4]
+        )
+        (
+            up_weight,
+            up_bias,
+            up_input_bounds,
+            up_output_bounds,
+            pos,
+        ) = _take_projection(
+            state, pos, spec.projection_biases[5], spec.clipped_projections[5]
+        )
+        (
+            down_weight,
+            down_bias,
+            down_input_bounds,
+            down_output_bounds,
+            pos,
+        ) = _take_projection(
+            state, pos, spec.projection_biases[6], spec.clipped_projections[6]
+        )
+        input_norm_weight, post_attn_norm_weight = state[pos : pos + 2]
+        pos += 2
+        pre_ffn_norm_weight, post_ffn_norm_weight = state[pos : pos + 2]
+
         bsz, seq_len, _ = hidden_states.shape
         residual = hidden_states
         hidden_states = _gemma4_rms_norm(
-            hidden_states, layer.input_layernorm.weight, layer.input_layernorm.eps
+            hidden_states, input_norm_weight, spec.input_norm_eps
         )
 
-        query = attn.q_proj.linear(_clamp(hidden_states, q_input_bounds))
+        query = F.linear(_clamp(hidden_states, q_input_bounds), q_weight, q_bias)
         query = _clamp(query, q_output_bounds).view(
-            bsz, seq_len, num_heads, padded_head_dim
+            bsz, seq_len, spec.num_heads, spec.padded_head_dim
         )
         query = _padded_rms_norm(
-            query, attn.q_norm.weight, attn.q_norm.eps, orig_head_dim
+            query, q_norm_weight, spec.q_norm_eps, spec.orig_head_dim
         ).transpose(1, 2)
 
-        key = attn.k_proj.linear(_clamp(hidden_states, k_input_bounds))
+        key = F.linear(_clamp(hidden_states, k_input_bounds), k_weight, k_bias)
         key = _clamp(key, k_output_bounds).view(
-            bsz, seq_len, num_heads, padded_head_dim
+            bsz, seq_len, spec.num_heads, spec.padded_head_dim
         )
         key = _padded_rms_norm(
-            key, attn.k_norm.weight, attn.k_norm.eps, orig_head_dim
+            key, k_norm_weight, spec.k_norm_eps, spec.orig_head_dim
         ).transpose(1, 2)
 
-        value = attn.v_proj.linear(_clamp(hidden_states, v_input_bounds))
+        value = F.linear(_clamp(hidden_states, v_input_bounds), v_weight, v_bias)
         value = _clamp(value, v_output_bounds).view(
-            bsz, seq_len, num_heads, padded_head_dim
+            bsz, seq_len, spec.num_heads, spec.padded_head_dim
         )
-        value = _padded_rms_norm(value, None, attn.v_norm.eps, orig_head_dim).transpose(
-            1, 2
-        )
+        value = _padded_rms_norm(
+            value, None, spec.v_norm_eps, spec.orig_head_dim
+        ).transpose(1, 2)
 
         query = apply_rope_matmul(query, rope_matrices).contiguous()
         key = apply_rope_matmul(key, rope_matrices).contiguous()
@@ -173,32 +357,93 @@ def _make_compiled_block(layer, num_heads, orig_head_dim, padded_head_dim):
             attn_mask=attn_mask,
             dropout_p=0.0,
             is_causal=False,
-            scale=1.0,
+            scale=spec.scaling,
         )
+        attn_output = _clamp(attn_output, o_input_bounds)
         attn_output = attn_output.transpose(1, 2).reshape(bsz, seq_len, -1)
-        attn_output = attn.o_proj.linear(_clamp(attn_output, o_input_bounds))
+        attn_output = F.linear(attn_output, o_weight, o_bias)
         attn_output = _clamp(attn_output, o_output_bounds)
         hidden_states = residual + _gemma4_rms_norm(
-            attn_output,
-            layer.post_attention_layernorm.weight,
-            layer.post_attention_layernorm.eps,
+            attn_output, post_attn_norm_weight, spec.post_attention_norm_eps
         )
 
         residual = hidden_states
         hidden_states = _gemma4_rms_norm(
-            hidden_states,
-            layer.pre_feedforward_layernorm.weight,
-            layer.pre_feedforward_layernorm.eps,
+            hidden_states, pre_ffn_norm_weight, spec.pre_feedforward_norm_eps
         )
-        hidden_states = layer.mlp(hidden_states)
+        gate = F.linear(
+            _clamp(hidden_states, gate_input_bounds), gate_weight, gate_bias
+        )
+        gate = _clamp(gate, gate_output_bounds)
+        up = F.linear(_clamp(hidden_states, up_input_bounds), up_weight, up_bias)
+        up = _clamp(up, up_output_bounds)
+        hidden_states = _gemma4_mlp_activation(gate) * up
+        hidden_states = F.linear(
+            _clamp(hidden_states, down_input_bounds), down_weight, down_bias
+        )
+        hidden_states = _clamp(hidden_states, down_output_bounds)
         hidden_states = _gemma4_rms_norm(
-            hidden_states,
-            layer.post_feedforward_layernorm.weight,
-            layer.post_feedforward_layernorm.eps,
+            hidden_states, post_ffn_norm_weight, spec.post_feedforward_norm_eps
         )
         return residual + hidden_states
 
-    return torch.compile(block_forward, dynamic=False)
+    return block_forward
+
+
+def _prepare_vision_blocks(layers, num_heads, orig_head_dim, padded_head_dim):
+    compiled_by_spec = {}
+    state_signature_by_spec = {}
+    compiled_blocks = []
+    specs = []
+    for i, layer in enumerate(layers):
+        attn = layer.self_attn
+        attn.q_proj.linear = _pad_qk_linear(
+            attn.q_proj, num_heads, orig_head_dim, padded_head_dim
+        )
+        attn.k_proj.linear = _pad_qk_linear(
+            attn.k_proj, num_heads, orig_head_dim, padded_head_dim
+        )
+        attn.v_proj.linear = _pad_proj_output_simple(
+            attn.v_proj.linear, num_heads, orig_head_dim, padded_head_dim
+        )
+        attn.o_proj.linear = _pad_proj_input_simple(
+            attn.o_proj.linear, num_heads, orig_head_dim, padded_head_dim
+        )
+        attn.q_norm.weight = _pad_norm_weight(
+            attn.q_norm, orig_head_dim, padded_head_dim
+        )
+        attn.k_norm.weight = _pad_norm_weight(
+            attn.k_norm, orig_head_dim, padded_head_dim
+        )
+        for module in (
+            attn.q_proj,
+            attn.k_proj,
+            attn.v_proj,
+            attn.o_proj,
+            layer.mlp.gate_proj,
+            layer.mlp.up_proj,
+            layer.mlp.down_proj,
+        ):
+            _prepare_clip_bounds(module)
+
+        spec = _vision_block_spec(layer, num_heads, orig_head_dim, padded_head_dim)
+        state = _vision_block_state(layer)
+        signature = tuple((tuple(tensor.shape), tensor.dtype) for tensor in state)
+        if (
+            spec in state_signature_by_spec
+            and state_signature_by_spec[spec] != signature
+        ):
+            raise ValueError(
+                f"Gemma 4 vision layer {i} state does not match its compile group"
+            )
+        state_signature_by_spec.setdefault(spec, signature)
+        if spec not in compiled_by_spec:
+            compiled_by_spec[spec] = torch.compile(
+                _make_vision_forward(spec), dynamic=False, fullgraph=True
+            )
+        compiled_blocks.append(compiled_by_spec[spec])
+        specs.append(spec)
+    return compiled_blocks, specs, len(compiled_by_spec)
 
 
 def _build_rope_matrices(inv_freq, position_ids, padded_head_dim, dtype):
@@ -256,12 +501,13 @@ def prepare_for_spyre(model):
         model._spyre_gemma4_vision_std_bias = tower.std_bias.detach().cpu()
         model._spyre_gemma4_vision_std_scale = tower.std_scale.detach().cpu()
     model._spyre_gemma4_vision_head_dim = padded_head_dim
-    model._spyre_gemma4_vision_blocks = [
-        _make_compiled_block(
-            layer, config.num_attention_heads, orig_head_dim, padded_head_dim
-        )
-        for layer in layers
-    ]
+    (
+        model._spyre_gemma4_vision_blocks,
+        model._spyre_gemma4_vision_block_specs,
+        model._spyre_gemma4_vision_num_compile_groups,
+    ) = _prepare_vision_blocks(
+        layers, config.num_attention_heads, orig_head_dim, padded_head_dim
+    )
 
 
 def prefill_vision_tower(model, pixel_values, position_ids):
@@ -300,8 +546,10 @@ def prefill_vision_tower(model, pixel_values, position_ids):
     hidden_states = hidden_states.to(DEVICE)
     rope_matrices = rope_matrices.to(DEVICE)
     attn_mask = attn_mask.to(DEVICE)
-    for block in model._spyre_gemma4_vision_blocks:
-        hidden_states = block(hidden_states, rope_matrices, attn_mask).clone()
+    for layer, block in zip(tower.encoder.layers, model._spyre_gemma4_vision_blocks):
+        hidden_states = block(
+            _vision_block_state(layer), hidden_states, rope_matrices, attn_mask
+        ).clone()
 
     hidden_states = hidden_states[:, :seq_len].to("cpu")
     output_length = pixel_values.shape[-2] // (tower.config.pooling_kernel_size**2)
