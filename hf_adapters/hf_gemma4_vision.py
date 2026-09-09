@@ -394,7 +394,6 @@ def _prepare_vision_blocks(layers, num_heads, orig_head_dim, padded_head_dim):
     compiled_by_spec = {}
     state_signature_by_spec = {}
     compiled_blocks = []
-    specs = []
     for i, layer in enumerate(layers):
         attn = layer.self_attn
         attn.q_proj.linear = _pad_qk_linear(
@@ -442,8 +441,7 @@ def _prepare_vision_blocks(layers, num_heads, orig_head_dim, padded_head_dim):
                 _make_vision_forward(spec), dynamic=False, fullgraph=True
             )
         compiled_blocks.append(compiled_by_spec[spec])
-        specs.append(spec)
-    return compiled_blocks, specs, len(compiled_by_spec)
+    return compiled_blocks
 
 
 def _build_rope_matrices(inv_freq, position_ids, padded_head_dim, dtype):
@@ -501,11 +499,7 @@ def prepare_for_spyre(model):
         model._spyre_gemma4_vision_std_bias = tower.std_bias.detach().cpu()
         model._spyre_gemma4_vision_std_scale = tower.std_scale.detach().cpu()
     model._spyre_gemma4_vision_head_dim = padded_head_dim
-    (
-        model._spyre_gemma4_vision_blocks,
-        model._spyre_gemma4_vision_block_specs,
-        model._spyre_gemma4_vision_num_compile_groups,
-    ) = _prepare_vision_blocks(
+    model._spyre_gemma4_vision_blocks = _prepare_vision_blocks(
         layers, config.num_attention_heads, orig_head_dim, padded_head_dim
     )
 
