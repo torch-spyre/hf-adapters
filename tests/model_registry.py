@@ -358,14 +358,12 @@ CAUSAL_LM_MODELS = {
         "size": "1b",
         "kind": "dspark_draft",
     },
-    # hf_diffusion_gemma.py — block-diffusion LLM (gated)
     "diffusiongemma_26b": {
         "name": "DiffusionGemma 26B-A4B-it",
         "path": "google/diffusiongemma-26B-A4B-it",
         "adapter": "hf_diffusion_gemma.py",
         "size": "26b",
         "dtype": "bfloat16",
-        "is_gated": True,
         "kind": "diffusion",  # not AR; uses block-diffusion generate loop
     },
 }
@@ -732,11 +730,14 @@ _include_gated_flag = _include_gated()
 # proposers, driven by ``_run_draft_block`` — no ``generate``), so they are
 # registered for adapter-coverage but excluded from the generate-based CPU/Spyre
 # causal-LM harnesses; they are exercised by tests/spyre/test_dspark_draft_spyre.py.
+# ``kind == "diffusion"`` entries (e.g. DiffusionGemma) use a block-diffusion
+# generate loop that is incompatible with the AR causal-LM harness; they are
+# exercised by tests/spyre/test_diffusion_gemma.py.
 CAUSAL_PATHS: list[str] = _exclude(
     _select_representative_paths(
         CAUSAL_LM_MODELS,
         include_gated=_include_gated_flag,
-        predicate=lambda info: info.get("kind") != "dspark_draft",
+        predicate=lambda info: info.get("kind") not in ("dspark_draft", "diffusion"),
     )
 )
 MULTICARD_SMOKE_PATHS: list[str] = _exclude(
@@ -817,7 +818,7 @@ ALL_CAUSAL_PATHS: list[str] = _exclude(
     _all_paths(
         CAUSAL_LM_MODELS,
         include_gated=_include_gated_flag,
-        predicate=lambda info: info.get("kind") != "dspark_draft",
+        predicate=lambda info: info.get("kind") not in ("dspark_draft", "diffusion"),
     )
 )
 ALL_EMBED_PATHS: list[str] = _exclude(
