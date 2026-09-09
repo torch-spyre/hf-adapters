@@ -233,10 +233,12 @@ def _embed_and_scatter(model, input_ids, image_features):
     image_token_id = model.config.image_token_id
     dtype = get_model_dtype(model)
 
-    ids = input_ids.to(backbone.embed_tokens.weight.device)
+    image_mask = input_ids.to("cpu") == image_token_id  # [B, L] bool
+    text_ids = input_ids.to("cpu").clone()
+    text_ids[image_mask] = text_config(model.config).pad_token_id
+    ids = text_ids.to(backbone.embed_tokens.weight.device)
     h = backbone.embed_tokens(ids)  # scaled word embeddings, on embed device
 
-    image_mask = input_ids == image_token_id  # [B, L] bool, CPU
     n_image_tokens = int(image_mask.sum())
     hidden = h.shape[-1]
     feats = image_features.to("cpu", dtype)
@@ -381,7 +383,6 @@ def _logits_from_embeds(
             )
 
         ple_input_ids = input_ids
-        ple_inputs_embeds = inputs_embeds
         if inputs_embeds.shape[1] > 1:
             image_mask = input_ids.to("cpu") == model.config.image_token_id
             if image_mask.any():
@@ -389,18 +390,8 @@ def _logits_from_embeds(
                 ple_input_ids[image_mask] = cfg.pad_token_id
                 ple_input_ids = ple_input_ids.to(inputs_embeds.device)
 
-                backbone = get_backbone(model)
-                pad_embedding = backbone.embed_tokens.weight[
-                    cfg.pad_token_id : cfg.pad_token_id + 1
-                ]
-                keep = (~image_mask).to(inputs_embeds.dtype).unsqueeze(-1)
-                keep = keep.to(inputs_embeds.device)
-                ple_inputs_embeds = inputs_embeds * keep + pad_embedding.unsqueeze(
-                    0
-                ) * (1 - keep)
-
         per_layer_inputs = hf_gemma4._compute_per_layer_inputs(
-            model, ple_inputs_embeds, ple_input_ids
+            model, inputs_embeds, ple_input_ids
         )
     else:
         per_layer_inputs = None

@@ -857,6 +857,28 @@ def _block_spec(block, layer_type):
         )
     ple_dim = block.per_layer_input_gate.out_features if block.has_ple else 0
     post_ple_eps = block.post_per_layer_input_norm.eps if block.has_ple else 0.0
+    scaled_norms = [
+        ("input_layernorm", block.input_layernorm),
+        ("q_norm", attn.q_norm),
+        ("post_attention_layernorm", block.post_attention_layernorm),
+        ("pre_feedforward_layernorm", block.pre_feedforward_layernorm),
+        ("post_feedforward_layernorm", block.post_feedforward_layernorm),
+    ]
+    if kind == "writer":
+        scaled_norms.append(("k_norm", attn.k_norm))
+    if block.has_ple:
+        scaled_norms.append(
+            ("post_per_layer_input_norm", block.post_per_layer_input_norm)
+        )
+    unscaled = [name for name, norm in scaled_norms if not norm.with_scale]
+    if unscaled:
+        raise SpyreUnsupportedModelError(
+            "Gemma 4 requires scaled RMSNorm for " + ", ".join(unscaled)
+        )
+    if kind == "writer" and attn.v_norm.with_scale:
+        raise SpyreUnsupportedModelError(
+            "Gemma 4 requires an unscaled RMSNorm for v_norm"
+        )
     return _Gemma4BlockSpec(
         kind=kind,
         layer_type=layer_type,
