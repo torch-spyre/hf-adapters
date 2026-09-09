@@ -51,6 +51,7 @@ from hf_adapters.hf_common import (
 )
 
 _GENERATION_INPUT_NAMES: tuple = ("pixel_values", "image_grid_thw")
+_GENERATION_REQUIRED_INPUT_NAMES: tuple = ()
 _GENERATION_TOKEN_ALIGNED_INPUTS: dict = {}
 
 # A finite mask penalty is deliberate. Spyre's 16-bit arithmetic must never see
@@ -249,6 +250,7 @@ def _logits_from_embeds(
         value_caches,
         cache_index,
     )
+    h = h[:, -1:, :]
     logits = model.lm_head(h)[..., : model._spyre_original_vocab_size]
     logits = logits * cfg.output_multiplier
     cap = cfg.final_logit_softcapping
@@ -511,10 +513,16 @@ def _prefill_forward(
     key_caches,
     value_caches,
     cache_index,
-    pixel_values,
-    image_grid_thw,
+    pixel_values=None,
+    image_grid_thw=None,
 ):
-    features = _vision_features(model, pixel_values, image_grid_thw)
+    has_pixels = pixel_values is not None
+    has_grid = image_grid_thw is not None
+    if has_pixels != has_grid:
+        raise ValueError("pixel_values and image_grid_thw must be supplied together")
+    features = (
+        _vision_features(model, pixel_values, image_grid_thw) if has_pixels else None
+    )
     embeds = _embed_and_scatter(model, input_ids, features)
     return _logits_from_embeds(
         model,
