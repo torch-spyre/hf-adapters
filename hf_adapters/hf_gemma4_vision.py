@@ -23,6 +23,7 @@ import torch.nn.functional as F
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
+    SpyreUnsupportedFeatureError,
     _pad_proj_input_simple,
     _pad_proj_output_simple,
     apply_rope_matmul,
@@ -232,12 +233,12 @@ def prepare_for_spyre(model):
     config = tower.config
     layers = tower.encoder.layers
     if config.num_key_value_heads != config.num_attention_heads:
-        raise NotImplementedError(
+        raise SpyreUnsupportedFeatureError(
             "Gemma 4 vision GQA is not supported on Spyre; num_key_value_heads "
             "must equal num_attention_heads."
         )
     if config.rope_parameters.get("rope_type", "default") != "default":
-        raise NotImplementedError(
+        raise SpyreUnsupportedFeatureError(
             "Gemma 4 vision supports only default, unscaled RoPE on Spyre."
         )
     orig_head_dim = config.head_dim

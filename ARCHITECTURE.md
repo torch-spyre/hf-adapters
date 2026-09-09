@@ -74,7 +74,7 @@ CPU where integer/control-flow-heavy frontend or pooling operations do not lower
 | Gemma 4 26B-A4B | gemma4 | Gemma 4 vision tower + MoE text | Yes | Not run | Yes | Yes |
 
 **CPU Accurate** = adapter `generate` matches stock `model.generate` token-for-token on CPU (`test_vlm_e2e_cpu.py`).
-**Spyre Runs** = `test_vlm_e2e_spyre.py` drives the adapter teacher-forced on stock's tokens and asserts per-step logit cosine ≥ 0.99 vs the CPU reference over prefill + decode steps (top-1 agreement is reported, not asserted — an open-ended caption hits near-ties where the bf16-substrate winner is numerically arbitrary; see Multimodal VLM Path). granite-vision-4.1 holds cosine ≥ 0.99991 at every step and produces a correct, coherent caption. Gemma 4 12B IT runs in **bf16** (like the rest of the Gemma family, it overflows its residual stream in fp16) and holds cosine ≥ 0.99558 at every step with 4/5 top-1 agreement. Gemma 4 E2B holds cosine ≥ 0.99491 with 4/5 top-1 agreement after preserving stock PLE and mask semantics and running its 16-layer vision transformer on Spyre. Gemma 4 26B-A4B holds cosine ≥ 0.99956 with 4/5 top-1 agreement while running its 27-layer vision transformer on Spyre.
+**Spyre Runs** = `test_vlm_e2e_spyre.py` drives the adapter teacher-forced on stock's tokens and asserts per-step logit cosine ≥ 0.99 vs the CPU reference over prefill + decode steps (top-1 agreement is reported, not asserted — an open-ended caption hits near-ties where the bf16-substrate winner is numerically arbitrary; see Multimodal VLM Path). granite-vision-4.1 holds cosine ≥ 0.99991 at every step and produces a correct, coherent caption. Gemma 4 12B IT runs in **bf16** (like the rest of the Gemma family, it overflows its residual stream in fp16) and holds cosine ≥ 0.99939 at every step with 5/5 top-1 agreement. Gemma 4 E2B holds cosine ≥ 0.99502 with 4/5 top-1 agreement after preserving stock PLE and mask semantics and running its 16-layer vision transformer on Spyre. Gemma 4 26B-A4B holds cosine ≥ 0.99956 with 4/5 top-1 agreement while running its 27-layer vision transformer on Spyre.
 
 ### Embedding
 
@@ -772,7 +772,8 @@ dense and PLE/KV-sharing checkpoints reuse `hf_gemma4`, while
   standardization remains on CPU with the pooler.
 - **PLE preserves stock multimodal semantics.** The token-identity component uses
   image-placeholder IDs replaced with the pad token, while the contextual component
-  projects embeddings with multimodal positions replaced by the pad embedding.
+  projects embeddings with multimodal positions replaced by the raw, unscaled pad
+  embedding weight.
   Decode passes each generated
   token ID through the generic VLM hook so PLE can be recomputed per step. Existing
   producer-cache mapping handles the trailing KV-sharing layers.
@@ -787,10 +788,12 @@ dense and PLE/KV-sharing checkpoints reuse `hf_gemma4`, while
   HF RMSNorm uses), keeping the affine multiply in bf16. Without it the VLM logits are
   all-NaN (see docs/gemma4_mm_vision_layernorm_spyre.md).
 - **Bidirectional vision attention at prefill.** `use_bidirectional_attention ==
-  "vision"`: within one image the soft-tokens attend bidirectionally in sliding
-  layers. Full-attention layers remain causal; sliding layers use
-  `AND(sliding_window, OR(causal, blockwise))`. Decode steps are pure text (one
-  new causal token), so no blockwise band is needed after prefill.
+  "vision"`: full-vision `Gemma4Config` checkpoints keep full-attention layers
+  causal and use `AND(sliding_window, OR(causal, blockwise))` for sliding layers.
+  Encoder-free `Gemma4UnifiedConfig` checkpoints use `OR(causal, blockwise)` for
+  full layers and `OR(AND(sliding_window, causal), blockwise)` for sliding layers,
+  matching the stock Unified forward path. Decode steps are pure text (one new
+  causal token), so no blockwise band is needed after prefill.
 - **Runs in bf16.** Like the rest of the Gemma family (Gemma 3 / EmbeddingGemma),
   Gemma 4 overflows its residual stream in fp16 (`inf` → NaN end-to-end), so it
   runs in bf16. This is a separate concern from the vision LayerNorm defect above,

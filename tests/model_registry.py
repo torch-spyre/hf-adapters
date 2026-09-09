@@ -605,11 +605,14 @@ VISION_MODELS = {
         "dtype": "bfloat16",  # blocked-FP8 checkpoint, dequantized to bf16
         "size": "3b",
     },
+    # hf_gemma4_vision.py — Vision tower of enocoder-based Gemma4 models
+    "gemma4_vision_tower": {
+        "name": "Gemma 4 26B-A4B (Vision tower)",
+        "path": "google/gemma-4-26B-A4B-it",
+        "adapter": "hf_gemma4_vision.py",
+        "kind": "tower",
+    },
     # hf_gemma4_mm.py — unified encoder-free VLM (image + text -> text)
-    # Note: google/gemma-4-12b (base, no chat template) also resolves via this
-    # adapter (Gemma4UnifiedConfig -> hf_gemma4_mm) but is tested via the
-    # causal-LM path (gemma4_base in CAUSAL_LM_MODELS); the VLM harness requires
-    # apply_chat_template, which the base model does not provide.
     "gemma4_mm": {
         "name": "Gemma 4 12B IT (unified VLM)",
         "path": "google/gemma-4-12B-it",
