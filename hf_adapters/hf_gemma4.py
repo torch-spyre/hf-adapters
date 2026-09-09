@@ -893,7 +893,6 @@ def prepare_gemma4_blocks(
     """Install registered blocks and share compiled executors by structure."""
     compiled_by_spec = {}
     compiled_blocks = []
-    specs = []
     for i, layer in enumerate(list(layers)):
         if producer_of[i] is None:
             block = Gemma4Block(
@@ -923,8 +922,7 @@ def prepare_gemma4_blocks(
                 forward, dynamic=False, fullgraph=True
             )
         compiled_blocks.append(compiled_by_spec[spec])
-        specs.append(spec)
-    return compiled_blocks, specs
+    return compiled_blocks
 
 
 def _build_layer_masks(
@@ -1257,10 +1255,7 @@ def prepare_text_decoder_for_spyre(model):
         model, allow_moe=False
     )
 
-    (
-        model._spyre_compiled_blocks,
-        model._spyre_gemma4_block_specs,
-    ) = prepare_gemma4_blocks(
+    model._spyre_compiled_blocks = prepare_gemma4_blocks(
         backbone.layers,
         cfg.layer_types,
         num_q_heads_per_layer,
