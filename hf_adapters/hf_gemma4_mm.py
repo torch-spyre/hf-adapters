@@ -16,9 +16,11 @@
 HuggingFace adapter for Gemma 4 multimodal models on Spyre — image→text.
 
 Supports both encoder-free ``Gemma4UnifiedConfig`` checkpoints and full-vision
-``Gemma4Config`` checkpoints. The shared multimodal frontend scatters projected
-image features into ``<image>`` token slots, then delegates to the existing
-Gemma 4 dense/PLE or MoE text implementation selected by the nested text config.
+``Gemma4Config`` checkpoints. Full checkpoints run their transformer encoder
+blocks on Spyre while keeping position lookup and spatial pooling on CPU. The
+shared multimodal frontend scatters projected image features into ``<image>``
+token slots, then delegates to the existing Gemma 4 dense/PLE or MoE text
+implementation selected by the nested text config.
 
 For encoder-free checkpoints, vision is a pure projection of raw
 (processor-merged) pixel patches into the LM embedding space:
@@ -40,21 +42,11 @@ For encoder-free checkpoints, vision is a pure projection of raw
     logits  ──► final_logit_softcapping
 
 **Bidirectional vision attention.** ``text_config.use_bidirectional_attention ==
-"vision"``: within one image, the soft-tokens attend to each other
-bidirectionally. Stock builds every layer-type mask via
-``create_causal_mask(block_sequence_ids=...)``, which OR-s a "blockwise" overlay
-(same image group ⇒ allowed, from ``mm_token_type_ids``) into the causal mask for
-**both** full and sliding layers — NOT sliding-only. So at prefill we OR the
-blockwise band into the base causal mask for both types:
-
-  - full_attention  = OR(causal, blockwise)
-  - sliding_attention = AND(sliding_window, OR(causal, blockwise))
-
-Decode steps are pure text (one new causal token), so no blockwise band is
-needed after prefill. (Verified against stock ``create_causal_mask``: the
-``create_masks_for_vision_model`` docstring claiming globals stay causal is not
-the path the forward takes — traced directly through
-``create_masks_for_generate`` → ``create_causal_mask``.)
+"vision"``: within one image, soft tokens attend bidirectionally in sliding
+layers. Stock keeps full-attention layers causal and builds sliding masks as
+``AND(sliding_window, OR(causal, blockwise))``, where the blockwise overlay allows
+positions belonging to the same image group. Decode steps are pure text, so no
+blockwise band is needed after prefill.
 
 **Vision embedder on Spyre.** The compilable core (LN₁→Dense→LN₂→+posemb→
 pos_norm→RMSNorm→Linear) is ``torch.compile``d and runs on Spyre. The
@@ -75,7 +67,7 @@ Scope: **text + image**. Audio and video are asserted out loudly
 
 import torch
 
-from hf_adapters import hf_gemma4, hf_gemma4_moe
+from hf_adapters import hf_gemma4, hf_gemma4_moe, hf_gemma4_vision
 from hf_adapters.hf_common import (
     DEVICE,
     get_backbone,
@@ -157,11 +149,17 @@ def prepare_for_spyre(model):
         hf_gemma4.prepare_text_decoder_for_spyre(model)
 
     if getattr(model.model, "vision_tower", None) is not None:
-        # Gemma4Config checkpoints have a full vision transformer. Keep the stock
-        # tower and its projection on CPU for the initial correctness path; the
-        # shared loader re-pins these after its blanket Spyre device move.
+        # Full checkpoints run the dense transformer body on Spyre. The position
+        # lookup, spatial pooler, and text-space projection remain on CPU.
+        hf_gemma4_vision.prepare_for_spyre(model)
         cpu_submodules = list(getattr(model, "_spyre_cpu_submodules", []))
-        cpu_submodules.extend(["model.vision_tower", "model.embed_vision"])
+        cpu_submodules.extend(
+            [
+                "model.vision_tower.patch_embedder",
+                "model.vision_tower.pooler",
+                "model.embed_vision",
+            ]
+        )
         if getattr(model.model, "audio_tower", None) is not None:
             cpu_submodules.extend(["model.audio_tower", "model.embed_audio"])
         model._spyre_cpu_submodules = cpu_submodules
@@ -194,21 +192,19 @@ def _build_pos_embs(embedder, image_position_ids):
 
 def _image_features(model, pixel_values, image_position_ids):
     """Run the checkpoint's vision path and return flattened text-space features."""
-    if getattr(model.model, "vision_tower", None) is not None:
-        outputs = model.model.get_image_features(
-            pixel_values.to("cpu"),
-            image_position_ids.to("cpu"),
-            return_dict=True,
-        )
-        return torch.cat(outputs.pooler_output, dim=0)
-
-    embedder = _vision_embedder(model)
-    dtype = get_model_dtype(model)
-
-    # anyres / multi-image: [B, T, P, ...] -> [B*T, P, ...] (stock flattens too)
+    # anyres / multi-image: [B, T, P, ...] -> [B*T, P, ...]
     if pixel_values.dim() == 4:
         pixel_values = pixel_values.flatten(0, 1)
         image_position_ids = image_position_ids.flatten(0, 1)
+
+    if getattr(model.model, "vision_tower", None) is not None:
+        features = hf_gemma4_vision.prefill_vision_tower(
+            model, pixel_values, image_position_ids
+        )
+        return model.model.embed_vision(features.to("cpu"))
+
+    embedder = _vision_embedder(model)
+    dtype = get_model_dtype(model)
 
     pos_embs = _build_pos_embs(embedder, image_position_ids).to(dtype)
     features = model._spyre_vision_core(
@@ -301,22 +297,12 @@ def _blockwise_band(mm_token_type_ids, padded_len, max_cache_len, dtype):
 
 
 def _sliding_window_lower_band(mask, sliding_window):
-    """Add stock's sliding-window *lower bound* to an additive causal prefill mask.
+    """Apply stock's sliding-window lower bound to an additive prefill mask.
 
     Masks keys further back than ``sliding_window`` (``q - k >= window``) but —
-    unlike ``hf_common.add_causal_sliding_window_band`` — does NOT mask future
-    keys (``q - k < 0``). This is stock's ``sliding_window_overlay``
-    (``kv_idx > q_idx - window``), an ``and_mask`` over the *causal* base: the
-    causal upper bound already lives in ``mask``, so the window only supplies the
-    backward cutoff.
-
-    NOTE: this must be applied to the causal base *before* the blockwise vision
-    band is OR-ed on top — stock composes the sliding mask as
-    ``OR(AND(sliding_window_overlay, causal), blockwise)`` with the blockwise
-    overlay as the OUTERMOST op (``masking_utils.create_sliding_window_causal_mask``,
-    line 1189 then 1222), so the window must NOT gate the bidirectional image
-    pairs. Applying it after the OR would clip intra-image-block attention to the
-    window (wrong for a single image/video block longer than ``sliding_window``).
+    unlike ``hf_common.add_causal_sliding_window_band`` — does not independently
+    mask future keys. For multimodal prefill, call this after OR-ing the causal and
+    blockwise masks so the window gates bidirectional image edges too.
 
     Prefill only (``cache_index`` starts at cache slot 0), so a query row's cache
     coordinate is its row index ``q`` and the key column is the cache slot ``k``.
@@ -336,42 +322,14 @@ def _sliding_window_lower_band(mask, sliding_window):
 
 
 def _build_mm_masks(prefill_mask, blockwise_band, sliding_window):
-    """Per-layer-type masks for a multimodal prefill: {full, sliding}.
-
-    Stock builds each mask type from the same blockwise vision overlay, but ORs
-    it in as the OUTERMOST op for **both** full and sliding layers (traced through
-    ``create_masks_for_generate`` → ``create_causal_mask`` /
-    ``create_sliding_window_causal_mask``, ``masking_utils.py`` L997 / L1222):
-
-      - full_attention  = OR(causal, blockwise)
-      - sliding_attention = OR(AND(sliding_window_lowerbound, causal), blockwise)
-
-    Crucially the sliding window is AND-ed onto the *causal base only* and the
-    blockwise band is OR-ed on *after* — the window never gates the bidirectional
-    image pairs. (An earlier version AND-ed the window over ``OR(causal,
-    blockwise)``, which wrongly clipped intra-image-block attention to the window
-    for image/video blocks longer than ``sliding_window``.)
-
-    ``prefill_mask`` is the additive causal base (``build_prefill_mask``: causal +
-    left-pad + unused-cache masking). ``blockwise_band`` is the additive 0/-inf
-    image band; its allowed cells are only within a same image group, and padded
-    columns are group ``-1`` so the band never re-admits a padded key. The OR is an
-    elementwise ``max`` of the two additive masks, the AND (window) an elementwise
-    add; both done on CPU to avoid the bf16 ``-inf + -inf`` NaN hazard. Prefill
-    only. ``prefill_mask``/``blockwise_band`` are ``[B, 1, padded_len,
-    max_cache_len]``.
-    """
+    """Build Gemma 4's causal full mask and windowed blockwise sliding mask."""
     orig_device = prefill_mask.device
     prefill_cpu = prefill_mask.to("cpu")
     blockwise_cpu = blockwise_band.to("cpu")
 
-    # full_attention = OR(causal, blockwise)
-    full_mask = torch.maximum(prefill_cpu, blockwise_cpu).to(orig_device)
-
-    # sliding_attention = OR(AND(window, causal), blockwise): window gates only the
-    # causal base, then the image band is OR-ed back on top (ungated by the window).
-    windowed_causal = _sliding_window_lower_band(prefill_cpu, sliding_window)
-    sliding_mask = torch.maximum(windowed_causal.to("cpu"), blockwise_cpu).to(
+    full_mask = prefill_cpu.to(orig_device)
+    blockwise_causal = torch.maximum(prefill_cpu, blockwise_cpu)
+    sliding_mask = _sliding_window_lower_band(blockwise_causal, sliding_window).to(
         orig_device
     )
     return {"full_attention": full_mask, "sliding_attention": sliding_mask}
@@ -415,6 +373,7 @@ def _logits_from_embeds(
             )
 
         ple_input_ids = input_ids
+        ple_inputs_embeds = inputs_embeds
         if inputs_embeds.shape[1] > 1:
             image_mask = input_ids.to("cpu") == model.config.image_token_id
             if image_mask.any():
@@ -422,12 +381,15 @@ def _logits_from_embeds(
                 ple_input_ids[image_mask] = cfg.pad_token_id
                 ple_input_ids = ple_input_ids.to(inputs_embeds.device)
 
-        # Stock computes the token-identity PLE from pad-replaced multimodal IDs,
-        # but projects its context component from the final image-scattered decoder
-        # embeddings. `_compute_per_layer_inputs` mirrors that split: input_ids feed
-        # embed_tokens_per_layer while inputs_embeds feed per_layer_model_projection.
+                backbone = get_backbone(model)
+                pad_ids = torch.full_like(ple_input_ids, cfg.pad_token_id)
+                pad_embeds = backbone.embed_tokens(pad_ids)
+                keep = (~image_mask).to(inputs_embeds.dtype).unsqueeze(-1)
+                keep = keep.to(inputs_embeds.device)
+                ple_inputs_embeds = inputs_embeds * keep + pad_embeds * (1 - keep)
+
         per_layer_inputs = hf_gemma4._compute_per_layer_inputs(
-            model, inputs_embeds, ple_input_ids
+            model, ple_inputs_embeds, ple_input_ids
         )
     else:
         per_layer_inputs = None
