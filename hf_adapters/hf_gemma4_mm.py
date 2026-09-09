@@ -42,11 +42,12 @@ For encoder-free checkpoints, vision is a pure projection of raw
     logits  ──► final_logit_softcapping
 
 **Bidirectional vision attention.** ``text_config.use_bidirectional_attention ==
-"vision"``: within one image, soft tokens attend bidirectionally in sliding
-layers. Stock keeps full-attention layers causal and builds sliding masks as
-``AND(sliding_window, OR(causal, blockwise))``, where the blockwise overlay allows
-positions belonging to the same image group. Decode steps are pure text, so no
-blockwise band is needed after prefill.
+"vision"``: within one image, soft tokens attend bidirectionally. Full-vision
+``Gemma4Config`` checkpoints keep full-attention layers causal and build sliding
+masks as ``AND(sliding_window, OR(causal, blockwise))``. Encoder-free
+``Gemma4UnifiedConfig`` checkpoints build full masks as ``OR(causal, blockwise)``
+and sliding masks as ``OR(AND(sliding_window, causal), blockwise)``. Decode steps
+are pure text, so no blockwise band is needed after prefill.
 
 **Vision embedder on Spyre.** The compilable core (LN₁→Dense→LN₂→+posemb→
 pos_norm→RMSNorm→Linear) is ``torch.compile``d and runs on Spyre. The
@@ -321,18 +322,25 @@ def _sliding_window_lower_band(mask, sliding_window):
     return (mask.to("cpu") + band[None, None, :, :]).to(orig_device)
 
 
-def _build_mm_masks(prefill_mask, blockwise_band, sliding_window):
-    """Build Gemma 4's causal full mask and windowed blockwise sliding mask."""
+def _build_mm_masks(prefill_mask, blockwise_band, sliding_window, *, unified):
+    """Build the architecture-specific Gemma 4 multimodal attention masks."""
     orig_device = prefill_mask.device
     prefill_cpu = prefill_mask.to("cpu")
     blockwise_cpu = blockwise_band.to("cpu")
 
-    full_mask = prefill_cpu.to(orig_device)
-    blockwise_causal = torch.maximum(prefill_cpu, blockwise_cpu)
-    sliding_mask = _sliding_window_lower_band(blockwise_causal, sliding_window).to(
-        orig_device
-    )
-    return {"full_attention": full_mask, "sliding_attention": sliding_mask}
+    if unified:
+        full_mask = torch.maximum(prefill_cpu, blockwise_cpu)
+        sliding_causal = _sliding_window_lower_band(prefill_cpu, sliding_window)
+        sliding_mask = torch.maximum(sliding_causal.to("cpu"), blockwise_cpu)
+    else:
+        full_mask = prefill_cpu
+        blockwise_causal = torch.maximum(prefill_cpu, blockwise_cpu)
+        sliding_mask = _sliding_window_lower_band(blockwise_causal, sliding_window)
+
+    return {
+        "full_attention": full_mask.to(orig_device),
+        "sliding_attention": sliding_mask.to(orig_device),
+    }
 
 
 def _logits_from_embeds(
@@ -382,11 +390,14 @@ def _logits_from_embeds(
                 ple_input_ids = ple_input_ids.to(inputs_embeds.device)
 
                 backbone = get_backbone(model)
-                pad_ids = torch.full_like(ple_input_ids, cfg.pad_token_id)
-                pad_embeds = backbone.embed_tokens(pad_ids)
+                pad_embedding = backbone.embed_tokens.weight[
+                    cfg.pad_token_id : cfg.pad_token_id + 1
+                ]
                 keep = (~image_mask).to(inputs_embeds.dtype).unsqueeze(-1)
                 keep = keep.to(inputs_embeds.device)
-                ple_inputs_embeds = inputs_embeds * keep + pad_embeds * (1 - keep)
+                ple_inputs_embeds = inputs_embeds * keep + pad_embedding.unsqueeze(
+                    0
+                ) * (1 - keep)
 
         per_layer_inputs = hf_gemma4._compute_per_layer_inputs(
             model, ple_inputs_embeds, ple_input_ids
@@ -430,9 +441,9 @@ def _prefill_forward(
     """Shared multimodal prefill: padded ids + image → full-sequence logits.
 
     Builds scaled text embeddings with the image features scattered into the
-    ``<image>`` slots, then the per-layer-type masks with the bidirectional
-    vision overlay OR-ed into both full and sliding layers, and runs the decoder
-    once (writing the KV caches). ``mm_token_type_ids`` has already undergone
+    ``<image>`` slots, then the architecture-specific blockwise vision masks,
+    and runs the decoder once (writing the KV caches).
+    ``mm_token_type_ids`` has already undergone
     the same prompt compaction and block padding as ``input_ids``.
     """
     dtype = get_model_dtype(model)
@@ -445,7 +456,12 @@ def _prefill_forward(
         padded_len = input_ids.shape[1]
         max_cache_len = attention_mask.shape[-1]
         blockwise = _blockwise_band(mm_token_type_ids, padded_len, max_cache_len, dtype)
-        masks = _build_mm_masks(attention_mask, blockwise, cfg.sliding_window)
+        masks = _build_mm_masks(
+            attention_mask,
+            blockwise,
+            cfg.sliding_window,
+            unified=getattr(model.model, "vision_tower", None) is None,
+        )
         masks = {lt: m.to(DEVICE) for lt, m in masks.items()}
     return _logits_from_embeds(
         model,
