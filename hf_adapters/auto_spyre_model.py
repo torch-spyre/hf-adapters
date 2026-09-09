@@ -862,12 +862,17 @@ def _generate_image_text_to_text(
     """Run multimodal prefill and text decode through the shared generation loop."""
     # Processor outputs consumed by this adapter rather than by generation config.
     adapter_input_names = module._GENERATION_INPUT_NAMES
-    missing = set(adapter_input_names) - set(kwargs)
+    required_input_names = getattr(
+        module, "_GENERATION_REQUIRED_INPUT_NAMES", adapter_input_names
+    )
+    missing = set(required_input_names) - set(kwargs)
     if missing:
         raise TypeError(
             f"Missing processor inputs for {module.__name__}: {sorted(missing)}"
         )
-    adapter_inputs = {name: kwargs.pop(name) for name in adapter_input_names}
+    adapter_inputs = {
+        name: kwargs.pop(name) for name in adapter_input_names if name in kwargs
+    }
 
     # Inputs keyed by token position need the same compaction/padding as input_ids.
     # The mapping value is the padding value for each tensor.
@@ -875,6 +880,7 @@ def _generate_image_text_to_text(
     token_aligned_inputs = {
         name: (adapter_inputs[name], pad_value)
         for name, pad_value in aligned_specs.items()
+        if name in adapter_inputs
     }
     # Image tensors and metadata are passed to prefill unchanged.
     pass_through_inputs = {
