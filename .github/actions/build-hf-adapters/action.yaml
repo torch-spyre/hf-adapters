@@ -21,6 +21,36 @@ inputs:
       ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY). Set by the Test-With: flow.
     required: false
     default: ''
+  torch_spyre_sha:
+    description: >
+      Full 40-char torch-spyre commit SHA to pin (issue #449). When set, the
+      baked /home/senuser/torch-spyre checkout is fetched + checked out at
+      exactly this commit before `uv add`, so every job in a run installs the
+      identical torch-spyre instead of whatever HEAD each pod's image happened
+      to bake in. Empty (default) keeps today's behaviour, so callers that omit
+      it are unaffected. Named
+      torch_spyre_sha -- NOT torch_spyre_ref (an unrelated, unused dispatch
+      input elsewhere) and NOT the Checkout step's INPUT_REF (= inputs.ref, the
+      hf-adapters ref) -- so the three never get confused.
+      Ignored when prebaked_image is 'true' (that path installs no torch-spyre
+      at all); a caller should never set both.
+    required: false
+    default: ''
+  prebaked_image:
+    description: >
+      'true' on the integration-tests path (issue #449 review): the runner pod
+      image is purpose-built with torch-spyre already installed in the project
+      venv ($VIRTUAL_ENV) -- e.g. the exact torch-spyre of the PR that triggered
+      this run -- and the suites run against that venv via
+      `uv run --active --no-sync` (see the Makefile). So this action must NOT
+      install, checkout, or re-resolve torch-spyre at all: doing so would either
+      overwrite the image's torch-spyre with a different version (the review's
+      concern) or fail outright, since the lockfile pins a +cpu torch with no
+      ppc64le wheel and any on-device resolve errors. 'false' (default) keeps the
+      pin/unpinned install paths below that DO install torch-spyre from the baked
+      /home/senuser/torch-spyre source.
+    required: false
+    default: 'false'
 outputs:
   target_sha:
     description: The resolved commit SHA that was checked out
@@ -94,7 +124,14 @@ runs:
       working-directory: /home/senuser
       env:
         UV_GROUPS: "${{ inputs.uv_groups }}"
-        INPUT_REF: ""
+        # Pinned torch-spyre SHA (issue #449). Empty = today's behaviour (install
+        # whatever HEAD this pod's image baked in). Renamed from the previously
+        # hardcoded, dead `INPUT_REF: ""` here so it is never confused with the
+        # Checkout step's INPUT_REF (= inputs.ref, the hf-adapters ref).
+        TORCH_SPYRE_SHA: ${{ inputs.torch_spyre_sha }}
+        # 'true' = trust the image's pre-installed torch-spyre; install nothing
+        # for it here (issue #449 review). See the input description above.
+        PREBAKED_IMAGE: ${{ inputs.prebaked_image }}
       run: |
         source "$HOME/.bashrc"
         source /etc/profile.d/ibm-aiu-setup.sh
@@ -129,21 +166,60 @@ runs:
           GROUP_FLAGS="$GROUP_FLAGS --group $group"
         done
 
-        if [[ -n "$INPUT_REF" ]]; then
+        if [[ "$PREBAKED_IMAGE" == "true" ]]; then
+          # -----------------------------------------------------------------
+          # Prebaked-image mode (integration-tests; issue #449 review).
+          #
+          # FULLY SKIP torch-spyre install. The runner pod image was purpose-
+          # built with the exact torch-spyre under test already installed in the
+          # project venv ($VIRTUAL_ENV), and the suites run against that venv via
+          # `uv run --active --no-sync` (see the Makefile). We therefore do NOT
+          # `git checkout` /home/senuser/torch-spyre and do NOT `uv add` /
+          # `uv lock` / `uv sync` it here -- either would defeat the purpose:
+          #   * `uv add torch-spyre /home/senuser/torch-spyre` would rebuild from
+          #     the baked SOURCE checkout, whose HEAD is NOT guaranteed to equal
+          #     the torch-spyre already installed in the image venv -- exactly the
+          #     "overrides it with a different torch-spyre version" breakage the
+          #     review flagged; and
+          #   * any `uv sync` re-resolves the lockfile, which pins a +cpu torch
+          #     with no ppc64le wheel, so the resolve errors out on device (the
+          #     same reason the Makefile runs tests with --no-sync).
+          #
+          # ASSUMPTION (documented deliberately): the prebaked image's venv
+          # already contains torch-spyre AND every hf-adapters dependency this
+          # run needs. This action does not install hf-adapters' own dep groups
+          # here on the prebaked path; if a future image stops pre-installing a
+          # required group, add an install that targets the active venv WITHOUT
+          # re-resolving or reinstalling torch-spyre (e.g.
+          # `uv sync --active --inexact --no-install-package torch-spyre ...`),
+          # never a plain `uv add torch-spyre <path>` / `uv sync`.
+          echo "Prebaked image: using the torch-spyre already installed in the image venv; skipping all torch-spyre install/checkout."
+          if [[ -n "$TORCH_SPYRE_SHA" ]]; then
+            echo "::warning::prebaked_image=true ignores torch_spyre_sha=${TORCH_SPYRE_SHA}; a caller should not set both."
+          fi
+          git -C /home/senuser/torch-spyre log -1 --oneline || true
+        elif [[ -n "$TORCH_SPYRE_SHA" ]]; then
+          # Pinned mode (issue #449): install the exact torch-spyre commit the
+          # resolve-torch-spyre job picked, NOT whatever HEAD this pod's image
+          # baked in. `git fetch origin <sha>` retrieves that specific object even
+          # when this pod's checkout predates it (with a full-fetch fallback);
+          # then check it out and re-sync submodules so the working tree matches
+          # the pinned commit exactly before `uv add` builds from it.
           cd /home/senuser/torch-spyre
-          TARGET_SHA="$INPUT_REF"
-          TARGET_REF="$INPUT_REF"
-          echo "TARGET_REF=${TARGET_REF}"
-          echo "TARGET_SHA=${TARGET_SHA}"
-          git fetch --tags --force origin "+${TARGET_SHA}" || \
+          echo "Pinning torch-spyre to ${TORCH_SPYRE_SHA}"
+          git fetch --tags --force origin "${TORCH_SPYRE_SHA}" || \
             git fetch --tags --force origin
-          git checkout --force "${TARGET_SHA}"
+          git checkout --force "${TORCH_SPYRE_SHA}"
           git submodule sync --recursive
           git submodule update --init --recursive --force
           git log -1 --oneline
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # Same install tail as the unpinned branch below -- the ONLY difference
+          # is the fetch/checkout preamble above, so a pinned run behaves exactly
+          # like today's install, just at a fixed SHA.
           uv add torch-spyre /home/senuser/torch-spyre
-          uv sync --verbose --refresh $GROUP_FLAGS
+          uv lock --upgrade-package torch-spyre
+          uv sync --frozen --verbose --refresh $GROUP_FLAGS
         else
           cd "$CLONED_HF_ADAPTERS_DIR"
           # though we pin to main
@@ -154,5 +230,14 @@ runs:
           uv lock --upgrade-package torch-spyre
           uv sync --frozen --verbose --refresh $GROUP_FLAGS
         fi
-        uv pip show torch
-        uv pip freeze
+        # Post-install diagnostics. On the prebaked path there is no project
+        # .venv (we ran no sync) -- the relevant environment is the image's
+        # active venv, so target it with --active there. Non-fatal (|| true): a
+        # failed probe must never fail the build.
+        if [[ "$PREBAKED_IMAGE" == "true" ]]; then
+          uv pip show torch || true
+          uv pip freeze || true
+        else
+          uv pip show torch
+          uv pip freeze
+        fi

@@ -25,6 +25,21 @@ inputs:
       printed.
     required: false
     default: ''
+  pinned_torch_spyre_sha:
+    description: |
+      The torch-spyre commit SHA this run pinned (from the resolve-torch-spyre
+      job; issue #449). When set, this action asserts that the checked-out
+      torch-spyre HEAD equals it and fails the job on mismatch -- the per-shard
+      proof that the pin actually took. Empty = unpinned (no assertion).
+    required: false
+    default: ''
+  hf_adapters_sha:
+    description: |
+      The hf-adapters commit SHA build-hf-adapters resolved for this job (its
+      `target_sha` output). Reported alongside the pinned torch-spyre SHA in the
+      run summary for reproducibility. Optional.
+    required: false
+    default: ''
 
 runs:
   using: composite
@@ -43,6 +58,9 @@ runs:
         RUNNER_NAME: ${{ runner.name }}
         RUNNER_OS: ${{ runner.os }}
         RUNNER_ARCH: ${{ runner.arch }}
+        # Pin reporting/assertion (issue #449). Empty = unpinned, no assertion.
+        PINNED_TORCH_SPYRE_SHA: ${{ inputs.pinned_torch_spyre_sha }}
+        HF_ADAPTERS_SHA: ${{ inputs.hf_adapters_sha }}
       run: |
         source "$HOME/.bashrc"
         source /etc/profile.d/ibm-aiu-setup.sh
@@ -86,5 +104,25 @@ runs:
             echo "--- torch-spyre HEAD ---"
             git -C "$TORCH_SPYRE_DIR" log -n 1 --oneline || true
           fi
+        fi
+        # torch-spyre pin check (issue #449). Runs regardless of VERBOSE -- it is
+        # a correctness gate, not diagnostics: when a pin is in effect, this job's
+        # checked-out torch-spyre MUST match the SHA the run resolved once up
+        # front. A mismatch means some job installed a different commit (the exact
+        # inconsistency #449 fixes), so fail loudly rather than report a false
+        # green. Empty PINNED_TORCH_SPYRE_SHA (unpinned callers) skips the check.
+        if [[ -n "$PINNED_TORCH_SPYRE_SHA" ]]; then
+          echo "--- torch-spyre pin check ---"
+          ACTUAL_TORCH_SPYRE_SHA="$(git -C "$TORCH_SPYRE_DIR" rev-parse HEAD)"
+          echo "pinned:  $PINNED_TORCH_SPYRE_SHA"
+          echo "checked: $ACTUAL_TORCH_SPYRE_SHA"
+          if [[ "$ACTUAL_TORCH_SPYRE_SHA" != "$PINNED_TORCH_SPYRE_SHA" ]]; then
+            echo "::error::torch-spyre HEAD ($ACTUAL_TORCH_SPYRE_SHA) != pinned SHA ($PINNED_TORCH_SPYRE_SHA) for job ${GITHUB_JOB}"
+            exit 1
+          fi
+          # One row per job in the run summary: which hf-adapters + torch-spyre
+          # commit this job actually ran. Rows append concurrently/unordered
+          # under the header the resolve-torch-spyre job writes -- that's fine.
+          echo "| ${GITHUB_JOB} | ${HF_ADAPTERS_SHA:-<none>} | ${ACTUAL_TORCH_SPYRE_SHA} |" >> "$GITHUB_STEP_SUMMARY"
         fi
         echo "================================="
