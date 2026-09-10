@@ -228,8 +228,9 @@ def _embed_and_scatter(model, input_ids, image_features):
     the features at the image positions — bit-identical given the zeroed slots
     (same doctrine as hf_granite_vision_mm._inject_deepstack). The separately
     returned PLE context keeps scaled text embeddings but replaces image slots
-    with the raw, unscaled pad embedding, matching stock Gemma 4. Asserts the
-    token/feature counts match (mirrors stock's shape check).
+    with the raw, unscaled pad embedding, matching stock Gemma 4. The returned
+    token ids apply the same image-to-pad substitution for PLE token identity.
+    Asserts the token/feature counts match (mirrors stock's shape check).
     """
     backbone = get_backbone(model)
     image_token_id = model.config.image_token_id
@@ -262,7 +263,7 @@ def _embed_and_scatter(model, input_ids, image_features):
         raw_pad = backbone.embed_tokens.weight[text_config(model.config).pad_token_id]
         pad_additive = image_mask.to(dtype).unsqueeze(-1).to(h.device) * raw_pad
         ple_context_embeds = text_embeds + pad_additive
-    return inputs_embeds, ple_context_embeds
+    return inputs_embeds, ple_context_embeds, input_ids_cpu
 
 
 def _blockwise_band(mm_token_type_ids, padded_len, max_cache_len, dtype):
@@ -395,18 +396,10 @@ def _logits_from_embeds(
                 "Gemma 4 PLE decoding requires input_ids alongside inputs_embeds."
             )
 
-        ple_input_ids = input_ids
-        if inputs_embeds.shape[1] > 1:
-            image_mask = input_ids.to("cpu") == model.config.image_token_id
-            if image_mask.any():
-                ple_input_ids = input_ids.to("cpu").clone()
-                ple_input_ids[image_mask] = cfg.pad_token_id
-                ple_input_ids = ple_input_ids.to(inputs_embeds.device)
-
         per_layer_inputs = hf_gemma4._compute_per_layer_inputs(
             model,
             inputs_embeds if ple_context_embeds is None else ple_context_embeds,
-            ple_input_ids,
+            input_ids,
         )
     else:
         per_layer_inputs = None
@@ -455,7 +448,7 @@ def _prefill_forward(
     dtype = get_model_dtype(model)
     cfg = text_config(model.config)
     image_features = _image_features(model, pixel_values, image_position_ids)
-    inputs_embeds, ple_context_embeds = _embed_and_scatter(
+    inputs_embeds, ple_context_embeds, ple_input_ids = _embed_and_scatter(
         model, input_ids, image_features
     )
 
@@ -480,7 +473,7 @@ def _prefill_forward(
         value_caches,
         cache_index=cache_index,
         masks=masks,
-        input_ids=input_ids.to(DEVICE),
+        input_ids=ple_input_ids.to(DEVICE),
         ple_context_embeds=(
             ple_context_embeds.to(DEVICE) if ple_context_embeds is not None else None
         ),
