@@ -220,6 +220,7 @@ jobs:
       multicard_smoke_matrix: ${{ steps.generate.outputs.multicard_smoke_matrix }}
       embed_matrix: ${{ steps.generate.outputs.embed_matrix }}
       vision_matrix: ${{ steps.generate.outputs.vision_matrix }}
+      clip_matrix: ${{ steps.generate.outputs.clip_matrix }}
       masked_lm_matrix: ${{ steps.generate.outputs.masked_lm_matrix }}
       question_answering_matrix: ${{ steps.generate.outputs.question_answering_matrix }}
       combined_matrix: ${{ steps.generate.outputs.combined_matrix }}
@@ -914,6 +915,70 @@ jobs:
           job_key: vlm
           payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
 
+  spyre-clip-e2e-tests:
+    name: Spyre CLIP e2e (${{ matrix.model_key }})
+    needs: [generate-matrix, resolve-test-type]
+    # Suite key: "clip". Part of the "unit" coarse tier.
+    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' clip ')) }}
+    continue-on-error: true
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Dynamic matrix: CLIP (kind="clip") models from tests/model_registry.py
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.clip_matrix) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+
+      - name: Run test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }}..."
+          make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
+          echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-clip-${{ env.SAFE_MODEL_KEY }}
+          path: junit-clip-${{ matrix.model_key }}.xml
+          retention-days: 14
+
+      - name: Save suite descriptor for pod-level retry
+        if: failure()
+        uses: ./.github/actions/save-failed-suite-descriptor
+        with:
+          job_key: clip
+          payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
+
   # ---------------------------------------------------------------------------
   # DISABLED (2026-07-17): Dedicated 2-card (x2) VLM job for google/gemma-4-12B-it.
   # The x2 runner (x8664-cards2-torchspyrepinned, 2 cards / ~143 GiB) SOLVED the
@@ -1461,6 +1526,7 @@ jobs:
       - spyre-model-components-tests
       - spyre-embed-compare-tests
       - spyre-vlm-e2e-tests
+      - spyre-clip-e2e-tests
       - spyre-reranker-compare-tests
       - spyre-masked-lm-compare-tests
       - spyre-question-answering-compare-tests
@@ -1488,6 +1554,8 @@ jobs:
       has_failed_embed_compare: ${{ steps.collect.outputs.has_failed_embed_compare }}
       matrix_vlm: ${{ steps.collect.outputs.matrix_vlm }}
       has_failed_vlm: ${{ steps.collect.outputs.has_failed_vlm }}
+      matrix_clip: ${{ steps.collect.outputs.matrix_clip }}
+      has_failed_clip: ${{ steps.collect.outputs.has_failed_clip }}
       matrix_reranker: ${{ steps.collect.outputs.matrix_reranker }}
       has_failed_reranker: ${{ steps.collect.outputs.has_failed_reranker }}
       matrix_masked_lm: ${{ steps.collect.outputs.matrix_masked_lm }}
@@ -1541,7 +1609,7 @@ jobs:
           # One key per spyre-*-tests job above -- must match the "job_key" each job's "Save suite descriptor" step stamps into suite.json.
           keys = [
               "load", "smoke", "multicard_smoke", "token_compare", "model_components",
-              "embed_compare", "vlm", "reranker", "masked_lm", "qa",
+              "embed_compare", "vlm", "clip", "reranker", "masked_lm", "qa",
               "seq_classification", "token_classification", "edge_cases", "model_module",
           ]
           grouped = {key: [] for key in keys}
@@ -1949,6 +2017,60 @@ jobs:
           retention-days: 14
           overwrite: true
 
+  spyre-clip-e2e-tests-retry:
+    name: Spyre CLIP e2e (${{ matrix.model_key }}) (pod-level retry)
+    needs: [collect-failed-suites]
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_clip == 'true' }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.collect-failed-suites.outputs.matrix_clip) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+
+      - name: Run test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
+          make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
+          echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-clip-${{ env.SAFE_MODEL_KEY }}
+          path: junit-clip-${{ matrix.model_key }}.xml
+          retention-days: 14
+          overwrite: true
+
   spyre-reranker-compare-tests-retry:
     name: Spyre reranker compare (${{ matrix.model_key }}) (pod-level retry)
     needs: [collect-failed-suites]
@@ -2338,6 +2460,7 @@ jobs:
       - spyre-model-components-tests-retry
       - spyre-embed-compare-tests-retry
       - spyre-vlm-e2e-tests-retry
+      - spyre-clip-e2e-tests-retry
       - spyre-reranker-compare-tests-retry
       - spyre-masked-lm-compare-tests-retry
       - spyre-question-answering-compare-tests-retry
@@ -2367,6 +2490,7 @@ jobs:
                  (needs.collect-failed-suites.outputs.has_failed_model_components == 'true' && needs.spyre-model-components-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_embed_compare == 'true' && needs.spyre-embed-compare-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_vlm == 'true' && needs.spyre-vlm-e2e-tests-retry.result != 'success') ||
+                 (needs.collect-failed-suites.outputs.has_failed_clip == 'true' && needs.spyre-clip-e2e-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_reranker == 'true' && needs.spyre-reranker-compare-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_masked_lm == 'true' && needs.spyre-masked-lm-compare-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_qa == 'true' && needs.spyre-question-answering-compare-tests-retry.result != 'success') ||

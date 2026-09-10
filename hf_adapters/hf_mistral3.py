@@ -60,7 +60,7 @@ _run_backbone_forward = hf_mistral._run_backbone_forward
 _run_forward = hf_mistral._run_forward
 
 
-def load_hf_model(model_path, dtype):
+def load_hf_model(model_path, dtype, trust_remote_code=None):
     """Load a Mistral-3-family text decoder from its stock multimodal checkpoint.
 
     Both variants (Mistral-Small-3.2 with a ``mistral`` text backbone, and
@@ -85,6 +85,7 @@ def load_hf_model(model_path, dtype):
         model_path,
         dtype=dtype,
         device_map="cpu",
+        trust_remote_code=trust_remote_code,
     )
     # Drop the vision tower and multi-modal projector — text-only inference.
     if hasattr(model, "model"):

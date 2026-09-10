@@ -166,6 +166,14 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_llama.py",
         "size": "6b",
     },
+    # hf_bharatgen.py
+    "param_1_5b": {
+        "name": "BharatGen Param-1 5B",
+        "path": "bharatgenai/Param-1-5B",
+        "adapter": "hf_bharatgen.py",
+        "size": "5b",
+        "trust_remote_code": True,
+    },
     # hf_phi3.py
     "phi4": {
         "name": "Phi-4 mini",
@@ -609,6 +617,14 @@ VISION_MODELS = {
         "kind": "vlm",  # multimodal: image + text -> generated text
         "size": "12b",
     },
+    # hf_clip.py — CLIP dual-encoder (image + text -> embeddings via ST backend)
+    "clip_vit_b_32": {
+        "name": "clip-ViT-B-32",
+        "path": "sentence-transformers/clip-ViT-B-32",
+        "adapter": "hf_clip.py",
+        "kind": "clip",  # dual-encoder: image or text -> embedding
+        "size": "0.15b",
+    },
 }
 
 
@@ -753,6 +769,13 @@ VISION_PATHS: list[str] = _exclude(
         predicate=lambda info: info.get("kind") == "vlm",
     )
 )
+CLIP_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        VISION_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") == "clip",
+    )
+)
 
 
 def _all_paths(
@@ -804,6 +827,13 @@ ALL_VISION_PATHS: list[str] = _exclude(
         VISION_MODELS,
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") == "vlm",
+    )
+)
+ALL_CLIP_PATHS: list[str] = _exclude(
+    _all_paths(
+        VISION_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") == "clip",
     )
 )
 
