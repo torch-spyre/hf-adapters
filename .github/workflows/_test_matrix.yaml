@@ -135,6 +135,14 @@ env:
   # which causes the pytest inductor tests to fail with AssertionError
   # due to a mix of fallbacks and decompositions.
   # Here we set it to an empty string (or we could also unset it).
+  # /next :dev image ships the venv baked+activated at /home/senuser/.venv.
+  # Make uv reuse it instead of re-creating an empty project .venv: point the
+  # project env at the baked venv and skip uv run's implicit sync. Mirrors
+  # spyre-frameworks PR #1390 (image-level); applied here at workflow level so
+  # the shadow run validates before that image rebuild lands. Neutralized on
+  # the ubuntu-hosted check-uv-lock job below (no baked venv there).
+  UV_NO_SYNC: "1"
+  UV_PROJECT_ENVIRONMENT: /home/senuser/.venv
   CI: ""
   CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
   STORAGE_1_DIR: /storage-1/hf-adapters
@@ -350,6 +358,12 @@ jobs:
   check-uv-lock:
     name: check uv.lock
     runs-on: ubuntu-latest
+    # This hosted runner has no baked /home/senuser/.venv; setup-uv@v5 would
+    # try to use UV_PROJECT_ENVIRONMENT and fail. Blank both uv vars here so
+    # the top-level values (for the card jobs) do not leak into this job.
+    env:
+      UV_NO_SYNC: ""
+      UV_PROJECT_ENVIRONMENT: ""
     defaults:
       run:
         working-directory: .
@@ -1495,7 +1509,6 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cd "$CLONED_HF_ADAPTERS_DIR"
-          source .venv/bin/activate
           make model-module-tests MODULE_CONFIG=${{ matrix.config }} PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             JUNIT_XML=1 RESULTS_DIR=.
           mv "model-module-${{ matrix.config }}.xml" "junit-model-module-${{ matrix.config }}.xml"
@@ -2434,7 +2447,6 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cd "$CLONED_HF_ADAPTERS_DIR"
-          source .venv/bin/activate
           make model-module-tests MODULE_CONFIG=${{ matrix.config }} PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             JUNIT_XML=1 RESULTS_DIR=.
           mv "model-module-${{ matrix.config }}.xml" "junit-model-module-${{ matrix.config }}.xml"

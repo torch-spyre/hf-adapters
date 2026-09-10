@@ -72,6 +72,8 @@ runs:
         echo "Installed RPMs"
         cat "$HOME/installed_rpms.txt" || true
         echo "$MY_DELIM"
+        echo "VIRTUAL_ENV ${VIRTUAL_ENV:-<unset>}"
+        echo "UV_NO_SYNC ${UV_NO_SYNC:-<unset>}  UV_PROJECT_ENVIRONMENT ${UV_PROJECT_ENVIRONMENT:-<unset>}"
         python3 --version
         python3 -c 'import sys; print(sys.path)'
         if [[ "$VERBOSE" == 'true' ]]; then

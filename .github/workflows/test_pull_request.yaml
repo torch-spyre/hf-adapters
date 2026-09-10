@@ -130,7 +130,7 @@ jobs:
     needs: [detect-label]
     uses: ./.github/workflows/_test_matrix.yaml
     with:
-      image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
+      image_label: ${{ inputs.runner_label || 'image_torch_spyre_shadow' }}
       extra_test_flags: -vvv -s
       extra_test_flags_multi_spyre: -vvv -s
       ref: ${{ inputs.ref || '' }}
