@@ -860,9 +860,11 @@ jobs:
 
   spyre-model-components-tests:
     name: Spyre model component tests
-    needs: [resolve-test-type]
+    needs: [resolve-test-type, resolve-torch-spyre]
     # Suite key: "model_components". Part of the "unit" and "integration" coarse tiers.
-    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'integration' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_components ')) }}
+    # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
+    # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
+    if: ${{ (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'integration' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_components ')) }}
     # Don't let a failed run fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -880,13 +882,16 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
-          # This job does not pin torch-spyre (it runs on the image's baked-in
-          # torch-spyre), but on the integration path it must still fully skip
-          # the torch-spyre install like every other suite (issue #449 review).
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          # On the integration path (prebaked_image=true) this is empty and
+          # ignored: build-hf-adapters installs no torch-spyre and uses the one
+          # baked into the image venv instead.
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
           prebaked_image: ${{ inputs.prebaked_image }}
 
       - name: Gather runner info
@@ -894,6 +899,10 @@ jobs:
         with:
           verbose: 'true'
           runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_model_components_spyre.py
         run: |
@@ -1905,6 +1914,14 @@ jobs:
   spyre-load-tests-retry:
     name: Spyre load (${{ matrix.model_key }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
+    # Unlike the primary suites, the retries do not gate on
+    # needs.resolve-torch-spyre.result. They do not need to: fail-closed on a pin
+    # failure is emergent here. If resolve-torch-spyre failed, every primary suite
+    # skipped (their result == guard), so nothing ran, so no suite failed, so
+    # collect-failed-suites reports has_failed_* == 'false' and this retry never
+    # fires. The !cancelled() gate only keeps the retry alive across the expected
+    # failure() of its primary; it never resurrects a run that skipped on pin
+    # failure. All *-retry jobs share this rationale.
     if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_load == 'true' }}
     runs-on:
       - x86_64
@@ -2154,7 +2171,10 @@ jobs:
 
   spyre-model-components-tests-retry:
     name: Spyre model component tests (pod-level retry)
-    needs: [collect-failed-suites]
+    needs: [collect-failed-suites, resolve-torch-spyre]
+    # Fail-closed on pin failure is emergent, not gated here: if resolve-torch-spyre
+    # failed, every primary suite skipped, so nothing ran, so has_failed_model_components
+    # is false and this retry never fires. See spyre-load-tests-retry for the full note.
     if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_model_components == 'true' }}
     runs-on:
       - x86_64
@@ -2174,13 +2194,16 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
-          # This job does not pin torch-spyre (it runs on the image's baked-in
-          # torch-spyre), but on the integration path it must still fully skip
-          # the torch-spyre install like every other suite (issue #449 review).
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          # On the integration path (prebaked_image=true) this is empty and
+          # ignored: build-hf-adapters installs no torch-spyre and uses the one
+          # baked into the image venv instead.
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
           prebaked_image: ${{ inputs.prebaked_image }}
 
       - name: Gather runner info
@@ -2188,6 +2211,10 @@ jobs:
         with:
           verbose: 'true'
           runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_model_components_spyre.py (pod-level retry)
         run: |
