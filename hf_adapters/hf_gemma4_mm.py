@@ -219,14 +219,16 @@ def _image_features(model, pixel_values, image_position_ids):
 
 
 def _embed_and_scatter(model, input_ids, image_features):
-    """Scaled word embeddings with image features scattered into <image> slots.
+    """Build decoder and PLE-context embeddings for multimodal prefill.
 
     ``embed_tokens`` is ``Gemma4UnifiedTextScaledWordEmbedding`` (×√hidden runs
     as-is). Stock does ``inputs_embeds.masked_scatter(image_mask, features)``;
     Spyre can't ``masked_scatter``, so we zero the image-token slots (elementwise
     mul by a CPU-built keep factor) and add a CPU-built additive tensor holding
     the features at the image positions — bit-identical given the zeroed slots
-    (same doctrine as hf_granite_vision_mm._inject_deepstack). Asserts the
+    (same doctrine as hf_granite_vision_mm._inject_deepstack). The separately
+    returned PLE context keeps scaled text embeddings but replaces image slots
+    with the raw, unscaled pad embedding, matching stock Gemma 4. Asserts the
     token/feature counts match (mirrors stock's shape check).
     """
     backbone = get_backbone(model)
@@ -249,11 +251,18 @@ def _embed_and_scatter(model, input_ids, image_features):
         )
 
     keep = (~image_mask).to(dtype).unsqueeze(-1).to(h.device)
-    h = h * keep
+    text_embeds = h * keep
 
-    additive = torch.zeros(h.shape[0], h.shape[1], hidden, dtype=dtype)
-    additive[image_mask] = feats.view(n_image_tokens, hidden)
-    return h + additive.to(h.device)
+    image_additive = torch.zeros(h.shape[0], h.shape[1], hidden, dtype=dtype)
+    image_additive[image_mask] = feats.view(n_image_tokens, hidden)
+    inputs_embeds = text_embeds + image_additive.to(h.device)
+
+    ple_context_embeds = None
+    if model._spyre_has_ple:
+        raw_pad = backbone.embed_tokens.weight[text_config(model.config).pad_token_id]
+        pad_additive = image_mask.to(dtype).unsqueeze(-1).to(h.device) * raw_pad
+        ple_context_embeds = text_embeds + pad_additive
+    return inputs_embeds, ple_context_embeds
 
 
 def _blockwise_band(mm_token_type_ids, padded_len, max_cache_len, dtype):
@@ -355,6 +364,7 @@ def _logits_from_embeds(
     cache_index,
     masks=None,
     input_ids=None,
+    ple_context_embeds=None,
 ):
     """Text decoder over image-scattered embeds → logits (+ softcap).
 
@@ -369,6 +379,9 @@ def _logits_from_embeds(
     ``[0, padded_len)`` at prefill, a single slot per decode step. Every computed
     position is written, so the shared walk's sliding-window ``block_base`` is
     simply ``cache_index[0]``: the cache column the (only) query row occupies.
+    ``ple_context_embeds`` optionally carries stock's pre-scatter multimodal PLE
+    context: scaled text embeddings with image positions replaced by the raw,
+    unscaled pad embedding. Decode omits it and uses ``inputs_embeds`` directly.
     """
     cfg = text_config(model.config)
     query_row_mask = None
@@ -391,7 +404,9 @@ def _logits_from_embeds(
                 ple_input_ids = ple_input_ids.to(inputs_embeds.device)
 
         per_layer_inputs = hf_gemma4._compute_per_layer_inputs(
-            model, inputs_embeds, ple_input_ids
+            model,
+            inputs_embeds if ple_context_embeds is None else ple_context_embeds,
+            ple_input_ids,
         )
     else:
         per_layer_inputs = None
@@ -440,7 +455,9 @@ def _prefill_forward(
     dtype = get_model_dtype(model)
     cfg = text_config(model.config)
     image_features = _image_features(model, pixel_values, image_position_ids)
-    inputs_embeds = _embed_and_scatter(model, input_ids, image_features)
+    inputs_embeds, ple_context_embeds = _embed_and_scatter(
+        model, input_ids, image_features
+    )
 
     masks = None
     if getattr(cfg, "use_bidirectional_attention", None) == "vision":
@@ -464,4 +481,7 @@ def _prefill_forward(
         cache_index=cache_index,
         masks=masks,
         input_ids=input_ids.to(DEVICE),
+        ple_context_embeds=(
+            ple_context_embeds.to(DEVICE) if ple_context_embeds is not None else None
+        ),
     )
