@@ -145,11 +145,15 @@ weights, measured as max absolute diff between CPU and Spyre output:
 | Llama 3.2 3B | 0.07–0.08 | 1.9–6.0 |
 
 At that revision, prefill errors were in the fp16 rounding range and the first
-Qwen3 token matched the CPU reference. Decode errors were substantially larger
-and caused token drift after the first token. These measurements are retained as
-historical context, not as the current status of every model: the blocking
-causal test lane now requires exact greedy top-1 agreement with CPU over prefill
-and four decode steps. Gemma 4 E2B and E4B both pass that check.
+Qwen3 token matched the CPU reference, but decode errors were substantially
+larger and caused token drift after the first token. **These decode-divergence
+numbers are stale.** They were recorded against the old `torch-spyre @ 7c6ef99`
+pin; the dependency now tracks `main` (`pyproject.toml`), and decode has since
+been verified working end-to-end on **Granite** and **Qwen3** — both prefill and
+decode produce correct tokens. The measurements are retained only as historical
+context. The blocking causal test lane requires exact greedy top-1 agreement
+with CPU over prefill and four decode steps; Granite, Qwen3, and Gemma 4 E2B/E4B
+all pass that check.
 
 ## Model Family Coverage
 
@@ -816,9 +820,12 @@ binaries against `accumulated_recompile_limit` as it advances.
 
 ### Open Work
 
-1. **Decode path numerical accuracy** — device and CPU logits can differ more
-   during single-token decode than during prefill, so token-level comparison
-   remains part of the gating suite. The verified Gemma 4 E2B and E4B runs
-   match CPU top-1 across prefill and four decode steps.
-2. **Multi-iteration benchmarking** — run 5+ iterations to measure
+1. **Multi-iteration benchmarking** — run 5+ iterations to measure
    steady-state latency (after compilation cache is warm)
+
+Decode-path numerical accuracy is no longer open work. Single-token decode was
+historically the primary blocker for end-to-end correct generation on Spyre, but
+it has been verified working on Granite and Qwen3 (and Gemma 4 E2B/E4B) against
+the current torch-spyre `main`: greedy top-1 matches CPU across prefill and four
+decode steps. Token-level comparison stays in the gating suite as a regression
+guard, not because decode is expected to diverge.
