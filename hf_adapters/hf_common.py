@@ -713,6 +713,18 @@ def pad_attention_heads_linear(
     model._spyre_head_dim = padded_head_dim
 
 
+def pad_encoder_mlp(layers, orig_inter, padded_inter):
+    """Zero-pad each encoder layer's MLP intermediate dim to a stick boundary.
+
+    Pads ``layer.mlp.fc1`` output and ``layer.mlp.fc2`` input so the
+    contraction (K) dim of the fc2 matmul is stick-aligned on Spyre.
+    """
+    for layer in layers:
+        mlp = layer.mlp
+        mlp.fc1 = _pad_proj_output_simple(mlp.fc1, 1, orig_inter, padded_inter)
+        mlp.fc2 = _pad_proj_input_simple(mlp.fc2, 1, orig_inter, padded_inter)
+
+
 def pad_attention_heads_simple(
     model, layers, orig_head_dim, padded_head_dim, num_heads
 ):
@@ -1559,6 +1571,7 @@ def load_model_common(
     dtype=torch.float16,
     auto_model_cls=None,
     tp_plan=None,
+    trust_remote_code=None,
 ):
     """Load an HF model.
 
@@ -1573,6 +1586,9 @@ def load_model_common(
             ``device_map`` is omitted so HF's TP placement is authoritative.
             ``"auto"`` is resolved to a plan that keeps ``lm_head`` replicated
             (see ``_resolve_tp_plan``).
+        trust_remote_code: Passed through to the adapter's ``load_hf_model`` (or
+            to HF's ``from_pretrained``) so checkpoints shipping custom modeling
+            code load only when the caller explicitly opts in.
     """
     if auto_model_cls is None:
         from transformers import AutoModel
@@ -1585,7 +1601,9 @@ def load_model_common(
         )
 
     if hasattr(module, "load_hf_model"):
-        model = module.load_hf_model(model_path, dtype)
+        model = module.load_hf_model(
+            model_path, dtype, trust_remote_code=trust_remote_code
+        )
     elif tp_plan is not None:
         from transformers.distributed import DistributedConfig
 
@@ -1597,12 +1615,14 @@ def load_model_common(
             model_path,
             dtype=dtype,
             distributed_config=distributed_config,
+            trust_remote_code=trust_remote_code,
         )
     else:
         model = auto_model_cls.from_pretrained(
             model_path,
             dtype=dtype,
             device_map="cpu",
+            trust_remote_code=trust_remote_code,
         )
 
     model.eval()

@@ -108,6 +108,9 @@ model-components-tests: ## Run model component tests (suite key: model_component
 embed-compare-tests: ## Run embed-compare tests (suite key: embed_compare)
 	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_embed_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
+clip-tests: ## Run CLIP e2e tests (suite key: clip)
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_clip_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+
 vlm-tests: ## Run VLM e2e tests (suite key: vlm)
 	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_vlm_e2e_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 

@@ -13,7 +13,7 @@ from `transformers`.
 
 ## Supported Models
 
-**34 adapters · 10K+ compatible models**
+**34 adapters · 55 verified checkpoints · 10K+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
 **sequence classification** (sentiment / text categorisation),
