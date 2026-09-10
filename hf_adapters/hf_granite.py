@@ -29,6 +29,7 @@ Usage::
 
 import torch
 
+from hf_adapters.fp8_linear import swap_linears_to_fp8
 from hf_adapters.hf_common import (
     _SDPA_MAX_SEQUENCE_TILE_SIZE,
     embed_text_tokens,
@@ -93,6 +94,11 @@ def _run_forward(
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to Granite 3.3 model in-place."""
+    # FP8 checkpoints only; runs before the blocks are built so they close over
+    # FP8Linear.
+    n_fp8, n_excluded = swap_linears_to_fp8(model)
+    if n_fp8 or n_excluded:
+        print(f"FP8: {n_fp8} module(s) -> FP8Linear, {n_excluded} -> fp16 nn.Linear")
     prepare_rope_and_heads(model)
     logits_scaling = text_config(model.config).logits_scaling
     prepare_lm_head_for_spyre(
