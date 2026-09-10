@@ -23,6 +23,8 @@ Device-specific concerns (the layout pin itself, one-binary-per-position) are
 covered by the Spyre suites.
 """
 
+import types
+
 import pytest
 import torch
 
@@ -43,6 +45,10 @@ class _FakeModel:
 
     def __init__(self, num_layers=2, num_kv_heads=8, head_dim=128, kv_shapes=None):
         self.config = _FakeConfig(num_layers, num_kv_heads, head_dim)
+        # kv_cache_shapes probes layers[0].self_attn.k_proj to recover the KV-head
+        # count under tensor parallelism (hf_common, added in #234). No k_proj here,
+        # so it falls back to the config count -- which is what these tests want.
+        self.layers = [types.SimpleNamespace(self_attn=types.SimpleNamespace())]
         if kv_shapes is not None:
             self._spyre_kv_shapes = kv_shapes
 

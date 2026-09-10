@@ -118,6 +118,16 @@ def adapter_greedy_steps(
         prompt_offsets if isinstance(prompt_offsets, int) else prompt_offsets[0].item()
     )
 
+    # Mirror generate()'s per-sequence left-padding bookkeeping (hf_common.py:
+    # model._spyre_prompt_offsets = prompt_offsets). The band path reads its left
+    # padding out of the mask below, but the sliding-window op path cannot — an
+    # offset-and-length window has no way to skip pad columns, so it reads the
+    # padding from valid_start, which valid_start_for() pulls from this attribute.
+    # A harness that drives _run_forward directly must set it or the op attends the
+    # pad K/V (argmax flips while the logit magnitude barely moves).
+    model._spyre_prompt_offsets = prompt_offsets
+    model._spyre_padded_prompt_len = padded_len
+
     max_cache_len = generation_cache_len(padded_len, num_decode + 1)
     prefill_kv_len = _sdpa_compatible_kv_length(padded_len)
     dtype = get_model_dtype(model)

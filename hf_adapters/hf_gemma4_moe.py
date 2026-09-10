@@ -32,6 +32,7 @@ from hf_adapters.hf_gemma4 import (
     _run_forward,
     _setup_gemma4_text_decoder,
 )
+from hf_adapters.swa_attention import allocate_swa_caches
 
 __all__ = ["prepare_for_spyre", "_run_forward", "_run_backbone_forward"]
 
@@ -195,6 +196,10 @@ class Gemma4MoEBlock(nn.Module):
         is_kv_eq_v,
         moe_k,
         stick_size,
+        is_sliding=False,
+        window_size=None,
+        swa_mode=None,
+        is_causal=True,
     ):
         super().__init__()
         self.self_attn = Gemma4Attention(
@@ -203,6 +208,10 @@ class Gemma4MoEBlock(nn.Module):
             num_kv_heads,
             head_dim,
             is_kv_eq_v,
+            is_sliding=is_sliding,
+            window_size=window_size,
+            swa_mode=swa_mode,
+            is_causal=is_causal,
         )
         self.mlp = layer.mlp
         self.input_layernorm = layer.input_layernorm
@@ -461,6 +470,12 @@ def prepare_for_spyre(model):
     num_q_heads, kv_shapes, kv_equals_v = _setup_gemma4_text_decoder(
         model, allow_moe=True
     )
+    if not hasattr(model, "_spyre_swa_mode"):
+        model._spyre_swa_mode = "anchored"
+    if not hasattr(model, "_spyre_swa_is_causal"):
+        model._spyre_swa_is_causal = True
+    if model._spyre_swa_mode == "anchored":
+        model._spyre_cache_allocator = allocate_swa_caches
 
     blocks = []
     for i, layer in enumerate(list(backbone.layers)):
@@ -472,6 +487,10 @@ def prepare_for_spyre(model):
             kv_equals_v[i],
             moe_k,
             stick_size,
+            is_sliding=cfg.layer_types[i] == "sliding_attention",
+            window_size=cfg.sliding_window,
+            swa_mode=model._spyre_swa_mode,
+            is_causal=model._spyre_swa_is_causal,
         )
         expert_scale = block.router.per_expert_scale.detach()
         block.router.route_identity = torch.eye(

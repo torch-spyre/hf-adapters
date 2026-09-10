@@ -47,20 +47,18 @@ scattered into the ``<image>`` token slots of the text embeddings:
 
 **Bidirectional vision attention.** ``text_config.use_bidirectional_attention ==
 "vision"``: within one image, the soft-tokens attend to each other
-bidirectionally. Stock builds every layer-type mask via
-``create_causal_mask(block_sequence_ids=...)``, which OR-s a "blockwise" overlay
-(same image group ⇒ allowed, from ``mm_token_type_ids``) into the causal mask for
-**both** full and sliding layers — NOT sliding-only. So at prefill we OR the
-blockwise band into the base causal mask for both types:
+bidirectionally on sliding layers. Stock
+``create_masks_for_vision_model`` builds:
 
-  - full_attention  = OR(causal, blockwise)
+  - full_attention = causal
   - sliding_attention = AND(sliding_window, OR(causal, blockwise))
 
+where the blockwise overlay allows tokens in the same image group to attend in
+both directions. The sliding lower bound is applied after that widening, so an
+old vision key outside the window remains masked.
+
 Decode steps are pure text (one new causal token), so no blockwise band is
-needed after prefill. (Verified against stock ``create_causal_mask``: the
-``create_masks_for_vision_model`` docstring claiming globals stay causal is not
-the path the forward takes — traced directly through
-``create_masks_for_generate`` → ``create_causal_mask``.)
+needed after prefill.
 
 **Vision embedder on Spyre.** The compilable core (LN₁→Dense→LN₂→+posemb→
 pos_norm→RMSNorm→Linear) is ``torch.compile``d and runs on Spyre. The
@@ -156,6 +154,12 @@ def prepare_for_spyre(model):
         "hf_gemma4_mm requires a vision embedder (model.model.embed_vision); "
         "this checkpoint has no vision_config."
     )
+
+    # The VLM mask contains bidirectional vision regions, so its sliding layers
+    # use the generic full-cache access plan. The runtime tensor still defines
+    # the exact causal/blockwise/window semantics.
+    model._spyre_swa_mode = "anchored"
+    model._spyre_swa_is_causal = False
 
     # Shared text decoder (mirrors hf_gemma4.prepare_for_spyre).
     hf_gemma4.prepare_text_decoder_for_spyre(model)
@@ -307,13 +311,10 @@ def _sliding_window_lower_band(mask, sliding_window):
     causal upper bound already lives in ``mask``, so the window only supplies the
     backward cutoff.
 
-    NOTE: this must be applied to the causal base *before* the blockwise vision
-    band is OR-ed on top — stock composes the sliding mask as
-    ``OR(AND(sliding_window_overlay, causal), blockwise)`` with the blockwise
-    overlay as the OUTERMOST op (``masking_utils.create_sliding_window_causal_mask``,
-    line 1189 then 1222), so the window must NOT gate the bidirectional image
-    pairs. Applying it after the OR would clip intra-image-block attention to the
-    window (wrong for a single image/video block longer than ``sliding_window``).
+    Stock applies this after the blockwise vision overlay, composing
+    ``AND(sliding_window_overlay, OR(causal, blockwise))``. Thus future tokens
+    in the same vision block remain visible, but old vision keys beyond the
+    backward window do not.
 
     Prefill only (``cache_index`` starts at cache slot 0), so a query row's cache
     coordinate is its row index ``q`` and the key column is the cache slot ``k``.
@@ -335,19 +336,14 @@ def _sliding_window_lower_band(mask, sliding_window):
 def _build_mm_masks(prefill_mask, blockwise_band, sliding_window):
     """Per-layer-type masks for a multimodal prefill: {full, sliding}.
 
-    Stock builds each mask type from the same blockwise vision overlay, but ORs
-    it in as the OUTERMOST op for **both** full and sliding layers (traced through
-    ``create_masks_for_generate`` → ``create_causal_mask`` /
-    ``create_sliding_window_causal_mask``, ``masking_utils.py`` L997 / L1222):
+    Matches Transformers ``create_masks_for_vision_model``:
 
-      - full_attention  = OR(causal, blockwise)
-      - sliding_attention = OR(AND(sliding_window_lowerbound, causal), blockwise)
+      - full_attention = causal
+      - sliding_attention = AND(sliding_window, OR(causal, blockwise))
 
-    Crucially the sliding window is AND-ed onto the *causal base only* and the
-    blockwise band is OR-ed on *after* — the window never gates the bidirectional
-    image pairs. (An earlier version AND-ed the window over ``OR(causal,
-    blockwise)``, which wrongly clipped intra-image-block attention to the window
-    for image/video blocks longer than ``sliding_window``.)
+    The ordering matters for a vision block longer than ``sliding_window``: a
+    future token in the same block is allowed, while an old token in that same
+    block is rejected by the lower window boundary.
 
     ``prefill_mask`` is the additive causal base (``build_prefill_mask``: causal +
     left-pad + unused-cache masking). ``blockwise_band`` is the additive 0/-inf
@@ -362,13 +358,11 @@ def _build_mm_masks(prefill_mask, blockwise_band, sliding_window):
     prefill_cpu = prefill_mask.to("cpu")
     blockwise_cpu = blockwise_band.to("cpu")
 
-    # full_attention = OR(causal, blockwise)
-    full_mask = torch.maximum(prefill_cpu, blockwise_cpu).to(orig_device)
-
-    # sliding_attention = OR(AND(window, causal), blockwise): window gates only the
-    # causal base, then the image band is OR-ed back on top (ungated by the window).
-    windowed_causal = _sliding_window_lower_band(prefill_cpu, sliding_window)
-    sliding_mask = torch.maximum(windowed_causal.to("cpu"), blockwise_cpu).to(
+    # Full-attention layers remain causal. Sliding layers first widen causal
+    # attention within a vision block and then apply the backward window cutoff.
+    full_mask = prefill_mask
+    causal_or_blockwise = torch.maximum(prefill_cpu, blockwise_cpu)
+    sliding_mask = _sliding_window_lower_band(causal_or_blockwise, sliding_window).to(
         orig_device
     )
     return {"full_attention": full_mask, "sliding_attention": sliding_mask}
@@ -433,10 +427,10 @@ def _prefill_forward(
     """Shared multimodal prefill: padded ids + image → full-sequence logits.
 
     Builds scaled text embeddings with the image features scattered into the
-    ``<image>`` slots, then the per-layer-type masks with the bidirectional
-    vision overlay OR-ed into both full and sliding layers, and runs the decoder
-    once (writing the KV caches). ``mm_token_type_ids`` has already undergone
-    the same prompt compaction and block padding as ``input_ids``.
+    ``<image>`` slots, then the upstream per-layer-type masks (causal global;
+    windowed causal plus bidirectional vision regions for sliding layers), and
+    runs the decoder once (writing the KV caches). ``mm_token_type_ids`` has
+    undergone the same prompt compaction and block padding as ``input_ids``.
     """
     dtype = get_model_dtype(model)
     cfg = text_config(model.config)
