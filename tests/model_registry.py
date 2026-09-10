@@ -369,6 +369,12 @@ EMBEDDING_MODELS = {
         "is_gated": True,
         "size": "0.3b",
     },
+    "microsoft_embeddinggemma": {
+        "name": "Non-gated EmbeddingGemma",
+        "path": "microsoft/harrier-oss-v1-270m",
+        "adapter": "hf_gemma3.py",
+        "size": "0.270b",
+    },
     # hf_qwen3.py
     "qwen3_embed": {
         "name": "Qwen3-Embedding 0.6B",
