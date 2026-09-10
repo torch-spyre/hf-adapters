@@ -10,8 +10,10 @@ inputs:
     required: true
   ref:
     description: >
-      Branch, tag, or SHA of hf-adapters to check out. Empty = the PR/push head
-      (today's behaviour). Set by the cross-repo Test-With: flow to test a companion ref.
+      Branch, tag, or SHA of hf-adapters to check out. Empty = GITHUB_SHA (the
+      synthetic merge commit for pull_request events, the pushed commit otherwise),
+      consistent with actions/checkout; see issue #479. Set by the cross-repo
+      Test-With: flow to test a companion ref.
     required: false
     default: ''
   repository:
@@ -35,11 +37,9 @@ runs:
       shell: bash
       working-directory: /home/senuser
       env:
-        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         GITHUB_SHA: ${{ github.sha }}
         GITHUB_REF: ${{ github.ref }}
-        # Cross-repo Test-With: overrides. Empty = today's behaviour (base repo, PR/push head).
+        # Cross-repo Test-With: overrides. Empty = base repo at GITHUB_SHA (see issue #479).
         INPUT_REF: ${{ inputs.ref }}
         INPUT_REPOSITORY: ${{ inputs.repository }}
       run: |
@@ -72,8 +72,13 @@ runs:
           git checkout --force "${TARGET_REF}" 2>/dev/null || git checkout --force origin/_target
           TARGET_SHA="$(git rev-parse HEAD)"
         else
-          TARGET_SHA="${PR_HEAD_SHA:-$GITHUB_SHA}"
-          TARGET_REF="${PR_HEAD_REF:-$GITHUB_REF}"
+          # Use GITHUB_SHA (the synthetic merge commit for pull_request events,
+          # the pushed commit for push/merge_group, the dispatched SHA for
+          # workflow_dispatch). This is consistent with what actions/checkout
+          # defaults to, so all jobs in the workflow test the same commit;
+          # see issue #479.
+          TARGET_SHA="$GITHUB_SHA"
+          TARGET_REF="$GITHUB_REF"
           echo "TARGET_REF=${TARGET_REF}"
           echo "TARGET_SHA=${TARGET_SHA}"
           git fetch --tags --force origin "+${TARGET_SHA}" || \
