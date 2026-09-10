@@ -86,6 +86,14 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_granite.py",
         "size": "2b",
     },
+    # Runs in FP8 (FP8Linear / scaled_mm), unlike the dequantized FP8 entries
+    # below; no "dtype" key for that reason.
+    "granite8b_fp8": {
+        "name": "Granite 3.3 8B FP8",
+        "path": "ibm-granite/granite-3.3-8b-instruct-FP8",
+        "adapter": "hf_granite.py",
+        "size": "8b",
+    },
     # hf_granitemoehybrid.py
     "granite4": {
         "name": "Granite 4.0 1B",
@@ -859,6 +867,7 @@ NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = _non_blocking(
     (
         "smollm3",
         "gemma2_2b_unsloth",  # small gap that happens to flip token for test prompt
+        "granite8b_fp8",  # o_proj/down_proj still fp16; needs eager FP8 torch-spyre
     ),
 )
 

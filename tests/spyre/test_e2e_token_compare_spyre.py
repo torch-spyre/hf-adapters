@@ -295,6 +295,13 @@ def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]
     print("  Running HF reference on CPU ...")
     hf_results = hf_greedy_steps(model, input_ids, num_decode=num_decode)
 
+    # The CPU forward decompresses quantized weights in place, which would make
+    # the adapter's FP8 swap a no-op; reload for the Spyre half.
+    # TODO: avoid the second load (snapshot quantized weights before the CPU run).
+    if getattr(model.config, "quantization_config", None):
+        del model
+        model = load_ref_model(model_path=model_path, adapter_mod=adapter)
+
     # Use bf16/fp16 dtype, requested by the registry or based on the model config.
     # (Spyre does not support float32, so float32 entries will use fp16.)
     spyre_dtype = dtype_for_model_path(model_path, target_device="spyre")

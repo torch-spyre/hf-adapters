@@ -1631,11 +1631,15 @@ def load_model_common(
 
 
 def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
+    from hf_adapters.fp8_linear import prequantize_fp8_weights
+
     untie_embedding_and_lm_head(model)
     module.prepare_for_spyre(model)
     _move_to_spyre_with_layout(model, dtype)
     for submod_name in getattr(model, "_spyre_cpu_submodules", []):
         model.get_submodule(submod_name).to("cpu")
+    # No-op without FP8Linear. Last, so device placement is final.
+    prequantize_fp8_weights(model)
     print("Model on Spyre ready.")
 
 
