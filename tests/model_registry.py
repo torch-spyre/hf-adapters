@@ -605,17 +605,37 @@ VISION_MODELS = {
         "dtype": "bfloat16",  # blocked-FP8 checkpoint, dequantized to bf16
         "size": "3b",
     },
+    # hf_gemma4_vision.py — Vision tower of encoder-based Gemma4 models
+    "gemma4_vision_tower": {
+        "name": "Gemma 4 26B-A4B (Vision tower)",
+        "path": "google/gemma-4-26B-A4B-it",
+        "adapter": "hf_gemma4_vision.py",
+        "kind": "tower",
+    },
     # hf_gemma4_mm.py — unified encoder-free VLM (image + text -> text)
-    # Note: google/gemma-4-12b (base, no chat template) also resolves via this
-    # adapter (Gemma4UnifiedConfig -> hf_gemma4_mm) but is tested via the
-    # causal-LM path (gemma4_base in CAUSAL_LM_MODELS); the VLM harness requires
-    # apply_chat_template, which the base model does not provide.
     "gemma4_mm": {
         "name": "Gemma 4 12B IT (unified VLM)",
         "path": "google/gemma-4-12B-it",
         "adapter": "hf_gemma4_mm.py",
         "kind": "vlm",  # multimodal: image + text -> generated text
         "size": "12b",
+        "always_test": True,
+    },
+    "gemma4_e2b_mm": {
+        "name": "Gemma 4 E2B (VLM with PLE)",
+        "path": "google/gemma-4-E2B-it",
+        "adapter": "hf_gemma4_mm.py",
+        "kind": "vlm",
+        "size": "2b",
+        "always_test": True,
+    },
+    "gemma4_moe_mm": {
+        "name": "Gemma 4 26B-A4B (MoE VLM)",
+        "path": "google/gemma-4-26B-A4B-it",
+        "adapter": "hf_gemma4_mm.py",
+        "kind": "vlm",
+        "size": "26b",
+        "always_test": True,
     },
     # hf_clip.py — CLIP dual-encoder (image + text -> embeddings via ST backend)
     "clip_vit_b_32": {
