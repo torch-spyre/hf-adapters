@@ -22,6 +22,7 @@ Spyre graphs.  Video is intentionally outside this initial adapter.
 """
 
 import math
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
@@ -95,21 +96,86 @@ def _patch_muse_norm_classes(model):
     centered_cls.forward = centered_forward
 
 
-def _make_text_block(layer, cfg, uses_rope):
-    """Compile one Muse decoder layer; NoPE closures omit RoPE from their graph."""
+@dataclass(frozen=True)
+class _TextBlockSpec:
+    uses_rope: bool
+    num_attention_heads: int
+    num_key_value_heads: int
+    head_dim: int
+    attention_bias: bool
+    scale: float
+    qk_scale: float
+    qk_norm_eps: float
+    input_norm_eps: float
+    post_attention_norm_eps: float
+    pre_feedforward_norm_eps: float
+    post_feedforward_norm_eps: float
+
+
+def _text_block_spec(layer, cfg, uses_rope):
     attn = layer.self_attn
-    q_proj, k_proj, v_proj = attn.q_proj, attn.k_proj, attn.v_proj
-    gate_proj, o_proj = attn.gate_proj, attn.o_proj
-    input_norm = layer.input_layernorm
-    post_attn_norm = layer.post_attention_layernorm
-    pre_ff_norm = layer.pre_feedforward_layernorm
-    post_ff_norm = layer.post_feedforward_layernorm
-    mlp = layer.mlp
-    n_q, n_kv, head_dim = cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim
-    scale = head_dim**-0.5
-    qk_scale = cfg.qk_scale_factor
+    projections = (attn.q_proj, attn.k_proj, attn.v_proj, attn.o_proj)
+    attention_bias = projections[0].bias is not None
+    if any((proj.bias is not None) != attention_bias for proj in projections):
+        raise ValueError("Muse attention projections must use a consistent bias layout")
+    if attn.gate_proj.bias is not None:
+        raise ValueError("Muse attention gate projection must be bias-free")
+    if any(
+        proj.bias is not None
+        for proj in (layer.mlp.gate_proj, layer.mlp.up_proj, layer.mlp.down_proj)
+    ):
+        raise ValueError("Muse MLP projections must be bias-free")
+    if cfg.hidden_activation != "silu":
+        raise ValueError(
+            f"Muse text activation {cfg.hidden_activation!r} is not supported"
+        )
+    return _TextBlockSpec(
+        uses_rope=uses_rope,
+        num_attention_heads=cfg.num_attention_heads,
+        num_key_value_heads=cfg.num_key_value_heads,
+        head_dim=cfg.head_dim,
+        attention_bias=attention_bias,
+        scale=attn.scaling,
+        qk_scale=attn.qk_scale_factor,
+        qk_norm_eps=attn.qk_norm.eps,
+        input_norm_eps=layer.input_layernorm.eps,
+        post_attention_norm_eps=layer.post_attention_layernorm.eps,
+        pre_feedforward_norm_eps=layer.pre_feedforward_layernorm.eps,
+        post_feedforward_norm_eps=layer.post_feedforward_layernorm.eps,
+    )
+
+
+def _text_block_state(layer, spec):
+    attn = layer.self_attn
+    state = (
+        attn.q_proj.weight,
+        attn.k_proj.weight,
+        attn.v_proj.weight,
+        attn.gate_proj.weight,
+        attn.o_proj.weight,
+        layer.input_layernorm.weight,
+        layer.post_attention_layernorm.weight,
+        layer.pre_feedforward_layernorm.weight,
+        layer.post_feedforward_layernorm.weight,
+        layer.mlp.gate_proj.weight,
+        layer.mlp.up_proj.weight,
+        layer.mlp.down_proj.weight,
+    )
+    if spec.attention_bias:
+        state += (
+            attn.q_proj.bias,
+            attn.k_proj.bias,
+            attn.v_proj.bias,
+            attn.o_proj.bias,
+        )
+    return state
+
+
+def _make_text_forward(spec):
+    """Build a parameter-explicit text block shared by all matching layers."""
 
     def body(
+        state,
         hidden_states,
         selected_freqs,
         attn_mask,
@@ -117,15 +183,47 @@ def _make_text_block(layer, cfg, uses_rope):
         value_cache,
         cache_index,
     ):
+        (
+            q_weight,
+            k_weight,
+            v_weight,
+            gate_weight,
+            o_weight,
+            input_norm_weight,
+            post_attn_norm_weight,
+            pre_ff_norm_weight,
+            post_ff_norm_weight,
+            mlp_gate_weight,
+            mlp_up_weight,
+            mlp_down_weight,
+            *biases,
+        ) = state
+        if spec.attention_bias:
+            q_bias, k_bias, v_bias, o_bias = biases
+        else:
+            q_bias = k_bias = v_bias = o_bias = None
+
         residual = hidden_states
-        h = input_norm(hidden_states)
+        h = _centered_rmsnorm(hidden_states, input_norm_weight, spec.input_norm_eps)
         bsz, seq_len, _ = h.shape
-        q = q_proj(h).view(bsz, seq_len, n_q, head_dim).transpose(1, 2)
-        k = k_proj(h).view(bsz, seq_len, n_kv, head_dim).transpose(1, 2)
-        v = v_proj(h).view(bsz, seq_len, n_kv, head_dim).transpose(1, 2)
-        q = _scale_free_rmsnorm(q, attn.qk_norm.eps) * qk_scale
-        k = _scale_free_rmsnorm(k, attn.qk_norm.eps)
-        if uses_rope:
+        q = (
+            F.linear(h, q_weight, q_bias)
+            .view(bsz, seq_len, spec.num_attention_heads, spec.head_dim)
+            .transpose(1, 2)
+        )
+        k = (
+            F.linear(h, k_weight, k_bias)
+            .view(bsz, seq_len, spec.num_key_value_heads, spec.head_dim)
+            .transpose(1, 2)
+        )
+        v = (
+            F.linear(h, v_weight, v_bias)
+            .view(bsz, seq_len, spec.num_key_value_heads, spec.head_dim)
+            .transpose(1, 2)
+        )
+        q = _scale_free_rmsnorm(q, spec.qk_norm_eps) * spec.qk_scale
+        k = _scale_free_rmsnorm(k, spec.qk_norm_eps)
+        if spec.uses_rope:
             q = apply_rope_matmul(q, selected_freqs)
             k = apply_rope_matmul(k, selected_freqs)
         key_cache, value_cache = kv_cache_update(
@@ -137,23 +235,36 @@ def _make_text_block(layer, cfg, uses_rope):
             value_cache,
             attn_mask=attn_mask,
             dropout_p=0.0,
-            scale=scale,
+            scale=spec.scale,
             enable_gqa=True,
         )
-        gate = torch.sigmoid(gate_proj(h)).view(bsz, seq_len, n_q, head_dim)
+        gate = torch.sigmoid(F.linear(h, gate_weight)).view(
+            bsz, seq_len, spec.num_attention_heads, spec.head_dim
+        )
         out = out * gate.transpose(1, 2)
-        out = out.transpose(1, 2).reshape(bsz, seq_len, n_q * head_dim)
-        out = post_attn_norm(o_proj(out))
+        out = out.transpose(1, 2).reshape(
+            bsz, seq_len, spec.num_attention_heads * spec.head_dim
+        )
+        out = F.linear(out, o_weight, o_bias)
+        out = _centered_rmsnorm(
+            out, post_attn_norm_weight, spec.post_attention_norm_eps
+        )
         h = residual + out
         residual = h
-        h = post_ff_norm(mlp(pre_ff_norm(h)))
+        h = _centered_rmsnorm(h, pre_ff_norm_weight, spec.pre_feedforward_norm_eps)
+        h = F.linear(
+            F.silu(F.linear(h, mlp_gate_weight)) * F.linear(h, mlp_up_weight),
+            mlp_down_weight,
+        )
+        h = _centered_rmsnorm(h, post_ff_norm_weight, spec.post_feedforward_norm_eps)
         return residual + h, key_cache, value_cache
 
-    if uses_rope:
-        return torch.compile(body, dynamic=False)
+    if spec.uses_rope:
+        return torch.compile(body, dynamic=False, fullgraph=True)
 
     # Keep the NoPE graph free of both rotary operations and a rotary tensor input.
     def nope_body(
+        state,
         hidden_states,
         attn_mask,
         key_cache,
@@ -161,6 +272,7 @@ def _make_text_block(layer, cfg, uses_rope):
         cache_index,
     ):
         return body(
+            state,
             hidden_states,
             None,
             attn_mask,
@@ -169,7 +281,11 @@ def _make_text_block(layer, cfg, uses_rope):
             cache_index,
         )
 
-    return torch.compile(nope_body, dynamic=False)
+    return torch.compile(nope_body, dynamic=False, fullgraph=True)
+
+
+def _state_signature(state):
+    return tuple((tuple(t.shape), t.dtype) for t in state)
 
 
 def _finite_text_masks(attn_mask, cache_index, window, dtype):
@@ -208,11 +324,15 @@ def _run_text(
     )
     full_mask = full_mask.to(h.device)
     local_mask = local_mask.to(h.device)
-    for i, block in enumerate(model._spyre_text_blocks):
-        is_local = cfg.layer_types[i] == "sliding_attention"
-        mask = local_mask if is_local else full_mask
-        if model._spyre_text_uses_rope[i]:
+    layers = get_backbone(model).layers
+    for i, (block, spec) in enumerate(
+        zip(model._spyre_text_blocks, model._spyre_text_block_specs)
+    ):
+        mask = local_mask if cfg.layer_types[i] == "sliding_attention" else full_mask
+        state = _text_block_state(layers[i], spec)
+        if spec.uses_rope:
             h, key_caches[i], value_caches[i] = block(
+                state,
                 h,
                 selected_freqs,
                 mask,
@@ -222,6 +342,7 @@ def _run_text(
             )
         else:
             h, key_caches[i], value_caches[i] = block(
+                state,
                 h,
                 mask,
                 key_caches[i],
@@ -295,27 +416,127 @@ def _vision_rope_matrices(inv_freq, position_ids, padded_head_dim, dtype):
     return rot.contiguous().to(dtype)
 
 
-def _make_vision_block(layer, num_heads, head_dim, scale):
-    norm1, norm2 = layer.norm1, layer.norm2
-    attn, mlp = layer.attn, layer.mlp
+@dataclass(frozen=True)
+class _VisionBlockSpec:
+    num_heads: int
+    head_dim: int
+    scale: float
+    norm1_eps: float
+    norm2_eps: float
 
-    def block(hidden_states, rope, mask):
+
+def _vision_block_spec(layer, num_heads, head_dim, scale, hidden_act):
+    if hidden_act != "gelu":
+        raise ValueError(f"Muse vision activation {hidden_act!r} is not supported")
+    modules = (
+        layer.norm1,
+        layer.norm2,
+        layer.attn.q_proj,
+        layer.attn.k_proj,
+        layer.attn.v_proj,
+        layer.attn.proj,
+        layer.mlp.fc1,
+        layer.mlp.fc2,
+    )
+    if any(module.weight is None or module.bias is None for module in modules):
+        raise ValueError("Muse vision blocks require affine norms and biased linears")
+    return _VisionBlockSpec(
+        num_heads=num_heads,
+        head_dim=head_dim,
+        scale=scale,
+        norm1_eps=layer.norm1.eps,
+        norm2_eps=layer.norm2.eps,
+    )
+
+
+def _vision_block_state(layer):
+    return (
+        layer.norm1.weight,
+        layer.norm1.bias,
+        layer.attn.q_proj.weight,
+        layer.attn.q_proj.bias,
+        layer.attn.k_proj.weight,
+        layer.attn.k_proj.bias,
+        layer.attn.v_proj.weight,
+        layer.attn.v_proj.bias,
+        layer.attn.proj.weight,
+        layer.attn.proj.bias,
+        layer.norm2.weight,
+        layer.norm2.bias,
+        layer.mlp.fc1.weight,
+        layer.mlp.fc1.bias,
+        layer.mlp.fc2.weight,
+        layer.mlp.fc2.bias,
+    )
+
+
+def _layernorm(x, weight, bias, eps):
+    if x.device.type != "spyre":
+        return F.layer_norm(x, weight.shape, weight, bias, eps)
+    xf = x.float()
+    mean = xf.mean(-1, keepdim=True)
+    centered = xf - mean
+    inv = torch.rsqrt((centered * centered).mean(-1, keepdim=True) + eps)
+    h = (x - mean.to(x.dtype)) * inv.to(x.dtype)
+    return h * weight + bias
+
+
+def _make_vision_forward(spec):
+    """Build a parameter-explicit vision block shared by matching layers."""
+
+    def block(state, hidden_states, rope, mask):
+        (
+            norm1_weight,
+            norm1_bias,
+            q_weight,
+            q_bias,
+            k_weight,
+            k_bias,
+            v_weight,
+            v_bias,
+            out_weight,
+            out_bias,
+            norm2_weight,
+            norm2_bias,
+            fc1_weight,
+            fc1_bias,
+            fc2_weight,
+            fc2_bias,
+        ) = state
         residual = hidden_states
-        h = norm1(hidden_states)
+        h = _layernorm(hidden_states, norm1_weight, norm1_bias, spec.norm1_eps)
         seq = h.shape[0]
-        q = attn.q_proj(h).view(1, seq, num_heads, head_dim).transpose(1, 2)
-        k = attn.k_proj(h).view(1, seq, num_heads, head_dim).transpose(1, 2)
-        v = attn.v_proj(h).view(1, seq, num_heads, head_dim).transpose(1, 2)
+        q = (
+            F.linear(h, q_weight, q_bias)
+            .view(1, seq, spec.num_heads, spec.head_dim)
+            .transpose(1, 2)
+        )
+        k = (
+            F.linear(h, k_weight, k_bias)
+            .view(1, seq, spec.num_heads, spec.head_dim)
+            .transpose(1, 2)
+        )
+        v = (
+            F.linear(h, v_weight, v_bias)
+            .view(1, seq, spec.num_heads, spec.head_dim)
+            .transpose(1, 2)
+        )
         q = apply_rope_matmul(q, rope).contiguous()
         k = apply_rope_matmul(k, rope).contiguous()
         out = F.scaled_dot_product_attention(
-            q, k, v, attn_mask=mask, dropout_p=0.0, scale=scale
+            q, k, v, attn_mask=mask, dropout_p=0.0, scale=spec.scale
         )
-        out = out.transpose(1, 2).reshape(seq, num_heads * head_dim)
-        h = residual + attn.proj(out)
-        return h + mlp(norm2(h))
+        out = out.transpose(1, 2).reshape(seq, spec.num_heads * spec.head_dim)
+        h = residual + F.linear(out, out_weight, out_bias)
+        mlp_input = _layernorm(h, norm2_weight, norm2_bias, spec.norm2_eps)
+        mlp_output = F.linear(
+            F.gelu(F.linear(mlp_input, fc1_weight, fc1_bias)),
+            fc2_weight,
+            fc2_bias,
+        )
+        return h + mlp_output
 
-    return torch.compile(block, dynamic=False)
+    return torch.compile(block, dynamic=False, fullgraph=True)
 
 
 def _make_vision_projector_core(model):
@@ -403,7 +624,8 @@ def _vision_features(model, pixel_values, image_grid_thw):
         "window_attention": _segment_mask(window_cu, total, padded, dtype).to(DEVICE),
     }
     for i, block in enumerate(model._spyre_vision_blocks):
-        h = block(h, rope, masks[cfg.layer_types[i]])
+        state = _vision_block_state(tower.layers[i])
+        h = block(state, h, rope, masks[cfg.layer_types[i]])
 
     # Final vision LayerNorm is tokenwise, so it commutes with unpermutation and
     # can stay in a compiled device graph. Integer unpermutation and ragged pixel
@@ -460,11 +682,24 @@ def prepare_for_spyre(model):
         (cfg.num_key_value_heads, cfg.head_dim, cfg.head_dim)
         for _ in range(cfg.num_hidden_layers)
     ]
-    model._spyre_text_uses_rope = [bool(theta) for theta in cfg.layer_rope_theta]
-    model._spyre_text_blocks = [
-        _make_text_block(layer, cfg, model._spyre_text_uses_rope[i])
-        for i, layer in enumerate(get_backbone(model).layers)
+    layers = get_backbone(model).layers
+    if len(cfg.layer_rope_theta) != len(layers) or len(cfg.layer_types) != len(layers):
+        raise ValueError("Muse text layer metadata does not match the decoder depth")
+    model._spyre_text_block_specs = [
+        _text_block_spec(layer, cfg, bool(cfg.layer_rope_theta[i]))
+        for i, layer in enumerate(layers)
     ]
+    compiled_text_by_spec = {}
+    text_signature_by_spec = {}
+    model._spyre_text_blocks = []
+    for i, (layer, spec) in enumerate(zip(layers, model._spyre_text_block_specs)):
+        signature = _state_signature(_text_block_state(layer, spec))
+        if spec in text_signature_by_spec and text_signature_by_spec[spec] != signature:
+            raise ValueError(f"Muse text layer {i} has an incompatible state signature")
+        text_signature_by_spec.setdefault(spec, signature)
+        if spec not in compiled_text_by_spec:
+            compiled_text_by_spec[spec] = _make_text_forward(spec)
+        model._spyre_text_blocks.append(compiled_text_by_spec[spec])
     model._spyre_compiled_text_norm = torch.compile(
         get_backbone(model).norm, dynamic=False
     )
@@ -486,14 +721,35 @@ def prepare_for_spyre(model):
         layer.attn.proj = _pad_proj_input_simple(
             layer.attn.proj, vcfg.num_attention_heads, orig_head_dim, padded_head_dim
         )
-        patch_layernorm(layer.norm1, layer.norm2)
     patch_layernorm(tower.ln_pre, tower.ln_post)
     model._spyre_vision_inv_freq = tower.rotary_emb.inv_freq.detach().cpu()
     model._spyre_vision_head_dim = padded_head_dim
-    model._spyre_vision_blocks = [
-        _make_vision_block(layer, vcfg.num_attention_heads, padded_head_dim, scale)
+    vision_specs = [
+        _vision_block_spec(
+            layer,
+            vcfg.num_attention_heads,
+            padded_head_dim,
+            scale,
+            vcfg.hidden_act,
+        )
         for layer in tower.layers
     ]
+    compiled_vision_by_spec = {}
+    vision_signature_by_spec = {}
+    model._spyre_vision_blocks = []
+    for i, (layer, spec) in enumerate(zip(tower.layers, vision_specs)):
+        signature = _state_signature(_vision_block_state(layer))
+        if (
+            spec in vision_signature_by_spec
+            and vision_signature_by_spec[spec] != signature
+        ):
+            raise ValueError(
+                f"Muse vision layer {i} has an incompatible state signature"
+            )
+        vision_signature_by_spec.setdefault(spec, signature)
+        if spec not in compiled_vision_by_spec:
+            compiled_vision_by_spec[spec] = _make_vision_forward(spec)
+        model._spyre_vision_blocks.append(compiled_vision_by_spec[spec])
     model._spyre_compiled_vision_norm = torch.compile(tower.ln_post, dynamic=False)
     model._spyre_compiled_vision_projector = _make_vision_projector_core(model)
     model._spyre_cpu_submodules = [
