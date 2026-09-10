@@ -387,20 +387,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Python and uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           python-version: "3.11"
+          enable-cache: true
 
       - name: Install dependencies
-        run: |
-          pip install --quiet \
-            "torch>=2.0" \
-            "transformers>=5.12.1,<6.0.0" \
-            "mypy>=2.3.0,<3"
+        run: uv sync --frozen --group dev --no-group spyre
 
       - name: Run mypy
-        run: mypy --config-file=pyproject.toml
+        run: uv run --no-sync mypy --config-file=pyproject.toml
 
 #  cpu-tests:
 #    name: CPU tests (${{ matrix.test_file }})
