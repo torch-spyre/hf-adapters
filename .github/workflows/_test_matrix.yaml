@@ -713,10 +713,12 @@ jobs:
 
   spyre-multicard-smoke-tests:
     name: Spyre multicard smoke x2 (${{ matrix.model_key }})
-    needs: [generate-matrix, resolve-test-type]
+    needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
     # Suite key: "multicard_smoke". Runs in the unit, regression, and trunk
     # tiers or when selected explicitly.
-    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && needs.generate-matrix.outputs.multicard_smoke_matrix != '[]' && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' multicard_smoke ')) }}
+    # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
+    # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
+    if: ${{ (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && needs.generate-matrix.outputs.multicard_smoke_matrix != '[]' && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' multicard_smoke ')) }}
     # Don't let the initial pod failure fail the workflow outright -- the
     # fresh-pod retry and spyre-tests-result decide the authoritative result.
     continue-on-error: true
@@ -739,16 +741,27 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          # On the integration path (prebaked_image=true) this is empty and
+          # ignored: build-hf-adapters installs no torch-spyre and uses the one
+          # baked into the image venv instead.
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          prebaked_image: ${{ inputs.prebaked_image }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
           runner_labels: ${{ format('["x86_64","spyre_pf_x2","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run multicard smoke for ${{ matrix.model_key }}
         env:
@@ -1090,9 +1103,11 @@ jobs:
 
   spyre-clip-e2e-tests:
     name: Spyre CLIP e2e (${{ matrix.model_key }})
-    needs: [generate-matrix, resolve-test-type]
+    needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
     # Suite key: "clip". Part of the "unit" coarse tier.
-    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' clip ')) }}
+    # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
+    # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
+    if: ${{ (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' clip ')) }}
     continue-on-error: true
     runs-on:
       - x86_64
@@ -1114,16 +1129,27 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          # On the integration path (prebaked_image=true) this is empty and
+          # ignored: build-hf-adapters installs no torch-spyre and uses the one
+          # baked into the image venv instead.
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          prebaked_image: ${{ inputs.prebaked_image }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
           runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }}
         env:
@@ -2052,7 +2078,10 @@ jobs:
 
   spyre-multicard-smoke-tests-retry:
     name: Spyre multicard smoke x2 (${{ matrix.model_key }}) (pod-level retry)
-    needs: [collect-failed-suites]
+    needs: [collect-failed-suites, resolve-torch-spyre]
+    # Fail-closed on pin failure is emergent, not gated here: if resolve-torch-spyre
+    # failed, every primary suite skipped, so nothing ran, so has_failed_multicard_smoke
+    # is false and this retry never fires. See spyre-load-tests-retry for the full note.
     if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_multicard_smoke == 'true' }}
     runs-on:
       - x86_64
@@ -2072,16 +2101,27 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          # On the integration path (prebaked_image=true) this is empty and
+          # ignored: build-hf-adapters installs no torch-spyre and uses the one
+          # baked into the image venv instead.
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          prebaked_image: ${{ inputs.prebaked_image }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
           runner_labels: ${{ format('["x86_64","spyre_pf_x2","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run multicard smoke for ${{ matrix.model_key }} (pod-level retry)
         env:
@@ -2365,7 +2405,10 @@ jobs:
 
   spyre-clip-e2e-tests-retry:
     name: Spyre CLIP e2e (${{ matrix.model_key }}) (pod-level retry)
-    needs: [collect-failed-suites]
+    needs: [collect-failed-suites, resolve-torch-spyre]
+    # Fail-closed on pin failure is emergent, not gated here: if resolve-torch-spyre
+    # failed, every primary suite skipped, so nothing ran, so has_failed_clip
+    # is false and this retry never fires. See spyre-load-tests-retry for the full note.
     if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_clip == 'true' }}
     runs-on:
       - x86_64
@@ -2385,16 +2428,27 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          # On the integration path (prebaked_image=true) this is empty and
+          # ignored: build-hf-adapters installs no torch-spyre and uses the one
+          # baked into the image venv instead.
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          prebaked_image: ${{ inputs.prebaked_image }}
 
       - name: Gather runner info
         uses: ./.github/actions/gather-runner-info
         with:
           verbose: 'true'
           runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
       - name: Run test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)
         env:
