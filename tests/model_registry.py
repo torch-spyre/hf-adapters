@@ -605,7 +605,7 @@ VISION_MODELS = {
         "dtype": "bfloat16",  # blocked-FP8 checkpoint, dequantized to bf16
         "size": "3b",
     },
-    # hf_gemma4_vision.py — Vision tower of enocoder-based Gemma4 models
+    # hf_gemma4_vision.py — Vision tower of encoder-based Gemma4 models
     "gemma4_vision_tower": {
         "name": "Gemma 4 26B-A4B (Vision tower)",
         "path": "google/gemma-4-26B-A4B-it",
