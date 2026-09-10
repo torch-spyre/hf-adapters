@@ -66,6 +66,15 @@ jobs:
       CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
       CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
       CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
+      # Schema-v2 database. Reached by QUALIFYING every v2 statement rather than by a second
+      # connection: test_cases exists in both generations with incompatible shapes, so an
+      # unqualified name would hit the wrong one. Unset/empty makes the v2 write a no-op, so
+      # this is safe before the secret exists.
+      CLICKHOUSE_DB_V2: ${{ secrets.CLICKHOUSE_DB_V2 }}
+      # Dual-write during the migration window: v1 stays authoritative while v2 accumulates
+      # the same runs. No data is ported (v1 rows cannot produce a v2 run_id, the hash inputs
+      # were never recorded per row), so `both` is how v2 gets any history at all.
+      INGEST_SCHEMA: both
 
       # Metadata about the triggering run
       TRIGGERING_RUN_ID: ${{ github.event.workflow_run.id || inputs.gha_run_id }}
