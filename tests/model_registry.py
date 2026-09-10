@@ -793,7 +793,7 @@ def _all_paths(
     """
     return [
         info["path"]
-        for info in models.values()
+        for _, info in models.items()
         if (include_gated or not info.get("is_gated", False))
         and (predicate is None or predicate(info))
     ]

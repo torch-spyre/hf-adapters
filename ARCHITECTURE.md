@@ -60,7 +60,7 @@ chat-template tokenization (PR#385).
 
 Full multimodal VLMs: a vision tower (image → patch features) plus a causal text
 decoder (features + prompt → generated text). Both towers compile and run on
-Spyre; the projector / patch-embed / feature-merge ops that don't lower run on
+Spyre, the projector / patch-embed / feature-merge ops that don't lower run on
 CPU (see Multimodal VLM Path below).
 
 | Model | model\_type | Towers | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
