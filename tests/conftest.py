@@ -285,6 +285,25 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
                 item.add_marker(skip_slow)
 
 
+def _xfail_failure_message(report: pytest.TestReport) -> str:
+    """One-line summary of the exception behind an xfail, for CI visibility."""
+    longrepr = report.longrepr
+    reprcrash = getattr(longrepr, "reprcrash", None)
+    message = reprcrash.message if reprcrash is not None else str(longrepr)
+    message = " ".join(message.split())
+    return message[:300] + "..." if len(message) > 300 else message
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Print the underlying exception for xfail results — pytest's own summary only shows the marker's static `reason=`, hiding the actual error."""
+    if (
+        report.when == "call"
+        and report.skipped
+        and getattr(report, "wasxfail", None) is not None
+    ):
+        os.write(1, f"  [XFAIL ERROR = {_xfail_failure_message(report)}]\n".encode())
+
+
 def load_ref_model(
     model_path: str,
     adapter_mod: types.ModuleType | None = None,
