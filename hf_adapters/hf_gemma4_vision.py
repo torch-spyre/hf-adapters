@@ -136,6 +136,18 @@ class _Gemma4VisionBlockSpec:
     clipped_projections: tuple[bool, ...]
 
 
+def _assert_output_clamp_preserves_zero(module, name):
+    if not module.use_clipped_linears:
+        return
+    preserves_zero = torch.all((module.output_min <= 0) & (module.output_max >= 0))
+    if not bool(preserves_zero.item()):
+        raise ValueError(
+            f"{name} output clipping must include zero when attention heads are "
+            "padded; otherwise padded channels become nonzero before RMSNorm. "
+            f"Got output_min={module.output_min}, output_max={module.output_max}."
+        )
+
+
 def _prepare_clip_bounds(module):
     if not module.use_clipped_linears:
         return
@@ -396,6 +408,14 @@ def _prepare_vision_blocks(layers, num_heads, orig_head_dim, padded_head_dim):
     compiled_blocks = []
     for i, layer in enumerate(layers):
         attn = layer.self_attn
+        if padded_head_dim != orig_head_dim:
+            for name, module in (
+                ("q_proj", attn.q_proj),
+                ("k_proj", attn.k_proj),
+                ("v_proj", attn.v_proj),
+            ):
+                _assert_output_clamp_preserves_zero(module, f"layer {i} {name}")
+
         attn.q_proj.linear = _pad_qk_linear(
             attn.q_proj, num_heads, orig_head_dim, padded_head_dim
         )
