@@ -33,7 +33,7 @@ import pytest
 
 from tests.conftest import encode_generation_inputs
 from tests.model_registry import (
-    CAUSAL_PATHS,
+    CAUSAL_PARAMS,
     NON_BLOCKING_CAUSAL_MODELS,
     xfail_non_blocking,
 )
@@ -105,7 +105,7 @@ def run_smoke_test(model_path: str) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(
-    "model_path", xfail_non_blocking(CAUSAL_PATHS, table=NON_BLOCKING_CAUSAL_MODELS)
+    "model_path", xfail_non_blocking(CAUSAL_PARAMS, table=NON_BLOCKING_CAUSAL_MODELS)
 )
 def test_e2e_smoke_spyre(model_path: str) -> None:
     result = run_smoke_test(model_path)

@@ -652,7 +652,7 @@ def _select_representative_paths(
     *,
     include_gated: bool,
     predicate=None,
-) -> list[str]:
+) -> list[tuple[str, str]]:
     """Select representative model paths for each adapter module.
 
     Groups ``models`` by adapter and picks the smallest (by ``size``) model in
@@ -661,6 +661,9 @@ def _select_representative_paths(
     models are skipped unless ``include_gated``. An optional
     ``predicate(info) -> bool`` filters which entries are eligible (e.g.
     ``kind == "vlm"`` for vision).
+
+    Returns a list of ``(key, path)`` tuples so callers can build both plain
+    path lists (for ``ids=``) and ``pytest.param`` objects (for ``-k`` by key).
     """
     adapter_to_keys: dict[str, list[str]] = {}
     for key, info in models.items():
@@ -671,7 +674,7 @@ def _select_representative_paths(
         adapter = info["adapter"].replace(".py", "")
         adapter_to_keys.setdefault(adapter, []).append(key)
 
-    paths: list[str] = []
+    pairs: list[tuple[str, str]] = []
     for keys in adapter_to_keys.values():
         # Prefer smaller models (by size field) for faster tests; tie-break on
         # key name for consistency across runs.
@@ -683,8 +686,12 @@ def _select_representative_paths(
         selected_keys.update(
             key for key in sorted_keys if models[key].get("always_test", False)
         )
-        paths.extend(models[key]["path"] for key in sorted_keys if key in selected_keys)
-    return paths
+        pairs.extend(
+            (key, models[key]["path"])
+            for key in sorted_keys
+            if key in selected_keys
+        )
+    return pairs
 
 
 def _load_excluded_paths() -> frozenset[str]:
@@ -706,9 +713,28 @@ def _load_excluded_paths() -> frozenset[str]:
 _EXCLUDED_PATHS = _load_excluded_paths()
 
 
-def _exclude(paths: list[str]) -> list[str]:
-    """Drop any path listed in tests/model_lists/exclude.yaml."""
+def _exclude(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Drop any (key, path) pair whose path is listed in tests/model_lists/exclude.yaml."""
+    return [(k, p) for k, p in pairs if p not in _EXCLUDED_PATHS]
+
+
+def _exclude_paths(paths: list[str]) -> list[str]:
+    """Drop any plain path string listed in tests/model_lists/exclude.yaml."""
     return [p for p in paths if p not in _EXCLUDED_PATHS]
+
+
+def _to_paths(pairs: list[tuple[str, str]]) -> list[str]:
+    """Extract plain path strings from (key, path) pairs."""
+    return [p for _, p in pairs]
+
+
+def _to_params(pairs: list[tuple[str, str]]) -> list[object]:
+    """Build ``pytest.param(path, id=key)`` objects from (key, path) pairs.
+
+    Using registry key names as IDs means ``-k gemma4_moe``, ``-k granite8b``
+    etc. match correctly regardless of what the HF path string looks like.
+    """
+    return [pytest.param(path, id=key) for key, path in pairs]
 
 
 # At least one representative model per adapter module (smallest by size), plus
@@ -722,14 +748,19 @@ _include_gated_flag = _include_gated()
 # proposers, driven by ``_run_draft_block`` — no ``generate``), so they are
 # registered for adapter-coverage but excluded from the generate-based CPU/Spyre
 # causal-LM harnesses; they are exercised by tests/spyre/test_dspark_draft_spyre.py.
-CAUSAL_PATHS: list[str] = _exclude(
+_CAUSAL_PAIRS: list[tuple[str, str]] = _exclude(
     _select_representative_paths(
         CAUSAL_LM_MODELS,
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") != "dspark_draft",
     )
 )
-MULTICARD_SMOKE_PATHS: list[str] = _exclude(
+# Plain path strings — backward-compatible with every ``ids=CAUSAL_PATHS`` caller.
+CAUSAL_PATHS: list[str] = _to_paths(_CAUSAL_PAIRS)
+# pytest.param objects with id=key — use in parametrize so ``-k gemma4_moe`` works.
+CAUSAL_PARAMS: list[object] = _to_params(_CAUSAL_PAIRS)
+
+MULTICARD_SMOKE_PATHS: list[str] = _exclude_paths(
     [
         info["path"]
         for info in CAUSAL_LM_MODELS.values()
@@ -739,41 +770,55 @@ MULTICARD_SMOKE_PATHS: list[str] = _exclude(
 )
 # The DSpark drafter checkpoints (block proposers), one per adapter — exercised by
 # tests/spyre/test_dspark_draft_spyre.py via the block-propose ``_run_draft_block``.
-DSPARK_PATHS: list[str] = _exclude(
-    _select_representative_paths(
-        CAUSAL_LM_MODELS,
-        include_gated=_include_gated_flag,
-        predicate=lambda info: info.get("kind") == "dspark_draft",
+DSPARK_PATHS: list[str] = _to_paths(
+    _exclude(
+        _select_representative_paths(
+            CAUSAL_LM_MODELS,
+            include_gated=_include_gated_flag,
+            predicate=lambda info: info.get("kind") == "dspark_draft",
+        )
     )
 )
-EMBED_PATHS: list[str] = _exclude(
-    _select_representative_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)
-)
-MASKED_LM_PATHS: list[str] = _exclude(
-    _select_representative_paths(MASKED_LM_MODELS, include_gated=_include_gated_flag)
-)
-QUESTION_ANSWERING_PATHS: list[str] = _exclude(
-    _select_representative_paths(
-        QUESTION_ANSWERING_MODELS, include_gated=_include_gated_flag
+EMBED_PATHS: list[str] = _to_paths(
+    _exclude(
+        _select_representative_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)
     )
 )
-TOKEN_CLASSIFICATION_PATHS: list[str] = _exclude(
-    _select_representative_paths(
-        TOKEN_CLASSIFICATION_MODELS, include_gated=_include_gated_flag
+MASKED_LM_PATHS: list[str] = _to_paths(
+    _exclude(
+        _select_representative_paths(MASKED_LM_MODELS, include_gated=_include_gated_flag)
     )
 )
-VISION_PATHS: list[str] = _exclude(
+QUESTION_ANSWERING_PATHS: list[str] = _to_paths(
+    _exclude(
+        _select_representative_paths(
+            QUESTION_ANSWERING_MODELS, include_gated=_include_gated_flag
+        )
+    )
+)
+TOKEN_CLASSIFICATION_PATHS: list[str] = _to_paths(
+    _exclude(
+        _select_representative_paths(
+            TOKEN_CLASSIFICATION_MODELS, include_gated=_include_gated_flag
+        )
+    )
+)
+_VISION_PAIRS: list[tuple[str, str]] = _exclude(
     _select_representative_paths(
         VISION_MODELS,
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") == "vlm",
     )
 )
-CLIP_PATHS: list[str] = _exclude(
-    _select_representative_paths(
-        VISION_MODELS,
-        include_gated=_include_gated_flag,
-        predicate=lambda info: info.get("kind") == "clip",
+VISION_PATHS: list[str] = _to_paths(_VISION_PAIRS)
+VISION_PARAMS: list[object] = _to_params(_VISION_PAIRS)
+CLIP_PATHS: list[str] = _to_paths(
+    _exclude(
+        _select_representative_paths(
+            VISION_MODELS,
+            include_gated=_include_gated_flag,
+            predicate=lambda info: info.get("kind") == "clip",
+        )
     )
 )
 
@@ -803,33 +848,33 @@ def _all_paths(
 # reduction above -- used by generate_test_matrix.py's ``--only`` allowlist so
 # a caller can target any registered checkpoint, not just the adapter's
 # default representative. _exclude() applies here too, so --only can't override it.
-ALL_CAUSAL_PATHS: list[str] = _exclude(
+ALL_CAUSAL_PATHS: list[str] = _exclude_paths(
     _all_paths(
         CAUSAL_LM_MODELS,
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") != "dspark_draft",
     )
 )
-ALL_EMBED_PATHS: list[str] = _exclude(
+ALL_EMBED_PATHS: list[str] = _exclude_paths(
     _all_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)
 )
-ALL_MASKED_LM_PATHS: list[str] = _exclude(
+ALL_MASKED_LM_PATHS: list[str] = _exclude_paths(
     _all_paths(MASKED_LM_MODELS, include_gated=_include_gated_flag)
 )
-ALL_QUESTION_ANSWERING_PATHS: list[str] = _exclude(
+ALL_QUESTION_ANSWERING_PATHS: list[str] = _exclude_paths(
     _all_paths(QUESTION_ANSWERING_MODELS, include_gated=_include_gated_flag)
 )
-ALL_TOKEN_CLASSIFICATION_PATHS: list[str] = _exclude(
+ALL_TOKEN_CLASSIFICATION_PATHS: list[str] = _exclude_paths(
     _all_paths(TOKEN_CLASSIFICATION_MODELS, include_gated=_include_gated_flag)
 )
-ALL_VISION_PATHS: list[str] = _exclude(
+ALL_VISION_PATHS: list[str] = _exclude_paths(
     _all_paths(
         VISION_MODELS,
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") == "vlm",
     )
 )
-ALL_CLIP_PATHS: list[str] = _exclude(
+ALL_CLIP_PATHS: list[str] = _exclude_paths(
     _all_paths(
         VISION_MODELS,
         include_gated=_include_gated_flag,
@@ -868,24 +913,53 @@ NON_BLOCKING_VISION_MODELS: dict[str, str] = _non_blocking(
 )
 
 
-def xfail_non_blocking(paths: list[str], *, table: dict[str, str]) -> list[object]:
+# The actual runtime type of objects produced by pytest.param().
+_ParameterSet = type(pytest.param("_probe"))
+
+
+def xfail_non_blocking(
+    paths: list[object], *, table: dict[str, str]
+) -> list[object]:
     """Wrap entries of ``paths`` found in ``table`` with a non-strict xfail.
 
     The test still runs and its outcome (PASS/FAIL) is visible in the report,
     but a failure won't fail the pytest run or block CI.
+
+    Accepts both plain path strings (legacy callers that pass ``CAUSAL_PATHS``)
+    and ``pytest.param`` objects (new callers that pass ``CAUSAL_PARAMS`` so
+    that ``-k <registry-key>`` works).  In both cases the lookup into ``table``
+    is done on the path string (``table`` is always keyed by path).
     """
-    return [
-        (
-            pytest.param(
-                path,
-                marks=pytest.mark.xfail(reason=table[path], strict=False),
-                id=path,
-            )
-            if path in table
-            else path
-        )
-        for path in paths
-    ]
+    result = []
+    for item in paths:
+        if isinstance(item, _ParameterSet):
+            # pytest.param object — path is item.values[0], id is already set
+            path = item.values[0]
+            existing_id = item.id
+            if path in table:
+                result.append(
+                    pytest.param(
+                        path,
+                        marks=pytest.mark.xfail(reason=table[path], strict=False),
+                        id=existing_id,
+                    )
+                )
+            else:
+                result.append(item)
+        else:
+            # Plain string — legacy path
+            path = item
+            if path in table:
+                result.append(
+                    pytest.param(
+                        path,
+                        marks=pytest.mark.xfail(reason=table[path], strict=False),
+                        id=path,
+                    )
+                )
+            else:
+                result.append(path)
+    return result
 
 
 RERANKER_MODELS = {
@@ -898,7 +972,9 @@ RERANKER_MODELS = {
     },
 }
 
-RERANKER_PATHS: list[str] = _exclude([m["path"] for m in RERANKER_MODELS.values()])
+RERANKER_PATHS: list[str] = _exclude_paths(
+    [m["path"] for m in RERANKER_MODELS.values()]
+)
 # No per-adapter reduction for rerankers yet, so this equals RERANKER_PATHS -- kept separate so every category (see ALL_CAUSAL_PATHS et al.) follows the same pattern.
 ALL_RERANKER_PATHS: list[str] = list(RERANKER_PATHS)
 
@@ -923,11 +999,13 @@ SEQ_CLASSIFICATION_MODELS = {
     },
 }
 
-SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
-    _select_representative_paths(
-        SEQ_CLASSIFICATION_MODELS, include_gated=_include_gated_flag
+SEQ_CLASSIFICATION_PATHS: list[str] = _to_paths(
+    _exclude(
+        _select_representative_paths(
+            SEQ_CLASSIFICATION_MODELS, include_gated=_include_gated_flag
+        )
     )
 )
-ALL_SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
+ALL_SEQ_CLASSIFICATION_PATHS: list[str] = _exclude_paths(
     _all_paths(SEQ_CLASSIFICATION_MODELS, include_gated=_include_gated_flag)
 )
