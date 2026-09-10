@@ -1647,7 +1647,10 @@ def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
     _move_to_spyre_with_layout(model, dtype)
 
     for parent, attr, submod in saved_cpu_modules.values():
-        setattr(parent, attr, submod)
+        # Explicitly move to CPU: when DistributedConfig already placed the
+        # model on device before move_model_to_spyre runs, the saved submodule
+        # is on-device too; the restore would leave it on device rather than CPU.
+        setattr(parent, attr, submod.to("cpu"))
     print("Model on Spyre ready.")
 
 

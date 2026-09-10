@@ -73,6 +73,21 @@ Spyre adaptations
 - Self-conditioning: soft embeddings computed via ``embed_tokens`` on Spyre,
   combined via ``dec.self_conditioning`` on Spyre before the decoder layers.
 
+Tensor parallelism
+~~~~~~~~~~~~~~~~~~
+TP sharding uses **manual weight slicing + in-graph all-reduce**, not HF's
+``DistributedConfig`` / DTensor.  The DTensor RowwiseParallel path calls
+``dist.all_reduce`` eagerly in module.forward — on Spyre there is no ``gloo``
+backend for Spyre tensors, so that call hangs indefinitely.
+
+Instead, ``_apply_tp_sharding`` slices colwise projections along dim-0 and rowwise
+projections along dim-1 by ``rank``/``world_size`` (matching standard Megatron-LM
+column/row parallel linear).  The compiled attention and MLP blocks then call
+``torch.distributed.all_reduce`` on the ``o_proj`` and ``down_proj`` outputs
+respectively **before** returning.  ``torch.compile`` sees ``c10d_functional.all_reduce``
+(the functional form used inside compiled graphs) and the Spyre inductor lowers it
+to ``spyre.all_reduce_async`` — an on-chip all-reduce, no PCIe round-trip.
+
 Usage::
 
     from hf_adapters import AutoSpyreModelForCausalLM
@@ -161,15 +176,13 @@ class _DiffGemmaAttn(nn.Module):
       encoder cache, no write) via the ``encoder_mode`` flag.
     - ``is_kv_eq_v`` mirrors the Gemma 4 global-layer pattern.
 
-    Under tensor parallelism ``o_proj`` is rowwise-sharded, so its output is a
-    partial sum that must be all-reduced before the residual add.  To keep the
-    all-reduce out of the ``torch.compile`` graph (the Spyre bf16 backend does
-    not support the ``add`` inside ``allreduce_plan``), ``forward`` returns the
-    **raw** ``o_proj`` output and leaves the residual add to the caller.
+    Under tensor parallelism weights are sliced by ``_apply_tp_sharding`` and
+    a ``torch.distributed.all_reduce`` on the ``o_proj`` output is fused inside
+    the compiled graph as ``spyre.all_reduce_async``.
     """
 
     def __init__(
-        self, attn, head_dim, is_kv_eq_v, encoder_mode: bool
+        self, attn, head_dim, is_kv_eq_v, encoder_mode: bool, tp_group=None
     ):
         super().__init__()
         self.q_proj = attn.q_proj
@@ -184,6 +197,9 @@ class _DiffGemmaAttn(nn.Module):
         self.encoder_mode = encoder_mode
         # DiffusionGemma uses scale=1.0 (same as Gemma 4)
         self.scaling = attn.scaling
+        # Non-None only under TP; the all-reduce is inside the compiled graph so
+        # torch.compile lowers it to spyre.all_reduce_async (on-chip collective).
+        self.tp_group = tp_group
 
     def forward(
         self,
@@ -246,24 +262,36 @@ class _DiffGemmaAttn(nn.Module):
             enable_gqa=True,
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
-        # Return the raw o_proj output (partial sum under TP rowwise sharding).
-        # The caller all-reduces before the residual add.
-        return self.o_proj(attn_out), key_cache, value_cache
+        out = self.o_proj(attn_out)
+        if self.tp_group is not None:
+            # All-reduce inside the compiled graph; torch.compile lowers this to
+            # spyre.all_reduce_async (on-chip collective).
+            # Spyre hardware only supports fp16 for the 'add' (sum) collective;
+            # bf16 (dtype code 15) raises "Unsupported operation 'add' for
+            # data type BFLOAT16" at allreduce_plan time.  Cast to fp16 for the
+            # all-reduce and cast back to preserve the model's working dtype.
+            import torch.distributed as dist
+            orig_dtype = out.dtype
+            if orig_dtype == torch.bfloat16:
+                out = out.to(torch.float16)
+            dist.all_reduce(out, group=self.tp_group)
+            if orig_dtype == torch.bfloat16:
+                out = out.to(orig_dtype)
+        return out, key_cache, value_cache
 
 
 class _DiffGemmaBlockAttn(nn.Module):
     """Compiled first half of a DiffusionGemma layer: layernorm + attention only.
 
-    Returns ``(attn_out_partial, residual, key_cache, value_cache)`` where
-    ``attn_out_partial`` is the raw ``o_proj`` output (a partial sum under TP
-    rowwise sharding).  The caller all-reduces it on CPU before adding the
-    residual and feeding the MLP half.
+    Returns ``(attn_out, residual, key_cache, value_cache)``.  Under TP the
+    all-reduce on ``o_proj`` output is fused inside the compiled graph as
+    ``spyre.all_reduce_async`` (on-chip collective, no PCIe round-trip).
     """
 
-    def __init__(self, layer, head_dim, is_kv_eq_v, encoder_mode: bool):
+    def __init__(self, layer, head_dim, is_kv_eq_v, encoder_mode: bool, tp_group=None):
         super().__init__()
         self.self_attn = _DiffGemmaAttn(
-            layer.self_attn, head_dim, is_kv_eq_v, encoder_mode
+            layer.self_attn, head_dim, is_kv_eq_v, encoder_mode, tp_group=tp_group
         )
         self.input_layernorm = layer.input_layernorm
         self.train(layer.training)
@@ -271,27 +299,27 @@ class _DiffGemmaBlockAttn(nn.Module):
     def forward(self, hidden_states, selected_freqs, attn_mask, key_cache, value_cache, cache_index):
         residual = hidden_states
         h = self.input_layernorm(hidden_states)
-        attn_out_partial, key_cache, value_cache = self.self_attn(
+        attn_out, key_cache, value_cache = self.self_attn(
             h, selected_freqs, attn_mask, key_cache, value_cache, cache_index
         )
-        return attn_out_partial, residual, key_cache, value_cache
+        return attn_out, residual, key_cache, value_cache
 
 
 class _DiffGemmaBlockMLP(nn.Module):
     """Compiled second half of a DiffusionGemma layer: post-attn norm + dense MLP.
 
-    Takes the post-all-reduce ``h`` (= residual + post_attention_layernorm(attn_out))
-    and returns ``(mlp_out_partial, residual)`` where ``mlp_out_partial`` is the
-    raw ``down_proj`` output.  The caller all-reduces it on CPU, then applies
-    ``post_feedforward_layernorm_1`` to get ``dense_1`` for ``_finish_layer``.
+    Takes ``h`` (= residual + post_attention_layernorm(attn_out)) and returns
+    ``(mlp_out, residual)``.  Under TP the all-reduce on ``down_proj`` output is
+    fused inside the compiled graph as ``spyre.all_reduce_async`` (on-chip).
     """
 
-    def __init__(self, layer):
+    def __init__(self, layer, tp_group=None):
         super().__init__()
         self.mlp = layer.mlp
         self.post_attention_layernorm = layer.post_attention_layernorm
         self.pre_feedforward_layernorm = layer.pre_feedforward_layernorm
         self.post_feedforward_layernorm_1 = layer.post_feedforward_layernorm_1
+        self.tp_group = tp_group
         self.train(layer.training)
 
     def forward(self, h, residual_attn):
@@ -300,12 +328,24 @@ class _DiffGemmaBlockMLP(nn.Module):
         residual_mlp = h
         h = self.pre_feedforward_layernorm(h)
         h = self.mlp(h)
-        return h, residual_mlp  # (mlp_out_partial, residual_before_moe)
+        if self.tp_group is not None:
+            # All-reduce for TP rowwise down_proj; fused to spyre.all_reduce_async
+            # inside the compiled graph (torch.compile sees c10d_functional form).
+            # Cast to fp16 for the collective — bf16 is not supported by Spyre
+            # hardware's 'add' (sum) reduction (allreduce_plan rejects dtype 15).
+            import torch.distributed as dist
+            orig_dtype = h.dtype
+            if orig_dtype == torch.bfloat16:
+                h = h.to(torch.float16)
+            dist.all_reduce(h, group=self.tp_group)
+            if orig_dtype == torch.bfloat16:
+                h = h.to(orig_dtype)
+        return h, residual_mlp  # (mlp_out, residual_before_moe)
 
 
-def _compile_block(layer, head_dim, is_kv_eq_v, encoder_mode):
-    attn_block = _DiffGemmaBlockAttn(layer, head_dim, is_kv_eq_v, encoder_mode)
-    mlp_block = _DiffGemmaBlockMLP(layer)
+def _compile_block(layer, head_dim, is_kv_eq_v, encoder_mode, tp_group=None):
+    attn_block = _DiffGemmaBlockAttn(layer, head_dim, is_kv_eq_v, encoder_mode, tp_group=tp_group)
+    mlp_block = _DiffGemmaBlockMLP(layer, tp_group=tp_group)
     return (
         torch.compile(attn_block, dynamic=False),
         torch.compile(mlp_block, dynamic=False),
@@ -325,14 +365,10 @@ def _kv_shapes_for_model(model, cfg):
     ``AmbiguousGlobalPerLayerAttributeError``. Always read from
     ``per_layer_config[i]``.
 
-    Under tensor parallelism the ``k_proj`` weight is sharded across ranks, so
-    the effective ``num_kv_heads`` per device is ``config_kv_heads / tp_size``.
-    We derive it from the actual weight shape rather than the config value so
+    Under tensor parallelism ``k_proj.weight`` is sliced along dim-0 by
+    ``_apply_tp_sharding``, so the effective ``num_kv_heads`` per device is
+    ``config_kv_heads / tp_size``.  We derive it from the actual weight shape so
     both TP and non-TP paths are handled automatically.
-
-    The encoder and decoder share the same KV cache, so their ``k_proj`` must
-    be sharded identically (``load_hf_model`` mirrors the encoder TP plan onto
-    the decoder for exactly this reason).  Reading from the encoder is sufficient.
     """
     enc_text = model.model.encoder.language_model
     num_layers = cfg.num_hidden_layers
@@ -426,13 +462,19 @@ def _finish_layer(layer, dense_1, residual, layer_scalar):
 
 
 def _run_layer(compiled_attn, compiled_mlp, layer, h, freq, mask, key_cache, value_cache, cache_index, layer_scalar):
-    """Run one encoder/decoder layer: attn half → mlp half → MoE on CPU."""
-    # --- Attention half (compiled on Spyre) ---
+    """Run one encoder/decoder layer: attn half → mlp half → MoE on CPU.
+
+    Under TP, ``o_proj`` and ``down_proj`` outputs are all-reduced inside the
+    compiled graph via ``torch.distributed.all_reduce``.  ``torch.compile``
+    lowers this to ``spyre.all_reduce_async`` (on-chip collective, no PCIe
+    round-trip).  MoE always runs on CPU after the compiled blocks.
+    """
+    # --- Attention half (compiled on Spyre, all-reduces fused inside) ---
     attn_out, residual_0, key_cache, value_cache = compiled_attn(
         h, freq, mask, key_cache, value_cache, cache_index
     )
 
-    # --- MLP half (compiled on Spyre): post-attn norm + residual + dense MLP ---
+    # --- MLP half (compiled on Spyre, all-reduces fused inside) ---
     mlp_out, residual_1 = compiled_mlp(attn_out, residual_0)
     dense_1 = layer.post_feedforward_layernorm_1(mlp_out.to(h.device))
 
@@ -468,7 +510,7 @@ def _run_encoder_blocks(
         ls = float(enc_text.layers[i].layer_scalar)
         h, key_caches[i], value_caches[i] = _run_layer(
             compiled_attn, compiled_mlp, enc_text.layers[i],
-            h, freqs[lt], masks[lt], key_caches[i], value_caches[i], cache_index, ls
+            h, freqs[lt], masks[lt], key_caches[i], value_caches[i], cache_index, ls,
         )
 
     enc_text.norm(h)  # final encoder norm — result discarded, KV caches are the output
@@ -476,26 +518,22 @@ def _run_encoder_blocks(
 
 
 def _make_soft_embeddings(model, logits_cpu, dtype):
-    """Convert raw CPU logits to soft embeddings on CPU.
+    """Convert raw CPU logits to soft embeddings.
 
     Mirrors ``DiffusionGemmaDecoder.forward``:
         soft = softmax(logits) @ embed_weight * embed_scale
 
-    Computed on CPU from CPU logits so no Spyre retile occurs when the result
-    is moved to device — it enters the compiled graph as a plain [B, 256, H]
-    tensor with no prior eager-op layout annotation.
+    embed_tokens lives on Spyre, so we move the soft probs to Spyre, run the
+    matmul there (same device as embed_tokens.weight), then keep the result on
+    Spyre.  It enters the compiled decoder graph as a plain [B, 256, H] Spyre
+    tensor without any prior eager-op layout annotation.
     """
     dec = model.model.decoder
-    embed_w = dec.embed_tokens.weight.to("cpu")
+    embed_w = dec.embed_tokens.weight  # on Spyre after move_model_to_spyre
     embed_scale = float(dec.embed_tokens.embed_scale)
-    soft = (
-        torch.matmul(
-            logits_cpu.softmax(dim=-1, dtype=torch.float32).to(embed_w.dtype),
-            embed_w,
-        )
-        * embed_scale
-    )
-    return soft.to(dtype).contiguous()
+    probs = logits_cpu.softmax(dim=-1, dtype=torch.float32).to(dtype).to(embed_w.device)
+    soft = torch.matmul(probs, embed_w) * embed_scale
+    return soft.contiguous()
 
 
 def _run_decoder_blocks(
@@ -530,7 +568,7 @@ def _run_decoder_blocks(
         mask = decoder_attn_mask[lt] if isinstance(decoder_attn_mask, dict) else decoder_attn_mask
         h, _, _ = _run_layer(
             compiled_attn, compiled_mlp, dec.layers[i],
-            h, freqs[lt], mask, key_caches[i], value_caches[i], decoder_cache_index, ls
+            h, freqs[lt], mask, key_caches[i], value_caches[i], decoder_cache_index, ls,
         )
 
     return h
@@ -551,7 +589,10 @@ def _run_encoder_forward(
     cache_index,
 ):
     """Encode ``input_ids`` into the KV cache and return hidden states."""
-    h = model.model.encoder.language_model.embed_tokens(input_ids)
+    # embed_tokens (DiffusionGemmaTextScaledWordEmbedding) lives on Spyre —
+    # same 262K×2816 table as Gemma 4, which also runs on Spyre without issue.
+    embed = model.model.encoder.language_model.embed_tokens
+    h = embed(input_ids.to(embed.weight.device)).contiguous()
     return _run_encoder_blocks(
         model, h, position_ids, attn_mask, key_caches, value_caches, cache_index
     )
@@ -573,7 +614,8 @@ def _run_decoder_forward(
     soft_conditioning,  # [B, 256, H] on device, or None
 ):
     """Run the bidirectional decoder over a canvas, return logits."""
-    canvas_embeds = model.model.decoder.embed_tokens(canvas_ids)
+    embed = model.model.decoder.embed_tokens
+    canvas_embeds = embed(canvas_ids.to(embed.weight.device)).contiguous()
 
     h = _run_decoder_blocks(
         model,
@@ -761,14 +803,10 @@ def generate(
             )
             argmax_canvas = new_argmax.to(DEVICE)
 
-            # Self-conditioning: build soft embeddings on CPU from processed logits,
-            # then move to Spyre as a plain [B, 256, H] tensor — avoids the
-            # RetileWarning that fired when moving vocab-sized logits to Spyre.
-            soft_conditioning = (
-                _make_soft_embeddings(model, processed_logits, dtype)
-                .to(DEVICE)
-                .contiguous()
-            )
+            # Self-conditioning: softmax(logits) @ embed_weight on Spyre.
+            # logits_cpu stays on CPU; _make_soft_embeddings moves probs to Spyre
+            # and runs the matmul there, returning a [B, 256, H] Spyre tensor.
+            soft_conditioning = _make_soft_embeddings(model, processed_logits, dtype)
 
             # HF stopping criteria returns a [B] bool tensor — one flag per
             # batch item.  Only break when every item wants to stop; a plain
@@ -814,88 +852,100 @@ def generate(
 # ---------------------------------------------------------------------------
 
 
-def _expand_tp_plan(model, tp_plan):
-    """Expand wildcard ``*`` entries in a TP plan to concrete per-layer paths.
-
-    Uses ``fnmatch.filter`` against ``model.named_modules()`` so
-    ``get_submodule`` can resolve every path without hitting
-    ``AttributeError: ModuleList has no attribute '*'``.
-    """
-    import fnmatch
-
-    all_module_names = [name for name, _ in model.named_modules()]
-    return {
-        concrete: style
-        for pattern, style in tp_plan.items()
-        for concrete in (fnmatch.filter(all_module_names, pattern) if "*" in pattern else [pattern])
-    }
-
-
 def _apply_tp_sharding(model):
-    """Slice attention/MLP Linear weights in-place for this TP rank.
+    """Slice colwise/rowwise attention and MLP weights by rank for tensor parallelism.
 
-    ``"colwise"`` → shard output dim 0 of weight [out, in].
-    ``"rowwise"`` → shard input dim 1 of weight [out, in].
+    Implements standard Megatron-LM column/row parallel linear sharding:
+      - colwise (q_proj, k_proj, v_proj, gate_proj, up_proj): slice weight rows
+        (output features) → each rank keeps ``out_features // tp_size`` rows.
+      - rowwise (o_proj, down_proj): slice weight columns (input features) →
+        each rank keeps ``in_features // tp_size`` columns.
 
-    MoE experts are NOT sharded — they run on CPU where all ranks hold the
-    full expert tensors and execute the same router + expert dispatch.
+    The norms (q_norm, k_norm, v_norm) are replicated — each rank's per-head norm
+    operates on its own head shard; no communication needed.
+
+    lm_head, embed_tokens, and self_conditioning are intentionally replicated:
+      - lm_head is padded by pad_lm_head after load; sharding fights that.
+      - embed_tokens is a lookup table; no matmul all-reduce needed.
+      - self_conditioning runs in eager outside compiled blocks; an all-reduce
+        there would try to communicate on Spyre tensors outside torch.compile,
+        which hangs (no Spyre dist backend).
+
+    Modifies weights **in-place** on all ranks.  KV-cache shapes are derived from
+    the sliced weight shapes in ``_kv_shapes_for_model`` — no separate fixup needed.
     """
-    tp_plan = getattr(model, "_spyre_tp_plan", None)
-    if not tp_plan:
-        return
-
     import os
 
-    rank = int(os.environ.get("LOCAL_RANK", "0"))
-    tp_size = model._spyre_tp_size
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size == 1:
+        return
+    rank = int(os.environ.get("RANK", "0"))
 
-    for module_path, style in _expand_tp_plan(model, tp_plan).items():
-        parent_path, _, attr = module_path.rpartition(".")
-        parent = model.get_submodule(parent_path) if parent_path else model
-        submod = getattr(parent, attr)
-        if not isinstance(submod, nn.Linear):
-            continue
+    cfg = text_config(model.config)
+    num_layers = cfg.num_hidden_layers
 
-        w = submod.weight.data  # [out, in]
-        b = submod.bias.data if submod.bias is not None else None
+    def _slice_colwise(linear):
+        w = linear.weight.data
+        chunk = w.shape[0] // world_size
+        linear.weight = nn.Parameter(
+            w[rank * chunk : (rank + 1) * chunk].clone(), requires_grad=False
+        )
+        if linear.bias is not None:
+            b = linear.bias.data
+            linear.bias = nn.Parameter(
+                b[rank * chunk : (rank + 1) * chunk].clone(), requires_grad=False
+            )
 
-        if "colwise" in style:
-            out_dim = w.shape[0]
-            chunk = out_dim // tp_size
-            start, end = rank * chunk, (rank + 1) * chunk
-            submod.weight = nn.Parameter(w[start:end].clone(), requires_grad=False)
-            if b is not None:
-                submod.bias = nn.Parameter(b[start:end].clone(), requires_grad=False)
-        elif "rowwise" in style:
-            in_dim = w.shape[1]
-            chunk = in_dim // tp_size
-            start, end = rank * chunk, (rank + 1) * chunk
-            submod.weight = nn.Parameter(w[:, start:end].clone(), requires_grad=False)
+    def _slice_rowwise(linear):
+        w = linear.weight.data
+        chunk = w.shape[1] // world_size
+        linear.weight = nn.Parameter(
+            w[:, rank * chunk : (rank + 1) * chunk].clone(), requires_grad=False
+        )
+        # bias is added after the all-reduce; keep it only on rank 0 to avoid
+        # scaling it by world_size (same convention as Megatron-LM).
+        if linear.bias is not None and rank != 0:
+            linear.bias = None
+
+    for prefix_obj in (
+        model.model.encoder.language_model,
+        model.model.decoder,
+    ):
+        for i in range(num_layers):
+            layer = prefix_obj.layers[i]
+            attn = layer.self_attn
+            _slice_colwise(attn.q_proj)
+            _slice_colwise(attn.k_proj)
+            if attn.v_proj is not None:  # absent on k_eq_v (full_attention) layers
+                _slice_colwise(attn.v_proj)
+            _slice_rowwise(attn.o_proj)
+            _slice_colwise(layer.mlp.gate_proj)
+            _slice_colwise(layer.mlp.up_proj)
+            _slice_rowwise(layer.mlp.down_proj)
 
 
 def load_hf_model(model_path, dtype, tp_plan=None):
     """Custom loader: ``DiffusionGemmaForBlockDiffusion`` is not in AutoModelForCausalLM.
 
-    Loads weights to CPU.  When ``tp_plan`` is set, the resolved plan is
-    stashed on the model and ``prepare_for_spyre`` slices the Linear weights
-    via ``_apply_tp_sharding`` before ``move_model_to_spyre`` moves them to
-    Spyre.  The all-reduce for rowwise projections is performed in eager
-    (``_tp_all_reduce`` in ``_run_layer``) rather than inside the compiled
-    graph, because the Spyre bf16 backend does not support the ``add``
-    reduction inside ``allreduce_plan``.
+    Always loads to CPU with ``device_map="cpu"``.  TP weight slicing is done in
+    ``prepare_for_spyre`` via ``_apply_tp_sharding`` — never via HF's
+    ``DistributedConfig``.
 
-    The TP plan is extended to cover the decoder layers (the auto plan only
-    lists encoder paths).  Encoder and decoder share the same KV cache tensor
-    so they must be sharded with identical head counts.
+    Why not DistributedConfig?  HF's ``RowwiseParallel`` takes a local-inference
+    fast path (``should_use_local_tensors`` → True for eval Linear) that calls
+    ``dist.all_reduce(output, group=process_group)`` **eagerly** in each module
+    forward.  On Spyre there is no ``gloo`` or ``nccl`` backend that can reduce
+    Spyre device tensors in eager mode — the call hangs indefinitely.
 
-    ``embed_tokens`` entries are dropped — sharding them involves unsupported
-    bool/int32 ops on Spyre.
+    Instead, ``_apply_tp_sharding`` slices the weights manually and the compiled
+    blocks call ``torch.distributed.all_reduce`` on ``o_proj``/``down_proj``
+    outputs **inside** ``torch.compile``.  The Spyre inductor lowers the resulting
+    ``c10d_functional.all_reduce`` to ``spyre.all_reduce_async`` — an on-chip
+    collective that never leaves the Spyre interconnect.
     """
     from transformers.models.diffusion_gemma.modeling_diffusion_gemma import (
         DiffusionGemmaForBlockDiffusion,
     )
-
-    from hf_adapters.hf_common import _resolve_tp_size
 
     model = DiffusionGemmaForBlockDiffusion.from_pretrained(
         model_path,
@@ -904,42 +954,6 @@ def load_hf_model(model_path, dtype, tp_plan=None):
     )
     model.eval()
     model.requires_grad_(False)
-
-    if tp_plan is not None:
-        if dtype == torch.bfloat16:
-            raise ValueError(
-                "DiffusionGemma TP is not supported with bfloat16 on this Spyre version. "
-                "The Spyre bf16 inductor backend does not support the 'add' reduction inside "
-                "allreduce_plan (torch-spyre constants.py::SPYRE_FP32_OPS), so rowwise-sharded "
-                "projections (o_proj, down_proj) cannot be all-reduced on-device. "
-                "Use dtype=torch.float16 or run without --tp."
-            )
-        if tp_plan == "auto":
-            from transformers import AutoConfig
-
-            cfg = AutoConfig.from_pretrained(model_path)
-            with torch.device("meta"):
-                probe = DiffusionGemmaForBlockDiffusion._from_config(cfg)
-            resolved_plan = dict(probe.tp_plan or {})
-            resolved_plan.pop("lm_head", None)
-            resolved_plan.pop("model.embed_tokens", None)
-        else:
-            resolved_plan = dict(tp_plan)
-
-        resolved_plan.pop("model.encoder.language_model.embed_tokens", None)
-        resolved_plan.pop("model.decoder.embed_tokens", None)
-
-        # Mirror encoder layer paths onto the decoder — they share the same
-        # KV cache tensor, so num_kv_heads must match on every rank.
-        resolved_plan.update({
-            path.replace("model.encoder.language_model.layers.", "model.decoder.layers.", 1): style
-            for path, style in resolved_plan.items()
-            if path.startswith("model.encoder.language_model.layers.")
-        })
-
-        model._spyre_tp_plan = resolved_plan
-        model._spyre_tp_size = _resolve_tp_size()
-
     return model
 
 
@@ -948,12 +962,14 @@ def prepare_for_spyre(model):
 
     Steps:
     1. Patch ``DiffusionGemmaRMSNorm`` for the fp16 Spyre path.
-    2. Apply TP weight sharding (colwise/rowwise Linear slicing).
+    2. Apply TP weight sharding (no-op when WORLD_SIZE == 1).
     3. Build per-type ``PrecomputedRotaryEmbedding`` for encoder and decoder.
-    4. Record per-layer KV-cache shapes (reads post-TP weight shapes).
+    4. Record per-layer KV-cache shapes (reads post-sharding weight shapes).
     5. Pad the LM head.
-    6. Compile each layer's attention half and MLP half separately so that
-       the rowwise all-reduces can be inserted in eager between them.
+    6. Compile each layer's attention half and MLP half separately.
+       Under TP, the compiled blocks call ``torch.distributed.all_reduce`` on
+       ``o_proj``/``down_proj`` outputs; ``torch.compile`` lowers this to
+       ``spyre.all_reduce_async`` (on-chip, no PCIe round-trip).
        MoE runs on CPU via the stock HF eager dispatch after each layer.
     """
     from transformers.models.diffusion_gemma.modeling_diffusion_gemma import (
@@ -965,16 +981,14 @@ def prepare_for_spyre(model):
     # 1. Patch RMSNorm for the fp16 Spyre path.
     _patch_diffusion_gemma_rmsnorm(DiffusionGemmaRMSNorm)
 
+    # 2. TP weight sharding (no-op when WORLD_SIZE == 1 or tp_plan is None).
+    _apply_tp_sharding(model)
+
     # encoder text layers live under model.model.encoder.language_model
     enc_text = model.model.encoder.language_model
     # decoder layers live directly on model.model.decoder
     dec = model.model.decoder
     layer_types = cfg.layer_types
-
-    # 2. Apply TP weight sharding (colwise/rowwise) before moving to Spyre.
-    #    All-reduces for rowwise projections are done in eager by _tp_all_reduce
-    #    in _run_layer — not inside torch.compile (Spyre bf16 allreduce_plan unsupported).
-    _apply_tp_sharding(model)
 
     # 3. Per-type RoPE (Gemma4/DiffusionGemma store per-type inv_freq on the
     #    rotary_emb module as ``<layer_type>_inv_freq`` + ``<layer_type>_attention_scaling``).
@@ -1007,16 +1021,42 @@ def prepare_for_spyre(model):
             _rope.set_dtype(_model_dtype)
             _rope._extend_cache(_context_len)
 
-    # 4. Per-layer KV-cache shapes (reads actual post-TP weight shapes)
+    # 4. Per-layer KV-cache shapes (reads post-TP-sharding weight shapes)
     kv_shapes = _kv_shapes_for_model(model, cfg)
     model._spyre_kv_shapes = kv_shapes
 
     # 5. Pad LM head
     pad_lm_head(model)
 
-    # 6. Compile each layer as two halves (attn + mlp) so rowwise all-reduces
-    #    can be inserted in eager between them.  MoE stays in the HF layer
-    #    objects and runs on CPU via _finish_layer after each layer.
+    # 6. Compile each layer as two halves (attn + mlp).
+    #    Under TP, pass the process group so the compiled blocks insert all-reduces.
+    #    MoE stays in the HF layer objects and runs on CPU via _finish_layer.
+    import os
+    import torch.distributed as dist
+
+    tp_group = None
+    if int(os.environ.get("WORLD_SIZE", "1")) > 1:
+        # torchrun sets RANK/LOCAL_RANK/WORLD_SIZE but does NOT call
+        # init_process_group automatically.  The DistributedConfig path used to
+        # do this via initialize_tensor_parallelism → _ensure_torch_distributed.
+        # Now that we load on CPU without DistributedConfig we must initialize
+        # the process group ourselves before we can use dist.group.WORLD.
+        #
+        # Spyre requires "cpu:gloo,spyre:spyreccl" so that:
+        #   - CPU tensors (e.g. barriers) use gloo
+        #   - Spyre tensors inside compiled graphs use spyreccl
+        # _ensure_torch_distributed() uses backend_map which has no "spyre"
+        # entry and would init with backend=None (wrong).
+        if not dist.is_initialized():
+            rank = int(os.environ["RANK"])
+            world_size = int(os.environ["WORLD_SIZE"])
+            dist.init_process_group(
+                backend="cpu:gloo,spyre:spyreccl",
+                rank=rank,
+                world_size=world_size,
+            )
+        tp_group = dist.group.WORLD
+
     is_kv_eq_v_per_layer = [
         (lt == "full_attention") and (enc_text.layers[i].self_attn.v_proj is None)
         for i, lt in enumerate(layer_types)
@@ -1029,8 +1069,8 @@ def prepare_for_spyre(model):
         head_dim = layer_cfg.head_dim
         is_kv_eq_v = is_kv_eq_v_per_layer[i]
 
-        enc_compiled.append(_compile_block(layer_enc, head_dim, is_kv_eq_v, encoder_mode=True))
-        dec_compiled.append(_compile_block(layer_dec, head_dim, is_kv_eq_v, encoder_mode=False))
+        enc_compiled.append(_compile_block(layer_enc, head_dim, is_kv_eq_v, encoder_mode=True, tp_group=tp_group))
+        dec_compiled.append(_compile_block(layer_dec, head_dim, is_kv_eq_v, encoder_mode=False, tp_group=tp_group))
 
     model._spyre_enc_compiled_blocks = enc_compiled
     model._spyre_dec_compiled_blocks = dec_compiled
