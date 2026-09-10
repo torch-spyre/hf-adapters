@@ -69,7 +69,7 @@ E-variant support (E2B / E4B): the two E-variant features are handled here:
   reuse the KV cache of the nearest preceding non-shared layer of the same
   ``layer_type`` (stock ``store_full_length_kv`` semantics), so they run a lean
   Q-only block (no k/v proj, no cache write) against that producer's cache — see
-  ``_shared_producer_map`` and ``Gemma4SharedBlock``.
+  ``_shared_producer_map`` and the ``shared`` kind of ``Gemma4Block``.
 
 The MoE 26B-A4B variant is handled by the sibling ``hf_gemma4_moe`` adapter,
 which reuses this module's attention-side setup and forward driver.
@@ -331,17 +331,42 @@ class Gemma4Attention(nn.Module):
 
 
 class Gemma4Block(nn.Module):
-    """Registered dense Gemma 4 decoder block used by the Spyre adapter."""
+    """Registered writer or KV-sharing Gemma 4 decoder block."""
 
-    def __init__(self, layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v, has_ple):
+    def __init__(
+        self,
+        layer,
+        kind,
+        num_q_heads,
+        num_kv_heads,
+        head_dim,
+        is_kv_eq_v,
+        has_ple,
+    ):
         super().__init__()
-        self.self_attn = Gemma4Attention(
-            layer.self_attn,
-            num_q_heads,
-            num_kv_heads,
-            head_dim,
-            is_kv_eq_v,
-        )
+        if kind not in ("writer", "shared"):
+            raise ValueError(f"Unsupported Gemma 4 block kind: {kind!r}")
+        self.kind = kind
+
+        if kind == "writer":
+            self.self_attn = Gemma4Attention(
+                layer.self_attn,
+                num_q_heads,
+                num_kv_heads,
+                head_dim,
+                is_kv_eq_v,
+            )
+        else:
+            # A shared block runs lean Q-only attention against its producer's KV
+            # cache: it has no K/V projections or norms and never updates a cache.
+            attn = layer.self_attn
+            self.q_proj = attn.q_proj
+            self.q_norm = attn.q_norm
+            self.o_proj = attn.o_proj
+            self.scaling = attn.scaling
+            self.num_q_heads = num_q_heads
+            self.head_dim = head_dim
+
         self.mlp = layer.mlp
         self.input_layernorm = layer.input_layernorm
         self.post_attention_layernorm = layer.post_attention_layernorm
@@ -353,49 +378,6 @@ class Gemma4Block(nn.Module):
             persistent="layer_scalar" not in layer._non_persistent_buffers_set,
         )
         # E-variant per-layer-embedding submodules (absent on dense 12B/31B).
-        self.has_ple = has_ple
-        if has_ple:
-            self.per_layer_input_gate = layer.per_layer_input_gate
-            self.per_layer_projection = layer.per_layer_projection
-            self.post_per_layer_input_norm = layer.post_per_layer_input_norm
-        self.train(layer.training)
-
-    # This module intentionally owns state without implementing forward(). The
-    # shared compiled executor receives its tensors explicitly so structurally
-    # identical layers reuse one graph. An eager forward could delegate to that
-    # same functional executor in the future without duplicating block semantics.
-
-
-class Gemma4SharedBlock(nn.Module):
-    """KV-sharing Gemma 4 decoder block (E-variant trailing layers).
-
-    Runs a lean Q-only attention against a *producer* layer's KV cache: no
-    k/v projection, no k_norm/v_norm, no RoPE-on-K, no cache update. The
-    producer's cache is passed in by the driver (``_run_blocks_over_embeds``
-    selects ``key_caches[producer_of[i]]``). The shared executor accepts the
-    writer-shaped cache interface for compile-time uniformity, but receives no
-    ``cache_index`` and never writes.
-    """
-
-    def __init__(self, layer, num_q_heads, head_dim, has_ple):
-        super().__init__()
-        attn = layer.self_attn
-        self.q_proj = attn.q_proj
-        self.q_norm = attn.q_norm
-        self.o_proj = attn.o_proj
-        self.scaling = attn.scaling  # 1.0 for Gemma 4
-        self.num_q_heads = num_q_heads
-        self.head_dim = head_dim
-        self.mlp = layer.mlp
-        self.input_layernorm = layer.input_layernorm
-        self.post_attention_layernorm = layer.post_attention_layernorm
-        self.pre_feedforward_layernorm = layer.pre_feedforward_layernorm
-        self.post_feedforward_layernorm = layer.post_feedforward_layernorm
-        self.register_buffer(
-            "layer_scalar",
-            layer.layer_scalar,
-            persistent="layer_scalar" not in layer._non_persistent_buffers_set,
-        )
         self.has_ple = has_ple
         if has_ple:
             self.per_layer_input_gate = layer.per_layer_input_gate
@@ -443,9 +425,20 @@ def _linear_weight(linear, name):
     return linear.weight
 
 
+def _block_kind_and_attention(block):
+    if not isinstance(block, Gemma4Block):
+        raise TypeError(f"Unsupported Gemma 4 block type: {type(block).__name__}")
+    kind = block.kind
+    if kind == "writer":
+        return kind, block.self_attn
+    if kind == "shared":
+        return kind, block
+    raise ValueError(f"Unsupported Gemma 4 block kind: {kind!r}")
+
+
 def _block_state(block):
-    if isinstance(block, Gemma4Block):
-        attn = block.self_attn
+    kind, attn = _block_kind_and_attention(block)
+    if kind == "writer":
         state = [attn.q_proj.weight, attn.k_proj.weight]
         if attn.q_proj.bias is not None:
             state.extend([attn.q_proj.bias, attn.k_proj.bias])
@@ -457,16 +450,14 @@ def _block_state(block):
         if attn.o_proj.bias is not None:
             state.append(attn.o_proj.bias)
         state.extend([attn.q_norm.weight, attn.k_norm.weight])
-    elif isinstance(block, Gemma4SharedBlock):
-        state = [block.q_proj.weight]
-        if block.q_proj.bias is not None:
-            state.append(block.q_proj.bias)
-        state.append(block.o_proj.weight)
-        if block.o_proj.bias is not None:
-            state.append(block.o_proj.bias)
-        state.append(block.q_norm.weight)
     else:
-        raise TypeError(f"Unsupported Gemma 4 block type: {type(block).__name__}")
+        state = [attn.q_proj.weight]
+        if attn.q_proj.bias is not None:
+            state.append(attn.q_proj.bias)
+        state.append(attn.o_proj.weight)
+        if attn.o_proj.bias is not None:
+            state.append(attn.o_proj.bias)
+        state.append(attn.q_norm.weight)
 
     state.extend(
         [
@@ -669,22 +660,17 @@ def _make_block_forward(spec):
 
 
 def _block_spec(block, layer_type):
-    if isinstance(block, Gemma4Block):
-        attn = block.self_attn
-        kind = "writer"
+    kind, attn = _block_kind_and_attention(block)
+    if kind == "writer":
         num_kv_heads = attn.num_kv_heads
         is_kv_eq_v = attn.is_kv_eq_v
         k_norm_eps = attn.k_norm.eps
         v_norm_eps = attn.v_norm.eps
-    elif isinstance(block, Gemma4SharedBlock):
-        kind = "shared"
+    else:
         num_kv_heads = 0
         is_kv_eq_v = False
         k_norm_eps = 0.0
         v_norm_eps = 0.0
-        attn = block
-    else:
-        raise TypeError(f"Unsupported Gemma 4 block type: {type(block).__name__}")
     activation = block.mlp.config.hidden_activation
     if activation != "gelu_pytorch_tanh":
         raise SpyreUnsupportedModelError(
@@ -765,22 +751,16 @@ def prepare_gemma4_blocks(
     compiled_by_spec = {}
     compiled_blocks = []
     for i, layer in enumerate(list(layers)):
-        if producer_of[i] is None:
-            block = Gemma4Block(
-                layer,
-                num_q_heads_per_layer[i],
-                kv_shapes[i][0],
-                kv_shapes[i][1],
-                is_kv_eq_v_per_layer[i],
-                has_ple,
-            )
-        else:
-            block = Gemma4SharedBlock(
-                layer,
-                num_q_heads_per_layer[i],
-                kv_shapes[i][1],
-                has_ple,
-            )
+        kind = "writer" if producer_of[i] is None else "shared"
+        block = Gemma4Block(
+            layer,
+            kind,
+            num_q_heads_per_layer[i],
+            kv_shapes[i][0],
+            kv_shapes[i][1],
+            is_kv_eq_v_per_layer[i],
+            has_ple,
+        )
         layers[i] = block
         spec = _block_spec(block, layer_types[i])
         if spec not in compiled_by_spec:
