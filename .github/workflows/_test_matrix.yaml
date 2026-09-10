@@ -1495,7 +1495,8 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cd "$CLONED_HF_ADAPTERS_DIR"
-          source .venv/bin/activate
+          # build-hf-adapters prepared the active image environment, not .venv.
+          : "${VIRTUAL_ENV:?The build action must prepare the active test environment}"
           make model-module-tests MODULE_CONFIG=${{ matrix.config }} PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             JUNIT_XML=1 RESULTS_DIR=.
           mv "model-module-${{ matrix.config }}.xml" "junit-model-module-${{ matrix.config }}.xml"
@@ -2434,7 +2435,8 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cd "$CLONED_HF_ADAPTERS_DIR"
-          source .venv/bin/activate
+          # build-hf-adapters prepared the active image environment, not .venv.
+          : "${VIRTUAL_ENV:?The build action must prepare the active test environment}"
           make model-module-tests MODULE_CONFIG=${{ matrix.config }} PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             JUNIT_XML=1 RESULTS_DIR=.
           mv "model-module-${{ matrix.config }}.xml" "junit-model-module-${{ matrix.config }}.xml"

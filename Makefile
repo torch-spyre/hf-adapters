@@ -153,7 +153,7 @@ model-module-tests: ## Run oot_framework module tests (suite key: model_module; 
 	set -e; \
 	_run_test=$$(uv run --active --no-sync python3 -c \
 	  "import oot_framework, os; print(os.path.join(os.path.dirname(oot_framework.__file__), 'run_test.sh'))") || { \
-	  echo "ERROR: oot_framework is not installed in the active venv. Run 'uv sync --group oot' (see CLAUDE.md) and retry."; \
+	  echo "ERROR: oot_framework is not installed in the active venv. Install the oot group into $$VIRTUAL_ENV (see .github/actions/build-hf-adapters/action.yaml) and retry."; \
 	  exit 1; \
 	}; \
 	configs="$(MODULE_CONFIG)"; \

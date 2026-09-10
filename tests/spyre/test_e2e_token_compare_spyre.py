@@ -307,7 +307,38 @@ def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]
         num_decode=num_decode,
     )
 
-    return _compare_results(hf_results, adapter_results, tokenizer, model_path)
+    rows = _compare_results(hf_results, adapter_results, tokenizer, model_path)
+    if adapter.__name__ in ("hf_adapters.hf_gemma4", "hf_adapters.hf_gemma4_moe"):
+        # Forward-only comparison bypasses generation's bounded head and copy.
+        # Reuse this model/reference and the real loop, with fresh request caches.
+        from hf_adapters.hf_common import generate
+
+        output = generate(
+            adapter._run_forward,
+            model,
+            **encoded,
+            max_new_tokens=num_decode + 1,
+            do_sample=False,
+            eos_token_id=None,
+            return_dict_in_generate=True,
+            output_logits=True,
+        )
+        assert len(output.logits) == num_decode + 1
+        assert all(torch.isfinite(logits).all().item() for logits in output.logits)
+        generation_results = [
+            {
+                "step": step,
+                "logits": logits[0].float(),
+                "token": output.sequences[0, input_ids.shape[1] + step].item(),
+            }
+            for step, logits in enumerate(output.logits)
+        ]
+        rows.extend(
+            _compare_results(
+                hf_results, generation_results, tokenizer, f"{model_path} [generate]"
+            )
+        )
+    return rows
 
 
 def token_compare_spyre(

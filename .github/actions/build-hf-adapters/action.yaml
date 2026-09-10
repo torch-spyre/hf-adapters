@@ -123,6 +123,18 @@ runs:
         head -40 "$HOME/.bashrc" || true
         echo "::endgroup::"
 
+        # Tests use `uv run --active --no-sync`. Install into that same
+        # environment, not a second .venv under the checkout. The image owns
+        # Torch's native build (in particular on ppc64le, without a CPU wheel).
+        # Resolve dependencies without an implicit sync, then leave Torch and
+        # unrelated image packages intact in the one explicit sync below.
+        : "${VIRTUAL_ENV:?The runner must activate its Python environment}"
+        export UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV"
+        CI_PYTHON="$VIRTUAL_ENV/bin/python"
+        test -x "$CI_PYTHON"
+        TORCH_FINGERPRINT='import hashlib, json, pathlib, torch; p = pathlib.Path(torch._C.__file__); print(json.dumps([torch.__version__, str(p.resolve()), hashlib.sha256(p.read_bytes()).hexdigest()]))'
+        TORCH_BEFORE=$(TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$CI_PYTHON" -c "$TORCH_FINGERPRINT")
+
         # Build group flags from space-separated list
         GROUP_FLAGS=""
         for group in $UV_GROUPS; do
@@ -142,17 +154,37 @@ runs:
           git submodule update --init --recursive --force
           git log -1 --oneline
           cd "$CLONED_HF_ADAPTERS_DIR"
-          uv add torch-spyre /home/senuser/torch-spyre
-          uv sync --verbose --refresh $GROUP_FLAGS
+          uv add --no-sync torch-spyre /home/senuser/torch-spyre
         else
           cd "$CLONED_HF_ADAPTERS_DIR"
           # though we pin to main
           # frozen installation takes pinned commit when locked
           # we want to relax on torch-spyre to use floating version
           # and have other dependencies locked
-          uv add torch-spyre /home/senuser/torch-spyre
+          uv add --no-sync torch-spyre /home/senuser/torch-spyre
           uv lock --upgrade-package torch-spyre
-          uv sync --frozen --verbose --refresh $GROUP_FLAGS
         fi
+        uv sync --active --frozen --inexact --no-install-package torch --verbose --refresh $GROUP_FLAGS
+        TORCH_AFTER=$(TORCH_DEVICE_BACKEND_AUTOLOAD=0 "$CI_PYTHON" -c "$TORCH_FINGERPRINT")
+        if [[ "$TORCH_BEFORE" != "$TORCH_AFTER" ]]; then
+          echo "::error::Dependency installation changed the image's native Torch build"
+          exit 1
+        fi
+        uv pip check --python "$CI_PYTHON"
+        # Exercise exactly the interpreter-selection path used by Makefile.
+        # Fail during setup, rather than dispatching a suite with missing deps.
+        uv run --active --no-sync python - <<'PY'
+        import os
+        import pathlib
+        import sys
+        import torch
+        import transformers
+        import torch_spyre
+
+        assert pathlib.Path(sys.prefix).resolve() == pathlib.Path(os.environ["VIRTUAL_ENV"]).resolve()
+        if "oot" in os.environ["UV_GROUPS"].split():
+            import oot_framework
+        print(f"Test interpreter: {sys.executable}; torch: {torch.__version__}; transformers: {transformers.__version__}")
+        PY
         uv pip show torch
         uv pip freeze

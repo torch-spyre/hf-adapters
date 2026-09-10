@@ -756,8 +756,18 @@ def _run_forward(
     key_caches,
     value_caches,
     cache_index,
+    *,
+    _last_hidden_row_only=False,
 ):
-    """Gemma 4 causal-LM forward: backbone + LM head + logit softcap."""
+    """Gemma 4 forward; generation may request only the final head row.
+
+    The default returns every row. The opt-in leaves the backbone and all
+    cache updates intact, selecting a row before the existing vocabulary head
+    and softcap. Chunked generation requests one head row for each chunk,
+    while every chunk still runs its complete backbone and cache updates.
+    A differently shaped matmul may round differently; this is
+    not a promise of bitwise equality to the full-row device calculation.
+    """
     h = _run_backbone_forward(
         model,
         input_ids,
@@ -768,6 +778,8 @@ def _run_forward(
         cache_index,
     )
 
+    if _last_hidden_row_only:
+        h = h[:, -1:, :]
     logits = model.lm_head(h)
 
     cap = text_config(model.config).final_logit_softcapping
