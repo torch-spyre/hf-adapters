@@ -19,8 +19,8 @@ Covers both towers of each registered CLIP checkpoint:
 
 - **Text tower**: encode a list of strings and compare per-token cosine similarity
   between CPU and Spyre outputs, then assert a sentence-embedding cosine threshold.
-- **Vision tower**: encode PIL images downloaded from public URLs and compare
-  the resulting image embeddings between CPU and Spyre.
+- **Vision tower**: encode a PIL image downloaded from the Hugging Face Hub and
+  compare the resulting image embeddings between CPU and Spyre.
 - **Cross-modal**: verify the cosine-similarity ranking between one image embedding
   and a list of text embeddings is identical on CPU and Spyre.
 
@@ -29,7 +29,6 @@ Usage (on Spyre pod)::
     pytest -s -vvv tests/spyre/test_e2e_clip_compare_spyre.py
 """
 
-from io import BytesIO
 from typing import Any
 
 import pytest
@@ -38,22 +37,18 @@ import torch.nn.functional as F
 
 # Registers the "spyre" backend with sentence_transformers on import.
 import hf_adapters.st_backend  # noqa: F401
+from tests._vision_helpers import _load_sample_image
 from tests.model_registry import CLIP_PATHS
 
 pytestmark = pytest.mark.model_harness("embedding")
 
 TEXT_PROMPTS = [
-    "Two dogs in the snow",
-    "A cat on a table",
+    "Two dogs at the beach",
+    "A cat in the snow",
     "A picture of London at night",
 ]
 
-# Public-domain image URLs for the vision tower test.
-# Using small, reliable JPEG images to minimise download time.
-IMAGE_URLS = [
-    # Labrador retriever (Wikimedia Commons, public domain)
-    "https://upload.wikimedia.org/wikipedia/commons/3/34/Labrador_on_Quantock_%282175262184%29.jpg",
-]
+IMAGE_LABEL = "pipeline-cat-chonk.jpeg"
 
 COSINE_THRESHOLD = 0.97
 
@@ -61,16 +56,6 @@ COSINE_THRESHOLD = 0.97
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _load_image(url: str):
-    """Download an image from *url* and return a PIL Image (RGB)."""
-    import requests
-    from PIL import Image
-
-    response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
-    response.raise_for_status()
-    return Image.open(BytesIO(response.content)).convert("RGB")
 
 
 def _load_models(model_path: str):
@@ -138,8 +123,8 @@ def test_clip_image_compare_spyre(model_path: str) -> None:
     """Vision tower: Spyre image embeddings are close to CPU reference."""
     cpu_model, spyre_model = _load_models(model_path)
 
-    print(f"  Downloading {len(IMAGE_URLS)} image(s) ...")
-    images = [_load_image(url) for url in IMAGE_URLS]
+    print("  Downloading Hugging Face sample image ...")
+    images = [_load_sample_image()]
 
     print("  Encoding images on CPU ...")
     cpu_embs = cpu_model.encode(images, convert_to_tensor=True)
@@ -152,22 +137,23 @@ def test_clip_image_compare_spyre(model_path: str) -> None:
     ), f"Shape mismatch: CPU {tuple(cpu_embs.shape)} vs Spyre {tuple(spyre_embs.shape)}"
 
     rows: list[dict[str, Any]] = []
-    for i, url in enumerate(IMAGE_URLS):
+    for i, label in enumerate([IMAGE_LABEL]):
         cos = _cosine(cpu_embs[i], spyre_embs[i])
-        rows.append({"url": url, "cosine": cos, "match": cos >= COSINE_THRESHOLD})
+        rows.append({"label": label, "cosine": cos, "match": cos >= COSINE_THRESHOLD})
 
     print("\n## CLIP Vision Tower: CPU vs Spyre\n")
     print("| Image | Cosine | Match |")
     print("|-------|--------|-------|")
     for r in rows:
-        label = r["url"].split("/")[-1]
-        print(f"| {label} | {r['cosine']:.6f} | {'OK' if r['match'] else 'FAIL'} |")
+        print(
+            f"| {r['label']} | {r['cosine']:.6f} | {'OK' if r['match'] else 'FAIL'} |"
+        )
 
     mismatches = [r for r in rows if not r["match"]]
     assert (
         not mismatches
     ), f"Vision tower cosine < {COSINE_THRESHOLD} for: " + ", ".join(
-        r["url"] for r in mismatches
+        r["label"] for r in mismatches
     )
 
 
@@ -175,14 +161,13 @@ def test_clip_image_compare_spyre(model_path: str) -> None:
 def test_clip_crossmodal_ranking_spyre(model_path: str) -> None:
     """Cross-modal: image–text cosine rankings are identical on CPU and Spyre.
 
-    Encodes one dog image and three text descriptions. Asserts that the most
-    similar text on Spyre is the same as on CPU, and that "Two dogs in the snow"
-    ranks first (it describes a dog, matching the image content).
+    Encodes one cat image and three text descriptions, then asserts that the
+    ranking produced on Spyre is identical to the CPU reference.
     """
     cpu_model, spyre_model = _load_models(model_path)
 
     print("  Downloading image ...")
-    image = _load_image(IMAGE_URLS[0])
+    image = _load_sample_image()
 
     print("  Encoding image + text on CPU ...")
     cpu_img = cpu_model.encode(image, convert_to_tensor=True)
@@ -215,7 +200,7 @@ def test_clip_crossmodal_ranking_spyre(model_path: str) -> None:
         f"  CPU:   {cpu_ranking}\n"
         f"  Spyre: {spyre_ranking}"
     )
-    assert cpu_ranking[0] == 0, (
-        f"Expected 'Two dogs in the snow' to rank first for the dog image, "
+    assert cpu_ranking[0] == 1, (
+        f"Expected '{TEXT_PROMPTS[1]}' to rank first for the cat image, "
         f"got: {TEXT_PROMPTS[cpu_ranking[0]]!r}"
     )
