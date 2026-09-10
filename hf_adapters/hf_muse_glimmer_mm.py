@@ -39,6 +39,7 @@ from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
     PrecomputedRotaryEmbedding,
+    _mask_fill_value,
     _pad_proj_input_simple,
     _pad_proj_output_simple,
     apply_rope_matmul,
@@ -54,10 +55,6 @@ from hf_adapters.hf_common import (
 _GENERATION_INPUT_NAMES: tuple = ("pixel_values", "image_grid_thw")
 _GENERATION_REQUIRED_INPUT_NAMES: tuple = ()
 _GENERATION_TOKEN_ALIGNED_INPUTS: dict = {}
-
-# A finite mask penalty is deliberate. Spyre's 16-bit arithmetic must never see
-# infinities, and finfo.min can overflow in downstream additions.
-_MASK_PENALTY = -10_000.0
 
 
 def _scale_free_rmsnorm(x, eps):
@@ -292,9 +289,10 @@ def _finite_text_masks(attn_mask, cache_index, window, dtype):
     """Convert the generic mask to finite full/sliding Muse masks on CPU."""
     base = attn_mask.to("cpu")
     blocked = ~torch.isfinite(base) | (base < 0)
+    fill = _mask_fill_value(dtype)
 
     full = torch.zeros(blocked.shape, dtype=dtype)
-    full.masked_fill_(blocked, _MASK_PENALTY)
+    full.masked_fill_(blocked, fill)
 
     if window is None:
         return full, full
@@ -303,7 +301,7 @@ def _finite_text_masks(attn_mask, cache_index, window, dtype):
     k = torch.arange(base.shape[-1])[None, :]
     outside = (q - k) >= window
     local = torch.zeros(blocked.shape, dtype=dtype)
-    local.masked_fill_(blocked | outside[None, None], _MASK_PENALTY)
+    local.masked_fill_(blocked | outside[None, None], fill)
     return full, local
 
 
@@ -382,7 +380,7 @@ def _logits_from_embeds(
 
 def _segment_mask(cu_seqlens, total, padded, dtype):
     """Dense finite block-diagonal vision mask from cumulative boundaries."""
-    mask = torch.full((padded, padded), _MASK_PENALTY, dtype=dtype)
+    mask = torch.full((padded, padded), _mask_fill_value(dtype), dtype=dtype)
     bounds = cu_seqlens.to("cpu").tolist()
     for start, end in zip(bounds[:-1], bounds[1:]):
         mask[start:end, start:end] = 0
