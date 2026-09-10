@@ -235,10 +235,10 @@ def _embed_and_scatter(model, input_ids, image_features):
     image_token_id = model.config.image_token_id
     dtype = get_model_dtype(model)
 
-    image_mask = input_ids.to("cpu") == image_token_id  # [B, L] bool
-    text_ids = input_ids.to("cpu").clone()
-    text_ids[image_mask] = text_config(model.config).pad_token_id
-    ids = text_ids.to(backbone.embed_tokens.weight.device)
+    input_ids_cpu = input_ids.to("cpu").clone()
+    image_mask = input_ids_cpu == image_token_id  # [B, L] bool
+    input_ids_cpu[image_mask] = text_config(model.config).pad_token_id
+    ids = input_ids_cpu.to(backbone.embed_tokens.weight.device)
     h = backbone.embed_tokens(ids)  # scaled word embeddings, on embed device
 
     n_image_tokens = int(image_mask.sum())
