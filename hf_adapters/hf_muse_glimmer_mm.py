@@ -223,6 +223,7 @@ def _make_text_forward(spec):
         if spec.uses_rope:
             q = apply_rope_matmul(q, selected_freqs)
             k = apply_rope_matmul(k, selected_freqs)
+        q = q.contiguous()
         key_cache, value_cache = kv_cache_update(
             k, v, key_cache, value_cache, cache_index
         )
