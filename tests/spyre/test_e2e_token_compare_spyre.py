@@ -42,6 +42,7 @@ from tests.conftest import load_ref_model, resolve_adapter_module_for_test
 from tests.model_registry import (
     CAUSAL_PATHS,
     NON_BLOCKING_CAUSAL_MODELS,
+    REMOTE_CODE_PATHS,
     xfail_non_blocking,
 )
 
@@ -271,18 +272,28 @@ def _print_table(rows: list[dict[str, Any]]) -> None:
         )
 
 
-def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]]:
+def _run_model_test(
+    model_path: str, num_decode: int = 4, trust_remote_code: bool | None = None
+) -> list[dict[str, Any]]:
     """Full comparison for one model. Returns the list of comparison rows."""
     from transformers import AutoTokenizer
 
-    adapter = resolve_adapter_module_for_test(model_path)
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
+    adapter = resolve_adapter_module_for_test(
+        model_path, trust_remote_code=trust_remote_code
+    )
 
     print(f"\n{'=' * 70}")
     print(f"  {model_path}")
     print(f"{'=' * 70}")
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = load_ref_model(model_path=model_path, adapter_mod=adapter)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path, trust_remote_code=trust_remote_code
+    )
+    model = load_ref_model(
+        model_path=model_path, adapter_mod=adapter, trust_remote_code=trust_remote_code
+    )
 
     prompt = "The capital of France is"
     # Tokenize following the model's canonical scheme (chat template for
@@ -297,7 +308,11 @@ def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]
 
     # Use bf16/fp16 dtype, requested by the registry or based on the model config.
     # (Spyre does not support float32, so float32 entries will use fp16.)
-    spyre_dtype = dtype_for_model_path(model_path, target_device="spyre")
+    spyre_dtype = dtype_for_model_path(
+        model_path,
+        target_device="spyre",
+        trust_remote_code=trust_remote_code,
+    )
     move_model_to_spyre(model=model, module=adapter, dtype=spyre_dtype)
     print("  Running adapter on Spyre ...")
     adapter_results = adapter_greedy_steps(
@@ -312,8 +327,9 @@ def _run_model_test(model_path: str, num_decode: int = 4) -> list[dict[str, Any]
 
 def token_compare_spyre(
     model_path: str,
+    trust_remote_code: bool | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    rows = _run_model_test(model_path)
+    rows = _run_model_test(model_path, trust_remote_code=trust_remote_code)
     mismatches = [r for r in rows if not r["top1_match"]]
     return mismatches, rows
 
@@ -321,8 +337,12 @@ def token_compare_spyre(
 @pytest.mark.parametrize(
     "model_path", xfail_non_blocking(CAUSAL_PATHS, table=NON_BLOCKING_CAUSAL_MODELS)
 )
-def test_e2e_token_compare_spyre(model_path: str) -> None:
-    mismatches, rows = token_compare_spyre(model_path)
+def test_e2e_token_compare_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    mismatches, rows = token_compare_spyre(
+        model_path, trust_remote_code=trust_remote_code
+    )
     _print_table(rows)
     n_match = sum(1 for r in rows if r["top1_match"])
     print(f"\nTop-1 agreement: {n_match}/{len(rows)} steps")

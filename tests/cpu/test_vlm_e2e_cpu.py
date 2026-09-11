@@ -48,7 +48,7 @@ from tests.conftest import (
     resolve_adapter_module_for_test,
 )
 from tests.cpu.conftest import _set_rope_dtype, _unwrap_compiled_blocks
-from tests.model_registry import VISION_PATHS
+from tests.model_registry import REMOTE_CODE_PATHS, VISION_PATHS
 
 pytestmark = pytest.mark.model_harness("vision")
 
@@ -57,15 +57,23 @@ PROMPT: str = "Briefly describe this image."
 
 
 @pytest.mark.parametrize("model_path", VISION_PATHS, ids=VISION_PATHS)
-def test_vlm_generate(model_path: str) -> None:
+def test_vlm_generate(model_path: str, trust_remote_code: bool | None) -> None:
     from hf_adapters.auto_spyre_model import dtype_for_model_path
 
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
     adapter = resolve_adapter_module_for_test(
-        model_path, mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING
+        model_path,
+        mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+        trust_remote_code=trust_remote_code,
     )
-    dtype = dtype_for_model_path(model_path, target_device="cpu")
+    dtype = dtype_for_model_path(
+        model_path, target_device="cpu", trust_remote_code=trust_remote_code
+    )
 
-    processor, batch = build_vlm_batch(model_path, PROMPT)
+    processor, batch = build_vlm_batch(
+        model_path, PROMPT, trust_remote_code=trust_remote_code
+    )
     batch["pixel_values"] = batch["pixel_values"].to(dtype)
 
     # --- Stock reference: the FULL model.generate() (real deepstack) ---
@@ -76,11 +84,14 @@ def test_vlm_generate(model_path: str) -> None:
         batch=batch,
         max_new_tokens=MAX_NEW_TOKENS,
         adapter_mod=adapter,
+        trust_remote_code=trust_remote_code,
     )
     gc.collect()
 
     # --- Adapter generate (greedy) ---
-    model = AutoSpyreModelForImageTextToText.from_pretrained(model_path, dtype=dtype)
+    model = AutoSpyreModelForImageTextToText.from_pretrained(
+        model_path, dtype=dtype, trust_remote_code=trust_remote_code
+    )
     _set_rope_dtype(model, dtype)
     _unwrap_compiled_blocks(model)
     prompt_len = batch["input_ids"].shape[1]

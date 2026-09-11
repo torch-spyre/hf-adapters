@@ -34,22 +34,32 @@ pytestmark = pytest.mark.model_harness("causal")
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_eos_first_of_second_block_spyre(model_path: str) -> None:
-    ok, detail = run_eos_case(model_path, "eos_first_of_second_block")
+def test_eos_first_of_second_block_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    ok, detail = run_eos_case(
+        model_path, "eos_first_of_second_block", trust_remote_code=trust_remote_code
+    )
     assert ok, detail
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_eos_first_token_spyre(model_path: str) -> None:
-    ok, detail = run_eos_case(model_path, "eos_first_token")
+def test_eos_first_token_spyre(model_path: str, trust_remote_code: bool | None) -> None:
+    ok, detail = run_eos_case(
+        model_path, "eos_first_token", trust_remote_code=trust_remote_code
+    )
     assert ok, detail
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_eos_inside_prompt_spyre(model_path: str) -> None:
-    info, tokenizer, ref_model, model = _setup(model_path, need_ref=True)
+def test_eos_inside_prompt_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    info, tokenizer, ref_model, model = _setup(
+        model_path, need_ref=True, trust_remote_code=trust_remote_code
+    )
     try:
         if tokenizer.eos_token_id is None:
             pytest.skip("tokenizer has no eos_token_id")
@@ -81,22 +91,32 @@ def test_eos_inside_prompt_spyre(model_path: str) -> None:
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_eos_mid_block_spyre(model_path: str) -> None:
-    ok, detail = run_eos_case(model_path, "eos_mid_block")
+def test_eos_mid_block_spyre(model_path: str, trust_remote_code: bool | None) -> None:
+    ok, detail = run_eos_case(
+        model_path, "eos_mid_block", trust_remote_code=trust_remote_code
+    )
     assert ok, detail
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_eos_on_last_step_spyre(model_path: str) -> None:
-    ok, detail = run_eos_case(model_path, "eos_on_last_step")
+def test_eos_on_last_step_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    ok, detail = run_eos_case(
+        model_path, "eos_on_last_step", trust_remote_code=trust_remote_code
+    )
     assert ok, detail
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_no_eos_runs_full_budget_spyre(model_path: str) -> None:
-    info, tokenizer, ref_model, model = _setup(model_path, need_ref=True)
+def test_no_eos_runs_full_budget_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    info, tokenizer, ref_model, model = _setup(
+        model_path, need_ref=True, trust_remote_code=trust_remote_code
+    )
     try:
         no_eos_prompts = make_prompts(tokenizer, [5, 12])
         no_eos_max_new = 64 + 7

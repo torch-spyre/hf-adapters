@@ -42,6 +42,17 @@ def _include_gated() -> bool:
     return os.getenv("SPYRE_INCLUDE_GATED", "0") == "1"
 
 
+def _include_trust_remote_code() -> bool:
+    """Whether ``trust_remote_code`` models should be included in test lists.
+
+    Some checkpoints (e.g. bharatgenai/Param-1-5B) ship custom modelling code on
+    the Hub and only load with ``trust_remote_code=True``. We do not run them
+    implicitly in CI so they are excluded by default.
+    Set ``SPYRE_INCLUDE_TRUST_REMOTE_CODE=1`` to opt them in.
+    """
+    return os.getenv("SPYRE_INCLUDE_TRUST_REMOTE_CODE", "0") == "1"
+
+
 # Model registries - shared by all tests
 CAUSAL_LM_MODELS = {
     # hf_gpt2.py
@@ -651,6 +662,7 @@ def _select_representative_paths(
     models: dict[str, dict],
     *,
     include_gated: bool,
+    include_trust_remote_code: bool | None = None,
     predicate=None,
 ) -> list[str]:
     """Select representative model paths for each adapter module.
@@ -658,13 +670,18 @@ def _select_representative_paths(
     Groups ``models`` by adapter and picks the smallest (by ``size``) model in
     each group, breaking ties by key name for determinism. Entries marked
     ``always_test`` are included in addition to that representative. Gated
-    models are skipped unless ``include_gated``. An optional
+    models are skipped unless ``include_gated``; ``trust_remote_code`` models are
+    skipped unless ``include_trust_remote_code``. An optional
     ``predicate(info) -> bool`` filters which entries are eligible (e.g.
     ``kind == "vlm"`` for vision).
     """
+    if include_trust_remote_code is None:
+        include_trust_remote_code = _include_trust_remote_code()
     adapter_to_keys: dict[str, list[str]] = {}
     for key, info in models.items():
         if info.get("is_gated", False) and not include_gated:
+            continue
+        if info.get("trust_remote_code", False) and not include_trust_remote_code:
             continue
         if predicate is not None and not predicate(info):
             continue
@@ -717,6 +734,7 @@ def _exclude(paths: list[str]) -> list[str]:
 # ``_include_gated()`` snapshot is shared across all selections.
 # ``kind == "vlm"`` excludes bare vision towers.
 _include_gated_flag = _include_gated()
+
 
 # ``kind == "dspark_draft"`` entries are speculative-decoding drafters (block
 # proposers, driven by ``_run_draft_block`` — no ``generate``), so they are
@@ -782,6 +800,7 @@ def _all_paths(
     models: dict[str, dict],
     *,
     include_gated: bool,
+    include_trust_remote_code: bool | None = None,
     predicate=None,
 ) -> list[str]:
     """All registered paths (no per-adapter reduction), for explicit selection.
@@ -791,12 +810,34 @@ def _all_paths(
     target a non-representative checkpoint, e.g. a larger model that shares an
     adapter with a smaller default.
     """
+    if include_trust_remote_code is None:
+        include_trust_remote_code = _include_trust_remote_code()
     return [
         info["path"]
         for info in models.values()
         if (include_gated or not info.get("is_gated", False))
+        and (include_trust_remote_code or not info.get("trust_remote_code", False))
         and (predicate is None or predicate(info))
     ]
+
+
+# Paths that must be loaded with ``trust_remote_code=True``
+# Spans all category registries so a single lookup covers any harness. Test
+# call sites check membership in ``REMOTE_CODE_PATHS`` to decide whether to
+# forward ``trust_remote_code=True`` to ``from_pretrained``.
+REMOTE_CODE_PATHS: frozenset[str] = frozenset(
+    info["path"]
+    for models in (
+        CAUSAL_LM_MODELS,
+        EMBEDDING_MODELS,
+        MASKED_LM_MODELS,
+        QUESTION_ANSWERING_MODELS,
+        TOKEN_CLASSIFICATION_MODELS,
+        VISION_MODELS,
+    )
+    for info in models.values()
+    if info.get("trust_remote_code", False)
+)
 
 
 # Every registered path per category, bypassing the smallest-per-adapter

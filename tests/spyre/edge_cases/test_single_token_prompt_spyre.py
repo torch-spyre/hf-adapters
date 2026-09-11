@@ -24,6 +24,10 @@ pytestmark = pytest.mark.model_harness("causal")
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_single_token_prompt_spyre(model_path: str) -> None:
-    ok, detail = run_greedy_case(model_path, "single_token_prompt")
+def test_single_token_prompt_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    ok, detail = run_greedy_case(
+        model_path, "single_token_prompt", trust_remote_code=trust_remote_code
+    )
     assert ok, detail

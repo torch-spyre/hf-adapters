@@ -22,7 +22,7 @@ from tests.conftest import (
     resolve_adapter_module_for_test,
 )
 from tests.cpu.conftest import _unwrap_compiled_blocks
-from tests.model_registry import TOKEN_CLASSIFICATION_PATHS
+from tests.model_registry import REMOTE_CODE_PATHS, TOKEN_CLASSIFICATION_PATHS
 
 pytestmark = pytest.mark.model_harness("token_classification")
 
@@ -36,14 +36,19 @@ COSINE_THRESHOLD = 0.999
 @pytest.mark.parametrize(
     "model_path", TOKEN_CLASSIFICATION_PATHS, ids=TOKEN_CLASSIFICATION_PATHS
 )
-def test_native_forward(model_path: str) -> None:
+def test_native_forward(model_path: str, trust_remote_code: bool | None) -> None:
     auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
     dtype = get_dtype_for_cpu(model_path)
     adapter_module = resolve_adapter_module_for_test(
         model_path,
         mapping=auto_spyre_model.TOKEN_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+        trust_remote_code=trust_remote_code,
     )
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path, trust_remote_code=trust_remote_code
+    )
     encoded = tokenizer(
         SENTENCES,
         return_tensors="pt",
@@ -55,6 +60,7 @@ def test_native_forward(model_path: str) -> None:
         model_path=model_path,
         adapter_mod=adapter_module,
         auto_model_cls=AutoModelForTokenClassification,
+        trust_remote_code=trust_remote_code,
     )
     with torch.no_grad():
         ref_logits = ref_model(**encoded, return_dict=True).logits.float()
@@ -62,7 +68,7 @@ def test_native_forward(model_path: str) -> None:
     gc.collect()
 
     model = auto_spyre_model.AutoSpyreModelForTokenClassification.from_pretrained(
-        model_path, dtype=dtype
+        model_path, dtype=dtype, trust_remote_code=trust_remote_code
     )
     _unwrap_compiled_blocks(model)
     with torch.no_grad():

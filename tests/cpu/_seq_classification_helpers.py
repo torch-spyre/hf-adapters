@@ -30,11 +30,13 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from tests.conftest import load_ref_model
 from tests.cpu.conftest import _unwrap_compiled_blocks
+from tests.model_registry import REMOTE_CODE_PATHS
 
 
 def run_seq_classification_auto_loader_vs_ref(
     model_path: str,
     inputs: list[str] | list[tuple[str, str]],
+    trust_remote_code: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the auto-loader seq-classification path against a stock HF reference.
 
@@ -51,7 +53,11 @@ def run_seq_classification_auto_loader_vs_ref(
         ``(ref_logits, adapter_logits)`` — both ``[B, num_labels]`` float CPU tensors.
     """
     auto_spyre_model_mod = sys.modules["hf_adapters.auto_spyre_model"]
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path, trust_remote_code=trust_remote_code
+    )
 
     encoded = tokenizer(
         inputs,
@@ -66,6 +72,7 @@ def run_seq_classification_auto_loader_vs_ref(
     ref_model = load_ref_model(
         model_path=model_path,
         auto_model_cls=AutoModelForSequenceClassification,
+        trust_remote_code=trust_remote_code,
     )
     ref_model.eval()
     with torch.no_grad():
@@ -75,7 +82,7 @@ def run_seq_classification_auto_loader_vs_ref(
     # --- Auto-loader path ---
     model = (
         auto_spyre_model_mod.AutoSpyreModelForSequenceClassification.from_pretrained(
-            model_path
+            model_path, trust_remote_code=trust_remote_code
         )
     )
     _unwrap_compiled_blocks(model)

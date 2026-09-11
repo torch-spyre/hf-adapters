@@ -36,8 +36,12 @@ pytestmark = pytest.mark.model_harness("causal")
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_sampling_determinism_spyre(model_path: str) -> None:
-    info, tokenizer, _, model = _setup(model_path, need_ref=False)
+def test_sampling_determinism_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    info, tokenizer, _, model = _setup(
+        model_path, need_ref=False, trust_remote_code=trust_remote_code
+    )
     try:
         sampling_prompts = make_prompts(tokenizer, SAMPLING_TARGETS)
         encoded = encode_generation_inputs(tokenizer, sampling_prompts)
@@ -71,8 +75,12 @@ def test_sampling_determinism_spyre(model_path: str) -> None:
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_sampling_top_k_zero_spyre(model_path: str) -> None:
-    info, tokenizer, _, model = _setup(model_path, need_ref=False)
+def test_sampling_top_k_zero_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    info, tokenizer, _, model = _setup(
+        model_path, need_ref=False, trust_remote_code=trust_remote_code
+    )
     try:
         sampling_prompts = make_prompts(tokenizer, SAMPLING_TARGETS)
         encoded = encode_generation_inputs(tokenizer, sampling_prompts)

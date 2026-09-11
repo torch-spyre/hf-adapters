@@ -4,4 +4,3 @@ models:
   - tiiuae/Falcon3-1B-Base
   - mistralai/Mistral-Small-3.1-24B-Instruct-2503
   - ibm-research/granite-4.1-20b  # not yet publicly accessible
-  - bharatgenai/Param-1-5B # can be enabled post https://github.com/torch-spyre/hf-adapters/issues/482

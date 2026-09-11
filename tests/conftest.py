@@ -182,6 +182,28 @@ def pytest_addoption(parser: Parser) -> None:
             "in the test decorators are ignored."
         ),
     )
+    parser.addoption(
+        "--trust-remote-code",
+        action="store_true",
+        default=False,
+        help=(
+            "Force trust_remote_code=True for every test that loads a model. "
+            "Use with --model-path to run a remote-code checkpoint that is not "
+            "listed in tests/model_registry.py's REMOTE_CODE_PATHS."
+        ),
+    )
+
+
+@pytest.fixture
+def trust_remote_code(request) -> bool | None:
+    """CLI override for trust_remote_code.
+
+    ``None`` when the flag is absent — every test then falls back to its
+    ``model_path in REMOTE_CODE_PATHS`` check, so registry-driven runs are
+    unchanged. ``True`` when ``--trust-remote-code`` is passed, which wins over
+    the registry (the escape hatch for off-registry ``--model-path`` runs).
+    """
+    return True if request.config.getoption("--trust-remote-code") else None
 
 
 def pytest_generate_tests(metafunc: Metafunc) -> None:
@@ -308,17 +330,25 @@ def load_ref_model(
     model_path: str,
     adapter_mod: types.ModuleType | None = None,
     auto_model_cls: type = AutoModelForCausalLM,
+    trust_remote_code: bool | None = None,
 ):
+    from model_registry import REMOTE_CODE_PATHS
+
     from hf_adapters.auto_spyre_model import dtype_for_model_path
     from hf_adapters.hf_common import load_model_common
 
-    dtype = dtype_for_model_path(model_path, target_device="cpu")
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
+    dtype = dtype_for_model_path(
+        model_path, target_device="cpu", trust_remote_code=trust_remote_code
+    )
 
     ref_model = load_model_common(
         model_path=model_path,
         module=adapter_mod,
         dtype=dtype,
         auto_model_cls=auto_model_cls,
+        trust_remote_code=trust_remote_code,
     )
     return ref_model
 
@@ -328,7 +358,14 @@ def resolve_adapter_module_for_test(
     mapping: dict[
         type[PretrainedConfig], types.ModuleType
     ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
+    trust_remote_code: bool | None = None,
 ) -> types.ModuleType:
+    from model_registry import REMOTE_CODE_PATHS
+
+    if trust_remote_code is None:
+        trust_remote_code = str(model_name_or_path) in REMOTE_CODE_PATHS
     return resolve_adapter_module(
-        model_name_or_path=model_name_or_path, mapping=mapping, trust_remote_code=False
+        model_name_or_path=model_name_or_path,
+        mapping=mapping,
+        trust_remote_code=trust_remote_code,
     )

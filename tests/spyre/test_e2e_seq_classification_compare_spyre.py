@@ -40,7 +40,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 from _seq_classification_helpers import run_seq_classification_cpu_vs_spyre
-from model_registry import SEQ_CLASSIFICATION_PATHS
+from model_registry import REMOTE_CODE_PATHS, SEQ_CLASSIFICATION_PATHS
 
 from hf_adapters.auto_spyre_model import (
     SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING,
@@ -62,12 +62,19 @@ COSINE_THRESHOLD: float = 0.99
 @pytest.mark.parametrize(
     "model_path", SEQ_CLASSIFICATION_PATHS, ids=SEQ_CLASSIFICATION_PATHS
 )
-def test_e2e_seq_classification_compare_spyre(model_path: str) -> None:
+def test_e2e_seq_classification_compare_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
     adapter = resolve_adapter_module(
         model_path,
         mapping=SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+        trust_remote_code=trust_remote_code,
     )
-    result = run_seq_classification_cpu_vs_spyre(model_path, adapter, TEXTS)
+    result = run_seq_classification_cpu_vs_spyre(
+        model_path, adapter, TEXTS, trust_remote_code=trust_remote_code
+    )
 
     ref_logits = result["ref_logits"]
     spyre_logits = result["spyre_logits"]

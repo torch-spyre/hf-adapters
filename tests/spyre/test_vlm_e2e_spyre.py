@@ -84,6 +84,7 @@ from tests._vision_helpers import build_vlm_batch, stock_vlm_generate
 from tests.conftest import load_ref_model
 from tests.model_registry import (
     NON_BLOCKING_VISION_MODELS,
+    REMOTE_CODE_PATHS,
     VISION_PATHS,
     xfail_non_blocking,
 )
@@ -218,6 +219,7 @@ def _stock_vlm_greedy_steps(
     adapter_mod,
     num_steps: int,
     ref_model=None,
+    trust_remote_code: bool | None = None,
 ) -> tuple[list[torch.Tensor], list[int]]:
     """Stock HF per-step greedy logits + token ids over prefill + decode.
 
@@ -242,6 +244,7 @@ def _stock_vlm_greedy_steps(
             model_path=model_path,
             adapter_mod=adapter_mod,
             auto_model_cls=AutoModelForImageTextToText,
+            trust_remote_code=trust_remote_code,
         )
     with torch.no_grad():
         gen = ref_model.generate(
@@ -261,13 +264,21 @@ def _stock_vlm_greedy_steps(
 @pytest.mark.parametrize(
     "model_path", xfail_non_blocking(VISION_PATHS, table=NON_BLOCKING_VISION_MODELS)
 )
-def test_vlm_generate_spyre(model_path: str) -> None:
+def test_vlm_generate_spyre(model_path: str, trust_remote_code: bool | None) -> None:
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
     adapter = resolve_adapter_module(
-        model_path, mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING
+        model_path,
+        mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+        trust_remote_code=trust_remote_code,
     )
-    dtype = dtype_for_model_path(model_path, target_device="spyre")
+    dtype = dtype_for_model_path(
+        model_path, target_device="spyre", trust_remote_code=trust_remote_code
+    )
 
-    processor, batch = build_vlm_batch(model_path, PROMPT)
+    processor, batch = build_vlm_batch(
+        model_path, PROMPT, trust_remote_code=trust_remote_code
+    )
     batch["pixel_values"] = batch["pixel_values"].to(dtype)
 
     tokenizer = processor.tokenizer
@@ -287,6 +298,7 @@ def test_vlm_generate_spyre(model_path: str) -> None:
         model_path=model_path,
         adapter_mod=adapter,
         auto_model_cls=AutoModelForImageTextToText,
+        trust_remote_code=trust_remote_code,
     )
     ref_logits, ref_tokens = _stock_vlm_greedy_steps(
         model_path=model_path,
@@ -294,6 +306,7 @@ def test_vlm_generate_spyre(model_path: str) -> None:
         num_steps=NUM_COMPARE_STEPS,
         adapter_mod=adapter,
         ref_model=ref_model,
+        trust_remote_code=trust_remote_code,
     )
     ref_text = stock_vlm_generate(
         model_path=model_path,
@@ -302,6 +315,7 @@ def test_vlm_generate_spyre(model_path: str) -> None:
         max_new_tokens=MAX_NEW_TOKENS,
         adapter_mod=adapter,
         ref_model=ref_model,
+        trust_remote_code=trust_remote_code,
     )
     del ref_model
     gc.collect()
@@ -309,7 +323,7 @@ def test_vlm_generate_spyre(model_path: str) -> None:
     # --- Adapter on Spyre ---
     print("  Loading model for Spyre ...")
     model = AutoSpyreModelForImageTextToText.from_pretrained(
-        model_name_or_path=model_path, dtype=dtype
+        model_name_or_path=model_path, dtype=dtype, trust_remote_code=trust_remote_code
     )
 
     # Per-step adapter logits on Spyre, teacher-forced on stock's tokens (so the

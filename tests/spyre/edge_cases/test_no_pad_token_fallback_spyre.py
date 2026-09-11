@@ -34,8 +34,12 @@ pytestmark = pytest.mark.model_harness("causal")
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_no_pad_token_fallback_spyre(model_path: str) -> None:
-    info, tokenizer, ref_model, model = _setup(model_path, need_ref=True)
+def test_no_pad_token_fallback_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    info, tokenizer, ref_model, model = _setup(
+        model_path, need_ref=True, trust_remote_code=trust_remote_code
+    )
     try:
         no_pad_prompts = make_prompts(tokenizer, [5, 12])
         no_pad_max_new = 16

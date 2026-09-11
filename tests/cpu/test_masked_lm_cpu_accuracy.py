@@ -22,7 +22,7 @@ from tests.conftest import (
     resolve_adapter_module_for_test,
 )
 from tests.cpu.conftest import _unwrap_compiled_blocks
-from tests.model_registry import MASKED_LM_PATHS
+from tests.model_registry import MASKED_LM_PATHS, REMOTE_CODE_PATHS
 
 pytestmark = pytest.mark.model_harness("masked_lm")
 
@@ -34,11 +34,19 @@ COSINE_THRESHOLD = 0.999
 
 
 @pytest.mark.parametrize("model_path", MASKED_LM_PATHS, ids=MASKED_LM_PATHS)
-def test_auto_loader(model_path: str) -> None:
+def test_auto_loader(model_path: str, trust_remote_code: bool | None) -> None:
     auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
-    dtype = dtype_for_model_path(model_path, target_device="cpu")
-    adapter_module = resolve_adapter_module_for_test(model_path)
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
+    dtype = dtype_for_model_path(
+        model_path, target_device="cpu", trust_remote_code=trust_remote_code
+    )
+    adapter_module = resolve_adapter_module_for_test(
+        model_path, trust_remote_code=trust_remote_code
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path, trust_remote_code=trust_remote_code
+    )
     assert tokenizer.mask_token is not None
 
     encoded = tokenizer(
@@ -52,6 +60,7 @@ def test_auto_loader(model_path: str) -> None:
         model_path=model_path,
         adapter_mod=adapter_module,
         auto_model_cls=AutoModelForMaskedLM,
+        trust_remote_code=trust_remote_code,
     )
     with torch.no_grad():
         ref_logits = ref_model(**encoded, return_dict=True).logits.float()
@@ -59,7 +68,7 @@ def test_auto_loader(model_path: str) -> None:
     gc.collect()
 
     model = auto_spyre_model.AutoSpyreModelForMaskedLM.from_pretrained(
-        model_path, dtype=dtype
+        model_path, dtype=dtype, trust_remote_code=trust_remote_code
     )
     _unwrap_compiled_blocks(model)
     with torch.no_grad():
