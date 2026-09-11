@@ -25,8 +25,7 @@ block and backbone forward are reused from ``hf_granite``. The only differences
 from the bare-Granite causal adapter are checkpoint-shape details that the
 shared helpers already handle (``get_backbone`` descends to
 ``model.model.language_model``; ``text_config`` reads the nested text dims):
-this adapter just patches the VLM's own ``Granite4VisionTextRMSNorm`` and reads
-``logits_scaling`` from the nested ``text_config``.
+this adapter just reads ``logits_scaling`` from the nested ``text_config``.
 
 Usage::
 
@@ -36,7 +35,8 @@ Usage::
     model = AutoSpyreModelForCausalLM.from_pretrained(
         "ibm-granite/granite-vision-4.1-4b")
     tokenizer = AutoTokenizer.from_pretrained("ibm-granite/granite-vision-4.1-4b")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
 import torch
@@ -45,7 +45,6 @@ from hf_adapters import hf_granite
 from hf_adapters.hf_common import (
     get_backbone,
     pad_lm_head,
-    patch_rmsnorm,
     prepare_rope_and_heads,
     prepare_standard_gqa_blocks,
 )
@@ -54,7 +53,7 @@ _run_backbone_forward = hf_granite._run_backbone_forward
 _run_forward = hf_granite._run_forward
 
 
-def load_hf_model(model_path, dtype=torch.float16):
+def load_hf_model(model_path, dtype=torch.float16, trust_remote_code=None):
     """Load the stock Granite Vision VLM (text-only reference for the harness).
 
     Returns the ``Granite4VisionForConditionalGeneration`` with the vision tower
@@ -66,7 +65,7 @@ def load_hf_model(model_path, dtype=torch.float16):
     from transformers import AutoModelForImageTextToText
 
     model = AutoModelForImageTextToText.from_pretrained(
-        model_path, dtype=dtype, device_map="cpu"
+        model_path, dtype=dtype, device_map="cpu", trust_remote_code=trust_remote_code
     )
     # Drop the SigLIP vision tower and the deepstack/spatial projectors — text-only
     # inference (the full image→text pipeline lives in hf_granite_vision_mm).
@@ -83,18 +82,11 @@ def prepare_for_spyre(model):
 
     Mirrors ``hf_granite.prepare_for_spyre`` against the VLM's nested text
     backbone: the shared RoPE/head prep and LM-head padding descend via
-    ``get_backbone``/``text_config`` on their own, so the only VLM-specific step
-    is patching the decoder's ``Granite4VisionTextRMSNorm`` (not Granite 3.3's
-    ``GraniteRMSNorm``). The vision tower is left untouched — this is the
-    text-only path.
+    ``get_backbone``/``text_config`` on their own. The vision tower is left
+    untouched — this is the text-only path.
     """
-    from transformers.models.granite4_vision.modeling_granite4_vision import (
-        Granite4VisionTextRMSNorm,
-    )
-
     prepare_rope_and_heads(model)
-    patch_rmsnorm(Granite4VisionTextRMSNorm)
     pad_lm_head(model)
-    model._spyre_compiled_blocks = prepare_standard_gqa_blocks(
-        get_backbone(model).layers, True
-    )
+    backbone = get_backbone(model)
+    model._spyre_compiled_blocks = prepare_standard_gqa_blocks(backbone.layers, True)
+    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)

@@ -43,10 +43,6 @@ both sharing the Pixtral vision tower but distinguished by their
 - ``"ministral3"``  — e.g. ``mistralai/Ministral-3-14B-Instruct-2512``
   (blocked-FP8 checkpoint, dequantized on load; uses ``Ministral3RMSNorm``)
 
-``prepare_for_spyre`` auto-detects the RMSNorm class by inspecting the first
-decoder layer — the same strategy used by ``hf_mistral3.prepare_for_spyre``
-for the text-only path.
-
 Mistral3 uses a **flat single-injection** pattern (contrast with Granite
 Vision's deepstack multi-layer injection):
 
@@ -73,22 +69,15 @@ import torch
 from hf_adapters import hf_pixtral_vision
 from hf_adapters.hf_common import (
     DEVICE,
-    _resolve_generation_params,
-    allocate_kv_caches,
-    build_decode_mask,
-    build_prefill_mask,
-    decode_block_walk,
-    generation_cache_len,
     get_backbone,
     get_model_dtype,
-    make_cache_index,
-    pad_and_position,
     pad_lm_head,
-    patch_rmsnorm,
     prepare_rope_and_heads,
     prepare_standard_gqa_blocks,
-    select_next_token,
 )
+
+_GENERATION_INPUT_NAMES: tuple = ("pixel_values", "image_sizes")
+_GENERATION_TOKEN_ALIGNED_INPUTS: dict = {}
 
 # ---------------------------------------------------------------------------
 # Loading and preparation
@@ -102,25 +91,9 @@ def prepare_for_spyre(model):
     blocks, head padding, CPU patch-embed, 2D RoPE matrices).
     Text decoder → standard-GQA RoPE/head prep + compiled Mistral blocks +
     padded LM head, mirroring ``hf_mistral3.prepare_for_spyre`` but applied
-    against the VLM's nested text backbone.
-
-    The RMSNorm class is auto-detected from the first decoder layer to cover
-    both the ``mistral`` variant (``MistralRMSNorm``) and the ``ministral3``
-    variant (``Ministral3RMSNorm``, e.g. Ministral-3-14B-Instruct-2512).
+    against the VLM's nested text backbone. Covers both the ``mistral`` and
+    ``ministral3`` text variants.
     """
-    from transformers.models.ministral3.modeling_ministral3 import Ministral3RMSNorm
-    from transformers.models.mistral.modeling_mistral import MistralRMSNorm
-
-    try:
-        from torch_spyre._inductor import (  # type: ignore[import-not-found]
-            config as spyre_config,
-        )
-
-        # Bundle-scoped HBM pool planning in torch-spyre d9c0301 corrupts
-        # Ministral outputs. Keep this disabled through lazy compilation.
-        setattr(spyre_config, "hbm_pool_planning", False)
-    except ImportError:
-        pass
 
     # --- Vision tower ---
     hf_pixtral_vision.prepare_for_spyre(model)
@@ -139,21 +112,11 @@ def prepare_for_spyre(model):
     # does: call the constituent parts individually and store text blocks in
     # model._spyre_text_blocks.
     prepare_rope_and_heads(model)
-
-    # Detect the correct RMSNorm class from the first decoder layer's norm.
-    # Ministral3 text backbone uses Ministral3RMSNorm; Mistral-Small uses
-    # MistralRMSNorm.  Checking the live instance avoids hard-coding the
-    # text_config.model_type string and mirrors hf_mistral3.prepare_for_spyre.
-    first_norm = get_backbone(model).layers[0].input_layernorm
-    rmsnorm_cls = (
-        MistralRMSNorm if isinstance(first_norm, MistralRMSNorm) else Ministral3RMSNorm
-    )
-    patch_rmsnorm(rmsnorm_cls)
-
     pad_lm_head(model)
 
     backbone = get_backbone(model)
     model._spyre_text_blocks = prepare_standard_gqa_blocks(backbone.layers)
+    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +227,6 @@ def _run_text_backbone(
     a CPU additive scatter before the first decoder layer. Decode steps pass
     ``image_features=None`` (pure text).
     """
-    backbone = get_backbone(model)
     h = inputs_embeds
 
     # Single flat injection before layer 0 (unlike Granite's per-layer deepstack)
@@ -281,7 +243,7 @@ def _run_text_backbone(
             value_caches[i],
             cache_index,
         )
-    return backbone.norm(h)
+    return model._spyre_compiled_norm(h)
 
 
 def _logits_from_embeds(
@@ -311,21 +273,21 @@ def _logits_from_embeds(
 
 
 # ---------------------------------------------------------------------------
-# Prefill (shared between prefill_logits and generate)
+# Prefill for auto-model generation
 # ---------------------------------------------------------------------------
 
 
 def _prefill_forward(
+    *,
     model,
-    padded_ids,
-    padded_len,
-    prompt_offsets,
+    input_ids,
     position_ids,
-    pixel_values,
-    image_sizes,
+    attention_mask,
     key_caches,
     value_caches,
-    max_cache_len,
+    cache_index,
+    pixel_values,
+    image_sizes,
 ):
     """Shared multimodal prefill: padded ids + image → first-step logits.
 
@@ -336,8 +298,8 @@ def _prefill_forward(
     """
     model_dtype = get_model_dtype(model)
 
-    inputs_embeds = _embed_text(model, padded_ids)
-    vision_mask = _vision_mask(model, padded_ids)
+    inputs_embeds = _embed_text(model, input_ids)
+    vision_mask = _vision_mask(model, input_ids)
     # Zero the <image> slots: multiply by a (0/1) keep factor built on CPU
     # (masked_fill_ and boolean ops don't lower on Spyre).
     keep = (~vision_mask).to(model_dtype).to(inputs_embeds.device)
@@ -345,192 +307,14 @@ def _prefill_forward(
 
     image_feats = _image_features(model, pixel_values, image_sizes)
 
-    prefill_mask = build_prefill_mask(
-        padded_ids.shape[0],
-        padded_len,
-        max_cache_len,
-        prompt_offsets,
-        dtype=model_dtype,
-    )
     return _logits_from_embeds(
         model,
         inputs_embeds.to(DEVICE),
         position_ids.to(DEVICE),
-        prefill_mask.to(DEVICE),
+        attention_mask.to(DEVICE),
         key_caches,
         value_caches,
-        cache_index=make_cache_index(0, padded_len, DEVICE),
+        cache_index=cache_index,
         image_features=image_feats,  # on CPU; _inject_image_features moves it
         vision_mask=vision_mask,  # on CPU
     )
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
-def prefill_logits(model, input_ids, attention_mask, pixel_values, image_sizes):
-    """One-shot prefill of the (text + image-injected) sequence → logits.
-
-    Left-pads to a BLOCK_SIZE multiple, zeroes image-token embedding slots,
-    runs the Pixtral tower + projector, injects image features before layer 0,
-    and returns full-sequence logits ``[B, L, padded_vocab]``.
-
-    Callers take ``[:, -1, :true_vocab]`` for the first generated token.
-    """
-    actual_lengths = attention_mask.sum(dim=1)
-    padded_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
-        input_ids, actual_lengths
-    )
-    key_caches, value_caches = allocate_kv_caches(
-        model, padded_ids.shape[0], padded_len, get_model_dtype(model)
-    )
-    logits = _prefill_forward(
-        model,
-        padded_ids,
-        padded_len,
-        prompt_offsets,
-        position_ids,
-        pixel_values,
-        image_sizes,
-        key_caches,
-        value_caches,
-        max_cache_len=padded_len,
-    )
-    return logits, padded_len, input_ids.shape[1]
-
-
-def generate(
-    model,
-    processor,
-    input_ids,
-    attention_mask,
-    pixel_values,
-    image_sizes,
-    max_new_tokens,
-    do_sample=None,
-    temperature=None,
-    top_k=None,
-    top_p=None,
-):
-    """Autoregressive image→text generation on Spyre (greedy / top-k/p sampling).
-
-    Mirrors ``hf_common.generate``'s single-token decode, but driven by
-    **embeddings** so the prefill step can carry the image injection:
-
-    - **Prefill** (step 0): build text embeddings, zero the ``<image>`` slots,
-      run the Pixtral tower + projector, inject image features before decoder
-      layer 0, run the Mistral decoder once.
-    - **Decode** (steps ≥1): the single token the previous step produced is
-      embedded with the text embedding table and fed back — pure text, no image
-      re-encoding — and exactly one cache slot is written.
-
-    Inputs come pre-tokenized from ``AutoProcessor`` (handles chat template +
-    ``[IMG]`` token expansion). Assumes **left-padded** input (set
-    ``processor.tokenizer.padding_side = 'left'``).
-
-    Returns a list of decoded strings (one per batch row), EOS-trimmed.
-    """
-    tokenizer = processor.tokenizer
-    params = _resolve_generation_params(
-        model,
-        tokenizer,
-        {
-            "do_sample": do_sample,
-            "temperature": temperature,
-            "top_k": top_k,
-            "top_p": top_p,
-        },
-    )
-    do_sample = params["do_sample"]
-    temperature = params["temperature"]
-    top_k = params["top_k"]
-    top_p = params["top_p"]
-    eos_ids = params["eos_ids"]
-
-    backbone = get_backbone(model)
-    model_dtype = get_model_dtype(model)
-
-    batch_size, prompt_length = input_ids.shape
-    actual_prompt_lengths = attention_mask.sum(dim=1)  # [B]
-
-    max_cache_len = generation_cache_len(prompt_length, max_new_tokens)
-    input_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
-        input_ids, actual_prompt_lengths
-    )
-
-    key_caches, value_caches = allocate_kv_caches(
-        model, batch_size, max_cache_len, model_dtype
-    )
-
-    # Every decode step writes exactly one token at ``current_cache_len``, so
-    # generated tokens are contiguous from ``padded_len`` and ``result`` just
-    # grows by one column per step (mirrors ``hf_common.generate``).
-    result = input_ids.clone()
-    current_cache_len = padded_len
-    finished = torch.zeros(batch_size, dtype=torch.bool)
-    num_generated = torch.zeros(batch_size, dtype=torch.long)
-
-    def embed_ids(ids):
-        """Token ids → embeddings (decode steps; pure text, no multiplier)."""
-        return backbone.embed_tokens(ids)
-
-    for i in range(max_new_tokens):
-        if i == 0:
-            # --- PREFILL: text embeds with image slots zeroed, flat injection ---
-            logits = _prefill_forward(
-                model,
-                input_ids,
-                padded_len,
-                prompt_offsets,
-                position_ids,
-                pixel_values,
-                image_sizes,
-                key_caches,
-                value_caches,
-                max_cache_len,
-            )
-            next_logits = logits.to("cpu")[:, -1, :]
-            current_cache_len = padded_len
-        else:
-            # --- DECODE: one token in, one cache slot written ---
-            # The token to feed is the one the previous step appended.
-            next_input = result[:, -1:].to(DEVICE)
-            next_embeds = embed_ids(next_input)
-            # Absolute position of that token per sequence: its cache column
-            # minus the sequence's left-padding offset.
-            decode_pos = (current_cache_len - prompt_offsets).unsqueeze(1)  # [B, 1]
-            decode_mask = build_decode_mask(
-                batch_size,
-                max_cache_len,
-                current_cache_len,
-                prompt_offsets,
-                dtype=model_dtype,
-            )
-            logits = _logits_from_embeds(
-                model,
-                next_embeds,
-                decode_pos.to(DEVICE),
-                decode_mask.to(DEVICE),
-                key_caches,
-                value_caches,
-                cache_index=make_cache_index(current_cache_len, 1, DEVICE),
-            )
-            next_logits = logits.to("cpu")[:, -1, :]
-            current_cache_len += 1
-
-        # Token selection (CPU) — mirrors hf_common.generate.
-        next_tokens = select_next_token(
-            next_logits, do_sample, temperature, top_k, top_p
-        )
-
-        # Append the token: generated slots are contiguous from padded_len.
-        result = torch.cat([result, next_tokens.unsqueeze(1)], dim=1)
-        if eos_ids is not None:
-            finished |= torch.isin(next_tokens, eos_ids)
-        num_generated += (~finished).long()
-        if finished.all():
-            break
-
-    return decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer)

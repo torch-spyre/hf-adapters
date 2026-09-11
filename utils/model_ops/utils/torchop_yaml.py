@@ -182,7 +182,12 @@ def sanitize_arg(
 
 
 # Ops whose tensor inputs should use Xavier init when dtype/rank also qualify.
-_XAVIER_OPS = {"torch.matmul", "torch.nn.functional.linear"}
+_XAVIER_OPS = {
+    "torch.conv2d",
+    "torch.bmm",
+    "torch.matmul",
+    "torch.nn.functional.linear",
+}
 _XAVIER_DTYPES = {"torch.float16", "torch.float32", "torch.bfloat16"}
 
 
@@ -1597,6 +1602,10 @@ class TorchOpCollector:
         def _filter_cases(cases: list[dict[str, Any]]):
             result = []
             for tc in cases:
+                name = tc.get("name")
+                if not isinstance(name, str) or not name.startswith("torch"):
+                    print(f"Skipping test case with non-torch name: {name!r}")
+                    continue
                 try:
                     yaml.dump(tc, sort_keys=False)
                     result.append(tc)

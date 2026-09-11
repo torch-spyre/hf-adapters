@@ -24,8 +24,6 @@ import pytest
 
 from tests.spyre.weekly_generation.failure_categories import (
     FAILURE_CATEGORY_MODEL_TOO_LARGE,
-    FAILURE_CATEGORY_MOE,
-    FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
     MAX_NUMBER_PARAMS,
 )
 from tests.spyre.weekly_generation.model_prefilter import prefilter_models
@@ -64,7 +62,6 @@ def _row(model_id: str, **overrides: object) -> dict:
         "model_id": model_id,
         "downloads": 100,
         "parameters": 1_000_000_000,
-        "is_supported": True,
         "is_moe": False,
         "config_class": "LlamaConfig",
         "model_type": "llama",
@@ -81,27 +78,6 @@ class TestFilterBranches:
         assert [r["model_id"] for r in result.keep] == ["org/ok"]
         assert result.skipped == []
 
-    def test_unsupported_config_class(self) -> None:
-        result = _filter([_row("org/unsup", is_supported=False)])
-        assert result.keep == []
-        assert len(result.skipped) == 1
-        assert result.skipped[0].failure_category == (
-            FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER
-        )
-
-    def test_missing_is_supported_is_not_treated_as_unsupported(self) -> None:
-        """The check is ``is False``: unknown support status still gets evaluated.
-
-        A missing key or None means the fetcher could not determine the config
-        class, which is not the same as knowing there is no adapter for it.
-        """
-        assert [
-            r["model_id"] for r in _filter([_row("org/a", is_supported=None)]).keep
-        ] == ["org/a"]
-        no_key = _row("org/b")
-        del no_key["is_supported"]
-        assert [r["model_id"] for r in _filter([no_key]).keep] == ["org/b"]
-
     def test_too_large(self) -> None:
         result = _filter([_row("org/huge", parameters=999)], max_params=100)
         assert result.keep == []
@@ -112,10 +88,10 @@ class TestFilterBranches:
         result = _filter([_row("org/edge", parameters=100)], max_params=100)
         assert [r["model_id"] for r in result.keep] == ["org/edge"]
 
-    def test_moe(self) -> None:
+    def test_moe_is_kept_for_worker_classification(self) -> None:
         result = _filter([_row("org/moe", is_moe=True)])
-        assert result.keep == []
-        assert result.skipped[0].failure_category == FAILURE_CATEGORY_MOE
+        assert [row["model_id"] for row in result.keep] == ["org/moe"]
+        assert result.skipped == []
 
 
 class TestPrefilterIsPure:
@@ -135,22 +111,13 @@ class TestPrefilterIsPure:
     def test_every_model_lands_in_exactly_one_list(self) -> None:
         rows = [
             _row("org/a"),
-            _row("org/b", is_supported=False),
-            _row("org/c", is_moe=True),
+            _row("org/b", is_moe=True),
+            _row("org/c", parameters=10**15),
         ]
         result = _filter(rows)
         assert len(result.keep) + len(result.skipped) == len(rows)
-        assert [r["model_id"] for r in result.keep] == ["org/a"]
-        assert [s.row["model_id"] for s in result.skipped] == ["org/b", "org/c"]
-
-
-class TestPrecedence:
-    def test_unsupported_wins_over_moe(self) -> None:
-        """Both apply; the reported category is the first check that fires."""
-        result = _filter([_row("org/both", is_supported=False, is_moe=True)])
-        assert result.skipped[0].failure_category == (
-            FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER
-        )
+        assert [r["model_id"] for r in result.keep] == ["org/a", "org/b"]
+        assert [s.row["model_id"] for s in result.skipped] == ["org/c"]
 
 
 class TestParameterCoercion:
@@ -183,28 +150,24 @@ class TestOrderAndTallies:
     def test_keep_preserves_input_order(self) -> None:
         """The tier router and shard chunker rely on downloads-descending order."""
         rows = [_row(f"org/m{i}", downloads=1000 - i) for i in range(20)]
-        rows[3]["is_moe"] = True
-        rows[11]["is_supported"] = False
+        rows[11]["parameters"] = 10**15
         result = _filter(rows)
 
         kept = [r["model_id"] for r in result.keep]
         assert kept == sorted(kept, key=lambda m: -(1000 - int(m.split("m")[1])))
-        assert "org/m3" not in kept and "org/m11" not in kept
-        assert len(kept) == 18
+        assert "org/m11" not in kept
+        assert len(kept) == 19
 
     def test_counts_reconcile_with_the_input(self) -> None:
         rows = [
             _row("org/a"),
-            _row("org/b", is_supported=False),
-            _row("org/c", is_moe=True),
-            _row("org/d", parameters=10**15),
-            _row("org/e"),
+            _row("org/b", is_moe=True),
+            _row("org/c", parameters=10**15),
+            _row("org/d"),
         ]
         result = _filter(rows)
         counts = result.counts
-        assert counts["keep"] == 2
-        assert counts[FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER] == 1
-        assert counts[FAILURE_CATEGORY_MOE] == 1
+        assert counts["keep"] == 3
         assert counts[FAILURE_CATEGORY_MODEL_TOO_LARGE] == 1
         assert sum(counts.values()) == len(rows)
 
@@ -259,10 +222,10 @@ class TestWriteSkippedRows:
 
         csv_path = tmp_path / "out.csv"
         rows = [
-            _row("org/unsup", is_supported=False),
-            _row("org/moe", is_moe=True),
+            _row("org/huge-a", parameters=200),
+            _row("org/huge-b", parameters=300),
         ]
-        result = _filter(rows)
+        result = _filter(rows, max_params=100)
         today = date.today()
 
         with CsvResultSink(path=csv_path) as sink:
@@ -272,12 +235,11 @@ class TestWriteSkippedRows:
 
         assert written == 2
         text = csv_path.read_text()
-        assert "org/unsup" in text and "org/moe" in text
-        assert FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER in text
-        assert FAILURE_CATEGORY_MOE in text
+        assert "org/huge-a" in text and "org/huge-b" in text
+        assert FAILURE_CATEGORY_MODEL_TOO_LARGE in text
 
-    def test_field_mapping_matches_the_replaced_add_entry_calls(self, tmp_path) -> None:
-        """Pin the 14 column values the three deleted branches used to write."""
+    def test_field_mapping_matches_the_skip_writer_contract(self, tmp_path) -> None:
+        """Pin the fields written for an oversized model."""
         import csv as _csv
 
         from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
@@ -288,21 +250,21 @@ class TestWriteSkippedRows:
         result = _filter(
             [
                 _row(
-                    "org/unsup",
-                    is_supported=False,
+                    "org/huge",
                     downloads=42,
-                    parameters=7,
+                    parameters=101,
                     model_type="mistral",
                     architectures="MistralForCausalLM",
                     config_class="MistralConfig",
                 )
-            ]
+            ],
+            max_params=100,
         )
         with CsvResultSink(path=csv_path) as sink:
             write_skipped_rows(sink, result.skipped, snapshot_date=today, verbose=False)
 
         written_row = next(iter(_csv.DictReader(csv_path.open())))
-        assert written_row["model_name"] == "org/unsup"
+        assert written_row["model_name"] == "org/huge"
         assert written_row["config_class"] == "MistralConfig"
         assert written_row["adapter_name"] == ""
         assert written_row["added_date"] == ""
@@ -313,10 +275,8 @@ class TestWriteSkippedRows:
         assert written_row["num_downloads"] == "42"
         assert written_row["family"] == "mistral"
         assert written_row["architecture"] == "MistralForCausalLM"
-        assert written_row["parameters_number"] == "7"
-        assert written_row["failure_category"] == (
-            FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER
-        )
+        assert written_row["parameters_number"] == "101"
+        assert written_row["failure_category"] == FAILURE_CATEGORY_MODEL_TOO_LARGE
         assert written_row["error"] == ""
 
     def test_empty_skipped_list_writes_nothing(self, tmp_path) -> None:
@@ -394,8 +354,12 @@ class TestFetchAndFilter:
             max_params=MAX_NUMBER_PARAMS,
         )
 
-        # The MoE model is dropped and recorded; the other two survive.
-        assert [r["model_id"] for r in kept] == ["org/keep", "org/keep-too"]
+        # MoE classification happens in the worker, so all three are evaluated.
+        assert [r["model_id"] for r in kept] == [
+            "org/keep",
+            "org/moe",
+            "org/keep-too",
+        ]
 
         # The sink must still be writable — main() writes every evaluation
         # result through this same object after fetch_and_filter returns.
@@ -419,8 +383,7 @@ class TestFetchAndFilter:
             )
 
         written = list(_csv.DictReader(path.open()))
-        assert [r["model_name"] for r in written] == ["org/moe", "org/keep"]
-        assert written[0]["failure_category"] == FAILURE_CATEGORY_MOE
+        assert [r["model_name"] for r in written] == ["org/keep"]
 
     def test_curated_models_are_merged_ahead_of_fetched_and_flagged(
         self, tmp_path, monkeypatch, _stub_fetcher
@@ -454,18 +417,16 @@ class TestFetchAndFilter:
         assert [r["model_id"] for r in kept] == [
             "org/curated",
             "org/keep",
+            "org/moe",
             "org/keep-too",
         ]
         assert by_id["org/curated"]["curated"] is True
         assert by_id["org/keep"]["curated"] is True  # curated copy won the dedup
         assert by_id["org/keep-too"]["curated"] is False
 
-    def test_skipped_curated_model_is_recorded_as_curated(
+    def test_curated_moe_is_kept_for_worker_classification(
         self, tmp_path, monkeypatch, _stub_fetcher
     ) -> None:
-        """A curated model the pre-filter drops still lands in the DB as curated."""
-        import csv as _csv
-
         import tests.spyre.weekly_generation.model_fetcher as model_fetcher
         from tests.spyre.weekly_generation.model_prefilter import fetch_and_filter
         from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
@@ -475,9 +436,8 @@ class TestFetchAndFilter:
 
         monkeypatch.setattr(model_fetcher, "load_curated", _fake_curated)
 
-        path = tmp_path / "s.csv"
-        with CsvResultSink(path=path) as sink:
-            fetch_and_filter(
+        with CsvResultSink(path=tmp_path / "s.csv") as sink:
+            kept = fetch_and_filter(
                 model_type=ModelType.GENERATIVE,
                 snapshot_date=date.today(),
                 top_k=10,
@@ -485,9 +445,9 @@ class TestFetchAndFilter:
                 max_params=MAX_NUMBER_PARAMS,
             )
 
-        written = {r["model_name"]: r for r in _csv.DictReader(path.open())}
-        assert written["org/curated-moe"]["curated"] == "True"
-        assert written["org/moe"]["curated"] == "False"
+        by_id = {row["model_id"]: row for row in kept}
+        assert by_id["org/curated-moe"]["curated"] is True
+        assert by_id["org/moe"]["curated"] is False
 
     def test_drops_the_unserializable_model_info_field(
         self, tmp_path, _stub_fetcher
@@ -530,8 +490,12 @@ class TestFetchAndFilter:
                 max_params=MAX_NUMBER_PARAMS,
             )
 
-        assert [r["model_id"] for r in kept] == ["org/keep", "org/keep-too"]
-        assert [r["model_name"] for r in _csv.DictReader(path.open())] == ["org/moe"]
+        assert [r["model_id"] for r in kept] == [
+            "org/keep",
+            "org/moe",
+            "org/keep-too",
+        ]
+        assert list(_csv.DictReader(path.open())) == []
 
     def test_max_params_is_honoured(self, tmp_path, _stub_fetcher) -> None:
         from tests.spyre.weekly_generation.model_prefilter import fetch_and_filter
@@ -572,7 +536,9 @@ class TestCuratedKeeperWiring:
             (fg, fg.fetch_curated_generative_models_metadata),
             (fe, fe.fetch_curated_embedding_models_metadata),
         ):
-            name = "fetch_generative_models" if mod is fg else "fetch_embedding_models"
+            name = (
+                "_fetch_generative_models" if mod is fg else "_fetch_embedding_models"
+            )
             original = getattr(mod, name)
             try:
                 setattr(
@@ -598,8 +564,8 @@ class TestCuratedKeeperWiring:
             library_name = None
             tags: list[str] = []
 
-        assert keep_all(_Gated(), False) is True
-        assert keep_all(None, "tok") is True
+        assert keep_all(_Gated(), False) == (True, "")
+        assert keep_all(None, "tok") == (True, "")
 
     def test_ranked_entry_points_still_filter(self) -> None:
         """The bypass must not leak into the top-K scan it was carved out of."""
@@ -613,7 +579,9 @@ class TestCuratedKeeperWiring:
             (fg, fg.fetch_top_generative_models),
             (fe, fe.fetch_top_embedding_models),
         ):
-            name = "fetch_generative_models" if mod is fg else "fetch_embedding_models"
+            name = (
+                "_fetch_generative_models" if mod is fg else "_fetch_embedding_models"
+            )
             original = getattr(mod, name)
             try:
                 setattr(

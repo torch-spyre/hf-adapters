@@ -35,7 +35,8 @@ its own compiled block rather than ``make_standard_gqa_block``:
   (on the *MLP output* before the residual add).
 - **Unit-offset RMSNorm.** ``Gemma3RMSNorm`` scales by ``(1.0 + weight)`` (weights
   stored centered at 0) and is *always* scaled (no ``with_scale=False`` V-norm).
-  This is the one substantive numeric difference from ``hf_common.patch_rmsnorm``.
+  This unit-offset form is why Gemma keeps its own ``_patch_gemma3_rmsnorm`` rather
+  than relying on stock HF RMSNorm (which standard adapters do post-PR-#2927).
 - **Scaled attention via ``query_pre_attn_scalar``.** ``scaling ==
   query_pre_attn_scalar ** -0.5``, which is NOT ``head_dim ** -0.5`` in general
   (e.g. 27B: ``head_dim=128`` but ``query_pre_attn_scalar=168``). Captured from
@@ -58,7 +59,8 @@ Usage::
 
     model = AutoSpyreModelForCausalLM.from_pretrained("google/gemma-3-1b-it")
     tokenizer = AutoTokenizer.from_pretrained("google/gemma-3-1b-it")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
 import torch
@@ -76,18 +78,20 @@ from hf_adapters.hf_common import (
 )
 
 
-def _patch_gemma3_rmsnorm(rmsnorm_cls):
-    """Patch a Gemma3 ``RMSNorm`` class to stay in fp16 on Spyre.
+def _patch_gemma_rmsnorm(rmsnorm_cls):
+    """Patch a Gemma 2/3 unit-offset ``RMSNorm`` class for Spyre.
 
-    Mirrors ``hf_common.patch_rmsnorm`` but for Gemma3's RMSNorm, which:
+    Unlike standard adapters (which leave RMSNorm as stock HF now that PR #2927
+    lowers the fp32-upcast pattern), Gemma2/3's RMSNorm needs a dedicated patch
+    because it:
       - uses ``self.eps`` (not ``variance_epsilon``),
       - is **unit-offset**: scales by ``(1.0 + weight)`` rather than ``weight``
         (Gemma stores norm weights centered at 0),
       - is always scaled (no scale-free variant — there is no V-norm).
 
-    On Spyre we stay in fp16; on CPU we upcast to fp32 to match stock HF, whose
-    ``Gemma3RMSNorm`` computes the norm and the ``(1.0 + weight)`` multiply in
-    fp32 before casting back.
+    On Spyre we keep the reduction at input dtype; on CPU we upcast to fp32 to
+    match stock HF, whose Gemma RMSNorm computes the norm and the
+    ``(1.0 + weight)`` multiply in fp32 before casting back.
     """
 
     def _forward_fp16(self, hidden_states):
@@ -371,7 +375,7 @@ def prepare_for_spyre(model):
     # Patch whichever concrete RMSNorm class this model uses. The norm module
     # closest to a decoder layer's input_layernorm is representative.
     rmsnorm_cls = type(backbone.layers[0].input_layernorm)
-    _patch_gemma3_rmsnorm(rmsnorm_cls)
+    _patch_gemma_rmsnorm(rmsnorm_cls)
 
     head_dim = cfg.head_dim
     num_q_heads = cfg.num_attention_heads

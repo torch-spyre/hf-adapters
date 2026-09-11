@@ -25,7 +25,8 @@ Usage::
 
     model = AutoSpyreModelForCausalLM.from_pretrained("Qwen/Qwen2.5-7B")
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
 from hf_adapters.hf_common import (
@@ -40,6 +41,4 @@ _run_backbone_forward = standard_gqa_backbone_forward
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to Qwen2 model in-place."""
-    from transformers.models.qwen2.modeling_qwen2 import Qwen2RMSNorm
-
-    prepare_standard_gqa(model, Qwen2RMSNorm)
+    prepare_standard_gqa(model)

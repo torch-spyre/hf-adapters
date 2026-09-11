@@ -12,20 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Spyre edge case: ``no_pad_token_fallback`` (pad_token=None hits eos fallback)."""
+"""Spyre edge case: tokenization falls back from a missing pad token to EOS."""
 
 from __future__ import annotations
 
 import time
 
 import pytest
-from _generate_edge_case_helpers import (
+
+from tests._generate_edge_case_helpers import (
     NoPadTokenizer,
     hf_reference_outputs,
     make_prompts,
 )
-from _shared import _setup, _teardown
-from model_registry import CAUSAL_PATHS
+from tests.conftest import encode_generation_inputs
+from tests.model_registry import CAUSAL_PATHS
+from tests.spyre.edge_cases._shared import _setup, _teardown
 
 pytestmark = pytest.mark.model_harness("causal")
 
@@ -41,12 +43,18 @@ def test_no_pad_token_fallback_spyre(model_path: str) -> None:
             ref_model, tokenizer, no_pad_prompts, no_pad_max_new
         )
         wrapped = NoPadTokenizer(tokenizer)
+        encoded = encode_generation_inputs(wrapped, no_pad_prompts)
         t0 = time.time()
         out = model.generate(
-            wrapped, no_pad_prompts, max_new_tokens=no_pad_max_new, do_sample=False
+            **encoded,
+            max_new_tokens=no_pad_max_new,
+            do_sample=False,
+        )
+        spyre_outputs = tokenizer.batch_decode(
+            out[:, encoded["input_ids"].shape[1] :], skip_special_tokens=True
         )
         elapsed = time.time() - t0
-        ok = all(hf.strip() == sp.strip() for hf, sp in zip(no_pad_refs, out))
+        ok = all(hf.strip() == sp.strip() for hf, sp in zip(no_pad_refs, spyre_outputs))
         detail = "" if ok else f"hf={no_pad_refs!r} spyre={out!r}"
         print(f"  no_pad_token_fallback: {'PASS' if ok else 'FAIL'} ({elapsed:.1f}s)")
         assert ok, detail

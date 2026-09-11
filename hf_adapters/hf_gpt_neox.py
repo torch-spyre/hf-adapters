@@ -44,7 +44,8 @@ Usage::
 
     model = AutoSpyreModelForCausalLM.from_pretrained("EleutherAI/pythia-70m")
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-70m")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
 import torch
@@ -58,7 +59,6 @@ from hf_adapters.hf_common import (
     _pad_proj_input_simple,
     _pad_proj_output_simple,
     apply_rope_matmul,
-    assert_spyre_dimensions,
     get_backbone,
     kv_cache_update,
     pad_lm_head,
@@ -245,10 +245,6 @@ def prepare_for_spyre(model):
     pads the LM head, and compiles one block per layer.
     """
     cfg = model.config
-    assert_spyre_dimensions(
-        cfg, model_name=getattr(cfg, "name_or_path", "") or "gpt-neox"
-    )
-
     bb = get_backbone(model)
     num_heads = cfg.num_attention_heads
     hidden = cfg.hidden_size
