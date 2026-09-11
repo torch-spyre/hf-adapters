@@ -130,6 +130,16 @@ defaults:
     working-directory: /home/senuser
 
 env:
+  # The /next :dev runner image ships the venv baked and activated at
+  # /home/senuser/.venv. Make uv reuse it instead of re-creating an empty
+  # project .venv: point the project env at the baked venv and skip uv run's
+  # implicit sync. Without these, `uv run` re-syncs into an empty project .venv
+  # and every card test breaks at setup. Mirrors spyre-frameworks PR #1390
+  # (image-level bake of the same vars); kept at workflow level so tests stay
+  # green on the /next runners until that image rebuild lands. Neutralized on
+  # the ubuntu-hosted check-uv-lock job below (no baked venv there).
+  UV_NO_SYNC: "1"
+  UV_PROJECT_ENVIRONMENT: /home/senuser/.venv
   # The CI env var is very important.
   # GitHub actions automatically sets CI=true
   # which causes the pytest inductor tests to fail with AssertionError
@@ -350,6 +360,15 @@ jobs:
   check-uv-lock:
     name: check uv.lock
     runs-on: ubuntu-latest
+    # This hosted runner has no baked /home/senuser/.venv. setup-uv@v5 runs
+    # `uv venv` here, and uv reads the inherited top-level UV_* vars. GHA env:
+    # cannot truly unset an inherited var, and uv rejects a blank value:
+    # UV_NO_SYNC="" errors ("expected a boolish value") and UV_PROJECT_ENVIRONMENT=""
+    # gives an empty venv path, both exit 2. So set VALID hosted-runner values
+    # instead: sync on (0) into a workspace-local .venv.
+    env:
+      UV_NO_SYNC: "0"
+      UV_PROJECT_ENVIRONMENT: .venv
     defaults:
       run:
         working-directory: .
@@ -1495,7 +1514,6 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cd "$CLONED_HF_ADAPTERS_DIR"
-          source .venv/bin/activate
           make model-module-tests MODULE_CONFIG=${{ matrix.config }} PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             JUNIT_XML=1 RESULTS_DIR=.
           mv "model-module-${{ matrix.config }}.xml" "junit-model-module-${{ matrix.config }}.xml"
@@ -2434,7 +2452,6 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cd "$CLONED_HF_ADAPTERS_DIR"
-          source .venv/bin/activate
           make model-module-tests MODULE_CONFIG=${{ matrix.config }} PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             JUNIT_XML=1 RESULTS_DIR=.
           mv "model-module-${{ matrix.config }}.xml" "junit-model-module-${{ matrix.config }}.xml"
