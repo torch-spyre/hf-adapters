@@ -143,6 +143,7 @@ def _steady_state_itl(per_token: list[float]) -> float | None:
 
 def run_multicard_smoke_test(
     model_path: str,
+    prompt: str,
     max_new_tokens: int = _DEFAULT_MAX_NEW_TOKENS,
     dtype: "torch.dtype | None" = None,
     batch_size: int = _DEFAULT_BATCH_SIZE,
@@ -156,6 +157,7 @@ def run_multicard_smoke_test(
 
     Args:
         model_path:     HuggingFace repo ID or local directory.
+        prompt:         Prompt
         max_new_tokens: Token generation budget.
         dtype:          Torch dtype passed to from_pretrained (None = model default).
         batch_size:     Number of identical prompts to batch together (default 1).
@@ -225,7 +227,8 @@ def run_multicard_smoke_test(
     print(f"  max_new_tokens: {max_new_tokens}")
     print(f"  batch_size    : {batch_size}")
     print(f"  Datatype      : {dtype}")
-    print(f"  Prompt        : {_PROMPT!r}")
+    _prompt_display = prompt if len(prompt) <= 80 else prompt[:80] + "..."
+    print(f"  Prompt        : {_prompt_display!r}")
     print(f"{'=' * 70}")
 
     result: dict[str, Any] = {
@@ -273,7 +276,7 @@ def run_multicard_smoke_test(
 
     # batch_size > 1: repeat the same prompt N times (tests the KV cache batch
     # scatter path without needing N different prompts).
-    prompts = [_PROMPT] * batch_size
+    prompts = [prompt] * batch_size
     encoded = encode_generation_inputs(tokenizer, prompts)
 
     actual_prompt_len = encoded["input_ids"].shape[1]
@@ -380,7 +383,7 @@ def run_multicard_smoke_test(
 @pytest.mark.parametrize("model_path", [_DEFAULT_MODEL])
 def test_multicard_smoke_single_card(model_path: str) -> None:
     """Single-card smoke test: load, generate, verify output passes all checks."""
-    result = run_multicard_smoke_test(model_path)
+    result = run_multicard_smoke_test(model_path, _PROMPT)
     assert result["status"] == "PASS", (
         f"Smoke test failed with status {result['status']}.\n"
         f"Checks: {result.get('seq_checks')}\n"
@@ -401,7 +404,7 @@ if __name__ == "__main__":
 
     _model = sys.argv[1] if len(sys.argv) > 1 else _DEFAULT_MODEL
     _max_new_tokens = int(sys.argv[2]) if len(sys.argv) > 2 else _DEFAULT_MAX_NEW_TOKENS
-    _result = run_multicard_smoke_test(_model, _max_new_tokens)
+    _result = run_multicard_smoke_test(_model, _PROMPT, _max_new_tokens)
     print(f"\nFinal status: {_result['status']}")
     if _result["error"]:
         print(_result["error"])
