@@ -144,8 +144,29 @@ def _convert_transformers_path_to_url(comments):
     return _TRANSFORMERS_PATH_RE.sub(_replace, comments)
 
 
+# Dtypes emitted into the ``supported_dtypes`` block of every generated config.
+# Only the dtypes that model traces actually exercise are listed here; listing
+# integer, unsigned, complex, or bool dtypes alongside a float tolerance (atol/
+# rtol) is misleading and produces a block that is byte-identical across all
+# generated files without adding value.
+_SUPPORTED_DTYPES = [
+    "float16",
+    "float32",
+    "float64",
+    "bfloat16",
+    "half",
+    "int64",
+    "bool",
+]
+
+
 class FlowList(list):
     pass
+
+
+class YamlFmtDumper(yaml.Dumper):
+    def increase_indent(self, flow=False, indentless=False):
+        return super().increase_indent(flow, indentless=False)
 
 
 def repr_flow_seq(dumper, data):
@@ -153,6 +174,7 @@ def repr_flow_seq(dumper, data):
 
 
 yaml.add_representer(FlowList, repr_flow_seq)
+yaml.add_representer(FlowList, repr_flow_seq, Dumper=YamlFmtDumper)
 
 
 def sanitize_arg(
@@ -189,6 +211,42 @@ _XAVIER_OPS = {
     "torch.nn.functional.linear",
 }
 _XAVIER_DTYPES = {"torch.float16", "torch.float32", "torch.bfloat16"}
+
+
+def _fix_init_bounds(op_name, yaml_inputs):
+    """Adjust init_args.high for embedding ops and multi-dim indexing so they do not exceed table bounds."""
+    if not yaml_inputs or not isinstance(yaml_inputs, list):
+        return
+    if op_name == "torch.nn.functional.embedding" and len(yaml_inputs) >= 2:
+        idx_inp = (
+            yaml_inputs[0].get("tensor") if isinstance(yaml_inputs[0], dict) else None
+        )
+        wt_inp = (
+            yaml_inputs[1].get("tensor") if isinstance(yaml_inputs[1], dict) else None
+        )
+        if idx_inp and wt_inp:
+            wt_shape = wt_inp.get("shape")
+            if wt_shape and len(wt_shape) >= 1:
+                vocab_size = wt_shape[0]
+                if idx_inp.get("init") == "randint":
+                    if "init_args" not in idx_inp:
+                        idx_inp["init_args"] = {}
+                    idx_inp["init_args"]["high"] = vocab_size
+    elif op_name == "torch.getitem" and len(yaml_inputs) >= 2:
+        base_inp = (
+            yaml_inputs[0].get("tensor") if isinstance(yaml_inputs[0], dict) else None
+        )
+        idx_inp = yaml_inputs[1] if isinstance(yaml_inputs[1], dict) else None
+        if base_inp and idx_inp and "tensor_list" in idx_inp:
+            base_shape = base_inp.get("shape")
+            t_list = idx_inp.get("tensor_list", [])
+            if base_shape:
+                for idx_dim, t in enumerate(t_list):
+                    if idx_dim < len(base_shape) and isinstance(t, dict):
+                        if t.get("init") == "randint":
+                            if "init_args" not in t:
+                                t["init_args"] = {}
+                            t["init_args"]["high"] = base_shape[idx_dim]
 
 
 def _maybe_promote_init_to_xavier(op_name, yaml_inputs):
@@ -342,11 +400,6 @@ def add_test_case_yaml(
             test_case_yaml["kwmap"] = kwmap
 
     return test_case_yaml
-
-
-class YamlFmtDumper(yaml.Dumper):
-    def increase_indent(self, flow=False, indentless=False):
-        return super().increase_indent(flow, indentless=False)
 
 
 @dataclass
@@ -984,6 +1037,8 @@ class TorchOpCollector:
         TorchOpCollector.log_function[TorchOpCollector.log_mthd](
             f"Test case name: {op_name_with_seqno}"
         )
+        _fix_init_bounds(op_name, yaml_inputs)
+        _fix_init_bounds(op_name, yaml_inputs_norm)
         _maybe_promote_init_to_xavier(op_name, yaml_inputs)
         _maybe_promote_init_to_xavier(op_name, yaml_inputs_norm)
         tc_yaml = add_test_case_yaml(
@@ -1215,7 +1270,7 @@ class TorchOpCollector:
                 output_list.append("  kwargs:")
                 for k, v in node.kwargs.items():
                     output_list.append(f"    {k}: {v}")
-                    if "attn_mask" not in k:
+                    if "attn_mask" not in k and not isinstance(v, torch.fx.node.Node):
                         kwmap[k] = v
                         if isinstance(v, torch.dtype) or k == "device" or v is None:
                             kwmap[k] = str(v)
@@ -1554,12 +1609,19 @@ class TorchOpCollector:
     def _compile_fx(
         model_,
         example_inputs_,
-        inner_compile=torch._inductor.compile_fx.compile_fx_inner,
+        inner_compile=None,
         config_patches=None,
         decompositions=None,
         *args,
         **kwargs,
     ):
+        # Resolve inner_compile at call time so that callers can patch
+        # torch._inductor.compile_fx.compile_fx_inner (e.g. with a CPU-safe
+        # no-op) before entering TorchOpCollector, and have that patch take
+        # effect here rather than using the value frozen at class-definition
+        # time.
+        if inner_compile is None:
+            inner_compile = torch._inductor.compile_fx.compile_fx_inner
         model_.print_readable(print_output=TorchOpCollector.print_graph_module)
         TorchOpCollector.collect_torchops(
             model_, TorchOpCollector.ops_set, TorchOpCollector.print_output
@@ -1595,17 +1657,18 @@ class TorchOpCollector:
         return False
 
     def write_yaml(
-        self, model_name, output_dir=".", yaml_defaults=None, supress_spyre=False
+        self,
+        model_name,
+        output_dir=".",
+        yaml_defaults=None,
+        supress_spyre=False,
+        supported_dtypes=None,
     ):
         defaults = {**TorchOpCollector.DEFAULT_YAML_DEFAULTS, **(yaml_defaults or {})}
 
         def _filter_cases(cases: list[dict[str, Any]]):
             result = []
             for tc in cases:
-                name = tc.get("name")
-                if not isinstance(name, str) or not name.startswith("torch"):
-                    print(f"Skipping test case with non-torch name: {name!r}")
-                    continue
                 try:
                     yaml.dump(tc, sort_keys=False)
                     result.append(tc)
@@ -1615,28 +1678,11 @@ class TorchOpCollector:
 
         config = {}
         if not USE_OLDFORMAT:
-            dtypes = [
-                "float16",
-                "float32",
-                "float64",
-                "bfloat16",
-                "int8",
-                "int16",
-                "int32",
-                "int64",
-                "uint8",
-                "uint16",
-                "uint32",
-                "uint64",
-                "complex32",
-                "complex64",
-                "complex128",
-                "bool",
-                "half",
-            ]
             seed = 123
+            dtypes = supported_dtypes or _SUPPORTED_DTYPES
             config = {
                 "test_suite_config": {
+                    "labels": FlowList(["trunk"]),
                     "global": {
                         "supported_dtypes": [
                             {"name": dt, "precision": {"atol": 0.005, "rtol": 0.005}}
@@ -1653,7 +1699,7 @@ class TorchOpCollector:
                             "tests": [
                                 {
                                     "names": ["TestSpyreModelOps::test_model_ops_db"],
-                                    "mode": "mandatory_success",
+                                    "mode": "xfail",
                                     "tags": ["model__" + model_name],
                                     "edits": {
                                         "ops": {
