@@ -181,12 +181,19 @@ def sanitize_arg(
     return str(arg)
 
 
+# Op-name prefixes that never denote a tensor operation, so they get no test case.
+# torch.cuda.* are host-side device queries (e.g. get_device_capability(), called
+# from transformers' _can_use_grouped_mm) that return Python values, not tensors.
+_SKIPPED_OP_PREFIXES = ("torch.cuda.",)
+
 # Ops whose tensor inputs should use Xavier init when dtype/rank also qualify.
 _XAVIER_OPS = {
     "torch.conv2d",
     "torch.bmm",
     "torch.matmul",
+    "torch._grouped_mm",
     "torch.nn.functional.linear",
+    "torch.nn.functional.grouped_mm",
 }
 _XAVIER_DTYPES = {"torch.float16", "torch.float32", "torch.bfloat16"}
 
@@ -221,32 +228,85 @@ def _maybe_promote_init_to_xavier(op_name, yaml_inputs):
                 _maybe(t)
 
 
+# Grouped-GEMM group-boundary kwargs: (op, kwarg name) -> positional input whose
+# leading dim gives the total row count that the offsets must end at.
+_CUMSUM_OFFSETS_KWARGS = {
+    ("torch._grouped_mm", "offs"): 0,
+    ("torch.nn.functional.grouped_mm", "offs"): 0,
+    ("torch.ops.transformers.grouped_mm_fallback", "offs"): 0,
+}
+
+
+def _maybe_promote_init_to_cumsum_offsets(op_name, kwarg_name, details, yaml_inputs):
+    """Flip a grouped-GEMM ``offs`` tensor from the generic integer ``init: randint``
+    to ``init: cumsum_offsets``.
+
+    ``offs`` is not an arbitrary integer tensor: the kernel reads it as cumulative
+    group boundaries, so it must be monotonic non-decreasing and end at the number
+    of rows in ``mat_a`` (see transformers' ``grouped_mm_experts_forward``, which
+    builds it as ``cumsum(histc(sort(expert_ids)))``). Random values corrupt the
+    group boundaries, so record the constraint instead: ``init_args.total`` carries
+    ``mat_a.size(0)``, taken from the already-formatted positional inputs.
+    Mutates ``details`` in place.
+    """
+    arg_index = _CUMSUM_OFFSETS_KWARGS.get((op_name, kwarg_name))
+    if arg_index is None or not isinstance(details, dict):
+        return
+    if "int" not in str(details.get("dtype")):
+        return
+    shape = details.get("shape")
+    if shape is None or len(shape) != 1:
+        return
+
+    total = None
+    if yaml_inputs and len(yaml_inputs) > arg_index:
+        inp = yaml_inputs[arg_index]
+        if isinstance(inp, dict) and isinstance(inp.get("tensor"), dict):
+            mat_a_shape = inp["tensor"].get("shape")
+            if mat_a_shape is not None and len(mat_a_shape) >= 1:
+                total = int(mat_a_shape[0])
+    if total is None:
+        return
+
+    details["init"] = "cumsum_offsets"
+    details.pop("init_args", None)
+    details["init_args"] = {"total": total}
+
+
+def build_tensor_details(shape, stride, storage_offset, dtype, device, randintlim=1000):
+    """Build the YAML tensor block (shape/stride/dtype/device/init) for a tensor
+    described purely by its metadata."""
+    tensor_details = {}
+    tensor_details["shape"] = FlowList(shape)
+    tensor_details["stride"] = FlowList(stride)
+    tensor_details["storage_offset"] = storage_offset
+    tensor_details["dtype"] = str(dtype)
+    tensor_details["device"] = str(device)
+    if "float" in str(dtype):
+        tensor_details["init"] = "rand"
+    elif "int" in str(dtype):
+        tensor_details["init"] = "randint"
+        tensor_details["init_args"] = {"high": randintlim}
+    elif "bool" in str(dtype):
+        pass
+    else:
+        print(f"Unhandled dtype {dtype}")
+        return {}
+
+    return tensor_details
+
+
 def format_tensor_details(
     arg, shape, stride, storage_offset, dtype, device, randintlim=1000
 ):
     logging.getLogger("TorchOpCollector").debug(
         f"In format_tensor_details: {arg}, {shape}, {stride}, {storage_offset}, {dtype}, {device}, {randintlim}"
     )
-    tensor_details = {}
 
     if isinstance(arg, torch.fx.node.Node):
-        tensor_details["shape"] = FlowList(shape)
-        tensor_details["stride"] = FlowList(stride)
-        tensor_details["storage_offset"] = storage_offset
-        tensor_details["dtype"] = str(dtype)
-        tensor_details["device"] = str(device)
-        if "float" in str(dtype):
-            tensor_details["init"] = "rand"
-        elif "int" in str(dtype):
-            tensor_details["init"] = "randint"
-            tensor_details["init_args"] = {"high": randintlim}
-        elif "bool" in str(dtype):
-            pass
-        else:
-            print(f"Unhandled dtype {dtype}")
-            return {}
-
-        return tensor_details
+        return build_tensor_details(
+            shape, stride, storage_offset, dtype, device, randintlim
+        )
 
 
 def add_test_case_yaml(
@@ -891,15 +951,24 @@ class TorchOpCollector:
         TorchOpCollector.log_function[TorchOpCollector.log_mthd](
             f"Converting scalar args {san_args} to tuple for {op_name}"
         )
-        start_index_norm = 1
+        # The shape/dims may arrive either as varargs -- reshape(t, 1, 24, 2816) --
+        # or as a single sequence -- reshape(t, (1, 24, 2816)). Flatten both to a
+        # plain list of dims before indexing.
+        dims = []
+        for arg in san_args[1:]:
+            if isinstance(arg, (tuple, list, torch.Size)):
+                dims.extend(arg)
+            else:
+                dims.append(arg)
+        start_index_norm = 0
         if dim_redn:
             TorchOpCollector.log_function[TorchOpCollector.log_mthd](
                 f"Dim reduction: {orig_shape}, {shrunk_shape}, {start_index_norm}"
             )
             dims_removed = len(orig_shape) - len(shrunk_shape)
-            start_index_norm = max(dims_removed, 0) + 1
-        val_tuple = tuple(int(ii) for ii in san_args[1:])
-        val_tuple_norm = tuple(int(ii) for ii in san_args[start_index_norm:])
+            start_index_norm = max(dims_removed, 0)
+        val_tuple = tuple(int(ii) for ii in dims)
+        val_tuple_norm = tuple(int(ii) for ii in dims[start_index_norm:])
         if op_name == "torch.reshape":
             if round_up:
                 TorchOpCollector.log_function[TorchOpCollector.log_mthd](
@@ -1021,7 +1090,10 @@ class TorchOpCollector:
             TorchOpCollector.log_function[TorchOpCollector.log_mthd](
                 "Creating round_up version of the yaml"
             )
-            kwmap_norm = copy.deepcopy(kwmap)
+            # Shallow copy: only scalar entries ("dtype"/"fill_value") are
+            # rewritten below, and a deep copy would recurse into non-copyable
+            # values such as FakeTensors reachable from fx Nodes.
+            kwmap_norm = copy.copy(kwmap)
             if (
                 len(kwmap_norm) > 0
                 and "dtype" in kwmap_norm
@@ -1118,6 +1190,11 @@ class TorchOpCollector:
                     TorchOpCollector.log_function[TorchOpCollector.log_mthd](
                         f"Skipping op {op_name} as its shape contains unbound symbolic elements"
                     )
+                continue
+            if op_name.startswith(_SKIPPED_OP_PREFIXES):
+                TorchOpCollector.log_function[TorchOpCollector.log_mthd](
+                    f"Skipping op {op_name} as it is not a tensor operation"
+                )
                 continue
             TorchOpCollector.log_function[TorchOpCollector.log_mthd](
                 f"MAIN OP DETAILS: {op_name}, {out_shape}, {out_stride}, {out_storage_offset}, {out_dtype}, {out_device}"
@@ -1219,6 +1296,28 @@ class TorchOpCollector:
                         kwmap[k] = v
                         if isinstance(v, torch.dtype) or k == "device" or v is None:
                             kwmap[k] = str(v)
+                        elif isinstance(v, torch.fx.Node):
+                            # e.g. torch._grouped_mm(..., offs=<Node 'offsets'>).
+                            # Record the tensor's shape/dtype instead of the
+                            # producing variable's name: an fx Node carries a
+                            # FakeTensor in node.meta, which is neither
+                            # YAML-serializable nor deep-copyable (data_ptr() raises).
+                            details = TorchOpCollector._tensor_kwarg_details(v)
+                            _maybe_promote_init_to_cumsum_offsets(
+                                op_name, k, details, yaml_inputs
+                            )
+                            # Nest under "tensor" so a tensor-valued kwarg is
+                            # described exactly like a positional tensor input.
+                            kwmap[k] = (
+                                {"tensor": details} if details is not None else str(v)
+                            )
+                        elif isinstance(v, torch.Tensor):
+                            # A constant tensor baked into the graph: describe it
+                            # the same way, so kwmap never holds a live tensor.
+                            details = TorchOpCollector._tensor_details_from_meta(v)
+                            kwmap[k] = (
+                                {"tensor": details} if details is not None else str(v)
+                            )
 
             output_list.append(
                 f"  output shape: {out_shape}, {out_stride}, {out_storage_offset}, {out_dtype}, {out_device} @ {node.name}"
@@ -1274,6 +1373,38 @@ class TorchOpCollector:
                 if comm_idx > 0:
                     comments = comments[comm_idx:-2]
         return comments, stacktrace
+
+    @staticmethod
+    def _tensor_kwarg_details(node):
+        """Describe a tensor-valued kwarg (e.g. torch._grouped_mm's `offs`) by its
+        shape/dtype rather than by the producing variable's name.
+
+        Only metadata is available here: the collector runs at compile time, where
+        the kwarg's value is a FakeTensor with no backing data (reading it raises
+        DataDependentOutputException for data-dependent producers such as
+        cumsum(histc(...))). Emit the same tensor block used for positional
+        tensor inputs so the test harness can synthesize an input of the right
+        shape and dtype.
+        """
+        meta_val = node.meta.get(
+            "val",
+            node.meta.get("tensor_meta", node.meta.get("example_value", None)),
+        )
+        if meta_val is None:
+            return None
+        return TorchOpCollector._tensor_details_from_meta(meta_val)
+
+    @staticmethod
+    def _tensor_details_from_meta(meta_val):
+        """Build a YAML tensor block from a (fake) tensor's metadata."""
+        shape, stride, storage_offset, dtype, device = (
+            TorchOpCollector._extract_meta_info(meta_val)
+        )
+        if shape is None or dtype is None or shape == "symbolic":
+            return None
+        return (
+            build_tensor_details(shape, stride, storage_offset, dtype, device) or None
+        )
 
     @staticmethod
     def _extract_meta_info(meta_val):
@@ -1363,6 +1494,11 @@ class TorchOpCollector:
             dtypes_tuple = ()
             devices_tuple = ()
             for vv in meta_val:
+                if not isinstance(vv, torch.Tensor):
+                    TorchOpCollector.log_function[TorchOpCollector.log_mthd](
+                        f"{vv}: {type(vv)}"
+                    )
+                    continue
                 TorchOpCollector.log_function[TorchOpCollector.log_mthd](
                     f"{vv}: {type(vv)} type: {vv.dtype} shape: {vv.shape}"
                 )
