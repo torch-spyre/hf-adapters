@@ -16,6 +16,8 @@ import pytest
 import torch
 
 from hf_adapters.hf_common import (
+    _materialize_decode_mask_heads,
+    _prefill_cache_inputs,
     build_prefill_mask,
     encode_prompts,
     generation_cache_len,
@@ -97,24 +99,22 @@ def test_encode_prompts_can_force_plain_right_padding():
     ],
 )
 def test_padding_layouts_normalize_identically(input_ids, attention_mask):
-    padded_ids, lengths, padded_len, offsets, position_ids = _normalize(
-        input_ids, attention_mask
-    )
+    normalized = _normalize(input_ids, attention_mask)
 
-    assert padded_len == 64
-    assert lengths.tolist() == [3, 5]
-    assert offsets.tolist() == [61, 59]
-    assert padded_ids[0, -3:].tolist() == [11, 12, 13]
-    assert padded_ids[1, -5:].tolist() == [21, 22, 23, 24, 25]
-    assert position_ids[0, -3:].tolist() == [0, 1, 2]
-    assert position_ids[1, -5:].tolist() == [0, 1, 2, 3, 4]
+    assert normalized.padded_len == 64
+    assert normalized.actual_lengths.tolist() == [3, 5]
+    assert normalized.prompt_offsets.tolist() == [61, 59]
+    assert normalized.input_ids[0, -3:].tolist() == [11, 12, 13]
+    assert normalized.input_ids[1, -5:].tolist() == [21, 22, 23, 24, 25]
+    assert normalized.position_ids[0, -3:].tolist() == [0, 1, 2]
+    assert normalized.position_ids[1, -5:].tolist() == [0, 1, 2, 3, 4]
 
 
 def test_right_padding_regression_keeps_the_whole_prompt():
-    padded_ids, _, _, offsets, _ = _normalize([[11, 12, 13, 99, 99]], [[1, 1, 1, 0, 0]])
+    normalized = _normalize([[11, 12, 13, 99, 99]], [[1, 1, 1, 0, 0]])
 
-    assert offsets.tolist() == [61]
-    assert padded_ids[0, -3:].tolist() == [11, 12, 13]
+    assert normalized.prompt_offsets.tolist() == [61]
+    assert normalized.input_ids[0, -3:].tolist() == [11, 12, 13]
 
 
 @pytest.mark.parametrize(
@@ -125,15 +125,13 @@ def test_block_boundary_lengths(length, expected_padded_len, expected_offset):
     ids = torch.arange(1, length + 1).unsqueeze(0)
     mask = torch.ones_like(ids)
 
-    padded_ids, lengths, padded_len, offsets, position_ids = (
-        normalize_generation_inputs(ids, mask)
-    )
+    normalized = normalize_generation_inputs(ids, mask)
 
-    assert lengths.tolist() == [length]
-    assert padded_len == expected_padded_len
-    assert offsets.tolist() == [expected_offset]
-    assert padded_ids[0, expected_offset:].tolist() == ids[0].tolist()
-    assert position_ids[0, expected_offset:].tolist() == list(range(length))
+    assert normalized.actual_lengths.tolist() == [length]
+    assert normalized.padded_len == expected_padded_len
+    assert normalized.prompt_offsets.tolist() == [expected_offset]
+    assert normalized.input_ids[0, expected_offset:].tolist() == ids[0].tolist()
+    assert normalized.position_ids[0, expected_offset:].tolist() == list(range(length))
 
 
 def test_external_overpadding_does_not_inflate_cache_geometry():
@@ -142,33 +140,106 @@ def test_external_overpadding_does_not_inflate_cache_geometry():
     attention_mask = torch.zeros_like(input_ids)
     attention_mask[0, :20] = 1
 
-    _, lengths, padded_len, _, _ = normalize_generation_inputs(
-        input_ids, attention_mask
+    normalized = normalize_generation_inputs(input_ids, attention_mask)
+
+    assert normalized.padded_len == 64
+    assert normalized.actual_lengths.max().item() == 20
+    assert generation_cache_len(normalized.padded_len, 1) == 512
+
+
+def test_cache_capacity_is_based_on_padded_prefill_extent():
+    prompt_length = 1433
+    input_ids = torch.ones((1, prompt_length), dtype=torch.long)
+
+    normalized = normalize_generation_inputs(input_ids, pad_to_multiple=512)
+    max_cache_len = generation_cache_len(normalized.padded_len, 5)
+
+    assert normalized.padded_len == 1536
+    assert max_cache_len == 2048
+    assert normalized.padded_len + 5 <= max_cache_len
+
+
+def test_one_shot_prefill_preserves_cache_tensor_identity():
+    caches = [torch.zeros(1, 2, 512, 128), torch.zeros(1, 64, 3)]
+
+    selected = _prefill_cache_inputs(caches, 512, chunked_prefill=False)
+
+    assert selected is caches
+    assert all(actual is expected for actual, expected in zip(selected, caches))
+
+
+def test_chunked_prefill_slices_only_attention_caches():
+    attention_cache = torch.zeros(1, 2, 1024, 128)
+    state_cache = torch.zeros(1, 64, 3)
+
+    selected = _prefill_cache_inputs(
+        [attention_cache, state_cache], 512, chunked_prefill=True
     )
 
-    assert padded_len == 64
-    assert generation_cache_len(lengths.max().item(), 1) == 128
+    assert selected[0].shape == (1, 2, 512, 128)
+    assert selected[0]._base is attention_cache
+    assert selected[1] is state_cache
+
+
+def test_decode_mask_materialization_creates_real_head_storage():
+    mask = torch.arange(8).reshape(1, 1, 1, 8)
+
+    materialized = _materialize_decode_mask_heads(mask, 4)
+
+    assert materialized.shape == (1, 4, 1, 8)
+    assert materialized.is_contiguous()
+    assert materialized.stride(1) != 0
+    assert torch.equal(materialized[:, :1], mask)
 
 
 def test_missing_mask_treats_every_id_as_content():
-    padded_ids, lengths, _, offsets, _ = _normalize([[7, 0, 7]])
+    normalized = _normalize([[7, 0, 7]])
 
-    assert lengths.tolist() == [3]
-    assert offsets.tolist() == [61]
-    assert padded_ids[0, -3:].tolist() == [7, 0, 7]
+    assert normalized.actual_lengths.tolist() == [3]
+    assert normalized.prompt_offsets.tolist() == [61]
+    assert normalized.input_ids[0, -3:].tolist() == [7, 0, 7]
 
 
 def test_prefill_mask_matches_normalized_offsets():
-    padded_ids, _, padded_len, offsets, _ = _normalize(
+    normalized = _normalize(
         [[11, 12, 13, 99, 99], [21, 22, 23, 24, 25]],
         [[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]],
     )
-    mask = build_prefill_mask(2, padded_len, 128, offsets)
+    mask = build_prefill_mask(2, normalized.padded_len, 128, normalized.prompt_offsets)
 
-    assert padded_ids[:, -1].tolist() == [13, 25]
-    assert (mask[0, 0, -1, : offsets[0]] < 0).all()
-    assert (mask[0, 0, -1, offsets[0] : padded_len] == 0).all()
-    assert (mask[0, 0, -1, padded_len:] < 0).all()
+    assert normalized.input_ids[:, -1].tolist() == [13, 25]
+    assert (mask[0, 0, -1, : normalized.prompt_offsets[0]] < 0).all()
+    assert (
+        mask[
+            0,
+            0,
+            -1,
+            normalized.prompt_offsets[0] : normalized.padded_len,
+        ]
+        == 0
+    ).all()
+    assert (mask[0, 0, -1, normalized.padded_len :] < 0).all()
+
+
+def test_token_aligned_inputs_follow_prompt_normalization():
+    input_ids = torch.tensor([[11, 12, 99, 99], [0, 21, 22, 23]])
+    attention_mask = torch.tensor([[1, 1, 0, 0], [0, 1, 1, 1]])
+    token_types = torch.tensor([[1, 2, 9, 9], [9, 3, 4, 5]])
+
+    normalized = normalize_generation_inputs(input_ids, attention_mask)
+    normalized_types = normalized.normalize_token_aligned(token_types, pad_value=0)
+
+    assert normalized.input_ids[0, -3:].tolist() == [0, 11, 12]
+    assert normalized.input_ids[1, -3:].tolist() == [21, 22, 23]
+    assert normalized_types[0, -3:].tolist() == [0, 1, 2]
+    assert normalized_types[1, -3:].tolist() == [3, 4, 5]
+
+
+def test_token_aligned_inputs_validate_shape():
+    normalized = normalize_generation_inputs(torch.tensor([[11, 12]]))
+
+    with pytest.raises(ValueError, match="first two dimensions"):
+        normalized.normalize_token_aligned(torch.tensor([[1, 2, 3]]))
 
 
 def test_inputs_are_not_mutated():
@@ -195,6 +266,7 @@ def test_inputs_are_not_mutated():
         ),
         (torch.empty((1, 0), dtype=torch.long), None, ValueError, "at least one token"),
         (torch.tensor([[1.0, 2.0]]), None, TypeError, "integer dtype"),
+        (torch.tensor([[1, 2]], dtype=torch.int16), None, TypeError, "torch.int32"),
         (torch.tensor([[1, 2]]), torch.tensor([1, 1]), ValueError, "same shape"),
         (torch.tensor([[1, 2]]), torch.tensor([[1, 2]]), ValueError, "0 or 1"),
         (torch.tensor([[1, 2]]), torch.tensor([[0, 0]]), ValueError, "unmasked token"),

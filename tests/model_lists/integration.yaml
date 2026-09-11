@@ -6,3 +6,4 @@ models:
   - mistralai/Ministral-3-8B-Instruct-2512
   - ibm-granite/granite-4.1-8b
   - google/gemma-4-12B-it
+  - google/gemma-4-26B-A4B

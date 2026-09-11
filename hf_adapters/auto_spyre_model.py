@@ -41,8 +41,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from functools import partial
 from types import MethodType, ModuleType
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, cast
 
 import torch
 from transformers import (
@@ -55,7 +56,9 @@ from transformers import (
     AutoModelForSequenceClassification,
     AutoModelForTokenClassification,
     BertConfig,
+    CLIPConfig,
     DistilBertConfig,
+    Gemma2Config,
     Gemma3Config,
     Gemma3TextConfig,
     Gemma4Config,
@@ -68,13 +71,15 @@ from transformers import (
     Granite4VisionConfig,
     GraniteConfig,
     GraniteMoeHybridConfig,
-    GraniteSWAConfig,  # type: ignore[attr-defined]
+    GraniteSWAConfig,
+    Lfm2Config,
     LlamaConfig,
     MistralConfig,
     ModernBertConfig,
     MPNetConfig,
     Olmo2Config,
     OlmoConfig,
+    OPTConfig,
     Phi3Config,
     PreTrainedModel,
     Qwen2Config,
@@ -96,13 +101,17 @@ from transformers.models.mistral3.configuration_mistral3 import Mistral3Config
 import hf_adapters.hf_common as hf_common
 from hf_adapters import (
     hf_bert,
+    hf_bharatgen,
+    hf_clip,
     hf_distilbert,
     hf_dspark_gemma4,
     hf_dspark_granite,
     hf_dspark_qwen3,
+    hf_gemma2,
     hf_gemma3,
     hf_gemma4,
     hf_gemma4_mm,
+    hf_gemma4_moe,
     hf_gpt2,
     hf_gpt_neo,
     hf_gpt_neox,
@@ -111,6 +120,7 @@ from hf_adapters import (
     hf_granite_vision,
     hf_granite_vision_mm,
     hf_granitemoehybrid,
+    hf_lfm2,
     hf_llama,
     hf_ministral,
     hf_mistral,
@@ -120,6 +130,7 @@ from hf_adapters import (
     hf_mpnet,
     hf_olmo,
     hf_olmo2,
+    hf_opt,
     hf_phi3,
     hf_qwen2,
     hf_qwen3,
@@ -137,7 +148,9 @@ from hf_adapters.hf_common import (
 
 CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     BertConfig: hf_bert,
+    CLIPConfig: hf_clip,
     DistilBertConfig: hf_distilbert,
+    Gemma2Config: hf_gemma2,
     Gemma3Config: hf_gemma3,
     Gemma3TextConfig: hf_gemma3,
     Gemma4Config: hf_gemma4,
@@ -151,6 +164,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     GraniteConfig: hf_granite,
     GraniteMoeHybridConfig: hf_granitemoehybrid,
     GraniteSWAConfig: hf_granite_swa,
+    Lfm2Config: hf_lfm2,
     LlamaConfig: hf_llama,
     MistralConfig: hf_mistral,
     MinistralConfig: hf_ministral,
@@ -159,6 +173,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     MPNetConfig: hf_mpnet,
     OlmoConfig: hf_olmo,
     Olmo2Config: hf_olmo2,
+    OPTConfig: hf_opt,
     Phi3Config: hf_phi3,
     Qwen2Config: hf_qwen2,
     Qwen3Config: hf_qwen3,
@@ -178,6 +193,7 @@ ARCH_TO_ADAPTER_MODULE_MAPPING: dict[str, ModuleType] = {
     "Qwen3DSparkModel": hf_dspark_qwen3,
     "Gemma4DSparkModel": hf_dspark_gemma4,
     "GraniteDSparkModel": hf_dspark_granite,
+    "ParamBharatGenForCausalLM": hf_bharatgen,
 }
 
 # Multimodal (image-text-to-text) mapping — used by
@@ -226,6 +242,44 @@ MODEL_DTYPE_POLICIES: dict[str, ModelDTypePolicy] = {
 }
 
 
+# Known sub-module subfolders used by sentence-transformers composite repos,
+# e.g. sentence-transformers/clip-ViT-B-32 stores its model under '0_CLIPModel'.
+_ST_SUBFOLDERS = ("0_CLIPModel", "0_Transformer")
+
+
+def _autoconfig_with_subfolder_fallback(
+    model_name_or_path: Union[str, os.PathLike[str]],
+    trust_remote_code: bool | None = None,
+) -> PretrainedConfig | None:
+    """Load ``AutoConfig`` for *model_name_or_path*, probing known ST subfolders on failure.
+
+    Returns the first config that loads successfully, or ``None`` if every
+    attempt fails.
+    """
+    try:
+        return cast(
+            PretrainedConfig,
+            AutoConfig.from_pretrained(
+                model_name_or_path, trust_remote_code=trust_remote_code
+            ),
+        )
+    except Exception:
+        pass
+    for sub in _ST_SUBFOLDERS:
+        try:
+            return cast(
+                PretrainedConfig,
+                AutoConfig.from_pretrained(
+                    model_name_or_path,
+                    subfolder=sub,
+                    trust_remote_code=trust_remote_code,
+                ),
+            )
+        except Exception:
+            pass
+    return None
+
+
 def dtype_for_model_path(
     model_name_or_path: Union[str, os.PathLike[str]],
     target_device: str | torch.device,
@@ -242,8 +296,10 @@ def dtype_for_model_path(
     elif policy.dtype is not None:
         dtype = policy.dtype
     else:
-        config = AutoConfig.from_pretrained(model_name_or_path)
-        dtype = getattr(config, "dtype", None) or torch.float16
+        config = _autoconfig_with_subfolder_fallback(model_name_or_path)
+        dtype = (
+            getattr(config, "dtype", None) or torch.float16 if config else torch.float16
+        )
 
     if dtype == torch.float32 and device_str == "spyre":
         dtype = torch.float16
@@ -258,9 +314,11 @@ def resolve_adapter_module(
     ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
     trust_remote_code: bool | None = None,
 ) -> ModuleType:
-    model_config: PretrainedConfig = AutoConfig.from_pretrained(
+    model_config = _autoconfig_with_subfolder_fallback(
         model_name_or_path, trust_remote_code=trust_remote_code
     )
+    if model_config is None:
+        raise SpyreNoAdapterError(f"Could not load config for {model_name_or_path}")
 
     # Architecture-name dispatch first: DSpark drafters share their base model's
     # config class but carry a distinct ``*DSparkModel`` architecture, so route on
@@ -275,8 +333,15 @@ def resolve_adapter_module(
             f"Model {model_name_or_path} of type {type(model_config)} "
             "is not supported"
         )
+
+    adapter_module = mapping[type(model_config)]
+    if adapter_module is hf_gemma4:
+        text_cfg = getattr(model_config, "text_config", model_config)
+        if getattr(text_cfg, "enable_moe_block", False):
+            adapter_module = hf_gemma4_moe
+
     assert_spyre_dimensions(model_config, model_name=str(model_name_or_path))
-    return mapping[type(model_config)]
+    return adapter_module
 
 
 class AutoSpyreModel:
@@ -299,9 +364,12 @@ class AutoSpyreModel:
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
+        trust_remote_code: bool | None = None,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
-            model_name_or_path=model_name_or_path, mapping=cls._module_mapping
+            model_name_or_path=model_name_or_path,
+            mapping=cls._module_mapping,
+            trust_remote_code=trust_remote_code,
         )
         if dtype is None:
             dtype = dtype_for_model_path(
@@ -315,6 +383,7 @@ class AutoSpyreModel:
             dtype,
             auto_model_cls=cls._auto_model_cls,
             tp_plan=tp_plan,
+            trust_remote_code=trust_remote_code,
         )
         move_model_to_spyre(model, module, dtype)
         return model
@@ -335,15 +404,21 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
+        trust_remote_code: bool | None = None,
     ) -> PreTrainedModel:
-        module: ModuleType = resolve_adapter_module(model_name_or_path)
+        module: ModuleType = resolve_adapter_module(
+            model_name_or_path, trust_remote_code=trust_remote_code
+        )
         if getattr(module, "_is_encoder_only", False):
             raise SpyreUnsupportedModelError(
                 "Generation is not currently supported for encoder-only architectures"
             )
 
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype, tp_plan=tp_plan
+            model_name_or_path,
+            dtype=dtype,
+            tp_plan=tp_plan,
+            trust_remote_code=trust_remote_code,
         )
 
         def model_generate(
@@ -422,12 +497,18 @@ class AutoSpyreModelForMaskedLM(AutoSpyreModel):
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
+        trust_remote_code: bool | None = None,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
-            model_name_or_path, mapping=cls._module_mapping
+            model_name_or_path,
+            mapping=cls._module_mapping,
+            trust_remote_code=trust_remote_code,
         )
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype, tp_plan=tp_plan
+            model_name_or_path,
+            dtype=dtype,
+            tp_plan=tp_plan,
+            trust_remote_code=trust_remote_code,
         )
 
         def model_forward(
@@ -496,10 +577,16 @@ class AutoSpyreModelForQuestionAnswering(AutoSpyreModel):
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
+        trust_remote_code: bool | None = None,
     ) -> PreTrainedModel:
-        module: ModuleType = resolve_adapter_module(model_name_or_path)
+        module: ModuleType = resolve_adapter_module(
+            model_name_or_path, trust_remote_code=trust_remote_code
+        )
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype, tp_plan=tp_plan
+            model_name_or_path,
+            dtype=dtype,
+            tp_plan=tp_plan,
+            trust_remote_code=trust_remote_code,
         )
         if model.config.num_labels != 2:
             raise SpyreUnsupportedModelError(
@@ -579,12 +666,18 @@ class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
+        trust_remote_code: bool | None = None,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
-            model_name_or_path, mapping=cls._module_mapping
+            model_name_or_path,
+            mapping=cls._module_mapping,
+            trust_remote_code=trust_remote_code,
         )
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype, tp_plan=tp_plan
+            model_name_or_path,
+            dtype=dtype,
+            tp_plan=tp_plan,
+            trust_remote_code=trust_remote_code,
         )
 
         def model_forward(
@@ -671,12 +764,18 @@ class AutoSpyreModelForTokenClassification(AutoSpyreModel):
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
+        trust_remote_code: bool | None = None,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
-            model_name_or_path, mapping=cls._module_mapping
+            model_name_or_path,
+            mapping=cls._module_mapping,
+            trust_remote_code=trust_remote_code,
         )
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype, tp_plan=tp_plan
+            model_name_or_path,
+            dtype=dtype,
+            tp_plan=tp_plan,
+            trust_remote_code=trust_remote_code,
         )
 
         def model_forward(
@@ -728,13 +827,81 @@ class AutoSpyreModelForTokenClassification(AutoSpyreModel):
         return model
 
 
+def _run_vlm_text_forward(
+    module: ModuleType,
+    model: PreTrainedModel,
+    input_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    key_caches,
+    value_caches,
+    cache_index: torch.Tensor,
+):
+    """Run one text-only VLM decoder step through the adapter's shared backbone."""
+    return module._logits_from_embeds(
+        model,
+        hf_common.embed_text_tokens(model, input_ids),
+        position_ids,
+        attention_mask,
+        key_caches,
+        value_caches,
+        cache_index,
+    )
+
+
+def _generate_image_text_to_text(
+    module: ModuleType,
+    model: PreTrainedModel,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor | None = None,
+    **kwargs: Any,
+):
+    """Run multimodal prefill and text decode through the shared generation loop."""
+    # Processor outputs consumed by this adapter rather than by generation config.
+    adapter_input_names = module._GENERATION_INPUT_NAMES
+    missing = set(adapter_input_names) - set(kwargs)
+    if missing:
+        raise TypeError(
+            f"Missing processor inputs for {module.__name__}: {sorted(missing)}"
+        )
+    adapter_inputs = {name: kwargs.pop(name) for name in adapter_input_names}
+
+    # Inputs keyed by token position need the same compaction/padding as input_ids.
+    # The mapping value is the padding value for each tensor.
+    aligned_specs = module._GENERATION_TOKEN_ALIGNED_INPUTS
+    token_aligned_inputs = {
+        name: (adapter_inputs[name], pad_value)
+        for name, pad_value in aligned_specs.items()
+    }
+    # Image tensors and metadata are passed to prefill unchanged.
+    pass_through_inputs = {
+        name: value
+        for name, value in adapter_inputs.items()
+        if name not in aligned_specs
+    }
+
+    # Only prefill is multimodal; subsequent decode steps are ordinary text.
+    prefill_fn = partial(module._prefill_forward, **pass_through_inputs)
+    run_forward_fn = partial(_run_vlm_text_forward, module)
+
+    return hf_common.generate(
+        run_forward_fn,
+        model,
+        input_ids,
+        attention_mask=attention_mask,
+        prefill_fn=prefill_fn,
+        token_aligned_inputs=token_aligned_inputs,
+        **kwargs,
+    )
+
+
 class AutoSpyreModelForImageTextToText(AutoSpyreModel):
     """Load a multimodal (image-text-to-text) model and prepare BOTH towers.
 
     Selects the combined two-tower adapter (vision tower + text decoder),
     loads the full VLM via ``AutoModelForImageTextToText``, and prepares both
-    for Spyre. Attaches Spyre-aware ``prefill_logits`` (image + text → logits)
-    and ``generate`` (full image→text decode) methods.
+    for Spyre and attaches a Spyre-aware ``generate`` method for full
+    image-to-text decoding.
     """
 
     _auto_model_cls = AutoModelForImageTextToText  # type: ignore[assignment]
@@ -748,47 +915,33 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
+        trust_remote_code: bool | None = None,
     ):
         module: ModuleType = resolve_adapter_module(
             model_name_or_path,
             mapping=cls._module_mapping,
+            trust_remote_code=trust_remote_code,
         )
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype, tp_plan=tp_plan
+            model_name_or_path,
+            dtype=dtype,
+            tp_plan=tp_plan,
+            trust_remote_code=trust_remote_code,
         )
-
-        def model_prefill_logits(
-            self: PreTrainedModel,
-            input_ids: torch.Tensor,
-            attention_mask: torch.Tensor,
-            pixel_values: torch.Tensor,
-            **kwargs: Any,
-        ):
-            # Extra multimodal inputs vary by model: Granite Vision needs
-            # ``image_sizes`` (anyres tiling); Gemma 4 unified needs
-            # ``image_position_ids`` + ``mm_token_type_ids``. Forward whatever
-            # the processor produced as keyword args so each adapter takes its own.
-            return module.prefill_logits(
-                self, input_ids, attention_mask, pixel_values, **kwargs
-            )
 
         def model_generate(
             self: PreTrainedModel,
-            processor: Any,
             input_ids: torch.Tensor,
-            attention_mask: torch.Tensor,
-            pixel_values: torch.Tensor,
+            attention_mask: torch.Tensor | None = None,
             **kwargs: Any,
         ):
-            return module.generate(
+            return _generate_image_text_to_text(
+                module,
                 self,
-                processor,
                 input_ids,
-                attention_mask,
-                pixel_values,
+                attention_mask=attention_mask,
                 **kwargs,
             )
 
-        model.prefill_logits = MethodType(model_prefill_logits, model)  # type: ignore[assignment]
         model.generate = MethodType(model_generate, model)  # type: ignore[assignment]
         return model

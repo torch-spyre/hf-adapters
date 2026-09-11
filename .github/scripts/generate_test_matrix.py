@@ -49,8 +49,13 @@ def generate_matrices(exclude_models=None, only_models=None):
     registry = tests.model_registry
     categories = {
         "causal": (registry.CAUSAL_PATHS, registry.ALL_CAUSAL_PATHS),
+        "multicard_smoke": (
+            registry.MULTICARD_SMOKE_PATHS,
+            registry.MULTICARD_SMOKE_PATHS,
+        ),
         "embed": (registry.EMBED_PATHS, registry.ALL_EMBED_PATHS),
         "vision": (registry.VISION_PATHS, registry.ALL_VISION_PATHS),
+        "clip": (registry.CLIP_PATHS, registry.ALL_CLIP_PATHS),
         "masked_lm": (registry.MASKED_LM_PATHS, registry.ALL_MASKED_LM_PATHS),
         "question_answering": (
             registry.QUESTION_ANSWERING_PATHS,
@@ -87,8 +92,10 @@ def generate_matrices(exclude_models=None, only_models=None):
 
     return {
         "causal": paths["causal"],
+        "multicard_smoke": paths["multicard_smoke"],
         "embed": paths["embed"],
         "vision": paths["vision"],
+        "clip": paths["clip"],
         "masked_lm": paths["masked_lm"],
         "question_answering": paths["question_answering"],
         "combined": combined_paths,
@@ -110,8 +117,10 @@ def format_for_github_actions(matrices):
     """
     return {
         "causal_matrix": json.dumps(matrices["causal"]),
+        "multicard_smoke_matrix": json.dumps(matrices["multicard_smoke"]),
         "embed_matrix": json.dumps(matrices["embed"]),
         "vision_matrix": json.dumps(matrices["vision"]),
+        "clip_matrix": json.dumps(matrices["clip"]),
         "masked_lm_matrix": json.dumps(matrices["masked_lm"]),
         "question_answering_matrix": json.dumps(matrices["question_answering"]),
         "combined_matrix": json.dumps(matrices["combined"]),
@@ -173,11 +182,16 @@ def main():
         f"  Causal models ({len(matrices['causal'])}): {', '.join(matrices['causal'])}"
     )
     print(
+        f"  Multicard-smoke models ({len(matrices['multicard_smoke'])}): "
+        f"{', '.join(matrices['multicard_smoke'])}"
+    )
+    print(
         f"  Embedding models ({len(matrices['embed'])}): {', '.join(matrices['embed'])}"
     )
     print(
         f"  Vision models ({len(matrices['vision'])}): {', '.join(matrices['vision'])}"
     )
+    print(f"  CLIP models ({len(matrices['clip'])}): {', '.join(matrices['clip'])}")
     print(
         f"  Masked-LM models ({len(matrices['masked_lm'])}): {', '.join(matrices['masked_lm'])}"
     )

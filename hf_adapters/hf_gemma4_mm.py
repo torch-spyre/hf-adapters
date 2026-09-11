@@ -15,6 +15,10 @@
 """
 Unified (encoder-free) HuggingFace adapter for Gemma 4 12B on Spyre — image→text.
 
+Supports both the base checkpoint (``google/gemma-4-12b``) and the instruction-tuned
+variant (``google/gemma-4-12B-it``); both use ``model_type=gemma4_unified`` and
+``Gemma4UnifiedForConditionalGeneration``.
+
 Where ``hf_gemma4`` runs only the text decoder (``AutoSpyreModelForCausalLM``),
 this module loads the full unified multimodal model
 (``Gemma4UnifiedForConditionalGeneration``, ``model_type=gemma4_unified``) via
@@ -68,9 +72,8 @@ The CPU-built per-patch positional-embedding tensor is passed into the compiled
 core as a device argument.
 
 The text decoder reuses ``hf_gemma4`` unchanged. Both towers live under the one loaded VLM, so a
-single ``prepare_for_spyre`` covers them. Exposes ``prefill_logits``
-(first-token forward) and ``generate`` (full autoregressive decode — image
-features scattered at prefill; decode steps are pure text).
+single ``prepare_for_spyre`` covers them. Exposes the private prefill/decode
+hooks used by the auto model's generation loop.
 
 Scope: **text + image**. Audio and video are asserted out loudly
 (``prepare_for_spyre`` / forward raise if audio/video inputs are present).
@@ -81,21 +84,18 @@ import torch
 from hf_adapters import hf_gemma4
 from hf_adapters.hf_common import (
     DEVICE,
-    _resolve_generation_params,
-    allocate_kv_caches,
-    build_decode_mask,
-    build_prefill_mask,
-    decode_block_walk,
-    generation_begin_index,
-    generation_cache_len,
     get_backbone,
     get_model_dtype,
-    make_cache_index,
-    pad_and_position,
     patch_layernorm,
-    select_next_token,
     text_config,
 )
+
+_GENERATION_INPUT_NAMES: tuple = (
+    "pixel_values",
+    "image_position_ids",
+    "mm_token_type_ids",
+)
+_GENERATION_TOKEN_ALIGNED_INPUTS: dict = {"mm_token_type_ids": 0}
 
 
 def _vision_embedder(model):
@@ -159,6 +159,10 @@ def prepare_for_spyre(model):
 
     # Shared text decoder (mirrors hf_gemma4.prepare_for_spyre).
     hf_gemma4.prepare_text_decoder_for_spyre(model)
+    assert not model._spyre_has_ple, (
+        "hf_gemma4_mm does not support PLE (E-variant) checkpoints; "
+        "the VLM embed path does not compute per_layer_inputs."
+    )
 
     # Vision projection core, compiled for Spyre. The three vision LayerNorms
     # (patch_ln1/patch_ln2/pos_norm) must be patched to the un-fused
@@ -294,16 +298,22 @@ def _blockwise_band(mm_token_type_ids, padded_len, max_cache_len, dtype):
 
 
 def _sliding_window_lower_band(mask, sliding_window):
-    """Restrict an additive prefill mask to the sliding-window *lower bound* only.
+    """Add stock's sliding-window *lower bound* to an additive causal prefill mask.
 
     Masks keys further back than ``sliding_window`` (``q - k >= window``) but —
     unlike ``hf_common.add_causal_sliding_window_band`` — does NOT mask future
     keys (``q - k < 0``). This is stock's ``sliding_window_overlay``
-    (``kv_idx > q_idx - window``), an ``and_mask`` applied *after* the base
-    ``OR(causal, blockwise)`` composition: the causal upper bound already lives
-    in that base, so the window only supplies the backward cutoff. Applying the
-    causal window band instead would re-mask the forward-attending bidirectional
-    image pairs.
+    (``kv_idx > q_idx - window``), an ``and_mask`` over the *causal* base: the
+    causal upper bound already lives in ``mask``, so the window only supplies the
+    backward cutoff.
+
+    NOTE: this must be applied to the causal base *before* the blockwise vision
+    band is OR-ed on top — stock composes the sliding mask as
+    ``OR(AND(sliding_window_overlay, causal), blockwise)`` with the blockwise
+    overlay as the OUTERMOST op (``masking_utils.create_sliding_window_causal_mask``,
+    line 1189 then 1222), so the window must NOT gate the bidirectional image
+    pairs. Applying it after the OR would clip intra-image-block attention to the
+    window (wrong for a single image/video block longer than ``sliding_window``).
 
     Prefill only (``cache_index`` starts at cache slot 0), so a query row's cache
     coordinate is its row index ``q`` and the key column is the cache slot ``k``.
@@ -325,23 +335,42 @@ def _sliding_window_lower_band(mask, sliding_window):
 def _build_mm_masks(prefill_mask, blockwise_band, sliding_window):
     """Per-layer-type masks for a multimodal prefill: {full, sliding}.
 
-    Stock builds every mask type via ``create_causal_mask(block_sequence_ids)``,
-    which OR-s the blockwise vision overlay into the causal mask for **both** full
-    and sliding layers (traced through ``create_masks_for_generate`` →
-    ``create_causal_mask``):
+    Stock builds each mask type from the same blockwise vision overlay, but ORs
+    it in as the OUTERMOST op for **both** full and sliding layers (traced through
+    ``create_masks_for_generate`` → ``create_causal_mask`` /
+    ``create_sliding_window_causal_mask``, ``masking_utils.py`` L997 / L1222):
 
       - full_attention  = OR(causal, blockwise)
-      - sliding_attention = AND(sliding_window_lowerbound, OR(causal, blockwise))
+      - sliding_attention = OR(AND(sliding_window_lowerbound, causal), blockwise)
 
-    The OR is an elementwise ``max`` of the two additive (0 / -inf) masks, done on
-    CPU to avoid the bf16 ``-inf + -inf`` NaN hazard. Prefill only.
-    ``prefill_mask``/``blockwise_band`` are ``[B, 1, padded_len, max_cache_len]``.
+    Crucially the sliding window is AND-ed onto the *causal base only* and the
+    blockwise band is OR-ed on *after* — the window never gates the bidirectional
+    image pairs. (An earlier version AND-ed the window over ``OR(causal,
+    blockwise)``, which wrongly clipped intra-image-block attention to the window
+    for image/video blocks longer than ``sliding_window``.)
+
+    ``prefill_mask`` is the additive causal base (``build_prefill_mask``: causal +
+    left-pad + unused-cache masking). ``blockwise_band`` is the additive 0/-inf
+    image band; its allowed cells are only within a same image group, and padded
+    columns are group ``-1`` so the band never re-admits a padded key. The OR is an
+    elementwise ``max`` of the two additive masks, the AND (window) an elementwise
+    add; both done on CPU to avoid the bf16 ``-inf + -inf`` NaN hazard. Prefill
+    only. ``prefill_mask``/``blockwise_band`` are ``[B, 1, padded_len,
+    max_cache_len]``.
     """
     orig_device = prefill_mask.device
-    full_mask = torch.maximum(prefill_mask.to("cpu"), blockwise_band.to("cpu")).to(
+    prefill_cpu = prefill_mask.to("cpu")
+    blockwise_cpu = blockwise_band.to("cpu")
+
+    # full_attention = OR(causal, blockwise)
+    full_mask = torch.maximum(prefill_cpu, blockwise_cpu).to(orig_device)
+
+    # sliding_attention = OR(AND(window, causal), blockwise): window gates only the
+    # causal base, then the image band is OR-ed back on top (ungated by the window).
+    windowed_causal = _sliding_window_lower_band(prefill_cpu, sliding_window)
+    sliding_mask = torch.maximum(windowed_causal.to("cpu"), blockwise_cpu).to(
         orig_device
     )
-    sliding_mask = _sliding_window_lower_band(full_mask, sliding_window)
     return {"full_attention": full_mask, "sliding_attention": sliding_mask}
 
 
@@ -389,240 +418,43 @@ def _logits_from_embeds(
 
 
 def _prefill_forward(
+    *,
     model,
-    padded_ids,
-    padded_len,
-    prompt_offsets,
+    input_ids,
     position_ids,
+    attention_mask,
+    key_caches,
+    value_caches,
+    cache_index,
     pixel_values,
     image_position_ids,
     mm_token_type_ids,
-    key_caches,
-    value_caches,
-    max_cache_len,
 ):
     """Shared multimodal prefill: padded ids + image → full-sequence logits.
 
     Builds scaled text embeddings with the image features scattered into the
     ``<image>`` slots, then the per-layer-type masks with the bidirectional
     vision overlay OR-ed into both full and sliding layers, and runs the decoder
-    once (writing the KV caches). ``mm_token_type_ids`` is the *unpadded* batch
-    tensor; it is left-padded here to match ``padded_ids``.
+    once (writing the KV caches). ``mm_token_type_ids`` has already undergone
+    the same prompt compaction and block padding as ``input_ids``.
     """
     dtype = get_model_dtype(model)
     cfg = text_config(model.config)
     image_features = _image_features(model, pixel_values, image_position_ids)
-    inputs_embeds = _embed_and_scatter(model, padded_ids, image_features)
+    inputs_embeds = _embed_and_scatter(model, input_ids, image_features)
 
-    mm_padded = _pad_mm_token_type_ids(mm_token_type_ids, padded_len)
-    prefill_mask = build_prefill_mask(
-        padded_ids.shape[0], padded_len, max_cache_len, prompt_offsets, dtype=dtype
-    )
-    blockwise = _blockwise_band(mm_padded, padded_len, max_cache_len, dtype)
-    masks = _build_mm_masks(prefill_mask, blockwise, cfg.sliding_window)
+    padded_len = input_ids.shape[1]
+    max_cache_len = attention_mask.shape[-1]
+    blockwise = _blockwise_band(mm_token_type_ids, padded_len, max_cache_len, dtype)
+    masks = _build_mm_masks(attention_mask, blockwise, cfg.sliding_window)
     masks = {lt: m.to(DEVICE) for lt, m in masks.items()}
     return _logits_from_embeds(
         model,
         inputs_embeds.to(DEVICE),
         position_ids.to(DEVICE),
-        prefill_mask.to(DEVICE),
+        attention_mask.to(DEVICE),
         key_caches,
         value_caches,
-        cache_index=make_cache_index(0, padded_len, DEVICE),
+        cache_index=cache_index,
         masks=masks,
     )
-
-
-def _pad_mm_token_type_ids(mm_token_type_ids, padded_len):
-    """Left-pad ``mm_token_type_ids`` to ``padded_len`` with 0 (text), matching
-    ``pad_and_position``'s left block-pad of ``input_ids``."""
-    bsz, seq = mm_token_type_ids.shape
-    if padded_len == seq:
-        return mm_token_type_ids
-    pad = mm_token_type_ids.new_zeros((bsz, padded_len - seq))
-    return torch.cat([pad, mm_token_type_ids], dim=1)
-
-
-def prefill_logits(
-    model,
-    input_ids,
-    attention_mask,
-    pixel_values,
-    image_position_ids,
-    mm_token_type_ids,
-):
-    """One-shot prefill of the (text + scattered image) sequence → logits.
-
-    Left-pads to a BLOCK_SIZE multiple (same convention as ``generate``),
-    scatters image features into ``<image>`` slots, runs the decoder once with
-    the bidirectional vision band on sliding layers, and returns full-sequence
-    logits ``[B, L, padded_vocab]`` (callers take ``[:, -1, :true_vocab]``).
-    """
-    actual_lengths = attention_mask.sum(dim=1)
-    padded_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
-        input_ids, actual_lengths
-    )
-    key_caches, value_caches = allocate_kv_caches(
-        model, padded_ids.shape[0], padded_len, get_model_dtype(model)
-    )
-    logits = _prefill_forward(
-        model,
-        padded_ids,
-        padded_len,
-        prompt_offsets,
-        position_ids,
-        pixel_values,
-        image_position_ids,
-        mm_token_type_ids,
-        key_caches,
-        value_caches,
-        max_cache_len=padded_len,
-    )
-    return logits, padded_len, input_ids.shape[1]
-
-
-def generate(
-    model,
-    processor,
-    input_ids,
-    attention_mask,
-    pixel_values,
-    image_position_ids,
-    mm_token_type_ids,
-    max_new_tokens,
-    do_sample=None,
-    temperature=None,
-    top_k=None,
-    top_p=None,
-    generation_config=None,
-):
-    """Autoregressive image→text generation on Spyre (greedy / top-k/p sampling).
-
-    Mirrors ``hf_common.generate``'s single-token decode, driven by embeddings so
-    the prefill step carries the image scatter + bidirectional vision mask:
-
-    - **Prefill** (step 0): scaled text embeds with ``<image>`` slots filled by
-      the vision features; decoder runs once with the blockwise band on sliding
-      layers.
-    - **Decode** (steps ≥1): the single token the previous step produced is
-      embedded (scaled) and fed back, writing one cache slot — pure text, causal,
-      no image band. Generated tokens are therefore contiguous from ``padded_len``.
-
-    Inputs come pre-tokenized from the checkpoint's ``AutoProcessor`` (chat
-    template + image-token expansion). Assumes **left-padded** input
-    (``processor.tokenizer.padding_side='left'``). Returns EOS-trimmed strings.
-    """
-    tokenizer = processor.tokenizer
-    cfg, eos_ids, _ = _resolve_generation_params(
-        model,
-        generation_config,
-        {
-            "do_sample": do_sample,
-            "temperature": temperature,
-            "top_k": top_k,
-            "top_p": top_p,
-        },
-        {},
-    )
-    do_sample = cfg.do_sample
-    temperature = cfg.temperature
-    top_k = cfg.top_k
-    top_p = cfg.top_p
-
-    backbone = get_backbone(model)
-    model_d_type = get_model_dtype(model)
-
-    batch_size, prompt_length = input_ids.shape
-    actual_prompt_lengths = attention_mask.sum(dim=1)  # [B]
-    begin_suppress_index = generation_begin_index(
-        prompt_length, cfg.forced_bos_token_id
-    )
-
-    max_cache_len = generation_cache_len(prompt_length, max_new_tokens)
-    input_ids, padded_len, prompt_offsets, position_ids = pad_and_position(
-        input_ids, actual_prompt_lengths
-    )
-
-    key_caches, value_caches = allocate_kv_caches(
-        model, batch_size, max_cache_len, model_d_type
-    )
-
-    # Decode state. Every decode step writes exactly one token at
-    # ``current_cache_len``, so generated tokens are contiguous from ``padded_len``
-    # and ``result`` just grows by one column per step.
-    result = input_ids.clone()
-    current_cache_len = padded_len
-    finished = torch.zeros(batch_size, dtype=torch.bool)
-    num_generated = torch.zeros(batch_size, dtype=torch.long)
-
-    def embed_ids(ids):
-        """Token ids -> scaled embeddings (decode steps; pure text)."""
-        return backbone.embed_tokens(ids)
-
-    for i in range(max_new_tokens):
-        if i == 0:
-            # --- PREFILL: text embeds with image scatter + blockwise vision band ---
-            logits = _prefill_forward(
-                model,
-                input_ids,
-                padded_len,
-                prompt_offsets,
-                position_ids,
-                pixel_values,
-                image_position_ids,
-                mm_token_type_ids,
-                key_caches,
-                value_caches,
-                max_cache_len,
-            )
-            next_logits = logits.to("cpu")[:, -1, :]
-            current_cache_len = padded_len
-        else:
-            # --- DECODE: one token in, one cache slot written (pure text) ---
-            # The token to feed is the one the previous step appended.
-            next_input = result[:, -1:].to(DEVICE)
-            next_embeds = embed_ids(next_input)
-            # Absolute position of that token per sequence: its cache column
-            # minus the sequence's left-padding offset.
-            decode_pos = (current_cache_len - prompt_offsets).unsqueeze(1)  # [B, 1]
-            decode_mask = build_decode_mask(
-                batch_size,
-                max_cache_len,
-                current_cache_len,
-                prompt_offsets,
-                dtype=model_d_type,
-            )
-            logits = _logits_from_embeds(
-                model,
-                next_embeds,
-                decode_pos.to(DEVICE),
-                decode_mask.to(DEVICE),
-                key_caches,
-                value_caches,
-                cache_index=make_cache_index(current_cache_len, 1, DEVICE),
-            )
-            next_logits = logits.to("cpu")[:, -1, :]
-            current_cache_len += 1
-
-        next_tokens = select_next_token(
-            next_logits,
-            do_sample,
-            temperature,
-            top_k,
-            top_p,
-            cfg.suppress_tokens,
-            cfg.begin_suppress_tokens,
-            cfg.forced_bos_token_id,
-            current_length=prompt_length + i,
-            begin_suppress_index=begin_suppress_index,
-        )
-
-        # Append the token: generated slots are contiguous from padded_len.
-        result = torch.cat([result, next_tokens.unsqueeze(1)], dim=1)
-        if eos_ids is not None:
-            finished |= torch.isin(next_tokens, eos_ids)
-        num_generated += (~finished).long()
-        if finished.all():
-            break
-
-    return decode_block_walk(result, num_generated, padded_len, eos_ids, tokenizer)
