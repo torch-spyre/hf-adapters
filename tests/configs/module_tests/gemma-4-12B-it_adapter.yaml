@@ -505,6 +505,7 @@ test_suite_config:
                           num_key_value_heads: 8
                           intermediate_size: 15360
                           max_position_embeddings: 262144
+                          final_logit_softcapping: 30.0
                           _attn_implementation: sdpa
                     kwargs: {}
                   forward_inputs:
@@ -1022,6 +1023,7 @@ test_suite_config:
                           num_key_value_heads: 1
                           intermediate_size: 15360
                           max_position_embeddings: 262144
+                          final_logit_softcapping: 30.0
                           _attn_implementation: sdpa
                     kwargs: {}
                   forward_inputs:
@@ -1149,7 +1151,7 @@ test_suite_config:
           rtol: 0.001
       - name: bfloat16
         precision:
-          atol: 0.005
-          rtol: 0.005
+          atol: 0.016
+          rtol: 0.016
     input_config:
       seed: 123

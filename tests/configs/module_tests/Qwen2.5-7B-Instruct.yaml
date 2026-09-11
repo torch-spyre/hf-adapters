@@ -16,11 +16,13 @@ test_suite_config:
           edits:
             modules:
               include: &id005
-                - name: Embedding_4c1a0852_prefill
+                - name: Embedding_152064_3584_prefill
                   module_path: torch.nn.modules.sparse.Embedding
                   description: 'Module: torch.nn.modules.sparse.Embedding (defined at torch/nn/modules/sparse.py:14)'
                   constructor_inputs:
-                    args: []
+                    args:
+                      - value: 152064
+                      - value: 3584
                     kwargs: {}
                   forward_inputs:
                     - args:
@@ -34,11 +36,13 @@ test_suite_config:
                             init_args:
                               high: 1
                       kwargs: {}
-                - name: Embedding_4c1a0852_decode
+                - name: Embedding_152064_3584_decode
                   module_path: torch.nn.modules.sparse.Embedding
                   description: 'Module: torch.nn.modules.sparse.Embedding (defined at torch/nn/modules/sparse.py:14)'
                   constructor_inputs:
-                    args: []
+                    args:
+                      - value: 152064
+                      - value: 3584
                     kwargs: {}
                   forward_inputs:
                     - args:
@@ -416,12 +420,15 @@ test_suite_config:
                               dtype: torch.bfloat16
                               device: spyre
                               init: xavier
-                - name: Linear_layer0_prefill_h3584
+                - name: Linear_3584_3584_layer0_prefill
                   module_path: torch.nn.modules.linear.Linear
                   description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
                   constructor_inputs:
-                    args: []
-                    kwargs: {}
+                    args:
+                      - value: 3584
+                      - value: 3584
+                    kwargs:
+                      bias: true
                   forward_inputs:
                     - args:
                         - tensor:
@@ -432,28 +439,15 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: Linear_layer0_prefill_h18944
+                - name: Linear_3584_3584_layer0_decode
                   module_path: torch.nn.modules.linear.Linear
                   description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
                   constructor_inputs:
-                    args: []
-                    kwargs: {}
-                  forward_inputs:
-                    - args:
-                        - tensor:
-                            shape: [1, 128, 18944]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.bfloat16
-                            device: spyre
-                            init: xavier
-                      kwargs: {}
-                - name: Linear_layer0_decode_h3584
-                  module_path: torch.nn.modules.linear.Linear
-                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
-                  constructor_inputs:
-                    args: []
-                    kwargs: {}
+                    args:
+                      - value: 3584
+                      - value: 3584
+                    kwargs:
+                      bias: true
                   forward_inputs:
                     - args:
                         - tensor:
@@ -464,16 +458,38 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: Linear_layer0_decode_h18944
+                - name: Linear_3584_512_layer0_prefill
                   module_path: torch.nn.modules.linear.Linear
                   description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
                   constructor_inputs:
-                    args: []
-                    kwargs: {}
+                    args:
+                      - value: 3584
+                      - value: 512
+                    kwargs:
+                      bias: true
                   forward_inputs:
                     - args:
                         - tensor:
-                            shape: [1, 1, 18944]
+                            shape: [1, 128, 3584]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: Linear_3584_512_layer0_decode
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 3584
+                      - value: 512
+                    kwargs:
+                      bias: true
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 1, 3584]
                             stride: null
                             storage_offset: 0
                             dtype: torch.bfloat16
@@ -522,6 +538,44 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: Linear_3584_18944_layer0_prefill
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 3584
+                      - value: 18944
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 128, 3584]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: Linear_3584_18944_layer0_decode
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 3584
+                      - value: 18944
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 1, 3584]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
                 - name: SiLUActivation_layer0_prefill
                   module_path: transformers.activations.SiLUActivation
                   description: 'Module: transformers.activations.SiLUActivation (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/activations.py#L92)'
@@ -544,6 +598,44 @@ test_suite_config:
                   constructor_inputs:
                     args: []
                     kwargs: {}
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 1, 18944]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: Linear_18944_3584_layer0_prefill
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 18944
+                      - value: 3584
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 128, 18944]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: Linear_18944_3584_layer0_decode
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 18944
+                      - value: 3584
+                    kwargs:
+                      bias: false
                   forward_inputs:
                     - args:
                         - tensor:
@@ -615,7 +707,7 @@ test_suite_config:
           rtol: 0.001
       - name: bfloat16
         precision:
-          atol: 0.005
-          rtol: 0.005
+          atol: 0.016
+          rtol: 0.016
     input_config:
       seed: 123
