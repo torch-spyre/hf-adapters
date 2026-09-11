@@ -9,8 +9,8 @@ accepted only to satisfy that signature and is deliberately ignored.
 Those wrappers take their keep predicate as a parameter, and the curated callers pass
 an accept-everything one. That is deliberate: a curated id was requested by name, so
 the gates the ranked scan applies (embedding signal, gated, remote code, loadable
-weights) must not silently drop it. The terminal gates in ``prefilter_models``
-(no adapter, too large, MoE) still apply downstream and record why they skipped it.
+weights) must not silently drop it. The parameter-size gate still applies downstream;
+adapter resolution and MoE classification happen in the worker.
 """
 
 from typing import Callable

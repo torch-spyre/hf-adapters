@@ -58,6 +58,13 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_gpt_neo.py",
         "size": "0.1b",
     },
+    # hf_opt.py
+    "opt": {
+        "name": "OPT 125M",
+        "path": "facebook/opt-125m",
+        "adapter": "hf_opt.py",
+        "size": "0.1b",
+    },
     # hf_gpt_neox.py
     "pythia_410m": {
         "name": "Pythia 410M",
@@ -71,6 +78,7 @@ CAUSAL_LM_MODELS = {
         "path": "ibm-granite/granite-3.3-8b-instruct",
         "adapter": "hf_granite.py",
         "size": "8b",
+        "multicard_smoke": True,
     },
     "granite2b": {
         "name": "Granite 3.3 2B",
@@ -126,6 +134,13 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_smollm3.py",
         "size": "3b",
     },
+    # hf_lfm2.py
+    "lfm2_350m": {
+        "name": "LFM2 350M",
+        "path": "LiquidAI/LFM2-350M",
+        "adapter": "hf_lfm2.py",
+        "size": "0.35b",
+    },
     # hf_llama.py
     "tiny_llama": {
         "name": "TinyLlama 1.1B",
@@ -150,6 +165,14 @@ CAUSAL_LM_MODELS = {
         "path": "01-ai/Yi-1.5-6B",
         "adapter": "hf_llama.py",
         "size": "6b",
+    },
+    # hf_bharatgen.py
+    "param_1_5b": {
+        "name": "BharatGen Param-1 5B",
+        "path": "bharatgenai/Param-1-5B",
+        "adapter": "hf_bharatgen.py",
+        "size": "5b",
+        "trust_remote_code": True,
     },
     # hf_phi3.py
     "phi4": {
@@ -225,6 +248,19 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_olmo2.py",
         "size": "1b",
     },
+    # hf_gemma2.py
+    "gemma2_2b_unsloth": {
+        "name": "Gemma 2 2B",
+        "path": "unsloth/gemma-2-2b-it",
+        "adapter": "hf_gemma2.py",
+        "size": "2b",
+    },
+    "gemma2_9b_unsloth": {
+        "name": "Gemma 2 9B",
+        "path": "unsloth/gemma-2-9b-it",
+        "adapter": "hf_gemma2.py",
+        "size": "9b",
+    },
     # hf_gemma3.py
     "gemma3_unsloth": {
         "name": "Gemma 3 1B",
@@ -252,6 +288,7 @@ CAUSAL_LM_MODELS = {
         "path": "google/gemma-4-12B-it",
         "adapter": "hf_gemma4.py",
         "size": "12b",
+        "always_test": True,
     },
     "gemma4_31b": {
         "name": "Gemma 4 31B",
@@ -260,6 +297,39 @@ CAUSAL_LM_MODELS = {
         "size": "31b",
         "dtype": "bfloat16",
         "is_gated": True,
+    },
+    "gemma4_31b_it": {
+        "name": "Gemma 4 31B Instruct",
+        "path": "google/gemma-4-31b-it",
+        "adapter": "hf_gemma4.py",
+        "size": "31b",
+        "dtype": "bfloat16",
+        "is_gated": True,
+    },
+    # hf_gemma4_moe.py
+    "gemma4_moe": {
+        "name": "Gemma 4 26B-A4B (MoE)",
+        "path": "google/gemma-4-26B-A4B-it",
+        "adapter": "hf_gemma4_moe.py",
+        "size": "26b",
+        "dtype": "bfloat16",
+    },
+    # hf_gemma4.py E variants
+    "gemma4_e2b": {
+        "name": "Gemma 4 E2B",
+        "path": "google/gemma-4-E2B-it",
+        "adapter": "hf_gemma4.py",
+        "size": "2b",
+        # E2B and E4B exercise distinct released E-variant configurations; keep
+        # both in the default matrix even though they share one adapter.
+        "always_test": True,
+    },
+    "gemma4_e4b": {
+        "name": "Gemma 4 E4B",
+        "path": "google/gemma-4-E4B",
+        "adapter": "hf_gemma4.py",
+        "size": "4b",
+        "always_test": True,
     },
     # DSpark speculative-decoding drafters (block proposers). kind="dspark_draft"
     # keeps them out of the generate-based causal-LM harnesses (see CAUSAL_PATHS);
@@ -412,6 +482,12 @@ TOKEN_CLASSIFICATION_MODELS = {
         "adapter": "hf_bert.py",
         "size": "0.1b",
     },
+    "roberta_large_ner": {
+        "name": "RoBERTa large NER English",
+        "path": "Jean-Baptiste/roberta-large-ner-english",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.3b",
+    },
 }
 
 
@@ -427,6 +503,19 @@ QUESTION_ANSWERING_MODELS = {
         "path": "deepset/roberta-base-squad2",
         "adapter": "hf_xlm_roberta.py",
         "size": "0.1b",
+    },
+    # hf_distilbert.py
+    "distilbert_qa_uncased": {
+        "name": "DistilBERT base uncased distilled SQuAD",
+        "path": "distilbert/distilbert-base-uncased-distilled-squad",
+        "adapter": "hf_distilbert.py",
+        "size": "0.07b",
+    },
+    "distilbert_qa_cased": {
+        "name": "DistilBERT base cased distilled SQuAD",
+        "path": "distilbert/distilbert-base-cased-distilled-squad",
+        "adapter": "hf_distilbert.py",
+        "size": "0.07b",
     },
 }
 
@@ -517,12 +606,24 @@ VISION_MODELS = {
         "size": "3b",
     },
     # hf_gemma4_mm.py — unified encoder-free VLM (image + text -> text)
+    # Note: google/gemma-4-12b (base, no chat template) also resolves via this
+    # adapter (Gemma4UnifiedConfig -> hf_gemma4_mm) but is tested via the
+    # causal-LM path (gemma4_base in CAUSAL_LM_MODELS); the VLM harness requires
+    # apply_chat_template, which the base model does not provide.
     "gemma4_mm": {
-        "name": "Gemma 4 12B (unified VLM)",
+        "name": "Gemma 4 12B IT (unified VLM)",
         "path": "google/gemma-4-12B-it",
         "adapter": "hf_gemma4_mm.py",
         "kind": "vlm",  # multimodal: image + text -> generated text
         "size": "12b",
+    },
+    # hf_clip.py — CLIP dual-encoder (image + text -> embeddings via ST backend)
+    "clip_vit_b_32": {
+        "name": "clip-ViT-B-32",
+        "path": "sentence-transformers/clip-ViT-B-32",
+        "adapter": "hf_clip.py",
+        "kind": "clip",  # dual-encoder: image or text -> embedding
+        "size": "0.15b",
     },
 }
 
@@ -552,12 +653,14 @@ def _select_representative_paths(
     include_gated: bool,
     predicate=None,
 ) -> list[str]:
-    """Select one representative model path per adapter module.
+    """Select representative model paths for each adapter module.
 
     Groups ``models`` by adapter and picks the smallest (by ``size``) model in
-    each group, breaking ties by key name for determinism. Gated models are
-    skipped unless ``include_gated``. An optional ``predicate(info) -> bool``
-    filters which entries are eligible (e.g. ``kind == "vlm"`` for vision).
+    each group, breaking ties by key name for determinism. Entries marked
+    ``always_test`` are included in addition to that representative. Gated
+    models are skipped unless ``include_gated``. An optional
+    ``predicate(info) -> bool`` filters which entries are eligible (e.g.
+    ``kind == "vlm"`` for vision).
     """
     adapter_to_keys: dict[str, list[str]] = {}
     for key, info in models.items():
@@ -576,7 +679,11 @@ def _select_representative_paths(
             keys,
             key=lambda k: (_parse_size(models[k]["size"]), k),
         )
-        paths.append(models[sorted_keys[0]]["path"])
+        selected_keys = {sorted_keys[0]}
+        selected_keys.update(
+            key for key in sorted_keys if models[key].get("always_test", False)
+        )
+        paths.extend(models[key]["path"] for key in sorted_keys if key in selected_keys)
     return paths
 
 
@@ -604,9 +711,11 @@ def _exclude(paths: list[str]) -> list[str]:
     return [p for p in paths if p not in _EXCLUDED_PATHS]
 
 
-# One representative model per adapter module (smallest by size), so tests
-# automatically cover new adapters. A single ``_include_gated()`` snapshot is
-# shared across all three selections. ``kind == "vlm"`` excludes bare vision towers.
+# At least one representative model per adapter module (smallest by size), plus
+# any explicitly ``always_test`` configurations, so tests automatically cover
+# new adapters and materially distinct configurations. A single
+# ``_include_gated()`` snapshot is shared across all selections.
+# ``kind == "vlm"`` excludes bare vision towers.
 _include_gated_flag = _include_gated()
 
 # ``kind == "dspark_draft"`` entries are speculative-decoding drafters (block
@@ -619,6 +728,14 @@ CAUSAL_PATHS: list[str] = _exclude(
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") != "dspark_draft",
     )
+)
+MULTICARD_SMOKE_PATHS: list[str] = _exclude(
+    [
+        info["path"]
+        for info in CAUSAL_LM_MODELS.values()
+        if info.get("multicard_smoke", False)
+        and (_include_gated_flag or not info.get("is_gated", False))
+    ]
 )
 # The DSpark drafter checkpoints (block proposers), one per adapter — exercised by
 # tests/spyre/test_dspark_draft_spyre.py via the block-propose ``_run_draft_block``.
@@ -650,6 +767,13 @@ VISION_PATHS: list[str] = _exclude(
         VISION_MODELS,
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") == "vlm",
+    )
+)
+CLIP_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        VISION_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") == "clip",
     )
 )
 
@@ -705,6 +829,13 @@ ALL_VISION_PATHS: list[str] = _exclude(
         predicate=lambda info: info.get("kind") == "vlm",
     )
 )
+ALL_CLIP_PATHS: list[str] = _exclude(
+    _all_paths(
+        VISION_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") == "clip",
+    )
+)
 
 
 def _non_blocking(models: dict[str, dict], keys: tuple[str, ...]) -> dict[str, str]:
@@ -726,15 +857,14 @@ def _non_blocking(models: dict[str, dict], keys: tuple[str, ...]) -> dict[str, s
 NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = _non_blocking(
     CAUSAL_LM_MODELS,
     (
-        "gemma4_google",  # gemma4 responds poorly to prompt without template
-        "gemma4_base",
         "smollm3",
+        "gemma2_2b_unsloth",  # small gap that happens to flip token for test prompt
     ),
 )
 
 NON_BLOCKING_VISION_MODELS: dict[str, str] = _non_blocking(
     VISION_MODELS,
-    ("gemma4_mm",),
+    (),
 )
 
 
@@ -771,3 +901,33 @@ RERANKER_MODELS = {
 RERANKER_PATHS: list[str] = _exclude([m["path"] for m in RERANKER_MODELS.values()])
 # No per-adapter reduction for rerankers yet, so this equals RERANKER_PATHS -- kept separate so every category (see ALL_CAUSAL_PATHS et al.) follows the same pattern.
 ALL_RERANKER_PATHS: list[str] = list(RERANKER_PATHS)
+
+
+# Sequence-classification models — multi-label classifiers that return
+# ``[B, num_labels]`` logits.  Exercised by
+# ``tests/cpu/test_seq_classification_cpu_accuracy.py``.
+SEQ_CLASSIFICATION_MODELS = {
+    # hf_distilbert.py
+    "distilbert_sst2": {
+        "name": "DistilBERT base uncased finetuned SST-2",
+        "path": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+        "adapter": "hf_distilbert.py",
+        "size": "0.07b",
+    },
+    # hf_xlm_roberta.py (RobertaConfig → same adapter as XLM-R / reranker)
+    "roberta_mnli": {
+        "name": "RoBERTa large MNLI",
+        "path": "FacebookAI/roberta-large-mnli",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.36b",
+    },
+}
+
+SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        SEQ_CLASSIFICATION_MODELS, include_gated=_include_gated_flag
+    )
+)
+ALL_SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
+    _all_paths(SEQ_CLASSIFICATION_MODELS, include_gated=_include_gated_flag)
+)

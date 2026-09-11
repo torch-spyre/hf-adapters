@@ -75,9 +75,8 @@ from transformers import AutoTokenizer  # noqa: E402
 from hf_adapters import AutoSpyreModelForCausalLM  # noqa: E402
 
 # Registry key -> (HF path, Spyre-safe dtype). Kept inline so this script has
-# no dependency on the tests/ package. Dtypes mirror
-# hf_adapters.auto_spyre_model.MODEL_PATH_TO_TORCH_DTYPE: Ministral 3 uses
-# bfloat16; Granite 3.3 8B has no entry there, so it takes the fp16 default.
+# no dependency on the tests/ package. These match the checkpoints' configured
+# dtypes resolved by hf_adapters.auto_spyre_model.dtype_for_model_path.
 MODELS: dict[str, tuple[str, "torch.dtype"]] = {
     "ministral3": ("mistralai/Ministral-3-14B-Instruct-2512", torch.bfloat16),
     "granite8b": ("ibm-granite/granite-3.3-8b-instruct", torch.float16),
@@ -151,13 +150,19 @@ def run_profile(
     print(f"  Load time: {time.time() - t0:.1f}s")
     print(f"  Prompt: {prompt!r}")
 
-    gen_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False, timing=True)
+    encoded = tokenizer(prompt, return_tensors="pt")
+    gen_kwargs = dict(
+        **encoded,
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+        timing=True,
+    )
 
     # --- Warmup: first generate triggers torch.compile; NOT profiled. This
     #     is what "warms the compiler cache" so the profiled run below measures
     #     steady-state execution rather than compile time.
     print("\n[warmup] compiling (this run is not profiled)...")
-    model.generate(tokenizer, [prompt], **gen_kwargs)
+    model.generate(**gen_kwargs)
 
     # --- Profiled run: cache is warm. CPU + PrivateUse1 (Spyre device) activity.
     #     NOTE(#114): do NOT call prof.events() / prof.key_averages().table() —
@@ -174,11 +179,13 @@ def run_profile(
         with_stack=with_stack,
         with_modules=with_stack,
     ) as prof:
-        outputs = model.generate(tokenizer, [prompt], **gen_kwargs)
+        outputs = model.generate(**gen_kwargs)
 
     prof.export_chrome_trace(out_path)
 
-    output_text = outputs[0] if outputs else ""
+    output_text = tokenizer.decode(
+        outputs[0, encoded["input_ids"].shape[1] :], skip_special_tokens=True
+    )
     print(f"\n  Output: {output_text!r}")
     print(f"  trace → {out_path}")
     print("  open in https://ui.perfetto.dev/ or chrome://tracing")

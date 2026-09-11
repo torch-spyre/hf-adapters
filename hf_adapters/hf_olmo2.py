@@ -26,7 +26,8 @@ Usage::
 
     model = AutoSpyreModelForCausalLM.from_pretrained("allenai/OLMo-2-0425-1B")
     tokenizer = AutoTokenizer.from_pretrained("allenai/OLMo-2-0425-1B")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
 import torch
@@ -37,7 +38,6 @@ from hf_adapters.hf_common import (
     get_backbone,
     kv_cache_update,
     pad_lm_head,
-    patch_rmsnorm,
     prepare_rope_and_heads,
     standard_gqa_backbone_forward,
     standard_gqa_forward,
@@ -115,11 +115,9 @@ _run_backbone_forward = standard_gqa_backbone_forward
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to OLMo2 model in-place."""
-    from transformers.models.olmo2.modeling_olmo2 import Olmo2RMSNorm
-
     prepare_rope_and_heads(model)
-    patch_rmsnorm(Olmo2RMSNorm)
     pad_lm_head(model)
     model._spyre_compiled_blocks = [
         _make_compiled_block(layer) for layer in get_backbone(model).layers
     ]
+    model._spyre_compiled_norm = torch.compile(get_backbone(model).norm, dynamic=False)

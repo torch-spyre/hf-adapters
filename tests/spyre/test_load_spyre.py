@@ -15,26 +15,36 @@
 """
 Spyre loading test: every auto-class entry loads cleanly onto Spyre.
 
-No forward pass — just verifies that ``AutoSpyreModelForCausalLM`` and
-``AutoSpyreModel`` resolve, prepare, and move the model onto Spyre without
-error. Causal-LM entries also check that a ``generate`` method is attached.
+No forward pass — just verifies that each ``AutoSpyreModelFor*`` class
+resolves, prepares, and moves the model onto Spyre without error.
+
+Per-class checks:
+  - causal-LM          : model is not None + ``generate`` is attached
+  - embedding          : model is not None
+  - masked-LM          : model is not None + ``forward`` is callable
+  - question-answering : model is not None + ``forward`` callable + QA head on CPU
+  - seq-classification : model is not None + ``forward`` callable + classifier on CPU
+  - token-classification: model is not None + ``forward`` callable + classifier on CPU
 
 Usage (on Spyre pod)::
 
     pytest -s -vvv tests/spyre/test_load_spyre.py
     pytest -s -vvv tests/spyre/test_load_spyre.py -k qwen3
+    pytest -s -vvv tests/spyre/test_load_spyre.py -k distilbert
 """
 
 import time
 from typing import Any
 
 import pytest
-from model_registry import (
+
+from tests.model_registry import (
     CAUSAL_PATHS,
     EMBED_PATHS,
     MASKED_LM_PATHS,
     NON_BLOCKING_CAUSAL_MODELS,
     QUESTION_ANSWERING_PATHS,
+    SEQ_CLASSIFICATION_PATHS,
     TOKEN_CLASSIFICATION_PATHS,
     xfail_non_blocking,
 )
@@ -147,6 +157,31 @@ def test_load_question_answering(model_path: str) -> None:
     print(f"  [{model_path}] question-answering load time: {load_s:.1f}s")
     assert model_is_not_none, f"{model_path}: from_pretrained returned None"
     assert ready, f"{model_path}: native forward or CPU QA head is not ready"
+
+
+def load_seq_classification(model_path: str) -> tuple[Any, Any, float]:
+    from hf_adapters import AutoSpyreModelForSequenceClassification
+
+    t0 = time.time()
+    model: Any = AutoSpyreModelForSequenceClassification.from_pretrained(model_path)
+    load_s = time.time() - t0
+    head_on_cpu = next(model.classifier.parameters()).device.type == "cpu"
+    return model is not None, callable(model.forward) and head_on_cpu, load_s
+
+
+@pytest.mark.model_harness("seq_classification")
+@pytest.mark.parametrize(
+    "model_path", SEQ_CLASSIFICATION_PATHS, ids=SEQ_CLASSIFICATION_PATHS
+)
+def test_load_seq_classification(model_path: str) -> None:
+    model_is_not_none, ready, load_s = load_seq_classification(model_path)
+    print(f"  [{model_path}] seq-classification load time: {load_s:.1f}s")
+    print("\n## Spyre Load Test Results\n")
+    print("| Path | Kind | Status | Load (s) |")
+    print("|------|------|--------|----------|")
+    print(f"| {model_path} | seq-classification | PASS | {load_s:.1f} |")
+    assert model_is_not_none, f"{model_path}: from_pretrained returned None"
+    assert ready, f"{model_path}: native forward or CPU classifier head is not ready"
 
 
 def load_token_classification(model_path: str) -> tuple[Any, Any, float]:

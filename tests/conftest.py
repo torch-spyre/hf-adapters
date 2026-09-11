@@ -45,7 +45,7 @@ import importlib.util
 import os
 import sys
 import types
-from typing import Union
+from typing import Any, Union
 
 import pytest
 from _pytest.config import Config
@@ -145,6 +145,13 @@ from hf_adapters.auto_spyre_model import (  # noqa: E402
 )
 
 
+def encode_generation_inputs(tokenizer: Any, prompts: list[str]):
+    """Tokenize canonically, using right padding to exercise input normalization."""
+    from hf_adapters.hf_common import encode_prompts
+
+    return encode_prompts(tokenizer, prompts, padding_side="right")
+
+
 def pytest_configure(config: Config) -> None:
     config.addinivalue_line(
         "markers",
@@ -221,6 +228,7 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
         "masked_lm": {},
         "question_answering": {},
         "reranker": {},
+        "seq_classification": {},
         "token_classification": {},
     }
     try:
@@ -275,6 +283,25 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
         for item in items:
             if "slow" in item.keywords:
                 item.add_marker(skip_slow)
+
+
+def _xfail_failure_message(report: pytest.TestReport) -> str:
+    """One-line summary of the exception behind an xfail, for CI visibility."""
+    longrepr = report.longrepr
+    reprcrash = getattr(longrepr, "reprcrash", None)
+    message = reprcrash.message if reprcrash is not None else str(longrepr)
+    message = " ".join(message.split())
+    return message[:300] + "..." if len(message) > 300 else message
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Print the underlying exception for xfail results — pytest's own summary only shows the marker's static `reason=`, hiding the actual error."""
+    if (
+        report.when == "call"
+        and report.skipped
+        and getattr(report, "wasxfail", None) is not None
+    ):
+        os.write(1, f"  [XFAIL ERROR = {_xfail_failure_message(report)}]\n".encode())
 
 
 def load_ref_model(

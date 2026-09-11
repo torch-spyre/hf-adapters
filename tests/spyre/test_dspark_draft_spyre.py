@@ -33,7 +33,8 @@ Usage (on Spyre pod)::
 
 import pytest
 import torch
-from model_registry import DSPARK_PATHS
+
+from tests.model_registry import DSPARK_PATHS
 
 pytest.importorskip("deepspec", reason="DSpark drafter modeling requires DeepSpec")
 

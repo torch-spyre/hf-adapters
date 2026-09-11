@@ -29,7 +29,8 @@ Usage::
     model = AutoSpyreModelForCausalLM.from_pretrained(
         "/tmp/models/granite-4.1-20b")
     tokenizer = AutoTokenizer.from_pretrained("/tmp/models/granite-4.1-20b")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
 import torch
@@ -41,7 +42,6 @@ from hf_adapters.hf_common import (
     kv_cache_update,
     make_standard_gqa_block,
     pad_lm_head,
-    patch_rmsnorm,
     prepare_rope_and_heads,
 )
 from hf_adapters.hf_granite import _run_backbone_forward, _run_forward  # noqa: F401
@@ -135,17 +135,17 @@ def _make_compiled_block(layer, sliding_window: int):
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to a GraniteSWA model in-place."""
-    from transformers.models.granite_swa.modeling_granite_swa import GraniteSWARMSNorm
 
     sliding_window = model.config.sliding_window
     prepare_rope_and_heads(model)
-    patch_rmsnorm(GraniteSWARMSNorm)
     pad_lm_head(model)
+    backbone = get_backbone(model)
     model._spyre_compiled_blocks = [
         (
             _make_compiled_block(layer, sliding_window)
             if getattr(layer, "layer_type", "full_attention") == "sliding_attention"
             else make_standard_gqa_block(layer, True)
         )
-        for layer in get_backbone(model).layers
+        for layer in backbone.layers
     ]
+    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)

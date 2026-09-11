@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import torch
 import yaml
 from torch.utils._pytree import tree_flatten
-from transformers import AutoModel, AutoTokenizer, StaticCache
+from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer, StaticCache
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +141,304 @@ def _extract_config_kwargs(config: Any) -> Dict[str, Any]:
     return config_kwargs
 
 
+def _spyre_config_kwargs(config: Any, model: Any) -> Dict[str, Any]:
+    """``_extract_config_kwargs`` plus the head_dim the Spyre path actually runs.
+
+    ``pad_attention_heads`` lifts head_dim to a Spyre stick boundary and rewrites
+    the Q/K/V/O projections to that padded width, recording the result on
+    ``model._spyre_head_dim``. Emitting that value means a module rebuilt from the
+    generated YAML gets the PADDED projection shapes -- the ones the adapter
+    actually runs -- rather than the checkpoint's unpadded ones.
+
+    Only the shape is reproduced, not the padded weights: padding writes zeros
+    into the new positions, and a module test builds fresh weights anyway. A model
+    needing no padding (head_dim already >= 2 * BLOCK_SIZE) carries no
+    ``_spyre_head_dim``, and its config value is already correct.
+    """
+    config_kwargs = _extract_config_kwargs(config)
+    spyre_head_dim = getattr(model, "_spyre_head_dim", None)
+    if spyre_head_dim is not None:
+        config_kwargs["head_dim"] = spyre_head_dim
+    return config_kwargs
+
+
+# ---------------------------------------------------------------------------
+# Spyre adapter capture (--loader spyre)
+# ---------------------------------------------------------------------------
+
+# The device the Spyre execution path runs on. ``hf_common.DEVICE`` is pinned to
+# this; the loader below can patch it to "cpu" for an off-pod dry run.
+SPYRE_DEVICE = "spyre"
+
+# Spyre-introduced wrapper modules, i.e. the classes ``prepare_for_spyre()`` puts
+# into the model tree in place of the HF ones. Named here rather than detected
+# structurally because each needs different handling.
+SPYRE_ATTENTION_TYPE = "StandardGQAAttention"
+SPYRE_BLOCK_TYPE = "StandardGQABlock"
+
+# Module types excluded from a --loader spyre YAML.
+#
+# StandardGQABlock: deliberately not emitted, to keep the test framework simple.
+# Its ctor takes a live HF DecoderLayer *and* an is_res_mul flag, and it owns
+# submodules (mlp, both norms, self_attn) that are already captured as standalone
+# entries in their own right. Emitting it would need a second module-arg nesting
+# level for no extra module-level coverage. The block's own arithmetic (residual
+# order, residual_multiplier, norm placement) is covered end-to-end by
+# tests/spyre/test_e2e_*.
+#
+# PrecomputedRotaryEmbedding / InvFreqShim: Spyre-internal RoPE plumbing wrapping
+# the HF rotary embedding; the HF module itself is captured instead.
+SPYRE_EXCLUDED_MODULE_TYPES = frozenset(
+    {
+        SPYRE_BLOCK_TYPE,
+        "PrecomputedRotaryEmbedding",
+        "InvFreqShim",
+    }
+)
+
+
+def _ensure_hf_adapters_importable() -> None:
+    """Make ``import hf_adapters`` work when run as a script from this directory.
+
+    ``hf_adapters`` is not pip-installed on the Spyre pod (see CLAUDE.md), and
+    running this file directly puts ``utils/module_discovery/`` on sys.path rather
+    than the repo root. Every ``hf_adapters`` import in this module is lazy (inside
+    a function) precisely so the HF loader path never needs this; the Spyre path
+    calls it first. A pre-existing installed/PYTHONPATH copy wins -- this only adds
+    a fallback.
+    """
+    import importlib.util
+    import sys
+
+    if importlib.util.find_spec("hf_adapters") is not None:
+        return
+    repo_root = str(Path(__file__).resolve().parents[2])
+    if repo_root not in sys.path:
+        logger.info("Adding repo root to sys.path for hf_adapters: %s", repo_root)
+        sys.path.insert(0, repo_root)
+
+
+# ---------------------------------------------------------------------------
+# Execution-phase split (both loaders)
+# ---------------------------------------------------------------------------
+#
+# Upstream builds the generated test name from ``module_info.formatted_name``
+# (common_modules.py), so a YAML entry carrying several invocations becomes several
+# ModuleInputs under ONE test id: a failure cannot be attributed to a phase, and a
+# failing early invocation stops the later ones from running at all. Emitting one
+# entry per phase -- with the phase in the name -- gives each its own test id.
+#
+# The OOT framework already makes the YAML ``name`` authoritative
+# (_make_named_module_info_cls), so this needs no framework change.
+
+# Both loaders produce exactly two forward shapes: the prompt pass and the
+# per-token pass. The same two labels are used for both, so one ``-k prefill`` /
+# ``-k decode`` selects the same phase either way, even though the shapes differ
+# (hf sees 128/1; the Spyre adapter sees a block-padded prompt then 1).
+#
+# There is deliberately no third label. The Spyre path used to walk a 64-slot block
+# -- an ``expansion`` forward claiming a block, then ``is_filling=True`` writes into
+# it -- but hf-adapters#330 replaced that with an indirect scatter and one token per
+# step, so ``is_filling`` no longer exists and those two phases are gone with it.
+PHASE_PREFILL = "prefill"
+PHASE_DECODE = "decode"
+
+
+def _invocation_seq_len(invocation_inputs: List[Dict[str, Any]]) -> Optional[int]:
+    """Sequence length of an invocation: dim 1 of its first 3-D or 2-D tensor.
+
+    Activations reach a decoder submodule as ``[batch, seq_len, hidden]`` and token
+    ids as ``[batch, seq_len]``, so dim 1 is the sequence length in both cases. 3-D
+    is preferred over 2-D: where both are present the 3-D one is the activation,
+    while a 2-D tensor could be an unrelated 2-D argument.
+
+    Returns ``None`` when neither rank is present (e.g. a 4-D-only module), leaving
+    that module unsplit rather than risking a wrong label.
+    """
+
+    def _dim1(rank: int) -> Optional[int]:
+        for inp in invocation_inputs:
+            shape = inp.get("shape")
+            if isinstance(shape, list) and len(shape) == rank:
+                return shape[1]
+            for item in inp.get("items", []) or []:
+                shape = item.get("shape")
+                if isinstance(shape, list) and len(shape) == rank:
+                    return shape[1]
+        return None
+
+    return _dim1(3) if _dim1(3) is not None else _dim1(2)
+
+
+def _invocation_feature_width(
+    invocation_inputs: List[Dict[str, Any]],
+) -> Optional[int]:
+    """Trailing (feature) dimension of an invocation's first 3-D tensor.
+
+    Used only to disambiguate two invocations that share a phase label, where the
+    sequence length is by definition equal and the feature width is what differs --
+    e.g. a gated MLP's ``nn.Linear`` called at both 4096 and 12800.
+
+    Returns ``None`` when no 3-D tensor is present, in which case the caller leaves
+    the collision in place rather than inventing a suffix.
+    """
+    for inp in invocation_inputs:
+        shape = inp.get("shape")
+        if isinstance(shape, list) and len(shape) == 3:
+            return shape[-1]
+        for item in inp.get("items", []) or []:
+            shape = item.get("shape")
+            if isinstance(shape, list) and len(shape) == 3:
+                return shape[-1]
+    return None
+
+
+def _phase_label(
+    invocation_inputs: List[Dict[str, Any]],
+    prompt_seq_len: Optional[int],
+) -> Optional[str]:
+    """Label one invocation ``prefill`` or ``decode`` by its sequence length.
+
+    Both loaders produce exactly two forward shapes -- the prompt pass and the
+    per-token pass -- so the same two labels cover both, and one ``-k decode``
+    selects the same phase either way.
+
+    The prefill test is relative (``seq_len == prompt_seq_len``), never a fixed
+    length: the two loaders run different shapes (hf sees 128/1; the Spyre adapter
+    block-pads the prompt), so any hardcoded value would mislabel one of them.
+
+    Returns ``None`` when no sequence length can be read, leaving the entry unsplit.
+    """
+    if prompt_seq_len is None:
+        return None
+    seq_len = _invocation_seq_len(invocation_inputs)
+    if seq_len is None:
+        return None
+    return PHASE_PREFILL if seq_len == prompt_seq_len else PHASE_DECODE
+
+
+def split_module_data_by_phase(capture: "ModuleInfoCapture") -> None:
+    """Rewrite ``capture.module_data`` so each entry holds exactly one invocation.
+
+    Runs after capture rather than inside the hooks because the prefill label is
+    defined relative to the longest sequence a module saw, which is only known once
+    every invocation has been observed.
+
+    Each phase becomes its own entry named ``<original name>_<phase>``, keeping the
+    original identifier (a dim, a layer index, a config hash) so modules that differ
+    by config stay distinguishable. A module whose invocations cannot be labelled
+    (no sequence length readable from any argument) is left exactly as it was -- an
+    unsplit entry is better than a mislabelled one.
+
+    A phase can still hold several invocations when one class is used at more than
+    one width under the same config -- ``nn.Linear`` serves both the 4096->12800 and
+    12800->4096 halves of a gated MLP, and both are captured under one config
+    signature. Those get the feature width appended (``..._decode_h4096``) so each
+    still lands in its own entry with its own test id.
+    """
+    split: Dict[str, Dict[str, Any]] = {}
+
+    for name, data in capture.module_data.items():
+        invocations = data.get("invocations", [])
+
+        # The prompt pass is the longest sequence this module saw.
+        seq_lens = [_invocation_seq_len(inv) for inv in invocations]
+        known = [s for s in seq_lens if s is not None]
+        prompt_seq_len = max(known) if known else None
+
+        labels = [_phase_label(inv, prompt_seq_len) for inv in invocations]
+        if len(invocations) < 2 or any(lbl is None for lbl in labels):
+            if len(invocations) > 1:
+                logger.info(
+                    "%s: keeping %d invocations in one entry (no phase label "
+                    "available for every invocation).",
+                    name,
+                    len(invocations),
+                )
+            split[name] = data
+            continue
+
+        # Disambiguate only where a label is genuinely reused, so the common case
+        # keeps the short ``<name>_<phase>`` form.
+        duplicated = {lbl for lbl in labels if labels.count(lbl) > 1}
+
+        for label, inv in zip(labels, invocations):
+            phase_name = f"{name}_{label}"
+            if label in duplicated:
+                width = _invocation_feature_width(inv)
+                if width is not None:
+                    phase_name = f"{phase_name}_h{width}"
+            if phase_name in split:
+                # Still colliding: two invocations share a label AND a width. Keep
+                # both rather than dropping one, and say so -- the test id cannot
+                # then tell them apart.
+                logger.warning(
+                    "%s: more than one invocation labelled %r with the same width; "
+                    "leaving them in one entry, so a failing test id will not say "
+                    "which one broke.",
+                    phase_name,
+                    label,
+                )
+                split[phase_name]["invocations"].append(inv)
+                continue
+            entry = data.copy()
+            entry["name"] = phase_name
+            entry["invocations"] = [inv]
+            entry.pop("invocation_signatures", None)
+            entry["phase"] = label
+            split[phase_name] = entry
+
+    capture.module_data = split
+
+
+def _snapshot_hf_attention_classes(model) -> Dict[str, Tuple[str, Any, int]]:
+    """Record each decoder layer's HF attention class BEFORE prepare_for_spyre().
+
+    ``StandardGQAAttention.__init__(attn)`` adopts an HF attention's projections
+    and keeps none of its provenance -- no ``config``, no ``layer_idx``. Once
+    ``prepare_standard_gqa_blocks`` has replaced ``layers[i]``, the original class
+    is unrecoverable from the live tree, so the Spyre loader path must snapshot it
+    while the plain HF model is still intact.
+
+    Returns ``{layer_path: (attn_class_path, config, layer_idx)}`` keyed by the
+    decoder layer's ``named_modules`` path, which survives the replacement (only
+    the object at that path changes).
+    """
+    from hf_adapters.hf_common import get_backbone
+
+    snapshot: Dict[str, Tuple[str, Any, int]] = {}
+    backbone = get_backbone(model)
+    layers = getattr(backbone, "layers", None)
+    if layers is None:
+        logger.warning(
+            "Model has no backbone .layers; no HF attention classes recorded. "
+            "Spyre attention entries will not be rebuildable."
+        )
+        return snapshot
+
+    # Resolve the backbone's own path so keys match named_modules() on `model`.
+    backbone_path = ""
+    for name, mod in model.named_modules():
+        if mod is backbone:
+            backbone_path = name
+            break
+
+    for i, layer in enumerate(layers):
+        attn = getattr(layer, "self_attn", None)
+        if attn is None:
+            continue
+        cls = type(attn)
+        config = getattr(attn, "config", None)
+        layer_idx = getattr(attn, "layer_idx", None)
+        prefix = f"{backbone_path}.layers.{i}" if backbone_path else f"layers.{i}"
+        snapshot[prefix] = (
+            f"{cls.__module__}.{cls.__name__}",
+            config,
+            i if layer_idx is None else layer_idx,
+        )
+    return snapshot
+
+
 def _extract_tensor_info(tensor: torch.Tensor, name: str) -> Dict[str, Any]:
     """Extract information from a single tensor."""
     return {
@@ -150,6 +448,36 @@ def _extract_tensor_info(tensor: torch.Tensor, name: str) -> Dict[str, Any]:
         "is_random": not _is_special_tensor(name),
         "requires_grad": tensor.requires_grad,
     }
+
+
+# Scalar types recorded verbatim as a forward arg. A module's forward may take plain
+# Python scalars alongside tensors (a flag, an index, a length). Recording them is
+# not optional for POSITIONAL args: dropping one shifts every later arg a slot left,
+# so the replayed forward is called with the wrong arity.
+# ``bool`` precedes ``int`` only for clarity; ``isinstance`` covers both since
+# bool subclasses int.
+_SCALAR_ARG_TYPES = (bool, int, float, str)
+
+
+def _extract_scalar_info(value: Any, name: str) -> Dict[str, Any] | None:
+    """Describe a non-tensor scalar forward arg, or ``None`` if not a scalar.
+
+    Tensor-free args carry no pytree leaves, so :func:`_process_pytree_structure`
+    returns ``None`` for them. Dropping a *positional* arg is not merely a missing
+    input: it shifts every later arg one slot left, so the replayed forward is
+    called with the wrong arity and the wrong values. Recording the scalar keeps
+    the positional sequence intact.
+
+    ``None`` is recorded too (a genuine "pass None here" argument). It is checked
+    before the scalar types because ``None`` is not an instance of any of them.
+    """
+    if value is None:
+        return {"name": name, "type": "value", "value": None}
+    if isinstance(value, _SCALAR_ARG_TYPES):
+        # bool before int in the emitted type name for readability only; the YAML
+        # carries the value itself, which round-trips with its Python type.
+        return {"name": name, "type": "value", "value": value}
+    return None
 
 
 def _process_pytree_structure(value: Any, name: str) -> Dict[str, Any] | None:
@@ -431,13 +759,37 @@ def _extract_cache_info(
 class ModuleInfoCapture:
     """Captures module information during forward pass using hooks."""
 
-    def __init__(self):
+    def __init__(self, spyre_attn_snapshot=None, spyre_model=None):
         self.module_data: Dict[str, Dict[str, Any]] = {}
         self.seen_module_configs: Set[str] = (
             set()
         )  # Track unique configs, not just types
         # Track model-level context (KV cache, execution mode)
         self.current_model_context: Dict[str, Any] = {}
+        # Set only on the --loader spyre path: maps a decoder layer path to the HF
+        # attention class/config it held before prepare_for_spyre() replaced it
+        # (see _snapshot_hf_attention_classes). Left empty on the HF path, which
+        # keeps capture_constructor_info's behaviour bit-identical there.
+        self.spyre_attn_snapshot = spyre_attn_snapshot or {}
+        # The prepared model, read for _spyre_head_dim (the padded head_dim the
+        # adapter actually runs). None on the HF path.
+        self.spyre_model = spyre_model
+
+    def _resolve_spyre_attn_source(self, module_name: str):
+        """Look up the pre-Spyre HF attention for a wrapper's ``named_modules`` path.
+
+        ``module_name`` is the wrapper's path (e.g. ``model.layers.7.self_attn``)
+        while the snapshot is keyed by the decoder layer's path
+        (``model.layers.7``), so match on the longest recorded prefix rather than
+        assuming a fixed suffix -- the attribute the wrapper sits under differs
+        across adapters.
+        """
+        best = None
+        for layer_path, entry in self.spyre_attn_snapshot.items():
+            if module_name == layer_path or module_name.startswith(layer_path + "."):
+                if best is None or len(layer_path) > len(best[0]):
+                    best = (layer_path, entry)
+        return None if best is None else best[1]
 
     def capture_constructor_info(
         self, module, module_name: str, module_type: str
@@ -450,6 +802,44 @@ class ModuleInfoCapture:
         """
         constructor_args = []
         constructor_kwargs = {}
+
+        # A Spyre attention wrapper adopts an HF attention's projections and keeps
+        # no config/layer_idx of its own, so none of the heuristics below can
+        # describe it (they would fall through to the 1-D-weight branch and emit a
+        # wrong ctor). Emit a *module* arg instead: the test side rebuilds the
+        # inner HF attention from its config, then wraps it -- exactly what
+        # prepare_for_spyre did. Needs the OOT framework's InputArgModule.
+        if module_type == SPYRE_ATTENTION_TYPE:
+            entry = self._resolve_spyre_attn_source(module_name)
+            if entry is not None:
+                attn_path, attn_config, layer_idx = entry
+                constructor_args.append(
+                    {
+                        "type": "module",
+                        "module_path": attn_path,
+                        "config_path": (
+                            f"{type(attn_config).__module__}."
+                            f"{type(attn_config).__name__}"
+                        ),
+                        # head_dim reflects _spyre_head_dim when the adapter padded
+                        # it, so the rebuilt projections get the padded widths the
+                        # adapter actually runs.
+                        "config_kwargs": _spyre_config_kwargs(
+                            attn_config, self.spyre_model
+                        ),
+                        "module_kwargs": {"layer_idx": layer_idx},
+                    }
+                )
+                return {
+                    "constructor_args": constructor_args,
+                    "constructor_kwargs": constructor_kwargs,
+                }
+            logger.warning(
+                "%s at %s: no pre-Spyre HF attention recorded; emitting no "
+                "constructor args (this entry will not be rebuildable).",
+                module_type,
+                module_name,
+            )
 
         # Special handling for decoder layers that don't expose config attribute
         # but require it as constructor arg (e.g., GraniteDecoderLayer)
@@ -615,11 +1005,29 @@ class ModuleInfoCapture:
             # Capture this invocation's inputs
             invocation_inputs = []
 
-            # Analyze positional arguments using pytree
+            # Analyze positional arguments using pytree.
+            #
+            # A positional arg MUST always yield an entry: these are replayed in
+            # order, so silently skipping one (a tensor-free scalar, for which
+            # _process_pytree_structure returns None) shifts every later arg into
+            # the wrong slot and the rebuilt forward is called with the wrong
+            # arity. Scalars are recorded as plain values; anything genuinely
+            # undescribable is logged rather than dropped in silence.
             for i, arg in enumerate(args):
                 input_info = _process_pytree_structure(arg, f"arg_{i}")
-                if input_info:
-                    invocation_inputs.append(input_info)
+                if input_info is None:
+                    input_info = _extract_scalar_info(arg, f"arg_{i}")
+                if input_info is None:
+                    logger.warning(
+                        "%s: positional arg_%d of type %s is neither tensor-bearing "
+                        "nor a scalar; the generated entry will be missing it and "
+                        "every later positional arg will shift one slot left.",
+                        module_type,
+                        i,
+                        type(arg).__name__,
+                    )
+                    continue
+                invocation_inputs.append(input_info)
 
             # Analyze keyword arguments using pytree
             for key, value in kwargs.items():
@@ -642,6 +1050,11 @@ class ModuleInfoCapture:
                             invocation_inputs.append(cache_info)
                     continue
                 input_info = _process_pytree_structure(value, key)
+                if input_info is None:
+                    # Scalar kwargs matter for the same reason as scalar
+                    # positionals (a forward may branch on them), though omitting
+                    # one here only loses that kwarg -- it cannot misalign others.
+                    input_info = _extract_scalar_info(value, key)
                 if input_info:
                     invocation_inputs.append(input_info)
 
@@ -744,6 +1157,12 @@ class ModuleInfoCapture:
             - Single tensor: {"name": "arg_0", "shape": [...], "dtype": ..., ...}
             - Container: {"name": "arg_0", "type": "list/tuple/dict/pytree", "items": [...]}
             """
+            # A scalar: include the VALUE, not just the type. Two invocations can
+            # differ only in a scalar while their tensor shapes are identical, so
+            # ignoring the value would collapse them into one and silently drop a
+            # pattern the module is really called with.
+            if input_info.get("type") == "value":
+                return {"type": "value", "value": input_info.get("value")}
             # A KV cache: distinct pattern so prefill (no cache) and decode
             # (cache present) never collapse into one invocation signature.
             if input_info.get("type") == "cache":
@@ -803,9 +1222,19 @@ class ModuleInfoCapture:
         return result
 
 
-def get_all_custom_modules(model) -> List[Tuple[str, str, Any]]:
+def get_all_custom_modules(
+    model, excluded_types: frozenset = frozenset()
+) -> List[Tuple[str, str, Any]]:
     """
     Get ALL custom module instances from the model (not just unique types).
+
+    Args:
+        model: The model to walk.
+        excluded_types: Class names to skip entirely. Used by the Spyre loader
+            path to drop wrapper modules not worth emitting as test entries (see
+            SPYRE_EXCLUDED_MODULE_TYPES). Empty by default, so the HF path is
+            unchanged. Excluding a container does NOT exclude its children: they
+            appear in named_modules() in their own right and are still captured.
 
     Returns:
         List of (module_name, module_type, module_instance) tuples
@@ -816,6 +1245,9 @@ def get_all_custom_modules(model) -> List[Tuple[str, str, Any]]:
             continue
 
         module_type = type(module).__name__
+
+        if module_type in excluded_types:
+            continue
 
         # Skip if already in upstream module_db
         if module_type in existing_modules:
@@ -839,6 +1271,16 @@ def _convert_constructor_arg_to_sample_input(
         return {
             "config_path": arg_spec["config_path"],
             "config_kwargs": arg_spec.get("config_kwargs", {}),
+        }
+    elif arg_spec["type"] == "module":
+        # Resolved by the OOT framework's InputArgModule -> _build_inner_module:
+        # import module_path, build the config, instantiate it, then hand the live
+        # module to the outer wrapper's constructor.
+        return {
+            "module_path": arg_spec["module_path"],
+            "config_path": arg_spec["config_path"],
+            "config_kwargs": arg_spec.get("config_kwargs", {}),
+            "module_kwargs": arg_spec.get("module_kwargs", {}),
         }
     elif arg_spec["type"] == "int":
         return {"value": arg_spec["value"]}
@@ -930,6 +1372,11 @@ def _convert_captured_input_to_sample_input(inp_spec: Dict[str, Any]) -> Dict[st
     """
     inp_name = inp_spec["name"]
     inp_type = inp_spec["type"]
+
+    if inp_type == "value":
+        # A plain Python scalar (or None) recorded verbatim. Resolved by the OOT
+        # framework's InputArgValue, which passes it through unchanged.
+        return {"value": inp_spec["value"]}
 
     if inp_type == "tensor":
         # Single tensor - wrap in standard format
@@ -1082,6 +1529,17 @@ def _build_module_entry_dict(module_info: Dict[str, Any]) -> Dict[str, Any]:
             }
         )
 
+    # One invocation per entry is the point of the phase split: it is what makes a
+    # test id identify exactly one phase. Warn rather than fail so an unexpected
+    # shape is visible in the generated YAML instead of aborting the capture.
+    if module_info.get("phase") and len(forward_inputs_list) > 1:
+        logger.warning(
+            "%s: %d invocations in a phase-split entry (expected 1), so a failing "
+            "test id will not say which phase broke.",
+            module_info.get("name", "<unknown>"),
+            len(forward_inputs_list),
+        )
+
     forward_inputs = forward_inputs_list
 
     # Record where the class is defined so a reader of the generated YAML can
@@ -1107,6 +1565,13 @@ def _build_module_entry_dict(module_info: Dict[str, Any]) -> Dict[str, Any]:
         },
         "forward_inputs": forward_inputs,
     }
+
+    # Only the Spyre-loader capture path records a device-side parameter layout:
+    # its modules were captured from a model already moved to Spyre by
+    # move_model_to_spyre. HF-loader entries omit the key entirely so existing
+    # configs regenerate byte-identically.
+    if module_info.get("apply_device_layout"):
+        entry["apply_device_layout"] = True
 
     return entry
 
@@ -1282,6 +1747,34 @@ def run_decode(model, inputs, prefill_outputs) -> Any:
         return None
 
 
+def register_capture_hooks(
+    model,
+    capture: "ModuleInfoCapture",
+    excluded_types: frozenset = frozenset(),
+) -> List[Any]:
+    """Register the model-level + per-module capture hooks; return their handles.
+
+    Split out of :func:`capture_module_invocations` so an alternative driver -- the
+    Spyre loader path, which cannot call ``model(**inputs)`` -- reuses the exact
+    same instrumentation instead of a divergent copy. The caller owns removal and
+    must do it in a ``finally``.
+    """
+    all_custom_modules = get_all_custom_modules(model, excluded_types=excluded_types)
+    logger.info(f"Found {len(all_custom_modules)} custom module instances")
+
+    # This hook sets context that module-level hooks will read
+    model_hook = capture.create_model_hook()
+    handles = [model.register_forward_pre_hook(model_hook, with_kwargs=True)]
+
+    # Register hooks on ALL custom module instances (not just unique types)
+    for module_name, module_type, module_instance in all_custom_modules:
+        hook = capture.create_hook(module_name, module_type, module_instance)
+        handles.append(
+            module_instance.register_forward_pre_hook(hook, with_kwargs=True)
+        )
+    return handles
+
+
 def capture_module_invocations(model, capture: ModuleInfoCapture, inputs) -> None:
     """Register capture hooks, run prefill + decode, then remove the hooks.
 
@@ -1294,20 +1787,7 @@ def capture_module_invocations(model, capture: ModuleInfoCapture, inputs) -> Non
         capture: The :class:`ModuleInfoCapture` to populate.
         inputs: Forward kwargs for the prefill pass (e.g. tokenizer output).
     """
-    all_custom_modules = get_all_custom_modules(model)
-    logger.info(f"Found {len(all_custom_modules)} custom module instances")
-
-    # This hook sets context that module-level hooks will read
-    model_hook = capture.create_model_hook()
-    model_handle = model.register_forward_pre_hook(model_hook, with_kwargs=True)
-    handles = [model_handle]
-
-    # Register hooks on ALL custom module instances (not just unique types)
-    for module_name, module_type, module_instance in all_custom_modules:
-        hook = capture.create_hook(module_name, module_type, module_instance)
-        handle = module_instance.register_forward_pre_hook(hook, with_kwargs=True)
-        handles.append(handle)
-
+    handles = register_capture_hooks(model, capture)
     try:
         prefill_outputs = run_prefill(model, inputs)
         run_decode(model, inputs, prefill_outputs)
@@ -1390,18 +1870,201 @@ def build_dummy_inputs(tokenizer, seq_len: int) -> Dict[str, Any]:
     )
 
 
-def write_module_config(
-    capture: ModuleInfoCapture, model_path: str, output: str = None
+def load_spyre_model_and_tokenizer(
+    model_path: str,
+    dtype: torch.dtype = torch.float16,
+    device: str = SPYRE_DEVICE,
 ):
-    """Generate the unified YAML config from captured modules and write it out."""
+    """Load via ``AutoSpyreModelForCausalLM``; return (model, tokenizer, module, snapshot).
+
+    Four values, because the Spyre execution path needs more than the model:
+
+    - ``module``: the resolved adapter module. Spyre runs
+      ``module._run_forward(...)``, NOT ``model.forward``, so the driver needs it.
+    - ``snapshot``: each layer's pre-Spyre HF attention class/config, recorded
+      before ``prepare_for_spyre()`` discards that information (see
+      :func:`_snapshot_hf_attention_classes`).
+
+    ``dtype`` defaults to float16 to match ``AutoSpyreModelForCausalLM``, NOT to
+    this module's bfloat16 :data:`DEFAULT_FLOAT_DTYPE`.
+
+    ``device`` exists for off-pod dry runs: ``hf_common.DEVICE`` is a module
+    constant pinned to "spyre", and the CPU test lane patches it in place. It must
+    be patched BEFORE ``auto_spyre_model`` is imported, because
+    ``move_model_to_spyre`` reads the module global at call time.
+    """
+    _ensure_hf_adapters_importable()
+
+    if device != SPYRE_DEVICE:
+        from hf_adapters import hf_common
+
+        logger.info("Patching hf_common.DEVICE -> %s (off-pod dry run)", device)
+        hf_common.DEVICE = device
+
+    from hf_adapters.auto_spyre_model import (
+        AutoSpyreModelForCausalLM,
+        resolve_adapter_module,
+    )
+    from hf_adapters.hf_common import SpyreUnsupportedModelError
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # Resolve the adapter first, so an unsupported model fails before the (slow)
+    # load + compile, and so the driver has _run_forward.
+    adapter_module = resolve_adapter_module(model_path)
+    if getattr(adapter_module, "_is_encoder_only", False):
+        raise SpyreUnsupportedModelError(
+            f"{model_path} is encoder-only; the Spyre loader path drives a "
+            f"causal-LM generate() and cannot capture it. Use --loader hf."
+        )
+
+    # Snapshot the HF attention classes from a plain load first:
+    # AutoSpyreModelForCausalLM.from_pretrained does load + prepare + move in one
+    # call with no hook in between, and prepare_for_spyre() destroys the
+    # provenance the Spyre attention entries need. Freed immediately to bound the
+    # peak of holding two copies of the weights.
+    probe = load_model_only(
+        model_path, model_cls=AutoModelForCausalLM, torch_dtype=dtype
+    )
+    snapshot = _snapshot_hf_attention_classes(probe)
+    del probe
+
+    logger.info(
+        "Loading %s via AutoSpyreModelForCausalLM (dtype=%s)", model_path, dtype
+    )
+    model = AutoSpyreModelForCausalLM.from_pretrained(model_path, dtype=dtype)
+    return model, tokenizer, adapter_module, snapshot
+
+
+def run_spyre_capture_forward(
+    model,
+    tokenizer,
+    adapter_module,
+    seq_len: int,
+    max_new_tokens: int = 3,
+):
+    """Drive the Spyre execution path so the capture hooks see every forward shape.
+
+    Delegates to the adapter's own generate loop rather than re-implementing it: that
+    loop already builds the block-padded input_ids, the KV caches, the position_ids
+    and the prefill/decode masks exactly as production does, so the captured shapes
+    are the real ones.
+
+    ``max_new_tokens`` only has to reach the second of the two forward shapes the
+    loop produces -- the padded prompt pass, then the per-token pass -- so anything
+    >= 2 suffices and the default leaves one step of margin. Extra steps add no new
+    shape: since hf-adapters#330 the cache is written by an indirect scatter with a
+    *tensor* index, so one compiled binary serves every write position and every
+    decode step looks identical to the capture.
+
+    ``seq_len`` is only a target: generate() block-pads the prompt to a multiple of
+    BLOCK_SIZE, so the captured sequence length is the padded one. That is the
+    correct thing to record -- it is what Spyre actually runs.
+
+    Returns the generated text, or ``None`` if the forward raised.
+    """
+    ###from hf_adapters.hf_common import generate
+
+    prompt = "This is a test input for capturing module information. " * (
+        seq_len // 10 + 1
+    )
+    try:
+        with torch.no_grad():
+            """
+            return generate(
+                adapter_module._run_forward,
+                model,
+                tokenizer,
+                [prompt],
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+            )
+            """
+            return model.generate(
+                tokenizer,
+                [prompt],
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                timing=True,
+            )
+    except Exception:
+        logger.exception("ERROR during Spyre forward")
+        return None
+
+
+def generate_spyre_module_config(
+    model_path: str,
+    seq_len: int = 128,
+    output: Optional[str] = None,
+    dtype: torch.dtype = torch.float16,
+    device: str = SPYRE_DEVICE,
+    max_new_tokens: int = 3,
+    excluded_types: frozenset = SPYRE_EXCLUDED_MODULE_TYPES,
+):
+    """Capture a module-test YAML from an ``AutoSpyreModelForCausalLM`` model.
+
+    The programmatic entry point for the Spyre loader path; :func:`main` is a thin
+    CLI wrapper over it, so ``--loader spyre`` and a direct call share one
+    implementation.
+
+    Emitted entries name the Spyre wrapper as ``module_path`` with the HF module it
+    wrapped as a nested module arg, and carry ``apply_device_layout: true`` so the
+    module test allocates parameters with the adapter's device layout.
+
+    NOTE: importing hf_adapters patches the RMSNorm class globally
+    (``patch_rmsnorm``), so a single process must not also run the HF loader path.
+
+    Returns:
+        The written YAML path.
+    """
+    model, tokenizer, adapter_module, snapshot = load_spyre_model_and_tokenizer(
+        model_path, dtype=dtype, device=device
+    )
+
+    capture = ModuleInfoCapture(spyre_attn_snapshot=snapshot, spyre_model=model)
+    handles = register_capture_hooks(model, capture, excluded_types=excluded_types)
+    try:
+        run_spyre_capture_forward(
+            model, tokenizer, adapter_module, seq_len, max_new_tokens
+        )
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    # Mark every captured entry so the emitted YAML requests the adapter's
+    # device-side parameter layout (see _build_module_entry_dict). Set here rather
+    # than per-hook because it is a property of the capture path, not of any one
+    # module.
+    for module_data in capture.module_data.values():
+        module_data["apply_device_layout"] = True
+
+    return write_module_config(capture, model_path, output, filename_suffix="_adapter")
+
+
+def write_module_config(
+    capture: ModuleInfoCapture,
+    model_path: str,
+    output: str = None,
+    filename_suffix: str = "",
+):
+    """Generate the unified YAML config from captured modules and write it out.
+
+    Splits every captured module into one entry per execution phase first (see
+    :func:`split_module_data_by_phase`), so each phase gets its own test id. Done
+    here rather than in each capture driver so both loaders get it from one place.
+    """
+    split_module_data_by_phase(capture)
+
     # Extract model name from path (handle both local paths and HuggingFace paths)
     model_path_parts = model_path.rstrip("/").split("/")
     model_name = model_path_parts[
         -1
     ]  # e.g., "granite-3.3-8b-instruct" or "granite-3.0-2b-instruct"
 
-    # For the YAML content, use underscores for the model_name field
-    model_name_normalized = model_name.replace("-", "_").replace(".", "_")
+    # For the YAML content, no normalization
+    model_name_normalized = model_name
 
     # Generate unified YAML config (new format)
     unified_yaml_content = generate_unified_yaml_config(
@@ -1412,8 +2075,13 @@ def write_module_config(
     if output:
         output_path = output
     else:
-        # Use tests/configs directory for unified format
-        output_path = f"./tests/configs/module_tests/{model_name_normalized}_spyre.yaml"
+        # filename_suffix keeps the two loader paths from overwriting each other:
+        # the HF path owns <model>_spyre.yaml, the Spyre-adapter path writes
+        # <model>_spyre_adapter.yaml.
+        output_path = (
+            f"./tests/configs/module_tests/"
+            f"{model_name_normalized}{filename_suffix}.yaml"
+        )
 
     # Write unified YAML file
     output_file = Path(output_path)
@@ -1456,25 +2124,96 @@ def parse_args():
         help="Output YAML file path (default: ./tests/configs/<model>_spyre.yaml)",
     )
     parser.add_argument(
+        "--loader",
+        choices=["hf", "spyre"],
+        default="hf",
+        help="hf (default): AutoModel/AutoModelForCausalLM driven through a "
+        "StaticCache prefill+decode. spyre: AutoSpyreModelForCausalLM (patched + "
+        "compiled blocks) driven through hf_common.generate(). Mutually exclusive "
+        "-- patch_rmsnorm rewrites the RMSNorm class globally, so one process "
+        "does one loader.",
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=["auto", "float16", "bfloat16", "float32"],
+        default=None,
+        help="Load dtype. Default: bfloat16 for --loader hf, float16 for "
+        "--loader spyre (matching AutoSpyreModelForCausalLM). 'auto' consults the "
+        "adapter registry's per-model dtype.",
+    )
+    parser.add_argument(
+        "--device",
+        default=SPYRE_DEVICE,
+        help="--loader spyre only: patches hf_common.DEVICE. Use 'cpu' for an "
+        "off-pod dry run (no torch_spyre required).",
+    )
+    parser.add_argument(
+        "--max_new_tokens",
+        type=int,
+        default=3,
+        help="--loader spyre only: decode steps to run. The generate loop produces "
+        "two forward shapes -- the padded prompt pass and the per-token pass -- so "
+        "anything >= 2 reaches both; the default leaves one step of margin. Extra "
+        "steps add no new shape, because the KV cache is written by an indirect "
+        "scatter whose index is a tensor, so every decode step looks identical.",
+    )
+    parser.add_argument(
         "--no_static_cache",
         action="store_true",
-        help="Disable the StaticCache used for the forward pass (default: enabled). "
+        help="--loader hf only. Disable the StaticCache used for the forward pass "
+        "(default: enabled). "
         "When set, the model uses its default dynamic KV cache instead.",
     )
     parser.add_argument(
         "--max_cache_len",
         type=int,
         default=2048,
-        help="max_cache_len for the StaticCache (default: 2048). "
+        help="--loader hf only. max_cache_len for the StaticCache (default: 2048). "
         "Ignored when --no_static_cache is set.",
     )
     return parser.parse_args()
 
 
+def _resolve_dtype(name: Optional[str], model_path: str, loader: str) -> torch.dtype:
+    """Resolve ``--dtype`` to a torch dtype, defaulting per loader.
+
+    The two loaders have different natural defaults: the HF capture path records
+    bfloat16 (:data:`DEFAULT_FLOAT_DTYPE`), while ``AutoSpyreModelForCausalLM``
+    loads float16.
+    """
+    if name == "auto":
+        _ensure_hf_adapters_importable()
+        from hf_adapters.auto_spyre_model import torch_dtype_for_model_path
+
+        return torch_dtype_for_model_path(model_path)
+    if name is not None:
+        return getattr(torch, name)
+    return torch.float16 if loader == "spyre" else DEFAULT_FLOAT_DTYPE
+
+
 def main():
     args = parse_args()
+    dtype = _resolve_dtype(args.dtype, args.model_path, args.loader)
 
-    model, tokenizer = load_model_and_tokenizer(args.model_path)
+    if args.loader == "spyre":
+        # These only shape the HF path's StaticCache; the Spyre path's KV caches
+        # come from generate(). Warn rather than fail so a mixed command line is
+        # visible instead of silently ignored.
+        if args.no_static_cache:
+            logger.warning("--no_static_cache is ignored with --loader spyre.")
+        if args.max_cache_len != 2048:
+            logger.warning("--max_cache_len is ignored with --loader spyre.")
+        generate_spyre_module_config(
+            args.model_path,
+            seq_len=args.seq_len,
+            output=args.output,
+            dtype=dtype,
+            device=args.device,
+            max_new_tokens=args.max_new_tokens,
+        )
+        return
+
+    model, tokenizer = load_model_and_tokenizer(args.model_path, torch_dtype=dtype)
     inputs = build_dummy_inputs(tokenizer, args.seq_len)
 
     # Use a StaticCache by default; --no_static_cache falls back to the model's

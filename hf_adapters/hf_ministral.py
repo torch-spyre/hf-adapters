@@ -29,7 +29,8 @@ Usage::
         "mistralai/Ministral-8B-Instruct-2410")
     tokenizer = AutoTokenizer.from_pretrained(
         "mistralai/Ministral-8B-Instruct-2410")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
 from hf_adapters.hf_common import (
@@ -44,6 +45,4 @@ _run_backbone_forward = standard_gqa_backbone_forward
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to a Ministral causal-LM in-place."""
-    from transformers.models.ministral.modeling_ministral import MinistralRMSNorm
-
-    prepare_standard_gqa(model, MinistralRMSNorm)
+    prepare_standard_gqa(model)

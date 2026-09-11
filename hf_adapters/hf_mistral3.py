@@ -40,18 +40,19 @@ Usage::
         "mistralai/Mistral-Small-3.2-24B-Instruct-2506")
     tokenizer = AutoTokenizer.from_pretrained(
         "mistralai/Mistral-Small-3.2-24B-Instruct-2506")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 
     model = AutoSpyreModelForCausalLM.from_pretrained(
         "mistralai/Ministral-3-14B-Instruct-2512")
     tokenizer = AutoTokenizer.from_pretrained(
         "mistralai/Ministral-3-14B-Instruct-2512")
-    outputs = model.generate(tokenizer, ["Hello!"], max_new_tokens=32)
+    encoded = tokenizer(["Hello!"], return_tensors="pt")
+    outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
 from hf_adapters import hf_mistral
 from hf_adapters.hf_common import (
-    get_backbone,
     prepare_standard_gqa,
 )
 
@@ -59,7 +60,7 @@ _run_backbone_forward = hf_mistral._run_backbone_forward
 _run_forward = hf_mistral._run_forward
 
 
-def load_hf_model(model_path, dtype):
+def load_hf_model(model_path, dtype, trust_remote_code=None):
     """Load a Mistral-3-family text decoder from its stock multimodal checkpoint.
 
     Both variants (Mistral-Small-3.2 with a ``mistral`` text backbone, and
@@ -84,6 +85,7 @@ def load_hf_model(model_path, dtype):
         model_path,
         dtype=dtype,
         device_map="cpu",
+        trust_remote_code=trust_remote_code,
     )
     # Drop the vision tower and multi-modal projector — text-only inference.
     if hasattr(model, "model"):
@@ -97,16 +99,4 @@ def load_hf_model(model_path, dtype):
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to a Mistral-3-family model in-place."""
-    from transformers.models.ministral3.modeling_ministral3 import Ministral3RMSNorm
-    from transformers.models.mistral.modeling_mistral import MistralRMSNorm
-
-    # Decide the correct RMSNorm class in one place by inspecting the first
-    # decoder layer's norm — Ministral3 uses Ministral3RMSNorm, Mistral-Small
-    # uses MistralRMSNorm.
-    first_norm = get_backbone(model).layers[0].input_layernorm
-    if isinstance(first_norm, MistralRMSNorm):
-        rmsnorm_cls = MistralRMSNorm
-    else:
-        rmsnorm_cls = Ministral3RMSNorm
-
-    prepare_standard_gqa(model, rmsnorm_cls)
+    prepare_standard_gqa(model)

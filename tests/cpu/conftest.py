@@ -115,23 +115,27 @@ def _unwrap_compiled_blocks(model: types.ModuleType) -> None:
     def _orig(cb):
         return getattr(cb, "_orig_mod", getattr(cb, "_torchdynamo_orig_callable", None))
 
-    for attr in ("_spyre_compiled_blocks", "_spyre_text_blocks"):
-        blocks = getattr(model, attr, None)
-        if blocks is None:
-            continue
-        unwrapped = []
-        for cb in blocks:
-            orig = _orig(cb)
-            unwrapped.append(orig if orig is not None else cb)
-        setattr(model, attr, unwrapped)
+    for module in model.modules():  # includes also `model` itself
+        for attr in ("_spyre_compiled_blocks", "_spyre_text_blocks"):
+            blocks = getattr(module, attr, None)
+            if blocks is None:
+                continue
+            unwrapped = []
+            for cb in blocks:
+                if isinstance(cb, tuple):
+                    unwrapped.append(tuple(_orig(part) or part for part in cb))
+                    continue
+                orig = _orig(cb)
+                unwrapped.append(orig if orig is not None else cb)
+            setattr(module, attr, unwrapped)
 
-    for attr in ("_spyre_vision_core",):
-        cb = getattr(model, attr, None)
-        if cb is None:
-            continue
-        orig = _orig(cb)
-        if orig is not None:
-            setattr(model, attr, orig)
+        for attr in ("_spyre_vision_core",):
+            cb = getattr(module, attr, None)
+            if cb is None:
+                continue
+            orig = _orig(cb)
+            if orig is not None:
+                setattr(module, attr, orig)
 
 
 def _set_rope_dtype(model: types.ModuleType, dtype: torch.dtype) -> None:

@@ -85,9 +85,10 @@ def _spyre_load_model(
     dtype = model_kwargs.pop("dtype", None)
     if dtype is None:
         dtype = model_kwargs.pop("torch_dtype", None)
-    model = AutoSpyreModel.from_pretrained(model_name_or_path, dtype=dtype)
 
+    model = AutoSpyreModel.from_pretrained(model_name_or_path, dtype=dtype)
     adapter_module = resolve_adapter_module(model_name_or_path)
+
     run_backbone_forward = adapter_module._run_backbone_forward
 
     # Route to the right prefill driver. Encoder-only adapters set
@@ -157,6 +158,28 @@ def _spyre_init(self, *args, **kwargs):
     return _original_init(self, *args, **kwargs)
 
 
+def _restore_cpu_submodule(submod):
+    """Move a sub-module back to CPU and restore any integer buffers corrupted by Spyre.
+
+    Moving a module to Spyre casts all buffers to the model's float dtype —
+    including Long index tensors like ``position_ids``. Moving back to CPU with
+    ``.to("cpu")`` restores the device but not the dtype. Walk every registered
+    buffer and re-cast known integer buffers (position_ids, token_type_ids) back
+    to long so downstream ``nn.Embedding`` lookups receive the correct dtype.
+    """
+    submod.to("cpu")
+    for name, buf in submod.named_buffers():
+        if buf is not None and "ids" in name and buf.dtype != torch.long:
+            # Re-cast in-place via register_buffer to preserve the attribute reference.
+            # Split the path so we target the right sub-module.
+            parts = name.rsplit(".", 1)
+            if len(parts) == 2:
+                owner = submod.get_submodule(parts[0])
+                owner.register_buffer(parts[1], buf.to(torch.long))
+            else:
+                submod.register_buffer(name, buf.to(torch.long))
+
+
 def _spyre_forward(self, input, **kwargs):
     """Some models have extra post-backbone heads with weights, for instance a
     ``Dense`` projection. ``self.to("spyre")`` moves *every* module to Spyre, but
@@ -166,10 +189,33 @@ def _spyre_forward(self, input, **kwargs):
     ``self.to(self.device)`` at the top of every call, silently pulling the
     heads back onto Spyre before the forward pass. So we move the non-backbone
     modules (``self[1:]``; the backbone is ``self[0]``) in each call.
+
+    For CLIP (and similar models with ``_spyre_cpu_submodules``): the backbone
+    is ``self[0]``, but it contains sub-modules (e.g. ``vision_model.embeddings``,
+    ``text_model.embeddings``) that must stay on CPU because Spyre cannot run
+    their integer-index operations (``nn.Embedding`` on ``position_ids``).
+    ``encode`` re-issues ``self.to("spyre")`` before every forward pass, pulling
+    those sub-modules back to Spyre. Re-move them to CPU here and restore any
+    integer buffer dtypes that Spyre corrupted to the model's float dtype.
     """
     if getattr(self, "_spyre_backend", False):
         for module in list(self.children())[1:]:
             module.to("cpu")
+        # Re-pin CPU sub-modules inside the backbone (e.g. CLIP embeddings).
+        # self[0] is the ST module wrapping the HF model. Depending on the ST
+        # module type the HF model is stored as ``auto_model`` (ST Transformer)
+        # or ``model`` (ST CLIPModel). Check both.
+        backbone_wrapper = next(iter(self.children()), None)
+        if backbone_wrapper is not None:
+            hf_model = getattr(backbone_wrapper, "auto_model", None) or getattr(
+                backbone_wrapper, "model", None
+            )
+            if hf_model is not None:
+                for submod_name in getattr(hf_model, "_spyre_cpu_submodules", []):
+                    try:
+                        _restore_cpu_submodule(hf_model.get_submodule(submod_name))
+                    except AttributeError:
+                        pass
     return _original_forward(self, input, **kwargs)
 
 

@@ -245,3 +245,6 @@ config.local.*
 .claude/commands/
 .bob/
 # Made with Bob
+
+# torch.compile inductor debug scratch
+torch_compile_debug/

@@ -21,9 +21,6 @@ from huggingface_hub.hf_api import ExpandModelProperty_T, ModelInfo
 from tqdm import tqdm
 from transformers import AutoConfig
 
-# Import the mapping to get supported config classes dynamically
-from hf_adapters.auto_spyre_model import CONFIG_TO_ADAPTER_MODULE_MAPPING
-
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
 
@@ -147,25 +144,13 @@ MOE_ARCH_SUBSTRINGS: list[str] = [
     "gptoss",
 ]
 
-# Get supported config class names dynamically from the mapping
-SUPPORTED_CONFIG_CLASSES: set[str] = {
-    config_class.__name__ for config_class in CONFIG_TO_ADAPTER_MODULE_MAPPING.keys()
-}
-
 
 def tags(model: ModelInfo) -> set[str]:
     """Lower-cased set of a model's tags (empty set if none)."""
     return {t.lower() for t in (getattr(model, "tags", None) or [])}
 
 
-def is_supported_config(config_class_name: str | None) -> bool:
-    """Check if the config class is supported by our adapter code."""
-    if config_class_name is None:
-        return False
-    return config_class_name in SUPPORTED_CONFIG_CLASSES
-
-
-def is_moe(model: ModelInfo) -> bool:
+def _is_moe(model: ModelInfo) -> bool:
     if any("moe" in t for t in tags(model)):
         return True
 
@@ -443,11 +428,9 @@ def build_catalog(
         "parameters (str)",
         "parameters",
         "library",
-        # "is_gated",
-        # "is_moe",
     ]
     extra_head: list[str] = [h for h, _ in extra_columns]
-    tail_head: list[str] = ["is_custom_code", "config_class", "is_supported", "Year"]
+    tail_head: list[str] = ["is_custom_code", "config_class", "Year"]
     header: list[str] = base_head + extra_head + tail_head
 
     t0 = time.perf_counter()
@@ -484,12 +467,9 @@ def build_catalog(
                         param_str,
                         param_int,
                         m.library_name,
-                        # bool(m.gated),
-                        # is_moe(m),
                         *extra_vals,
                         is_custom_code(m),
                         config_class,
-                        is_supported_config(config_class),
                         m.created_at.year if m.created_at else None,
                     ],
                 )
@@ -518,7 +498,7 @@ def build_catalog(
     t0 = time.perf_counter()
     for row, m in zip(rows, models):
         row["model_info"] = m
-        row["is_moe"] = is_moe(m)
+        row["is_moe"] = _is_moe(m)
     timings["attach model_info / is_moe"] = time.perf_counter() - t0
 
     timings["other"] = (time.perf_counter() - t_total) - sum(timings.values())

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 from hf_adapters.auto_spyre_model import (
     AutoSpyreModel,
     AutoSpyreModelForCausalLM,
@@ -21,6 +22,7 @@ from hf_adapters.auto_spyre_model import (
     AutoSpyreModelForSequenceClassification,
     AutoSpyreModelForTokenClassification,
 )
+from hf_adapters.hf_common import encode_prompts
 
 __all__ = [
     "AutoSpyreModel",
@@ -30,4 +32,5 @@ __all__ = [
     "AutoSpyreModelForQuestionAnswering",
     "AutoSpyreModelForSequenceClassification",
     "AutoSpyreModelForTokenClassification",
+    "encode_prompts",
 ]
