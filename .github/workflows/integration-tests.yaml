@@ -61,8 +61,8 @@ on:
       runner_label:
         description: |
           Per-PR ephemeral runner-set IMAGE label
-          (image_torch_spyre_pinned_pr_<component>_<sha12>).
-          Leave empty to use the standing image_torch_spyre set.
+          (image_hf_adapters_pr_<component>_<sha12>).
+          Leave empty to use the standing image_hf_adapters set.
         required: false
         type: string
         default: ''
@@ -215,7 +215,7 @@ jobs:
     needs: [provenance, resolve-models]
     uses: ./.github/workflows/_test_matrix.yaml
     with:
-      image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
+      image_label: ${{ inputs.runner_label || 'image_hf_adapters' }}
       extra_test_flags: -vvv -s
       extra_test_flags_multi_spyre: -vvv -s
       ref: ${{ inputs.ref || '' }}

@@ -7,6 +7,7 @@ self-hosted-runner:
     - spyre_pf_x4
     - image_spyre_inference
     - image_torch_spyre
+    - image_hf_adapters
     # used by push-to-clickhouse's generate-matrix job; was missing
     # from this list, so actionlint failed on main independently of image_ingest.
     - image_spyre_backend

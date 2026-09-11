@@ -3,7 +3,7 @@ name: test_daily
 # ---------------------------------------------------------------------------
 # Daily edge-case sweep. Delegates entirely to _test_matrix.yaml with
 # test_type: regression and edge_cases_only: true, so only the
-# tests/spyre/edge_cases/ suite runs on the standing image_torch_spyre set.
+# tests/spyre/edge_cases/ suite runs on the standing image_hf_adapters set.
 #
 # pre-commit / mypy / check-uv-lock still run as usual; every standard
 # spyre-*-tests suite short-circuits on !inputs.edge_cases_only and skips.
@@ -29,7 +29,7 @@ on:
       runner_label:
         description: |
           Per-PR ephemeral runner-set IMAGE label to select for runs-on.
-          Empty keeps the run on the standing image_torch_spyre set.
+          Empty keeps the run on the standing image_hf_adapters set.
         required: false
         type: string
         default: ""
@@ -56,7 +56,7 @@ jobs:
   run-tests:
     uses: ./.github/workflows/_test_matrix.yaml
     with:
-      image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
+      image_label: ${{ inputs.runner_label || 'image_hf_adapters' }}
       extra_test_flags: -vvv -s
       extra_test_flags_multi_spyre: -vvv -s
       ref: ${{ inputs.ref || '' }}

@@ -74,7 +74,7 @@ on:
           image_hf_adapters_pr_flex_8ddcf3e155e9). The per-PR ephemeral flow passes
           that PR's set label so jobs land on the per-PR image (the changed RPM is
           baked in -> no runtime sudo). Empty keeps push/PR/merge_group runs on the
-          standing image_torch_spyre set (today's behaviour).
+          standing image_hf_adapters set (today's behaviour).
         required: false
         type: string
         default: ""
@@ -130,7 +130,7 @@ jobs:
     needs: [detect-label]
     uses: ./.github/workflows/_test_matrix.yaml
     with:
-      image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
+      image_label: ${{ inputs.runner_label || 'image_hf_adapters' }}
       extra_test_flags: -vvv -s
       extra_test_flags_multi_spyre: -vvv -s
       ref: ${{ inputs.ref || '' }}
