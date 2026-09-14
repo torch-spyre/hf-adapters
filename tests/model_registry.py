@@ -369,9 +369,9 @@ EMBEDDING_MODELS = {
         "is_gated": True,
         "size": "0.3b",
     },
-    "microsoft_embeddinggemma": {
+    "unsloth_embeddinggemma": {
         "name": "Non-gated EmbeddingGemma",
-        "path": "microsoft/harrier-oss-v1-270m",
+        "path": "unsloth/embeddinggemma-300m",
         "adapter": "hf_gemma3.py",
         "size": "0.270b",
     },
