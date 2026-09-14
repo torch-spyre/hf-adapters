@@ -248,6 +248,13 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_olmo2.py",
         "size": "1b",
     },
+    # hf_olmoe.py
+    "olmoe_1b_7b": {
+        "name": "OLMoE 1B-7B",
+        "path": "allenai/OLMoE-1B-7B-0924",
+        "adapter": "hf_olmoe.py",
+        "size": "7b",
+    },
     # hf_gemma2.py
     "gemma2_2b_unsloth": {
         "name": "Gemma 2 2B",
