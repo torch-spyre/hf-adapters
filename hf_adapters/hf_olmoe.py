@@ -410,17 +410,24 @@ def prepare_for_spyre(model):
     """Prepare an OLMoE causal LM for Spyre in place."""
     backbone = get_backbone(model)
     cfg = model.config
-    head_dim = getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads)
+    head_dim = (
+        getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
+    )
     if cfg.hidden_act != "silu":
         raise SpyreUnsupportedFeatureError(
             f"OLMoE activation {cfg.hidden_act!r} is not supported; expected 'silu'"
         )
     if cfg.clip_qkv is not None:
         raise SpyreUnsupportedFeatureError("OLMoE clip_qkv is not supported")
-    if head_dim // 2 < BLOCK_SIZE:
+    if getattr(cfg, "sliding_window", None) is not None:
+        raise SpyreUnsupportedFeatureError(
+            "OLMoE sliding-window attention is not supported"
+        )
+    if head_dim % (2 * BLOCK_SIZE) != 0:
         raise SpyreUnsupportedModelError(
             "OLMoE head padding is not supported because Q/K RMSNorm spans the "
-            f"native projections; got head_dim={head_dim}"
+            f"native projections; head_dim must be a multiple of {2 * BLOCK_SIZE}, "
+            f"got head_dim={head_dim}"
         )
 
     prepare_rope_and_heads(model)
