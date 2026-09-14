@@ -68,6 +68,8 @@ runs:
         echo "PATH $PATH"
         echo "HOME $HOME"
         echo "TORCH_ROOT ${TORCH_ROOT:-<unset>}"
+        echo "VIRTUAL_ENV ${VIRTUAL_ENV:-<unset>}"
+        echo "UV_NO_SYNC ${UV_NO_SYNC:-<unset>}  UV_PROJECT_ENVIRONMENT ${UV_PROJECT_ENVIRONMENT:-<unset>}"
         echo "$MY_DELIM"
         echo "Installed RPMs"
         cat "$HOME/installed_rpms.txt" || true
