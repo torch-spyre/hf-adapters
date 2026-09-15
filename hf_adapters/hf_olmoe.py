@@ -31,8 +31,12 @@ from hf_adapters.hf_common import (
     apply_rope_matmul,
     get_backbone,
     kv_cache_update,
+    moe_prefill_all_experts,
+    moe_topk,
+    named_moe_prefill_inputs,
     optional_spyre_config_patch,
     pad_lm_head,
+    prepare_moe_expert_weights,
     prepare_rope_and_heads,
     standard_gqa_backbone_forward,
     standard_gqa_forward,
@@ -43,49 +47,11 @@ _run_backbone_forward = standard_gqa_backbone_forward
 _MOE_TILE = 32
 
 
-def _name_prefill_inputs(x, gate, up, down):
-    if x.device.type != "spyre":
-        return
-
-    from torch_spyre._inductor.wsr.propagate_named_dims import (
-        declare_tensor_dim,
-        name_tensor_dims,
-    )
-
-    tokens = x.shape[0] * x.shape[1]
-    experts, hidden, intermediate = gate.shape
-    for name, extent in (
-        ("E", experts),
-        ("T", tokens),
-        ("H", hidden),
-        ("M", intermediate),
-        ("ONE", 1),
-    ):
-        declare_tensor_dim(name, extent)
-    name_tensor_dims(x, ["T", "H"])
-    name_tensor_dims(gate, ["E", "H", "M"])
-    name_tensor_dims(up, ["E", "H", "M"])
-    name_tensor_dims(down, ["E", "M", "H"])
-
-
-def _reset_named_dims(x):
-    if x.device.type != "spyre":
-        return
-
-    from torch_spyre._inductor.wsr.propagate_named_dims import reset
-
-    reset()
-
-
 def _router_topk(x, weight, top_k, norm_topk_prob):
     router_logits = F.linear(x, weight)
     softmax_dtype = None if x.device.type == "spyre" else torch.float32
     probs = torch.softmax(router_logits, dtype=softmax_dtype, dim=-1)
-    tokens = probs.shape[0]
-    topk_input = probs.expand(2, -1).contiguous() if tokens == 1 else probs
-    weights, expert_indices = torch.topk(topk_input, top_k, dim=-1)
-    weights = weights[:tokens]
-    expert_indices = expert_indices[:tokens]
+    weights, expert_indices = moe_topk(probs, top_k)
     if norm_topk_prob:
         weights = weights / weights.sum(-1, keepdim=True)
     return (
@@ -162,27 +128,6 @@ def _moe_prefill_route_packed(
     # ReLU materializes the expansion; the identity BMM puts it on a stick.
     packed = torch.relu(routing.unsqueeze(-1).expand(-1, -1, stick_size))
     return packed @ route_identity
-
-
-def _moe_prefill_experts(x, routing_weight, gate, up, down):
-    """Evaluate every expert and sum their routed outputs."""
-    if x.device.type == "spyre":
-        from torch_spyre._inductor.propagate_hints import spyre_hint
-
-        experts = gate.shape[0]
-        with spyre_hint(named_dims=["E", "T", "ONE"]):
-            route = routing_weight.permute(1, 0, 2).contiguous().clone()
-        with spyre_hint(num_tiles_per_dim={"E": experts}, work_div={"T": 32}):
-            gate_out = torch.matmul(x.unsqueeze(0), gate)
-            up_out = torch.matmul(x.unsqueeze(0), up)
-            down_out = torch.matmul(F.silu(gate_out) * up_out, down)
-            return (down_out * route).sum(dim=0)
-
-    gate_out = torch.matmul(x.unsqueeze(0), gate)
-    up_out = torch.matmul(x.unsqueeze(0), up)
-    down_out = torch.matmul(F.silu(gate_out) * up_out, down)
-    route = routing_weight.permute(1, 0, 2)
-    return (down_out * route).sum(dim=0)
 
 
 class OlmoeAttention(nn.Module):
@@ -324,12 +269,13 @@ class OlmoeMoEBlock(nn.Module):
             self.gate.route_identity,
         )[..., :1]
         experts = self.experts
-        moe_out = _moe_prefill_experts(
+        moe_out = moe_prefill_all_experts(
             x,
             routing_weight,
             experts.gate_proj,
             experts.up_proj,
             experts.down_proj,
+            "silu",
         )
         return residual + moe_out.to(residual.dtype).reshape_as(residual)
 
@@ -352,19 +298,16 @@ class OlmoeMoEBlock(nn.Module):
                 cache_index,
             )
             experts = self.experts
-            try:
-                _name_prefill_inputs(
-                    hidden_states,
-                    experts.gate_proj,
-                    experts.up_proj,
-                    experts.down_proj,
-                )
+            with named_moe_prefill_inputs(
+                hidden_states,
+                experts.gate_proj,
+                experts.up_proj,
+                experts.down_proj,
+            ):
                 with optional_spyre_config_patch(
                     {"allow_all_ops_in_lx_planning": True}
                 ):
                     hidden_states = self._compiled_prefill_ffn(hidden_states)
-            finally:
-                _reset_named_dims(hidden_states)
         else:
             hidden_states, key_cache, value_cache = self._compiled_decode(
                 hidden_states,
@@ -375,35 +318,6 @@ class OlmoeMoEBlock(nn.Module):
                 cache_index,
             )
         return hidden_states, key_cache, value_cache
-
-
-def _move_expert_weight(weight):
-    if not str(hf_common.DEVICE).startswith("spyre"):
-        return weight
-
-    from torch_spyre.model_utils import dma_moe_expert_weight_to_spyre
-
-    moved = dma_moe_expert_weight_to_spyre(weight)
-    return moved if moved is not None else weight.to(hf_common.DEVICE)
-
-
-def _prepare_experts(experts):
-    gate_up = experts.gate_up_proj.detach()
-    del experts.gate_up_proj
-
-    intermediate_size = gate_up.shape[1] // 2
-    gate = gate_up[:, :intermediate_size].transpose(1, 2).contiguous()
-    experts.gate_proj = _move_expert_weight(gate)
-    del gate
-
-    up = gate_up[:, intermediate_size:].transpose(1, 2).contiguous()
-    experts.up_proj = _move_expert_weight(up)
-    del up
-    del gate_up
-
-    down = experts.down_proj.detach().transpose(1, 2).contiguous()
-    del experts.down_proj
-    experts.down_proj = _move_expert_weight(down)
 
 
 def prepare_for_spyre(model):
@@ -452,7 +366,7 @@ def prepare_for_spyre(model):
         block.gate.route_identity = torch.eye(stick_size, dtype=route_dtype).to(
             hf_common.DEVICE
         )
-        _prepare_experts(block.experts)
+        prepare_moe_expert_weights(block.experts)
         backbone.layers[i] = block
         blocks.append(block)
 
