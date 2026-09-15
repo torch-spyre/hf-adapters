@@ -399,6 +399,9 @@ jobs:
   mypy:
     name: mypy
     runs-on: ubuntu-latest
+    env:
+      UV_NO_SYNC: "0"
+      UV_PROJECT_ENVIRONMENT: .venv
     defaults:
       run:
         working-directory: .
