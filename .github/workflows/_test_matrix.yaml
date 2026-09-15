@@ -147,6 +147,16 @@ defaults:
     working-directory: /home/senuser
 
 env:
+  # The /next :dev runner image ships the venv baked and activated at
+  # /home/senuser/.venv. Make uv reuse it instead of re-creating an empty
+  # project .venv: point the project env at the baked venv and skip uv run's
+  # implicit sync. Without these, `uv run` re-syncs into an empty project .venv
+  # and every card test breaks at setup. Mirrors spyre-frameworks PR #1390
+  # (image-level bake of the same vars); kept at workflow level so tests stay
+  # green on the /next runners until that image rebuild lands. Neutralized on
+  # the ubuntu-hosted check-uv-lock job below (no baked venv there).
+  UV_NO_SYNC: "1"
+  UV_PROJECT_ENVIRONMENT: /home/senuser/.venv
   # The CI env var is very important.
   # GitHub actions automatically sets CI=true
   # which causes the pytest inductor tests to fail with AssertionError
@@ -437,6 +447,15 @@ jobs:
   check-uv-lock:
     name: check uv.lock
     runs-on: ubuntu-latest
+    # This hosted runner has no baked /home/senuser/.venv. setup-uv@v5 runs
+    # `uv venv` here, and uv reads the inherited top-level UV_* vars. GHA env:
+    # cannot truly unset an inherited var, and uv rejects a blank value:
+    # UV_NO_SYNC="" errors ("expected a boolish value") and UV_PROJECT_ENVIRONMENT=""
+    # gives an empty venv path, both exit 2. So set VALID hosted-runner values
+    # instead: sync on (0) into a workspace-local .venv.
+    env:
+      UV_NO_SYNC: "0"
+      UV_PROJECT_ENVIRONMENT: .venv
     defaults:
       run:
         working-directory: .
@@ -467,6 +486,9 @@ jobs:
   mypy:
     name: mypy
     runs-on: ubuntu-latest
+    env:
+      UV_NO_SYNC: "0"
+      UV_PROJECT_ENVIRONMENT: .venv
     defaults:
       run:
         working-directory: .
@@ -474,20 +496,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Python and uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           python-version: "3.11"
+          enable-cache: true
 
       - name: Install dependencies
-        run: |
-          pip install --quiet \
-            "torch>=2.0" \
-            "transformers>=5.12.1,<6.0.0" \
-            "mypy>=2.3.0,<3"
+        run: uv sync --frozen --group dev --no-group spyre
 
       - name: Run mypy
-        run: mypy --config-file=pyproject.toml
+        run: uv run --no-sync mypy --config-file=pyproject.toml
 
 # NOTE (issue #449): if re-enabling cpu-tests, add `resolve-torch-spyre` to its
 # `needs:` and pass `torch_spyre_sha:
@@ -1790,7 +1809,6 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cd "$CLONED_HF_ADAPTERS_DIR"
-          source .venv/bin/activate
           make model-module-tests MODULE_CONFIG=${{ matrix.config }} PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             JUNIT_XML=1 RESULTS_DIR=.
           mv "model-module-${{ matrix.config }}.xml" "junit-model-module-${{ matrix.config }}.xml"
@@ -2911,7 +2929,6 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cd "$CLONED_HF_ADAPTERS_DIR"
-          source .venv/bin/activate
           make model-module-tests MODULE_CONFIG=${{ matrix.config }} PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             JUNIT_XML=1 RESULTS_DIR=.
           mv "model-module-${{ matrix.config }}.xml" "junit-model-module-${{ matrix.config }}.xml"
