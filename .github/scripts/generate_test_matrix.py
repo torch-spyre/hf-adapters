@@ -72,6 +72,18 @@ def generate_matrices(exclude_models=None, only_models=None):
         ),
     }
 
+    if only_models:
+        available_paths = {
+            path for _, all_paths in categories.values() for path in all_paths
+        }
+        unavailable_paths = sorted(only_models - available_paths)
+        if unavailable_paths:
+            formatted_paths = "\n  - ".join(unavailable_paths)
+            raise ValueError(
+                "--only contains model paths that are not available for matrix "
+                f"generation (unregistered or excluded):\n  - {formatted_paths}"
+            )
+
     paths = {}
     for name, (representative_paths, all_paths) in categories.items():
         source = all_paths if only_models else representative_paths
