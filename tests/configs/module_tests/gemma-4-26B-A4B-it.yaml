@@ -16,12 +16,15 @@ test_suite_config:
           edits:
             modules:
               include: &id013
-                - name: Gemma4TextScaledWordEmbedding_d17617e6_prefill
+                - name: Gemma4TextScaledWordEmbedding_262144_2816_prefill
                   module_path: transformers.models.gemma4.modeling_gemma4.Gemma4TextScaledWordEmbedding
                   description: 'Module: transformers.models.gemma4.modeling_gemma4.Gemma4TextScaledWordEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/gemma4/modeling_gemma4.py#L1448)'
                   constructor_inputs:
-                    args: []
-                    kwargs: {}
+                    args:
+                      - value: 262144
+                      - value: 2816
+                    kwargs:
+                      padding_idx: 0
                   forward_inputs:
                     - args:
                         - tensor:
@@ -34,12 +37,15 @@ test_suite_config:
                             init_args:
                               high: 1
                       kwargs: {}
-                - name: Gemma4TextScaledWordEmbedding_d17617e6_decode
+                - name: Gemma4TextScaledWordEmbedding_262144_2816_decode
                   module_path: transformers.models.gemma4.modeling_gemma4.Gemma4TextScaledWordEmbedding
                   description: 'Module: transformers.models.gemma4.modeling_gemma4.Gemma4TextScaledWordEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/gemma4/modeling_gemma4.py#L1448)'
                   constructor_inputs:
-                    args: []
-                    kwargs: {}
+                    args:
+                      - value: 262144
+                      - value: 2816
+                    kwargs:
+                      padding_idx: 0
                   forward_inputs:
                     - args:
                         - tensor:
@@ -118,7 +124,7 @@ test_suite_config:
                           value: null
                         attention_mask:
                           tensor_list:
-                            - shape: [1, 1, 1, 1024]
+                            - shape: [1, 1, 1, 2048]
                               stride: null
                               storage_offset: 0
                               dtype: torch.int64
@@ -126,7 +132,7 @@ test_suite_config:
                               init: randint
                               init_args:
                                 high: 1
-                            - shape: [1, 1, 1, 2048]
+                            - shape: [1, 1, 1, 1024]
                               stride: null
                               storage_offset: 0
                               dtype: torch.int64
@@ -156,7 +162,7 @@ test_suite_config:
                           value: true
                         return_dict:
                           value: true
-                - name: Gemma4TextRotaryEmbedding_a0e0b662_prefill_h2816_sliding_attention
+                - name: Gemma4TextRotaryEmbedding_a0e0b662_prefill_h2816_full_attention
                   module_path: transformers.models.gemma4.modeling_gemma4.Gemma4TextRotaryEmbedding
                   description: 'Module: transformers.models.gemma4.modeling_gemma4.Gemma4TextRotaryEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/gemma4/modeling_gemma4.py#L1084)'
                   constructor_inputs:
@@ -188,9 +194,9 @@ test_suite_config:
                             init: randint
                             init_args:
                               high: 1
-                        - value: sliding_attention
+                        - value: full_attention
                       kwargs: {}
-                - name: Gemma4TextRotaryEmbedding_a0e0b662_prefill_h2816_full_attention
+                - name: Gemma4TextRotaryEmbedding_a0e0b662_prefill_h2816_sliding_attention
                   module_path: transformers.models.gemma4.modeling_gemma4.Gemma4TextRotaryEmbedding
                   description: 'Module: transformers.models.gemma4.modeling_gemma4.Gemma4TextRotaryEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/gemma4/modeling_gemma4.py#L1084)'
                   constructor_inputs:
@@ -209,34 +215,6 @@ test_suite_config:
                             init: xavier
                         - tensor:
                             shape: [1, 128]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.int64
-                            device: spyre
-                            init: randint
-                            init_args:
-                              high: 1
-                        - value: full_attention
-                      kwargs: {}
-                - name: Gemma4TextRotaryEmbedding_a0e0b662_decode_h2816_sliding_attention
-                  module_path: transformers.models.gemma4.modeling_gemma4.Gemma4TextRotaryEmbedding
-                  description: 'Module: transformers.models.gemma4.modeling_gemma4.Gemma4TextRotaryEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/gemma4/modeling_gemma4.py#L1084)'
-                  constructor_inputs:
-                    args:
-                      - config_path: transformers.models.gemma4.configuration_gemma4.Gemma4TextConfig
-                        config_kwargs: *id002
-                    kwargs: {}
-                  forward_inputs:
-                    - args:
-                        - tensor:
-                            shape: [1, 1, 2816]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.bfloat16
-                            device: spyre
-                            init: xavier
-                        - tensor:
-                            shape: [1, 1]
                             stride: null
                             storage_offset: 0
                             dtype: torch.int64
@@ -273,6 +251,34 @@ test_suite_config:
                             init_args:
                               high: 1
                         - value: full_attention
+                      kwargs: {}
+                - name: Gemma4TextRotaryEmbedding_a0e0b662_decode_h2816_sliding_attention
+                  module_path: transformers.models.gemma4.modeling_gemma4.Gemma4TextRotaryEmbedding
+                  description: 'Module: transformers.models.gemma4.modeling_gemma4.Gemma4TextRotaryEmbedding (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/gemma4/modeling_gemma4.py#L1084)'
+                  constructor_inputs:
+                    args:
+                      - config_path: transformers.models.gemma4.configuration_gemma4.Gemma4TextConfig
+                        config_kwargs: *id002
+                    kwargs: {}
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 1, 2816]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                        - tensor:
+                            shape: [1, 1]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.int64
+                            device: spyre
+                            init: randint
+                            init_args:
+                              high: 1
+                        - value: sliding_attention
                       kwargs: {}
                 - name: Gemma4TextDecoderLayer_layer0_prefill
                   module_path: transformers.models.gemma4.modeling_gemma4.Gemma4TextDecoderLayer
@@ -626,12 +632,15 @@ test_suite_config:
                               head_dim: 256
                               num_hidden_layers: 1
                               max_position_embeddings: 262144
-                - name: Linear_layer0_prefill_h2816
+                - name: Linear_2816_4096_layer0_prefill
                   module_path: torch.nn.modules.linear.Linear
                   description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
                   constructor_inputs:
-                    args: []
-                    kwargs: {}
+                    args:
+                      - value: 2816
+                      - value: 4096
+                    kwargs:
+                      bias: false
                   forward_inputs:
                     - args:
                         - tensor:
@@ -642,112 +651,19 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: Linear_layer0_prefill_h4096
+                - name: Linear_2816_4096_layer0_decode
                   module_path: torch.nn.modules.linear.Linear
                   description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
                   constructor_inputs:
-                    args: []
-                    kwargs: {}
-                  forward_inputs:
-                    - args:
-                        - tensor:
-                            shape: [1, 128, 4096]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.bfloat16
-                            device: spyre
-                            init: xavier
-                      kwargs: {}
-                - name: Linear_layer0_prefill_h2112
-                  module_path: torch.nn.modules.linear.Linear
-                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
-                  constructor_inputs:
-                    args: []
-                    kwargs: {}
-                  forward_inputs:
-                    - args:
-                        - tensor:
-                            shape: [1, 128, 2112]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.bfloat16
-                            device: spyre
-                            init: xavier
-                      kwargs: {}
-                - name: Linear_layer0_prefill
-                  module_path: torch.nn.modules.linear.Linear
-                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
-                  constructor_inputs:
-                    args: []
-                    kwargs: {}
-                  forward_inputs:
-                    - args:
-                        - tensor:
-                            shape: [128, 2816]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.bfloat16
-                            device: spyre
-                            init: xavier
-                      kwargs: {}
-                - name: Linear_layer0_decode_h2816
-                  module_path: torch.nn.modules.linear.Linear
-                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
-                  constructor_inputs:
-                    args: []
-                    kwargs: {}
+                    args:
+                      - value: 2816
+                      - value: 4096
+                    kwargs:
+                      bias: false
                   forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 2816]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.bfloat16
-                            device: spyre
-                            init: xavier
-                      kwargs: {}
-                - name: Linear_layer0_decode_h4096
-                  module_path: torch.nn.modules.linear.Linear
-                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
-                  constructor_inputs:
-                    args: []
-                    kwargs: {}
-                  forward_inputs:
-                    - args:
-                        - tensor:
-                            shape: [1, 1, 4096]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.bfloat16
-                            device: spyre
-                            init: xavier
-                      kwargs: {}
-                - name: Linear_layer0_decode_h2112
-                  module_path: torch.nn.modules.linear.Linear
-                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
-                  constructor_inputs:
-                    args: []
-                    kwargs: {}
-                  forward_inputs:
-                    - args:
-                        - tensor:
-                            shape: [1, 1, 2112]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.bfloat16
-                            device: spyre
-                            init: xavier
-                      kwargs: {}
-                - name: Linear_layer0_decode
-                  module_path: torch.nn.modules.linear.Linear
-                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
-                  constructor_inputs:
-                    args: []
-                    kwargs: {}
-                  forward_inputs:
-                    - args:
-                        - tensor:
-                            shape: [1, 2816]
                             stride: null
                             storage_offset: 0
                             dtype: torch.bfloat16
@@ -798,6 +714,44 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: Linear_2816_2048_layer0_prefill
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 2816
+                      - value: 2048
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 128, 2816]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: Linear_2816_2048_layer0_decode
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 2816
+                      - value: 2048
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 1, 2816]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
                 - name: Gemma4RMSNorm_layer0
                   module_path: transformers.models.gemma4.modeling_gemma4.Gemma4RMSNorm
                   description: 'Module: transformers.models.gemma4.modeling_gemma4.Gemma4RMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/gemma4/modeling_gemma4.py#L197)'
@@ -841,6 +795,44 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: Linear_4096_2816_layer0_prefill
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 4096
+                      - value: 2816
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 128, 4096]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: Linear_4096_2816_layer0_decode
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 4096
+                      - value: 2816
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 1, 4096]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
                 - name: Gemma4TextMLP_layer0_prefill
                   module_path: transformers.models.gemma4.modeling_gemma4.Gemma4TextMLP
                   description: 'Module: transformers.models.gemma4.modeling_gemma4.Gemma4TextMLP (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/gemma4/modeling_gemma4.py#L1065)'
@@ -874,6 +866,44 @@ test_suite_config:
                       - config_path: transformers.models.gemma4.configuration_gemma4.Gemma4TextConfig
                         config_kwargs: *id005
                     kwargs: {}
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 1, 2816]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: Linear_2816_2112_layer0_prefill
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 2816
+                      - value: 2112
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 128, 2816]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: Linear_2816_2112_layer0_decode
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 2816
+                      - value: 2112
+                    kwargs:
+                      bias: false
                   forward_inputs:
                     - args:
                         - tensor:
@@ -941,6 +971,44 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: Linear_2112_2816_layer0_prefill
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 2112
+                      - value: 2816
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 128, 2112]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: Linear_2112_2816_layer0_decode
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 2112
+                      - value: 2816
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 1, 2112]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
                 - name: Gemma4TextRouter_layer0_prefill
                   module_path: transformers.models.gemma4.modeling_gemma4.Gemma4TextRouter
                   description: 'Module: transformers.models.gemma4.modeling_gemma4.Gemma4TextRouter (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/gemma4/modeling_gemma4.py#L1322)'
@@ -974,6 +1042,44 @@ test_suite_config:
                       - config_path: transformers.models.gemma4.configuration_gemma4.Gemma4TextConfig
                         config_kwargs: *id006
                     kwargs: {}
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 2816]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: Linear_2816_128_layer0_prefill
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 2816
+                      - value: 128
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [128, 2816]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: Linear_2816_128_layer0_decode
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 2816
+                      - value: 128
+                    kwargs:
+                      bias: false
                   forward_inputs:
                     - args:
                         - tensor:
@@ -1395,12 +1501,15 @@ test_suite_config:
                               head_dim: 512
                               num_hidden_layers: 6
                               max_position_embeddings: 262144
-                - name: Linear_layer5_prefill_h2816
+                - name: Linear_2816_8192_layer5_prefill
                   module_path: torch.nn.modules.linear.Linear
                   description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
                   constructor_inputs:
-                    args: []
-                    kwargs: {}
+                    args:
+                      - value: 2816
+                      - value: 8192
+                    kwargs:
+                      bias: false
                   forward_inputs:
                     - args:
                         - tensor:
@@ -1411,112 +1520,19 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
-                - name: Linear_layer5_prefill_h8192
+                - name: Linear_2816_8192_layer5_decode
                   module_path: torch.nn.modules.linear.Linear
                   description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
                   constructor_inputs:
-                    args: []
-                    kwargs: {}
-                  forward_inputs:
-                    - args:
-                        - tensor:
-                            shape: [1, 128, 8192]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.bfloat16
-                            device: spyre
-                            init: xavier
-                      kwargs: {}
-                - name: Linear_layer5_prefill_h2112
-                  module_path: torch.nn.modules.linear.Linear
-                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
-                  constructor_inputs:
-                    args: []
-                    kwargs: {}
-                  forward_inputs:
-                    - args:
-                        - tensor:
-                            shape: [1, 128, 2112]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.bfloat16
-                            device: spyre
-                            init: xavier
-                      kwargs: {}
-                - name: Linear_layer5_prefill
-                  module_path: torch.nn.modules.linear.Linear
-                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
-                  constructor_inputs:
-                    args: []
-                    kwargs: {}
-                  forward_inputs:
-                    - args:
-                        - tensor:
-                            shape: [128, 2816]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.bfloat16
-                            device: spyre
-                            init: xavier
-                      kwargs: {}
-                - name: Linear_layer5_decode_h2816
-                  module_path: torch.nn.modules.linear.Linear
-                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
-                  constructor_inputs:
-                    args: []
-                    kwargs: {}
+                    args:
+                      - value: 2816
+                      - value: 8192
+                    kwargs:
+                      bias: false
                   forward_inputs:
                     - args:
                         - tensor:
                             shape: [1, 1, 2816]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.bfloat16
-                            device: spyre
-                            init: xavier
-                      kwargs: {}
-                - name: Linear_layer5_decode_h8192
-                  module_path: torch.nn.modules.linear.Linear
-                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
-                  constructor_inputs:
-                    args: []
-                    kwargs: {}
-                  forward_inputs:
-                    - args:
-                        - tensor:
-                            shape: [1, 1, 8192]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.bfloat16
-                            device: spyre
-                            init: xavier
-                      kwargs: {}
-                - name: Linear_layer5_decode_h2112
-                  module_path: torch.nn.modules.linear.Linear
-                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
-                  constructor_inputs:
-                    args: []
-                    kwargs: {}
-                  forward_inputs:
-                    - args:
-                        - tensor:
-                            shape: [1, 1, 2112]
-                            stride: null
-                            storage_offset: 0
-                            dtype: torch.bfloat16
-                            device: spyre
-                            init: xavier
-                      kwargs: {}
-                - name: Linear_layer5_decode
-                  module_path: torch.nn.modules.linear.Linear
-                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
-                  constructor_inputs:
-                    args: []
-                    kwargs: {}
-                  forward_inputs:
-                    - args:
-                        - tensor:
-                            shape: [1, 2816]
                             stride: null
                             storage_offset: 0
                             dtype: torch.bfloat16
@@ -1567,6 +1583,44 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: Linear_2816_1024_layer5_prefill
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 2816
+                      - value: 1024
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 128, 2816]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: Linear_2816_1024_layer5_decode
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 2816
+                      - value: 1024
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 1, 2816]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
                 - name: Gemma4RMSNorm_layer5
                   module_path: transformers.models.gemma4.modeling_gemma4.Gemma4RMSNorm
                   description: 'Module: transformers.models.gemma4.modeling_gemma4.Gemma4RMSNorm (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/gemma4/modeling_gemma4.py#L197)'
@@ -1610,6 +1664,44 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: Linear_8192_2816_layer5_prefill
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 8192
+                      - value: 2816
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 128, 8192]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: Linear_8192_2816_layer5_decode
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 8192
+                      - value: 2816
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 1, 8192]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
                 - name: Gemma4TextMLP_layer5_prefill
                   module_path: transformers.models.gemma4.modeling_gemma4.Gemma4TextMLP
                   description: 'Module: transformers.models.gemma4.modeling_gemma4.Gemma4TextMLP (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/gemma4/modeling_gemma4.py#L1065)'
@@ -1643,6 +1735,44 @@ test_suite_config:
                       - config_path: transformers.models.gemma4.configuration_gemma4.Gemma4TextConfig
                         config_kwargs: *id010
                     kwargs: {}
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 1, 2816]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: Linear_2816_2112_layer5_prefill
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 2816
+                      - value: 2112
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 128, 2816]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: Linear_2816_2112_layer5_decode
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 2816
+                      - value: 2112
+                    kwargs:
+                      bias: false
                   forward_inputs:
                     - args:
                         - tensor:
@@ -1710,6 +1840,44 @@ test_suite_config:
                             device: spyre
                             init: xavier
                       kwargs: {}
+                - name: Linear_2112_2816_layer5_prefill
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 2112
+                      - value: 2816
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 128, 2112]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: Linear_2112_2816_layer5_decode
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 2112
+                      - value: 2816
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 1, 2112]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
                 - name: Gemma4TextRouter_layer5_prefill
                   module_path: transformers.models.gemma4.modeling_gemma4.Gemma4TextRouter
                   description: 'Module: transformers.models.gemma4.modeling_gemma4.Gemma4TextRouter (defined at https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/gemma4/modeling_gemma4.py#L1322)'
@@ -1743,6 +1911,44 @@ test_suite_config:
                       - config_path: transformers.models.gemma4.configuration_gemma4.Gemma4TextConfig
                         config_kwargs: *id011
                     kwargs: {}
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [1, 2816]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: Linear_2816_128_layer5_prefill
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 2816
+                      - value: 128
+                    kwargs:
+                      bias: false
+                  forward_inputs:
+                    - args:
+                        - tensor:
+                            shape: [128, 2816]
+                            stride: null
+                            storage_offset: 0
+                            dtype: torch.bfloat16
+                            device: spyre
+                            init: xavier
+                      kwargs: {}
+                - name: Linear_2816_128_layer5_decode
+                  module_path: torch.nn.modules.linear.Linear
+                  description: 'Module: torch.nn.modules.linear.Linear (defined at torch/nn/modules/linear.py:53)'
+                  constructor_inputs:
+                    args:
+                      - value: 2816
+                      - value: 128
+                    kwargs:
+                      bias: false
                   forward_inputs:
                     - args:
                         - tensor:
@@ -1889,7 +2095,7 @@ test_suite_config:
           rtol: 0.001
       - name: bfloat16
         precision:
-          atol: 0.016
-          rtol: 0.016
+          atol: 0.005
+          rtol: 0.005
     input_config:
       seed: 123
