@@ -13,7 +13,7 @@ from `transformers`.
 
 ## Supported Models
 
-**34 adapters · 55 verified checkpoints · 10K+ compatible models**
+**34 adapters · 10K+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
 **sequence classification** (sentiment / text categorisation),
@@ -22,7 +22,7 @@ Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers)
 Llama / Qwen / Granite / Mistral / Phi / Gemma / OLMo / GPT decoders to BERT /
 XLM-RoBERTa / MPNet / ModernBERT encoders, the Granite Vision 4.1 (SigLIP tower +
 Granite text), Mistral3 Vision (Pixtral tower + Mistral text), and Gemma 4
-(encoder-free) multimodal VLMs, plus the DSpark block-propose drafters for
+(encoder-free and full-vision) multimodal VLMs, plus the DSpark block-propose drafters for
 Qwen 3 / Granite / Gemma 4.
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
@@ -247,8 +247,9 @@ A multimodal checkpoint's config is registered under both auto classes:
 `AutoSpyreModelForCausalLM` selects the text-only adapter (vision tower
 discarded), while `AutoSpyreModelForImageTextToText` selects the combined
 multimodal adapter. This works for Granite Vision (`Granite4VisionConfig`),
-Mistral3 Vision (`Mistral3Config`), and Gemma 4 (`Gemma4UnifiedConfig`, an
-encoder-free VLM — no vision tower; see [ARCHITECTURE.md](ARCHITECTURE.md#multimodal-vlm-path-vision-tower--text-decoder)).
+Mistral3 Vision (`Mistral3Config`), and Gemma 4 (`Gemma4UnifiedConfig` for the
+encoder-free variant, or `Gemma4Config` for the full vision-tower variants; see
+[ARCHITECTURE.md](ARCHITECTURE.md#multimodal-vlm-path-vision-tower--text-decoder)).
 
 ## Repo Structure
 
@@ -322,23 +323,29 @@ uv run pytest tests/test_load_cpu.py                              # CPU load tes
 ### Spyre Tests (requires Spyre hardware)
 
 The Spyre lane lives under `tests/spyre/` and is also pytest-driven (not
-`python tests/...`). Each test is parametrized off the model registry, so a
-single model is selected with `-k <key>` (e.g. `granite2b`, `qwen3`, `bge_base`).
-Run the whole file to cover every registered model. Run from the repository root.
+`python tests/...`). Each test is parametrized off the model registry using
+HF paths as test IDs. Select a specific model with `-k <path-substring>` or
+`--model-path <hf-path>`. Run from the repository root.
+
+> **Note:** Inside a Spyre container where a virtualenv is already active, drop
+> the `uv run` prefix and use `pytest` directly (e.g.
+> `pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py --model-path ...`).
 
 ```bash
 # E2E smoke test (real weights, verify non-trivial output)
-uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py                  # one representative model per adapter
-uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k granite2b     # one model
+uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py                                                   # one representative model per adapter
+uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k "granite-3.3-2b"                               # one model by path substring
+uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py --model-path ibm-granite/granite-3.3-2b-instruct  # exact model by HF path
+uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py --model-path ibm-granite/granite-3.3-8b-instruct  # model not in default collection
 
 # E2E token comparison (HF CPU vs adapter Spyre, per-step greedy tokens)
-uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k granite2b
+uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k "granite-3.3-2b"
 
 # E2E embedding comparison (HF CPU vs adapter Spyre, hidden-states cosine)
-uv run pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k bge_base
+uv run pytest -s -vvv tests/spyre/test_e2e_embed_compare_spyre.py -k "bge-base"
 
 # E2E multimodal VLM (image→text; teacher-forced per-step logit comparison)
-uv run pytest -s -vvv tests/spyre/test_vlm_e2e_spyre.py -k granite_vision_mm
+uv run pytest -s -vvv tests/spyre/test_vlm_e2e_spyre.py -k "granite-vision"
 
 # Load test (verify a model loads on Spyre without errors)
 uv run pytest -s -vvv tests/spyre/test_load_spyre.py
