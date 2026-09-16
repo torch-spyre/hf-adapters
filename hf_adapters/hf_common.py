@@ -1384,7 +1384,7 @@ def make_cache_index(start, length, device=None):
 
 def allocate_kv_cache_tensor(
     batch_size, num_kv_heads, max_cache_len, head_dim, dtype, device=None
-):
+) -> torch.Tensor:
     """Allocate one zeroed KV tensor with a scatter-ready device layout."""
     if device is None:
         device = DEVICE

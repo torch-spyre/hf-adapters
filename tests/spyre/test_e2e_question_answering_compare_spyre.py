@@ -17,7 +17,7 @@ from transformers import AutoModelForQuestionAnswering, AutoTokenizer
 
 from hf_adapters import AutoSpyreModelForQuestionAnswering
 from hf_adapters.auto_spyre_model import dtype_for_model_path
-from tests.model_registry import QUESTION_ANSWERING_PATHS
+from tests.model_registry import QUESTION_ANSWERING_PATHS, REMOTE_CODE_PATHS
 
 pytestmark = pytest.mark.model_harness("question_answering")
 
@@ -32,8 +32,14 @@ COSINE_THRESHOLD = 0.99
 @pytest.mark.parametrize(
     "model_path", QUESTION_ANSWERING_PATHS, ids=QUESTION_ANSWERING_PATHS
 )
-def test_e2e_question_answering_compare_spyre(model_path: str) -> None:
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+def test_e2e_question_answering_compare_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path, trust_remote_code=trust_remote_code
+    )
     encoded = tokenizer(
         QUESTIONS,
         CONTEXTS,
@@ -45,8 +51,11 @@ def test_e2e_question_answering_compare_spyre(model_path: str) -> None:
 
     ref_model = AutoModelForQuestionAnswering.from_pretrained(
         model_path,
-        dtype=dtype_for_model_path(model_path, target_device="cpu"),
+        dtype=dtype_for_model_path(
+            model_path, target_device="cpu", trust_remote_code=trust_remote_code
+        ),
         device_map="cpu",
+        trust_remote_code=trust_remote_code,
     ).eval()
     with torch.no_grad():
         ref_outputs = ref_model(**encoded, return_dict=True)
@@ -54,7 +63,11 @@ def test_e2e_question_answering_compare_spyre(model_path: str) -> None:
     gc.collect()
 
     model = AutoSpyreModelForQuestionAnswering.from_pretrained(
-        model_path, dtype=dtype_for_model_path(model_path, target_device="spyre")
+        model_path,
+        dtype=dtype_for_model_path(
+            model_path, target_device="spyre", trust_remote_code=trust_remote_code
+        ),
+        trust_remote_code=trust_remote_code,
     )
     with torch.no_grad():
         outputs = model(**encoded, return_dict=True)

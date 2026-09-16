@@ -74,10 +74,10 @@ def _assert_seq_classification_logits(
 @pytest.mark.parametrize(
     "model_path", SEQ_CLASSIFICATION_PATHS, ids=SEQ_CLASSIFICATION_PATHS
 )
-def test_auto_loader(model_path: str) -> None:
+def test_auto_loader(model_path: str, trust_remote_code: bool | None) -> None:
     """AutoSpyreModelForSequenceClassification logits match HF CPU reference."""
     ref_logits, adapter_logits = run_seq_classification_auto_loader_vs_ref(
-        model_path, TEXTS
+        model_path, TEXTS, trust_remote_code=trust_remote_code
     )
     gc.collect()
     _assert_seq_classification_logits(ref_logits, adapter_logits)

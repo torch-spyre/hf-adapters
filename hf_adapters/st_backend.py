@@ -86,8 +86,18 @@ def _spyre_load_model(
     if dtype is None:
         dtype = model_kwargs.pop("torch_dtype", None)
 
-    model = AutoSpyreModel.from_pretrained(model_name_or_path, dtype=dtype)
-    adapter_module = resolve_adapter_module(model_name_or_path)
+    # Remote-code checkpoints ship custom modeling code that both the backbone
+    # load and the adapter-module resolution must opt into; ST callers pass it
+    # via ``model_kwargs`` (e.g. ``SentenceTransformer(path, backend="spyre",
+    # model_kwargs={"trust_remote_code": True})``).
+    trust_remote_code = model_kwargs.pop("trust_remote_code", None)
+
+    model = AutoSpyreModel.from_pretrained(
+        model_name_or_path, dtype=dtype, trust_remote_code=trust_remote_code
+    )
+    adapter_module = resolve_adapter_module(
+        model_name_or_path, trust_remote_code=trust_remote_code
+    )
 
     run_backbone_forward = adapter_module._run_backbone_forward
 

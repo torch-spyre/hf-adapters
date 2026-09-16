@@ -209,12 +209,12 @@ Optional fields:
 ## Step 6: Run CPU Accuracy Test
 
 The CPU tests are pytest-parametrized off the registry — run from the repo root
-and select your model with `-k <key>` (never `python tests/...`, which bypasses
-the conftest patching):
+and select your model with `-k <path-substring>` or `--model-path <hf-path>`
+(never `python tests/...`, which bypasses the conftest patching):
 
 ```bash
 # Both parametrized cases for one model (test_manual_path + test_auto_loader)
-uv run pytest tests/test_adapter_cpu_accuracy.py -k mymodel
+uv run pytest tests/test_adapter_cpu_accuracy.py --model-path Qwen/Qwen3-0.6B
 
 # Just one path
 uv run pytest tests/test_adapter_cpu_accuracy.py -k "mymodel and manual"        # adapter alone
@@ -234,14 +234,16 @@ globally.
 ## Step 7: Test on Spyre
 
 Once CPU accuracy passes, test on hardware (requires Spyre pod access). The Spyre
-lane lives under `tests/spyre/` and is also pytest-parametrized (`-k <key>`):
+lane lives under `tests/spyre/` and uses HF paths as test IDs. Use
+`-k <path-substring>` for models in the default collection, or `--model-path
+<hf-path>` for any specific model including those not in the default collection:
 
 ```bash
 # End-to-end smoke test (load + generate, non-trivial output)
-uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k mymodel
+uv run pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py --model-path <hf-path>
 
 # Token comparison (CPU vs Spyre, real weights, per-step top-1)
-uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py -k mymodel
+uv run pytest -s -vvv tests/spyre/test_e2e_token_compare_spyre.py --model-path <hf-path>
 ```
 
 ## Step 8: Update Documentation
