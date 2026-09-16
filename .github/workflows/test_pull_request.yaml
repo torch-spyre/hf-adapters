@@ -103,6 +103,8 @@ jobs:
   detect-label:
     name: Detect integration-test label
     runs-on: ubuntu-latest
+    # Skip on merge_group and on PR commits once auto_merge is enabled -- see run-tests' if: below for the full condition.
+    if: ${{ !(github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.auto_merge != null)) }}
     outputs:
       labeled: ${{ steps.label.outputs.labeled }}
     steps:
@@ -128,6 +130,8 @@ jobs:
   # ---------------------------------------------------------------------------
   run-tests:
     needs: [detect-label]
+    # Skip entirely on merge_group runs and on PR commits once auto_merge is enabled -- native GHA checks are not required there; run-spyre-unit-tests below still reports green since "skipped" isn't a failure.
+    if: ${{ !(github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.auto_merge != null)) }}
     uses: ./.github/workflows/_test_matrix.yaml
     with:
       # Per-PR ephemeral image label when provided, else the merge-queue or
