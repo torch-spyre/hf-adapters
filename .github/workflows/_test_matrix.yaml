@@ -111,11 +111,9 @@ on:
           spyre-*-tests / spyre-model-module-tests job (they report
           "skipped", not "failure", so the run-spyre-unit-tests gate still
           passes). Does NOT skip pre-commit, mypy, or check-uv-lock -- those
-          static checks stay cheap and hardware-independent, so callers that
-          hand testing off elsewhere (e.g. test_pull_request.yaml's
-          "integration-test" PR label, which routes to a separate Jenkins
-          run) can still get fast lint feedback here. Default false runs
-          everything, unchanged from today.
+          static checks stay cheap and hardware-independent, so a caller that
+          hands testing off elsewhere can still get fast lint feedback here.
+          Default false runs everything, unchanged from today.
         required: false
         type: boolean
         default: false

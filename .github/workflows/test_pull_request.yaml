@@ -4,10 +4,7 @@ name: test_pull_request
 # still runs every job unconditionally (job-selection for trunk == full,
 # which is already this workflow's only mode), so the run-name below is
 # purely a labeling change. Delegates its suite jobs to the same reusable
-# _test_matrix.yaml used by integration-tests.yaml, keeping only what's
-# specific to the PR/trunk trigger inline: the "integration-test" label
-# detection, which skips the whole suite when Jenkins owns this commit's
-# testing (via _test_matrix.yaml's skip_tests input).
+# _test_matrix.yaml used by integration-tests.yaml.
 run-name: ${{ github.event_name == 'push' && 'trunk' || 'regression' }}
 
 on:
@@ -16,7 +13,6 @@ on:
     tags: ["*"]
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       torch_spyre_ref:
@@ -88,42 +84,14 @@ permissions:
   actions: read
 
 jobs:
-  # Resolves the `integration-test` label on the triggering PR.
-  #
-  # Every gated suite `needs` this job, so a FAILURE here would skip all of them
-  # regardless of their own `if:` -- which is why it is also listed in
-  # run-spyre-unit-tests' failure predicates below: the required check then goes red
-  # rather than reporting a false green over suites that never ran.
-  detect-label:
-    name: Detect integration-test label
-    runs-on: ubuntu-latest
-    # Skip once auto_merge is enabled on the PR -- see run-tests' if: below for why.
-    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.auto_merge != null) }}
-    outputs:
-      labeled: ${{ steps.label.outputs.labeled }}
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: .github/actions
-          sparse-checkout-cone-mode: false
-      - name: Resolve label
-        id: label
-        uses: ./.github/actions/detect-integration-test-label
-
   # ---------------------------------------------------------------------------
   # Delegates to the shared _test_matrix.yaml (pre-commit, mypy, check-uv-lock,
   # adapter-coverage, matrix generation, and every spyre-*-tests /
   # spyre-model-module-tests suite). test_type is left at its default
   # ("regression" -- everything), matching this workflow's historical
-  # behavior of always running the full suite. skip_tests carries the
-  # "integration-test" label decision through: it skips matrix generation,
-  # adapter-coverage, and every spyre suite (leaving pre-commit/mypy/
-  # check-uv-lock running, same as before) when Jenkins owns this commit's
-  # testing.
+  # behavior of always running the full suite.
   # ---------------------------------------------------------------------------
   run-tests:
-    needs: [detect-label]
     # Skip entirely once auto_merge is enabled on the PR -- native GHA checks aren't required there; run-spyre-unit-tests below still reports green since "skipped" isn't a failure.
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.auto_merge != null) }}
     uses: ./.github/workflows/_test_matrix.yaml
@@ -134,26 +102,20 @@ jobs:
       extra_test_flags_multi_spyre: -vvv -s
       ref: ${{ inputs.ref || '' }}
       repository: ${{ inputs.repository || '' }}
-      skip_tests: ${{ needs.detect-label.outputs.labeled == 'true' }}
 
   # ----------------------------------------------------------------------------------
-  # Required check gate -- fans in detect-label and the delegated suite run so a
-  # single branch protection rule ("tests / run spyre unit tests") passes only
-  # when both succeed. A labeled PR still gets a green run-tests result (its
-  # jobs report "skipped", not "failure") -- that flow is handled by Jenkins.
+  # Required check gate -- wraps the delegated suite run so a single branch
+  # protection rule ("tests / run spyre unit tests") tracks one stable job name.
   # ----------------------------------------------------------------------------------
   run-spyre-unit-tests:
     name: run spyre unit tests
     runs-on: ubuntu-latest
-    needs:
-      - detect-label
-      - run-tests
+    needs: [run-tests]
     if: always()
     steps:
       - name: Check all suites passed
         run: |-
-          if ${{ contains(needs.detect-label.result, 'failure') || contains(needs.detect-label.result, 'cancelled') ||
-                 contains(needs.run-tests.result, 'failure') || contains(needs.run-tests.result, 'cancelled') }}; then
+          if ${{ contains(needs.run-tests.result, 'failure') || contains(needs.run-tests.result, 'cancelled') }}; then
             echo "One or more test suites failed."
             exit 1
           fi
