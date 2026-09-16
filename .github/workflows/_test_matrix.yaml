@@ -567,10 +567,8 @@ jobs:
     # The resolve-torch-spyre guard lets this job run when the pin succeeded
     # (pinned mode) OR was skipped (prebaked_image mode) but NOT when it failed
     # -- a failed pin must skip the matrix, not silently run on baked-in
-    # torch-spyre (issue #449). Referencing needs.resolve-torch-spyre.result also
-    # lifts the implicit success() gate that would otherwise cascade-skip this
-    # job when resolve-torch-spyre is skipped.
-    if: ${{ (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' load ')) }}
+    # torch-spyre (issue #449). `!cancelled() &&` is required: without a literal status-check function GitHub auto-prepends success(), which is false when resolve-torch-spyre is skipped, silently skipping this job under prebaked_image.
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' load ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-load-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -654,7 +652,7 @@ jobs:
     # copy this `if:` line with that key; no existing job needs to change.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' smoke ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' smoke ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-smoke-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -735,7 +733,7 @@ jobs:
     # tiers or when selected explicitly.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && needs.generate-matrix.outputs.multicard_smoke_matrix != '[]' && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' multicard_smoke ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && needs.generate-matrix.outputs.multicard_smoke_matrix != '[]' && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' multicard_smoke ')) }}
     # Don't let the initial pod failure fail the workflow outright -- the
     # fresh-pod retry and spyre-tests-result decide the authoritative result.
     continue-on-error: true
@@ -814,7 +812,7 @@ jobs:
     # Suite key: "token_compare". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'integration' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_compare ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'integration' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-token-compare-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -894,7 +892,7 @@ jobs:
     # Suite key: "model_components". Part of the "unit" and "integration" coarse tiers.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'integration' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_components ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'integration' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_components ')) }}
     # Don't let a failed run fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -963,7 +961,7 @@ jobs:
     # Suite key: "embed_compare". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' embed_compare ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' embed_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-embed-compare-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -1043,7 +1041,7 @@ jobs:
     # Suite key: "vlm". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' vlm ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' vlm ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-vlm-e2e-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -1124,7 +1122,7 @@ jobs:
     # Suite key: "clip". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' clip ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' clip ')) }}
     continue-on-error: true
     runs-on:
       - x86_64
@@ -1264,7 +1262,7 @@ jobs:
     # Suite key: "reranker_compare". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' reranker_compare ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' reranker_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-reranker-compare-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -1341,7 +1339,7 @@ jobs:
     # Suite key: "masked_lm_compare". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' masked_lm_compare ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' masked_lm_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-masked-lm-compare-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -1418,7 +1416,7 @@ jobs:
     # Suite key: "question_answering_compare". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' question_answering_compare ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' question_answering_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-question-answering-compare-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -1495,7 +1493,7 @@ jobs:
     # Suite key: "seq_classification_compare". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' seq_classification_compare ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' seq_classification_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-seq-classification-compare-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -1572,7 +1570,7 @@ jobs:
     # Suite key: "token_classification_compare". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_classification_compare ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_classification_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-token-classification-compare-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -1662,7 +1660,7 @@ jobs:
     needs: [generate-matrix, resolve-torch-spyre]
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && inputs.edge_cases_only }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && inputs.edge_cases_only }}
     # Don't let one failed (model, test_file) leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-edge-cases-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -1754,7 +1752,7 @@ jobs:
     # Suite key: "model_module". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_module ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_module ')) }}
     # Don't let one failed config leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-model-module-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
