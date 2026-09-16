@@ -2495,6 +2495,17 @@ class StandardGQAAttention(nn.Module):
         return attn_out, key_cache, value_cache
 
 
+def _run_mlp_2d(mlp, h):
+    """Run a token-wise dense MLP with a rank-2 activation.
+
+    Decoder MLPs do not mix leading batch or sequence dimensions. Flattening
+    them avoids carrying singleton batch dimensions into Spyre matmul layout
+    selection, while restoring the adapter-visible shape before the residual.
+    """
+    original_shape = h.shape
+    return mlp(h.reshape(-1, original_shape[-1])).reshape(original_shape)
+
+
 class StandardGQABlock(nn.Module):
     """Two compiled regions with an eager dim-naming boundary between them."""
 
@@ -2537,7 +2548,7 @@ class StandardGQABlock(nn.Module):
 
         residual = h
         h = self.post_attention_layernorm(h)
-        h = self.mlp(h)
+        h = _run_mlp_2d(self.mlp, h)
         if self.residual_multiplier is None:
             h = residual + h
         else:

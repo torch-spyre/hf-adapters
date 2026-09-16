@@ -23,6 +23,7 @@ Run them explicitly on a Spyre pod::
 import pytest
 import torch
 import torch.nn.functional as F
+from torch_spyre._C import SpyreTensorLayout
 from transformers import GraniteConfig
 from transformers.models.granite.modeling_granite import (
     GraniteAttention,
@@ -36,8 +37,38 @@ from hf_adapters.hf_common import (
     pad_lm_head,
     prepare_rope_and_heads,
 )
+from hf_adapters.hf_gemma4 import _query_row_mask
 
 pytestmark = pytest.mark.requires_spyre
+
+
+def test_gemma4_query_row_mask_keeps_singleton_feature_stick():
+    """The eager mask boundary must not force token-stick block outputs."""
+    sequence_length = 512
+    hidden_size = 128
+    live_tokens = 448
+    h_cpu = torch.randn(1, sequence_length, hidden_size, dtype=torch.bfloat16)
+    h = h_cpu.to("spyre")
+    attn_mask = torch.zeros(
+        1, 1, sequence_length, sequence_length, dtype=torch.bfloat16
+    )
+    attn_mask[:, :, live_tokens:, :] = torch.finfo(attn_mask.dtype).min
+
+    mask = _query_row_mask(h, attn_mask)
+
+    expected_layout = SpyreTensorLayout(
+        list(mask.shape),
+        list(mask.stride()),
+        mask.dtype,
+        list(range(mask.ndim)),
+    )
+    assert mask.device_tensor_layout() == expected_layout
+
+    multiply = torch.compile(lambda activation, row_mask: activation * row_mask)
+    out = multiply(h, mask).cpu()
+    expected = h_cpu.clone()
+    expected[:, live_tokens:] = 0
+    torch.testing.assert_close(out, expected)
 
 
 class _Layer(torch.nn.Module):

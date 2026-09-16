@@ -23,7 +23,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from hf_adapters.hf_common import optional_spyre_config_patch, text_config
+from hf_adapters.hf_common import (
+    _run_mlp_2d,
+    optional_spyre_config_patch,
+    text_config,
+)
 from hf_adapters.hf_gemma4 import (
     Gemma4Attention,
     _gemma4_backbone,
@@ -284,7 +288,7 @@ class Gemma4MoEBlock(nn.Module):
             self.pre_feedforward_layernorm.eps,
         )
         return _gemma4_rms_norm(
-            self.mlp(dense_input),
+            _run_mlp_2d(self.mlp, dense_input),
             self.post_feedforward_layernorm_1.weight,
             self.post_feedforward_layernorm_1.eps,
         )

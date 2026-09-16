@@ -234,8 +234,29 @@ def _query_row_mask(h, attn_mask):
     # attn_mask: [B, 1, S, cache_len]. Allowed entries are exactly zero;
     # disallowed entries use the finite value returned by _mask_fill_value.
     am = attn_mask.to("cpu")
-    live_rows = (am == 0).any(dim=-1).any(dim=1).to(h.dtype)  # [B, S]
-    return live_rows.to(h.device)[:, :, None]
+    live_rows = (am == 0).any(dim=-1).any(dim=1).to(h.dtype)[:, :, None]
+    if h.device.type != "spyre":
+        return live_rows.to(h.device)
+
+    # Keep the singleton feature dimension as the stick dimension.  A generic
+    # transfer chooses the token dimension instead, so multiplying this
+    # [B, S, 1] mask into an H-stick [B, S, H] block result re-tiles the whole
+    # activation to T-stick.  The following block's entry RMSNorm immediately
+    # re-tiles it back to H-stick, creating two full-activation retiles between
+    # every pair of prefill layers and obscuring the MLP layout improvements.
+    #
+    # This sparse layout broadcasts directly into the H-stick activation.  It
+    # is also a real eager-boundary layout: torch-spyre reads it from the graph
+    # input and includes it in the compiled cache key/layout guards.
+    from torch_spyre._C import SpyreTensorLayout  # type: ignore[import-not-found]
+
+    mask_layout = SpyreTensorLayout(
+        list(live_rows.shape),
+        list(live_rows.stride()),
+        live_rows.dtype,
+        list(range(live_rows.ndim)),
+    )
+    return live_rows.to(h.device, device_layout=mask_layout)
 
 
 def _patch_gemma4_rmsnorm(rmsnorm_cls):
@@ -508,10 +529,13 @@ def _finish_block(
 
     residual = h
     h = _gemma4_rms_norm(h, pre_ffn_norm_weight, spec.pre_feedforward_norm_eps)
+    original_shape = h.shape
+    h = h.reshape(-1, original_shape[-1])
     h = F.linear(
         _gemma4_mlp_activation(F.linear(h, gate_weight)) * F.linear(h, up_weight),
         down_weight,
     )
+    h = h.reshape(original_shape)
     h = residual + _gemma4_rms_norm(
         h, post_ffn_norm_weight, spec.post_feedforward_norm_eps
     )
