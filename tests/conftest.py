@@ -45,6 +45,7 @@ import importlib.util
 import os
 import sys
 import types
+import warnings
 from typing import Any, Union
 
 import pytest
@@ -182,6 +183,71 @@ def pytest_addoption(parser: Parser) -> None:
             "in the test decorators are ignored."
         ),
     )
+    parser.addoption(
+        "--trust-remote-code",
+        action="store_true",
+        default=False,
+        help=(
+            "Force trust_remote_code=True for every test that loads a model. "
+            "Use with --model-path to run a remote-code checkpoint that is not "
+            "listed in tests/model_registry.py's REMOTE_CODE_PATHS."
+        ),
+    )
+    parser.addoption(
+        "--suite",
+        default="",
+        help=(
+            "Suite key this run belongs to (e.g. ``smoke``, ``token_compare``), used "
+            "only to stamp the JUnit ``testtype__<tier>`` tags the CI/CD warehouse "
+            "reads. Each Makefile suite target passes its own key; see "
+            "tests/_tier_tags.py for the suite -> tier table. Unset means no tier "
+            "tag, which costs reuse data but never fails a run."
+        ),
+    )
+
+
+@pytest.fixture
+def trust_remote_code(request) -> bool | None:
+    """CLI override for trust_remote_code.
+
+    ``None`` when the flag is absent — every test then falls back to its
+    ``model_path in REMOTE_CODE_PATHS`` check, so registry-driven runs are
+    unchanged. ``True`` when ``--trust-remote-code`` is passed, which wins over
+    the registry (the escape hatch for off-registry ``--model-path`` runs).
+    """
+    return True if request.config.getoption("--trust-remote-code") else None
+
+
+@pytest.fixture(autouse=True)
+def _emit_result_tags(request, record_property):
+    """Stamp each test's ``testtype__<tier>`` / ``model__<id>`` JUnit tags.
+
+    The CI/CD warehouse reads these to decide whether a tier's coverage already exists
+    for an artifact, so a run must record every tier its suite BELONGS to (from
+    ``--suite`` via tests/_tier_tags.py), not the one that invoked it. Autouse because
+    the tags describe every case, not an opt-in subset.
+
+    Imported inside the fixture and wrapped: tagging is REPORTING, so it must never be
+    able to fail a test run. At conftest module scope a bad import aborts collection for
+    the whole suite, and pytest then reports the first failing import in the chain --
+    which can look like an unrelated dependency error rather than this one.
+    """
+    suite = request.config.getoption("--suite")
+    if not suite:
+        return
+    try:
+        from tests._tier_tags import result_tags
+    except Exception as exc:  # pragma: no cover - defensive
+        warnings.warn(
+            f"result tags unavailable, tests run untagged: {exc!r}", stacklevel=1
+        )
+        return
+    params = getattr(getattr(request.node, "callspec", None), "params", {})
+    try:
+        for name, value in result_tags(suite, params):
+            record_property(name, value)
+    except Exception as exc:  # pragma: no cover - defensive
+        warnings.warn(f"could not stamp result tags: {exc!r}", stacklevel=1)
 
 
 def pytest_generate_tests(metafunc: Metafunc) -> None:
@@ -308,17 +374,25 @@ def load_ref_model(
     model_path: str,
     adapter_mod: types.ModuleType | None = None,
     auto_model_cls: type = AutoModelForCausalLM,
+    trust_remote_code: bool | None = None,
 ):
+    from model_registry import REMOTE_CODE_PATHS
+
     from hf_adapters.auto_spyre_model import dtype_for_model_path
     from hf_adapters.hf_common import load_model_common
 
-    dtype = dtype_for_model_path(model_path, target_device="cpu")
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
+    dtype = dtype_for_model_path(
+        model_path, target_device="cpu", trust_remote_code=trust_remote_code
+    )
 
     ref_model = load_model_common(
         model_path=model_path,
         module=adapter_mod,
         dtype=dtype,
         auto_model_cls=auto_model_cls,
+        trust_remote_code=trust_remote_code,
     )
     return ref_model
 
@@ -328,7 +402,14 @@ def resolve_adapter_module_for_test(
     mapping: dict[
         type[PretrainedConfig], types.ModuleType
     ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
+    trust_remote_code: bool | None = None,
 ) -> types.ModuleType:
+    from model_registry import REMOTE_CODE_PATHS
+
+    if trust_remote_code is None:
+        trust_remote_code = str(model_name_or_path) in REMOTE_CODE_PATHS
     return resolve_adapter_module(
-        model_name_or_path=model_name_or_path, mapping=mapping, trust_remote_code=False
+        model_name_or_path=model_name_or_path,
+        mapping=mapping,
+        trust_remote_code=trust_remote_code,
     )

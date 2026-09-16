@@ -79,10 +79,10 @@ def _assert_reranker_logits(
 
 
 @pytest.mark.parametrize("model_path", RERANKER_PATHS, ids=RERANKER_PATHS)
-def test_auto_loader(model_path: str) -> None:
+def test_auto_loader(model_path: str, trust_remote_code: bool | None) -> None:
     """AutoSpyreModelForSequenceClassification logits match HF CPU reference."""
     ref_logits, adapter_logits = run_seq_classification_auto_loader_vs_ref(
-        model_path, PAIRS
+        model_path, PAIRS, trust_remote_code=trust_remote_code
     )
     gc.collect()
     _assert_reranker_logits(ref_logits, adapter_logits)
