@@ -31,6 +31,7 @@ from hf_adapters.hf_common import (
     apply_rope_matmul,
     get_backbone,
     kv_cache_update,
+    moe_decode_selected_experts,
     moe_prefill_all_experts,
     moe_topk,
     named_moe_prefill_inputs,
@@ -73,38 +74,19 @@ def _moe_decode(
     stick_size,
 ):
     """Run the selected-expert decode FFN and combine outputs on device."""
-    T, H = x.shape
     _, weights, expert_indices = _router_topk(x, router_weight, top_k, norm_topk_prob)
-
-    if x.device.type == "spyre":
-        from torch_spyre._inductor.propagate_hints import spyre_hint
-
-        # Widen topk's fp16 indices onto a stick before converting them to the
-        # device's int32 gather indices. The layout pass inserts the restickify.
-        index_stick = (
-            expert_indices[..., None].expand(T, top_k, stick_size).contiguous()
-        )
-        index_stick = index_stick.to(torch.float32)
-        index_address = index_stick[..., : stick_size // 2].to(torch.int32)
-        expert_indices = index_address[..., 0]
-        hint = spyre_hint(tiles={"row": tile})
-    else:
-        from contextlib import nullcontext
-
-        hint = nullcontext()
-
-    with hint:
-        rows = T * top_k
-        intermediate = gate_dev.shape[-1]
-        inputs = x[:, None, :].expand(T, top_k, H).contiguous().reshape(rows, 1, H)
-        gate = gate_dev[expert_indices].reshape(rows, H, intermediate)
-        up = up_dev[expert_indices].reshape(rows, H, intermediate)
-        down = down_dev[expert_indices].reshape(rows, intermediate, H)
-
-        gate_out = torch.bmm(inputs, gate)
-        up_out = torch.bmm(inputs, up)
-        expert_out = torch.bmm(F.silu(gate_out) * up_out, down).reshape(T, top_k, H)
-        return (expert_out * weights[..., None]).sum(dim=1)
+    return moe_decode_selected_experts(
+        x,
+        weights,
+        expert_indices,
+        gate_dev,
+        up_dev,
+        down_dev,
+        top_k,
+        tile,
+        stick_size,
+        "silu",
+    )
 
 
 def _moe_prefill_route_packed(

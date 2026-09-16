@@ -24,6 +24,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
+    moe_decode_selected_experts,
     moe_prefill_all_experts,
     moe_topk,
     named_moe_prefill_inputs,
@@ -61,7 +62,7 @@ def _compiled_moe_loop_region(
     router_proj_w,
     router_scale,
     router_scalar_root_size,
-    per_expert_scale,
+    per_expert_scale_stick,
     gate_dev,
     up_dev,
     down_dev,
@@ -71,9 +72,6 @@ def _compiled_moe_loop_region(
     eps,
 ):
     """Run the routed decode FFN and combine its expert outputs on device."""
-    from torch_spyre._inductor.propagate_hints import spyre_hint
-
-    T, H = x_expert.shape
     probs = _router_probs(
         x_router,
         router_proj_w,
@@ -83,34 +81,19 @@ def _compiled_moe_loop_region(
     )
     weights, expert_indices = moe_topk(probs, top_k)
     weights = weights / weights.sum(-1, keepdim=True)
-
-    # Widen topk's fp16 indices onto a stick before converting them to the
-    # device's int32 gather indices. The layout pass inserts the restickify.
-    index_stick = expert_indices[..., None].expand(T, top_k, stick_size).contiguous()
-    index_stick = index_stick.to(torch.float32)
-    index_address = index_stick[..., : stick_size // 2].to(torch.int32)
-    expert_indices = index_address[..., 0]
-
-    with spyre_hint(tiles={"row": tile}):
-        rows = T * top_k
-        intermediate = gate_dev.shape[-1]
-        inputs = (
-            x_expert[:, None, :].expand(T, top_k, H).contiguous().reshape(rows, 1, H)
-        )
-        gate = gate_dev[expert_indices].reshape(rows, H, intermediate)
-        up = up_dev[expert_indices].reshape(rows, H, intermediate)
-        down = down_dev[expert_indices].reshape(rows, intermediate, H)
-
-        gate_out = torch.bmm(inputs, gate)
-        up_out = torch.bmm(inputs, up)
-        activated = F.gelu(gate_out, approximate="tanh") * up_out
-        expert_out = torch.bmm(activated, down).reshape(T, top_k, H)
-
-        # Scale on the H-carrying tensor because bare [T,K] products have no
-        # legal layout. The widened source gives the gather a physical stick.
-        expert_scale = per_expert_scale[expert_indices][..., :1]
-        expert_out = expert_out * weights[..., None] * expert_scale
-        return expert_out.sum(dim=1)
+    return moe_decode_selected_experts(
+        x_expert,
+        weights,
+        expert_indices,
+        gate_dev,
+        up_dev,
+        down_dev,
+        top_k,
+        tile,
+        stick_size,
+        "gelu_tanh",
+        per_expert_scale_stick=per_expert_scale_stick,
+    )
 
 
 def _moe_route_persistent_packed(
