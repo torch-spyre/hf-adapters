@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Profile the Ministral 3 14B end-to-end generation loop on Spyre.
+"""Profile an end-to-end generation loop on Spyre.
 
 Runs the same load + generate path as the e2e smoke test twice:
 
@@ -29,6 +29,13 @@ Usage (on the Spyre pod, with the project root on PYTHONPATH)::
 
 The HF hub cache lives at ``<HF_HOME>/hub``; pass ``--hf-home`` (or set the
 ``HF_HOME`` env var) to point at a shared cache instead of the default.
+
+For tensor parallelism, launch one process per card. Each rank writes its own
+trace so concurrent profilers do not overwrite one another::
+
+    SPYRE_DEVICES=0,1,2,3 torchrun --nproc-per-node=4 \\
+        scripts/profile_e2e_spyre.py --model gemma4_26b_a4b \\
+        --hf-home /mnt/models/hf_cache
 
 Pass ``--with-stack`` to annotate each trace event with its Python source
 stack and module hierarchy, so an op (e.g. the per-layer ``torch.full``) can
@@ -78,6 +85,7 @@ from hf_adapters import AutoSpyreModelForCausalLM  # noqa: E402
 # no dependency on the tests/ package. These match the checkpoints' configured
 # dtypes resolved by hf_adapters.auto_spyre_model.dtype_for_model_path.
 MODELS: dict[str, tuple[str, "torch.dtype"]] = {
+    "gemma4_26b_a4b": ("google/gemma-4-26B-A4B-it", torch.float16),
     "ministral3": ("mistralai/Ministral-3-14B-Instruct-2512", torch.bfloat16),
     "granite8b": ("ibm-granite/granite-3.3-8b-instruct", torch.float16),
 }
@@ -140,12 +148,21 @@ def run_profile(
     with_stack: bool = False,
 ) -> None:
     """Load *model_path*, warm the compile cache, then profile one generate."""
+    rank = int(os.environ.get("RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    tp_plan = "auto" if world_size > 1 else None
+    if world_size > 1:
+        stem, suffix = os.path.splitext(out_path)
+        out_path = f"{stem}.rank{rank}{suffix or '.json'}"
+
     print(f"{'=' * 70}")
-    print(f"  profiling {model_path}  (dtype={dtype})")
+    print(f"  profiling {model_path}  (dtype={dtype}, rank={rank}/{world_size})")
     print(f"{'=' * 70}")
 
     t0 = time.time()
-    model = AutoSpyreModelForCausalLM.from_pretrained(model_path, dtype=dtype)
+    model = AutoSpyreModelForCausalLM.from_pretrained(
+        model_path, dtype=dtype, tp_plan=tp_plan
+    )
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     print(f"  Load time: {time.time() - t0:.1f}s")
     print(f"  Prompt: {prompt!r}")

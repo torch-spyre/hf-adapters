@@ -60,9 +60,10 @@ from hf_adapters.hf_common import (
     DEVICE,
     get_backbone,
     get_model_dtype,
-    pad_lm_head,
+    prepare_lm_head_for_spyre,
     prepare_rope_and_heads,
     prepare_standard_gqa_blocks,
+    run_lm_head,
 )
 
 _GENERATION_INPUT_NAMES: tuple = ("pixel_values", "image_sizes")
@@ -82,7 +83,10 @@ def prepare_for_spyre(model):
 
     # --- Text decoder (model.model.language_model via get_backbone) ---
     prepare_rope_and_heads(model)
-    pad_lm_head(model)
+    logits_scaling = model.config.text_config.logits_scaling
+    prepare_lm_head_for_spyre(
+        model, logits_processor=lambda logits: logits / logits_scaling
+    )
     backbone = get_backbone(model)
     model._spyre_text_blocks = prepare_standard_gqa_blocks(backbone.layers, True)
     model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
@@ -335,4 +339,4 @@ def _logits_from_embeds(
         deepstack=deepstack,
         vision_mask=vision_mask,
     )
-    return model.lm_head(h) / model.config.text_config.logits_scaling
+    return run_lm_head(model, h)

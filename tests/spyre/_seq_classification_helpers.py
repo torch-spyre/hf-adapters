@@ -25,6 +25,7 @@ texts and their assertions (ranking-order vs cosine similarity).
 from __future__ import annotations
 
 import types
+from typing import cast
 
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -78,8 +79,17 @@ def run_seq_classification_cpu_vs_spyre(
         trust_remote_code=trust_remote_code,
     )
 
+    if inputs and isinstance(inputs[0], tuple):
+        paired_inputs = cast(list[tuple[str, str]], inputs)
+        texts = [text for text, _ in paired_inputs]
+        text_pairs = [text_pair for _, text_pair in paired_inputs]
+    else:
+        texts = cast(list[str], inputs)
+        text_pairs = None
+
     encoded = tokenizer(
-        inputs,
+        texts,
+        text_pair=text_pairs,
         return_tensors="pt",
         padding=True,
         truncation=True,

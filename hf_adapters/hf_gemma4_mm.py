@@ -74,8 +74,41 @@ from hf_adapters.hf_common import (
     get_backbone,
     get_model_dtype,
     patch_layernorm,
+    run_lm_head,
     text_config,
 )
+
+# The multimodal auto class selects this adapter rather than the standalone
+# text adapter.  Forward the text decoder's TP loading policies so MoE weights
+# are staged and low-count KV heads are grouped exactly as in text-only loads.
+SPYRE_TP_CPU_STAGED_MODULES = hf_gemma4_moe.SPYRE_TP_CPU_STAGED_MODULES
+spyre_tp_grouped_colwise_modules = hf_gemma4.spyre_tp_grouped_colwise_modules
+
+
+def spyre_tp_cpu_replicated_modules(model, tp_size):
+    """Keep the full vision encoder on CPU until its Spyre preparation pass.
+
+    The Gemma 4 vision executor consumes parameter tensors directly and does
+    not run Transformers' per-module TP hooks.  Replicating these modules is
+    therefore required for correctness.  Staging them on CPU also lets the
+    vision adapter pad Q/K/V and MLP weights before their one layout-aware
+    transfer to Spyre.
+    """
+    del tp_size
+    prefix = "model.vision_tower.encoder."
+    modules = set()
+    for name, module in model.named_modules():
+        if not name.startswith(prefix):
+            continue
+        has_direct_state = (
+            next(module.parameters(recurse=False), None) is not None
+            or next(module.buffers(recurse=False), None) is not None
+        )
+        wraps_linear = isinstance(getattr(module, "linear", None), torch.nn.Linear)
+        if has_direct_state or wraps_linear:
+            modules.add(name)
+    return modules
+
 
 _GENERATION_INPUT_NAMES: tuple = (
     "pixel_values",
@@ -415,13 +448,7 @@ def _logits_from_embeds(
         per_layer_inputs=per_layer_inputs,
         query_row_mask=query_row_mask,
     )
-    logits = model.lm_head(h)
-    cap = text_config(model.config).final_logit_softcapping
-    if cap is not None:
-        logits = logits / cap
-        logits = torch.tanh(logits)
-        logits = logits * cap
-    return logits
+    return run_lm_head(model, h)
 
 
 def _prefill_forward(

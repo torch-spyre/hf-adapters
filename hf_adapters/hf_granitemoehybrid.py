@@ -51,7 +51,7 @@ from hf_adapters.hf_common import (
     apply_rope_matmul,
     get_backbone,
     kv_cache_update,
-    pad_lm_head,
+    prepare_lm_head_for_spyre,
     prepare_rope_and_heads,
     split_fused_linear,
 )
@@ -131,7 +131,10 @@ def prepare_for_spyre(model):
     )
 
     prepare_rope_and_heads(model)
-    pad_lm_head(model)
+    logits_scaling = model.config.logits_scaling
+    prepare_lm_head_for_spyre(
+        model, logits_processor=lambda logits: logits / logits_scaling
+    )
 
     res_mult = model.config.residual_multiplier
 

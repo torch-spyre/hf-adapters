@@ -39,7 +39,7 @@ from hf_adapters.hf_common import (
     apply_rope_matmul,
     get_backbone,
     kv_cache_update,
-    pad_lm_head,
+    prepare_lm_head_for_spyre,
     standard_gqa_backbone_forward,
     standard_gqa_forward,
 )
@@ -118,7 +118,7 @@ _run_backbone_forward = standard_gqa_backbone_forward
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to Qwen3 model in-place."""
     model._spyre_rope = PrecomputedRotaryEmbedding(get_backbone(model).rotary_emb)
-    pad_lm_head(model)
+    prepare_lm_head_for_spyre(model)
     model._spyre_compiled_blocks = [
         _make_compiled_block(layer) for layer in get_backbone(model).layers
     ]

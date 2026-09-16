@@ -41,7 +41,8 @@ its own compiled block rather than ``make_standard_gqa_block``:
   query_pre_attn_scalar ** -0.5``, which is NOT ``head_dim ** -0.5`` in general
   (e.g. 27B: ``head_dim=128`` but ``query_pre_attn_scalar=168``). Captured from
   ``attn.scaling`` so the per-checkpoint value is used.
-- **Large vocab.** 262K vocab → chunked LM head (like ``hf_gemma4`` / ``hf_phi3``).
+- **Large vocab.** 262K vocab → stick-padded LM head (like ``hf_gemma4`` /
+  ``hf_phi3``).
   ``final_logit_softcapping`` is ``None`` on published Gemma 3 (dropped from
   Gemma 2); the cap is applied only if a checkpoint sets it.
 
@@ -73,7 +74,8 @@ from hf_adapters.hf_common import (
     apply_rope_matmul,
     get_backbone,
     kv_cache_update,
-    pad_lm_head,
+    prepare_lm_head_for_spyre,
+    run_lm_head,
     text_config,
 )
 
@@ -340,16 +342,7 @@ def _run_forward(
         cache_index,
     )
 
-    logits = model.lm_head(h)
-
-    # final_logit_softcapping is None on published Gemma 3 (dropped from Gemma 2);
-    # applied defensively if a checkpoint sets it.
-    cap = getattr(text_config(model.config), "final_logit_softcapping", None)
-    if cap is not None:
-        logits = logits / cap
-        logits = torch.tanh(logits)
-        logits = logits * cap
-    return logits
+    return run_lm_head(model, h)
 
 
 def prepare_for_spyre(model):
@@ -365,7 +358,7 @@ def prepare_for_spyre(model):
     2. Build one ``PrecomputedRotaryEmbedding`` per layer type from the model's
        per-type ``inv_freq`` buffers (no head padding — D/2 >= 64 already).
     3. Record per-layer KV-cache shapes (single head_dim for all layers).
-    4. Chunk the LM head for the large vocab (no-op for the bare embedder
+    4. Prepare the padded LM head (no-op for the bare embedder
        backbone, which has no ``lm_head``).
     5. Compile each decoder layer's block.
     """
@@ -404,9 +397,18 @@ def prepare_for_spyre(model):
         (num_kv_heads, head_dim, head_dim) for _ in cfg.layer_types
     ]
 
-    # LM head: smooth-padded to a stick-aligned vocab whose per-core span fits
-    # the 256 MB EAR limit (see hf_common.pad_lm_head).
-    pad_lm_head(model)
+    # final_logit_softcapping is None on published Gemma 3 (dropped from Gemma
+    # 2); apply it defensively if a checkpoint sets it.
+    cap = getattr(cfg, "final_logit_softcapping", None)
+
+    def process_logits(logits):
+        if cap is not None:
+            logits = logits / cap
+            logits = torch.tanh(logits)
+            logits = logits * cap
+        return logits
+
+    prepare_lm_head_for_spyre(model, logits_processor=process_logits)
 
     model._spyre_compiled_blocks = [
         _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim)

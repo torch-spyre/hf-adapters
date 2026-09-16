@@ -71,9 +71,10 @@ from hf_adapters.hf_common import (
     DEVICE,
     get_backbone,
     get_model_dtype,
-    pad_lm_head,
+    prepare_lm_head_for_spyre,
     prepare_rope_and_heads,
     prepare_standard_gqa_blocks,
+    run_lm_head,
 )
 
 _GENERATION_INPUT_NAMES: tuple = ("pixel_values", "image_sizes")
@@ -112,7 +113,7 @@ def prepare_for_spyre(model):
     # does: call the constituent parts individually and store text blocks in
     # model._spyre_text_blocks.
     prepare_rope_and_heads(model)
-    pad_lm_head(model)
+    prepare_lm_head_for_spyre(model)
 
     backbone = get_backbone(model)
     model._spyre_text_blocks = prepare_standard_gqa_blocks(backbone.layers)
@@ -270,7 +271,7 @@ def _logits_from_embeds(
         image_features=image_features,
         vision_mask=vision_mask,
     )
-    return model.lm_head(h)
+    return run_lm_head(model, h)
 
 
 # ---------------------------------------------------------------------------

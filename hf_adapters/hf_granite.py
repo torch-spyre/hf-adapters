@@ -32,9 +32,10 @@ import torch
 from hf_adapters.hf_common import (
     _SDPA_MAX_SEQUENCE_TILE_SIZE,
     get_backbone,
-    pad_lm_head,
+    prepare_lm_head_for_spyre,
     prepare_rope_and_heads,
     prepare_standard_gqa_blocks,
+    run_lm_head,
     text_config,
 )
 
@@ -88,14 +89,16 @@ def _run_forward(
         value_caches,
         cache_index,
     )
-    logits = model.lm_head(h)
-    return logits / text_config(model.config).logits_scaling
+    return run_lm_head(model, h)
 
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to Granite 3.3 model in-place."""
     prepare_rope_and_heads(model)
-    pad_lm_head(model)
+    logits_scaling = text_config(model.config).logits_scaling
+    prepare_lm_head_for_spyre(
+        model, logits_processor=lambda logits: logits / logits_scaling
+    )
     backbone = get_backbone(model)
     model._spyre_compiled_blocks = prepare_standard_gqa_blocks(backbone.layers, True)
     model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)

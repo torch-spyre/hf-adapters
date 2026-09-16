@@ -38,15 +38,12 @@ import torch
 import torch.nn.functional as F
 from _seq_classification_helpers import run_seq_classification_auto_loader_vs_ref
 
-from tests.model_registry import SEQ_CLASSIFICATION_PATHS
+from tests.model_registry import (
+    SEQ_CLASSIFICATION_PATHS,
+    sequence_classification_test_case,
+)
 
 pytestmark = pytest.mark.model_harness("seq_classification")
-
-TEXTS: list[str] = [
-    "Hello, my dog is cute.",
-    "This movie was absolutely terrible.",
-    "The weather is nice today.",
-]
 
 # fp16 encoder vs fp32 reference: per-label cosine should be very tight.
 COSINE_THRESHOLD: float = 0.999
@@ -55,6 +52,7 @@ COSINE_THRESHOLD: float = 0.999
 def _assert_seq_classification_logits(
     ref_logits: torch.Tensor,
     adapter_logits: torch.Tensor,
+    expected_ids: list[int],
 ) -> None:
     assert (
         adapter_logits.shape == ref_logits.shape
@@ -66,6 +64,10 @@ def _assert_seq_classification_logits(
     ), f"min per-sample cosine {cos.min().item():.6f} < threshold {COSINE_THRESHOLD}"
     ref_ids = ref_logits.argmax(dim=-1)
     adapter_ids = adapter_logits.argmax(dim=-1)
+    assert ref_ids.tolist() == expected_ids, (
+        f"reference predictions {ref_ids.tolist()} do not match task labels "
+        f"{expected_ids}"
+    )
     assert torch.equal(
         adapter_ids, ref_ids
     ), f"predicted class mismatch: adapter {adapter_ids.tolist()} vs ref {ref_ids.tolist()}"
@@ -76,8 +78,9 @@ def _assert_seq_classification_logits(
 )
 def test_auto_loader(model_path: str, trust_remote_code: bool | None) -> None:
     """AutoSpyreModelForSequenceClassification logits match HF CPU reference."""
+    inputs, expected_ids = sequence_classification_test_case(model_path)
     ref_logits, adapter_logits = run_seq_classification_auto_loader_vs_ref(
-        model_path, TEXTS, trust_remote_code=trust_remote_code
+        model_path, inputs, trust_remote_code=trust_remote_code
     )
     gc.collect()
-    _assert_seq_classification_logits(ref_logits, adapter_logits)
+    _assert_seq_classification_logits(ref_logits, adapter_logits, expected_ids)

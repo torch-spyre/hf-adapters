@@ -987,6 +987,12 @@ SEQ_CLASSIFICATION_MODELS = {
         "path": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
         "adapter": "hf_distilbert.py",
         "size": "0.07b",
+        "test_inputs": [
+            "This movie was fantastic.",
+            "This movie was absolutely terrible.",
+            "I loved every minute of it.",
+        ],
+        "expected_ids": [1, 0, 1],
     },
     # hf_xlm_roberta.py (RobertaConfig → same adapter as XLM-R / reranker)
     "roberta_mnli": {
@@ -994,8 +1000,41 @@ SEQ_CLASSIFICATION_MODELS = {
         "path": "FacebookAI/roberta-large-mnli",
         "adapter": "hf_xlm_roberta.py",
         "size": "0.36b",
+        "test_inputs": [
+            (
+                "The capital of France is Paris.",
+                "Paris is the capital of France.",
+            ),
+            ("A man is eating lunch.", "Nobody is eating."),
+            (
+                "A woman is reading a book.",
+                "The woman is reading a mystery novel.",
+            ),
+        ],
+        "expected_ids": [2, 0, 1],
     },
 }
+
+NON_BLOCKING_SEQUENCE_CLASSIFICATION_MODELS: dict[str, str] = _non_blocking(
+    SEQ_CLASSIFICATION_MODELS,
+    (),
+)
+
+
+def sequence_classification_test_case(
+    model_path: str,
+) -> tuple[list[str] | list[tuple[str, str]], list[int]]:
+    """Return task-appropriate inputs and expected labels for a classifier."""
+    normalized_path = model_path.lower().replace("\\", "/")
+    for model in SEQ_CLASSIFICATION_MODELS.values():
+        registered_path = model["path"].lower()
+        cache_path = registered_path.replace("/", "--")
+        if normalized_path == registered_path or cache_path in normalized_path:
+            return model["test_inputs"], model["expected_ids"]
+    raise ValueError(
+        f"No task-appropriate sequence-classification inputs registered for {model_path!r}"
+    )
+
 
 SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
     _select_representative_paths(
