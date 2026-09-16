@@ -85,7 +85,7 @@ adapter-coverage-tests: ## Run adapter registry coverage check (suite key: adapt
 	$(PYTEST) -v --noconftest tests/test_adapter_coverage.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 smoke-tests: ## Run e2e smoke tests (suite key: smoke)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_smoke_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) --suite smoke tests/spyre/test_e2e_smoke_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 load-tests: ## Run load tests (suite key: load)
 	# test_load_spyre.py is the one suite file with FOUR model_path-parametrized
@@ -97,44 +97,44 @@ load-tests: ## Run load tests (suite key: load)
 	# selects the one matching parametrization, same as every other suite target
 	# gets from --model-path (safe here because MODEL_PATH is always one exact
 	# registry path, never an attacker-controlled or ambiguous substring).
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_load_spyre.py $(if $(MODEL_PATH),-k "$(MODEL_PATH)",$(K_ARGS)) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) --suite load tests/spyre/test_load_spyre.py $(if $(MODEL_PATH),-k "$(MODEL_PATH)",$(K_ARGS)) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 token-compare-tests: ## Run token-compare tests (suite key: token_compare)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_token_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) --suite token_compare tests/spyre/test_e2e_token_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 model-components-tests: ## Run model component tests (suite key: model_components)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_model_components_spyre.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) --suite model_components tests/spyre/test_model_components_spyre.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 embed-compare-tests: ## Run embed-compare tests (suite key: embed_compare)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_embed_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) --suite embed_compare tests/spyre/test_e2e_embed_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 clip-tests: ## Run CLIP e2e tests (suite key: clip)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_clip_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) --suite clip tests/spyre/test_e2e_clip_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 vlm-tests: ## Run VLM e2e tests (suite key: vlm)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_vlm_e2e_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) --suite vlm tests/spyre/test_vlm_e2e_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 reranker-tests: ## Run reranker compare tests (suite key: reranker_compare)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_reranker_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) --suite reranker_compare tests/spyre/test_e2e_reranker_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 masked-lm-compare-tests: ## Run masked-LM compare tests (suite key: masked_lm_compare)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_masked_lm_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) --suite masked_lm_compare tests/spyre/test_e2e_masked_lm_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 question-answering-compare-tests: ## Run question-answering compare tests (suite key: question_answering_compare)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_question_answering_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) --suite question_answering_compare tests/spyre/test_e2e_question_answering_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 seq-classification-compare-tests: ## Run seq-classification compare tests (suite key: seq_classification_compare)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_seq_classification_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) --suite seq_classification_compare tests/spyre/test_e2e_seq_classification_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 token-classification-compare-tests: ## Run token-classification compare tests (suite key: token_classification_compare)
-	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_e2e_token_classification_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) --suite token_classification_compare tests/spyre/test_e2e_token_classification_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 # EDGE_CASE_FILE narrows edge-cases-tests to one file under tests/spyre/edge_cases/
 # (matrix-style per-file CI jobs pass this); empty = run every file in the directory.
 # All edge-case tests are @pytest.mark.slow, so --run-slow is passed unconditionally.
 EDGE_CASE_FILE ?=
 edge-cases-tests: ## Run edge-case tests (suite key: edge_cases; EDGE_CASE_FILE=<file>.py narrows to one)
-	$(PYTEST) $(PYTEST_ARGS) --run-slow $(if $(EDGE_CASE_FILE),tests/spyre/edge_cases/$(EDGE_CASE_FILE),tests/spyre/edge_cases/) $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) --suite edge_cases --run-slow $(if $(EDGE_CASE_FILE),tests/spyre/edge_cases/$(EDGE_CASE_FILE),tests/spyre/edge_cases/) $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 # MODULE_CONFIG narrows model-module-tests to one YAML config (matrix-style
 # per-config CI jobs pass this); empty = run every config in tests/configs/module_tests.

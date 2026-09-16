@@ -12,3 +12,6 @@ self-hosted-runner:
     - image_spyre_backend
     # cardless ClickHouse-ingest set (spyre-frameworks #1235/#1236)
     - image_ingest
+    # merge-queue runner sets
+    - image_torch_spyre_mq
+    - image_spyre_inference_mq
