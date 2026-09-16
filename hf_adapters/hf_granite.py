@@ -27,7 +27,11 @@ Usage::
     outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
+import types
+
 import torch
+
+from hf_adapters.fp8_linear import swap_linears_to_fp8
 
 from hf_adapters.hf_common import (
     _SDPA_MAX_SEQUENCE_TILE_SIZE,
@@ -91,12 +95,31 @@ def _run_forward(
     logits = model.lm_head(h)
     return logits / text_config(model.config).logits_scaling
 
+def _fp16_rmsnorm_forward(self, h):
+    """RMSNorm with the variance reduction kept in fp16 on Spyre."""
+    if h.device.type != "spyre":
+        return type(self).forward(self, h)
+    variance = (h * h).mean(-1, keepdim=True)
+    return self.weight * (h * torch.rsqrt(variance + self.variance_epsilon))
+
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to Granite 3.3 model in-place."""
+    backbone = get_backbone(model)
+    # FP8 checkpoints only; runs before the blocks are built so they close over
+    # FP8Linear.
+    n_fp8, n_excluded = swap_linears_to_fp8(model)
+    if n_fp8 or n_excluded:
+        print(f"FP8: {n_fp8} module(s) -> FP8Linear, {n_excluded} -> fp16 nn.Linear")
+    if n_fp8:
+        # TODO: stock RMSNorm's fp32->fp16 cast leaves torch-spyre no feasible
+        # layout for the FP8 scaled_mm that consumes it; keep the norms feeding
+        # FP8Linear in fp16 until that is fixed.
+        for layer in backbone.layers:
+            for norm in (layer.input_layernorm, layer.post_attention_layernorm):
+                norm.forward = types.MethodType(_fp16_rmsnorm_forward, norm)
     prepare_rope_and_heads(model)
     pad_lm_head(model)
-    backbone = get_backbone(model)
     model._spyre_compiled_blocks = prepare_standard_gqa_blocks(backbone.layers, True)
     model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
     model._spyre_prefill_chunk_size = _SDPA_MAX_SEQUENCE_TILE_SIZE
