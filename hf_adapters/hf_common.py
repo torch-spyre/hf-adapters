@@ -111,6 +111,56 @@ def moe_topk(probabilities, top_k):
     return weights[:tokens], expert_indices[:tokens]
 
 
+def _moe_decode_down_output_blocks(activated, down_bank, expert_indices, block_size):
+    """Select output-column blocks before indexing the original expert bank.
+
+    Every output still sums its full reduction dimension in one BMM. Concatenate
+    columns in order; never concatenate weights into a full selected slab.
+    """
+    from torch_spyre._inductor.propagate_hints import spyre_hint
+
+    rows, _, intermediate = activated.shape
+    hidden = down_bank.shape[-1]
+    outputs = []
+    for start in range(0, hidden, block_size):
+        width = min(block_size, hidden - start)
+        selected = down_bank[:, :, start : start + width][expert_indices].reshape(
+            rows, intermediate, width
+        )
+        # The indexed load keeps data columns unsplit on this compiler. H:4
+        # needs a proven distributed load or explicit transfer, not a new hint.
+        with spyre_hint(named_dims=["R", "ONE", "H"], work_div={"R": rows, "H": 1}):
+            outputs.append(torch.bmm(activated, selected))
+    return torch.cat(outputs, dim=-1)
+
+
+def _moe_decode_gate_up_blocks(inputs, gate_bank, up_bank, expert_indices, block_size):
+    """Load and consume one gate/up block at a time from unchanged banks."""
+    from torch_spyre._inductor.propagate_hints import spyre_hint
+
+    rows, _, hidden = inputs.shape
+    intermediate = gate_bank.shape[-1]
+    gate_out = up_out = None
+    for start in range(0, hidden, block_size):
+        width = min(block_size, hidden - start)
+        x_slice = inputs[:, :, start : start + width]
+        # Keep the measured gate-BMM-add, then up-BMM-add order so the two
+        # large selected panels need not be live together. Add in start order.
+        gate_panel = gate_bank[:, start : start + width, :][expert_indices].reshape(
+            rows, width, intermediate
+        )
+        with spyre_hint(named_dims=["R", "ONE", "F"], work_div={"R": rows}):
+            gate_part = torch.bmm(x_slice, gate_panel)
+        gate_out = gate_part if gate_out is None else gate_out + gate_part
+        up_panel = up_bank[:, start : start + width, :][expert_indices].reshape(
+            rows, width, intermediate
+        )
+        with spyre_hint(named_dims=["R", "ONE", "F"], work_div={"R": rows}):
+            up_part = torch.bmm(x_slice, up_panel)
+        up_out = up_part if up_out is None else up_out + up_part
+    return gate_out, up_out
+
+
 def moe_decode_selected_experts(
     x,
     weights,
@@ -123,8 +173,17 @@ def moe_decode_selected_experts(
     stick_size,
     activation,
     per_expert_scale_stick=None,
+    *,
+    route_division=None,
+    gate_up_panel=None,
+    down_output_panel=None,
 ):
-    """Gather selected experts and combine their decode outputs."""
+    """Gather selected experts and combine their decode outputs.
+
+    Models may supply already-qualified divisions and panel sizes. With no
+    options, all models retain the ordinary selected-expert implementation.
+    Panel arithmetic and index conversion live here, not in a second model loop.
+    """
     if activation not in ("silu", "gelu_tanh"):
         raise ValueError(f"unsupported MoE activation: {activation!r}")
 
@@ -148,17 +207,39 @@ def moe_decode_selected_experts(
         rows = T * top_k
         intermediate = gate.shape[-1]
         inputs = x[:, None, :].expand(T, top_k, H).contiguous().reshape(rows, 1, H)
-        selected_gate = gate[expert_indices].reshape(rows, H, intermediate)
-        selected_up = up[expert_indices].reshape(rows, H, intermediate)
-        selected_down = down[expert_indices].reshape(rows, intermediate, H)
+        if gate_up_panel is None:
+            selected_gate = gate[expert_indices].reshape(rows, H, intermediate)
+            selected_up = up[expert_indices].reshape(rows, H, intermediate)
+        if down_output_panel is None:
+            selected_down = down[expert_indices].reshape(rows, intermediate, H)
 
-        gate_out = torch.bmm(inputs, selected_gate)
-        up_out = torch.bmm(inputs, selected_up)
+        if gate_up_panel is not None:
+            gate_out, up_out = _moe_decode_gate_up_blocks(
+                inputs, gate, up, expert_indices, gate_up_panel
+            )
+        else:
+            if route_division is not None:
+                from torch_spyre._inductor.propagate_hints import spyre_hint
+
+                compute_hint = spyre_hint(
+                    named_dims=["R", "ONE", "F"], work_div={"R": route_division}
+                )
+            else:
+                compute_hint = nullcontext()
+            with compute_hint:
+                gate_out = torch.bmm(inputs, selected_gate)
+                up_out = torch.bmm(inputs, selected_up)
         if activation == "silu":
             activated = F.silu(gate_out) * up_out
         else:
             activated = F.gelu(gate_out, approximate="tanh") * up_out
-        expert_out = torch.bmm(activated, selected_down).reshape(T, top_k, H)
+        if down_output_panel is not None:
+            expert_out = _moe_decode_down_output_blocks(
+                activated, down, expert_indices, down_output_panel
+            )
+        else:
+            expert_out = torch.bmm(activated, selected_down)
+        expert_out = expert_out.reshape(T, top_k, H)
         expert_out = expert_out * weights[..., None]
         if per_expert_scale_stick is not None:
             expert_scale = per_expert_scale_stick[expert_indices][..., :1]
@@ -194,7 +275,17 @@ def named_moe_prefill_inputs(x, gate, up, down):
         named_dims.reset()
 
 
-def moe_prefill_all_experts(x, routing_weight, gate, up, down, activation):
+def moe_prefill_all_experts(
+    x,
+    routing_weight,
+    gate,
+    up,
+    down,
+    activation,
+    *,
+    gate_up_work_div=None,
+    down_work_div=None,
+):
     """Evaluate every expert and sum its routed prefill output."""
     if activation not in ("silu", "gelu_tanh"):
         raise ValueError(f"unsupported MoE activation: {activation!r}")
@@ -208,13 +299,19 @@ def moe_prefill_all_experts(x, routing_weight, gate, up, down, activation):
 
         def expert_body(acc, tiles):
             x, route_tile, gate_tile, up_tile, down_tile = tiles
-            gate_out = torch.matmul(x, gate_tile)
-            up_out = torch.matmul(x, up_tile)
+            with (
+                spyre_hint(work_div=gate_up_work_div)
+                if gate_up_work_div
+                else nullcontext()
+            ):
+                gate_out = torch.matmul(x, gate_tile)
+                up_out = torch.matmul(x, up_tile)
             if activation == "silu":
                 activated = F.silu(gate_out) * up_out
             else:
                 activated = F.gelu(gate_out, approximate="tanh") * up_out
-            down_out = torch.matmul(activated, down_tile)
+            with spyre_hint(work_div=down_work_div) if down_work_div else nullcontext():
+                down_out = torch.matmul(activated, down_tile)
             return acc + (down_out * route_tile).squeeze(0), None
 
         with spyre_hint(work_div={"T": 32}):
@@ -2118,6 +2215,16 @@ def select_next_token(
     return (tokens, scores) if return_scores else tokens
 
 
+def _prefill_next_logits(logits):
+    """Copy the row generation consumes, without changing model forward.
+
+    On Spyre, transferring an offset view can convert its entire underlying
+    allocation. Materialize the selected row on device before the CPU copy.
+    Vocabulary cropping remains downstream.
+    """
+    return logits[:, -1:, :].clone().to("cpu")[:, 0, :]
+
+
 def generate(
     run_forward_fn: Optional[Callable],
     model,
@@ -2142,7 +2249,7 @@ def generate(
     """Model-agnostic generation: optional chunked prefill, then token decode.
 
     When attached to a model via ``auto_spyre_model.py`` (which binds
-    ``run_forward_fn`` to the adapter module's ``_run_forward``), callers use
+    ``run_forward_fn`` to the adapter's generation driver), callers use
     the stock input and tensor-output shape::
 
         encoded = tokenizer(["Hello!"], return_tensors="pt", padding=True)
@@ -2377,7 +2484,7 @@ def generate(
                         ),
                     )
             # Only the last chunk's logits matter for next-token selection.
-            next_logits = logits.to("cpu")[:, -1, :]
+            next_logits = _prefill_next_logits(logits)
             current_cache_len = padded_len
 
         else:

@@ -209,3 +209,240 @@ def test_auto_loader(model_path, trust_remote_code):
     assert (
         auto_outputs[0].strip() == hf_text.strip()
     ), f"auto-loader output {auto_outputs[0]!r} != HF reference {hf_text!r}"
+
+
+@pytest.fixture
+def gemma_moe_compiler(monkeypatch):
+    """Only compiler hints/config are stubbed; import the actual adapter."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from hf_adapters import hf_gemma4_moe as moe
+
+    config = SimpleNamespace(
+        sencores=32,
+        ignore_work_division_hints=False,
+        ignore_wsr_hints=False,
+        indexed_selection_consumer_layout=False,
+        layout_solver="greedy",
+        co_optimizing_lx_planning=False,
+        ktir_emitter=False,
+        lx_planning=True,
+    )
+    monkeypatch.setitem(
+        sys.modules, "torch_spyre._inductor", SimpleNamespace(config=config)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "torch_spyre._inductor.propagate_hints",
+        SimpleNamespace(spyre_hint=lambda **kw: nullcontext()),
+    )
+    return moe, config
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "gate_blocks,down_blocks",
+    [(True, True), (True, False), (False, True), (False, False)],
+)
+def test_gemma_decode_block_composition(
+    gemma_moe_compiler, monkeypatch, dtype, gate_blocks, down_blocks
+):
+    """Prove dispatch engages both changes, including the 768-column down tail."""
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    moe, _ = gemma_moe_compiler
+    monkeypatch.setattr(moe, "_DECODE_GATE_UP_K_PANEL", 704 if gate_blocks else None)
+    monkeypatch.setattr(moe, "_DECODE_DOWN_OUTPUT_PANEL", 1024 if down_blocks else None)
+
+    def make(*shape):
+        return torch.empty(shape, device="meta", dtype=dtype)
+
+    x, gate, up, down = (
+        make(1, 2816),
+        make(128, 2816, 704),
+        make(128, 2816, 704),
+        make(128, 704, 2816),
+    )
+    monkeypatch.setattr(moe, "_router_probs", lambda *args: make(1, 8))
+    monkeypatch.setattr(
+        moe,
+        "moe_topk",
+        lambda *args: (make(1, 8), torch.empty(1, 8, device="meta", dtype=torch.int64)),
+    )
+    selected, products = [], []
+
+    class Record(TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            if func == torch.ops.aten.index.Tensor and args[0].ndim == 3:
+                selected.append(tuple(args[0].shape))
+            if func == torch.ops.aten.bmm.default:
+                products.append(tuple(args[1].shape))
+            return func(*args, **(kwargs or {}))
+
+    with Record():
+        result = moe._compiled_moe_loop_region(
+            x, x, None, None, None, make(128, 64), gate, up, down, 8, 32, 64, 1e-6
+        )
+    expected_gate = [(8, 704, 704)] * 8 if gate_blocks else [(8, 2816, 704)] * 2
+    expected_down = (
+        [(8, 704, w) for w in (1024, 1024, 768)] if down_blocks else [(8, 704, 2816)]
+    )
+    assert products == expected_gate + expected_down
+    assert sorted(selected) == sorted((128, *shape[1:]) for shape in products)
+    assert result.shape == (1, 2816)
+
+
+def test_gemma_schedule_fallbacks(gemma_moe_compiler, monkeypatch):
+    moe, config = gemma_moe_compiler
+    assert moe._decode_route_schedule_enabled(1, 8)
+    assert not moe._decode_route_schedule_enabled(2, 8)
+    assert not moe._decode_route_schedule_enabled(1, 7)
+    del config.indexed_selection_consumer_layout
+    assert not moe._decode_route_schedule_enabled(1, 8)
+    for chooser, width in (
+        (moe._decode_down_panel, 1024),
+        (moe._decode_gate_up_panel, 704),
+    ):
+        assert chooser(2816, 704, (torch.bfloat16,) * 4, True) == width
+        for hidden, dtypes, eligible in (
+            (2816, (torch.bfloat16,) * 4, False),
+            (1408, (torch.bfloat16,) * 4, True),
+            (2816, (torch.float16,) * 3 + (torch.bfloat16,), True),
+            (2816, (torch.float32,) * 4, True),
+        ):
+            assert chooser(hidden, 704, dtypes, eligible) is None
+
+    # Missing compiler support declines automatically but an explicit request
+    # must fail before attention can mutate the cache.
+    assert moe._prefill_expert_config() == {"allow_all_ops_in_lx_planning": True}
+    monkeypatch.setattr(moe, "_PREFILL_EXPERT_DIVISIONS", True)
+    with pytest.raises(RuntimeError, match="reader-compatible"):
+        moe.Gemma4MoEBlock.forward(
+            None,
+            torch.empty(1, 512, 2816, device="meta"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_gemma_prefill_schedule_selection(gemma_moe_compiler, monkeypatch, dtype):
+    moe, config = gemma_moe_compiler
+    config.consumer_compatible_input_staging = False
+    config.read_copy_elision = False
+    config.lx_planner_relayout = False
+    assert moe._prefill_expert_config()["consumer_compatible_input_staging"]
+    tensors = [
+        torch.empty(shape, dtype=dtype, device="meta")
+        for shape in ((512, 2816), (128, 2816, 704), (128, 2816, 704), (128, 704, 2816))
+    ]
+    assert moe._validate_prefill_expert_inputs(*tensors)
+    tensors[-1] = tensors[-1].to(torch.float32)
+    assert not moe._validate_prefill_expert_inputs(*tensors)
+    monkeypatch.setattr(moe, "_PREFILL_EXPERT_DIVISIONS", True)
+    with pytest.raises(ValueError, match="matching"):
+        moe._validate_prefill_expert_inputs(*tensors)
+
+
+def test_gemma_block_addresses_and_order(gemma_moe_compiler):
+    """Small exact integers isolate movement/order from device rounding."""
+    from hf_adapters.hf_common import (
+        _moe_decode_down_output_blocks,
+        _moe_decode_gate_up_blocks,
+    )
+
+    ids = torch.tensor([[0, 2, 2, 0]])
+    x = torch.arange(20).reshape(4, 1, 5).double() % 3
+    gate = torch.arange(3 * 5 * 7).reshape(3, 5, 7).double() % 5
+    up, down = gate + 1, gate.transpose(1, 2).contiguous()
+    g, u = _moe_decode_gate_up_blocks(x, gate, up, ids, 2)
+    assert torch.equal(g, torch.bmm(x, gate[ids].reshape(4, 5, 7)))
+    assert torch.equal(u, torch.bmm(x, up[ids].reshape(4, 5, 7)))
+    actual = _moe_decode_down_output_blocks(g, down, ids, 2)
+    assert torch.equal(actual, torch.bmm(g, down[ids].reshape(4, 7, 5)))
+
+
+@pytest.mark.parametrize("use_divisions", [False, True])
+def test_gemma_prefill_explicit_loop(gemma_moe_compiler, monkeypatch, use_divisions):
+    """Adapter-level carry and hint placement; device lowering is not tested here."""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    moe, config = gemma_moe_compiler
+    config.consumer_compatible_input_staging = False
+    config.read_copy_elision = False
+    config.lx_planner_relayout = False
+    # Use tiny inputs for arithmetic; the real shape gate has its own test above.
+    monkeypatch.setattr(
+        moe, "_validate_prefill_expert_inputs", lambda *a: use_divisions
+    )
+    active, scopes, calls = [], [], []
+
+    @contextmanager
+    def hint(**kwargs):
+        scopes.append(kwargs)
+        active.append(kwargs)
+        try:
+            yield
+        finally:
+            active.pop()
+
+    def eager_tiles(body, operands, *, dims, tile_size, init):
+        calls.append((dims, tile_size, tuple(init.shape)))
+        assert active == [{"work_div": {"T": 32}}]
+        assert dims == (None, 0, 0, 0, 0) and tile_size == 1
+        acc = init
+        for e in range(operands[1].shape[0]):
+            tiles = tuple(
+                t if d is None else t.narrow(d, e, 1) for t, d in zip(operands, dims)
+            )
+            acc, output = body(acc, tiles)
+            assert output is None
+        return acc, None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "torch_spyre._inductor.wsr",
+        SimpleNamespace(for_each_tile=eager_tiles),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "torch_spyre._inductor.propagate_hints",
+        SimpleNamespace(spyre_hint=hint),
+    )
+    x = torch.arange(20).reshape(4, 5).double() % 3 - 1
+    gate = torch.arange(3 * 5 * 7).reshape(3, 5, 7).double() % 5 - 2
+    up, down = gate + 1, gate.transpose(1, 2).contiguous()
+    route = (
+        torch.tensor([[1, 0, 2], [0, 0, 0], [2, 1, 0], [1, 1, 1]])
+        .double()
+        .unsqueeze(-1)
+    )
+    # Exercise the shared helper's Spyre loop branch with the eager tile
+    # interpreter above. Storage and arithmetic remain CPU-only; this is not
+    # a device-lowering or device-numerics test.
+    with monkeypatch.context() as device_branch:
+        device_branch.setattr(
+            torch.Tensor, "device", property(lambda self: SimpleNamespace(type="spyre"))
+        )
+        actual = moe._moe_expert_persistent(x, route, gate, up, down)
+    expected = torch.zeros_like(x)
+    for e in range(3):
+        activated = torch.nn.functional.gelu(x @ gate[e], approximate="tanh") * (
+            x @ up[e]
+        )
+        expected = expected + (activated @ down[e]) * route[:, e]
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert calls == [((None, 0, 0, 0, 0), 1, (4, 5))]
+    assert scopes[:2] == [{"named_dims": ["E", "T", "ONE"]}, {"work_div": {"T": 32}}]
+    assert scopes[2:] == (
+        [{"work_div": {"T": 8, "H": 4}}, {"work_div": {"T": 16, "H": 2}}] * 3
+        if use_divisions
+        else []
+    )
+    assert not active

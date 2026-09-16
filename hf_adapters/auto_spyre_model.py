@@ -407,6 +407,11 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
 
     Attaches a Spyre-aware ``generate`` method that runs the block-padded
     prefill + single-token decode loop.
+
+    An adapter may provide ``_run_prefill_next_logits`` with ``_run_forward``'s
+    arguments and cache updates, returning only the final row ``[B, 1, V]``.
+    Generation uses it for prefill chunks and single-row decode; other adapters
+    use ``_run_forward``. Explicit prefill/decode callbacks still take precedence.
     """
 
     _auto_model_cls = AutoModelForCausalLM  # type: ignore[assignment]
@@ -443,7 +448,7 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
             from hf_adapters.hf_common import generate
 
             return generate(
-                module._run_forward,
+                getattr(module, "_run_prefill_next_logits", module._run_forward),
                 self,
                 input_ids,
                 attention_mask=attention_mask,

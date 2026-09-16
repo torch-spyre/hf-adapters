@@ -983,7 +983,7 @@ def _run_forward(
     value_caches,
     cache_index,
 ):
-    """Gemma 4 causal-LM forward: backbone + LM head + logit softcap."""
+    """Ordinary forward returns logits for every input row."""
     h = _run_backbone_forward(
         model,
         input_ids,
@@ -994,6 +994,41 @@ def _run_forward(
         cache_index,
     )
 
+    return _logits_from_hidden(model, h)
+
+
+def _run_prefill_next_logits(
+    model,
+    input_ids,
+    position_ids,
+    attn_mask,
+    key_caches,
+    value_caches,
+    cache_index,
+):
+    """Return final-row logits [B, 1, V] after the full backbone and cache writes.
+
+    This optional generation driver has the same arguments as _run_forward.
+    Generation consumes only the last row of each prefill chunk or decode call.
+    Single-row inputs use the same head input as _run_forward, so decode is
+    unchanged.
+    A smaller head matmul can round differently from the all-row calculation.
+    """
+    h = _run_backbone_forward(
+        model,
+        input_ids,
+        position_ids,
+        attn_mask,
+        key_caches,
+        value_caches,
+        cache_index,
+    )
+    if h.shape[1] > 1:
+        h = h[:, -1:, :]
+    return _logits_from_hidden(model, h)
+
+
+def _logits_from_hidden(model, h):
     logits = model.lm_head(h)
 
     cap = text_config(model.config).final_logit_softcapping
