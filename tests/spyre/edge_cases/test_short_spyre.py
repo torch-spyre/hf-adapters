@@ -24,27 +24,41 @@ pytestmark = pytest.mark.model_harness("causal")
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_short_block_minus_one_spyre(model_path: str) -> None:
-    ok, detail = run_greedy_case(model_path, "short_block_minus_one")
+def test_short_block_minus_one_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    ok, detail = run_greedy_case(
+        model_path, "short_block_minus_one", trust_remote_code=trust_remote_code
+    )
     assert ok, detail
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_short_cross_block_spyre(model_path: str) -> None:
-    ok, detail = run_greedy_case(model_path, "short_cross_block")
+def test_short_cross_block_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    ok, detail = run_greedy_case(
+        model_path, "short_cross_block", trust_remote_code=trust_remote_code
+    )
     assert ok, detail
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_short_one_token_spyre(model_path: str) -> None:
-    ok, detail = run_greedy_case(model_path, "short_one_token")
+def test_short_one_token_spyre(model_path: str, trust_remote_code: bool | None) -> None:
+    ok, detail = run_greedy_case(
+        model_path, "short_one_token", trust_remote_code=trust_remote_code
+    )
     assert ok, detail
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
 @pytest.mark.slow
-def test_short_two_blocks_plus_spyre(model_path: str) -> None:
-    ok, detail = run_greedy_case(model_path, "short_two_blocks_plus")
+def test_short_two_blocks_plus_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    ok, detail = run_greedy_case(
+        model_path, "short_two_blocks_plus", trust_remote_code=trust_remote_code
+    )
     assert ok, detail

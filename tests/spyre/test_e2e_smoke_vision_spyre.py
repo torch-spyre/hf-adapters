@@ -53,6 +53,7 @@ from hf_adapters.auto_spyre_model import dtype_for_model_path
 from tests._vision_helpers import build_vlm_batch, load_smoke_test_images
 from tests.model_registry import (
     NON_BLOCKING_VISION_MODELS,
+    REMOTE_CODE_PATHS,
     VISION_PATHS,
     xfail_non_blocking,
 )
@@ -71,6 +72,7 @@ def _run_single_image(
     label: str,
     prompt: str,
     image: Any,
+    trust_remote_code: bool | None = None,
 ) -> dict[str, Any]:
     """Run generate for one image and return a per-image result dict.
 
@@ -79,7 +81,9 @@ def _run_single_image(
 
     TTFT and ITL are printed by the shared generate loop via ``timing=True``.
     """
-    processor_i, batch = build_vlm_batch(model_path, prompt, image)
+    processor_i, batch = build_vlm_batch(
+        model_path, prompt, image, trust_remote_code=trust_remote_code
+    )
     batch["pixel_values"] = batch["pixel_values"].to(dtype)
 
     # --- Full generation (timing printed by the shared generate loop) ---------
@@ -126,7 +130,9 @@ def _run_single_image(
     }
 
 
-def run_vision_smoke_test(model_path: str) -> dict[str, Any]:
+def run_vision_smoke_test(
+    model_path: str, trust_remote_code: bool | None = None
+) -> dict[str, Any]:
     """Load model once, then run all SMOKE_TEST_IMAGES through it in sequence.
 
     Returns a result dict with per-image results and overall load time.
@@ -136,11 +142,15 @@ def run_vision_smoke_test(model_path: str) -> dict[str, Any]:
     print(f"  loading from {model_path}")
     print(f"{'=' * 70}")
 
-    dtype = dtype_for_model_path(model_path, target_device="spyre")
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
+    dtype = dtype_for_model_path(
+        model_path, target_device="spyre", trust_remote_code=trust_remote_code
+    )
 
     t0 = time.time()
     model = AutoSpyreModelForImageTextToText.from_pretrained(
-        model_name_or_path=model_path, dtype=dtype
+        model_name_or_path=model_path, dtype=dtype, trust_remote_code=trust_remote_code
     )
     load_time = time.time() - t0
     print(f"  Load time: {load_time:.1f}s")
@@ -152,7 +162,15 @@ def run_vision_smoke_test(model_path: str) -> dict[str, Any]:
     image_results = []
     for label, prompt, image in smoke_images:
         print(f"\n  [{label}] prompt: {prompt!r}")
-        result = _run_single_image(model, dtype, model_path, label, prompt, image)
+        result = _run_single_image(
+            model,
+            dtype,
+            model_path,
+            label,
+            prompt,
+            image,
+            trust_remote_code=trust_remote_code,
+        )
         print(f"  [{label}] output: {result['text']!r}")
         print(f"  [{label}] gen: {result['gen_s']:.1f}s  status: {result['status']}")
         image_results.append(result)
@@ -169,8 +187,10 @@ def run_vision_smoke_test(model_path: str) -> dict[str, Any]:
 @pytest.mark.parametrize(
     "model_path", xfail_non_blocking(VISION_PATHS, table=NON_BLOCKING_VISION_MODELS)
 )
-def test_e2e_smoke_vision_spyre(model_path: str) -> None:
-    result = run_vision_smoke_test(model_path)
+def test_e2e_smoke_vision_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    result = run_vision_smoke_test(model_path, trust_remote_code=trust_remote_code)
 
     print("\n## E2E Vision Smoke Test Results\n")
     print("| Image | Status | Tokens | Generated Text | Gen (s) |")

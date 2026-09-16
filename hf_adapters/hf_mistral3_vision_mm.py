@@ -256,6 +256,7 @@ def _logits_from_embeds(
     cache_index,
     image_features=None,
     vision_mask=None,
+    input_ids=None,
 ):
     """Run text backbone over embeds + LM head → logits."""
     h = _run_text_backbone(

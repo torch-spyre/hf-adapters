@@ -17,7 +17,7 @@ from transformers import AutoModelForMaskedLM, AutoTokenizer
 
 from hf_adapters import AutoSpyreModelForMaskedLM
 from hf_adapters.auto_spyre_model import dtype_for_model_path
-from tests.model_registry import MASKED_LM_PATHS
+from tests.model_registry import MASKED_LM_PATHS, REMOTE_CODE_PATHS
 
 pytestmark = pytest.mark.model_harness("masked_lm")
 
@@ -29,8 +29,14 @@ COSINE_THRESHOLD = 0.99
 
 
 @pytest.mark.parametrize("model_path", MASKED_LM_PATHS, ids=MASKED_LM_PATHS)
-def test_e2e_masked_lm_compare_spyre(model_path: str) -> None:
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+def test_e2e_masked_lm_compare_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path, trust_remote_code=trust_remote_code
+    )
     assert tokenizer.mask_token is not None
     encoded = tokenizer(
         [prompt.format(mask=tokenizer.mask_token) for prompt in PROMPTS],
@@ -41,8 +47,11 @@ def test_e2e_masked_lm_compare_spyre(model_path: str) -> None:
 
     ref_model = AutoModelForMaskedLM.from_pretrained(
         model_path,
-        dtype=dtype_for_model_path(model_path, target_device="cpu"),
+        dtype=dtype_for_model_path(
+            model_path, target_device="cpu", trust_remote_code=trust_remote_code
+        ),
         device_map="cpu",
+        trust_remote_code=trust_remote_code,
     ).eval()
     with torch.no_grad():
         ref_logits = ref_model(**encoded, return_dict=True).logits.float()
@@ -50,7 +59,11 @@ def test_e2e_masked_lm_compare_spyre(model_path: str) -> None:
     gc.collect()
 
     model = AutoSpyreModelForMaskedLM.from_pretrained(
-        model_path, dtype=dtype_for_model_path(model_path, target_device="spyre")
+        model_path,
+        dtype=dtype_for_model_path(
+            model_path, target_device="spyre", trust_remote_code=trust_remote_code
+        ),
+        trust_remote_code=trust_remote_code,
     )
     with torch.no_grad():
         logits = model(**encoded, return_dict=True).logits.float()

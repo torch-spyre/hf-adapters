@@ -130,7 +130,11 @@ jobs:
     needs: [detect-label]
     uses: ./.github/workflows/_test_matrix.yaml
     with:
-      image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
+      # Per-PR ephemeral image label when provided, else the merge-queue or
+      # standing set for this event.
+      image_label: ${{ inputs.runner_label
+        || (github.event_name == 'merge_group' && 'image_torch_spyre_mq')
+        || 'image_torch_spyre' }}
       extra_test_flags: -vvv -s
       extra_test_flags_multi_spyre: -vvv -s
       ref: ${{ inputs.ref || '' }}

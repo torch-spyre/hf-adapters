@@ -222,6 +222,13 @@ jobs:
       repository: ${{ inputs.repository || '' }}
       test_type: ${{ inputs.test_type || 'integration' }}
       models: ${{ (inputs.models != '' && inputs.models) || needs.resolve-models.outputs.models || '' }}
+      # Run on the torch-spyre baked into the (possibly ephemeral, per-PR) image
+      # this run was dispatched onto -- do NOT resolve/pin origin/main, which
+      # would `git checkout --force` away the exact torch-spyre version this
+      # integration run exists to test (issue #449 review). Every other caller
+      # (test_pull_request / test_daily / push-to-clickhouse) omits this, keeping
+      # the default false = pin origin/main once across the run.
+      prebaked_image: true
 
   # ----------------------------------------------------------------------------------
   # Fan-in gate job so callers can poll a single stable job name for pass/fail.
