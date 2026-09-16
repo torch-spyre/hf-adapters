@@ -25,6 +25,7 @@ which models are supported on Spyre.
 | Phi-3.5 mini | phi3 | 96→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | OLMo 1B | olmo | 128 | 64 | Yes | Yes | Yes | Yes |
 | OLMo2 1B | olmo2 | 128 | 64 | Yes | Yes | Yes | Yes |
+| OLMoE 1B-7B | olmoe | 128 | 64 | Yes | Yes | Yes | Yes |
 | Falcon 3 1B | llama | 256 | 128 | Yes | Yes | Yes | Yes |
 | DeepSeek-Coder 1.3B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
 | Yi 1.5 6B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
@@ -55,6 +56,11 @@ carried sum). Decode uses per-token expert gather with BMM. Both paths compile
 and run end-to-end; the decode path is a single compiled graph (attention +
 layernorms + FFN/MoE fused). Token-compare: 5/5 top-1 agreement with proper
 chat-template tokenization (PR#385).
+
+**OLMoE 1B-7B:** 64 experts, top-8 routing with the checkpoint's
+unnormalized selected probabilities. Prefill evaluates all experts persistently;
+decode gathers only the selected experts. The BF16 path compiles and runs
+end-to-end with 5/5 top-1 agreement against the CPU reference.
 
 ### Vision-Language (image→text)
 
@@ -161,8 +167,8 @@ and four decode steps. Gemma 4 E2B and E4B both pass that check.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 33 adapters · 57 verified checkpoints · 10K+ compatible models.
-The 57 verified rows are 34 generative + 13 embedding + 2 seq-classification +
+**Coverage:** 37 adapters · 58 verified checkpoints · 10K+ compatible models.
+The 59 verified rows are 36 generative + 13 embedding + 2 seq-classification +
 2 token-classification + 6 vision-language (see the Verified Checkpoints tables
 above). `hf_siglip_vision` and `hf_pixtral_vision` are bare vision-tower components
 used by VLM adapters and are not included in the adapter count. The three DSpark
@@ -202,6 +208,7 @@ pattern, norms, and weight layout.
 | hf\_gemma2.py | gemma2 | 1 | Gemma 2 2B and Gemma 2 fine-tunes. |
 | hf\_olmo.py | olmo | 1 | OLMo 7B |
 | hf\_olmo2.py | olmo2 | 1 | OLMo 2 7B |
+| hf\_olmoe.py | olmoe | 1 | OLMoE-1B-7B-0125 and OLMoE fine-tunes with the same SiLU/no-QKV-clipping configuration |
 | hf\_gpt2.py | gpt2 | 1 | GPT-2 medium/large/xl, DistilGPT-2, Cerebras-GPT (111M–6.7B) |
 | hf\_gpt\_neo.py | gpt_neo | 1 | GPT-Neo 1.3B/2.7B, GPT-Neo-style fine-tunes |
 | hf\_opt.py | opt | 1 | OPT 350M/1.3B/2.7B/6.7B and OPT fine-tunes |
