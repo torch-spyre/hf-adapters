@@ -24,7 +24,7 @@ import torch.nn as nn
 
 FP8_DTYPE = torch.float8_e4m3fn
 FP8_MAX = 448.0  # torch.finfo(torch.float8_e4m3fn).max
-SCALE_EPS = 1e-4  # keeps reciprocal(x_scale) finite for all-zero rows
+SCALE_EPS = 1e-4  # CPU path: keeps reciprocal(x_scale) finite for all-zero rows
 
 # TODO: o_proj and down_proj fail torch-spyre FP8 codegen (DtException on
 # o_proj, ReStickifyOpHBM on SEN143_FP8 for down_proj); kept fp16 until fixed.
@@ -60,14 +60,18 @@ class FP8Linear(nn.Module):
         out_shape = (*x.shape[:-1], self.out_features)
 
         if x.device.type == "spyre":
+            # Fused per-token scale (torch-spyre#3457). clone() gives x_scale a
+            # fresh layout; inherited rank-reducing ancestry otherwise breaks
+            # the multi-arg rescale in layout propagation.
+            x_scale = torch.ops.spyre.quantscalepertokenfp8(x, FP8_MAX).clone()
             # clone() gives x_scale a fresh layout; inherited rank-reducing
             # ancestry (e.g. o_proj's input) otherwise breaks the multi-arg
             # rescale in layout propagation.
-            x_scale = (
-                (x.abs().amax(dim=-1, keepdim=True) * (1.0 / FP8_MAX))
-                .clamp(min=SCALE_EPS)
-                .clone()
-            )
+            # x_scale = (
+            #     (x.abs().amax(dim=-1, keepdim=True) * (1.0 / FP8_MAX))
+            #     .clamp(min=SCALE_EPS)
+            #     .clone()
+            # )
             wq = (
                 self.weight
                 if self.prequantized
