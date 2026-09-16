@@ -316,6 +316,7 @@ def _logits_from_embeds(
     cache_index,
     deepstack=None,
     vision_mask=None,
+    input_ids=None,
 ):
     """Run text backbone over embeds + LM head / logits scaling -> logits.
 

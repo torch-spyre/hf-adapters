@@ -45,7 +45,7 @@ from tests.conftest import (
     resolve_adapter_module_for_test,
 )
 from tests.cpu.conftest import _unwrap_compiled_blocks
-from tests.model_registry import CAUSAL_PATHS
+from tests.model_registry import CAUSAL_PATHS, REMOTE_CODE_PATHS
 
 pytestmark = pytest.mark.model_harness("causal")
 
@@ -162,12 +162,18 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=NUM_DECODE
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
-def test_auto_loader(model_path):
+def test_auto_loader(model_path, trust_remote_code):
     auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path, trust_remote_code=trust_remote_code
+    )
 
     # Phase 1: auto-loader generate
-    model = auto_spyre_model.AutoSpyreModelForCausalLM.from_pretrained(model_path)
+    model = auto_spyre_model.AutoSpyreModelForCausalLM.from_pretrained(
+        model_path, trust_remote_code=trust_remote_code
+    )
     _unwrap_compiled_blocks(model)
     encoded = encode_generation_inputs(tokenizer, [PROMPT])
     auto_sequences = model.generate(
@@ -183,8 +189,12 @@ def test_auto_loader(model_path):
     gc.collect()
 
     # Phase 2: HF reference (fresh)
-    adapter_mod = resolve_adapter_module_for_test(model_path)
-    hf_model = load_ref_model(model_path, adapter_mod)
+    adapter_mod = resolve_adapter_module_for_test(
+        model_path, trust_remote_code=trust_remote_code
+    )
+    hf_model = load_ref_model(
+        model_path, adapter_mod, trust_remote_code=trust_remote_code
+    )
     encoded = encode_prompts(tokenizer, PROMPT)
     with torch.no_grad():
         hf_out = hf_model.generate(

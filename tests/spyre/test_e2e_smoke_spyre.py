@@ -22,8 +22,10 @@ Verifies:
 
 Usage (on Spyre pod)::
 
-    pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py
-    pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k qwen3
+    pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py                                                  # all representative models
+    pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py -k "Qwen3-0.6B"                                  # one model by path substring
+    pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py --model-path Qwen/Qwen3-0.6B                     # exact model by HF path
+    pytest -s -vvv tests/spyre/test_e2e_smoke_spyre.py --model-path ibm-granite/granite-3.3-8b-instruct  # model not in default collection
 """
 
 import time
@@ -35,28 +37,38 @@ from tests.conftest import encode_generation_inputs
 from tests.model_registry import (
     CAUSAL_PATHS,
     NON_BLOCKING_CAUSAL_MODELS,
+    REMOTE_CODE_PATHS,
     xfail_non_blocking,
 )
 
 pytestmark = pytest.mark.model_harness("causal")
 
 
-def run_smoke_test(model_path: str) -> dict[str, Any]:
+def run_smoke_test(
+    model_path: str, trust_remote_code: bool | None = None
+) -> dict[str, Any]:
     """Load model, generate 5 tokens, validate output. Returns a result dict."""
     from transformers import AutoTokenizer
 
     from hf_adapters import AutoSpyreModelForCausalLM
+
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
 
     print(f"\n{'=' * 70}")
     print(f"  loading from {model_path}")
     print(f"{'=' * 70}")
 
     t0 = time.time()
-    model = AutoSpyreModelForCausalLM.from_pretrained(model_path)
+    model = AutoSpyreModelForCausalLM.from_pretrained(
+        model_path, trust_remote_code=trust_remote_code
+    )
     load_time = time.time() - t0
     print(f"  Load time: {load_time:.1f}s")
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path, trust_remote_code=trust_remote_code
+    )
     prompt = "The capital of France is"
     print(f"  Prompt: {prompt!r}")
 
@@ -107,8 +119,8 @@ def run_smoke_test(model_path: str) -> dict[str, Any]:
 @pytest.mark.parametrize(
     "model_path", xfail_non_blocking(CAUSAL_PATHS, table=NON_BLOCKING_CAUSAL_MODELS)
 )
-def test_e2e_smoke_spyre(model_path: str) -> None:
-    result = run_smoke_test(model_path)
+def test_e2e_smoke_spyre(model_path: str, trust_remote_code: bool | None) -> None:
+    result = run_smoke_test(model_path, trust_remote_code=trust_remote_code)
     print("\n## E2E Smoke Test Results\n")
     print("| Model | Status | Tokens | Generated Text | Load (s) | Gen (s) |")
     print("|-------|--------|--------|----------------|----------|---------|")

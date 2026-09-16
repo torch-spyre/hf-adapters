@@ -40,7 +40,7 @@ from hf_adapters.auto_spyre_model import (
     SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING,
     resolve_adapter_module,
 )
-from tests.model_registry import RERANKER_PATHS
+from tests.model_registry import REMOTE_CODE_PATHS, RERANKER_PATHS
 from tests.spyre._seq_classification_helpers import run_seq_classification_cpu_vs_spyre
 
 pytestmark = pytest.mark.model_harness("reranker")
@@ -65,12 +65,19 @@ SCORE_ATOL: float = 0.5
 
 
 @pytest.mark.parametrize("model_path", RERANKER_PATHS, ids=RERANKER_PATHS)
-def test_e2e_reranker_compare_spyre(model_path: str) -> None:
+def test_e2e_reranker_compare_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
     adapter = resolve_adapter_module(
         model_path,
         mapping=SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+        trust_remote_code=trust_remote_code,
     )
-    result = run_seq_classification_cpu_vs_spyre(model_path, adapter, PAIRS)
+    result = run_seq_classification_cpu_vs_spyre(
+        model_path, adapter, PAIRS, trust_remote_code=trust_remote_code
+    )
 
     ref_scores = result["ref_logits"][:, 0]
     spyre_scores = result["spyre_logits"][:, 0]

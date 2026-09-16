@@ -44,6 +44,7 @@ from tests.cpu.conftest import _set_rope_dtype, _unwrap_compiled_blocks
 from tests.model_registry import (
     CAUSAL_PATHS,
     NON_BLOCKING_CAUSAL_MODELS,
+    REMOTE_CODE_PATHS,
     xfail_non_blocking,
 )
 
@@ -53,26 +54,36 @@ pytestmark = pytest.mark.model_harness("causal")
 @pytest.mark.parametrize(
     "model_path", xfail_non_blocking(CAUSAL_PATHS, table=NON_BLOCKING_CAUSAL_MODELS)
 )
-def test_multibatch(model_path: str) -> None:
+def test_multibatch(model_path: str, trust_remote_code: bool | None) -> None:
     from hf_adapters.auto_spyre_model import dtype_for_model_path
 
     hf_common_mod = sys.modules["hf_adapters.hf_common"]
-    adapter_mod = resolve_adapter_module_for_test(model_path)
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
+    adapter_mod = resolve_adapter_module_for_test(
+        model_path, trust_remote_code=trust_remote_code
+    )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path, trust_remote_code=trust_remote_code
+    )
 
     # HF reference (per-prompt, BEFORE patching for cleanliness)
-    model = load_ref_model(model_path, adapter_mod)
+    model = load_ref_model(model_path, adapter_mod, trust_remote_code=trust_remote_code)
     hf_outputs = hf_reference_outputs(model, tokenizer, PROMPTS, MAX_NEW_TOKENS)
     del model
     gc.collect()
 
     # Adapter batched generate
     encoded = encode_generation_inputs(tokenizer, PROMPTS)
-    model = load_ref_model(model_path, adapter_mod)
+    model = load_ref_model(model_path, adapter_mod, trust_remote_code=trust_remote_code)
     adapter_mod.prepare_for_spyre(model)
     _unwrap_compiled_blocks(model)
-    dtype = dtype_for_model_path(model_path, target_device="cpu")
+    dtype = dtype_for_model_path(
+        model_path,
+        target_device="cpu",
+        trust_remote_code=trust_remote_code,
+    )
     _set_rope_dtype(model, dtype)
     sequences = hf_common_mod.generate(
         adapter_mod._run_forward,
