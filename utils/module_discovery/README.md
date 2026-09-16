@@ -32,20 +32,50 @@ There are two steps:
 
 ```bash
 uv sync --group dev --group spyre --group test
+uv pip install mistral_common[opencv]
 ```
 
 ### Run
 
 ```bash
 # Stock HuggingFace modules
-python utils/module_discovery/auto_generate_module_config.py \
+uv run python utils/module_discovery/auto_generate_module_config.py \
     --model_path ibm-granite/granite-3.3-8b-instruct \
     --seq_len 128
 
+
 # hf-adapters (Spyre) modules
-python utils/module_discovery/auto_generate_module_config.py \
+uv run python utils/module_discovery/auto_generate_module_config.py \
     --model_path ibm-granite/granite-3.3-8b-instruct \
     --seq_len 128 --loader spyre
+
+# More than one decoder layer (default is layer 0 only)
+python utils/module_discovery/auto_generate_module_config.py \
+    --model_path ibm-granite/granite-3.3-8b-instruct \
+    --seq_len 128 --capture_layers 0,1
+```
+
+#### Generate YAML files for Stock HuggingFace modules
+```
+uv run python utils/module_discovery/auto_generate_module_config.py --model_path ibm-granite/granite-3.3-8b-instruct --seq_len 128 --loader hf --max_cache_len 2048
+uv run python utils/module_discovery/auto_generate_module_config.py --model_path ibm-granite/granite-4.1-8b --seq_len 128 --loader hf --max_cache_len 2048
+uv run python utils/module_discovery/auto_generate_module_config.py --model_path meta-llama/Meta-Llama-3.1-8B-Instruct --seq_len 128 --loader hf --max_cache_len 2048
+uv run python utils/module_discovery/auto_generate_module_config.py --model_path mistralai/Ministral-3-14B-Instruct-2512 --seq_len 128 --loader hf --max_cache_len 2048
+uv run python utils/module_discovery/auto_generate_module_config.py --model_path mistralai/Mistral-Small-3.2-24B-Instruct-2506 --seq_len 128 --loader hf --max_cache_len 2048
+uv run python utils/module_discovery/auto_generate_module_config.py --model_path Qwen/Qwen2.5-7B-Instruct --seq_len 128 --loader hf --max_cache_len 2048
+uv run python utils/module_discovery/auto_generate_module_config.py --model_path google/gemma-4-12B-it --seq_len 128 --capture_layers 0,5 --loader hf --max_cache_len 2048
+uv run python utils/module_discovery/auto_generate_module_config.py --model_path openai/gpt-oss-20b --seq_len 128 --capture_layers 0,1 --loader hf --max_cache_len 2048
+```
+
+#### Generate YAML files for hf-adapters (Spyre) modules
+```
+uv run python utils/module_discovery/auto_generate_module_config.py --model_path ibm-granite/granite-3.3-8b-instruct --seq_len 128 --loader spyre
+uv run python utils/module_discovery/auto_generate_module_config.py --model_path ibm-granite/granite-4.1-8b --seq_len 128 --loader spyre
+uv run python utils/module_discovery/auto_generate_module_config.py --model_path meta-llama/Meta-Llama-3.1-8B-Instruct --seq_len 128 --loader spyre
+uv run python utils/module_discovery/auto_generate_module_config.py --model_path mistralai/Ministral-3-14B-Instruct-2512 --seq_len 128 --loader spyre
+uv run python utils/module_discovery/auto_generate_module_config.py --model_path mistralai/Mistral-Small-3.2-24B-Instruct-2506 --seq_len 128 --loader spyre
+uv run python utils/module_discovery/auto_generate_module_config.py --model_path Qwen/Qwen2.5-7B-Instruct --seq_len 128 --loader spyre
+uv run python utils/module_discovery/auto_generate_module_config.py --model_path google/gemma-4-12B-it --seq_len 128 --capture_layers 0,5 --loader spyre
 ```
 
 Arguments:
@@ -54,13 +84,15 @@ Arguments:
 |------|---------|---------|
 | `--model_path` | *(required)* | HuggingFace model path/id |
 | `--seq_len` | `128` | Prompt sequence length. Under `--loader spyre` this is a *target*: `generate()` block-pads it to a multiple of `BLOCK_SIZE`, and the padded length is what gets recorded |
-| `--output` | `<model>.yaml` (hf) / `<model>adapter.yaml` (spyre) | Output YAML path, under `./tests/configs/module_tests/`. The defaults differ so the two loaders never overwrite each other |
+| `--output` | `<model>.yaml` (hf) / `<model>_adapter.yaml` (spyre) | Output YAML path, under `./tests/configs/module_tests/`. The model name is used as-is (`granite-3.3-8b-instruct.yaml`), and the `_adapter` suffix keeps the two loaders from overwriting each other |
 | `--loader` | `hf` | Capture path (see the table above) |
 | `--dtype` | `bfloat16` (hf) / `float16` (spyre) | Load dtype. The spyre default matches `AutoSpyreModelForCausalLM`; `auto` consults the adapter registry's per-model dtype |
 | `--device` | `spyre` | **`--loader spyre` only.** Patches `hf_common.DEVICE`. Pass `cpu` for an off-pod dry run (no `torch_spyre` needed) |
 | `--max_new_tokens` | `3` | **`--loader spyre` only.** Decode steps to run; `>= 2` reaches both forward shapes — see below |
 | `--no_static_cache` | off | **`--loader hf` only.** Use the model's default dynamic KV cache instead of a `StaticCache` |
 | `--max_cache_len` | `2048` | **`--loader hf` only.** `StaticCache` capacity |
+| `--capture_layers` | `0` | Comma-separated decoder layer indices to capture, or `all`. Applies to **both** loaders — see below |
+| `--capture_device` | *(model stays on CPU)* | **`--loader hf` only.** Device to *run* the capture forward on (`cpu` / `cuda` / `cuda:1` / `spyre`). Distinct from `--device`, which applies to `--loader spyre` |
 
 The same work is available programmatically, so a caller can drive capture without
 the CLI:
@@ -77,7 +109,9 @@ generate_spyre_module_config(
 ```
 
 `main()` is a thin wrapper over this function, so the CLI and the API produce
-identical YAML.
+identical YAML. `generate_module_config()` is the equivalent entry point for the `hf`
+path; both take `capture_layers` as a set of indices (`None` = layer 0 only, or pass
+`CAPTURE_ALL_LAYERS` for every layer).
 
 The generated YAML:
 
@@ -90,16 +124,44 @@ The generated YAML:
 - stores each module's captured forward-input shapes/dtypes in `forward_inputs`, one
   entry per distinct invocation pattern.
 
+### Which layers get captured
+
+By default only **decoder layer 0** is recorded — one representative layer. A decoder
+stack repeats the same shapes in every layer, so capturing more multiplies the YAML and
+the number of compiled binaries in the module test for little extra coverage. Prefer a
+couple of representatives:
+
+```bash
+--capture_layers 0        # default
+--capture_layers 0,1,39   # first, second, last
+--capture_layers all      # every layer
+```
+
+Modules **outside** any decoder layer (`model.norm`, `lm_head`, and `rotary_emb` on most
+architectures) exist once rather than once per layer, so they are always recorded
+regardless of this flag.
+
+The filter applies to both loaders: `prepare_for_spyre()` replaces `layers[i]` in place,
+so the `named_modules()` paths stay `…layers.N…` and one filter covers both paths.
+
+### `--capture_device` (hf loader)
+
+`--capture_device` chooses where the capture forward pass *executes* while inputs are
+recorded — useful to capture a large model on a GPU instead of CPU. It does **not**
+change the `device` written into the generated tensor specs, which stays `spyre`,
+because that is where the module test runs.
+
 ### One entry per execution phase
 
 A module is called with different shapes in different phases of generation, and each
 phase becomes **its own YAML entry**, with the phase in the name:
 
 ```
-GraniteMLP_77d2613c_prefill
-GraniteMLP_77d2613c_decode
-Linear_e6950b45_prefill_h4096     # width suffix, see below
-Linear_e6950b45_prefill_h12800
+GraniteMLP_layer0_prefill         # layer suffix, see below
+GraniteMLP_layer0_decode
+Linear_layer0_prefill_h4096       # width suffix, see below
+Linear_layer0_prefill_h12800
+Linear_e6950b45_prefill           # lm_head: outside any layer, so hashed
 ```
 
 This exists because upstream builds the test name from the module class, not from the
@@ -134,12 +196,33 @@ when there is no 3-D tensor (token ids arrive as `[batch, seq_len]`). A module w
 neither rank is present is left as a single unsplit entry and logged, rather than
 risking a wrong label.
 
+**Layer suffix.** A module inside a decoder layer is named `<Class>_layer<N>`, so each
+captured layer gets its own entry and test id (`GraniteMLP_layer0`,
+`GraniteRMSNorm_4096_layer0`). Modules **outside** any layer keep the older
+`<Class>_<hash>` form (`Embedding_4c1a0852`, `Linear_e6950b45` for the LM head), where
+the hash is of the config signature — it is still needed there to separate variants.
+
+Suffixes are appended in a fixed order — layer, then phase, then the width/scalar
+disambiguators below — so a name stays stable as axes are added:
+
+```
+GraniteRMSNorm_4096_layer0_prefill    # in-layer norm, layer 0, prompt pass
+GraniteRMSNorm_4096_prefill           # model.norm — outside any layer, no suffix
+```
+
 **Width suffix.** One class can be used at more than one width under the same config —
 `nn.Linear` serves both the `4096→12800` and `12800→4096` halves of a gated MLP, and
 both are captured under one config signature. Where that leaves two invocations sharing
-a phase, the feature width is appended (`Linear_..._decode_h4096`) so each still gets
+a phase, the feature width is appended (`Linear_layer0_decode_h4096`) so each still gets
 its own entry and test id. Modules without such a collision keep the short
 `<name>_<phase>` form.
+
+**Scalar suffix.** Where a phase label is reused *and* the widths match too, a scalar
+argument that differs across those invocations is appended as a last axis. It is computed
+per label group, so a scalar that varies only between prefill and decode — already
+covered by the phase label — never enters the name. If two invocations still collide on
+label and width, both are kept in one entry and a warning is logged, since the test id
+cannot then say which one failed.
 
 ### `--loader spyre` specifics
 
@@ -222,11 +305,12 @@ If you want to do edtable install, see the vLLM section below for the one-time `
 ```bash
 uv run \
     tests/run_oot_module_configs.sh \
-    "$(pwd)/tests/configs/module_tests/granite_3_3_8b_instruct.yaml" \
+    "$(pwd)/tests/configs/module_tests/granite-3.3-8b-instruct.yaml" \
     -v -s -rsadp
 ```
 
-Add `-k <pattern>` to narrow to one module while iterating, e.g. `-k Attention`.
+Add `-k <pattern>` to narrow to one module while iterating, e.g. `-k Attention`,
+`-k prefill`, or `-k layer0` when several layers were captured.
 
 `--no-group spyre` runs on CPU; drop it to run on the Spyre pod. A YAML generated with
 `--loader spyre` carries `device: spyre` input specs and `apply_device_layout`, so it is
@@ -284,7 +368,7 @@ pod and does not use `LLM()`.)
 ```bash
 python utils/module_discovery/auto_generate_module_config_vllm.py \
     --model ibm-granite/granite-3.3-8b-instruct \
-    --seq-len 128 \
+    --seq_len 128 \
     --dtype bfloat16
 ```
 
@@ -293,7 +377,7 @@ Arguments:
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--model` | *(required)* | HuggingFace model path/id |
-| `--seq-len` | `128` | Prefill sequence length |
+| `--seq_len` | `128` | Prefill sequence length |
 | `--dtype` | `bfloat16` | Model load dtype (`bfloat16` / `float16` / `float32`); also written to the YAML `supported_dtypes` |
 | `--model-impl` | `native` | vLLM backend (`native` / `transformers`) |
 | `--output` | `./tests/configs/module_tests/<model>_vllm.yaml` | Output YAML path |

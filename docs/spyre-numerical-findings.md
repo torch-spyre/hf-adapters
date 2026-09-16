@@ -1,5 +1,20 @@
 # Spyre Numerical Accuracy Findings
 
+> **⚠️ Superseded (2026-09-10): the decode-divergence findings below are
+> resolved.** They were recorded against an older torch-spyre pin
+> (`223312d` / `7c6ef99`). The dependency now tracks torch-spyre `main`
+> (`pyproject.toml`), and single-token decode has since been verified working
+> end-to-end on **Granite** and **Qwen3** — both prefill and decode produce
+> correct tokens, with greedy top-1 matching the CPU reference across prefill
+> and multiple decode steps. Specifically, the following sections no longer
+> describe current behavior and are retained only as a historical record:
+> **Decode Divergence** (the `decode-2…4+ = FAIL` table), the "Spyre's dl16
+> RMSNorm accounts for the divergence" conclusion, the "model-side decode bug is
+> upstream of RMSNorm" (`q_proj/k_proj`) note, and the "incoherent garbage after
+> first token" GSM8K sample. The per-op torch-spyre bug records (e.g. the
+> non-contiguous RMSNorm and head-layout issues) remain useful as filed-issue
+> history.
+
 Date: 2026-04-24
 Model: Qwen/Qwen3-0.6B (28 layers, hidden=1024, head_dim=128)
 torch-spyre: upstream main @ `223312d`
@@ -15,6 +30,10 @@ torch-spyre: upstream main @ `223312d`
 **All 50 MMLU predictions were identical.** MMLU requires only 1 generated token (A/B/C/D), so the answer is determined by prefill logits. Prefill accuracy matches GPU exactly.
 
 ## Decode Divergence
+
+> **Resolved (2026-09-10):** the divergence described below no longer occurs on
+> torch-spyre `main`. Decode is verified correct on Granite and Qwen3. Kept as a
+> historical record of the old pin's behavior.
 
 Decode tokens 2+ diverge from GPU due to error accumulation through layers. Verified with `test_e2e_token_compare_v2.py` (fill+expand mode):
 
@@ -131,7 +150,11 @@ Compiled wrapper compare
 
 Issue filed: `torch-spyre/torch-spyre#1781`
 
-### New: model-side decode bug is upstream of RMSNorm
+### Resolved: model-side decode bug is upstream of RMSNorm
+
+> **Resolved (2026-09-10):** this `q_proj/k_proj` decode failure no longer
+> reproduces on torch-spyre `main`; decode is verified correct on Granite and
+> Qwen3. Retained as a historical record.
 
 The latest layer-0 decode-fill repro shows that Spyre `q_proj/k_proj` is
 already wrong on identical inputs before per-head RMSNorm runs, so the current
@@ -189,6 +212,11 @@ Verified correct on CPU (9/9 token match vs HF DynamicCache). The fill+expand bl
 
 ## GSM8K Generation Comparison (Short Sample)
 
+> **Resolved (2026-09-10):** the garbage decode output shown below is from the
+> old torch-spyre pin. On torch-spyre `main`, multi-token generation is correct
+> on Granite and Qwen3 (prefill and decode both match the CPU reference). This
+> sample is retained only to document the historical failure.
+
 Question: "Marin and his neighbor Nancy each eat 4 apples a day. How many apples do they eat in 30 days?"
 
 **GPU (stock HF, A100):**
@@ -223,7 +251,11 @@ Answer::  5:::55
 
 The GPU output shows correct chain-of-thought reasoning. The Spyre output degrades into garbage within the first few tokens — colons, random digits, broken words. This is the dl16 RMSNorm error compounding across 28 layers and multiple decode steps.
 
-**Key insight:** Prefill (first token) matches GPU. Multi-token generation rapidly degrades. Single-token tasks (MMLU) are unaffected; multi-token tasks (GSM8K, open-ended generation) are broken.
+**Key insight (historical):** On the old pin, prefill (first token) matched GPU
+but multi-token generation rapidly degraded — single-token tasks (MMLU) were
+unaffected while multi-token tasks (GSM8K, open-ended generation) were broken.
+This no longer holds: on torch-spyre `main`, multi-token decode is correct on
+Granite and Qwen3.
 
 ## Performance Characteristics
 
