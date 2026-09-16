@@ -19,6 +19,8 @@ evaluating every expert; single-token decode gathers only the selected experts.
 Both paths share one device-resident expert-weight set.
 """
 
+import inspect
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -41,6 +43,7 @@ __all__ = [
 ]
 
 _MOE_TILE = 32  # Decode gather requires tiles with at least two rows.
+_MOE_DOWN_OUTPUT_STICK_TILE = 22  # Best shared prefill/decode layout for Gemma 4.
 
 
 def _name_prefill_inputs(x, gate, up, down):
@@ -432,10 +435,21 @@ class Gemma4MoEBlock(nn.Module):
         return hidden_states, key_cache, value_cache
 
 
-def _move_expert_weight(weight):
+def _move_expert_weight(weight, *, output_stick_tile=None):
     from torch_spyre.model_utils import dma_moe_expert_weight_to_spyre
 
-    moved = dma_moe_expert_weight_to_spyre(weight)
+    supports_output_tile = (
+        "output_stick_tile"
+        in inspect.signature(dma_moe_expert_weight_to_spyre).parameters
+    )
+    if output_stick_tile is None or not supports_output_tile:
+        moved = dma_moe_expert_weight_to_spyre(weight)
+    else:
+        moved = dma_moe_expert_weight_to_spyre(
+            weight, output_stick_tile=output_stick_tile
+        )
+        if moved is None:
+            moved = dma_moe_expert_weight_to_spyre(weight)
     return moved if moved is not None else weight.to("spyre")
 
 
@@ -455,7 +469,11 @@ def _prepare_experts(experts):
 
     down = experts.down_proj.detach().transpose(1, 2).contiguous()
     del experts.down_proj
-    experts.down_proj = _move_expert_weight(down)
+    # Share one physical weight layout between prefill and decode. This blocks
+    # the free dimension into 22-stick bursts while retaining row locality.
+    experts.down_proj = _move_expert_weight(
+        down, output_stick_tile=_MOE_DOWN_OUTPUT_STICK_TILE
+    )
 
 
 def prepare_text_decoder_for_spyre(model):
