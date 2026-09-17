@@ -269,9 +269,9 @@ def _section_verified_on_spyre(
         for m in common
         if not prev_by[m]["verified_on_spyre"] and curr_by[m]["verified_on_spyre"]
     )
-    cpu_ok_spyre_fail = [
-        r for r in curr_rows if r["verified_on_cpu"] and not r["verified_on_spyre"]
-    ]
+    # cpu_ok_spyre_fail = [
+    #     r for r in curr_rows if r["verified_on_cpu"] and not r["verified_on_spyre"]
+    # ]
     # Infrastructure-noise models (their verdict is not about the model)
     infra_noise = [
         r for r in curr_rows if (r.get("failure_category") or "") in _INFRA_CATEGORIES
@@ -313,16 +313,16 @@ def _section_verified_on_spyre(
     else:
         lines.append("    (none)")
 
-    lines += [
-        "",
-        f"  CPU-OK but Spyre-FAIL (currently): {len(cpu_ok_spyre_fail)}",
-    ]
-    if cpu_ok_spyre_fail:
-        cats = Counter(
-            (r.get("failure_category") or "unknown") for r in cpu_ok_spyre_fail
-        )
-        for cat, n in cats.most_common():
-            lines.append(f"    {cat:<40}  {n:>4}")
+    # lines += [
+    #     "",
+    #     f"  CPU-OK but Spyre-FAIL (currently): {len(cpu_ok_spyre_fail)}",
+    # ]
+    # if cpu_ok_spyre_fail:
+    #     cats = Counter(
+    #         (r.get("failure_category") or "unknown") for r in cpu_ok_spyre_fail
+    #     )
+    #     for cat, n in cats.most_common():
+    #         lines.append(f"    {cat:<40}  {n:>4}")
 
     return "\n".join(lines)
 
@@ -657,13 +657,10 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.prev is None:
         prev_date, curr_date = _two_latest_dates(client, table)
-        print(f"Auto-selected dates: prev={prev_date}  curr={curr_date}")
     else:
         prev_date, curr_date = args.prev, args.curr
 
-    print(f"Fetching snapshot {prev_date} …")
     prev_rows = _fetch_snapshot(client, table, prev_date)
-    print(f"Fetching snapshot {curr_date} …")
     curr_rows = _fetch_snapshot(client, table, curr_date)
 
     header = "\n".join(
