@@ -27,7 +27,6 @@ as the rest of the weekly pipeline does — see clickhouse_db.py.
 from __future__ import annotations
 
 import argparse
-import statistics
 import sys
 from collections import Counter
 from datetime import date
@@ -475,7 +474,7 @@ def _section_adapter_coverage(
     lines = [
         "",
         _hr("═"),
-        "2. ADAPTER / CONFIG_CLASS COVERAGE",
+        "2. ADAPTER COVERAGE",
         _hr(),
         f"  Distinct adapters   : {len(prev_adapters):>5}  →  {len(curr_adapters):>5}  ({_delta(len(curr_adapters), len(prev_adapters))})",
         "",
@@ -539,64 +538,62 @@ def _section_family_breakdown(
         if abs(delta_pct) >= 5.0:
             changed.append((fam, delta_pct))
     changed.sort(key=lambda x: x[1])
-
-    lines = [
-        "",
-        _hr("═"),
-        "6. SIZE / FAMILY BREAKDOWN",
-        _hr(),
-        f"  {'family':<30}  {'prev pass':>9}  {'curr pass':>9}  {'delta pp':>8}",
-        f"  {_hr('-', 30)}  {'---------':>9}  {'---------':>9}  {'--------':>8}",
-    ]
-    for fam in all_fams:
-        p_pass, p_tot = prev_fam.get(fam, (0, 0))
-        c_pass, c_tot = curr_fam.get(fam, (0, 0))
-        prev_r = _pct(p_pass, p_tot)
-        curr_r = _pct(c_pass, c_tot)
-        if p_tot > 0 and c_tot > 0:
-            delta_pp = (c_pass / c_tot - p_pass / p_tot) * 100
-            delta_str = f"{delta_pp:+.1f}pp"
-        else:
-            delta_str = "n/a"
-        lines.append(f"  {fam:<30}  {prev_r:>9}  {curr_r:>9}  {delta_str:>8}")
-
-    lines += [
-        "",
-        "  Families with ≥5pp pass-rate change:",
-    ]
     if changed:
-        for fam, delta_pct in changed:
-            lines.append(f"    {fam:<30}  {delta_pct:+.1f}pp")
-    else:
-        lines.append("    (none)")
 
-    # Parameter-size of regressions
-    prev_by = {r["model_name"]: r for r in prev_rows}
-    curr_by = {r["model_name"]: r for r in curr_rows}
-    common = set(prev_by) & set(curr_by)
-    regressed = [
-        curr_by[m]
-        for m in common
-        if prev_by[m]["verified_on_spyre"]
-        and not curr_by[m]["verified_on_spyre"]
-        and not _is_infra_failure(curr_by[m])
-    ]
-    if regressed:
-        sizes: list[int] = sorted(r.get("parameters_number") or 0 for r in regressed)
-        median: int = int(statistics.median(sizes))
+        lines = [
+            "",
+            _hr("═"),
+            "6. FAMILY BREAKDOWN",
+            _hr(),
+            # f"  {'family':<30}  {'prev pass':>9}  {'curr pass':>9}  {'delta pp':>8}",
+            # f"  {_hr('-', 30)}  {'---------':>9}  {'---------':>9}  {'--------':>8}",
+        ]
+        # for fam in all_fams:
+        #     p_pass, p_tot = prev_fam.get(fam, (0, 0))
+        #     c_pass, c_tot = curr_fam.get(fam, (0, 0))
+        #     prev_r = _pct(p_pass, p_tot)
+        #     curr_r = _pct(c_pass, c_tot)
+        #     if p_tot > 0 and c_tot > 0:
+        #         delta_pp = (c_pass / c_tot - p_pass / p_tot) * 100
+        #         delta_str = f"{delta_pp:+.1f}pp"
+        #     else:
+        #         delta_str = "n/a"
+        #     lines.append(f"  {fam:<30}  {prev_r:>9}  {curr_r:>9}  {delta_str:>8}")
+
         lines += [
             "",
-            "  Regressed models — parameter sizes:",
-            f"    count={len(sizes)}, min={min(sizes):,}, median={median:,}, max={max(sizes):,}",
+            "  Families with ≥5pp pass-rate change:",
         ]
+        for fam, delta_pct in changed:
+            lines.append(f"    {fam:<30}  {delta_pct:+.1f}pp")
 
-        # Finer than family: architecture breakdown of the regressions (issue §6).
-        arch_counts: Counter[str] = Counter(
-            (r.get("architecture") or "(unknown)") for r in regressed
-        )
-        lines.append("  Regressed models — architecture breakdown:")
-        for arch, n in arch_counts.most_common():
-            lines.append(f"    {arch:<40}  {n:>4}")
+    # # Parameter-size of regressions
+    # prev_by = {r["model_name"]: r for r in prev_rows}
+    # curr_by = {r["model_name"]: r for r in curr_rows}
+    # common = set(prev_by) & set(curr_by)
+    # regressed = [
+    #     curr_by[m]
+    #     for m in common
+    #     if prev_by[m]["verified_on_spyre"]
+    #     and not curr_by[m]["verified_on_spyre"]
+    #     and not _is_infra_failure(curr_by[m])
+    # ]
+    # if regressed:
+    #     sizes: list[int] = sorted(r.get("parameters_number") or 0 for r in regressed)
+    #     median: int = int(statistics.median(sizes))
+    #     lines += [
+    #         "",
+    #         "  Regressed models — parameter sizes:",
+    #         f"    count={len(sizes)}, min={min(sizes):,}, median={median:,}, max={max(sizes):,}",
+    #     ]
+    #
+    #     # Finer than family: architecture breakdown of the regressions (issue §6).
+    #     arch_counts: Counter[str] = Counter(
+    #         (r.get("architecture") or "(unknown)") for r in regressed
+    #     )
+    #     lines.append("  Regressed models — architecture breakdown:")
+    #     for arch, n in arch_counts.most_common():
+    #         lines.append(f"    {arch:<40}  {n:>4}")
 
     return "\n".join(lines)
 
