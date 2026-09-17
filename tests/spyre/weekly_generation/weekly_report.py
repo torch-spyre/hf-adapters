@@ -156,6 +156,17 @@ def _delta(curr: int, prev: int) -> str:
     return "0"
 
 
+def _is_infra_failure(row: dict[str, Any]) -> bool:
+    """True when the row's verdict is an infrastructure failure, not a model one.
+
+    A ``verified_on_spyre = False`` caused by ``hardware_exception`` /
+    ``worker_crashed`` / ``worker_timeout`` says nothing about the model, so it
+    must not be counted as a regression (nor its later disappearance as a
+    recovery).
+    """
+    return (row.get("failure_category") or "") in _INFRA_CATEGORIES
+
+
 def _pct(numerator: int, denominator: int) -> str:
     if denominator == 0:
         return "n/a"
@@ -257,15 +268,22 @@ def _section_verified_on_spyre(
         r for r in curr_rows if r.get("failure_category") not in _INFRA_CATEGORIES
     ]
 
+    # A PASS→FAIL only counts as a regression if the current FAIL is a real
+    # model failure, not infra noise. Likewise a FAIL→PASS is only a genuine
+    # recovery if the previous FAIL was a real model failure.
     regressed = sorted(
         m
         for m in common
-        if prev_by[m]["verified_on_spyre"] and not curr_by[m]["verified_on_spyre"]
+        if prev_by[m]["verified_on_spyre"]
+        and not curr_by[m]["verified_on_spyre"]
+        and not _is_infra_failure(curr_by[m])
     )
     recovered = sorted(
         m
         for m in common
-        if not prev_by[m]["verified_on_spyre"] and curr_by[m]["verified_on_spyre"]
+        if not prev_by[m]["verified_on_spyre"]
+        and curr_by[m]["verified_on_spyre"]
+        and not _is_infra_failure(prev_by[m])
     )
     # cpu_ok_spyre_fail = [
     #     r for r in curr_rows if r["verified_on_cpu"] and not r["verified_on_spyre"]
@@ -589,7 +607,9 @@ def _section_family_breakdown(
     regressed = [
         curr_by[m]
         for m in common
-        if prev_by[m]["verified_on_spyre"] and not curr_by[m]["verified_on_spyre"]
+        if prev_by[m]["verified_on_spyre"]
+        and not curr_by[m]["verified_on_spyre"]
+        and not _is_infra_failure(curr_by[m])
     ]
     if regressed:
         sizes: list[int] = sorted(r.get("parameters_number") or 0 for r in regressed)
