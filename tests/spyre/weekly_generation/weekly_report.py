@@ -299,8 +299,8 @@ def _section_verified_on_spyre(
         "",
         f"  Infrastructure noise (hardware_exception / worker_crashed / worker_timeout): {len(infra_noise)}",
         "  ⚠ If non-zero, curr verified_on_spyre count is understated for those models.",
-        "",
-        f"  Regressions PASS→FAIL ({len(regressed)}):",
+        "\n"
+        f"  Regressions PASS→FAIL (ignoring infrastructure noise) - {len(regressed)}:",
     ]
     if regressed:
         lines.append(_trunc(regressed))
@@ -314,14 +314,12 @@ def _section_verified_on_spyre(
     else:
         lines.append("    (none)")
 
-    lines += [
-        "",
-        f"  Recoveries FAIL→PASS ({len(recovered)}):",
-    ]
     if recovered:
+        lines += [
+            "",
+            f"  Recoveries FAIL→PASS (ignoring infrastructure noise) - {len(recovered)}:",
+        ]
         lines.append(_trunc(recovered))
-    else:
-        lines.append("    (none)")
 
     # lines += [
     #     "",
