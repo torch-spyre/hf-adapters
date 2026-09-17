@@ -144,6 +144,7 @@ def _steady_state_itl(per_token: list[float]) -> float | None:
 def run_multicard_smoke_test(
     model_path: str,
     max_new_tokens: int = _DEFAULT_MAX_NEW_TOKENS,
+    min_new_tokens: int | None = None,
     dtype: "torch.dtype | None" = None,
     batch_size: int = _DEFAULT_BATCH_SIZE,
     trust_remote_code: bool | None = None,
@@ -293,12 +294,17 @@ def run_multicard_smoke_test(
     def _run_generate() -> tuple[list[str], str]:
         """Run one generate call; return (output_texts_per_seq, captured_stdout)."""
         buf = io.StringIO()
+        gen_kwargs: dict[str, Any] = {
+            "max_new_tokens": max_new_tokens,
+            "do_sample": False,
+            "timing": True,
+        }
+        if min_new_tokens is not None:
+            gen_kwargs["min_new_tokens"] = min_new_tokens
         with contextlib.redirect_stdout(buf):
             sequences = model.generate(
                 **encoded,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                timing=True,
+                **gen_kwargs,
             )
         captured = buf.getvalue()
         print(captured, end="")

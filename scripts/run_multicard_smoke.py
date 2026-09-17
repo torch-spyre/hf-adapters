@@ -24,23 +24,33 @@ SPYRE_DEVICES tells the Flex runtime which card indices to use per rank.
 Index-to-physical-card mapping is handled internally by Flex and is not
 independently verifiable from this script.
 
+1-card example::
+
+    export SPYRE_DEVICES=0
+    torchrun --nproc-per-node=1 --master-port=29500 \\
+        scripts/run_multicard_smoke.py --dtype float16
+
 2-card example (valid indices are node-specific — check yours first)::
 
     export SPYRE_DEVICES=0,1
-    export PYTHONPATH=/path/to/hf-adapters
     torchrun --nproc-per-node=2 --master-port=29500 \\
         scripts/run_multicard_smoke.py --dtype float16
 
 4-card example::
 
     export SPYRE_DEVICES=0,1,2,3
-    export PYTHONPATH=/path/to/hf-adapters
     torchrun --nproc-per-node=4 --master-port=29500 \\
         scripts/run_multicard_smoke.py --dtype float16
 
-Single-card::
+Use ``--max-new-tokens`` to control output length.  By default the model
+stops at EOS (typically just a few tokens).  Pass ``--min-new-tokens``
+equal to ``--max-new-tokens`` to suppress EOS and force exactly N tokens
+every run — useful for consistent latency benchmarking::
 
-    python scripts/run_multicard_smoke.py
+    export SPYRE_DEVICES=0
+    torchrun --nproc-per-node=1 --master-port=29500 \\
+        scripts/run_multicard_smoke.py --dtype float16 \\
+        --max-new-tokens 256 --min-new-tokens 256
 
 The --model argument accepts any HuggingFace repo ID or local path
 (default: ibm-granite/granite-3.3-8b-instruct).
@@ -94,6 +104,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Torch dtype to pass to AutoSpyreModelForCausalLM.from_pretrained "
             "(e.g. float16, bfloat16, float32).  Omit to let the model decide."
+        ),
+    )
+    parser.add_argument(
+        "--min-new-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Suppress EOS until this many tokens have been generated.  "
+            "Set equal to --max-new-tokens to force exactly N tokens every run "
+            "(useful for latency benchmarking).  Omit to let the model stop naturally."
         ),
     )
     parser.add_argument(
@@ -158,6 +178,7 @@ def main(argv: list[str] | None = None) -> None:
     result = run_multicard_smoke_test(
         args.model,
         args.max_new_tokens,
+        min_new_tokens=args.min_new_tokens,
         dtype=dtype,
         batch_size=args.batch,
     )
