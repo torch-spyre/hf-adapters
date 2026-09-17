@@ -305,7 +305,7 @@ def _section_verified_on_spyre(
     if regressed:
         lines.append(_trunc(regressed))
         # Annotate with failure_category
-        lines.append("  Failure categories for regressed models:")
+        lines.append("\n  Failure categories for regressed models:")
         cats = Counter(
             (curr_by[m].get("failure_category") or "unknown") for m in regressed
         )
@@ -463,15 +463,6 @@ def _section_adapter_coverage(
     new_adapters = sorted(curr_adapters - prev_adapters)
     lost_adapters = sorted(prev_adapters - curr_adapters)
 
-    prev_covered = _covered_classes(prev_rows)
-    curr_covered = _covered_classes(curr_rows)
-    newly_covered = sorted(curr_covered - prev_covered)
-    lost_covered = sorted(prev_covered - curr_covered)
-
-    prev_uncovered = _uncovered_classes(prev_rows)
-    curr_uncovered = _uncovered_classes(curr_rows)
-    newly_uncovered = sorted(curr_uncovered - prev_uncovered)
-
     # added_date per adapter (issue §5), taken from the current snapshot rows.
     added_date_by_adapter: dict[str, date | None] = {}
     for r in curr_rows:
@@ -485,7 +476,6 @@ def _section_adapter_coverage(
         "5. ADAPTER / CONFIG_CLASS COVERAGE",
         _hr(),
         f"  Distinct adapters   : {len(prev_adapters):>5}  →  {len(curr_adapters):>5}  ({_delta(len(curr_adapters), len(prev_adapters))})",
-        f"  Covered config_classes : {len(prev_covered):>5}  →  {len(curr_covered):>5}  ({_delta(len(curr_covered), len(prev_covered))})",
         "",
         f"  New adapters ({len(new_adapters)}):",
     ]
@@ -498,26 +488,12 @@ def _section_adapter_coverage(
             lines.append(f"  … and {len(new_adapters) - _MAX_MODELS_SHOWN} more")
     else:
         lines.append("    (none)")
-    lines += [
-        "",
-        f"  Lost adapters ({len(lost_adapters)}):",
-    ]
-    lines.append(_trunc(lost_adapters) if lost_adapters else "    (none)")
-    lines += [
-        "",
-        f"  config_classes newly covered ({len(newly_covered)}):",
-    ]
-    lines.append(_trunc(newly_covered) if newly_covered else "    (none)")
-    lines += [
-        "",
-        f"  config_classes that lost coverage ({len(lost_covered)}):",
-    ]
-    lines.append(_trunc(lost_covered) if lost_covered else "    (none)")
-    lines += [
-        "",
-        f"  config_classes newly not-implemented-adapter ({len(newly_uncovered)}):",
-    ]
-    lines.append(_trunc(newly_uncovered) if newly_uncovered else "    (none)")
+    if lost_adapters:
+        lines += [
+            "",
+            f"  Lost adapters ({len(lost_adapters)}):",
+        ]
+        lines.append(_trunc(lost_adapters) if lost_adapters else "    (none)")
 
     return "\n".join(lines)
 
