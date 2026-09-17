@@ -216,7 +216,6 @@ def _section_coverage(
     curr_models = {r["model_name"] for r in curr_rows}
 
     added = sorted(curr_models - prev_models)
-    dropped = sorted(prev_models - curr_models)
 
     # New models, most-downloaded first, annotated with their download count.
     curr_by_name: dict[str, dict[str, Any]] = {r["model_name"]: r for r in curr_rows}
@@ -240,11 +239,6 @@ def _section_coverage(
     ]
     if added_by_downloads:
         lines.append(_format_models_with_downloads(added_by_downloads))
-
-    lines += [
-        "",
-        f"  Dropped models this week ({len(dropped)})",
-    ]
 
     return "\n".join(lines)
 
