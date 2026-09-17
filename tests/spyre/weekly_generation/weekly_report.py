@@ -503,69 +503,55 @@ def _section_family_breakdown(
     prev_rows: list[dict[str, Any]],
     curr_rows: list[dict[str, Any]],
 ) -> str:
-    def _family_pass_rate(rows: list[dict[str, Any]]) -> dict[str, tuple[int, int]]:
-        """Return {family: (pass_count, total_count)} excluding infra-failure rows.
+    def _adapter_pass_rate(rows: list[dict[str, Any]]) -> dict[str, tuple[int, int]]:
+        """Return {adapter_name: (pass_count, total_count)} excluding infra rows.
 
         Only infrastructure failures (hardware_exception / worker_crashed /
         worker_timeout) are excluded — their verdict is not about the model.
         Pre-filter verdicts (not-implemented-adapter / model_too_large / moe) are
         kept in the denominator: a model unsupported on Spyre counts as a failure.
+        Rows without an adapter bucket under ``(no adapter)``.
         """
         result: dict[str, list[int]] = {}
         for r in rows:
             if (r.get("failure_category") or "") in _INFRA_CATEGORIES:
                 continue
-            fam = r.get("family") or "(unknown)"
-            if fam not in result:
-                result[fam] = [0, 0]
-            result[fam][1] += 1
+            adapter = r.get("adapter_name") or "(no adapter)"
+            if adapter not in result:
+                result[adapter] = [0, 0]
+            result[adapter][1] += 1
             if r["verified_on_spyre"]:
-                result[fam][0] += 1
+                result[adapter][0] += 1
         return {k: (v[0], v[1]) for k, v in result.items()}
 
-    prev_fam = _family_pass_rate(prev_rows)
-    curr_fam = _family_pass_rate(curr_rows)
-    all_fams = sorted(set(prev_fam) | set(curr_fam))
+    prev_adapter = _adapter_pass_rate(prev_rows)
+    curr_adapter = _adapter_pass_rate(curr_rows)
+    all_adapters = sorted(set(prev_adapter) | set(curr_adapter))
 
-    # Find families with a notable pass-rate change
+    # Find adapters with a notable pass-rate change
     changed: list[tuple[str, float]] = []
-    for fam in all_fams:
-        p_pass, p_tot = prev_fam.get(fam, (0, 0))
-        c_pass, c_tot = curr_fam.get(fam, (0, 0))
+    for adapter in all_adapters:
+        p_pass, p_tot = prev_adapter.get(adapter, (0, 0))
+        c_pass, c_tot = curr_adapter.get(adapter, (0, 0))
         if p_tot == 0 or c_tot == 0:
             continue
         delta_pct = (c_pass / c_tot - p_pass / p_tot) * 100
         if abs(delta_pct) >= 5.0:
-            changed.append((fam, delta_pct))
+            changed.append((adapter, delta_pct))
     changed.sort(key=lambda x: x[1])
+
+    lines = [
+        "",
+        _hr("═"),
+        "6. ADAPTER BREAKDOWN",
+        _hr(),
+        "  Adapters with ≥5pp pass-rate change:",
+    ]
     if changed:
-
-        lines = [
-            "",
-            _hr("═"),
-            "6. FAMILY BREAKDOWN",
-            _hr(),
-            # f"  {'family':<30}  {'prev pass':>9}  {'curr pass':>9}  {'delta pp':>8}",
-            # f"  {_hr('-', 30)}  {'---------':>9}  {'---------':>9}  {'--------':>8}",
-        ]
-        # for fam in all_fams:
-        #     p_pass, p_tot = prev_fam.get(fam, (0, 0))
-        #     c_pass, c_tot = curr_fam.get(fam, (0, 0))
-        #     prev_r = _pct(p_pass, p_tot)
-        #     curr_r = _pct(c_pass, c_tot)
-        #     if p_tot > 0 and c_tot > 0:
-        #         delta_pp = (c_pass / c_tot - p_pass / p_tot) * 100
-        #         delta_str = f"{delta_pp:+.1f}pp"
-        #     else:
-        #         delta_str = "n/a"
-        #     lines.append(f"  {fam:<30}  {prev_r:>9}  {curr_r:>9}  {delta_str:>8}")
-
-        lines += [
-            "",
-            "  Families with ≥5pp pass-rate change:",
-        ]
-        for fam, delta_pct in changed:
-            lines.append(f"    {fam:<30}  {delta_pct:+.1f}pp")
+        for adapter, delta_pct in changed:
+            lines.append(f"    {adapter:<30}  {delta_pct:+.1f}pp")
+    else:
+        lines.append("    (none)")
 
     # # Parameter-size of regressions
     # prev_by = {r["model_name"]: r for r in prev_rows}
