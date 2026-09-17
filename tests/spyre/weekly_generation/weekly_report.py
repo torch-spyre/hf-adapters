@@ -85,7 +85,7 @@ _INFRA_CATEGORIES: frozenset[str] = frozenset(
 _MAX_ERROR_EXAMPLES: int = 5
 
 # When listing changed models, show up to this many per bucket.
-_MAX_MODELS_SHOWN: int = 20
+_MAX_MODELS_SHOWN: int = 8
 
 
 # ---------------------------------------------------------------------------
@@ -230,11 +230,11 @@ def _section_coverage(
         f"  New models this week ({len(added)}):",
     ]
     if added_by_downloads:
-        lines.append(_format_models_with_downloads(added_by_downloads, limit=10))
+        lines.append(_format_models_with_downloads(added_by_downloads))
 
     lines += [
         "",
-        f"  Dropped models this week ({len(dropped)}):",
+        f"  Dropped models this week ({len(dropped)})",
     ]
 
     return "\n".join(lines)
