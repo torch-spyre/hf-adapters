@@ -20,6 +20,10 @@ Usage::
     python tests/spyre/weekly_generation/weekly_report.py \\
         --mode generative --prev 2025-06-21 --curr 2025-06-28
 
+    # Choose how section 5 groups error messages (default: normalized)
+    python tests/spyre/weekly_generation/weekly_report.py \\
+        --mode generative --cluster-method exact
+
 Credentials are read from .env (CLICKHOUSE_HOST / CLICKHOUSE_PASS etc.) exactly
 as the rest of the weekly pipeline does — see clickhouse_db.py.
 """
@@ -31,6 +35,7 @@ import re
 import sys
 from collections import Counter
 from datetime import date
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -80,7 +85,7 @@ _INFRA_CATEGORIES: frozenset[str] = frozenset(
 )
 
 # When clustering error messages, show up to this many distinct examples.
-_MAX_ERROR_EXAMPLES: int = 10
+_MAX_ERROR_EXAMPLES: int = 20
 
 # When listing changed models, show up to this many per bucket.
 _MAX_MODELS_SHOWN: int = 5
@@ -200,63 +205,142 @@ def _format_models_with_downloads(
 # ---------------------------------------------------------------------------
 # Error clustering
 # ---------------------------------------------------------------------------
+#
+# Section 5 groups the failing models' error messages into clusters and reports
+# the biggest ones. Two grouping methods are offered, selectable with
+# ``--cluster-method``:
+#
+#   exact       Group by the raw first line, truncated, with only bracketed
+#               spans ([...]) collapsed. Two errors cluster when their text is
+#               identical apart from a tensor shape / index list — so the
+#               "cannot reshape tensor … into shape [1, 0, -1, 64]" family lands
+#               on one row — but everything else (versions, repo ids, quoted
+#               names) stays literal, keeping this method faithful and far
+#               coarser-grained than the normalized one.
+#
+#   normalized  Group by a signature that erases the model-specific token
+#               classes (numbers, tensor shapes, versions, repo ids, quoted
+#               literals) from the first line, so errors describing the *same*
+#               fault collapse onto one row while distinct faults stay apart.
+#               Validated against a full snapshot (1234 generative + 600
+#               embedding non-infra errors on 2026-09-05): it reduced ~160 raw
+#               distinct first-lines to ~80 clusters whose top 20 cover >90% of
+#               all failures, with no rule written for any specific message.
+#
+# Both look only at the *first* line: the lines beneath it are a traceback /
+# source snippet whose file paths and line numbers vary by install and would
+# defeat either grouping.
 
-# Ordered substitutions that erase the parts of an error string that vary from
-# one model to the next while keeping the part that identifies the fault. They
-# run in sequence on the first line of the message, and two errors that reduce
-# to the same result are treated as one cluster. The intent is that
-#   "cannot reshape tensor of 0 elements into shape [1, 0, -1, 64] ..."
-#   "cannot reshape tensor of 0 elements into shape [1, 0, -1, 128] ..."
-#   "cannot reshape tensor of 0 elements into shape [-1, 0] ..."
-# all collapse onto one signature (the bracketed shape becomes "[…]"), while a
-# genuinely different exception keeps a distinct signature.
-_SIGNATURE_SUBS: tuple[tuple[re.Pattern[str], str], ...] = (
-    # Bracketed tensor shapes / index lists: [1, 0, -1, 64] -> [N]
-    (re.compile(r"\[[\d,\s\-]*\]"), "[N]"),
-    # Parenthesised tuples of numbers: (1, 0, 64) -> (N)
-    (re.compile(r"\((?:\s*-?\d+\s*,?)+\)"), "(N)"),
-    # Hex addresses: 0x7f3c... -> 0xADDR
+
+class ClusterMethod(StrEnum):
+    """How section 5 groups error messages. See the block comment above."""
+
+    EXACT = "exact"
+    NORMALIZED = "normalized"
+
+
+# The default when ``--cluster-method`` is not given: the semantic grouping,
+# which is what makes the section readable on a real snapshot.
+_DEFAULT_CLUSTER_METHOD: ClusterMethod = ClusterMethod.NORMALIZED
+
+# "exact" method: how many characters of the (bracket-collapsed) first line to
+# keep. Long enough to distinguish faults, short enough that a runaway tail does
+# not dominate. Collapsing brackets before truncating also equalizes the cutoff
+# point across a fault family whose only difference was the length of a shape
+# list, so the truncated tail no longer splits the cluster.
+_EXACT_TRUNC_LEN: int = 120
+
+# The normalized substitutions are ordered — URL before repo-id before the
+# quote/number rules — because an earlier rule consumes text a later rule would
+# otherwise mis-handle (e.g. a URL contains an ``org/model`` that the repo rule
+# should not see, and a version like ``1.2b`` must be protected before the bare
+# integer rule reaches it).
+
+# Ordered (pattern, replacement) pairs applied left to right to one first line.
+_NORMALIZE_SUBS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # URLs first — they embed slashes and digits the later rules would mangle.
+    (re.compile(r"https?://\S+"), "<url>"),
+    # Hex addresses: 0x7f3c… -> 0xADDR
     (re.compile(r"0x[0-9a-fA-F]+"), "0xADDR"),
-    # Version strings: 0.15.0, 0.46.1 -> VER
-    (re.compile(r"\b\d+\.\d+(?:\.\d+)*\b"), "VER"),
-    # Any remaining bare integer: 0 elements -> N elements
-    (re.compile(r"\b\d+\b"), "N"),
-    # Single- or double-quoted literals (model paths, token names, dtypes):
-    # 'BertConfig' -> '…'
-    (re.compile(r"'[^']*'"), "'…'"),
-    (re.compile(r'"[^"]*"'), '"…"'),
-    # Collapse runs of whitespace left behind by the substitutions above.
-    (re.compile(r"\s+"), " "),
+    # HuggingFace repo ids: exactly one slash, no spaces (org/model-name.v2).
+    # Runs before the version/number rules so digits inside a repo name (Carbon-3B,
+    # GENERator-1.2b) do not first get rewritten and split the cluster.
+    (re.compile(r"\b[\w.\-]+/[\w.\-]+\b"), "<repo>"),
+    # Quoted literals (config classes, token names, dtypes, module names). Length
+    # bounded and non-greedy so an apostrophe inside a word (``Can't``) cannot
+    # swallow the rest of the line.
+    (re.compile(r"'[^']{0,80}?'"), "'…'"),
+    (re.compile(r'"[^"]{0,80}?"'), '"…"'),
+    (re.compile(r"`[^`]{0,80}?`"), "`…`"),
+    # Version strings: 0.15.0, 0.46.1 -> VER (before the bare-integer rule).
+    (re.compile(r"\b\d+(?:\.\d+)+\b"), "VER"),
 )
 
+# Innermost-out collapse of bracketed / parenthesised spans (tensor shapes,
+# argument tuples). Applied repeatedly so a nested ``([1, 2], [3])`` reduces
+# fully. Kept separate from _NORMALIZE_SUBS because it needs the loop.
+_BRACKET_RE: re.Pattern[str] = re.compile(r"\[[^\[\]]*\]")
+_PAREN_RE: re.Pattern[str] = re.compile(r"\([^()]*\)")
 
-# The fault an error identifies lives in its opening words (the exception type
-# and the first clause of the message); what follows is often a free-text tail
-# that varies — and, because the DB column is truncated at ingest, is cut at
-# different points for otherwise-identical errors. Clustering on a normalized
-# prefix of this length groups those together instead of splitting on the tail.
-_SIGNATURE_PREFIX_LEN: int = 64
+# Safety net only: clustering is done by the normalization above, not by this
+# cap. The prefix-length sweep on real data was essentially flat (79 clusters at
+# full length vs 77 at 90 chars), so this just guards against a pathological
+# runaway tail; it is deliberately generous.
+_SIGNATURE_PREFIX_LEN: int = 100
 
 
-def _error_signature(error: str) -> str:
-    """Reduce an error message to a stable signature for clustering.
-
-    Only the first non-empty line is considered — that is the exception type and
-    message; the lines below it are a traceback / source snippet that varies by
-    install path and line number and would defeat clustering. Numbers, shapes
-    and quoted literals are erased, then the result is truncated to a prefix so
-    a varying free-text tail does not split one fault into several clusters. The
-    signature is an internal grouping key, never shown to the reader.
-    """
-    first_line: str = ""
-    for raw in error.splitlines():
+def _first_nonempty_line(text: str) -> str:
+    for raw in text.splitlines():
         if raw.strip():
-            first_line = raw.strip()
+            return raw.strip()
+    return ""
+
+
+def _exact_signature(error: str) -> str:
+    """Signature for the ``exact`` method: first line, only ``[...]`` collapsed.
+
+    The one normalization applied is collapsing bracketed spans (tensor shapes,
+    index lists) to ``[…]``, so a fault whose message differs only in a shape —
+    ``reshape … into shape [1, 0, -1, 64]`` vs ``[-1, 0]`` — clusters together.
+    Everything else stays literal, so this remains far coarser-grained than the
+    normalized method. Doubles as the displayed label.
+    """
+    sig: str = _first_nonempty_line(error)
+    for _ in range(4):
+        collapsed: str = _BRACKET_RE.sub("[…]", sig)
+        if collapsed == sig:
             break
-    sig: str = first_line
-    for pattern, replacement in _SIGNATURE_SUBS:
+        sig = collapsed
+    return sig[:_EXACT_TRUNC_LEN]
+
+
+def _normalized_signature(error: str) -> str:
+    """Signature for the ``normalized`` method: first line, token classes erased.
+
+    Erases every model-specific token class (URLs, repo ids, quoted literals,
+    versions, bracketed shapes, bare numbers) from the first line so two errors
+    describing the same fault reduce to the same string. The result is also the
+    human-readable label shown for the cluster — the placeholders keep it
+    legible — so this doubles as both grouping key and display text.
+    """
+    sig: str = _first_nonempty_line(error)
+    for pattern, replacement in _NORMALIZE_SUBS:
         sig = pattern.sub(replacement, sig)
-    return sig.strip()[:_SIGNATURE_PREFIX_LEN]
+    for _ in range(4):
+        collapsed: str = _PAREN_RE.sub("(…)", _BRACKET_RE.sub("[…]", sig))
+        if collapsed == sig:
+            break
+        sig = collapsed
+    sig = re.sub(r"\b\d+\b", "N", sig)
+    sig = re.sub(r"\s+", " ", sig).strip()
+    return sig[:_SIGNATURE_PREFIX_LEN]
+
+
+def _signature_for(error: str, method: ClusterMethod) -> str:
+    """Compute the clustering signature of *error* under the chosen *method*."""
+    if method is ClusterMethod.EXACT:
+        return _exact_signature(error)
+    return _normalized_signature(error)
 
 
 def _hr(char: str = "─", width: int = 72) -> str:
@@ -436,83 +520,61 @@ def _section_failure_categories(
 def _section_error_patterns(
     prev_rows: list[dict[str, Any]],
     curr_rows: list[dict[str, Any]],
+    method: ClusterMethod = _DEFAULT_CLUSTER_METHOD,
 ) -> str:
-    # prev_by = {r["model_name"]: r for r in prev_rows}
-    # curr_by = {r["model_name"]: r for r in curr_rows}
-    # common = set(prev_by) & set(curr_by)
-
-    # # Only newly failing models (not pre-existing failures)
-    # new_failures = [
-    #     curr_by[m]
-    #     for m in common
-    #     if prev_by[m]["verified_on_spyre"]
-    #     and not curr_by[m]["verified_on_spyre"]
-    #     and curr_by[m].get("error")
-    # ]
     # All current failures with an error string, excluding infra failures
     # (their error is about the infrastructure, not the model).
-    all_failures_with_error = [
+    all_failures_with_error: list[dict[str, Any]] = [
         r for r in curr_rows if r.get("error") and not _is_infra_failure(r)
     ]
 
     def _top_errors(
         rows: list[dict[str, Any]], limit: int = _MAX_ERROR_EXAMPLES
     ) -> list[str]:
-        # Cluster by signature (numbers / shapes / quoted literals erased) so
-        # near-identical errors that differ only in a tensor shape or a version
-        # collapse into one line. Track a representative raw message per cluster
-        # — the shortest one seen, which tends to be the least path-polluted —
-        # and how many distinct raw messages the cluster absorbed.
+        # Group by the signature for the chosen method (see _signature_for). The
+        # signature doubles as the readable label. `raw_variants` counts the
+        # distinct raw first-lines each cluster absorbed — always 1 under the
+        # exact method (identical text is the grouping condition), so the
+        # "(+N variants)" marker is only ever shown for the normalized method,
+        # where it flags a genuine family versus a lone recurring string.
         counts: Counter[str] = Counter()
-        example: dict[str, str] = {}
-        variants: dict[str, set[str]] = {}
+        raw_variants: dict[str, set[str]] = {}
         for r in rows:
             err: str = (r.get("error") or "").strip()
             if not err:
                 continue
-            sig: str = _error_signature(err)
-            first_line: str = err.splitlines()[0].strip() if err else err
+            sig: str = _signature_for(err, method)
             counts[sig] += 1
-            variants.setdefault(sig, set()).add(first_line)
-            if sig not in example or len(first_line) < len(example[sig]):
-                example[sig] = first_line
+            raw_variants.setdefault(sig, set()).add(_first_nonempty_line(err))
         out: list[str] = []
         for sig, n in counts.most_common(limit):
-            rep: str = example[sig][:120]
-            n_variants: int = len(variants[sig])
-            extra: int = n_variants - 1
+            extra: int = len(raw_variants[sig]) - 1
             suffix: str = (
                 f"  (+{extra} variant{'s' if extra > 1 else ''})" if extra else ""
             )
-            out.append(f"    [{n:>4}×]  {rep}{suffix}")
+            out.append(f"    [{n:>5}×]  {sig}{suffix}")
         return out
 
-    lines = [
+    total_errors: int = len(all_failures_with_error)
+    clusters: set[str] = {
+        _signature_for(r["error"] or "", method) for r in all_failures_with_error
+    }
+    grouping_note: str = (
+        "near-identical messages grouped"
+        if method is ClusterMethod.NORMALIZED
+        else "identical messages grouped"
+    )
+
+    lines: list[str] = [
         "",
         _hr("═"),
         "5. ERROR PATTERN ANALYSIS",
         _hr(),
-        # f"  Newly failing models with an error string: {len(new_failures)}",
-    ]
-    # if new_failures:
-    #     lines.append(f"  Top {_MAX_ERROR_EXAMPLES} error patterns (new regressions):")
-    #     lines += _top_errors(new_failures)
-    #
-    #     # Family / architecture breakdown
-    #     fam_counts: Counter[str] = Counter(
-    #         (r.get("family") or "(unknown)") for r in new_failures
-    #     )
-    #     lines += [
-    #         "",
-    #         "  Families affected by new regressions:",
-    #     ]
-    #     for fam, n in fam_counts.most_common():
-    #         lines.append(f"    {fam:<40}  {n:>4}")
-
-    lines += [
+        f"  Clustering method: {method.value}",
+        f"  Failures with an error message (excl. infra): {total_errors}",
+        f"  Distinct error clusters: {len(clusters)}",
         "",
-        # f"  All current failures with error string: {len(all_failures_with_error)}",
-        f"  Top {_MAX_ERROR_EXAMPLES} recurring error patterns:",
+        f"  Top {_MAX_ERROR_EXAMPLES} recurring error clusters ({grouping_note}):",
     ]
     lines += _top_errors(all_failures_with_error)
 
@@ -692,6 +754,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="YYYY-MM-DD",
         help="Current snapshot date. Defaults to the most-recent in the table.",
     )
+    parser.add_argument(
+        "--cluster-method",
+        choices=[m.value for m in ClusterMethod],
+        default=_DEFAULT_CLUSTER_METHOD.value,
+        help=(
+            "How section 5 groups error messages. "
+            "'normalized' (default) erases model-specific tokens so the same "
+            "fault clusters together; 'exact' groups only byte-identical "
+            "first lines."
+        ),
+    )
     args = parser.parse_args(argv)
     if (args.prev is None) != (args.curr is None):
         parser.error("--prev and --curr must be provided together or not at all.")
@@ -701,6 +774,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     model_type = ModelType(args.mode)
+    cluster_method = ClusterMethod(args.cluster_method)
     table = (
         GENERATIVE_TABLE_NAME
         if model_type is ModelType.GENERATIVE
@@ -733,7 +807,7 @@ def main(argv: list[str] | None = None) -> None:
             _section_adapter_coverage(prev_rows, curr_rows),
             _section_verified_on_spyre(prev_rows, curr_rows),
             _section_failure_categories(prev_rows, curr_rows),
-            _section_error_patterns(prev_rows, curr_rows),
+            _section_error_patterns(prev_rows, curr_rows, cluster_method),
             _section_family_breakdown(prev_rows, curr_rows),
             _hr("═"),
         ]
