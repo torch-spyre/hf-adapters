@@ -381,18 +381,18 @@ def _section_error_patterns(
     prev_rows: list[dict[str, Any]],
     curr_rows: list[dict[str, Any]],
 ) -> str:
-    prev_by = {r["model_name"]: r for r in prev_rows}
-    curr_by = {r["model_name"]: r for r in curr_rows}
-    common = set(prev_by) & set(curr_by)
+    # prev_by = {r["model_name"]: r for r in prev_rows}
+    # curr_by = {r["model_name"]: r for r in curr_rows}
+    # common = set(prev_by) & set(curr_by)
 
-    # Only newly failing models (not pre-existing failures)
-    new_failures = [
-        curr_by[m]
-        for m in common
-        if prev_by[m]["verified_on_spyre"]
-        and not curr_by[m]["verified_on_spyre"]
-        and curr_by[m].get("error")
-    ]
+    # # Only newly failing models (not pre-existing failures)
+    # new_failures = [
+    #     curr_by[m]
+    #     for m in common
+    #     if prev_by[m]["verified_on_spyre"]
+    #     and not curr_by[m]["verified_on_spyre"]
+    #     and curr_by[m].get("error")
+    # ]
     # All current failures with an error string
     all_failures_with_error = [r for r in curr_rows if r.get("error")]
 
@@ -414,27 +414,27 @@ def _section_error_patterns(
         _hr("═"),
         "5. ERROR PATTERN ANALYSIS",
         _hr(),
-        f"  Newly failing models with an error string: {len(new_failures)}",
+        # f"  Newly failing models with an error string: {len(new_failures)}",
     ]
-    if new_failures:
-        lines.append(f"  Top {_MAX_ERROR_EXAMPLES} error patterns (new regressions):")
-        lines += _top_errors(new_failures)
-
-        # Family / architecture breakdown
-        fam_counts: Counter[str] = Counter(
-            (r.get("family") or "(unknown)") for r in new_failures
-        )
-        lines += [
-            "",
-            "  Families affected by new regressions:",
-        ]
-        for fam, n in fam_counts.most_common():
-            lines.append(f"    {fam:<40}  {n:>4}")
+    # if new_failures:
+    #     lines.append(f"  Top {_MAX_ERROR_EXAMPLES} error patterns (new regressions):")
+    #     lines += _top_errors(new_failures)
+    #
+    #     # Family / architecture breakdown
+    #     fam_counts: Counter[str] = Counter(
+    #         (r.get("family") or "(unknown)") for r in new_failures
+    #     )
+    #     lines += [
+    #         "",
+    #         "  Families affected by new regressions:",
+    #     ]
+    #     for fam, n in fam_counts.most_common():
+    #         lines.append(f"    {fam:<40}  {n:>4}")
 
     lines += [
         "",
-        f"  All current failures with error string: {len(all_failures_with_error)}",
-        f"  Top {_MAX_ERROR_EXAMPLES} recurring error patterns (current week, all failures):",
+        # f"  All current failures with error string: {len(all_failures_with_error)}",
+        f"  Top {_MAX_ERROR_EXAMPLES} recurring error patterns:",
     ]
     lines += _top_errors(all_failures_with_error)
 
