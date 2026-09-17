@@ -27,6 +27,7 @@ as the rest of the weekly pipeline does — see clickhouse_db.py.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from collections import Counter
 from datetime import date
@@ -79,10 +80,10 @@ _INFRA_CATEGORIES: frozenset[str] = frozenset(
 )
 
 # When clustering error messages, show up to this many distinct examples.
-_MAX_ERROR_EXAMPLES: int = 5
+_MAX_ERROR_EXAMPLES: int = 10
 
 # When listing changed models, show up to this many per bucket.
-_MAX_MODELS_SHOWN: int = 8
+_MAX_MODELS_SHOWN: int = 5
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +197,68 @@ def _format_models_with_downloads(
     return body + suffix
 
 
+# ---------------------------------------------------------------------------
+# Error clustering
+# ---------------------------------------------------------------------------
+
+# Ordered substitutions that erase the parts of an error string that vary from
+# one model to the next while keeping the part that identifies the fault. They
+# run in sequence on the first line of the message, and two errors that reduce
+# to the same result are treated as one cluster. The intent is that
+#   "cannot reshape tensor of 0 elements into shape [1, 0, -1, 64] ..."
+#   "cannot reshape tensor of 0 elements into shape [1, 0, -1, 128] ..."
+#   "cannot reshape tensor of 0 elements into shape [-1, 0] ..."
+# all collapse onto one signature (the bracketed shape becomes "[…]"), while a
+# genuinely different exception keeps a distinct signature.
+_SIGNATURE_SUBS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # Bracketed tensor shapes / index lists: [1, 0, -1, 64] -> [N]
+    (re.compile(r"\[[\d,\s\-]*\]"), "[N]"),
+    # Parenthesised tuples of numbers: (1, 0, 64) -> (N)
+    (re.compile(r"\((?:\s*-?\d+\s*,?)+\)"), "(N)"),
+    # Hex addresses: 0x7f3c... -> 0xADDR
+    (re.compile(r"0x[0-9a-fA-F]+"), "0xADDR"),
+    # Version strings: 0.15.0, 0.46.1 -> VER
+    (re.compile(r"\b\d+\.\d+(?:\.\d+)*\b"), "VER"),
+    # Any remaining bare integer: 0 elements -> N elements
+    (re.compile(r"\b\d+\b"), "N"),
+    # Single- or double-quoted literals (model paths, token names, dtypes):
+    # 'BertConfig' -> '…'
+    (re.compile(r"'[^']*'"), "'…'"),
+    (re.compile(r'"[^"]*"'), '"…"'),
+    # Collapse runs of whitespace left behind by the substitutions above.
+    (re.compile(r"\s+"), " "),
+)
+
+
+# The fault an error identifies lives in its opening words (the exception type
+# and the first clause of the message); what follows is often a free-text tail
+# that varies — and, because the DB column is truncated at ingest, is cut at
+# different points for otherwise-identical errors. Clustering on a normalized
+# prefix of this length groups those together instead of splitting on the tail.
+_SIGNATURE_PREFIX_LEN: int = 64
+
+
+def _error_signature(error: str) -> str:
+    """Reduce an error message to a stable signature for clustering.
+
+    Only the first non-empty line is considered — that is the exception type and
+    message; the lines below it are a traceback / source snippet that varies by
+    install path and line number and would defeat clustering. Numbers, shapes
+    and quoted literals are erased, then the result is truncated to a prefix so
+    a varying free-text tail does not split one fault into several clusters. The
+    signature is an internal grouping key, never shown to the reader.
+    """
+    first_line: str = ""
+    for raw in error.splitlines():
+        if raw.strip():
+            first_line = raw.strip()
+            break
+    sig: str = first_line
+    for pattern, replacement in _SIGNATURE_SUBS:
+        sig = pattern.sub(replacement, sig)
+    return sig.strip()[:_SIGNATURE_PREFIX_LEN]
+
+
 def _hr(char: str = "─", width: int = 72) -> str:
     return char * width
 
@@ -305,13 +368,6 @@ def _section_verified_on_spyre(
     ]
     if regressed:
         lines.append(_trunc(regressed))
-        # Annotate with failure_category
-        lines.append("\n  Failure categories for regressed models:")
-        cats = Counter(
-            (curr_by[m].get("failure_category") or "unknown") for m in regressed
-        )
-        for cat, n in cats.most_common():
-            lines.append(f"    {cat:<40}  {n:>4}")
     else:
         lines.append("    (none)")
 
@@ -393,20 +449,42 @@ def _section_error_patterns(
     #     and not curr_by[m]["verified_on_spyre"]
     #     and curr_by[m].get("error")
     # ]
-    # All current failures with an error string
-    all_failures_with_error = [r for r in curr_rows if r.get("error")]
+    # All current failures with an error string, excluding infra failures
+    # (their error is about the infrastructure, not the model).
+    all_failures_with_error = [
+        r for r in curr_rows if r.get("error") and not _is_infra_failure(r)
+    ]
 
     def _top_errors(
         rows: list[dict[str, Any]], limit: int = _MAX_ERROR_EXAMPLES
     ) -> list[str]:
+        # Cluster by signature (numbers / shapes / quoted literals erased) so
+        # near-identical errors that differ only in a tensor shape or a version
+        # collapse into one line. Track a representative raw message per cluster
+        # — the shortest one seen, which tends to be the least path-polluted —
+        # and how many distinct raw messages the cluster absorbed.
         counts: Counter[str] = Counter()
+        example: dict[str, str] = {}
+        variants: dict[str, set[str]] = {}
         for r in rows:
-            err = (r.get("error") or "").strip()
-            # Truncate long error strings for readability
-            counts[err[:120]] += 1
-        out = []
-        for err, n in counts.most_common(limit):
-            out.append(f"    [{n:>4}×]  {err}")
+            err: str = (r.get("error") or "").strip()
+            if not err:
+                continue
+            sig: str = _error_signature(err)
+            first_line: str = err.splitlines()[0].strip() if err else err
+            counts[sig] += 1
+            variants.setdefault(sig, set()).add(first_line)
+            if sig not in example or len(first_line) < len(example[sig]):
+                example[sig] = first_line
+        out: list[str] = []
+        for sig, n in counts.most_common(limit):
+            rep: str = example[sig][:120]
+            n_variants: int = len(variants[sig])
+            extra: int = n_variants - 1
+            suffix: str = (
+                f"  (+{extra} variant{'s' if extra > 1 else ''})" if extra else ""
+            )
+            out.append(f"    [{n:>4}×]  {rep}{suffix}")
         return out
 
     lines = [
