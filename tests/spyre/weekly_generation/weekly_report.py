@@ -209,8 +209,6 @@ def _hr(char: str = "─", width: int = 72) -> str:
 def _section_coverage(
     prev_rows: list[dict[str, Any]],
     curr_rows: list[dict[str, Any]],
-    prev_date: date,
-    curr_date: date,
 ) -> str:
     prev_models = {r["model_name"] for r in prev_rows}
     curr_models = {r["model_name"] for r in curr_rows}
@@ -227,13 +225,17 @@ def _section_coverage(
 
     prev_curated = sum(1 for r in prev_rows if r["curated"])
     curr_curated = sum(1 for r in curr_rows if r["curated"])
+    delta_str = (
+        f"[{_delta(len(curr_models), len(prev_models))} ({_delta(curr_curated, prev_curated)})]"
+        if (_delta(len(curr_models), len(prev_models)) != "0")
+        else ""
+    )
 
     lines = [
         _hr("═"),
         "1. COVERAGE — MODEL COUNT",
         _hr(),
-        f"  Total models (Curated models)   : {len(prev_models):>6} ({prev_curated})  →  {len(curr_models):>6} ({curr_curated})  [{_delta(len(curr_models), len(prev_models))} ({_delta(curr_curated, prev_curated)})]",
-        # f"  Curated models : {prev_curated:>6}  →  {curr_curated:>6}  ({_delta(curr_curated, prev_curated)})",
+        f"  Total models (Curated models)   : {len(prev_models):>6} ({prev_curated})  →  {len(curr_models):>6} ({curr_curated})  {delta_str}",
         "\n",
         f"  New models this week ({len(added)}):",
     ]
@@ -666,7 +668,7 @@ def main(argv: list[str] | None = None) -> None:
     report = "\n".join(
         [
             header,
-            _section_coverage(prev_rows, curr_rows, prev_date, curr_date),
+            _section_coverage(prev_rows, curr_rows),
             _section_adapter_coverage(prev_rows, curr_rows),
             _section_verified_on_spyre(prev_rows, curr_rows),
             _section_failure_categories(prev_rows, curr_rows),
