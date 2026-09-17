@@ -4,10 +4,10 @@ Queries ClickHouse for two consecutive snapshot_dates and prints a structured
 plain-text report covering the six analysis areas defined in issue #484:
 
   1. Coverage (model count changes)
-  2. verified_on_spyre delta
-  3. failure_category distribution shift
-  4. Error pattern analysis
-  5. Adapter / config_class coverage changes
+  2. Adapter / config_class coverage changes
+  3. verified_on_spyre delta
+  4. failure_category distribution shift
+  5. Error pattern analysis
   6. Size / family breakdown
 
 Usage::
@@ -232,9 +232,9 @@ def _section_coverage(
         _hr("═"),
         "1. COVERAGE — MODEL COUNT",
         _hr(),
-        f"  Total models   : {len(prev_models):>6}  →  {len(curr_models):>6}  ({_delta(len(curr_models), len(prev_models))})",
-        f"  Curated models : {prev_curated:>6}  →  {curr_curated:>6}  ({_delta(curr_curated, prev_curated)})",
-        "",
+        f"  Total models (Curated models)   : {len(prev_models):>6} ({prev_curated})  →  {len(curr_models):>6} ({curr_curated})  [{_delta(len(curr_models), len(prev_models))} ({_delta(curr_curated, prev_curated)})]",
+        # f"  Curated models : {prev_curated:>6}  →  {curr_curated:>6}  ({_delta(curr_curated, prev_curated)})",
+        "\n",
         f"  New models this week ({len(added)}):",
     ]
     if added_by_downloads:
@@ -290,7 +290,7 @@ def _section_verified_on_spyre(
     lines = [
         "",
         _hr("═"),
-        "2. VERIFIED_ON_SPYRE DELTA",
+        "3. VERIFIED_ON_SPYRE DELTA",
         _hr(),
         f"  Absolute count  : {prev_pass:>6}  →  {curr_pass:>6}  ({_delta(curr_pass, prev_pass)})",
         "  Pass rate (excl. infrastructure-failures):",
@@ -355,7 +355,7 @@ def _section_failure_categories(
     lines = [
         "",
         _hr("═"),
-        "3. FAILURE_CATEGORY DISTRIBUTION",
+        "4. FAILURE_CATEGORY DISTRIBUTION",
         _hr(),
         f"  {'category':<42}  {'prev':>6}  {'curr':>6}  {'delta':>6}",
         f"  {_hr('-', 42)}  {'------':>6}  {'------':>6}  {'------':>6}",
@@ -411,7 +411,7 @@ def _section_error_patterns(
     lines = [
         "",
         _hr("═"),
-        "4. ERROR PATTERN ANALYSIS",
+        "5. ERROR PATTERN ANALYSIS",
         _hr(),
         f"  Newly failing models with an error string: {len(new_failures)}",
     ]
@@ -473,7 +473,7 @@ def _section_adapter_coverage(
     lines = [
         "",
         _hr("═"),
-        "5. ADAPTER / CONFIG_CLASS COVERAGE",
+        "2. ADAPTER / CONFIG_CLASS COVERAGE",
         _hr(),
         f"  Distinct adapters   : {len(prev_adapters):>5}  →  {len(curr_adapters):>5}  ({_delta(len(curr_adapters), len(prev_adapters))})",
         "",
@@ -667,10 +667,10 @@ def main(argv: list[str] | None = None) -> None:
         [
             header,
             _section_coverage(prev_rows, curr_rows, prev_date, curr_date),
+            _section_adapter_coverage(prev_rows, curr_rows),
             _section_verified_on_spyre(prev_rows, curr_rows),
             _section_failure_categories(prev_rows, curr_rows),
             _section_error_patterns(prev_rows, curr_rows),
-            _section_adapter_coverage(prev_rows, curr_rows),
             _section_family_breakdown(prev_rows, curr_rows),
             _hr("═"),
         ]
