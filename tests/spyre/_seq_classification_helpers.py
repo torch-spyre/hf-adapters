@@ -25,6 +25,7 @@ texts and their assertions (ranking-order vs cosine similarity).
 from __future__ import annotations
 
 import types
+from typing import cast
 
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -32,12 +33,14 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from hf_adapters.auto_spyre_model import dtype_for_model_path
 from hf_adapters.hf_common import move_model_to_spyre, prefill_sequence_classification
 from tests.conftest import load_ref_model
+from tests.model_registry import REMOTE_CODE_PATHS
 
 
 def run_seq_classification_cpu_vs_spyre(
     model_path: str,
     adapter: types.ModuleType,
     inputs: list[str] | list[tuple[str, str]],
+    trust_remote_code: bool | None = None,
 ) -> dict:
     """Load a seq-classification model, run a CPU reference forward, then run
     the adapter on Spyre via ``prefill_sequence_classification``.
@@ -55,22 +58,38 @@ def run_seq_classification_cpu_vs_spyre(
             ``spyre_logits`` – ``[B, num_labels]`` float CPU tensor (adapter on Spyre).
             ``dtype``        – dtype used for the Spyre model.
     """
-    dtype = dtype_for_model_path(model_path, target_device="spyre")
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
+    dtype = dtype_for_model_path(
+        model_path, target_device="spyre", trust_remote_code=trust_remote_code
+    )
 
     print(f"\n{'=' * 70}")
     print(f"  {model_path}")
     print(f"  dtype: {dtype}")
     print(f"{'=' * 70}")
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path, trust_remote_code=trust_remote_code
+    )
     model = load_ref_model(
         model_path=model_path,
         adapter_mod=adapter,
         auto_model_cls=AutoModelForSequenceClassification,
+        trust_remote_code=trust_remote_code,
     )
 
+    if inputs and isinstance(inputs[0], tuple):
+        paired_inputs = cast(list[tuple[str, str]], inputs)
+        texts = [text for text, _ in paired_inputs]
+        text_pairs = [text_pair for _, text_pair in paired_inputs]
+    else:
+        texts = cast(list[str], inputs)
+        text_pairs = None
+
     encoded = tokenizer(
-        inputs,
+        texts,
+        text_pair=text_pairs,
         return_tensors="pt",
         padding=True,
         truncation=True,

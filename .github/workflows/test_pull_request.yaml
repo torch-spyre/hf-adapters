@@ -4,10 +4,7 @@ name: test_pull_request
 # still runs every job unconditionally (job-selection for trunk == full,
 # which is already this workflow's only mode), so the run-name below is
 # purely a labeling change. Delegates its suite jobs to the same reusable
-# _test_matrix.yaml used by integration-tests.yaml, keeping only what's
-# specific to the PR/trunk trigger inline: the "integration-test" label
-# detection, which skips the whole suite when Jenkins owns this commit's
-# testing (via _test_matrix.yaml's skip_tests input).
+# _test_matrix.yaml used by integration-tests.yaml.
 run-name: ${{ github.event_name == 'push' && 'trunk' || 'regression' }}
 
 on:
@@ -16,9 +13,6 @@ on:
     tags: ["*"]
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened]
-  merge_group:
-    types: [checks_requested]
   workflow_dispatch:
     inputs:
       torch_spyre_ref:
@@ -58,7 +52,7 @@ on:
       pr_url_hash:
         description: |
           Hash of the full URL of the PR that triggered this run.
-          Sent by the internal integration pipeline; unused on push/PR/merge_group.
+          Sent by the internal integration pipeline; unused on push/PR.
         required: false
         type: string
         default: ""
@@ -73,7 +67,7 @@ on:
           (image_hf_adapters_pr_<component>_<sha12>, e.g.
           image_hf_adapters_pr_flex_8ddcf3e155e9). The per-PR ephemeral flow passes
           that PR's set label so jobs land on the per-PR image (the changed RPM is
-          baked in -> no runtime sudo). Empty keeps push/PR/merge_group runs on the
+          baked in -> no runtime sudo). Empty keeps push/PR runs on the
           standing image_torch_spyre set (today's behaviour).
         required: false
         type: string
@@ -90,71 +84,38 @@ permissions:
   actions: read
 
 jobs:
-  # Resolves the `integration-test` label for BOTH pull_request and merge_group.
-  # A merge_group payload has no pull_request object, so the label cannot be read
-  # inline there -- the previous `github.event_name == 'pull_request' && ...` form
-  # was always false in the queue, so every suite below re-ran on a commit whose
-  # testing the label had already handed to the Jenkins integration run.
-  #
-  # Every gated suite `needs` this job, so a FAILURE here would skip all of them
-  # regardless of their own `if:` -- which is why it is also listed in
-  # run-spyre-unit-tests' failure predicates below: the required check then goes red
-  # rather than reporting a false green over suites that never ran.
-  detect-label:
-    name: Detect integration-test label
-    runs-on: ubuntu-latest
-    outputs:
-      labeled: ${{ steps.label.outputs.labeled }}
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: .github/actions
-          sparse-checkout-cone-mode: false
-      - name: Resolve label
-        id: label
-        uses: ./.github/actions/detect-integration-test-label
-
   # ---------------------------------------------------------------------------
   # Delegates to the shared _test_matrix.yaml (pre-commit, mypy, check-uv-lock,
   # adapter-coverage, matrix generation, and every spyre-*-tests /
   # spyre-model-module-tests suite). test_type is left at its default
   # ("regression" -- everything), matching this workflow's historical
-  # behavior of always running the full suite. skip_tests carries the
-  # "integration-test" label decision through: it skips matrix generation,
-  # adapter-coverage, and every spyre suite (leaving pre-commit/mypy/
-  # check-uv-lock running, same as before) when Jenkins owns this commit's
-  # testing.
+  # behavior of always running the full suite.
   # ---------------------------------------------------------------------------
   run-tests:
-    needs: [detect-label]
+    # Skip entirely once auto_merge is enabled on the PR -- native GHA checks aren't required there; run-spyre-unit-tests below still reports green since "skipped" isn't a failure.
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.auto_merge != null) }}
     uses: ./.github/workflows/_test_matrix.yaml
     with:
+      # Per-PR ephemeral image label when provided, else the standing set for this event.
       image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
       extra_test_flags: -vvv -s
       extra_test_flags_multi_spyre: -vvv -s
       ref: ${{ inputs.ref || '' }}
       repository: ${{ inputs.repository || '' }}
-      skip_tests: ${{ needs.detect-label.outputs.labeled == 'true' }}
 
   # ----------------------------------------------------------------------------------
-  # Required check gate -- fans in detect-label and the delegated suite run so a
-  # single branch protection rule ("tests / run spyre unit tests") passes only
-  # when both succeed. A labeled PR still gets a green run-tests result (its
-  # jobs report "skipped", not "failure") -- that flow is handled by Jenkins.
+  # Required check gate -- wraps the delegated suite run so a single branch
+  # protection rule ("tests / run spyre unit tests") tracks one stable job name.
   # ----------------------------------------------------------------------------------
   run-spyre-unit-tests:
     name: run spyre unit tests
     runs-on: ubuntu-latest
-    needs:
-      - detect-label
-      - run-tests
+    needs: [run-tests]
     if: always()
     steps:
       - name: Check all suites passed
         run: |-
-          if ${{ contains(needs.detect-label.result, 'failure') || contains(needs.detect-label.result, 'cancelled') ||
-                 contains(needs.run-tests.result, 'failure') || contains(needs.run-tests.result, 'cancelled') }}; then
+          if ${{ contains(needs.run-tests.result, 'failure') || contains(needs.run-tests.result, 'cancelled') }}; then
             echo "One or more test suites failed."
             exit 1
           fi

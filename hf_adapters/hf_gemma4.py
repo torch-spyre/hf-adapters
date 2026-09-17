@@ -53,7 +53,7 @@ in several ways, so it gets a custom compiled block rather than reusing
   ``layer_scalar`` buffer (init 1.0).
 - **Unscaled attention.** ``Gemma4TextAttention.scaling == 1.0`` — Q·Kᵀ is NOT
   divided by ``sqrt(head_dim)``. SDPA is called with ``scale=1.0``.
-- **Large vocab + logit softcap.** 262K vocab → chunked LM head (like
+- **Large vocab + logit softcap.** 262K vocab → stick-padded LM head (like
   ``hf_phi3``); ``final_logit_softcapping`` (30.0) applies a
   ``cap * tanh(logits / cap)`` after the head.
 
@@ -61,15 +61,15 @@ E-variant support (E2B / E4B): the two E-variant features are handled here:
 
 - **Per-Layer Embeddings (PLE).** E-variants inject a per-layer residual after
   the MLP: ``embed_tokens_per_layer`` + a projected/normed context term, gated
-  and added back per layer (``_compute_per_layer_inputs`` + ``_ple_tail``,
-  mirroring stock ``get_per_layer_inputs`` / ``project_per_layer_inputs`` and
-  the decoder tail). Gated off (``has_ple=False``) for the dense 12B/31B
+  and added back per layer (``_compute_per_layer_inputs`` plus the compiled
+  decoder tail), mirroring stock ``get_per_layer_inputs`` /
+  ``project_per_layer_inputs``. Gated off (``has_ple=False``) for the dense 12B/31B
   variants, which carry no PLE submodules.
 - **KV-sharing across layers.** The trailing ``num_kv_shared_layers`` layers
   reuse the KV cache of the nearest preceding non-shared layer of the same
   ``layer_type`` (stock ``store_full_length_kv`` semantics), so they run a lean
   Q-only block (no k/v proj, no cache write) against that producer's cache — see
-  ``_shared_producer_map`` and ``Gemma4SharedBlock``.
+  ``_shared_producer_map`` and the ``shared`` kind of ``Gemma4Block``.
 
 The MoE 26B-A4B variant is handled by the sibling ``hf_gemma4_moe`` adapter,
 which reuses this module's attention-side setup and forward driver.
@@ -85,6 +85,8 @@ Usage::
     outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -92,13 +94,20 @@ import torch.nn.functional as F
 from hf_adapters.hf_common import (
     InvFreqShim,
     PrecomputedRotaryEmbedding,
+    SpyreUnsupportedModelError,
     add_causal_sliding_window_band,
     apply_rope_matmul,
     get_backbone,
     kv_cache_update,
     optional_spyre_config_patch,
-    pad_lm_head,
+    prepare_lm_head_for_spyre,
+    run_lm_head,
     text_config,
+)
+from hf_adapters.spyre_tensor_parallel import (
+    SPYRE_REPLICATED_LINEAR,
+    SPYRE_ROWWISE,
+    spyre_compiled_all_reduce,
 )
 
 
@@ -115,6 +124,36 @@ def _gemma4_backbone(model):
     matching where ``pad_lm_head`` looks.
     """
     return get_backbone(model)
+
+
+def spyre_tp_grouped_colwise_modules(model, tp_size):
+    """Return K/V projections that need replication within rank groups.
+
+    HF's colwise plan splits a projection's output dimension evenly across TP
+    ranks. That is only a valid attention shard when every rank receives an
+    integral number of ``head_dim``-wide heads. Gemma 4 A4B's full-attention
+    layers have two 512-wide KV heads, for example, so TP=4 would otherwise
+    produce invalid 256-wide half-heads. Instead, shard those projections into
+    two whole heads and replicate each head across its two corresponding ranks.
+    """
+    backbone = _gemma4_backbone(model)
+    cfg = text_config(model.config)
+    module_names = {id(module): name for name, module in model.named_modules()}
+    grouped = {}
+
+    for layer, layer_cfg in zip(backbone.layers, cfg.per_layer_config):
+        attn = layer.self_attn
+        head_dim = layer_cfg.head_dim
+        for projection_name in ("k_proj", "v_proj"):
+            projection = getattr(attn, projection_name, None)
+            if projection is None:
+                continue
+            if projection.out_features % (head_dim * tp_size) != 0:
+                num_kv_heads = projection.out_features // head_dim
+                assert tp_size % num_kv_heads == 0
+                grouped[module_names[id(projection)]] = num_kv_heads
+
+    return grouped
 
 
 def _gemma4_rms_norm(hidden_states, weight, eps):
@@ -153,22 +192,6 @@ def _compute_per_layer_inputs(model, inputs_embeds, input_ids):
     context = backbone.per_layer_projection_norm(context)
 
     return (context + token_identity) * backbone.per_layer_input_scale
-
-
-def _ple_tail(block, h, per_layer_input):
-    """Gemma 4 PLE per-layer residual injection (stock modeling_gemma4 tail).
-
-    ``block`` is the registered decoder block carrying the per-layer PLE
-    submodules (``per_layer_input_gate`` / ``per_layer_projection`` /
-    ``post_per_layer_input_norm``), captured in ``__init__`` when ``has_ple``.
-    """
-    residual = h
-    x = block.per_layer_input_gate(h)
-    x = F.gelu(x, approximate="tanh")
-    x = x * per_layer_input
-    x = block.per_layer_projection(x)
-    x = block.post_per_layer_input_norm(x)
-    return residual + x
 
 
 def _offset_zero_per_layer_input(per_layer_inputs, layer_index):
@@ -297,13 +320,6 @@ class Gemma4Attention(nn.Module):
         self.head_dim = head_dim
         self.is_kv_eq_v = is_kv_eq_v
         self.scaling = attn.scaling  # 1.0 for Gemma 4
-        self._use_compiled_rms_norm = False
-
-    def _rms_norm(self, hidden_states, norm):
-        if self._use_compiled_rms_norm:
-            weight = norm.weight if norm.with_scale else None
-            return _compiled_gemma4_rms_norm(hidden_states, weight, norm.eps)
-        return norm(hidden_states)
 
     def forward(
         self,
@@ -315,8 +331,6 @@ class Gemma4Attention(nn.Module):
         cache_index,
     ):
         bsz, seq_len, _ = hidden_states.shape
-        # Q/K/V projections viewed as [B, L, n_heads, head_dim]; norms are
-        # applied per-head (last dim = head_dim) before the transpose.
         q = self.q_proj(hidden_states).view(
             bsz, seq_len, self.num_q_heads, self.head_dim
         )
@@ -325,31 +339,19 @@ class Gemma4Attention(nn.Module):
         )
 
         if self.is_kv_eq_v:
-            # V reuses the raw k_proj output (pre-k_norm, pre-RoPE) but still
-            # passes through v_norm: stock HF aliases value_states = key_states
-            # *before* k_norm/RoPE, then applies self.v_norm(value_states)
-            # unconditionally (modeling_gemma4 Gemma4TextAttention.forward). The
-            # norm exists on these layers even though v_proj is None.
-            v = self._rms_norm(k_lin, self.v_norm).transpose(1, 2)
+            v = _gemma4_rms_norm(k_lin, None, self.v_norm.eps).transpose(1, 2)
         else:
             v = self.v_proj(hidden_states).view(
                 bsz, seq_len, self.num_kv_heads, self.head_dim
             )
-            v = self._rms_norm(v, self.v_norm).transpose(1, 2)
+            v = _gemma4_rms_norm(v, None, self.v_norm.eps).transpose(1, 2)
 
-        q = self._rms_norm(q, self.q_norm).transpose(1, 2)
-        k = self._rms_norm(k_lin, self.k_norm).transpose(1, 2)
-        # Materialize the transpose returned by RoPE before the cache scatter.
-        # A view here can make index_copy_ consume the wrong physical layout.
+        q = _gemma4_rms_norm(q, self.q_norm.weight, self.q_norm.eps).transpose(1, 2)
+        k = _gemma4_rms_norm(k_lin, self.k_norm.weight, self.k_norm.eps).transpose(1, 2)
         q = apply_rope_matmul(q, selected_freqs).contiguous()
         k = apply_rope_matmul(k, selected_freqs).contiguous()
-
         key_cache, value_cache = kv_cache_update(
-            k,
-            v,
-            key_cache,
-            value_cache,
-            cache_index,
+            k, v, key_cache, value_cache, cache_index
         )
         attn_out = F.scaled_dot_product_attention(
             q,
@@ -365,17 +367,42 @@ class Gemma4Attention(nn.Module):
 
 
 class Gemma4Block(nn.Module):
-    """Registered dense Gemma 4 decoder block used by the Spyre adapter."""
+    """Registered writer or KV-sharing Gemma 4 decoder block."""
 
-    def __init__(self, layer, num_q_heads, num_kv_heads, head_dim, is_kv_eq_v, has_ple):
+    def __init__(
+        self,
+        layer,
+        kind,
+        num_q_heads,
+        num_kv_heads,
+        head_dim,
+        is_kv_eq_v,
+        has_ple,
+    ):
         super().__init__()
-        self.self_attn = Gemma4Attention(
-            layer.self_attn,
-            num_q_heads,
-            num_kv_heads,
-            head_dim,
-            is_kv_eq_v,
-        )
+        if kind not in ("writer", "shared"):
+            raise ValueError(f"Unsupported Gemma 4 block kind: {kind!r}")
+        self.kind = kind
+
+        if kind == "writer":
+            self.self_attn = Gemma4Attention(
+                layer.self_attn,
+                num_q_heads,
+                num_kv_heads,
+                head_dim,
+                is_kv_eq_v,
+            )
+        else:
+            # A shared block runs lean Q-only attention against its producer's KV
+            # cache: it has no K/V projections or norms and never updates a cache.
+            attn = layer.self_attn
+            self.q_proj = attn.q_proj
+            self.q_norm = attn.q_norm
+            self.o_proj = attn.o_proj
+            self.scaling = attn.scaling
+            self.num_q_heads = num_q_heads
+            self.head_dim = head_dim
+
         self.mlp = layer.mlp
         self.input_layernorm = layer.input_layernorm
         self.post_attention_layernorm = layer.post_attention_layernorm
@@ -394,154 +421,441 @@ class Gemma4Block(nn.Module):
             self.post_per_layer_input_norm = layer.post_per_layer_input_norm
         self.train(layer.training)
 
+    # This module intentionally owns state without implementing forward(). The
+    # shared compiled executor receives its tensors explicitly so structurally
+    # identical layers reuse one graph. An eager forward could delegate to that
+    # same functional executor in the future without duplicating block semantics.
+
+
+@dataclass(frozen=True)
+class _Gemma4BlockSpec:
+    kind: str
+    layer_type: str
+    num_q_heads: int
+    num_kv_heads: int
+    head_dim: int
+    intermediate_size: int
+    activation: str
+    is_kv_eq_v: bool
+    attention_bias: bool
+    tp_group_name: str | None
+    has_ple: bool
+    ple_dim: int
+    scaling: float
+    input_norm_eps: float
+    q_norm_eps: float
+    k_norm_eps: float
+    v_norm_eps: float
+    post_attention_norm_eps: float
+    pre_feedforward_norm_eps: float
+    post_feedforward_norm_eps: float
+    post_ple_norm_eps: float
+
+
+def _gemma4_mlp_activation(hidden_states):
+    return F.gelu(hidden_states, approximate="tanh")
+
+
+def _linear_weight(linear, name):
+    if linear.bias is not None:
+        raise ValueError(f"Gemma 4 {name} bias is not supported")
+    return linear.weight
+
+
+def _block_kind_and_attention(block):
+    if not isinstance(block, Gemma4Block):
+        raise TypeError(f"Unsupported Gemma 4 block type: {type(block).__name__}")
+    kind = block.kind
+    if kind == "writer":
+        return kind, block.self_attn
+    if kind == "shared":
+        return kind, block
+    raise ValueError(f"Unsupported Gemma 4 block kind: {kind!r}")
+
+
+def _block_state(block):
+    kind, attn = _block_kind_and_attention(block)
+    if kind == "writer":
+        state = [attn.q_proj.weight, attn.k_proj.weight]
+        if attn.q_proj.bias is not None:
+            state.extend([attn.q_proj.bias, attn.k_proj.bias])
+        if not attn.is_kv_eq_v:
+            state.append(attn.v_proj.weight)
+            if attn.v_proj.bias is not None:
+                state.append(attn.v_proj.bias)
+        state.append(attn.o_proj.weight)
+        if attn.o_proj.bias is not None:
+            state.append(attn.o_proj.bias)
+        state.extend([attn.q_norm.weight, attn.k_norm.weight])
+    else:
+        state = [attn.q_proj.weight]
+        if attn.q_proj.bias is not None:
+            state.append(attn.q_proj.bias)
+        state.append(attn.o_proj.weight)
+        if attn.o_proj.bias is not None:
+            state.append(attn.o_proj.bias)
+        state.append(attn.q_norm.weight)
+
+    state.extend(
+        [
+            _linear_weight(block.mlp.gate_proj, "gate_proj"),
+            _linear_weight(block.mlp.up_proj, "up_proj"),
+            _linear_weight(block.mlp.down_proj, "down_proj"),
+            block.input_layernorm.weight,
+            block.post_attention_layernorm.weight,
+            block.pre_feedforward_layernorm.weight,
+            block.post_feedforward_layernorm.weight,
+        ]
+    )
+    if block.has_ple:
+        state.extend(
+            [
+                _linear_weight(block.per_layer_input_gate, "per_layer_input_gate"),
+                _linear_weight(block.per_layer_projection, "per_layer_projection"),
+                block.post_per_layer_input_norm.weight,
+            ]
+        )
+    state.append(block.layer_scalar)
+    return tuple(state)
+
+
+def _finish_block(
+    spec,
+    residual,
+    attn_out,
+    o_weight,
+    o_bias,
+    post_attn_norm_weight,
+    pre_ffn_norm_weight,
+    post_ffn_norm_weight,
+    gate_weight,
+    up_weight,
+    down_weight,
+    ple_gate_weight,
+    ple_projection_weight,
+    post_ple_norm_weight,
+    layer_scalar,
+    per_layer_input,
+    query_row_mask,
+):
+    # These functional linears bypass the Transformers module hooks which
+    # normally complete a rowwise projection. Reduce the rank-local partial
+    # sums explicitly, before adding a replicated bias or residual.
+    attn_out = F.linear(attn_out, o_weight)
+    if spec.tp_group_name is not None:
+        attn_out = spyre_compiled_all_reduce(attn_out, spec.tp_group_name)
+    if o_bias is not None:
+        attn_out = attn_out + o_bias
+    h = residual + _gemma4_rms_norm(
+        attn_out, post_attn_norm_weight, spec.post_attention_norm_eps
+    )
+
+    residual = h
+    h = _gemma4_rms_norm(h, pre_ffn_norm_weight, spec.pre_feedforward_norm_eps)
+    h = _gemma4_mlp_activation(F.linear(h, gate_weight)) * F.linear(h, up_weight)
+    h = F.linear(h, down_weight)
+    if spec.tp_group_name is not None:
+        h = spyre_compiled_all_reduce(h, spec.tp_group_name)
+    h = residual + _gemma4_rms_norm(
+        h, post_ffn_norm_weight, spec.post_feedforward_norm_eps
+    )
+    if spec.has_ple:
+        residual = h
+        h = F.gelu(F.linear(h, ple_gate_weight), approximate="tanh")
+        h = h * per_layer_input
+        h = F.linear(h, ple_projection_weight)
+        h = _gemma4_rms_norm(h, post_ple_norm_weight, spec.post_ple_norm_eps)
+        h = residual + h
+    h = h * layer_scalar
+    if query_row_mask is not None:
+        h = h * query_row_mask
+    return h
+
+
+def _make_block_forward(spec):
     def forward(
-        self,
+        state,
         hidden_states,
         selected_freqs,
         attn_mask,
         key_cache,
         value_cache,
         cache_index,
-        layer_scalar,
-        per_layer_input=None,
-        query_row_mask=None,
+        per_layer_input,
+        query_row_mask,
     ):
+        pos = 0
+        if spec.kind == "writer":
+            q_weight, k_weight = state[pos : pos + 2]
+            pos += 2
+            if spec.attention_bias:
+                q_bias, k_bias = state[pos : pos + 2]
+                pos += 2
+            else:
+                q_bias = k_bias = None
+            if spec.is_kv_eq_v:
+                v_weight = v_bias = None
+            else:
+                v_weight = state[pos]
+                pos += 1
+                if spec.attention_bias:
+                    v_bias = state[pos]
+                    pos += 1
+                else:
+                    v_bias = None
+        else:
+            q_weight = state[pos]
+            pos += 1
+            if spec.attention_bias:
+                q_bias = state[pos]
+                pos += 1
+            else:
+                q_bias = None
+
+        o_weight = state[pos]
+        pos += 1
+        if spec.attention_bias:
+            o_bias = state[pos]
+            pos += 1
+        else:
+            o_bias = None
+        if spec.kind == "writer":
+            q_norm_weight, k_norm_weight = state[pos : pos + 2]
+            pos += 2
+        else:
+            q_norm_weight = state[pos]
+            pos += 1
+        gate_weight, up_weight, down_weight = state[pos : pos + 3]
+        pos += 3
+        input_norm_weight, post_attn_norm_weight = state[pos : pos + 2]
+        pos += 2
+        pre_ffn_norm_weight, post_ffn_norm_weight = state[pos : pos + 2]
+        pos += 2
+        ple_gate_weight = ple_projection_weight = post_ple_norm_weight = None
+        if spec.has_ple:
+            ple_gate_weight, ple_projection_weight, post_ple_norm_weight = state[
+                pos : pos + 3
+            ]
+            pos += 3
+        layer_scalar = state[pos]
+
+        bsz, seq_len, _ = hidden_states.shape
         residual = hidden_states
-        h = self.input_layernorm(hidden_states)
-        attn_out, key_cache, value_cache = self.self_attn(
-            h,
-            selected_freqs,
-            attn_mask,
-            key_cache,
-            value_cache,
-            cache_index,
+        h = _gemma4_rms_norm(hidden_states, input_norm_weight, spec.input_norm_eps)
+        q = F.linear(h, q_weight, q_bias).view(
+            bsz, seq_len, spec.num_q_heads, spec.head_dim
         )
-        # Sandwich: norm the attention output BEFORE adding the residual.
-        h = residual + self.post_attention_layernorm(attn_out)
+        q = _gemma4_rms_norm(q, q_norm_weight, spec.q_norm_eps).transpose(1, 2)
 
-        residual = h
-        h = self.pre_feedforward_layernorm(h)
-        h = self.mlp(h)
-        h = self.post_feedforward_layernorm(h)
-        h = residual + h
-        if self.has_ple:
-            h = _ple_tail(self, h, per_layer_input)
-        h = h * layer_scalar
-        if query_row_mask is not None:
-            h = h * query_row_mask
-        return h, key_cache, value_cache
+        if spec.kind == "writer":
+            k_lin = F.linear(h, k_weight, k_bias).view(
+                bsz, seq_len, spec.num_kv_heads, spec.head_dim
+            )
+            if spec.is_kv_eq_v:
+                v = _gemma4_rms_norm(k_lin, None, spec.v_norm_eps).transpose(1, 2)
+            else:
+                v = F.linear(h, v_weight, v_bias).view(
+                    bsz, seq_len, spec.num_kv_heads, spec.head_dim
+                )
+                v = _gemma4_rms_norm(v, None, spec.v_norm_eps).transpose(1, 2)
+            q = apply_rope_matmul(q, selected_freqs).contiguous()
+            k = apply_rope_matmul(
+                _gemma4_rms_norm(k_lin, k_norm_weight, spec.k_norm_eps).transpose(1, 2),
+                selected_freqs,
+            ).contiguous()
+            key_cache, value_cache = kv_cache_update(
+                k, v, key_cache, value_cache, cache_index
+            )
+        else:
+            q = apply_rope_matmul(q, selected_freqs)
 
-
-class Gemma4SharedBlock(nn.Module):
-    """KV-sharing Gemma 4 decoder block (E-variant trailing layers).
-
-    Runs a lean Q-only attention against a *producer* layer's KV cache: no
-    k/v projection, no k_norm/v_norm, no RoPE-on-K, no cache update. The
-    producer's cache is passed in by the driver (``_run_blocks_over_embeds``
-    selects ``key_caches[producer_of[i]]``), so this block returns only the
-    updated hidden state (never a cache tuple) and needs no ``cache_index`` —
-    it never writes.
-    """
-
-    def __init__(self, layer, num_q_heads, head_dim, has_ple):
-        super().__init__()
-        attn = layer.self_attn
-        self.q_proj = attn.q_proj
-        self.q_norm = attn.q_norm
-        self.o_proj = attn.o_proj
-        self.scaling = attn.scaling  # 1.0 for Gemma 4
-        self.num_q_heads = num_q_heads
-        self.head_dim = head_dim
-        self.mlp = layer.mlp
-        self.input_layernorm = layer.input_layernorm
-        self.post_attention_layernorm = layer.post_attention_layernorm
-        self.pre_feedforward_layernorm = layer.pre_feedforward_layernorm
-        self.post_feedforward_layernorm = layer.post_feedforward_layernorm
-        self.register_buffer(
-            "layer_scalar",
-            layer.layer_scalar,
-            persistent="layer_scalar" not in layer._non_persistent_buffers_set,
-        )
-        self.has_ple = has_ple
-        if has_ple:
-            self.per_layer_input_gate = layer.per_layer_input_gate
-            self.per_layer_projection = layer.per_layer_projection
-            self.post_per_layer_input_norm = layer.post_per_layer_input_norm
-        self.train(layer.training)
-
-    def forward(
-        self,
-        hidden_states,
-        selected_freqs,
-        attn_mask,
-        key_cache,
-        value_cache,
-        layer_scalar,
-        per_layer_input=None,
-        query_row_mask=None,
-    ):
-        residual = hidden_states
-        h = self.input_layernorm(hidden_states)
-        bsz, seq_len, _ = h.shape
-        q = self.q_proj(h).view(bsz, seq_len, self.num_q_heads, self.head_dim)
-        q = self.q_norm(q).transpose(1, 2)
-        q = apply_rope_matmul(q, selected_freqs)
         attn_out = F.scaled_dot_product_attention(
             q,
             key_cache,
             value_cache,
             attn_mask=attn_mask,
             dropout_p=0.0,
-            scale=self.scaling,
+            scale=spec.scaling,
             enable_gqa=True,
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
-        attn_out = self.o_proj(attn_out)
-        h = residual + self.post_attention_layernorm(attn_out)
+        h = _finish_block(
+            spec,
+            residual,
+            attn_out,
+            o_weight,
+            o_bias,
+            post_attn_norm_weight,
+            pre_ffn_norm_weight,
+            post_ffn_norm_weight,
+            gate_weight,
+            up_weight,
+            down_weight,
+            ple_gate_weight,
+            ple_projection_weight,
+            post_ple_norm_weight,
+            layer_scalar,
+            per_layer_input,
+            query_row_mask,
+        )
+        return h, key_cache, value_cache
 
-        residual = h
-        h = self.pre_feedforward_layernorm(h)
-        h = self.mlp(h)
-        h = self.post_feedforward_layernorm(h)
-        h = residual + h
-        if self.has_ple:
-            h = _ple_tail(self, h, per_layer_input)
-        h = h * layer_scalar
-        if query_row_mask is not None:
-            h = h * query_row_mask
-        return h
+    return forward
+
+
+def _block_spec(block, layer_type):
+    kind, attn = _block_kind_and_attention(block)
+    if kind == "writer":
+        num_kv_heads = attn.num_kv_heads
+        is_kv_eq_v = attn.is_kv_eq_v
+        k_norm_eps = attn.k_norm.eps
+        v_norm_eps = attn.v_norm.eps
+    else:
+        num_kv_heads = 0
+        is_kv_eq_v = False
+        k_norm_eps = 0.0
+        v_norm_eps = 0.0
+    activation = block.mlp.config.hidden_activation
+    if activation != "gelu_pytorch_tanh":
+        raise SpyreUnsupportedModelError(
+            "Gemma 4 checkpoints must use hidden_activation='gelu_pytorch_tanh'; "
+            f"got {activation!r}"
+        )
+    attention_bias = attn.q_proj.bias is not None
+    attention_projections = [attn.q_proj, attn.o_proj]
+    if kind == "writer":
+        attention_projections.append(attn.k_proj)
+        if not is_kv_eq_v:
+            attention_projections.append(attn.v_proj)
+    if any(
+        (projection.bias is not None) != attention_bias
+        for projection in attention_projections
+    ):
+        raise ValueError(
+            "Gemma 4 attention projections must use a consistent bias setting"
+        )
+    ple_dim = block.per_layer_input_gate.out_features if block.has_ple else 0
+    post_ple_eps = block.post_per_layer_input_norm.eps if block.has_ple else 0.0
+    scaled_norms = [
+        ("input_layernorm", block.input_layernorm),
+        ("q_norm", attn.q_norm),
+        ("post_attention_layernorm", block.post_attention_layernorm),
+        ("pre_feedforward_layernorm", block.pre_feedforward_layernorm),
+        ("post_feedforward_layernorm", block.post_feedforward_layernorm),
+    ]
+    if kind == "writer":
+        scaled_norms.append(("k_norm", attn.k_norm))
+    if block.has_ple:
+        scaled_norms.append(
+            ("post_per_layer_input_norm", block.post_per_layer_input_norm)
+        )
+    unscaled = [name for name, norm in scaled_norms if not norm.with_scale]
+    if unscaled:
+        raise SpyreUnsupportedModelError(
+            "Gemma 4 requires scaled RMSNorm for " + ", ".join(unscaled)
+        )
+    if kind == "writer" and attn.v_norm.with_scale:
+        raise SpyreUnsupportedModelError(
+            "Gemma 4 requires an unscaled RMSNorm for v_norm"
+        )
+
+    # Transformers normally all-reduces rowwise projections in module output
+    # hooks. The compiled executor uses their weights through F.linear instead,
+    # so carry the process-group name into the graph and reduce explicitly.
+    rowwise_projections = (attn.o_proj, block.mlp.down_proj)
+    device_meshes = [
+        getattr(projection, "_hf_device_mesh", None)
+        for projection in rowwise_projections
+    ]
+    if any(mesh is not None for mesh in device_meshes):
+        if any(mesh is None for mesh in device_meshes):
+            raise ValueError(
+                "Gemma 4 TP requires both o_proj and down_proj on a device mesh"
+            )
+        plans = [
+            getattr(projection, "_hf_tp_plan", None)
+            for projection in rowwise_projections
+        ]
+        if any(plan != SPYRE_ROWWISE for plan in plans):
+            raise ValueError(
+                "Gemma 4 compiled TP requires rowwise o_proj and down_proj"
+            )
+        group_names = [mesh.get_group().group_name for mesh in device_meshes]
+        if group_names[0] != group_names[1]:
+            raise ValueError("Gemma 4 o_proj and down_proj must use the same TP group")
+        tp_group_name = group_names[0]
+    else:
+        tp_group_name = None
+
+    # Gemma 4's base TP plan deliberately omits the PLE projections. The
+    # adapter's plan completion therefore replicates them, and unlike o_proj
+    # and down_proj their functional calls need no collective.
+    if block.has_ple and tp_group_name is not None:
+        ple_projections = (
+            block.per_layer_input_gate,
+            block.per_layer_projection,
+        )
+        if any(
+            getattr(projection, "_hf_tp_plan", None) != SPYRE_REPLICATED_LINEAR
+            for projection in ple_projections
+        ):
+            raise ValueError("Gemma 4 PLE projections must be replicated for TP")
+    return _Gemma4BlockSpec(
+        kind=kind,
+        layer_type=layer_type,
+        num_q_heads=attn.num_q_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=attn.head_dim,
+        intermediate_size=block.mlp.gate_proj.out_features,
+        activation=activation,
+        is_kv_eq_v=is_kv_eq_v,
+        attention_bias=attention_bias,
+        tp_group_name=tp_group_name,
+        has_ple=block.has_ple,
+        ple_dim=ple_dim,
+        scaling=attn.scaling,
+        input_norm_eps=block.input_layernorm.eps,
+        q_norm_eps=attn.q_norm.eps,
+        k_norm_eps=k_norm_eps,
+        v_norm_eps=v_norm_eps,
+        post_attention_norm_eps=block.post_attention_layernorm.eps,
+        pre_feedforward_norm_eps=block.pre_feedforward_layernorm.eps,
+        post_feedforward_norm_eps=block.post_feedforward_layernorm.eps,
+        post_ple_norm_eps=post_ple_eps,
+    )
 
 
 def prepare_gemma4_blocks(
-    layers, num_q_heads_per_layer, kv_shapes, is_kv_eq_v_per_layer, producer_of, has_ple
+    layers,
+    layer_types,
+    num_q_heads_per_layer,
+    kv_shapes,
+    is_kv_eq_v_per_layer,
+    producer_of,
+    has_ple,
 ):
-    """Replace Gemma 4 decoder layers with registered blocks and compile them.
-
-    ``producer_of[i]`` is ``None`` for a normal (KV-writing) layer and an int
-    for a KV-sharing layer, in which case a lean ``Gemma4SharedBlock`` is built
-    instead of a full ``Gemma4Block``.
-    """
-    blocks = []
+    """Install registered blocks and share compiled executors by structure."""
+    compiled_by_spec = {}
+    compiled_blocks = []
     for i, layer in enumerate(list(layers)):
-        if producer_of[i] is None:
-            block = Gemma4Block(
-                layer,
-                num_q_heads_per_layer[i],
-                kv_shapes[i][0],
-                kv_shapes[i][1],
-                is_kv_eq_v_per_layer[i],
-                has_ple,
-            )
-        else:
-            block = Gemma4SharedBlock(
-                layer,
-                num_q_heads_per_layer[i],
-                kv_shapes[i][1],
-                has_ple,
-            )
+        kind = "writer" if producer_of[i] is None else "shared"
+        block = Gemma4Block(
+            layer,
+            kind,
+            num_q_heads_per_layer[i],
+            kv_shapes[i][0],
+            kv_shapes[i][1],
+            is_kv_eq_v_per_layer[i],
+            has_ple,
+        )
         layers[i] = block
-        blocks.append(torch.compile(block, dynamic=False))
-    return blocks
+        spec = _block_spec(block, layer_types[i])
+        if spec not in compiled_by_spec:
+            compiled_by_spec[spec] = torch.compile(
+                _make_block_forward(spec), dynamic=False, fullgraph=True
+            )
+        compiled_blocks.append(compiled_by_spec[spec])
+    return compiled_blocks
 
 
 def _build_layer_masks(
@@ -662,9 +976,7 @@ def _run_blocks_over_embeds(
             else None
         )
         p = producer_of[i]
-        # Pass the per-layer scalar as a tensor read fresh from the registered,
-        # device-moved block — NOT as a Python float — so Dynamo guards on tensor
-        # metadata instead of recompiling for each distinct learned value.
+        block = backbone_layers[i]
         if is_moe:
             # The dedicated MoE blocks predate the dense/E optional inputs and
             # compile their attention and FFN regions internally. Preserve that
@@ -680,29 +992,29 @@ def _run_blocks_over_embeds(
             )
         elif p is None:
             h, key_caches[i], value_caches[i] = compiled_block(
+                _block_state(block),
                 h,
                 freqs[lt],
                 masks[lt],
                 key_caches[i],
                 value_caches[i],
                 cache_index,
-                backbone_layers[i].layer_scalar,
                 pli,
                 query_row_mask,
             )
         else:
             # KV-sharing layer: read the producer's cache, write nothing.
-            h = compiled_block(
+            h, _, _ = compiled_block(
+                _block_state(block),
                 h,
                 freqs[lt],
                 masks[lt],
                 key_caches[p],
                 value_caches[p],
-                backbone_layers[i].layer_scalar,
+                None,
                 pli,
                 query_row_mask,
             )
-
     norm = backbone.norm
     weight = norm.weight if norm.with_scale else None
     h = _compiled_gemma4_rms_norm(h, weight, norm.eps)
@@ -768,14 +1080,7 @@ def _run_forward(
         cache_index,
     )
 
-    logits = model.lm_head(h)
-
-    cap = text_config(model.config).final_logit_softcapping
-    if cap is not None:
-        logits = logits / cap
-        logits = torch.tanh(logits)
-        logits = logits * cap
-    return logits
+    return run_lm_head(model, h)
 
 
 def _setup_gemma4_text_decoder(model, *, allow_moe=False):
@@ -795,7 +1100,7 @@ def _setup_gemma4_text_decoder(model, *, allow_moe=False):
       2. Patch ``Gemma4RMSNorm`` for the fp16 Spyre path.
       3. Build one ``PrecomputedRotaryEmbedding`` per layer type.
       4. Record per-layer KV-cache shapes (sliding vs global differ).
-      5. Chunk the LM head for the large vocab.
+      5. Prepare the padded LM head and a TP vocabulary gather when needed.
 
     Returns ``(num_q_heads_per_layer, kv_shapes, is_kv_eq_v_per_layer)`` — the
     per-layer geometry the caller needs to compile its blocks.
@@ -831,13 +1136,34 @@ def _setup_gemma4_text_decoder(model, *, allow_moe=False):
     kv_shapes = []
     is_kv_eq_v_per_layer = []
     for i, (layer_type, layer_cfg) in enumerate(zip(cfg.layer_types, layer_configs)):
-        num_q_heads_per_layer.append(layer_cfg.num_attention_heads)
         head_dim = layer_cfg.head_dim
         assert head_dim % 2 == 0 and head_dim // 2 >= 64, (
             f"Gemma 4 layer {i} head_dim={head_dim}: head_dim/2 must be >= 64 "
             "(one Spyre stick). A padded variant is not implemented for this adapter."
         )
-        num_kv_heads = layer_cfg.num_key_value_heads
+        # HF updates the Linear metadata when its colwise TP plan shards Q/K/V.
+        # Derive local head counts from those modules rather than retaining the
+        # global config counts; otherwise a 2-way shard producing 2048 Q values
+        # is incorrectly viewed as 16 * 256 (=4096) values.
+        attn = backbone.layers[i].self_attn
+        assert attn.q_proj.out_features % head_dim == 0
+        num_q_heads = attn.q_proj.out_features // head_dim
+        k_proj = getattr(attn, "k_proj", None)
+        if k_proj is None:
+            # KV-sharing layers intentionally omit K/V projections. Reuse the
+            # already-derived local KV geometry of their producer.
+            producer = model._spyre_producer_of[i]
+            assert producer is not None
+            num_kv_heads = kv_shapes[producer][0]
+        else:
+            assert k_proj.out_features % head_dim == 0, (
+                f"Gemma 4 layer {i} has a partial KV head after TP: "
+                f"k_proj.out_features={k_proj.out_features}, head_dim={head_dim}, "
+                f"weight.shape={tuple(k_proj.weight.shape)}, "
+                f"tp_plan={getattr(k_proj, '_hf_tp_plan', None)!r}"
+            )
+            num_kv_heads = k_proj.out_features // head_dim
+        num_q_heads_per_layer.append(num_q_heads)
         kv_shapes.append((num_kv_heads, head_dim, head_dim))
         is_kv_eq_v_per_layer.append(attention_k_eq_v and layer_type == "full_attention")
     model._spyre_kv_shapes = kv_shapes
@@ -854,9 +1180,16 @@ def _setup_gemma4_text_decoder(model, *, allow_moe=False):
             InvFreqShim(inv_freq, scaling)
         )
 
-    # LM head: smooth-padded to a stick-aligned vocab whose per-core span fits
-    # the 256 MB EAR limit (see hf_common.pad_lm_head).
-    pad_lm_head(model)
+    cap = cfg.final_logit_softcapping
+
+    def process_logits(logits):
+        if cap is not None:
+            logits = logits / cap
+            logits = torch.tanh(logits)
+            logits = logits * cap
+        return logits
+
+    prepare_lm_head_for_spyre(model, logits_processor=process_logits)
 
     return num_q_heads_per_layer, kv_shapes, is_kv_eq_v_per_layer
 
@@ -866,17 +1199,19 @@ def prepare_text_decoder_for_spyre(model):
 
     Runs the shared attention-side setup (``_setup_gemma4_text_decoder``:
     feature dispatch, RMSNorm patch, per-type RoPE, KV shapes, LM-head padding)
-    then compiles a dense ``Gemma4Block`` per decoder layer. The MoE
-    adapter (``hf_gemma4_moe``) calls the same seam with ``allow_moe=True`` and
-    compiles its own MoE blocks instead.
+    then installs registered dense blocks and compiles one parameter-explicit
+    executor per structural layer class. The MoE adapter (``hf_gemma4_moe``)
+    calls the same seam with ``allow_moe=True`` and compiles its own MoE blocks.
     """
     backbone = _gemma4_backbone(model)
+    cfg = text_config(model.config)
     num_q_heads_per_layer, kv_shapes, is_kv_eq_v_per_layer = _setup_gemma4_text_decoder(
         model, allow_moe=False
     )
 
     model._spyre_compiled_blocks = prepare_gemma4_blocks(
         backbone.layers,
+        cfg.layer_types,
         num_q_heads_per_layer,
         kv_shapes,
         is_kv_eq_v_per_layer,

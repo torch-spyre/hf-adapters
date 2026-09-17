@@ -24,17 +24,20 @@ reference; they differ only in their input texts/pairs and assertions.
 from __future__ import annotations
 
 import sys
+from typing import cast
 
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from tests.conftest import load_ref_model
 from tests.cpu.conftest import _unwrap_compiled_blocks
+from tests.model_registry import REMOTE_CODE_PATHS
 
 
 def run_seq_classification_auto_loader_vs_ref(
     model_path: str,
     inputs: list[str] | list[tuple[str, str]],
+    trust_remote_code: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the auto-loader seq-classification path against a stock HF reference.
 
@@ -51,10 +54,23 @@ def run_seq_classification_auto_loader_vs_ref(
         ``(ref_logits, adapter_logits)`` — both ``[B, num_labels]`` float CPU tensors.
     """
     auto_spyre_model_mod = sys.modules["hf_adapters.auto_spyre_model"]
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path, trust_remote_code=trust_remote_code
+    )
+
+    if inputs and isinstance(inputs[0], tuple):
+        paired_inputs = cast(list[tuple[str, str]], inputs)
+        texts = [text for text, _ in paired_inputs]
+        text_pairs = [text_pair for _, text_pair in paired_inputs]
+    else:
+        texts = cast(list[str], inputs)
+        text_pairs = None
 
     encoded = tokenizer(
-        inputs,
+        texts,
+        text_pair=text_pairs,
         return_tensors="pt",
         padding=True,
         truncation=True,
@@ -66,6 +82,7 @@ def run_seq_classification_auto_loader_vs_ref(
     ref_model = load_ref_model(
         model_path=model_path,
         auto_model_cls=AutoModelForSequenceClassification,
+        trust_remote_code=trust_remote_code,
     )
     ref_model.eval()
     with torch.no_grad():
@@ -75,7 +92,7 @@ def run_seq_classification_auto_loader_vs_ref(
     # --- Auto-loader path ---
     model = (
         auto_spyre_model_mod.AutoSpyreModelForSequenceClassification.from_pretrained(
-            model_path
+            model_path, trust_remote_code=trust_remote_code
         )
     )
     _unwrap_compiled_blocks(model)

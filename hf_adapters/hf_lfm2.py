@@ -32,7 +32,8 @@ from hf_adapters.hf_common import (
     get_backbone,
     kv_cache_update,
     pad_attention_heads,
-    pad_lm_head,
+    prepare_lm_head_for_spyre,
+    run_lm_head,
 )
 
 
@@ -327,7 +328,7 @@ def _run_forward(
         value_caches,
         cache_index,
     )
-    return model.lm_head(h)
+    return run_lm_head(model, h)
 
 
 def _allocate_caches(model, batch_size, max_cache_len, dtype, device):
@@ -418,7 +419,7 @@ def prepare_for_spyre(model):
                 attn.k_layernorm, original_head_dim, padded_head_dim
             )
 
-    pad_lm_head(model)
+    prepare_lm_head_for_spyre(model)
     model._spyre_cache_allocator = _allocate_caches
     model._spyre_compiled_blocks = [
         (

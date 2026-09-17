@@ -32,6 +32,7 @@ from PIL import Image
 from transformers import AutoProcessor
 
 from tests.conftest import load_ref_model
+from tests.model_registry import REMOTE_CODE_PATHS
 
 # ── VLM (image→text) end-to-end helpers ──────────────────────────────────────
 #
@@ -146,6 +147,7 @@ def build_vlm_batch(
     model_path: str,
     prompt: str,
     image: Image.Image | None = None,
+    trust_remote_code: bool | None = None,
 ) -> tuple[AutoProcessor, dict[str, torch.Tensor]]:
     """Processor + tokenized (image + prompt) batch, the official VLM way.
 
@@ -158,10 +160,16 @@ def build_vlm_batch(
     convention. Returns ``(processor, batch)``; ``batch`` carries whatever image
     inputs the model needs (``pixel_values``, ``image_sizes``, …).
     """
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
     if "mistral" in model_path.lower():
-        processor = AutoProcessor.from_pretrained(model_path, fix_mistral_regex=True)
+        processor = AutoProcessor.from_pretrained(
+            model_path, fix_mistral_regex=True, trust_remote_code=trust_remote_code
+        )
     else:
-        processor = AutoProcessor.from_pretrained(model_path)
+        processor = AutoProcessor.from_pretrained(
+            model_path, trust_remote_code=trust_remote_code
+        )
     processor.tokenizer.padding_side = "left"
 
     if image is None:
@@ -192,6 +200,7 @@ def stock_vlm_generate(
     adapter_mod,
     max_new_tokens: int,
     ref_model=None,
+    trust_remote_code: bool | None = None,
 ) -> str:
     """Reference: stock ``AutoModelForImageTextToText.generate`` on ``batch``.
 
@@ -206,6 +215,7 @@ def stock_vlm_generate(
         ref_model = load_ref_model(
             model_path=model_path,
             adapter_mod=adapter_mod,
+            trust_remote_code=trust_remote_code,
             auto_model_cls=AutoModelForImageTextToText,
         )
 

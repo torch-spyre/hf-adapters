@@ -43,7 +43,7 @@ import os
 from dataclasses import dataclass
 from functools import partial
 from types import MethodType, ModuleType
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, cast
 
 import torch
 from transformers import (
@@ -56,6 +56,7 @@ from transformers import (
     AutoModelForSequenceClassification,
     AutoModelForTokenClassification,
     BertConfig,
+    CLIPConfig,
     DistilBertConfig,
     Gemma2Config,
     Gemma3Config,
@@ -70,7 +71,7 @@ from transformers import (
     Granite4VisionConfig,
     GraniteConfig,
     GraniteMoeHybridConfig,
-    GraniteSWAConfig,  # type: ignore[attr-defined]
+    GraniteSWAConfig,
     Lfm2Config,
     LlamaConfig,
     MistralConfig,
@@ -78,6 +79,7 @@ from transformers import (
     MPNetConfig,
     Olmo2Config,
     OlmoConfig,
+    OlmoeConfig,
     OPTConfig,
     Phi3Config,
     PreTrainedModel,
@@ -100,6 +102,8 @@ from transformers.models.mistral3.configuration_mistral3 import Mistral3Config
 import hf_adapters.hf_common as hf_common
 from hf_adapters import (
     hf_bert,
+    hf_bharatgen,
+    hf_clip,
     hf_distilbert,
     hf_dspark_gemma4,
     hf_dspark_granite,
@@ -127,6 +131,7 @@ from hf_adapters import (
     hf_mpnet,
     hf_olmo,
     hf_olmo2,
+    hf_olmoe,
     hf_opt,
     hf_phi3,
     hf_qwen2,
@@ -145,6 +150,7 @@ from hf_adapters.hf_common import (
 
 CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     BertConfig: hf_bert,
+    CLIPConfig: hf_clip,
     DistilBertConfig: hf_distilbert,
     Gemma2Config: hf_gemma2,
     Gemma3Config: hf_gemma3,
@@ -169,6 +175,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     MPNetConfig: hf_mpnet,
     OlmoConfig: hf_olmo,
     Olmo2Config: hf_olmo2,
+    OlmoeConfig: hf_olmoe,
     OPTConfig: hf_opt,
     Phi3Config: hf_phi3,
     Qwen2Config: hf_qwen2,
@@ -189,6 +196,7 @@ ARCH_TO_ADAPTER_MODULE_MAPPING: dict[str, ModuleType] = {
     "Qwen3DSparkModel": hf_dspark_qwen3,
     "Gemma4DSparkModel": hf_dspark_gemma4,
     "GraniteDSparkModel": hf_dspark_granite,
+    "ParamBharatGenForCausalLM": hf_bharatgen,
 }
 
 # Multimodal (image-text-to-text) mapping — used by
@@ -199,6 +207,7 @@ ARCH_TO_ADAPTER_MODULE_MAPPING: dict[str, ModuleType] = {
 IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     type[PretrainedConfig], ModuleType
 ] = {
+    Gemma4Config: hf_gemma4_mm,
     Gemma4UnifiedConfig: hf_gemma4_mm,
     Granite4VisionConfig: hf_granite_vision_mm,
     Mistral3Config: hf_mistral3_vision_mm,
@@ -237,11 +246,55 @@ MODEL_DTYPE_POLICIES: dict[str, ModelDTypePolicy] = {
 }
 
 
+# Known sub-module subfolders used by sentence-transformers composite repos,
+# e.g. sentence-transformers/clip-ViT-B-32 stores its model under '0_CLIPModel'.
+_ST_SUBFOLDERS = ("0_CLIPModel", "0_Transformer")
+
+
+def _autoconfig_with_subfolder_fallback(
+    model_name_or_path: Union[str, os.PathLike[str]],
+    trust_remote_code: bool | None = None,
+) -> PretrainedConfig | None:
+    """Load ``AutoConfig`` for *model_name_or_path*, probing known ST subfolders on failure.
+
+    Returns the first config that loads successfully, or ``None`` if every
+    attempt fails.
+    """
+    try:
+        return cast(
+            PretrainedConfig,
+            AutoConfig.from_pretrained(
+                model_name_or_path, trust_remote_code=trust_remote_code
+            ),
+        )
+    except Exception:
+        pass
+    for sub in _ST_SUBFOLDERS:
+        try:
+            return cast(
+                PretrainedConfig,
+                AutoConfig.from_pretrained(
+                    model_name_or_path,
+                    subfolder=sub,
+                    trust_remote_code=trust_remote_code,
+                ),
+            )
+        except Exception:
+            pass
+    return None
+
+
 def dtype_for_model_path(
     model_name_or_path: Union[str, os.PathLike[str]],
     target_device: str | torch.device,
+    trust_remote_code: bool | None = None,
 ) -> torch.dtype:
     """Resolve one concrete dtype before loading a model."""
+    # trust_remote_code is forwarded to AutoConfig.from_pretrained only when the
+    # dtype has to be read from the config (no explicit policy). Checkpoints that
+    # ship custom config code otherwise block on an interactive opt-in prompt
+    # here, before the load ever reaches from_pretrained.
+
     device_str = (
         target_device.type
         if isinstance(target_device, torch.device)
@@ -253,8 +306,12 @@ def dtype_for_model_path(
     elif policy.dtype is not None:
         dtype = policy.dtype
     else:
-        config = AutoConfig.from_pretrained(model_name_or_path)
-        dtype = getattr(config, "dtype", None) or torch.float16
+        config = _autoconfig_with_subfolder_fallback(
+            model_name_or_path, trust_remote_code=trust_remote_code
+        )
+        dtype = (
+            getattr(config, "dtype", None) or torch.float16 if config else torch.float16
+        )
 
     if dtype == torch.float32 and device_str == "spyre":
         dtype = torch.float16
@@ -269,9 +326,11 @@ def resolve_adapter_module(
     ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
     trust_remote_code: bool | None = None,
 ) -> ModuleType:
-    model_config: PretrainedConfig = AutoConfig.from_pretrained(
+    model_config = _autoconfig_with_subfolder_fallback(
         model_name_or_path, trust_remote_code=trust_remote_code
     )
+    if model_config is None:
+        raise SpyreNoAdapterError(f"Could not load config for {model_name_or_path}")
 
     # Architecture-name dispatch first: DSpark drafters share their base model's
     # config class but carry a distinct ``*DSparkModel`` architecture, so route on
@@ -317,14 +376,18 @@ class AutoSpyreModel:
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
+        trust_remote_code: bool | None = None,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
-            model_name_or_path=model_name_or_path, mapping=cls._module_mapping
+            model_name_or_path=model_name_or_path,
+            mapping=cls._module_mapping,
+            trust_remote_code=trust_remote_code,
         )
         if dtype is None:
             dtype = dtype_for_model_path(
                 model_name_or_path,
                 target_device=hf_common.DEVICE,
+                trust_remote_code=trust_remote_code,
             )
 
         model: PreTrainedModel = load_model_common(
@@ -333,6 +396,7 @@ class AutoSpyreModel:
             dtype,
             auto_model_cls=cls._auto_model_cls,
             tp_plan=tp_plan,
+            trust_remote_code=trust_remote_code,
         )
         move_model_to_spyre(model, module, dtype)
         return model
@@ -353,15 +417,21 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
+        trust_remote_code: bool | None = None,
     ) -> PreTrainedModel:
-        module: ModuleType = resolve_adapter_module(model_name_or_path)
+        module: ModuleType = resolve_adapter_module(
+            model_name_or_path, trust_remote_code=trust_remote_code
+        )
         if getattr(module, "_is_encoder_only", False):
             raise SpyreUnsupportedModelError(
                 "Generation is not currently supported for encoder-only architectures"
             )
 
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype, tp_plan=tp_plan
+            model_name_or_path,
+            dtype=dtype,
+            tp_plan=tp_plan,
+            trust_remote_code=trust_remote_code,
         )
 
         def model_generate(
@@ -440,12 +510,18 @@ class AutoSpyreModelForMaskedLM(AutoSpyreModel):
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
+        trust_remote_code: bool | None = None,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
-            model_name_or_path, mapping=cls._module_mapping
+            model_name_or_path,
+            mapping=cls._module_mapping,
+            trust_remote_code=trust_remote_code,
         )
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype, tp_plan=tp_plan
+            model_name_or_path,
+            dtype=dtype,
+            tp_plan=tp_plan,
+            trust_remote_code=trust_remote_code,
         )
 
         def model_forward(
@@ -514,10 +590,16 @@ class AutoSpyreModelForQuestionAnswering(AutoSpyreModel):
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
+        trust_remote_code: bool | None = None,
     ) -> PreTrainedModel:
-        module: ModuleType = resolve_adapter_module(model_name_or_path)
+        module: ModuleType = resolve_adapter_module(
+            model_name_or_path, trust_remote_code=trust_remote_code
+        )
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype, tp_plan=tp_plan
+            model_name_or_path,
+            dtype=dtype,
+            tp_plan=tp_plan,
+            trust_remote_code=trust_remote_code,
         )
         if model.config.num_labels != 2:
             raise SpyreUnsupportedModelError(
@@ -597,12 +679,18 @@ class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
+        trust_remote_code: bool | None = None,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
-            model_name_or_path, mapping=cls._module_mapping
+            model_name_or_path,
+            mapping=cls._module_mapping,
+            trust_remote_code=trust_remote_code,
         )
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype, tp_plan=tp_plan
+            model_name_or_path,
+            dtype=dtype,
+            tp_plan=tp_plan,
+            trust_remote_code=trust_remote_code,
         )
 
         def model_forward(
@@ -689,12 +777,18 @@ class AutoSpyreModelForTokenClassification(AutoSpyreModel):
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
+        trust_remote_code: bool | None = None,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
-            model_name_or_path, mapping=cls._module_mapping
+            model_name_or_path,
+            mapping=cls._module_mapping,
+            trust_remote_code=trust_remote_code,
         )
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype, tp_plan=tp_plan
+            model_name_or_path,
+            dtype=dtype,
+            tp_plan=tp_plan,
+            trust_remote_code=trust_remote_code,
         )
 
         def model_forward(
@@ -765,6 +859,7 @@ def _run_vlm_text_forward(
         key_caches,
         value_caches,
         cache_index,
+        input_ids=input_ids,
     )
 
 
@@ -834,13 +929,18 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
         model_name_or_path: Union[str, os.PathLike[str]],
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
+        trust_remote_code: bool | None = None,
     ):
         module: ModuleType = resolve_adapter_module(
             model_name_or_path,
             mapping=cls._module_mapping,
+            trust_remote_code=trust_remote_code,
         )
         model: PreTrainedModel = super().from_pretrained(
-            model_name_or_path, dtype=dtype, tp_plan=tp_plan
+            model_name_or_path,
+            dtype=dtype,
+            tp_plan=tp_plan,
+            trust_remote_code=trust_remote_code,
         )
 
         def model_generate(

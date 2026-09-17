@@ -219,6 +219,47 @@ def test_vlm_adapters_implement_generation_hooks():
         )
 
 
+def test_standard_gqa_adapters_prepare_lm_head():
+    """Every adapter using the shared causal forward must install its LM head."""
+    adapter_dir = Path(__file__).parent.parent / "hf_adapters"
+    valid_setup_calls = {"prepare_lm_head_for_spyre", "prepare_standard_gqa"}
+
+    for adapter_path in adapter_dir.glob("hf_*.py"):
+        tree = ast.parse(adapter_path.read_text())
+        uses_standard_forward = any(
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "_run_forward"
+                for target in node.targets
+            )
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "standard_gqa_forward"
+            for node in tree.body
+        )
+        if not uses_standard_forward:
+            continue
+
+        prepare = next(
+            (
+                node
+                for node in tree.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "prepare_for_spyre"
+            ),
+            None,
+        )
+        assert prepare is not None, f"{adapter_path.name} has no prepare_for_spyre"
+        calls = {
+            node.func.id
+            for node in ast.walk(prepare)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert calls & valid_setup_calls, (
+            f"{adapter_path.name} uses standard_gqa_forward but prepare_for_spyre "
+            "does not install the shared LM-head callable"
+        )
+
+
 def test_adapter_coverage_details():
     """
     Provide detailed information about adapter coverage for debugging.

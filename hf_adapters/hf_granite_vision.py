@@ -44,16 +44,17 @@ import torch
 from hf_adapters import hf_granite
 from hf_adapters.hf_common import (
     get_backbone,
-    pad_lm_head,
+    prepare_lm_head_for_spyre,
     prepare_rope_and_heads,
     prepare_standard_gqa_blocks,
+    text_config,
 )
 
 _run_backbone_forward = hf_granite._run_backbone_forward
 _run_forward = hf_granite._run_forward
 
 
-def load_hf_model(model_path, dtype=torch.float16):
+def load_hf_model(model_path, dtype=torch.float16, trust_remote_code=None):
     """Load the stock Granite Vision VLM (text-only reference for the harness).
 
     Returns the ``Granite4VisionForConditionalGeneration`` with the vision tower
@@ -65,7 +66,7 @@ def load_hf_model(model_path, dtype=torch.float16):
     from transformers import AutoModelForImageTextToText
 
     model = AutoModelForImageTextToText.from_pretrained(
-        model_path, dtype=dtype, device_map="cpu"
+        model_path, dtype=dtype, device_map="cpu", trust_remote_code=trust_remote_code
     )
     # Drop the SigLIP vision tower and the deepstack/spatial projectors — text-only
     # inference (the full image→text pipeline lives in hf_granite_vision_mm).
@@ -86,7 +87,10 @@ def prepare_for_spyre(model):
     untouched — this is the text-only path.
     """
     prepare_rope_and_heads(model)
-    pad_lm_head(model)
+    logits_scaling = text_config(model.config).logits_scaling
+    prepare_lm_head_for_spyre(
+        model, logits_processor=lambda logits: logits / logits_scaling
+    )
     backbone = get_backbone(model)
     model._spyre_compiled_blocks = prepare_standard_gqa_blocks(backbone.layers, True)
     model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)

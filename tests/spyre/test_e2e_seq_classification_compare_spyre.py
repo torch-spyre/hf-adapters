@@ -40,7 +40,13 @@ import pytest
 import torch
 import torch.nn.functional as F
 from _seq_classification_helpers import run_seq_classification_cpu_vs_spyre
-from model_registry import SEQ_CLASSIFICATION_PATHS
+from model_registry import (
+    NON_BLOCKING_SEQUENCE_CLASSIFICATION_MODELS,
+    REMOTE_CODE_PATHS,
+    SEQ_CLASSIFICATION_PATHS,
+    sequence_classification_test_case,
+    xfail_non_blocking,
+)
 
 from hf_adapters.auto_spyre_model import (
     SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING,
@@ -49,25 +55,31 @@ from hf_adapters.auto_spyre_model import (
 
 pytestmark = pytest.mark.model_harness("seq_classification")
 
-TEXTS: list[str] = [
-    "Hello, my dog is cute.",
-    "This movie was absolutely terrible.",
-    "The weather is nice today.",
-]
-
 # Spyre fp16 backbone vs CPU fp32: cosine over num_labels should be very tight.
 COSINE_THRESHOLD: float = 0.99
 
 
 @pytest.mark.parametrize(
-    "model_path", SEQ_CLASSIFICATION_PATHS, ids=SEQ_CLASSIFICATION_PATHS
+    "model_path",
+    xfail_non_blocking(
+        SEQ_CLASSIFICATION_PATHS,
+        table=NON_BLOCKING_SEQUENCE_CLASSIFICATION_MODELS,
+    ),
 )
-def test_e2e_seq_classification_compare_spyre(model_path: str) -> None:
+def test_e2e_seq_classification_compare_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
     adapter = resolve_adapter_module(
         model_path,
         mapping=SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+        trust_remote_code=trust_remote_code,
     )
-    result = run_seq_classification_cpu_vs_spyre(model_path, adapter, TEXTS)
+    inputs, expected_ids = sequence_classification_test_case(model_path)
+    result = run_seq_classification_cpu_vs_spyre(
+        model_path, adapter, inputs, trust_remote_code=trust_remote_code
+    )
 
     ref_logits = result["ref_logits"]
     spyre_logits = result["spyre_logits"]
@@ -77,12 +89,15 @@ def test_e2e_seq_classification_compare_spyre(model_path: str) -> None:
     cos = F.cosine_similarity(spyre_logits, ref_logits, dim=-1)  # [B]
 
     print("\n## Seq Classification: HF (CPU) vs Adapter (Spyre)\n")
-    print("| Text | HF id | Spyre id | Cosine | Match |")
-    print("|------|-------|----------|--------|-------|")
-    for text, ref_id, spyre_id, c in zip(TEXTS, ref_ids, spyre_ids, cos):
+    print("| Input | Expected id | HF id | Spyre id | Cosine | Match |")
+    print("|-------|-------------|-------|----------|--------|-------|")
+    for model_input, expected_id, ref_id, spyre_id, c in zip(
+        inputs, expected_ids, ref_ids, spyre_ids, cos
+    ):
         match = "Yes" if ref_id.item() == spyre_id.item() else "No"
         print(
-            f"| {text} | {ref_id.item()} | {spyre_id.item()} | {c.item():.6f} | {match} |"
+            f"| {model_input} | {expected_id} | {ref_id.item()} | "
+            f"{spyre_id.item()} | {c.item():.6f} | {match} |"
         )
 
     assert (
@@ -93,6 +108,10 @@ def test_e2e_seq_classification_compare_spyre(model_path: str) -> None:
         f"min per-sample cosine {cos.min().item():.6f} < threshold {COSINE_THRESHOLD}\n"
         f"  HF logits    : {ref_logits.tolist()}\n"
         f"  Spyre logits : {spyre_logits.tolist()}"
+    )
+    assert ref_ids.tolist() == expected_ids, (
+        f"reference predictions {ref_ids.tolist()} do not match task labels "
+        f"{expected_ids}"
     )
     assert torch.equal(spyre_ids, ref_ids), (
         f"predicted class mismatch.\n"

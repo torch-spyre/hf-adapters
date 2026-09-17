@@ -16,6 +16,7 @@ All tests use pytree for robust handling of nested input/output structures and t
 real model configurations from YAML without artificial modifications.
 """
 
+import copy
 import os
 
 import torch
@@ -82,11 +83,29 @@ def _construct_module(
     loading after the device transfer would overwrite the laid-out parameters with
     default-layout ones -- leaving the test green while proving nothing. Doing both
     here keeps that ordering in one place.
+
+    Constructor args are DEEP-COPIED for each construction. A YAML
+    ``module_path`` arg (``InputArgModule``) is built into a real ``nn.Module``
+    once per ``module_inputs_func`` call, and the framework hands that SAME
+    instance to every ``_construct_module`` call. Wrappers like
+    ``hf_common.StandardGQAAttention`` adopt the inner module's ``nn.Linear``
+    submodules by reference (``self.q_proj = attn.q_proj``), so a CPU reference
+    module and a device module built from one spec ended up sharing the very same
+    parameter objects -- ``cpu_module.q_proj is device_module.q_proj``. Since
+    ``load_model_to_spyre``/``.to(device)`` relocate parameters IN PLACE, moving
+    the device module then moved the CPU reference's weights too, and the "CPU"
+    reference ran CPU inputs against Spyre weights::
+
+        RuntimeError: Spyre decomposition function called with inputs on a
+        different device! Args devices: devs=[cpu, spyre:0]
+
+    raised from the CPU module's first ``F.linear``. A ``state_dict`` clone cannot
+    fix this -- ``load_state_dict`` copies values INTO the shared parameter object
+    -- so the inner module itself has to be copied before construction.
     """
-    module = module_info.module_cls(
-        *module_input.constructor_input.args,
-        **module_input.constructor_input.kwargs,
-    )
+    ctor_args = copy.deepcopy(module_input.constructor_input.args)
+    ctor_kwargs = copy.deepcopy(module_input.constructor_input.kwargs)
+    module = module_info.module_cls(*ctor_args, **ctor_kwargs)
     if dtype is not None:
         module = module.to(dtype)
     if state_dict is not None:
@@ -132,6 +151,37 @@ def _move_inputs(module_input, *, dtype=None, device=None):
 
     args = tree_map(move, module_input.forward_input.args)
     kwargs = tree_map(move, module_input.forward_input.kwargs)
+    return args, kwargs
+
+
+def _fresh_inputs(module_input, *, device):
+    """Return a private copy of a module_input's forward args/kwargs on ``device``.
+
+    ``module_info.module_inputs_func`` builds each input tensor ONCE, and the
+    framework hands the same tensor objects to every forward the test runs. That
+    breaks any module that mutates an input in place -- the Spyre adapters'
+    attention modules take a KV cache and write it via ``index_copy_``, returning
+    the very same tensor. Run eager and then compiled on those shared objects and
+    the second run starts from a cache the first one already filled, so it is not
+    the same experiment: differences are attributed to eager-vs-compile when they
+    actually come from the leftover state.
+
+    ``_move_inputs``/``.to(device)`` cannot serve here: ``.to()`` on a tensor that
+    is already on the target device returns the SAME object, not a copy, so
+    "moving" device tensors to the device they are already on aliases them.
+    ``.clone()`` is what forces a distinct allocation.
+
+    Cloning on Spyre also preserves the device layout the YAML pinned, which a
+    CPU round-trip would discard.
+    """
+
+    def fresh(x):
+        if not isinstance(x, torch.Tensor):
+            return x
+        return x.clone().to(device) if device is not None else x.clone()
+
+    args = tree_map(fresh, module_input.forward_input.args)
+    kwargs = tree_map(fresh, module_input.forward_input.kwargs)
     return args, kwargs
 
 
@@ -628,22 +678,22 @@ class TestModuleCustom(TestCase):
             # oot_test_config_models.py). They are NOT CPU tensors despite the
             # attribute name, so build a genuine CPU copy for the CPU reference
             # module instead of using them as-is.
-            args_device = module_input.forward_input.args
-            kwargs_device = module_input.forward_input.kwargs
-
-            args_cpu = tree_map(
-                lambda x: x.cpu() if isinstance(x, torch.Tensor) else x, args_device
-            )
-            kwargs_cpu = tree_map(
-                lambda x: x.cpu() if isinstance(x, torch.Tensor) else x, kwargs_device
-            )
+            # Each of the three forwards gets its OWN copy of the inputs. The
+            # framework builds them once and reuses the objects, so sharing them
+            # would let an in-place module (the attention modules write their KV
+            # cache via index_copy_) feed the eager run's leftover cache into the
+            # compiled run -- see _fresh_inputs. A .cpu()/.to(device) pair is not
+            # enough: it returns the same object when already on that device.
+            args_cpu, kwargs_cpu = _fresh_inputs(module_input, device="cpu")
+            args_eager, kwargs_eager = _fresh_inputs(module_input, device=device)
+            args_compile, kwargs_compile = _fresh_inputs(module_input, device=device)
 
             # Run forward passes
             with torch.no_grad():
                 output_cpu = module_cpu(*args_cpu, **kwargs_cpu)
-                output_device_eager = module_device_eager(*args_device, **kwargs_device)
+                output_device_eager = module_device_eager(*args_eager, **kwargs_eager)
                 output_device_compile = module_device_compile(
-                    *args_device, **kwargs_device
+                    *args_compile, **kwargs_compile
                 )
 
             # Extract all tensors from outputs using pytree
@@ -770,9 +820,10 @@ class TestModuleCustom(TestCase):
                 cpu_state_dict = module_cpu.state_dict()
 
                 # === CPU forward pass. ===
-                args_cpu, kwargs_cpu = _move_inputs(
-                    module_input, dtype=dtype, device="cpu"
-                )
+                # A device->CPU move already allocates, so this side was never
+                # aliased; _fresh_inputs is used anyway so both sides of the
+                # comparison obtain their inputs the same way.
+                args_cpu, kwargs_cpu = _fresh_inputs(module_input, device="cpu")
                 cpu_tensors = _run_forward(module_cpu, args_cpu, kwargs_cpu)
 
                 # === Instantiate the module on device with the same weights. ===
@@ -794,10 +845,12 @@ class TestModuleCustom(TestCase):
                     module_device = torch.compile(module_device)
 
                 # === Device forward pass. ===
-                # Move inputs to device using pytree to handle nested structures.
-                args_device, kwargs_device = _move_inputs(
-                    module_input, dtype=dtype, device=device
-                )
+                # A private copy per mode, not _move_inputs: the framework's
+                # tensors are already on `device`, so .to(device) hands back the
+                # same objects and running both modes (TEST_EAGER_WITH_CPU=1 with
+                # TEST_COMPILE_WITH_CPU=1) would let the first mode's in-place KV
+                # cache writes carry into the second. See _fresh_inputs.
+                args_device, kwargs_device = _fresh_inputs(module_input, device=device)
                 # Outputs may be a bare tensor, a tuple/list, or a dict (e.g.
                 # attention/decoder layers return hidden_states + attn weights +
                 # cache). Flatten both sides with pytree and compare every tensor,
@@ -811,9 +864,19 @@ class TestModuleCustom(TestCase):
                     )
 
                 for i, (cpu_t, device_t) in enumerate(zip(cpu_tensors, device_tensors)):
+                    # See the comment in test_eager_vs_compile: atol/rtol must be
+                    # passed explicitly so the YAML-driven tolerances reach the
+                    # comparison. Omitting them left this test on torch's bf16
+                    # default (atol=1e-05), which no honest bf16 reduction of this
+                    # depth can meet -- CPU and Spyre accumulate a 192-long
+                    # softmax/matmul in different orders, so results differ by a
+                    # few bf16 ULPs. That made this test fail intermittently
+                    # depending only on the random input draw.
                     self.assertEqual(
                         cpu_t,
                         device_t.cpu(),
+                        atol=self.precision,
+                        rtol=self.rel_tol,
                         msg=f"{module_info.name}: CPU vs device mismatch ({mode}, tensor {i})",
                     )
 
@@ -871,17 +934,15 @@ class TestModuleCustom(TestCase):
             # relocates to the test device so upstream's single-module
             # test_forward can use them directly -- see _move_to_test_device in
             # oot_test_config_models.py). They are NOT CPU tensors despite the
-            # attribute name, so build a genuine CPU copy for the CPU reference
-            # module instead of using them as-is.
-            args_device = module_input.forward_input.args
-            kwargs_device = module_input.forward_input.kwargs
-
-            args_cpu = tree_map(
-                lambda x: x.cpu() if isinstance(x, torch.Tensor) else x, args_device
-            )
-            kwargs_cpu = tree_map(
-                lambda x: x.cpu() if isinstance(x, torch.Tensor) else x, kwargs_device
-            )
+            # attribute name.
+            #
+            # Both sides get their own copy rather than sharing those objects: the
+            # framework builds each input once, and a module that mutates an input
+            # in place (the attention modules write their KV cache via
+            # index_copy_) would otherwise leak the device run's writes into the
+            # next module_input of this loop. See _fresh_inputs.
+            args_cpu, kwargs_cpu = _fresh_inputs(module_input, device="cpu")
+            args_device, kwargs_device = _fresh_inputs(module_input, device=device)
 
             # Run forward passes
             with torch.no_grad():
