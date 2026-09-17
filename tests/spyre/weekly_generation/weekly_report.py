@@ -672,7 +672,6 @@ def main(argv: list[str] | None = None) -> None:
             f"WEEKLY SPYRE SCAN — {model_type.value.upper()} REPORT",
             f"  Previous snapshot : {prev_date}  ({len(prev_rows)} rows)",
             f"  Current snapshot  : {curr_date}  ({len(curr_rows)} rows)",
-            f"  Table             : {DATABASE}.{table}",
         ]
     )
 
