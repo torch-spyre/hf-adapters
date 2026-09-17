@@ -377,10 +377,6 @@ def _section_failure_categories(
             infra_curr += c
         lines.append(f"  {cat + tag:<42}  {p:>6}  {c:>6}  {_delta(c, p):>6}")
 
-    lines += [
-        f"  {_hr('-', 42)}  {'------':>6}  {'------':>6}  {'------':>6}",
-        f"  {'SUBTOTAL infra noise':<42}  {infra_prev:>6}  {infra_curr:>6}  {_delta(infra_curr, infra_prev):>6}",
-    ]
     return "\n".join(lines)
 
 
@@ -690,8 +686,8 @@ def main(argv: list[str] | None = None) -> None:
         [
             _hr("═"),
             f"WEEKLY SPYRE SCAN — {model_type.value.upper()} REPORT",
-            f"  Previous snapshot : {prev_date}  ({len(prev_rows)} rows)",
-            f"  Current snapshot  : {curr_date}  ({len(curr_rows)} rows)",
+            f"  Previous snapshot : {prev_date}",
+            f"  Current snapshot  : {curr_date}",
         ]
     )
 
