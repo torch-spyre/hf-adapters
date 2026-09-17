@@ -346,7 +346,11 @@ def _section_failure_categories(
     curr_cats = Counter(
         r["failure_category"] for r in curr_rows if r.get("failure_category")
     )
-    all_cats = sorted(set(prev_cats) | set(curr_cats))
+    # Sort by descending delta (curr - prev); tie-break by name for stability.
+    all_cats = sorted(
+        set(prev_cats) | set(curr_cats),
+        key=lambda cat: (-(curr_cats.get(cat, 0) - prev_cats.get(cat, 0)), cat),
+    )
 
     lines = [
         "",
