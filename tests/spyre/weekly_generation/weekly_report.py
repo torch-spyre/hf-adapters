@@ -37,8 +37,6 @@ from typing import Any
 from tests.spyre.weekly_generation.clickhouse_db import get_client
 from tests.spyre.weekly_generation.failure_categories import (
     FAILURE_CATEGORY_HARDWARE_EXCEPTION,
-    FAILURE_CATEGORY_MODEL_TOO_LARGE,
-    FAILURE_CATEGORY_MOE,
     FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
     FAILURE_CATEGORY_WORKER_CRASHED,
     FAILURE_CATEGORY_WORKER_TIMEOUT,
@@ -63,14 +61,14 @@ for _p in (
         sys.path.insert(0, str(_p))
 
 
-# Categories that are deterministic pre-filter verdicts (never reflect runtime).
-_PREFILTER_CATEGORIES: frozenset[str] = frozenset(
-    {
-        FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
-        FAILURE_CATEGORY_MODEL_TOO_LARGE,
-        FAILURE_CATEGORY_MOE,
-    }
-)
+# # Categories that are deterministic pre-filter verdicts (never reflect runtime).
+# _PREFILTER_CATEGORIES: frozenset[str] = frozenset(
+#     {
+#         FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
+#         FAILURE_CATEGORY_MODEL_TOO_LARGE,
+#         FAILURE_CATEGORY_MOE,
+#     }
+# )
 
 # Categories that reflect infrastructure problems, not model quality.
 _INFRA_CATEGORIES: frozenset[str] = frozenset(
@@ -251,12 +249,12 @@ def _section_verified_on_spyre(
     prev_pass = sum(1 for r in prev_rows if r["verified_on_spyre"])
     curr_pass = sum(1 for r in curr_rows if r["verified_on_spyre"])
 
-    # Exclude pre-filter rows from the denominator (they never reach Spyre)
+    # Exclude infrastructure-failures rows from the denominator (they never reach Spyre)
     prev_eligible = [
-        r for r in prev_rows if r.get("failure_category") not in _PREFILTER_CATEGORIES
+        r for r in prev_rows if r.get("failure_category") not in _INFRA_CATEGORIES
     ]
     curr_eligible = [
-        r for r in curr_rows if r.get("failure_category") not in _PREFILTER_CATEGORIES
+        r for r in curr_rows if r.get("failure_category") not in _INFRA_CATEGORIES
     ]
 
     regressed = sorted(
@@ -283,7 +281,7 @@ def _section_verified_on_spyre(
         "2. VERIFIED_ON_SPYRE DELTA",
         _hr(),
         f"  Absolute count  : {prev_pass:>6}  →  {curr_pass:>6}  ({_delta(curr_pass, prev_pass)})",
-        "  Pass rate (excl. pre-filter):",
+        "  Pass rate (excl. infrastructure-failures):",
         f"    prev  {_pct(prev_pass, len(prev_eligible))}  ({prev_pass}/{len(prev_eligible)})",
         f"    curr  {_pct(curr_pass, len(curr_eligible))}  ({curr_pass}/{len(curr_eligible)})",
         "",
@@ -331,8 +329,13 @@ def _section_failure_categories(
     prev_rows: list[dict[str, Any]],
     curr_rows: list[dict[str, Any]],
 ) -> str:
-    prev_cats = Counter((r.get("failure_category") or "passed") for r in prev_rows)
-    curr_cats = Counter((r.get("failure_category") or "passed") for r in curr_rows)
+    # Only rows with a failure_category; passing rows (NULL) are not failures.
+    prev_cats = Counter(
+        r["failure_category"] for r in prev_rows if r.get("failure_category")
+    )
+    curr_cats = Counter(
+        r["failure_category"] for r in curr_rows if r.get("failure_category")
+    )
     all_cats = sorted(set(prev_cats) | set(curr_cats))
 
     lines = [
@@ -344,18 +347,13 @@ def _section_failure_categories(
         f"  {_hr('-', 42)}  {'------':>6}  {'------':>6}  {'------':>6}",
     ]
 
-    prefilter_prev = prefilter_curr = 0
     infra_prev = infra_curr = 0
 
     for cat in all_cats:
         p = prev_cats.get(cat, 0)
         c = curr_cats.get(cat, 0)
         tag = ""
-        if cat in _PREFILTER_CATEGORIES:
-            tag = " [pre-filter]"
-            prefilter_prev += p
-            prefilter_curr += c
-        elif cat in _INFRA_CATEGORIES:
+        if cat in _INFRA_CATEGORIES:
             tag = " [infra]"
             infra_prev += p
             infra_curr += c
@@ -363,7 +361,6 @@ def _section_failure_categories(
 
     lines += [
         f"  {_hr('-', 42)}  {'------':>6}  {'------':>6}  {'------':>6}",
-        f"  {'SUBTOTAL pre-filter':<42}  {prefilter_prev:>6}  {prefilter_curr:>6}  {_delta(prefilter_curr, prefilter_prev):>6}",
         f"  {'SUBTOTAL infra noise':<42}  {infra_prev:>6}  {infra_curr:>6}  {_delta(infra_curr, infra_prev):>6}",
     ]
     return "\n".join(lines)
@@ -520,10 +517,16 @@ def _section_family_breakdown(
     curr_rows: list[dict[str, Any]],
 ) -> str:
     def _family_pass_rate(rows: list[dict[str, Any]]) -> dict[str, tuple[int, int]]:
-        """Return {family: (pass_count, total_count)} excluding pre-filter rows."""
+        """Return {family: (pass_count, total_count)} excluding infra-failure rows.
+
+        Only infrastructure failures (hardware_exception / worker_crashed /
+        worker_timeout) are excluded — their verdict is not about the model.
+        Pre-filter verdicts (not-implemented-adapter / model_too_large / moe) are
+        kept in the denominator: a model unsupported on Spyre counts as a failure.
+        """
         result: dict[str, list[int]] = {}
         for r in rows:
-            if (r.get("failure_category") or "") in _PREFILTER_CATEGORIES:
+            if (r.get("failure_category") or "") in _INFRA_CATEGORIES:
                 continue
             fam = r.get("family") or "(unknown)"
             if fam not in result:
