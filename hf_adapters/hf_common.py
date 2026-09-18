@@ -437,7 +437,8 @@ class PrecomputedRotaryEmbedding(nn.Module):
         rope_half = inv_freq.shape[0]  # type: ignore[index]
         t = torch.arange(target_len, dtype=inv_freq.dtype)  # type: ignore[arg-type]
         freqs = torch.outer(
-            t, inv_freq  # type: ignore[arg-type]
+            t,
+            inv_freq,  # type: ignore[arg-type]
         ).float()  # [S, rope_half] # type: ignore[arg-type]
         scaling = getattr(self.original, "attention_scaling", 1.0)
         rot = torch.stack(
@@ -449,7 +450,10 @@ class PrecomputedRotaryEmbedding(nn.Module):
             ],
             dim=1,
         ).view(
-            target_len, 2, 2, rope_half  # type: ignore[arg-type]
+            target_len,
+            2,
+            2,
+            rope_half,  # type: ignore[arg-type]
         )  # type: ignore[arg-type]
 
         if self.padded_head_dim is not None:
@@ -1452,7 +1456,13 @@ def add_sliding_window_band(mask, sliding_window):
     return mask + band[None, None, :, :]
 
 
-def add_causal_sliding_window_band(mask, query_cache_coords, sliding_window):
+def add_causal_sliding_window_band(
+    mask,
+    query_cache_coords,
+    sliding_window,
+    *,
+    key_cache_coords=None,
+):
     """Restrict an additive *causal* mask to a backward ``sliding_window`` band.
 
     Gemma 4's sliding ("local") attention layers are causal AND windowed: a
@@ -1478,6 +1488,11 @@ def add_causal_sliding_window_band(mask, query_cache_coords, sliding_window):
         query_cache_coords: ``[B, Lq]`` cache coordinate of each query row
             (column index the row's token occupies / will occupy in the cache).
         sliding_window: window size (number of keys, exclusive lower bound).
+        key_cache_coords: Optional ``[Lk_compact]`` mapping from each physical
+            cache column to its logical full-cache coordinate. Negative entries
+            name slots that have not been written yet. When present, the base
+            mask is gathered into physical cache order before the band is
+            applied; this is used by chunked prefill's compact ring buffer.
 
     Returns a new mask with the base padding/causality preserved plus -inf on
     every key outside ``(q - sliding_window, q]``. Same device/dtype as ``mask``.
@@ -1490,11 +1505,34 @@ def add_causal_sliding_window_band(mask, query_cache_coords, sliding_window):
     ``-inf + -inf`` has been observed to produce NaN on Spyre in bf16 (see the
     note at the return). Mirrors ``add_sliding_window_band``.
     """
-    lk = mask.shape[-1]
-    k_col = torch.arange(lk)[None, None, :]  # [1, 1, Lk] on CPU
+    mask_cpu = mask.to("cpu")
+    if key_cache_coords is None:
+        lk = mask.shape[-1]
+        k_col = torch.arange(lk)[None, None, :]  # [1, 1, Lk] on CPU
+        invalid = None
+    else:
+        key_cache_coords = key_cache_coords.detach().to("cpu", dtype=torch.long)
+        if key_cache_coords.ndim != 1:
+            raise ValueError(
+                "key_cache_coords must be one-dimensional, got "
+                f"{tuple(key_cache_coords.shape)}"
+            )
+        logical_lk = mask.shape[-1]
+        valid = (key_cache_coords >= 0) & (key_cache_coords < logical_lk)
+        compact_shape = (*mask.shape[:-1], key_cache_coords.numel())
+        compact_mask = torch.zeros(compact_shape, dtype=mask.dtype)
+        if valid.any():
+            compact_mask[..., valid] = mask_cpu.index_select(
+                -1, key_cache_coords[valid]
+            )
+        mask_cpu = compact_mask
+        k_col = key_cache_coords[None, None, :]
+        invalid = ~valid[None, None, :]
     q_coord = query_cache_coords.to("cpu")[:, :, None].to(k_col.dtype)  # [B, Lq, 1]
     delta = q_coord - k_col  # [B, Lq, Lk]
     out_of_band = (delta < 0) | (delta >= sliding_window)  # CPU bool
+    if invalid is not None:
+        out_of_band = out_of_band | invalid
     band = torch.zeros(out_of_band.shape, dtype=mask.dtype)  # CPU float
     band = band.masked_fill(out_of_band, -torch.inf)
     # Combine on CPU, then move the result to the input's device. Doing the
@@ -1505,7 +1543,7 @@ def add_causal_sliding_window_band(mask, query_cache_coords, sliding_window):
     # can overflow once cells are summed. Combining on CPU avoids the issue; the
     # mask is tiny so the round-trip is cheap.
     orig_device = mask.device
-    combined = mask.to("cpu") + band[:, None, :, :]
+    combined = mask_cpu + band[:, None, :, :]
     return combined.to(orig_device)
 
 
@@ -1725,6 +1763,9 @@ def allocate_kv_caches(model, batch_size, max_cache_len, dtype, device=None):
     correctly-sized caches per layer. Returns ``(key_caches, value_caches)``
     lists. ``device`` defaults to the module ``DEVICE`` resolved at call time (so
     the conftest CPU patch applies).
+
+    Models that need specialized per-layer capacities may install a
+    ``model._spyre_cache_allocator`` hook.
     """
     if device is None:
         device = DEVICE
@@ -2523,6 +2564,19 @@ def generate(
     prefill_kv_len = (
         _sdpa_compatible_kv_length(padded_len) if chunked_prefill else max_cache_len
     )
+    # Compact-cache state needs the left-padding offsets so its runtime attention
+    # mask can exclude padding after prompt rows move to anchored coordinates.
+    model._spyre_prompt_offsets = prompt_offsets
+    # Specialized cache allocators and prefill/decode state transitions need the
+    # padded prompt extent before caches are allocated. Keep this as host metadata;
+    # it is not an input to compiled graphs.
+    model._spyre_padded_prompt_len = padded_len
+    # Specialized cache allocators can use the active chunk geometry to keep
+    # local-attention caches bounded during prefill. Store None for one-shot
+    # prefill so an earlier generate call cannot leave stale chunk metadata.
+    model._spyre_active_prefill_chunk_size = (
+        query_chunk_size if chunked_prefill else None
+    )
 
     # Initialize empty KV caches. Per-layer shapes come from the model
     # (``_spyre_kv_shapes``) for heterogeneous architectures like Gemma 4,
@@ -2704,11 +2758,11 @@ def generate(
             break
 
     if timing and times_list:
-        print(f"\nFirst-token latency: {times_list[0]*1000:.3f} ms")
+        print(f"\nFirst-token latency: {times_list[0] * 1000:.3f} ms")
         if len(times_list) > 1:
             avg = sum(times_list[1:]) / len(times_list[1:])
-            print(f"Avg next-token latency: {avg*1000:.3f} ms")
-        print("Per-token: " + ", ".join(f"{t*1000:.1f}" for t in times_list) + " ms")
+            print(f"Avg next-token latency: {avg * 1000:.3f} ms")
+        print("Per-token: " + ", ".join(f"{t * 1000:.1f}" for t in times_list) + " ms")
 
     if generated_columns:
         generated_ids = torch.stack(generated_columns, dim=1)

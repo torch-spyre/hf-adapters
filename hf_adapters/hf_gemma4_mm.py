@@ -176,6 +176,12 @@ def prepare_for_spyre(model):
         "this checkpoint has no vision_config."
     )
 
+    # VLM prefill contains bidirectional vision regions. The mask remains the
+    # source of exact semantics; the non-causal flag selects the generic kernel
+    # access plan so those future image-token edges are reachable.
+    model._spyre_swa_mode = "anchored"
+    model._spyre_swa_is_causal = False
+
     # Reuse the text adapter selected by the nested decoder configuration.
     if getattr(cfg, "enable_moe_block", False):
         hf_gemma4_moe.prepare_text_decoder_for_spyre(model)
