@@ -23,11 +23,12 @@ Run them explicitly on a Spyre pod::
 import pytest
 import torch
 import torch.nn.functional as F
-from transformers import GraniteConfig
+from transformers import GraniteConfig, PixtralVisionConfig
 from transformers.models.granite.modeling_granite import (
     GraniteAttention,
     GraniteRotaryEmbedding,
 )
+from transformers.models.pixtral.modeling_pixtral import PixtralAttentionLayer
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
@@ -35,6 +36,10 @@ from hf_adapters.hf_common import (
     apply_rope_matmul,
     pad_lm_head,
     prepare_rope_and_heads,
+)
+from hf_adapters.hf_pixtral_vision import (
+    _make_compiled_pixtral_block,
+    _pad_pixtral_heads,
 )
 
 pytestmark = pytest.mark.requires_spyre
@@ -193,6 +198,64 @@ def test_padded_lm_head(dtype):
         rtol=0,
         atol=0,
     )
+
+
+def test_pixtral_compiled_block():
+    """Exercise a complete production-sized Pixtral encoder block on Spyre.
+
+    Covers head padding, projections, RoPE, bidirectional SDPA, residual
+    connections, and the SwiGLU MLP using Ministral-3's vision configuration and
+    a representative padded image-patch sequence.
+    """
+
+    config = PixtralVisionConfig(
+        hidden_size=1024,
+        intermediate_size=4096,
+        num_hidden_layers=1,
+        num_attention_heads=16,
+        image_size=1540,
+        patch_size=14,
+    )
+    layer = PixtralAttentionLayer(config).eval().to(torch.bfloat16)
+
+    head_dim = config.hidden_size // config.num_attention_heads
+    padded_head_dim = 2 * BLOCK_SIZE
+    _pad_pixtral_heads([layer], config.num_attention_heads, head_dim, padded_head_dim)
+    compiled_block = _make_compiled_pixtral_block(
+        layer,
+        config.num_attention_heads,
+        padded_head_dim,
+        head_dim**-0.5,
+    )
+    _move_to_spyre_with_layout(layer, torch.bfloat16)
+
+    sequence_length = 3520
+    torch.manual_seed(42)
+    hidden_states = torch.randn(
+        1, sequence_length, config.hidden_size, dtype=torch.bfloat16
+    )
+    selected_freqs = torch.zeros(
+        1,
+        sequence_length,
+        2,
+        2,
+        padded_head_dim // 2,
+        dtype=torch.bfloat16,
+    )
+    selected_freqs[:, :, 0, 0, :] = 1
+    selected_freqs[:, :, 1, 1, :] = 1
+    attn_mask = torch.zeros(
+        1, 1, sequence_length, sequence_length, dtype=torch.bfloat16
+    )
+
+    with torch.no_grad():
+        output = compiled_block(
+            hidden_states.to("spyre"),
+            selected_freqs.to("spyre"),
+            attn_mask.to("spyre"),
+        )
+
+    assert output.shape == hidden_states.shape
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
