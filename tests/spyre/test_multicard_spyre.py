@@ -393,7 +393,9 @@ def test_multicard_smoke_single_card(
     model_path: str, trust_remote_code: bool | None
 ) -> None:
     """Single-card smoke test: load, generate, verify output passes all checks."""
-    result = run_multicard_smoke_test(model_path, prompt=_DEFAULT_PROMPT, trust_remote_code=trust_remote_code)
+    result = run_multicard_smoke_test(
+        model_path, prompt=_DEFAULT_PROMPT, trust_remote_code=trust_remote_code
+    )
     assert result["status"] == "PASS", (
         f"Smoke test failed with status {result['status']}.\n"
         f"Checks: {result.get('seq_checks')}\n"
