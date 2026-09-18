@@ -471,7 +471,8 @@ jobs:
         run: |
           echo "Checking that all adapter files are registered in model_registry.py..."
           python -m pip install --quiet pytest
-          make adapter-coverage-tests PYTEST="python -m pytest" JUNIT_XML=junit-adapter-coverage.xml
+          source .github/scripts/run-with-pod-stdout.sh
+          run_teed make adapter-coverage-tests PYTEST="python -m pytest" JUNIT_XML=junit-adapter-coverage.xml
           echo "Adapter coverage check passed."
 
       - name: Upload JUnit results
@@ -671,8 +672,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_load_spyre.py for ${{ matrix.model_key }}..."
-          make load-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-load-${{ matrix.model_key }}.xml
+          run_teed make load-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-load-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -755,8 +757,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
-          make smoke-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-smoke-${{ matrix.model_key }}.xml
+          run_teed make smoke-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-smoke-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -838,7 +841,8 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          uv run --active --no-sync torchrun \
+          source .github/scripts/run-with-pod-stdout.sh
+          run_teed uv run --active --no-sync torchrun \
             --standalone \
             --nnodes=1 \
             --nproc-per-node=2 \
@@ -915,8 +919,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}..."
-          make token-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-compare-${{ matrix.model_key }}.xml
+          run_teed make token-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -985,7 +990,8 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          make model-components-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' JUNIT_XML=junit-model-components.xml
+          source .github/scripts/run-with-pod-stdout.sh
+          run_teed make model-components-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' JUNIT_XML=junit-model-components.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1064,8 +1070,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}..."
-          make embed-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-embed-compare-${{ matrix.model_key }}.xml
+          run_teed make embed-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-embed-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1145,8 +1152,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_vlm_e2e_spyre.py for ${{ matrix.model_key }}..."
-          make vlm-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-vlm-${{ matrix.model_key }}.xml
+          run_teed make vlm-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-vlm-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1222,8 +1230,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }}..."
-          make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
+          run_teed make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1362,8 +1371,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_reranker_compare_spyre.py for ${{ matrix.model_key }}..."
-          make reranker-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-reranker-compare-${{ matrix.model_key }}.xml
+          run_teed make reranker-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-reranker-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1439,8 +1449,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_masked_lm_compare_spyre.py for ${{ matrix.model_key }}..."
-          make masked-lm-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-masked-lm-compare-${{ matrix.model_key }}.xml
+          run_teed make masked-lm-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-masked-lm-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1516,8 +1527,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_question_answering_compare_spyre.py for ${{ matrix.model_key }}..."
-          make question-answering-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-question-answering-compare-${{ matrix.model_key }}.xml
+          run_teed make question-answering-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-question-answering-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1593,8 +1605,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_seq_classification_compare_spyre.py for ${{ matrix.model_key }}..."
-          make seq-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-seq-classification-compare-${{ matrix.model_key }}.xml
+          run_teed make seq-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-seq-classification-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1670,8 +1683,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_token_classification_compare_spyre.py for ${{ matrix.model_key }}..."
-          make token-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-classification-compare-${{ matrix.model_key }}.xml
+          run_teed make token-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-classification-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1771,8 +1785,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running ${{ matrix.test_file }} for ${{ matrix.model_key }}..."
-          make edge-cases-tests \
+          run_teed make edge-cases-tests \
             PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             EDGE_CASE_FILE='${{ matrix.test_file }}' \
             MODEL_PATH='${{ matrix.model_key }}' \
@@ -1853,7 +1868,8 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cd "$CLONED_HF_ADAPTERS_DIR"
-          make model-module-tests MODULE_CONFIG=${{ matrix.config }} PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
+          source .github/scripts/run-with-pod-stdout.sh
+          run_teed make model-module-tests MODULE_CONFIG=${{ matrix.config }} PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             JUNIT_XML=1 RESULTS_DIR=.
           mv "model-module-${{ matrix.config }}.xml" "junit-model-module-${{ matrix.config }}.xml"
 
@@ -2059,8 +2075,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_load_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make load-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-load-${{ matrix.model_key }}.xml
+          run_teed make load-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-load-${{ matrix.model_key }}.xml
           echo "tests done"
 
       # overwrite: true replaces the failed first attempt's report (same name) so downstream consumers see only the corrected result.
@@ -2125,8 +2142,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make smoke-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-smoke-${{ matrix.model_key }}.xml
+          run_teed make smoke-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-smoke-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -2197,7 +2215,8 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          uv run --active --no-sync torchrun \
+          source .github/scripts/run-with-pod-stdout.sh
+          run_teed uv run --active --no-sync torchrun \
             --standalone \
             --nnodes=1 \
             --nproc-per-node=2 \
@@ -2258,8 +2277,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_token_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make token-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-compare-${{ matrix.model_key }}.xml
+          run_teed make token-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -2323,7 +2343,8 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          make model-components-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' JUNIT_XML=junit-model-components.xml
+          source .github/scripts/run-with-pod-stdout.sh
+          run_teed make model-components-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' JUNIT_XML=junit-model-components.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -2387,8 +2408,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make embed-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-embed-compare-${{ matrix.model_key }}.xml
+          run_teed make embed-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-embed-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -2452,8 +2474,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_vlm_e2e_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make vlm-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-vlm-${{ matrix.model_key }}.xml
+          run_teed make vlm-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-vlm-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -2520,8 +2543,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
+          run_teed make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -2584,8 +2608,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_reranker_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make reranker-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-reranker-compare-${{ matrix.model_key }}.xml
+          run_teed make reranker-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-reranker-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -2648,8 +2673,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_masked_lm_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make masked-lm-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-masked-lm-compare-${{ matrix.model_key }}.xml
+          run_teed make masked-lm-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-masked-lm-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -2712,8 +2738,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_question_answering_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make question-answering-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-question-answering-compare-${{ matrix.model_key }}.xml
+          run_teed make question-answering-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-question-answering-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -2776,8 +2803,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_seq_classification_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make seq-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-seq-classification-compare-${{ matrix.model_key }}.xml
+          run_teed make seq-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-seq-classification-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -2840,8 +2868,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_token_classification_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make token-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-classification-compare-${{ matrix.model_key }}.xml
+          run_teed make token-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-classification-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -2907,8 +2936,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running ${{ matrix.test_file }} for ${{ matrix.model_key }} (pod-level retry)..."
-          make edge-cases-tests \
+          run_teed make edge-cases-tests \
             PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             EDGE_CASE_FILE='${{ matrix.test_file }}' \
             MODEL_PATH='${{ matrix.model_key }}' \
@@ -2973,7 +3003,8 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cd "$CLONED_HF_ADAPTERS_DIR"
-          make model-module-tests MODULE_CONFIG=${{ matrix.config }} PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
+          source .github/scripts/run-with-pod-stdout.sh
+          run_teed make model-module-tests MODULE_CONFIG=${{ matrix.config }} PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             JUNIT_XML=1 RESULTS_DIR=.
           mv "model-module-${{ matrix.config }}.xml" "junit-model-module-${{ matrix.config }}.xml"
 
