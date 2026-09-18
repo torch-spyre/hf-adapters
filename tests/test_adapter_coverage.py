@@ -200,22 +200,44 @@ def test_vlm_adapters_implement_generation_hooks():
             for node in tree.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
-        metadata = {
-            target.id
-            for node in tree.body
-            if isinstance(node, ast.Assign)
-            for target in node.targets
-            if isinstance(target, ast.Name)
-        }
-        metadata.update(
-            node.target.id
-            for node in tree.body
-            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+        metadata = {}
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                names = [
+                    target.id for target in node.targets if isinstance(target, ast.Name)
+                ]
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                names = [node.target.id]
+            else:
+                continue
+            if node.value is not None:
+                metadata.update({name: node.value for name in names})
+
+        missing = (required_functions - functions) | (
+            required_metadata - metadata.keys()
         )
-        missing = (required_functions - functions) | (required_metadata - metadata)
         assert not missing, (
             f"{adapter_file} is missing VLM generation protocol members "
             f"{sorted(missing)}"
+        )
+
+        metadata_values = {
+            name: ast.literal_eval(value)
+            for name, value in metadata.items()
+            if name.startswith("_GENERATION_")
+        }
+        input_names = set(metadata_values["_GENERATION_INPUT_NAMES"])
+        required_input_names = set(
+            metadata_values.get("_GENERATION_REQUIRED_INPUT_NAMES", input_names)
+        )
+        token_aligned_names = set(metadata_values["_GENERATION_TOKEN_ALIGNED_INPUTS"])
+        assert required_input_names <= input_names, (
+            f"{adapter_file} has required generation inputs not declared in "
+            f"_GENERATION_INPUT_NAMES: {sorted(required_input_names - input_names)}"
+        )
+        assert token_aligned_names <= input_names, (
+            f"{adapter_file} has token-aligned generation inputs not declared in "
+            f"_GENERATION_INPUT_NAMES: {sorted(token_aligned_names - input_names)}"
         )
 
 
