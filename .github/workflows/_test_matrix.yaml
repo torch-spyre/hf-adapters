@@ -282,6 +282,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        # Without this, a dispatched run (per-PR image, Test-With) checks out github.sha (the dispatch-level ref, usually main) instead of the PR's own code.
+        with:
+          ref: ${{ inputs.ref || '' }}
+          repository: ${{ inputs.repository != '' && inputs.repository || github.repository }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -328,6 +332,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        # Without this, a dispatched run (per-PR image, Test-With) generates the matrix from main's model_registry.py instead of the PR's own.
+        with:
+          ref: ${{ inputs.ref || '' }}
+          repository: ${{ inputs.repository != '' && inputs.repository || github.repository }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -421,6 +429,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        # Without this, a dispatched run (per-PR image, Test-With) checks adapter coverage against main instead of the PR's own model_registry.py.
+        with:
+          ref: ${{ inputs.ref || '' }}
+          repository: ${{ inputs.repository != '' && inputs.repository || github.repository }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -459,6 +471,10 @@ jobs:
         working-directory: .
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        # Without this, a dispatched run (per-PR image, Test-With) checks main's uv.lock instead of the PR's own.
+        with:
+          ref: ${{ inputs.ref || '' }}
+          repository: ${{ inputs.repository != '' && inputs.repository || github.repository }}
 
       - name: Set up Python 3.12
         uses: astral-sh/setup-uv@v5
@@ -493,6 +509,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        # Without this, a dispatched run (per-PR image, Test-With) type-checks main instead of the PR's own code.
+        with:
+          ref: ${{ inputs.ref || '' }}
+          repository: ${{ inputs.repository != '' && inputs.repository || github.repository }}
 
       - name: Set up Python and uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
