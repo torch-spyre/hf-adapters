@@ -645,6 +645,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -729,6 +730,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -809,6 +811,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -889,6 +892,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -963,6 +967,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -1038,6 +1043,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -1119,6 +1125,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -1197,6 +1204,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -1338,6 +1346,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -1415,6 +1424,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -1492,6 +1502,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -1569,6 +1580,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -1646,6 +1658,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -1744,6 +1757,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -1830,6 +1844,7 @@ jobs:
           uv_groups: "dev spyre test oot"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -2034,6 +2049,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -2100,6 +2116,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -2168,6 +2185,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -2233,6 +2251,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -2301,6 +2320,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -2362,6 +2382,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -2427,6 +2448,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -2495,6 +2517,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -2560,6 +2583,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -2624,6 +2648,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -2688,6 +2713,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -2752,6 +2778,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -2816,6 +2843,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -2880,6 +2908,7 @@ jobs:
           uv_groups: "dev spyre test"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one
@@ -2951,6 +2980,7 @@ jobs:
           uv_groups: "dev spyre test oot"
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this run (issue #449).
           # On the integration path (prebaked_image=true) this is empty and
           # ignored: build-hf-adapters installs no torch-spyre and uses the one

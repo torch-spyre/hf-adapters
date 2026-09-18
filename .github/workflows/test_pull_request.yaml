@@ -95,6 +95,15 @@ jobs:
     # Skip entirely once auto_merge is enabled on the PR -- native GHA checks aren't required there; run-spyre-unit-tests below still reports green since "skipped" isn't a failure.
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.auto_merge != null) }}
     uses: ./.github/workflows/_test_matrix.yaml
+    # Pass caller secrets down so the reusable workflow's `HF_TOKEN: ${{
+    # secrets.HF_TOKEN }}` steps authenticate to the HF Hub. This is for faster,
+    # un-throttled model downloads (anonymous pulls are rate-limited) -- we do
+    # NOT access gated models via this token. A reusable workflow does not
+    # inherit the caller's secrets automatically; an undeclared secret resolves
+    # to the empty string there, silently falling back to slower anonymous
+    # downloads. (No effect for fork PRs, which GitHub denies secrets
+    # regardless.)
+    secrets: inherit
     with:
       # Per-PR ephemeral image label when provided, else the standing set for this event.
       image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
