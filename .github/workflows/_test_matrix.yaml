@@ -1,4 +1,5 @@
 name: Test matrix (reusable)
+# Cloud Logs stdout-capture E2E probe 2026-09-17: empty trigger, DO NOT MERGE.
 
 # ---------------------------------------------------------------------------
 # Reusable workflow — not triggered directly.
