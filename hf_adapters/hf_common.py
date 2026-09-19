@@ -33,6 +33,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sympy import factorint
+from torch.compiler import nested_compile_region
 from transformers import GenerationConfig
 from transformers.generation import GenerateDecoderOnlyOutput
 
@@ -2014,9 +2015,22 @@ def load_model_common(
     return model
 
 
-def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
+def move_model_to_spyre(
+    model, module, dtype: torch.dtype, *, hier_compile: bool = False
+) -> None:
+    """Prepare ``model`` for Spyre via its adapter and move it to the device.
+
+    ``hier_compile`` is an experimental opt-in understood only by
+    ``hf_granite.prepare_for_spyre``; see that function's docstring. The kwarg is
+    forwarded ONLY when True, because every other adapter's ``prepare_for_spyre``
+    takes ``(model)`` alone and would raise TypeError on an unexpected keyword.
+    Do not collapse this into an unconditional pass-through.
+    """
     untie_embedding_and_lm_head(model)
-    module.prepare_for_spyre(model)
+    if hier_compile:
+        module.prepare_for_spyre(model, hier_compile=True)
+    else:
+        module.prepare_for_spyre(model)
     cpu_submodules = getattr(model, "_spyre_cpu_submodules", [])
     saved_cpu_modules = {}
     for path in cpu_submodules:
@@ -2963,6 +2977,38 @@ class StandardGQABlock(nn.Module):
             )
         return h, key_cache, value_cache
 
+    def region_forward(
+        self,
+        hidden_states,
+        selected_freqs,
+        attn_mask,
+        key_cache,
+        value_cache,
+        cache_index,
+    ):
+        """``forward`` minus the eager dim-naming, for the whole-forward path.
+
+        Called only from ``_shared_region_block``. Inside a
+        ``nested_compile_region`` there is no eager boundary between
+        ``_pre_attn`` and ``_attention_tail`` — the surrounding whole-forward
+        ``torch.compile`` traces straight through both inner compiles — so
+        ``_named_standard_gqa_attention_inputs`` has no following *separate*
+        compilation to annotate and would only force a graph break. Its
+        ``named_dims`` declare/reset calls are host-side global side effects
+        that carry no meaning under tracing anyway.
+
+        Kept as a sibling of ``forward`` rather than a flag on it so the eager
+        adapters (olmo, granite_vision_mm, mistral3_vision_mm) keep the
+        dim-naming contract untouched, and so a future accidental nesting of
+        ``forward`` under an outer compile still fails loudly (graph break)
+        instead of silently dropping the annotations.
+        """
+        q, key_cache, value_cache = self._pre_attn(
+            hidden_states, selected_freqs, key_cache, value_cache, cache_index
+        )
+        h = self._attention_tail(hidden_states, q, key_cache, value_cache, attn_mask)
+        return h, key_cache, value_cache
+
 
 def make_standard_gqa_block(layer, is_res_mul: bool | None = None):
     """Build one standard GQA block; its two regions are compiled internally."""
@@ -2980,6 +3026,101 @@ def prepare_standard_gqa_blocks(layers, is_res_mul: bool | None = None):
         block = StandardGQABlock(layer, is_res_mul)
         layers[i] = block
         blocks.append(block)
+    return blocks
+
+
+@nested_compile_region
+def _shared_region_block(block, *args):
+    """The ONE nested compile region shared across every decoder layer.
+
+    ``block`` is a positional argument, NOT closed over — this is load-bearing.
+    ``nested_compile_region`` traces the region body exactly ONCE and reuses that
+    single subgraph for every ``invoke_subgraph`` call (that reuse is the whole
+    point: it keeps whole-forward compile time flat across N layers). Anything the
+    region *closes over* is captured from the FIRST trace only, so if ``block``
+    were a closure cell every layer would silently run with layer 0's weights
+    (the block's ``nn.Linear``/RMSNorm params are ``self.`` attributes). Passing
+    ``block`` as an argument makes Dynamo lift each layer's own parameters as
+    region inputs, so layer i computes with layer i's weights.
+
+    The block's ``(key_cache, value_cache)`` return is dropped; only ``h`` is
+    exposed. ``StandardGQABlock`` updates the KV caches IN PLACE
+    (``kv_cache_update`` slice-assignment) and returns those same buffers for the
+    eager (non-region) callers, but the whole-forward compile turns the region
+    into an ``invoke_subgraph`` HOP call that rejects a subgraph output aliasing a
+    subgraph input. In-place mutation of a HOP input IS supported
+    (``auto_functionalize`` handles it) and is copy-free, so we keep the mutation
+    and discard the aliasing return here — leaving the shared ``StandardGQABlock``
+    contract untouched for eager adapters (olmo, granite_vision_mm,
+    mistral3_vision_mm).
+
+    Dispatches to ``region_forward``, not ``forward``: the eager Q/K/V dim-naming
+    in ``forward`` would graph-break this region. See ``region_forward``.
+    """
+    h, _key_cache, _value_cache = block.region_forward(*args)
+    return h
+
+
+def nested_region_block(block):
+    """Return a per-layer callable that dispatches to the shared compile region.
+
+    The returned callable forwards ``block`` to ``_shared_region_block`` as a
+    positional argument (never a closure cell — see that function's docstring for
+    why). All layers therefore share ONE subgraph while each still runs with its
+    own weights.
+    """
+
+    def call(*args, **kwargs):
+        return _shared_region_block(block, *args, **kwargs)
+
+    return call
+
+
+def h_only_block(block):
+    """Return a per-layer callable exposing only ``h``, for eager drivers.
+
+    The eager twin of ``nested_region_block``: same single-value return, no
+    compile region. ``StandardGQABlock.forward`` yields the 3-tuple that eager
+    adapters (olmo, granite_vision, granite_vision_mm, mistral3_vision_mm,
+    ``standard_gqa_backbone_forward``) unpack, but a driver shared with the
+    whole-forward path needs ONE return shape across both. The caches are
+    mutated in place, so dropping the returned buffers loses nothing.
+
+    Prefer this over having the driver sniff the return type: the shape is then
+    fixed where the blocks are built, not re-derived on every layer.
+    """
+
+    def call(*args, **kwargs):
+        h, _key_cache, _value_cache = block(*args, **kwargs)
+        return h
+
+    return call
+
+
+def prepare_standard_gqa_h_only_blocks(layers, is_res_mul: bool | None = None):
+    """``prepare_standard_gqa_blocks``, with each block narrowed to ``h`` only.
+
+    For adapters whose backbone driver is shared between the per-layer-compile
+    path and the whole-forward path (Granite 3.3), so both see the single-value
+    block contract that ``nested_compile_region`` forces on the latter.
+    """
+    return [
+        h_only_block(block) for block in prepare_standard_gqa_blocks(layers, is_res_mul)
+    ]
+
+
+def prepare_standard_gqa_region_blocks(layers, is_res_mul=None):
+    """Register decoder layers as Spyre blocks and wrap each in a compile region.
+
+    Mirrors ``prepare_standard_gqa_blocks`` but returns region-wrapped callables
+    (not ``torch.compile``d), for use inside a single whole-forward
+    ``torch.compile`` graph.
+    """
+    blocks = []
+    for i, layer in enumerate(list(layers)):
+        block = StandardGQABlock(layer, is_res_mul)
+        layers[i] = block
+        blocks.append(nested_region_block(block))
     return blocks
 
 

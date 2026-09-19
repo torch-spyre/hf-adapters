@@ -248,3 +248,14 @@ config.local.*
 
 # torch.compile inductor debug scratch
 torch_compile_debug/
+
+# Superpowers brainstorming/plan/spec docs (working artifacts, not shipped)
+docs/superpowers/
+
+# Profiling helper scripts — contain a live HF_TOKEN, must never be committed
+scripts/profiler.sh
+scripts/hier_profile_run.sh
+
+# Profiling trace artifacts (large JSON dumps)
+*_trace_baseline.json
+*.pt.trace.json

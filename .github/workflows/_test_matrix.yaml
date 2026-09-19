@@ -934,6 +934,97 @@ jobs:
           job_key: token_compare
           payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
 
+  # ---------------------------------------------------------------------------
+  # EXPERIMENTAL Granite hierarchical whole-forward compile.
+  #
+  # Covers hf_granite.prepare_for_spyre(model, hier_compile=True): one compiled
+  # whole-forward whose decoder layers are nested_compile_region blocks, instead
+  # of one torch.compile per layer. The flag is opt-in and defaults to False, so
+  # every other Granite suite above still exercises the per-layer path -- this is
+  # that path's ONLY on-hardware coverage.
+  #
+  # Suite key: "hier_compile". Runs on the "regression"/"trunk" tiers, so it
+  # gates PRs and push-to-main exactly like the standard suites -- the point is
+  # to get the same automatic signal token-compare gets, rather than relying on
+  # someone remembering to dispatch it. Left OUT of "unit" and "integration":
+  # those tiers are consumed by sister repos and the upstream integration
+  # pipeline, which have no stake in an experimental Granite-only path. Also
+  # selectable on its own via test_type "hier_compile" (or a combo, e.g.
+  # "smoke hier_compile").
+  #
+  # Once the hierarchical path becomes the default, this job and its retry twin
+  # should be retired: every standard suite then covers the same code.
+  #
+  # Fixed to Granite 3.3 2B rather than the generated causal matrix: hf_granite.py
+  # is the only adapter that understands the flag. The 2B leg exercises the same
+  # region-block code as 8B for roughly half the runtime, so CI runs 2B only; 8B
+  # stays reachable via `make hier-compile-tests MODEL_PATH=...` (the test file
+  # itself still parametrizes both).
+  # ---------------------------------------------------------------------------
+  spyre-hier-compile-tests:
+    name: Spyre hierarchical compile (${{ matrix.model_key }})
+    needs: [resolve-test-type]
+    if: ${{ !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' hier_compile ')) }}
+    # Don't let the leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-hier-compile-tests-retry) gets a shot on a fresh pod.
+    continue-on-error: true
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        model_key:
+          - ibm-granite/granite-3.3-2b-instruct
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+
+      - name: Run test_hier_compile_spyre.py for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_hier_compile_spyre.py for ${{ matrix.model_key }}..."
+          make hier-compile-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-hier-compile-${{ matrix.model_key }}.xml
+          echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-hier-compile-${{ env.SAFE_MODEL_KEY }}
+          path: junit-hier-compile-${{ matrix.model_key }}.xml
+          retention-days: 14
+
+      - name: Save suite descriptor for pod-level retry
+        if: failure()
+        uses: ./.github/actions/save-failed-suite-descriptor
+        with:
+          job_key: hier_compile
+          payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
+
   spyre-model-components-tests:
     name: Spyre model component tests
     needs: [resolve-test-type, resolve-torch-spyre]
@@ -1880,6 +1971,7 @@ jobs:
       - spyre-smoke-tests
       - spyre-multicard-smoke-tests
       - spyre-token-compare-tests
+      - spyre-hier-compile-tests
       - spyre-model-components-tests
       - spyre-embed-compare-tests
       - spyre-vlm-e2e-tests
@@ -1905,6 +1997,8 @@ jobs:
       has_failed_multicard_smoke: ${{ steps.collect.outputs.has_failed_multicard_smoke }}
       matrix_token_compare: ${{ steps.collect.outputs.matrix_token_compare }}
       has_failed_token_compare: ${{ steps.collect.outputs.has_failed_token_compare }}
+      matrix_hier_compile: ${{ steps.collect.outputs.matrix_hier_compile }}
+      has_failed_hier_compile: ${{ steps.collect.outputs.has_failed_hier_compile }}
       matrix_model_components: ${{ steps.collect.outputs.matrix_model_components }}
       has_failed_model_components: ${{ steps.collect.outputs.has_failed_model_components }}
       matrix_embed_compare: ${{ steps.collect.outputs.matrix_embed_compare }}
@@ -1965,7 +2059,8 @@ jobs:
 
           # One key per spyre-*-tests job above -- must match the "job_key" each job's "Save suite descriptor" step stamps into suite.json.
           keys = [
-              "load", "smoke", "multicard_smoke", "token_compare", "model_components",
+              "load", "smoke", "multicard_smoke", "token_compare", "hier_compile",
+              "model_components",
               "embed_compare", "vlm", "clip", "reranker", "masked_lm", "qa",
               "seq_classification", "token_classification", "edge_cases", "model_module",
           ]
@@ -2268,6 +2363,60 @@ jobs:
         with:
           name: junit-token-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-token-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
+          overwrite: true
+
+  spyre-hier-compile-tests-retry:
+    name: Spyre hierarchical compile (${{ matrix.model_key }}) (pod-level retry)
+    needs: [collect-failed-suites]
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_hier_compile == 'true' }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.collect-failed-suites.outputs.matrix_hier_compile) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+
+      - name: Run test_hier_compile_spyre.py for ${{ matrix.model_key }} (pod-level retry)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          echo "Running test_hier_compile_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
+          make hier-compile-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-hier-compile-${{ matrix.model_key }}.xml
+          echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-hier-compile-${{ env.SAFE_MODEL_KEY }}
+          path: junit-hier-compile-${{ matrix.model_key }}.xml
           retention-days: 14
           overwrite: true
 
@@ -2995,6 +3144,7 @@ jobs:
       - spyre-smoke-tests-retry
       - spyre-multicard-smoke-tests-retry
       - spyre-token-compare-tests-retry
+      - spyre-hier-compile-tests-retry
       - spyre-model-components-tests-retry
       - spyre-embed-compare-tests-retry
       - spyre-vlm-e2e-tests-retry
@@ -3025,6 +3175,7 @@ jobs:
                  (needs.collect-failed-suites.outputs.has_failed_smoke == 'true' && needs.spyre-smoke-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_multicard_smoke == 'true' && needs.spyre-multicard-smoke-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_token_compare == 'true' && needs.spyre-token-compare-tests-retry.result != 'success') ||
+                 (needs.collect-failed-suites.outputs.has_failed_hier_compile == 'true' && needs.spyre-hier-compile-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_model_components == 'true' && needs.spyre-model-components-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_embed_compare == 'true' && needs.spyre-embed-compare-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_vlm == 'true' && needs.spyre-vlm-e2e-tests-retry.result != 'success') ||

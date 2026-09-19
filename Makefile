@@ -102,6 +102,26 @@ load-tests: ## Run load tests (suite key: load)
 token-compare-tests: ## Run token-compare tests (suite key: token_compare)
 	$(PYTEST) $(PYTEST_ARGS) --suite token_compare tests/spyre/test_e2e_token_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
+# EXPERIMENTAL Granite hierarchical whole-forward compile (suite key: hier_compile).
+# Deliberately NOT part of the regression/unit/integration tiers -- the opt-in
+# path it covers is experimental, so it must not gate PRs. Reach it explicitly
+# with TEST_TYPE=hier_compile (or `make hier-compile-tests`).
+#
+# Unlike the other model-parametrized suites this does NOT take MODEL_PATH_ARGS:
+# the test carries its own fixed Granite 2B/8B list (hf_granite.py is the only
+# adapter whose prepare_for_spyre understands hier_compile), and --model-path
+# REPLACES that list rather than narrowing it, which would point a
+# Granite-specific test at unrelated models. MODEL_PATH instead narrows via -k,
+# so a tier that supplies a model list selects the matching Granite legs (and
+# collects nothing when it names no Granite model -- see the `tests` target,
+# which tolerates pytest's exit-5 for this suite).
+#
+# CI pins this to Granite 3.3 2B only (see _test_matrix.yaml): 8B exercises the
+# same code path for roughly double the runtime, so it stays available on demand
+# via `make hier-compile-tests MODEL_PATH=ibm-granite/granite-3.3-8b-instruct`.
+hier-compile-tests: ## Run Granite hierarchical-compile e2e tests (suite key: hier_compile)
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_hier_compile_spyre.py $(if $(MODEL_PATH),-k "$(MODEL_PATH)",$(K_ARGS)) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+
 model-components-tests: ## Run model component tests (suite key: model_components)
 	$(PYTEST) $(PYTEST_ARGS) --suite model_components tests/spyre/test_model_components_spyre.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
@@ -189,7 +209,7 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	  model_path="$$(grep -E '^[[:space:]]*-[[:space:]]' "tests/model_lists/$${resolved}.yaml" | sed -E 's/^[[:space:]]*-[[:space:]]*//' | tr '\n' ' ')"; \
 	fi; \
 	case " $$resolved " in \
-	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare model_components embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module" ;; \
+	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare hier_compile model_components embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module" ;; \
 	  *" unit "*) suites="adapter_coverage load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module" ;; \
 	  " integration ") suites="token_compare" ;; \
 	  " perf ") suites="perf" ;; \
@@ -206,6 +226,12 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	    load)             mkdir -p "$(RESULTS_DIR)/junit-load" && $(MAKE) load-tests             JUNIT_XML="$(RESULTS_DIR)/junit-load/junit-load.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    token_compare)    mkdir -p "$(RESULTS_DIR)/junit-token-compare" && $(MAKE) token-compare-tests     JUNIT_XML="$(RESULTS_DIR)/junit-token-compare/junit-token-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    model_components) mkdir -p "$(RESULTS_DIR)/junit-model-components" && $(MAKE) model-components-tests JUNIT_XML="$(RESULTS_DIR)/junit-model-components/junit-model-components.xml" || rc=1 ;; \
+	    hier_compile)     mkdir -p "$(RESULTS_DIR)/junit-hier-compile"; \
+	                      $(MAKE) hier-compile-tests JUNIT_XML="$(RESULTS_DIR)/junit-hier-compile/junit-hier-compile.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path"; \
+	                      hc_rc=$$?; \
+	                      if [ "$$hc_rc" = "5" ]; then \
+	                        echo "hier_compile: no Granite leg selected by the supplied model list (pytest exit 5) -- not a failure, this suite is Granite-only."; \
+	                      elif [ "$$hc_rc" != "0" ]; then rc=1; fi ;; \
 	    embed_compare)    mkdir -p "$(RESULTS_DIR)/junit-embed-compare" && $(MAKE) embed-compare-tests     JUNIT_XML="$(RESULTS_DIR)/junit-embed-compare/junit-embed-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    vlm)              mkdir -p "$(RESULTS_DIR)/junit-vlm" && $(MAKE) vlm-tests               JUNIT_XML="$(RESULTS_DIR)/junit-vlm/junit-vlm.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    reranker_compare) mkdir -p "$(RESULTS_DIR)/junit-reranker-compare" && $(MAKE) reranker-tests          JUNIT_XML="$(RESULTS_DIR)/junit-reranker-compare/junit-reranker-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
@@ -227,7 +253,7 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	                        '  <testsuite name="hf-adapters-perf" tests="0" skipped="0" failures="0" errors="0"/>' \
 	                        '</testsuites>' > "$(RESULTS_DIR)/report.xml"; \
 	                      echo "hf-adapters has no perf harness yet (scaffold stub): wrote placeholder $(RESULTS_DIR)/report.xml" ;; \
-	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare model_components embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module edge_cases perf"; rc=1 ;; \
+	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare model_components hier_compile embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module edge_cases perf"; rc=1 ;; \
 	  esac; \
 	done; \
 	exit $$rc
