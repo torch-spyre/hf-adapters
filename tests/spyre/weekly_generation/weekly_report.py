@@ -412,20 +412,32 @@ def _section_verified_on_spyre(
 
     # A PASS→FAIL only counts as a regression if the current FAIL is a real
     # model failure, not infra noise. Likewise a FAIL→PASS is only a genuine
-    # recovery if the previous FAIL was a real model failure.
+    # recovery if the previous FAIL was a real model failure. Both lists are
+    # ordered by num_downloads (most-downloaded first) so the models that matter
+    # most surface at the top; the current snapshot's count is used as it is the
+    # freshest, tie-broken by name for stable output.
+    def _by_downloads_desc(name: str) -> tuple[int, str]:
+        return (-(curr_by[name].get("num_downloads") or 0), name)
+
     regressed = sorted(
-        m
-        for m in common
-        if prev_by[m]["verified_on_spyre"]
-        and not curr_by[m]["verified_on_spyre"]
-        and not _is_infra_failure(curr_by[m])
+        (
+            m
+            for m in common
+            if prev_by[m]["verified_on_spyre"]
+            and not curr_by[m]["verified_on_spyre"]
+            and not _is_infra_failure(curr_by[m])
+        ),
+        key=_by_downloads_desc,
     )
     recovered = sorted(
-        m
-        for m in common
-        if not prev_by[m]["verified_on_spyre"]
-        and curr_by[m]["verified_on_spyre"]
-        and not _is_infra_failure(prev_by[m])
+        (
+            m
+            for m in common
+            if not prev_by[m]["verified_on_spyre"]
+            and curr_by[m]["verified_on_spyre"]
+            and not _is_infra_failure(prev_by[m])
+        ),
+        key=_by_downloads_desc,
     )
     # cpu_ok_spyre_fail = [
     #     r for r in curr_rows if r["verified_on_cpu"] and not r["verified_on_spyre"]
@@ -451,7 +463,11 @@ def _section_verified_on_spyre(
         f"  Regressions PASS→FAIL (ignoring infrastructure noise) - {len(regressed)}:",
     ]
     if regressed:
-        lines.append(_trunc(regressed))
+        lines.append(
+            _format_models_with_downloads(
+                [(m, curr_by[m].get("num_downloads") or 0) for m in regressed]
+            )
+        )
     else:
         lines.append("    (none)")
 
@@ -460,7 +476,11 @@ def _section_verified_on_spyre(
             "",
             f"  Recoveries FAIL→PASS (ignoring infrastructure noise) - {len(recovered)}:",
         ]
-        lines.append(_trunc(recovered))
+        lines.append(
+            _format_models_with_downloads(
+                [(m, curr_by[m].get("num_downloads") or 0) for m in recovered]
+            )
+        )
 
     # lines += [
     #     "",
