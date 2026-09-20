@@ -46,6 +46,61 @@ shape (`adapter_name`, `verified_on_spyre`, `failure_category`, `error`, …), s
 the whole procedure is one table constant — `GENERATIVE_TABLE_NAME` /
 `EMBEDDING_TABLE_NAME` — chosen once from `--mode` and used in every snippet.
 
+## Usage — print the parameter hints instead of running
+
+Before doing anything else, look at `$ARGUMENTS`. If — and only if — the user is
+asking *how to use the skill* rather than to run it, print the usage block below
+and **stop**: do not touch ClickHouse, do not run any `python3 -c` snippet, do not
+write any file. Treat it as a help request when `$ARGUMENTS`, after trimming
+whitespace, is any of:
+
+- empty (no arguments at all), or
+- exactly `help`, `-h`, `--help`, `?`, or `usage` (case-insensitive), or
+- prose that plainly asks about the parameters rather than for a run — e.g.
+  "what are the options", "what flags does this take", "hints on the parameters",
+  "how do I use this".
+
+Anything that carries a real run instruction — a `--mode`, a date, a threshold, an
+output path, or prose like "run the embedding report" — is **not** a help request:
+run the scan normally (Step 0 onward). When in doubt between "asking about a
+parameter" and "asking for a run", prefer printing the help; a wasted ClickHouse
+fetch is worse than an extra hint.
+
+Print the hints as a single ```text``` fenced block, in this shape (this is the
+canonical source for what each flag means — keep it in sync with `## Parameters`
+below if either changes):
+
+```text
+/analyse-weekly-report — weekly Spyre scan report + per-adapter regression analysis
+
+USAGE
+  /analyse-weekly-report [--mode generative|embedding]
+                         [--prev YYYY-MM-DD --curr YYYY-MM-DD]
+                         [--min-delta PP] [--min-n N]
+                         [--output-file PATH]
+  /analyse-weekly-report help        show this help and exit (no query runs)
+
+PARAMETERS
+  --mode generative|embedding  Which table to scan. Default: generative.
+  --prev / --curr YYYY-MM-DD   The two snapshots to compare (older=prev,
+                               newer=curr). Given together or not at all;
+                               omitted → the two most recent snapshots of the
+                               chosen table.
+  --min-delta PP               Regression threshold in percentage points, for
+                               the analysis section only. Default: 10.
+  --min-n N                    Minimum denominator in BOTH snapshots for an
+                               adapter to be eligible for analysis (suppresses
+                               tiny-sample noise). Default: 10.
+  --output-file PATH           Also write the full report + section 7 as plain
+                               text to PATH (overwrites if it exists). Default:
+                               print only.
+
+NOTES
+  • Read-only: queries ClickHouse once; never writes the DB, never commits.
+  • Only regressions (pass rate DROPPED) are analysed; improvements are not.
+  • Dates/thresholds/paths named in prose are mapped onto these flags.
+```
+
 ## What "the rate" means
 
 For one adapter, over the rows of one snapshot:
@@ -63,7 +118,10 @@ is not an adapter, so never write a per-adapter explanation sentence for it.
 
 ## Parameters
 
-`$ARGUMENTS` may carry:
+If `$ARGUMENTS` is a help request rather than a run instruction, do **not** read
+this section as run flags — print the usage block from *Usage — print the
+parameter hints instead of running* above and stop. Otherwise, `$ARGUMENTS` may
+carry:
 
 - `--mode generative|embedding` — which table to analyse. Default **generative**.
   Maps to the table constant: `generative` → `GENERATIVE_TABLE_NAME`,
