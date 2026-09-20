@@ -41,8 +41,17 @@ from typing import Any
 
 from tests.spyre.weekly_generation.clickhouse_db import get_client
 from tests.spyre.weekly_generation.failure_categories import (
+    FAILURE_CATEGORY_CPU_GENERATE_FAILED,
+    FAILURE_CATEGORY_CPU_LOAD_FAILED,
     FAILURE_CATEGORY_HARDWARE_EXCEPTION,
+    FAILURE_CATEGORY_MISFORMED_HF_FAILED,
+    FAILURE_CATEGORY_MODEL_TOO_LARGE,
+    FAILURE_CATEGORY_MOE,
     FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
+    FAILURE_CATEGORY_QUANTIZED_MODEL,
+    FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION,
+    FAILURE_CATEGORY_UNSUPPORTED_CHECKPOINT,
+    FAILURE_CATEGORY_VERIFICATION_FAILED,
     FAILURE_CATEGORY_WORKER_CRASHED,
     FAILURE_CATEGORY_WORKER_TIMEOUT,
 )
@@ -83,6 +92,70 @@ _INFRA_CATEGORIES: frozenset[str] = frozenset(
         FAILURE_CATEGORY_WORKER_TIMEOUT,
     }
 )
+
+# Section 4 rolls the raw failure_category values up into four meaningful groups
+# so the distribution reads as "what kind of failure" rather than a flat list.
+# Every category string defined in failure_categories.py must belong to exactly
+# one group below (a stray/unknown value falls into "other" at render time).
+#
+#   unrelated  — nothing to do with Spyre: the model failed on CPU, is quantized,
+#                is a malformed/unsupported checkpoint. Not our verdict.
+#   expected   — Spyre cannot run this model *by design* and we know it up front:
+#                no adapter implemented, too large for the device, MoE. A
+#                deterministic pre-filter verdict, not a bug.
+#   unexpected — Spyre *should* have run this model but it failed at test time:
+#                the adapter compiled/ran wrong (test_execution_exception) or the
+#                output was incorrect (verification_failed). These are the ones
+#                worth chasing — a real Spyre/adapter defect.
+#   infra      — the run itself broke (device unreachable, worker crash/timeout);
+#                the verdict is about the harness, not the model. Mirrors
+#                _INFRA_CATEGORIES.
+_GROUP_UNRELATED: str = "unrelated model issue"
+_GROUP_EXPECTED: str = "expected Spyre limitation"
+_GROUP_UNEXPECTED: str = "unexpected Spyre failure"
+_GROUP_INFRA: str = "infrastructure"
+_GROUP_OTHER: str = "other / uncategorised"
+
+# Insertion order here is the display order of the groups in section 4.
+_CATEGORY_GROUPS: dict[str, frozenset[str]] = {
+    _GROUP_UNEXPECTED: frozenset(
+        {
+            FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION,
+            FAILURE_CATEGORY_VERIFICATION_FAILED,
+        }
+    ),
+    _GROUP_EXPECTED: frozenset(
+        {
+            FAILURE_CATEGORY_NOT_IMPLEMENTED_ADAPTER,
+            FAILURE_CATEGORY_MODEL_TOO_LARGE,
+            FAILURE_CATEGORY_MOE,
+            FAILURE_CATEGORY_QUANTIZED_MODEL,
+        }
+    ),
+    _GROUP_UNRELATED: frozenset(
+        {
+            FAILURE_CATEGORY_CPU_LOAD_FAILED,
+            FAILURE_CATEGORY_CPU_GENERATE_FAILED,
+            FAILURE_CATEGORY_MISFORMED_HF_FAILED,
+            FAILURE_CATEGORY_UNSUPPORTED_CHECKPOINT,
+        }
+    ),
+    _GROUP_INFRA: _INFRA_CATEGORIES,
+}
+
+
+def _group_for_category(category: str) -> str:
+    """Return the display group a raw ``failure_category`` belongs to.
+
+    Falls back to ``_GROUP_OTHER`` for any category not mapped in
+    ``_CATEGORY_GROUPS`` (e.g. a newly added string not yet grouped here), so an
+    unknown value is surfaced rather than silently dropped.
+    """
+    for group, members in _CATEGORY_GROUPS.items():
+        if category in members:
+            return group
+    return _GROUP_OTHER
+
 
 # When clustering error messages, show up to this many distinct examples.
 _MAX_ERROR_EXAMPLES: int = 20
@@ -507,11 +580,12 @@ def _section_failure_categories(
     curr_cats = Counter(
         r["failure_category"] for r in curr_rows if r.get("failure_category")
     )
-    # Sort by descending delta (curr - prev); tie-break by name for stability.
-    all_cats = sorted(
-        set(prev_cats) | set(curr_cats),
-        key=lambda cat: (-(curr_cats.get(cat, 0) - prev_cats.get(cat, 0)), cat),
-    )
+    all_cats: set[str] = set(prev_cats) | set(curr_cats)
+
+    # Bucket every category into its meaningful group (see _CATEGORY_GROUPS).
+    by_group: dict[str, list[str]] = {}
+    for cat in all_cats:
+        by_group.setdefault(_group_for_category(cat), []).append(cat)
 
     lines = [
         "",
@@ -522,17 +596,39 @@ def _section_failure_categories(
         f"  {_hr('-', 42)}  {'------':>6}  {'------':>6}  {'------':>6}",
     ]
 
-    infra_prev = infra_curr = 0
+    # Render one labelled block per group, groups ordered as _CATEGORY_GROUPS
+    # (unexpected first — those are the ones worth chasing), then any leftover
+    # "other" group last. Within a group, categories sort by descending delta,
+    # tie-broken by name. Each block leads with a subtotal row so the group
+    # magnitudes are comparable at a glance.
+    group_order: list[str] = list(_CATEGORY_GROUPS) + [_GROUP_OTHER]
+    total_prev = total_curr = 0
 
-    for cat in all_cats:
-        p = prev_cats.get(cat, 0)
-        c = curr_cats.get(cat, 0)
-        tag = ""
-        if cat in _INFRA_CATEGORIES:
-            tag = " [infra]"
-            infra_prev += p
-            infra_curr += c
-        lines.append(f"  {cat + tag:<42}  {p:>6}  {c:>6}  {_delta(c, p):>6}")
+    for group in group_order:
+        cats = by_group.get(group)
+        if not cats:
+            continue
+        cats.sort(
+            key=lambda cat: (-(curr_cats.get(cat, 0) - prev_cats.get(cat, 0)), cat)
+        )
+        g_prev: int = sum(prev_cats.get(cat, 0) for cat in cats)
+        g_curr: int = sum(curr_cats.get(cat, 0) for cat in cats)
+        total_prev += g_prev
+        total_curr += g_curr
+
+        lines.append("")
+        lines.append(
+            f"  {group.upper():<42}  {g_prev:>6}  {g_curr:>6}  {_delta(g_curr, g_prev):>6}"
+        )
+        for cat in cats:
+            p = prev_cats.get(cat, 0)
+            c = curr_cats.get(cat, 0)
+            lines.append(f"    {cat:<40}  {p:>6}  {c:>6}  {_delta(c, p):>6}")
+
+    lines.append(f"  {_hr('-', 42)}  {'------':>6}  {'------':>6}  {'------':>6}")
+    lines.append(
+        f"  {'TOTAL':<42}  {total_prev:>6}  {total_curr:>6}  {_delta(total_curr, total_prev):>6}"
+    )
 
     return "\n".join(lines)
 
