@@ -44,19 +44,19 @@ class _FakeClient:
 
 
 def test_component_defaults_to_this_repos_product():
-    assert (lambda m: m.v2_component(_Args(component=""), m.V2_COMPONENT_DEFAULT))(
+    assert (lambda m: m.component_of(_Args(component=""), m.V2_COMPONENT_DEFAULT))(
         _load()
     ) == "hf-adapters"
 
 
 def test_component_honours_an_explicit_override():
     assert (
-        lambda m: m.v2_component(_Args(component="torch-spyre"), m.V2_COMPONENT_DEFAULT)
+        lambda m: m.component_of(_Args(component="torch-spyre"), m.V2_COMPONENT_DEFAULT)
     )(_load()) == "torch-spyre"
 
 
 def test_component_treats_blank_as_absent():
-    assert (lambda m: m.v2_component(_Args(component="   "), m.V2_COMPONENT_DEFAULT))(
+    assert (lambda m: m.component_of(_Args(component="   "), m.V2_COMPONENT_DEFAULT))(
         _load()
     ) == "hf-adapters"
 
@@ -64,7 +64,7 @@ def test_component_treats_blank_as_absent():
 def test_component_survives_a_caller_that_passes_no_flag():
     # An older caller's Namespace has no `component` attribute; falling back keeps the ingest
     # working while callers are updated, rather than raising.
-    assert (lambda m: m.v2_component(_Args(), m.V2_COMPONENT_DEFAULT))(
+    assert (lambda m: m.component_of(_Args(), m.V2_COMPONENT_DEFAULT))(
         _load()
     ) == "hf-adapters"
 
@@ -72,10 +72,10 @@ def test_component_survives_a_caller_that_passes_no_flag():
 def test_component_changes_test_case_identity():
     # Why a wrong stamp is not merely a mislabel: component is a test_case_id hash input.
     # Imported from the library, which the ingest now uses rather than a local copy.
-    from spyre_clickhouse_ingest import v2_test_case_id
+    from spyre_clickhouse_ingest import case_id_for
 
-    a = v2_test_case_id("hf-adapters", "T", "test_x", [])
-    b = v2_test_case_id("torch-spyre", "T", "test_x", [])
+    a = case_id_for("hf-adapters", "T", "test_x", [])
+    b = case_id_for("torch-spyre", "T", "test_x", [])
     assert a and b and a != b
 
 
@@ -91,7 +91,7 @@ def _one_run_row(source_file="junit-token.xml"):
             "fail_message": "",
         }
     ]
-    m.insert_v2(client, "spyre_v2", "hf-adapters", RID, cases, source_file)
+    m.insert_test_results(client, "spyre_v2", "hf-adapters", RID, cases, source_file)
     return [r for r in client.rows.get("test_case_runs", []) if "props" in r]
 
 
@@ -122,20 +122,20 @@ def test_ingest_uses_the_shared_library_not_a_local_copy():
     for name in (
         "extract_properties",
         "get_client",
-        "insert_v2",
+        "insert_test_results",
         "promote_xpass",
-        "v2_already_ingested",
-        "v2_component",
-        "v2_database",
-        "v2_run_id_for",
-        "v2_source_and_external_run_id",
-        "v2_tables_present",
+        "cases_already_ingested",
+        "component_of",
+        "target_database",
+        "run_id_for",
+        "source_and_external_run_id",
+        "tables_present",
     ):
         assert getattr(module, name) is getattr(lib, name), name
 
 
 def test_component_default_is_hf_not_the_library_default():
-    # v2_component takes the default as a PARAMETER precisely so this repo stamps itself.
+    # component_of takes the default as a PARAMETER precisely so this repo stamps itself.
     # `component` hashes into test_case_id, so falling back to the library's own default would
     # mint torch-spyre identities for hf rows -- a wrong identity, not a mislabel.
     import spyre_clickhouse_ingest as lib
@@ -143,5 +143,5 @@ def test_component_default_is_hf_not_the_library_default():
     module = _load()
     assert module.V2_COMPONENT_DEFAULT == "hf-adapters"
     args = _Args(component="")
-    assert lib.v2_component(args, module.V2_COMPONENT_DEFAULT) == "hf-adapters"
-    assert lib.v2_component(args) != "hf-adapters"
+    assert lib.component_of(args, module.V2_COMPONENT_DEFAULT) == "hf-adapters"
+    assert lib.component_of(args) != "hf-adapters"
