@@ -27,16 +27,16 @@ from pathlib import Path
 
 from lxml import etree
 from spyre_clickhouse_ingest import (
+    cases_already_ingested,
+    component_of,
     extract_properties,
     get_client,
     insert_test_results,
     promote_xpass,
-    cases_already_ingested,
-    component_of,
-    target_database,
     run_id_for,
     source_and_external_run_id,
     tables_present,
+    target_database,
 )
 from spyre_clickhouse_ingest.junit import _runner_run_id, _threaded_run_id
 
