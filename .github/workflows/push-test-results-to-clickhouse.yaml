@@ -66,15 +66,6 @@ jobs:
       CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
       CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
       CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
-      # Schema-v2 database. Reached by QUALIFYING every v2 statement rather than by a second
-      # connection: test_cases exists in both generations with incompatible shapes, so an
-      # unqualified name would hit the wrong one. Unset/empty makes the v2 write a no-op, so
-      # this is safe before the secret exists.
-      CLICKHOUSE_DB_V2: ${{ secrets.CLICKHOUSE_DB_V2 }}
-      # Dual-write during the migration window: v1 stays authoritative while v2 accumulates
-      # the same runs. No data is ported (v1 rows cannot produce a v2 run_id, the hash inputs
-      # were never recorded per row), so `both` is how v2 gets any history at all.
-      INGEST_SCHEMA: both
 
       # Metadata about the triggering run
       TRIGGERING_RUN_ID: ${{ github.event.workflow_run.id || inputs.gha_run_id }}
@@ -287,6 +278,29 @@ jobs:
             --pr-number    "${PR_NUMBER}" \
             --trigger-type "${TIER}" \
             --platform "${LEG_ARCH}"
+
+      # Schema-v2: the same test_cases/test_case_runs tables torch-spyre writes, via its reusable action -- never installs the library locally.
+      - name: Ingest XML into shared v2 ClickHouse tables
+        uses: torch-spyre/torch-spyre/.github/actions/ingest-xml-to-clickhouse@main
+        with:
+          xml-dir: xml_artifacts
+          workflow: ${{ env.TRIGGERING_WORKFLOW }}
+          branch: ${{ env.TRIGGERING_BRANCH }}
+          sha: ${{ env.TRIGGERING_SHA }}
+          run-id: ${{ steps.threaded-run-id.outputs.run_id }}
+          gha-run-id: ${{ env.TRIGGERING_RUN_ID }}
+          triggered-at: ${{ env.TRIGGERING_AT }}
+          pr-number: ${{ steps.resolve-pr.outputs.pr_number }}
+          trigger-type: ${{ steps.extract-tier.outputs.tier }}
+          platform: x86_64
+          component: hf-adapters
+          schema: v2
+          clickhouse-host: ${{ secrets.CLICKHOUSE_HOST }}
+          clickhouse-port: ${{ secrets.CLICKHOUSE_PORT }}
+          clickhouse-user: ${{ secrets.CLICKHOUSE_USER }}
+          clickhouse-pass: ${{ secrets.CLICKHOUSE_PASS }}
+          clickhouse-db: ${{ secrets.CLICKHOUSE_DB }}
+          clickhouse-db-v2: ${{ secrets.CLICKHOUSE_DB_V2 }}
 
       - name: Summary
         if: always()
