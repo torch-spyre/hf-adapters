@@ -99,10 +99,6 @@ jobs:
         with:
           sparse-checkout: |
             .github/scripts/ingest_xml_hf_adapters.py
-            # v2_schema.py is imported as a sibling module by the script above, so it must be
-            # checked out too. Listing only the entry point made `import v2_schema` fail at
-            # startup and every ingest run exit 1 -- no rows written, v1 or v2.
-            .github/scripts/v2_schema.py
           sparse-checkout-cone-mode: false
 
       - name: Install uv
@@ -117,7 +113,8 @@ jobs:
       - name: Install Python dependencies
         run: |
           source .venv/bin/activate
-          uv pip install requests clickhouse-driver clickhouse-connect lxml regex
+          uv pip install requests clickhouse-driver clickhouse-connect lxml regex \
+            "git+https://github.com/torch-spyre/torch-spyre@main#subdirectory=extensions/clickhouse-ingest"
 
       - name: Install gh CLI
         env:
@@ -223,6 +220,26 @@ jobs:
           echo "Downloaded XML files:"
           find xml_artifacts -name "*.xml" 2>/dev/null || echo "(none)"
 
+      # The orchestrator's uuid, uploaded by _test_matrix as the `run-id` artifact (this
+      # workflow runs on workflow_run, so it cannot receive it as a dispatch input). Absent on
+      # a GHA-initiated run => empty => the ingest derives its own id from the run coordinate.
+      - name: Recover threaded run_id
+        id: threaded-run-id
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RID=""
+          AID=$(gh api --paginate \
+            "/repos/${{ github.repository }}/actions/runs/${TRIGGERING_RUN_ID}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name == "run-id") | .id' | head -1)
+          if [[ -n "${AID}" ]]; then
+            gh api "/repos/${{ github.repository }}/actions/artifacts/${AID}/zip" > run-id.zip || true
+            unzip -o -q run-id.zip -d run-id-dir || true
+            RID=$(tr -d '[:space:]' < run-id-dir/run-id.txt 2>/dev/null || echo "")
+          fi
+          echo "Threaded run_id: ${RID:-<none, ingest will derive>}"
+          echo "run_id=${RID}" >> "${GITHUB_OUTPUT}"
+
       - name: Extract suite tier from display title
         id: extract-tier
         run: |
@@ -243,6 +260,20 @@ jobs:
       # hf_test_runs / hf_test_cases / hf_run_properties.
       # ---------------------------------------------------------------------------
       - name: Ingest XML files into ClickHouse
+        env:
+          # The arch the SUITE ran on, not this job's: arch is a run_id hash input and this
+          # job is pinned to x86_64, so `uname -m` would stamp x86_64 on every leg it
+          # ingests. All test legs are x86_64 today; this needs to become a per-leg value
+          # (carried like the run-id artifact) before a non-x86 leg is added.
+          LEG_ARCH: x86_64
+          # Routed through env rather than interpolated into the script below: this job runs on
+          # workflow_run, a privileged secrets-bearing trigger, and the value reaches us from a
+          # downloaded artifact originating outside this workflow.
+          THREADED_RUN_ID: ${{ steps.threaded-run-id.outputs.run_id }}
+          # Same reasoning: PR_NUMBER comes from the triggering run's payload and TIER is parsed
+          # out of its run-name, so neither is trusted input to a shell here.
+          PR_NUMBER: ${{ steps.resolve-pr.outputs.pr_number }}
+          TIER: ${{ steps.extract-tier.outputs.tier }}
         run: |
           source .venv/bin/activate
           python3 .github/scripts/ingest_xml_hf_adapters.py \
@@ -251,10 +282,11 @@ jobs:
             --branch   "${TRIGGERING_BRANCH}" \
             --sha      "${TRIGGERING_SHA}" \
             --gha-run-id "${TRIGGERING_RUN_ID}" \
+            --run-id "${THREADED_RUN_ID}" \
             --triggered-at "${TRIGGERING_AT}" \
-            --pr-number    "${{ steps.resolve-pr.outputs.pr_number }}" \
-            --trigger-type "${{ steps.extract-tier.outputs.tier }}" \
-            --platform "$(uname -m)"
+            --pr-number    "${PR_NUMBER}" \
+            --trigger-type "${TIER}" \
+            --platform "${LEG_ARCH}"
 
       - name: Summary
         if: always()
@@ -271,4 +303,181 @@ jobs:
             echo "| Branch              | ${TRIGGERING_BRANCH} |"
             echo "| Commit SHA          | ${TRIGGERING_SHA:0:12} |"
             echo "| XML files ingested  | ${XML_COUNT} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Ingest raw GHA job logs from spyre-model-module-tests into ClickHouse.
+  # Runs alongside the existing XML ingest whenever integration-tests or
+  # test_pull_request completes — those are the only two workflows that actually
+  # run spyre-model-module-tests (test_daily sets edge_cases_only:true which
+  # skips module tests entirely, so it is deliberately not in the trigger list).
+  # Produces two richer tables: module_test_suites + module_test_variants.
+  # ---------------------------------------------------------------------------
+  ingest-module-logs:
+    name: Ingest module-test logs -> ClickHouse
+    runs-on:
+      - x86_64
+      - linux
+      - image_ingest
+    timeout-minutes: 20
+    # Only fire when integration-tests completes (not on every PR / test_pull_request run).
+    # For manual re-ingest, only accept workflow_name == 'integration-tests'.
+    if: |
+      (github.event_name == 'workflow_dispatch' && inputs.workflow_name == 'integration-tests') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.name == 'integration-tests' &&
+       github.event.workflow_run.conclusion != 'cancelled')
+
+    env:
+      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
+      CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
+      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+      CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
+      CLICKHOUSE_DB:   ${{ secrets.CLICKHOUSE_DB }}
+      TRIGGERING_RUN_ID:  ${{ github.event.workflow_run.id || inputs.gha_run_id }}
+      TRIGGERING_BRANCH:  ${{ github.event.workflow_run.head_branch || github.ref_name }}
+      TRIGGERING_SHA:     ${{ github.event.workflow_run.head_sha || github.sha }}
+
+    steps:
+      # Always check out from default branch so the scripts are canonical
+      - name: Checkout ingest scripts
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          sparse-checkout: |
+            .github/scripts/parse_module_test_logs.py
+            .github/scripts/ingest_module_tests.py
+            tests/configs/module_tests
+          sparse-checkout-cone-mode: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Set up venv and install dependencies
+        run: |
+          uv venv
+          source .venv/bin/activate
+          uv pip install clickhouse-connect pyyaml
+
+      - name: Install gh CLI
+        env:
+          GH_CLI_VERSION_FLOOR: 2.98.0
+        run: |
+          set -euo pipefail
+          ver="$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest \
+                   | jq -r '.tag_name // empty' | sed 's/^v//')" || ver=""
+          if [ -z "$ver" ]; then
+            echo "api.github.com unreachable; flooring to ${GH_CLI_VERSION_FLOOR}"
+            ver="${GH_CLI_VERSION_FLOOR}"
+          fi
+          curl -fsSL "https://github.com/cli/cli/releases/download/v${ver}/gh_${ver}_linux_amd64.tar.gz" \
+            -o gh.tar.gz
+          tar -xzf gh.tar.gz
+          echo "$PWD/gh_${ver}_linux_amd64/bin" >> "${GITHUB_PATH}"
+
+      # ---------------------------------------------------------------------------
+      # Download the raw job logs for every "Spyre model-module tests" job leg
+      # from the triggering run. Each leg corresponds to one config/model YAML.
+      # The GHA jobs API lists all jobs for the run; we filter by name prefix and
+      # download the text log for each matching job into raw_logs/.
+      # ---------------------------------------------------------------------------
+      - name: Download model-module test job logs
+        id: download-logs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p raw_logs
+
+          # List all jobs for the triggering run, filter to "Spyre model-module tests" legs
+          gh api --paginate \
+            "/repos/${{ github.repository }}/actions/runs/${TRIGGERING_RUN_ID}/jobs?per_page=100" \
+            --jq '.jobs[] | select(.name | startswith("Spyre model-module tests")) | {id: .id, name: .name}' \
+          | python3 -c "
+          import json, sys
+          jobs = [json.loads(l) for l in sys.stdin if l.strip()]
+          print(json.dumps(jobs))
+          " > jobs.json
+
+          JOB_COUNT=$(python3 -c "import json; print(len(json.load(open('jobs.json'))))")
+          echo "Found ${JOB_COUNT} model-module test job(s)"
+          echo "job_count=${JOB_COUNT}" >> "${GITHUB_OUTPUT}"
+
+          python3 - <<'PYEOF'
+          import json, os, subprocess
+          from pathlib import Path
+
+          jobs    = json.load(open("jobs.json"))
+          repo    = os.environ["GITHUB_REPOSITORY"]
+          run_id  = os.environ["TRIGGERING_RUN_ID"]
+          token   = os.environ["GH_TOKEN"]
+
+          for job in jobs:
+              job_id   = job["id"]
+              job_name = job["name"]
+              # Sanitise for use as filename: replace / and spaces
+              safe     = job_name.replace("/", "_").replace(" ", "_")
+              out_path = Path("raw_logs") / f"{job_id}_{safe}.txt"
+              result   = subprocess.run(
+                  ["gh", "api", f"/repos/{repo}/actions/jobs/{job_id}/logs"],
+                  capture_output=True,
+                  env={**os.environ},
+              )
+              if result.returncode == 0 and result.stdout:
+                  out_path.write_bytes(result.stdout)
+                  print(f"  saved: {out_path.name} ({len(result.stdout)} bytes)")
+              else:
+                  print(f"  WARN: no log for job {job_id} ({job_name}): {result.stderr.decode()[:200]}")
+          PYEOF
+
+          echo "Log files downloaded:"
+          ls -lh raw_logs/ || echo "(none)"
+
+      # ---------------------------------------------------------------------------
+      # Run parse_module_test_logs.py against the downloaded .txt files.
+      # The script expects files matching:
+      #   *_run-tests _ Spyre model-module tests*.txt
+      # The job name from GHA is "Spyre model-module tests (<config>)", which
+      # after sanitisation becomes "<id>_Spyre_model-module_tests_(<config>).txt"
+      # -- close enough for the yaml-stem extraction regex inside the script.
+      # We pass tests/configs/module_tests as the yaml-config-dir so forward_inputs
+      # are back-filled for OOT test_forward records.
+      # ---------------------------------------------------------------------------
+      - name: Parse module-test logs → JSON
+        if: steps.download-logs.outputs.job_count != '0'
+        run: |
+          source .venv/bin/activate
+          python3 .github/scripts/parse_module_test_logs.py \
+            raw_logs \
+            --output "module_tests_${TRIGGERING_RUN_ID}.json"
+          echo "Produced module_tests_${TRIGGERING_RUN_ID}.json"
+          cat "module_tests_${TRIGGERING_RUN_ID}.json" | python3 -c \
+            "import json,sys; d=json.load(sys.stdin); print(f'  {len(d)} suite record(s)')"
+
+      # ---------------------------------------------------------------------------
+      # Ingest the JSON into ClickHouse: module_test_suites + module_test_variants
+      # ---------------------------------------------------------------------------
+      - name: Ingest JSON → ClickHouse
+        if: steps.download-logs.outputs.job_count != '0'
+        run: |
+          source .venv/bin/activate
+          python3 .github/scripts/ingest_module_tests.py \
+            --json-file "module_tests_${TRIGGERING_RUN_ID}.json" \
+            --workflow  "${TRIGGERING_WORKFLOW:-test_daily}" \
+            --branch    "${TRIGGERING_BRANCH}" \
+            --sha       "${TRIGGERING_SHA}" \
+            --run-id    "${TRIGGERING_RUN_ID}"
+
+      - name: Module-log ingest summary
+        if: always()
+        run: |
+          JOB_COUNT="${{ steps.download-logs.outputs.job_count || '0' }}"
+          {
+            echo "### Module-Test Log Ingest Summary"
+            echo "| Key | Value |"
+            echo "|---|---|"
+            echo "| Triggering workflow | ${TRIGGERING_WORKFLOW:-test_daily} |"
+            echo "| Triggering run ID   | ${TRIGGERING_RUN_ID} |"
+            echo "| Branch              | ${TRIGGERING_BRANCH} |"
+            echo "| Commit SHA          | ${TRIGGERING_SHA:0:12} |"
+            echo "| Module-test jobs    | ${JOB_COUNT} |"
           } >> "$GITHUB_STEP_SUMMARY"

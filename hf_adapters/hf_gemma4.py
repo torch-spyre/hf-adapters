@@ -53,7 +53,7 @@ in several ways, so it gets a custom compiled block rather than reusing
   ``layer_scalar`` buffer (init 1.0).
 - **Unscaled attention.** ``Gemma4TextAttention.scaling == 1.0`` — Q·Kᵀ is NOT
   divided by ``sqrt(head_dim)``. SDPA is called with ``scale=1.0``.
-- **Large vocab + logit softcap.** 262K vocab → chunked LM head (like
+- **Large vocab + logit softcap.** 262K vocab → stick-padded LM head (like
   ``hf_phi3``); ``final_logit_softcapping`` (30.0) applies a
   ``cap * tanh(logits / cap)`` after the head.
 
@@ -100,8 +100,14 @@ from hf_adapters.hf_common import (
     get_backbone,
     kv_cache_update,
     optional_spyre_config_patch,
-    pad_lm_head,
+    prepare_lm_head_for_spyre,
+    run_lm_head,
     text_config,
+)
+from hf_adapters.spyre_tensor_parallel import (
+    SPYRE_REPLICATED_LINEAR,
+    SPYRE_ROWWISE,
+    spyre_compiled_all_reduce,
 )
 
 
@@ -118,6 +124,36 @@ def _gemma4_backbone(model):
     matching where ``pad_lm_head`` looks.
     """
     return get_backbone(model)
+
+
+def spyre_tp_grouped_colwise_modules(model, tp_size):
+    """Return K/V projections that need replication within rank groups.
+
+    HF's colwise plan splits a projection's output dimension evenly across TP
+    ranks. That is only a valid attention shard when every rank receives an
+    integral number of ``head_dim``-wide heads. Gemma 4 A4B's full-attention
+    layers have two 512-wide KV heads, for example, so TP=4 would otherwise
+    produce invalid 256-wide half-heads. Instead, shard those projections into
+    two whole heads and replicate each head across its two corresponding ranks.
+    """
+    backbone = _gemma4_backbone(model)
+    cfg = text_config(model.config)
+    module_names = {id(module): name for name, module in model.named_modules()}
+    grouped = {}
+
+    for layer, layer_cfg in zip(backbone.layers, cfg.per_layer_config):
+        attn = layer.self_attn
+        head_dim = layer_cfg.head_dim
+        for projection_name in ("k_proj", "v_proj"):
+            projection = getattr(attn, projection_name, None)
+            if projection is None:
+                continue
+            if projection.out_features % (head_dim * tp_size) != 0:
+                num_kv_heads = projection.out_features // head_dim
+                assert tp_size % num_kv_heads == 0
+                grouped[module_names[id(projection)]] = num_kv_heads
+
+    return grouped
 
 
 def _gemma4_rms_norm(hidden_states, weight, eps):
@@ -402,6 +438,7 @@ class _Gemma4BlockSpec:
     activation: str
     is_kv_eq_v: bool
     attention_bias: bool
+    tp_group_name: str | None
     has_ple: bool
     ple_dim: int
     scaling: float
@@ -501,17 +538,24 @@ def _finish_block(
     per_layer_input,
     query_row_mask,
 ):
-    attn_out = F.linear(attn_out, o_weight, o_bias)
+    # These functional linears bypass the Transformers module hooks which
+    # normally complete a rowwise projection. Reduce the rank-local partial
+    # sums explicitly, before adding a replicated bias or residual.
+    attn_out = F.linear(attn_out, o_weight)
+    if spec.tp_group_name is not None:
+        attn_out = spyre_compiled_all_reduce(attn_out, spec.tp_group_name)
+    if o_bias is not None:
+        attn_out = attn_out + o_bias
     h = residual + _gemma4_rms_norm(
         attn_out, post_attn_norm_weight, spec.post_attention_norm_eps
     )
 
     residual = h
     h = _gemma4_rms_norm(h, pre_ffn_norm_weight, spec.pre_feedforward_norm_eps)
-    h = F.linear(
-        _gemma4_mlp_activation(F.linear(h, gate_weight)) * F.linear(h, up_weight),
-        down_weight,
-    )
+    h = _gemma4_mlp_activation(F.linear(h, gate_weight)) * F.linear(h, up_weight)
+    h = F.linear(h, down_weight)
+    if spec.tp_group_name is not None:
+        h = spyre_compiled_all_reduce(h, spec.tp_group_name)
     h = residual + _gemma4_rms_norm(
         h, post_ffn_norm_weight, spec.post_feedforward_norm_eps
     )
@@ -714,6 +758,48 @@ def _block_spec(block, layer_type):
         raise SpyreUnsupportedModelError(
             "Gemma 4 requires an unscaled RMSNorm for v_norm"
         )
+
+    # Transformers normally all-reduces rowwise projections in module output
+    # hooks. The compiled executor uses their weights through F.linear instead,
+    # so carry the process-group name into the graph and reduce explicitly.
+    rowwise_projections = (attn.o_proj, block.mlp.down_proj)
+    device_meshes = [
+        getattr(projection, "_hf_device_mesh", None)
+        for projection in rowwise_projections
+    ]
+    if any(mesh is not None for mesh in device_meshes):
+        if any(mesh is None for mesh in device_meshes):
+            raise ValueError(
+                "Gemma 4 TP requires both o_proj and down_proj on a device mesh"
+            )
+        plans = [
+            getattr(projection, "_hf_tp_plan", None)
+            for projection in rowwise_projections
+        ]
+        if any(plan != SPYRE_ROWWISE for plan in plans):
+            raise ValueError(
+                "Gemma 4 compiled TP requires rowwise o_proj and down_proj"
+            )
+        group_names = [mesh.get_group().group_name for mesh in device_meshes]
+        if group_names[0] != group_names[1]:
+            raise ValueError("Gemma 4 o_proj and down_proj must use the same TP group")
+        tp_group_name = group_names[0]
+    else:
+        tp_group_name = None
+
+    # Gemma 4's base TP plan deliberately omits the PLE projections. The
+    # adapter's plan completion therefore replicates them, and unlike o_proj
+    # and down_proj their functional calls need no collective.
+    if block.has_ple and tp_group_name is not None:
+        ple_projections = (
+            block.per_layer_input_gate,
+            block.per_layer_projection,
+        )
+        if any(
+            getattr(projection, "_hf_tp_plan", None) != SPYRE_REPLICATED_LINEAR
+            for projection in ple_projections
+        ):
+            raise ValueError("Gemma 4 PLE projections must be replicated for TP")
     return _Gemma4BlockSpec(
         kind=kind,
         layer_type=layer_type,
@@ -724,6 +810,7 @@ def _block_spec(block, layer_type):
         activation=activation,
         is_kv_eq_v=is_kv_eq_v,
         attention_bias=attention_bias,
+        tp_group_name=tp_group_name,
         has_ple=block.has_ple,
         ple_dim=ple_dim,
         scaling=attn.scaling,
@@ -928,7 +1015,6 @@ def _run_blocks_over_embeds(
                 pli,
                 query_row_mask,
             )
-
     norm = backbone.norm
     weight = norm.weight if norm.with_scale else None
     h = _compiled_gemma4_rms_norm(h, weight, norm.eps)
@@ -994,14 +1080,7 @@ def _run_forward(
         cache_index,
     )
 
-    logits = model.lm_head(h)
-
-    cap = text_config(model.config).final_logit_softcapping
-    if cap is not None:
-        logits = logits / cap
-        logits = torch.tanh(logits)
-        logits = logits * cap
-    return logits
+    return run_lm_head(model, h)
 
 
 def _setup_gemma4_text_decoder(model, *, allow_moe=False):
@@ -1021,7 +1100,7 @@ def _setup_gemma4_text_decoder(model, *, allow_moe=False):
       2. Patch ``Gemma4RMSNorm`` for the fp16 Spyre path.
       3. Build one ``PrecomputedRotaryEmbedding`` per layer type.
       4. Record per-layer KV-cache shapes (sliding vs global differ).
-      5. Chunk the LM head for the large vocab.
+      5. Prepare the padded LM head and a TP vocabulary gather when needed.
 
     Returns ``(num_q_heads_per_layer, kv_shapes, is_kv_eq_v_per_layer)`` — the
     per-layer geometry the caller needs to compile its blocks.
@@ -1057,13 +1136,34 @@ def _setup_gemma4_text_decoder(model, *, allow_moe=False):
     kv_shapes = []
     is_kv_eq_v_per_layer = []
     for i, (layer_type, layer_cfg) in enumerate(zip(cfg.layer_types, layer_configs)):
-        num_q_heads_per_layer.append(layer_cfg.num_attention_heads)
         head_dim = layer_cfg.head_dim
         assert head_dim % 2 == 0 and head_dim // 2 >= 64, (
             f"Gemma 4 layer {i} head_dim={head_dim}: head_dim/2 must be >= 64 "
             "(one Spyre stick). A padded variant is not implemented for this adapter."
         )
-        num_kv_heads = layer_cfg.num_key_value_heads
+        # HF updates the Linear metadata when its colwise TP plan shards Q/K/V.
+        # Derive local head counts from those modules rather than retaining the
+        # global config counts; otherwise a 2-way shard producing 2048 Q values
+        # is incorrectly viewed as 16 * 256 (=4096) values.
+        attn = backbone.layers[i].self_attn
+        assert attn.q_proj.out_features % head_dim == 0
+        num_q_heads = attn.q_proj.out_features // head_dim
+        k_proj = getattr(attn, "k_proj", None)
+        if k_proj is None:
+            # KV-sharing layers intentionally omit K/V projections. Reuse the
+            # already-derived local KV geometry of their producer.
+            producer = model._spyre_producer_of[i]
+            assert producer is not None
+            num_kv_heads = kv_shapes[producer][0]
+        else:
+            assert k_proj.out_features % head_dim == 0, (
+                f"Gemma 4 layer {i} has a partial KV head after TP: "
+                f"k_proj.out_features={k_proj.out_features}, head_dim={head_dim}, "
+                f"weight.shape={tuple(k_proj.weight.shape)}, "
+                f"tp_plan={getattr(k_proj, '_hf_tp_plan', None)!r}"
+            )
+            num_kv_heads = k_proj.out_features // head_dim
+        num_q_heads_per_layer.append(num_q_heads)
         kv_shapes.append((num_kv_heads, head_dim, head_dim))
         is_kv_eq_v_per_layer.append(attention_k_eq_v and layer_type == "full_attention")
     model._spyre_kv_shapes = kv_shapes
@@ -1080,9 +1180,16 @@ def _setup_gemma4_text_decoder(model, *, allow_moe=False):
             InvFreqShim(inv_freq, scaling)
         )
 
-    # LM head: smooth-padded to a stick-aligned vocab whose per-core span fits
-    # the 256 MB EAR limit (see hf_common.pad_lm_head).
-    pad_lm_head(model)
+    cap = cfg.final_logit_softcapping
+
+    def process_logits(logits):
+        if cap is not None:
+            logits = logits / cap
+            logits = torch.tanh(logits)
+            logits = logits * cap
+        return logits
+
+    prepare_lm_head_for_spyre(model, logits_processor=process_logits)
 
     return num_q_heads_per_layer, kv_shapes, is_kv_eq_v_per_layer
 

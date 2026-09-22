@@ -294,7 +294,7 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
         "masked_lm": {},
         "question_answering": {},
         "reranker": {},
-        "seq_classification": {},
+        "seq_classification": model_registry.NON_BLOCKING_SEQUENCE_CLASSIFICATION_MODELS,
         "token_classification": {},
     }
     try:

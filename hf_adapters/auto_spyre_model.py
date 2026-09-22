@@ -96,6 +96,9 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutput,
     TokenClassifierOutput,
 )
+from transformers.models.diffusion_gemma.configuration_diffusion_gemma import (
+    DiffusionGemmaConfig,
+)
 from transformers.models.ministral.configuration_ministral import MinistralConfig
 from transformers.models.mistral3.configuration_mistral3 import Mistral3Config
 
@@ -104,6 +107,7 @@ from hf_adapters import (
     hf_bert,
     hf_bharatgen,
     hf_clip,
+    hf_diffusion_gemma,
     hf_distilbert,
     hf_dspark_gemma4,
     hf_dspark_granite,
@@ -151,6 +155,7 @@ from hf_adapters.hf_common import (
 CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     BertConfig: hf_bert,
     CLIPConfig: hf_clip,
+    DiffusionGemmaConfig: hf_diffusion_gemma,
     DistilBertConfig: hf_distilbert,
     Gemma2Config: hf_gemma2,
     Gemma3Config: hf_gemma3,
@@ -440,6 +445,9 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
             attention_mask: torch.Tensor | None = None,
             **kwargs: Any,
         ):
+            if hasattr(module, "generate"):
+                return module.generate(self, input_ids, attention_mask, **kwargs)
+
             from hf_adapters.hf_common import generate
 
             return generate(

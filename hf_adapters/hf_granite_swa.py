@@ -41,8 +41,9 @@ from hf_adapters.hf_common import (
     get_backbone,
     kv_cache_update,
     make_standard_gqa_block,
-    pad_lm_head,
+    prepare_lm_head_for_spyre,
     prepare_rope_and_heads,
+    text_config,
 )
 from hf_adapters.hf_granite import _run_backbone_forward, _run_forward  # noqa: F401
 
@@ -138,7 +139,10 @@ def prepare_for_spyre(model):
 
     sliding_window = model.config.sliding_window
     prepare_rope_and_heads(model)
-    pad_lm_head(model)
+    logits_scaling = text_config(model.config).logits_scaling
+    prepare_lm_head_for_spyre(
+        model, logits_processor=lambda logits: logits / logits_scaling
+    )
     backbone = get_backbone(model)
     model._spyre_compiled_blocks = [
         (

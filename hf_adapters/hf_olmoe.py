@@ -36,7 +36,7 @@ from hf_adapters.hf_common import (
     moe_topk,
     named_moe_prefill_inputs,
     optional_spyre_config_patch,
-    pad_lm_head,
+    prepare_lm_head_for_spyre,
     prepare_moe_expert_weights,
     prepare_rope_and_heads,
     standard_gqa_backbone_forward,
@@ -327,7 +327,7 @@ def prepare_for_spyre(model):
         )
 
     prepare_rope_and_heads(model)
-    pad_lm_head(model)
+    prepare_lm_head_for_spyre(model)
 
     try:
         from torch_spyre._C import get_elem_in_stick

@@ -25,15 +25,20 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-# v2_schema is a SIBLING file, not an installed package: this script is copied into three
-# repos and run by path (`uv run --no-project .../ingest_xml*.py`), so its own directory is only
-# on sys.path when it is the entry point. A caller that loads it via spec_from_file_location --
-# as the ingest tests do -- would otherwise fail at this import.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-import clickhouse_connect
-import v2_schema
 from lxml import etree
+from spyre_clickhouse_ingest import (
+    extract_properties,
+    get_client,
+    insert_v2,
+    promote_xpass,
+    v2_already_ingested,
+    v2_component,
+    v2_database,
+    v2_run_id_for,
+    v2_source_and_external_run_id,
+    v2_tables_present,
+)
+from spyre_clickhouse_ingest.junit import _runner_run_id, _threaded_run_id
 
 # ---------------------------------------------------------------------------
 # hf_test_runs / hf_test_cases / hf_run_properties are provisioned out of
@@ -76,38 +81,6 @@ def classify_testcase(tc_el):
         return "skipped", "", msg
 
     return "passed", "", ""
-
-
-def extract_properties(tc_el):
-    props = []
-    props_el = tc_el.find("properties")
-    if props_el is None:
-        return props
-    for p in props_el.findall("property"):
-        name = p.get("name", "").strip()
-        value = p.get("value", "").strip()
-        if name:
-            props.append((name, value))
-    return props
-
-
-def promote_xpass(raw_cases, suite_attrs):
-    """Mirror torch-spyre's ingest_xml.py: pytest's plain <failures> count
-    lumps strict and non-strict xfail-passed cases together with real
-    failures, so bare-passed cases must be promoted to "xpass" to reconcile
-    the suite-level failure count."""
-    failures = int(suite_attrs.get("failures", 0))
-    true_fail_raw = sum(1 for c in raw_cases if c["status"] in ("failed", "error"))
-    strict_xpass_raw = sum(1 for c in raw_cases if c["status"] == "xpass")
-    non_strict = max(0, failures - true_fail_raw - strict_xpass_raw)
-
-    promoted = 0
-    for c in raw_cases:
-        if promoted >= non_strict:
-            break
-        if c["_is_bare"]:
-            c["status"] = "xpass"
-            promoted += 1
 
 
 def parse_test_xml(xml_path: Path):
@@ -169,28 +142,6 @@ def parse_test_xml(xml_path: Path):
 # ---------------------------------------------------------------------------
 # ClickHouse insertion
 # ---------------------------------------------------------------------------
-
-
-def get_client():
-    return clickhouse_connect.get_client(
-        host=os.environ["CLICKHOUSE_HOST"],
-        port=int(os.environ.get("CLICKHOUSE_PORT", 443)),
-        user=os.environ.get("CLICKHOUSE_USER", "default"),
-        password=os.environ["CLICKHOUSE_PASS"],
-        database=os.environ.get("CLICKHOUSE_DB", "spyre"),
-        secure=True,
-    )
-
-
-def v2_database() -> str:
-    """The v2 database name, or "" when v2 is not configured.
-
-    A NAME rather than a second connection: the same instance holds both generations, so one
-    client serves both provided every v2 statement is QUALIFIED. Qualifying is not optional --
-    test_cases exists in both with incompatible shapes, so an unqualified name resolves
-    against whichever database the connection holds and silently hits the wrong table.
-    """
-    return os.environ.get("CLICKHOUSE_DB_V2", "").strip()
 
 
 def insert_run(client, run_id: str, run: dict, args):
@@ -320,31 +271,6 @@ def insert_properties(client, run_id: str, cases: list[dict]):
 # ---------------------------------------------------------------------------
 
 
-def _runner_run_id(args, run_id: str) -> str:
-    """This leg's own run id: --gha-run-id when GHA-dispatched, else the same uuid as run_id."""
-    raw = (getattr(args, "gha_run_id", "") or "").strip()
-    if raw:
-        try:
-            int(raw)
-            return raw
-        except (ValueError, TypeError):
-            pass
-    return run_id
-
-
-def _threaded_run_id(args) -> str:
-    """--run-id when it is a real UUID, else "" so the caller mints one.
-
-    Only a well-formed uuid is honoured: the column is a UUID join key, so any
-    other value (a build number, a GHA run id) must be ignored, not stored.
-    """
-    raw = (getattr(args, "run_id", "") or "").strip()
-    try:
-        return str(uuid.UUID(raw))
-    except (ValueError, AttributeError, TypeError):
-        return ""
-
-
 # ---------------------------------------------------------------------------
 # ── SCHEMA v2: test_cases + test_case_runs ─────────────────────────────────
 #
@@ -369,228 +295,13 @@ def _threaded_run_id(args) -> str:
 # The product this script ingests for. Replaces v1's hf_/si_ table-name prefixes: one
 # v2 table pair serves all three products, discriminated by this column. It is also a
 # test_case_id hash input, so it cannot drift from the identity it is stamped on.
-V2_COMPONENT = "hf-adapters"
-
-V2_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, "clickhouse-v2.spyre.ibm.com")
-V2_SEP = "|"
-
-
-def _v2_norm(value) -> str:
-    """Canonical scalar form. Lowercasing is not cosmetic: the same tier arrives as
-    'Regression' from a Jenkins parameter and 'regression' from a GHA input."""
-    return ("" if value is None else str(value)).strip().lower()
-
-
-def v2_canonical_arch(arch) -> str:
-    """amd64/x86/x86-64 all mean x86_64 -- a leg labelled 'amd64' by Jenkins and
-    'x86_64' by GHA is ONE leg, and must hash as one."""
-    a = _v2_norm(arch)
-    return "x86_64" if a in ("amd64", "x86", "x86-64", "x86_64") else a
-
-
-def v2_run_id(source: str, external_run_id: str, arch: str, test_type: str) -> str:
-    """Identity of one TEST-EXECUTION LEG: (source, external_run_id, arch, test_type).
-
-    arch and test_type are IN the key because the real execution grain measured
-    (run, arch, tier) at 19,867 legs under 16,381 CI runs. external_run_id is a
-    STRING: typed numerically, every Jenkins leg would be 0 and collide into one id.
-    Returns '' when a field is missing -- an all-defaults hash is a real uuid that
-    every incomplete leg would share, which is worse than a blank.
-    """
-    fields = (source, external_run_id, arch, test_type)
-    if not all(_v2_norm(f) for f in fields):
-        return ""
-    return str(
-        uuid.uuid5(
-            V2_NAMESPACE,
-            V2_SEP.join(
-                (
-                    _v2_norm(source),
-                    _v2_norm(external_run_id),
-                    v2_canonical_arch(arch),
-                    _v2_norm(test_type),
-                )
-            ),
-        )
-    )
-
-
-def v2_test_case_id(component: str, classname: str, name: str, tags) -> str:
-    """Content identity of a TEST, so the same test reconciles across runs. v1 minted
-    uuid4 per row: 37,322,701 identities for 58,711 distinct (classname, name) pairs.
-
-    `tags` are deduped and SORTED -- they are a set and source order is incidental,
-    so an unsorted join makes two writers disagree about the same test. They are
-    INSIDE the hash, so re-tagging mints a new identity; trend queries must
-    therefore group on (component, classname, name), never on test_case_id.
-    """
-    if not (_v2_norm(component) and _v2_norm(name)):
-        # Same collision hazard as v2_run_id: an empty field still hashes to a real,
-        # stable uuid that every other such case shares. The v2 table's CONSTRAINTs
-        # reject component='' / name='' anyway. classname is legitimately empty for a
-        # module-level test, so it is NOT required.
-        return ""
-    norm = sorted({t for t in (_v2_norm(x) for x in (tags or [])) if t})
-    return str(
-        uuid.uuid5(
-            V2_NAMESPACE,
-            V2_SEP.join(
-                (
-                    _v2_norm(component),
-                    _v2_norm(classname),
-                    _v2_norm(name),
-                    ",".join(norm),
-                )
-            ),
-        )
-    )
-
-
-def v2_tags_for_case(case: dict) -> list:
-    """The case's tags as an ARRAY of `namespace__value` strings.
-
-    Array, not Map: `testtype` carries up to 5 values on 91.7% of cases, so a Map
-    would silently keep one and drop the rest. The v1 shape is a (prop_name,
-    prop_value) list where the only prop_name is literally 'tag' and the real
-    key is encoded inside the value -- so the VALUE is the tag.
-    """
-    tags = set()
-    for pname, pvalue in case.get("properties", []) or []:
-        if pname == "tag":
-            if pvalue:
-                tags.add(pvalue)
-        elif "__" in pname:
-            # Some emitters put the namespace__value in the property NAME instead.
-            tags.add(pname)
-    return sorted(tags)
-
-
-def v2_source_and_external_run_id(args, run_id: str):
-    """(source, external_run_id) for this leg, from whichever CI dispatched it.
-
-    A numeric --gha-run-id means GHA dispatched it. Otherwise the leg is
-    Jenkins-dispatched and its own externalizable id ('folder/job#123') is the run
-    coordinate -- the SAME value the orchestrator hashes on its side of the join, so
-    neither side has to thread a minted uuid.
-    `source` is required precisely because a GHA run id and a Jenkins build number
-    share a number space.
-    """
-    gha = (getattr(args, "gha_run_id", "") or "").strip()
-    if gha:
-        try:
-            int(gha)
-            return "gha", gha
-        except (ValueError, TypeError):
-            pass
-    jenkins_key = (getattr(args, "jenkins_run_key", "") or "").strip()
-    if jenkins_key:
-        return "jenkins", jenkins_key
-    # No CI coordinate at all: fall back to the run uuid so the rows are still
-    # self-consistent and joinable WITHIN this ingest, just not to an artifact.
-    return "local", run_id
-
-
-def v2_tables_present(client, db: str) -> bool:
-    """v2 write path is skipped unless BOTH tables exist, so this script can be
-    deployed before the migration without erroring on every run."""
-    return all(
-        bool(client.command(f"EXISTS TABLE {t.qualified(db)}"))
-        for t in (v2_schema.TEST_CASES, v2_schema.TEST_CASE_RUNS)
-    )
-
-
-def v2_already_ingested(
-    client, db: str, run_id: str, component: str, source_file: str = ""
-) -> bool:
-    """Has THIS source file's rows for this run already landed?
-
-    test_case_runs is a plain MergeTree with no dedup key, so a double ingest of one leg
-    DOUBLES its counts -- and v2 dropped the stored counters precisely because they are
-    derived from these rows. This check is what keeps that correct.
-
-    Scoped by source file, not just run_id: a sharded run is MANY xml files under ONE
-    run_id (the pipeline passes --xml-dir with every shard in a single invocation), so a
-    run-level check lets the first shard block all the others. Measured on a real
-    Spyre-Next run: 9 of 10 cases silently dropped across 7 shards.
-
-    `props['source_file']` carries the discriminator. props is a Map outside every key, so
-    recording it costs no sort-order change.
-    """
-    table = v2_schema.TEST_CASE_RUNS.qualified(db)
-    if source_file:
-        rows = client.query(
-            f"SELECT count() FROM {table} "
-            "WHERE component = {component:String} AND run_id = {run_id:UUID} "
-            "AND props['source_file'] = {sf:String}",
-            parameters={"component": component, "run_id": run_id, "sf": source_file},
-        ).result_rows
-    else:
-        # No discriminator given: fall back to the run-level check rather than skip
-        # dedup entirely, so a caller that cannot name the file is still protected.
-        rows = client.query(
-            f"SELECT count() FROM {table} "
-            "WHERE component = {component:String} AND run_id = {run_id:UUID}",
-            parameters={"component": component, "run_id": run_id},
-        ).result_rows
-    return bool(rows and rows[0][0] > 0)
-
-
-def insert_v2(
-    client, db: str, component: str, run_id: str, cases: list, source_file: str = ""
-) -> int:
-    """Write test_cases (identity) + test_case_runs (outcome) for one leg.
-
-    Rows are built as dicts and ordered by v2_schema, so a field cannot be assigned to the
-    wrong column and the column order lives in exactly one place.
-
-    Dropped from v2 deliberately: filename, suite_name, runner_run_id, and every stored
-    counter -- all derivable, and a stored counter invites drift.
-    """
-    if not cases:
-        return 0
-    ident_rows, run_rows = {}, []
-
-    skipped_unidentifiable = 0
-    for c in cases:
-        tags = v2_tags_for_case(c)
-        classname, name = c.get("classname", ""), c.get("name", "")
-        tcid = v2_test_case_id(component, classname, name, tags)
-        if not tcid:
-            # Refused identity: writing the row anyway would collide it with every
-            # other unidentifiable case rather than merely orphaning it.
-            skipped_unidentifiable += 1
-            continue
-        # Keyed by id: identical identity rows within a leg are one fact.
-        ident_rows[tcid] = {
-            "test_case_id": tcid,
-            "component": component,
-            "classname": classname,
-            "name": name,
-            "tags": tags,
-        }
-        run_rows.append(
-            {
-                "run_id": run_id,
-                "test_case_id": tcid,
-                "component": component,
-                "status": c.get("status", ""),
-                "duration_s": float(c.get("duration_s", 0) or 0),
-                "fail_message": (c.get("fail_message") or "")[:8192],
-                # Names the xml this row came from, so a sharded run dedups per
-                # file instead of the first shard blocking the rest.
-                "props": ({"source_file": source_file} if source_file else {}),
-            }
-        )
-    # Cross-run dedup, not just in-leg: test_cases is a plain MergeTree, so re-inserting a
-    # known identity appends a duplicate instead of collapsing it.
-    v2_schema.insert_identities(client, v2_schema.TEST_CASES, ident_rows, db=db)
-    v2_schema.insert(client, v2_schema.TEST_CASE_RUNS, run_rows, db=db)
-    if skipped_unidentifiable:
-        print(
-            f"  [warn] v2: {skipped_unidentifiable} case(s) skipped -- identity not derivable",
-            file=sys.stderr,
-        )
-    return len(run_rows)
+# The product this script ingests for by DEFAULT. A default, not a constant: a test cell may
+# run ANOTHER component's suite through this script, and hardcoding the owner stamps those rows
+# with the wrong component. Because component is a test_case_id hash input, that does not merely
+# mislabel -- the same test reconciles to a DIFFERENT identity depending on whose script ran it,
+# splitting one suite across two components. --component lets the caller name the suite's real
+# owner; product-test already knows it (config.yaml's PRODUCT).
+V2_COMPONENT_DEFAULT = "hf-adapters"
 
 
 def main():
@@ -601,6 +312,13 @@ def main():
     parser.add_argument("--branch", default="")
     parser.add_argument("--sha", default="")
     parser.add_argument("--run-id", default="")
+    parser.add_argument(
+        "--component",
+        default="",
+        help="Component to stamp on v2 rows. Defaults to this repo's own product; set it "
+        "when a cell runs ANOTHER component's suite through this script, so the rows (and "
+        "the test_case_id they hash into) name the suite's real owner.",
+    )
     parser.add_argument("--gha-run-id", default="")
     parser.add_argument("--triggered-at", default="")
     parser.add_argument("--pr-number", default="")
@@ -619,10 +337,12 @@ def main():
     parser.add_argument(
         "--platform",
         default=_platform.machine() or "",
-        help="Hardware platform the suite ran on, e.g. x86_64 | s390x | ppc64le. "
-        "Defaults to the ingest host's arch, which is the machine the suite ran on. NOT "
-        "optional for v2: arch is an input to the run_id hash, so an empty value makes "
-        "v2_run_id refuse to derive an id and every row lands unjoinable.",
+        help="Hardware platform the SUITE ran on, e.g. x86_64 | s390x | ppc64le. Folded into "
+        "the run_id hash, so a wrong value mints an id that joins to nothing: pass it "
+        "explicitly whenever the ingest does not run on the test host (the workflow_run "
+        "ingest does not -- it is pinned to x86_64). The default is the INGEST host's arch, "
+        "correct only for a direct run. An empty value makes v2_run_id refuse to derive an "
+        "id, so every row lands unjoinable.",
     )
     parser.add_argument(
         "--img-digest",
@@ -763,7 +483,7 @@ def main():
                 _v2_source, _v2_ext = v2_source_and_external_run_id(args, run_id)
                 _v2_tier = (getattr(args, "trigger_type", "") or "").strip()
                 _v2_arch = (args.platform or run.get("platform") or "").strip()
-                _v2_run_id = v2_run_id(_v2_source, _v2_ext, _v2_arch, _v2_tier)
+                _v2_run_id = v2_run_id_for(args, run_id, _v2_arch, _v2_tier)
                 if not _v2_run_id:
                     # Loud, because a blank run_id means these cases reach v2 unjoinable
                     # to any artifact -- and that reads downstream as "no tests ran".
@@ -774,12 +494,21 @@ def main():
                         file=sys.stderr,
                     )
                 elif v2_already_ingested(
-                    client, v2db, _v2_run_id, V2_COMPONENT, xml_path.name
+                    client,
+                    v2db,
+                    _v2_run_id,
+                    v2_component(args, V2_COMPONENT_DEFAULT),
+                    xml_path.name,
                 ):
                     print(f"  v2: already ingested run_id={_v2_run_id} — skipping")
                 else:
                     _n = insert_v2(
-                        client, v2db, V2_COMPONENT, _v2_run_id, cases, xml_path.name
+                        client,
+                        v2db,
+                        v2_component(args, V2_COMPONENT_DEFAULT),
+                        _v2_run_id,
+                        cases,
+                        xml_path.name,
                     )
                     print(f"  v2: {_n} test_case_runs under run_id={_v2_run_id}")
         except Exception as _v2_err:

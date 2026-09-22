@@ -46,10 +46,11 @@ from hf_adapters.hf_common import (
     apply_rope_matmul,
     get_backbone,
     kv_cache_update,
-    pad_lm_head,
     pad_qk_proj_for_rope,
     permute_proj_for_rope,
+    prepare_lm_head_for_spyre,
     rope_dim_permutation,
+    run_lm_head,
     split_fused_linear,
 )
 
@@ -202,7 +203,7 @@ def _run_forward(
         cache_index,
     )
 
-    return model.lm_head(h)
+    return run_lm_head(model, h)
 
 
 def prepare_for_spyre(model):
@@ -229,9 +230,7 @@ def prepare_for_spyre(model):
         get_backbone(model).rotary_emb, padded_head_dim=work_hd
     )
 
-    # LM head: smooth-padded to a stick-aligned vocab whose per-core span fits
-    # the 256 MB EAR limit (see hf_common.pad_lm_head).
-    pad_lm_head(model)
+    prepare_lm_head_for_spyre(model)
 
     num_q = cfg.num_attention_heads
     num_kv = cfg.num_key_value_heads

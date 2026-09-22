@@ -129,7 +129,7 @@ def _unwrap_compiled_blocks(model: types.ModuleType) -> None:
                 unwrapped.append(orig if orig is not None else cb)
             setattr(module, attr, unwrapped)
 
-        for attr in ("_spyre_vision_core",):
+        for attr in ("_spyre_vision_core", "_spyre_lm_head_forward"):
             cb = getattr(module, attr, None)
             if cb is None:
                 continue
