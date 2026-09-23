@@ -33,7 +33,6 @@ from hf_adapters.hf_common import (
     kv_cache_update,
     moe_decode_selected_experts,
     moe_prefill_all_experts,
-    named_moe_prefill_inputs,
     optional_spyre_config_patch,
     prepare_lm_head_for_spyre,
     prepare_moe_expert_weights,
@@ -267,15 +266,8 @@ def _make_attention_block(
     )
 
     def named_prefill_routed(x, routing_weight):
-        experts = mlp.experts
-        with named_moe_prefill_inputs(
-            x,
-            experts.gate_proj,
-            experts.up_proj,
-            experts.down_proj,
-        ):
-            with optional_spyre_config_patch({"allow_all_ops_in_lx_planning": True}):
-                return compiled_prefill_routed(x, routing_weight)
+        with optional_spyre_config_patch({"allow_all_ops_in_lx_planning": True}):
+            return compiled_prefill_routed(x, routing_weight)
 
     compiled_finish_prefill = torch.compile(finish_attention, dynamic=False)
     compiled_finish_decode = torch.compile(finish_attention, dynamic=False)
@@ -359,15 +351,8 @@ def _make_linear_attention_block(layer, top_k, stick_size, tp_group_name=None):
     )
 
     def named_prefill_routed(x, routing_weight):
-        experts = mlp.experts
-        with named_moe_prefill_inputs(
-            x,
-            experts.gate_proj,
-            experts.up_proj,
-            experts.down_proj,
-        ):
-            with optional_spyre_config_patch({"allow_all_ops_in_lx_planning": True}):
-                return compiled_prefill_routed(x, routing_weight)
+        with optional_spyre_config_patch({"allow_all_ops_in_lx_planning": True}):
+            return compiled_prefill_routed(x, routing_weight)
 
     def finish_prefill(hidden_states):
         x = compiled_normalize_prefill(hidden_states)
