@@ -27,7 +27,6 @@ from hf_adapters.hf_common import (
     moe_decode_selected_experts,
     moe_prefill_all_experts,
     moe_topk,
-    named_moe_prefill_inputs,
     optional_spyre_config_patch,
     prepare_moe_expert_weights,
     text_config,
@@ -397,19 +396,8 @@ class Gemma4MoEBlock(nn.Module):
                 value_cache,
                 cache_index,
             )
-            experts = self.experts
-            with named_moe_prefill_inputs(
-                hidden_states,
-                experts.gate_proj,
-                experts.up_proj,
-                experts.down_proj,
-            ):
-                with optional_spyre_config_patch(
-                    {"allow_all_ops_in_lx_planning": True}
-                ):
-                    hidden_states = self._compiled_prefill_ffn(
-                        hidden_states, layer_scalar
-                    )
+            with optional_spyre_config_patch({"allow_all_ops_in_lx_planning": True}):
+                hidden_states = self._compiled_prefill_ffn(hidden_states, layer_scalar)
         else:
             hidden_states, key_cache, value_cache = self._compiled_decode(
                 hidden_states,

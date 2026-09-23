@@ -16,8 +16,11 @@ import pytest
 import torch
 
 from hf_adapters.hf_common import (
+    _ChunkedPrefillMaskBuilder,
+    _mask_fill_value,
     _materialize_decode_mask_heads,
     _prefill_cache_inputs,
+    add_causal_sliding_window_band,
     build_prefill_mask,
     encode_prompts,
     generation_cache_len,
@@ -219,6 +222,45 @@ def test_prefill_mask_matches_normalized_offsets():
         == 0
     ).all()
     assert (mask[0, 0, -1, normalized.padded_len :] < 0).all()
+
+
+@pytest.mark.parametrize("sliding_window", [3, 5, 8])
+def test_chunked_prefill_mask_recurrence_matches_reference(sliding_window):
+    batch_size = 2
+    chunk_size = 4
+    cache_len = 12
+    offsets = torch.tensor([2, 0])
+    builder = _ChunkedPrefillMaskBuilder(
+        batch_size,
+        chunk_size,
+        cache_len,
+        offsets,
+        device="cpu",
+    )
+    fill = _mask_fill_value(torch.float16)
+
+    for query_start in range(0, cache_len, chunk_size):
+        actual = builder.build(query_start)
+        expected = build_prefill_mask(
+            batch_size,
+            chunk_size,
+            cache_len,
+            offsets,
+            query_start=query_start,
+        )
+        assert torch.equal(actual, expected)
+
+        query_coords = (torch.arange(chunk_size)[None, :] + query_start).expand(
+            batch_size, chunk_size
+        )
+        actual_sliding = add_causal_sliding_window_band(
+            actual, query_coords, sliding_window
+        )
+        expected_sliding = expected.clone()
+        for row in range(chunk_size):
+            lower_bound = max(0, query_start + row - sliding_window + 1)
+            expected_sliding[..., row, :lower_bound] = fill
+        assert torch.equal(actual_sliding, expected_sliding)
 
 
 def test_token_aligned_inputs_follow_prompt_normalization():
