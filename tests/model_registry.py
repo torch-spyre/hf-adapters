@@ -259,6 +259,13 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_olmo2.py",
         "size": "1b",
     },
+    # hf_olmoe.py
+    "olmoe_1b_7b": {
+        "name": "OLMoE 1B-7B",
+        "path": "allenai/OLMoE-1B-7B-0924",
+        "adapter": "hf_olmoe.py",
+        "size": "7b",
+    },
     # hf_gemma2.py
     "gemma2_2b_unsloth": {
         "name": "Gemma 2 2B",
@@ -368,6 +375,14 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_dspark_granite.py",
         "size": "1b",
         "kind": "dspark_draft",
+    },
+    "diffusiongemma_26b": {
+        "name": "DiffusionGemma 26B-A4B-it",
+        "path": "google/diffusiongemma-26B-A4B-it",
+        "adapter": "hf_diffusion_gemma.py",
+        "size": "26b",
+        "dtype": "bfloat16",
+        "kind": "diffusion",  # not AR; uses block-diffusion generate loop
     },
 }
 
@@ -766,11 +781,14 @@ _include_gated_flag = _include_gated()
 # proposers, driven by ``_run_draft_block`` — no ``generate``), so they are
 # registered for adapter-coverage but excluded from the generate-based CPU/Spyre
 # causal-LM harnesses; they are exercised by tests/spyre/test_dspark_draft_spyre.py.
+# ``kind == "diffusion"`` entries (e.g. DiffusionGemma) use a block-diffusion
+# generate loop that is incompatible with the AR causal-LM harness; they are
+# exercised by tests/spyre/test_diffusion_gemma.py.
 CAUSAL_PATHS: list[str] = _exclude(
     _select_representative_paths(
         CAUSAL_LM_MODELS,
         include_gated=_include_gated_flag,
-        predicate=lambda info: info.get("kind") != "dspark_draft",
+        predicate=lambda info: info.get("kind") not in ("dspark_draft", "diffusion"),
     )
 )
 MULTICARD_SMOKE_PATHS: list[str] = _exclude(
@@ -874,7 +892,7 @@ ALL_CAUSAL_PATHS: list[str] = _exclude(
     _all_paths(
         CAUSAL_LM_MODELS,
         include_gated=_include_gated_flag,
-        predicate=lambda info: info.get("kind") != "dspark_draft",
+        predicate=lambda info: info.get("kind") not in ("dspark_draft", "diffusion"),
     )
 )
 ALL_EMBED_PATHS: list[str] = _exclude(
@@ -980,6 +998,12 @@ SEQ_CLASSIFICATION_MODELS = {
         "path": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
         "adapter": "hf_distilbert.py",
         "size": "0.07b",
+        "test_inputs": [
+            "This movie was fantastic.",
+            "This movie was absolutely terrible.",
+            "I loved every minute of it.",
+        ],
+        "expected_ids": [1, 0, 1],
     },
     # hf_xlm_roberta.py (RobertaConfig → same adapter as XLM-R / reranker)
     "roberta_mnli": {
@@ -987,8 +1011,41 @@ SEQ_CLASSIFICATION_MODELS = {
         "path": "FacebookAI/roberta-large-mnli",
         "adapter": "hf_xlm_roberta.py",
         "size": "0.36b",
+        "test_inputs": [
+            (
+                "The capital of France is Paris.",
+                "Paris is the capital of France.",
+            ),
+            ("A man is eating lunch.", "Nobody is eating."),
+            (
+                "A woman is reading a book.",
+                "The woman is reading a mystery novel.",
+            ),
+        ],
+        "expected_ids": [2, 0, 1],
     },
 }
+
+NON_BLOCKING_SEQUENCE_CLASSIFICATION_MODELS: dict[str, str] = _non_blocking(
+    SEQ_CLASSIFICATION_MODELS,
+    (),
+)
+
+
+def sequence_classification_test_case(
+    model_path: str,
+) -> tuple[list[str] | list[tuple[str, str]], list[int]]:
+    """Return task-appropriate inputs and expected labels for a classifier."""
+    normalized_path = model_path.lower().replace("\\", "/")
+    for model in SEQ_CLASSIFICATION_MODELS.values():
+        registered_path = model["path"].lower()
+        cache_path = registered_path.replace("/", "--")
+        if normalized_path == registered_path or cache_path in normalized_path:
+            return model["test_inputs"], model["expected_ids"]
+    raise ValueError(
+        f"No task-appropriate sequence-classification inputs registered for {model_path!r}"
+    )
+
 
 SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
     _select_representative_paths(

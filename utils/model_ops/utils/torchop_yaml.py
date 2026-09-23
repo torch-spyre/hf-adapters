@@ -186,6 +186,22 @@ def sanitize_arg(
 # from transformers' _can_use_grouped_mm) that return Python values, not tensors.
 _SKIPPED_OP_PREFIXES = ("torch.cuda.",)
 
+# ``_operator`` names that must not be spelled "torch." + name, because the
+# trailing underscore in ``operator.and_`` / ``or_`` is only Python
+# keyword-avoidance ("Same as a & b.") while in torch a trailing ``_`` means
+# in-place. Emitting "torch.and_" for ``a & b`` therefore names the out-of-place
+# capture like the in-place op, and torch-spyre's op registry implements it that
+# way — an in-place write, which cannot express a capture whose operands
+# broadcast. The real torch spellings keep ``_`` meaning in-place; the in-place
+# halves exist only as Tensor methods, so they are spelled that way. See
+# https://github.com/torch-spyre/hf-adapters/issues/546.
+_OPERATOR_OP_NAMES = {
+    "and_": "torch.bitwise_and",  # a & b
+    "or_": "torch.bitwise_or",  # a | b
+    "iand": "torch.Tensor.bitwise_and_",  # a &= b
+    "ior": "torch.Tensor.bitwise_or_",  # a |= b
+}
+
 # Ops whose tensor inputs should use Xavier init when dtype/rank also qualify.
 _XAVIER_OPS = {
     "torch.conv2d",
@@ -1547,6 +1563,12 @@ class TorchOpCollector:
                     f"Function type is _operator: {node.target.__name__}"
                 )
                 target_name = node.target.__name__
+                if target_name in _OPERATOR_OP_NAMES:
+                    op = _OPERATOR_OP_NAMES[target_name]
+                    TorchOpCollector.log_function[TorchOpCollector.log_mthd](
+                        f"Operator {target_name} is spelled {op} in torch"
+                    )
+                    return op
                 if target_name in torch.fx.graph.magic_methods:
                     TorchOpCollector.log_function[TorchOpCollector.log_mthd](
                         f"Operator {target_name} is magic method"

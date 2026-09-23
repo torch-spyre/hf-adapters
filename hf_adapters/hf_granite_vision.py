@@ -44,9 +44,10 @@ import torch
 from hf_adapters import hf_granite
 from hf_adapters.hf_common import (
     get_backbone,
-    pad_lm_head,
+    prepare_lm_head_for_spyre,
     prepare_rope_and_heads,
     prepare_standard_gqa_blocks,
+    text_config,
 )
 
 _run_backbone_forward = hf_granite._run_backbone_forward
@@ -86,7 +87,10 @@ def prepare_for_spyre(model):
     untouched — this is the text-only path.
     """
     prepare_rope_and_heads(model)
-    pad_lm_head(model)
+    logits_scaling = text_config(model.config).logits_scaling
+    prepare_lm_head_for_spyre(
+        model, logits_processor=lambda logits: logits / logits_scaling
+    )
     backbone = get_backbone(model)
     model._spyre_compiled_blocks = prepare_standard_gqa_blocks(backbone.layers, True)
     model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)

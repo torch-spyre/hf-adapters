@@ -68,8 +68,9 @@ from hf_adapters.hf_common import (
     get_backbone,
     make_decoder_block,
     pad_attention_heads_linear,
-    pad_lm_head,
     patch_new_gelu,
+    prepare_lm_head_for_spyre,
+    run_lm_head,
 )
 
 
@@ -155,8 +156,7 @@ def _run_forward(
         value_caches,
         cache_index,
     )
-    logits = model.lm_head(h)
-    return logits[..., : model.config.vocab_size]
+    return run_lm_head(model, h)
 
 
 def prepare_for_spyre(model):
@@ -194,7 +194,10 @@ def prepare_for_spyre(model):
     else:
         padded_head_dim = orig_head_dim  # no-op; keep variable consistent below
 
-    pad_lm_head(model)
+    vocab_size = model.config.vocab_size
+    prepare_lm_head_for_spyre(
+        model, logits_processor=lambda logits: logits[..., :vocab_size]
+    )
 
     # GPT-Neo config uses num_heads / hidden_size rather than the standard
     # num_key_value_heads / head_dim. Set explicit KV shapes (with the

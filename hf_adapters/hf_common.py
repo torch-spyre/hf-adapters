@@ -25,7 +25,7 @@ import math
 import os
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Optional
 
@@ -69,6 +69,184 @@ def optional_spyre_config_patch(options: dict[str, Any]) -> Iterator[None]:
 
     with spyre_config.patch(options):
         yield
+
+
+def _move_moe_expert_weight(weight):
+    if not str(DEVICE).startswith("spyre"):
+        return weight
+
+    from torch_spyre.model_utils import dma_moe_expert_weight_to_spyre
+
+    moved = dma_moe_expert_weight_to_spyre(weight)
+    return moved if moved is not None else weight.to(DEVICE)
+
+
+def prepare_moe_expert_weights(experts, *, pad_to_multiple=None):
+    """Split, transpose, pad, and move persistent MoE weights in place."""
+    gate_up = experts.gate_up_proj.detach()
+    del experts.gate_up_proj
+
+    intermediate_size = gate_up.shape[1] // 2
+    intermediate_pad = (
+        (-intermediate_size) % pad_to_multiple if pad_to_multiple is not None else 0
+    )
+    gate = gate_up[:, :intermediate_size].transpose(1, 2).contiguous()
+    if intermediate_pad:
+        gate = F.pad(gate, (0, intermediate_pad))
+    experts.gate_proj = _move_moe_expert_weight(gate)
+    del gate
+
+    up = gate_up[:, intermediate_size:].transpose(1, 2).contiguous()
+    if intermediate_pad:
+        up = F.pad(up, (0, intermediate_pad))
+    experts.up_proj = _move_moe_expert_weight(up)
+    del up
+    del gate_up
+
+    down = experts.down_proj.detach().transpose(1, 2).contiguous()
+    del experts.down_proj
+    if intermediate_pad:
+        # Match the zero-padded local gate/up channels. The added down rows are
+        # zero, so each rank's partial output is unchanged before TP all-reduce.
+        down = F.pad(down, (0, 0, 0, intermediate_pad))
+    experts.down_proj = _move_moe_expert_weight(down)
+
+
+def moe_topk(probabilities, top_k):
+    """Select experts, widening singleton inputs for Spyre's top-k lowering."""
+    tokens = probabilities.shape[0]
+    topk_input = (
+        probabilities.expand(2, -1).contiguous() if tokens == 1 else probabilities
+    )
+    weights, expert_indices = torch.topk(topk_input, top_k, dim=-1)
+    return weights[:tokens], expert_indices[:tokens]
+
+
+def moe_decode_selected_experts(
+    x,
+    weights,
+    expert_indices,
+    gate,
+    up,
+    down,
+    top_k,
+    tile,
+    stick_size,
+    activation,
+    per_expert_scale_stick=None,
+):
+    """Gather selected experts and combine their decode outputs."""
+    if activation not in ("silu", "gelu_tanh"):
+        raise ValueError(f"unsupported MoE activation: {activation!r}")
+
+    T, H = x.shape
+    if x.device.type == "spyre":
+        from torch_spyre._inductor.propagate_hints import spyre_hint
+
+        # Widen topk's fp16 indices onto a stick before converting them to the
+        # device's int32 gather indices. The layout pass inserts the restickify.
+        index_stick = (
+            expert_indices[..., None].expand(T, top_k, stick_size).contiguous()
+        )
+        index_stick = index_stick.to(torch.float32)
+        index_address = index_stick[..., : stick_size // 2].to(torch.int32)
+        expert_indices = index_address[..., 0]
+        hint = spyre_hint(tiles={"row": tile})
+    else:
+        hint = nullcontext()
+
+    with hint:
+        rows = T * top_k
+        intermediate = gate.shape[-1]
+        inputs = x[:, None, :].expand(T, top_k, H).contiguous().reshape(rows, 1, H)
+        selected_gate = gate[expert_indices].reshape(rows, H, intermediate)
+        selected_up = up[expert_indices].reshape(rows, H, intermediate)
+        selected_down = down[expert_indices].reshape(rows, intermediate, H)
+
+        gate_out = torch.bmm(inputs, selected_gate)
+        up_out = torch.bmm(inputs, selected_up)
+        if activation == "silu":
+            activated = F.silu(gate_out) * up_out
+        else:
+            activated = F.gelu(gate_out, approximate="tanh") * up_out
+        expert_out = torch.bmm(activated, selected_down).reshape(T, top_k, H)
+        expert_out = expert_out * weights[..., None]
+        if per_expert_scale_stick is not None:
+            expert_scale = per_expert_scale_stick[expert_indices][..., :1]
+            expert_out = expert_out * expert_scale
+        return expert_out.sum(dim=1)
+
+
+@contextmanager
+def named_moe_prefill_inputs(x, gate, up, down):
+    """Name eager MoE inputs for the immediately following compiled prefill."""
+    if x.device.type != "spyre":
+        yield
+        return
+
+    named_dims = sys.modules["torch_spyre._inductor.wsr.propagate_named_dims"]
+    tokens = x.shape[0] * x.shape[1]
+    experts, hidden, intermediate = gate.shape
+    try:
+        for name, extent in (
+            ("E", experts),
+            ("T", tokens),
+            ("H", hidden),
+            ("M", intermediate),
+            ("ONE", 1),
+        ):
+            named_dims.declare_tensor_dim(name, extent)
+        named_dims.name_tensor_dims(x, ["T", "H"])
+        named_dims.name_tensor_dims(gate, ["E", "H", "M"])
+        named_dims.name_tensor_dims(up, ["E", "H", "M"])
+        named_dims.name_tensor_dims(down, ["E", "M", "H"])
+        yield
+    finally:
+        named_dims.reset()
+
+
+def moe_prefill_all_experts(x, routing_weight, gate, up, down, activation):
+    """Evaluate every expert and sum its routed prefill output."""
+    if activation not in ("silu", "gelu_tanh"):
+        raise ValueError(f"unsupported MoE activation: {activation!r}")
+
+    if x.device.type == "spyre":
+        from torch_spyre._inductor.propagate_hints import spyre_hint
+        from torch_spyre._inductor.wsr import for_each_tile
+
+        with spyre_hint(named_dims=["E", "T", "ONE"]):
+            route = routing_weight.permute(1, 0, 2).contiguous().clone()
+
+        def expert_body(acc, tiles):
+            x, route_tile, gate_tile, up_tile, down_tile = tiles
+            gate_out = torch.matmul(x, gate_tile)
+            up_out = torch.matmul(x, up_tile)
+            if activation == "silu":
+                activated = F.silu(gate_out) * up_out
+            else:
+                activated = F.gelu(gate_out, approximate="tanh") * up_out
+            down_out = torch.matmul(activated, down_tile)
+            return acc + (down_out * route_tile).squeeze(0), None
+
+        with spyre_hint(work_div={"T": 32}):
+            result, _ = for_each_tile(
+                expert_body,
+                (x, route, gate, up, down),
+                dims=(None, 0, 0, 0, 0),
+                tile_size=1,
+                init=torch.zeros_like(x),
+            )
+        return result
+
+    gate_out = torch.matmul(x.unsqueeze(0), gate)
+    up_out = torch.matmul(x.unsqueeze(0), up)
+    if activation == "silu":
+        activated = F.silu(gate_out) * up_out
+    else:
+        activated = F.gelu(gate_out, approximate="tanh") * up_out
+    down_out = torch.matmul(activated, down)
+    route = routing_weight.permute(1, 0, 2)
+    return (down_out * route).sum(dim=0)
 
 
 def assert_spyre_dimensions(config, model_name):
@@ -878,7 +1056,7 @@ def _get_lm_head(model):
     return None
 
 
-def pad_lm_head(model):
+def pad_lm_head(model, *, min_vocab_size: int | None = None):
     """Pad the LM head vocab dim up to a stick boundary with a "smooth" stick count.
 
     The lm_head is a ``batchmatmul`` ``X[M,K] @ W[K,N]`` (K=hidden, N=padded_vocab)
@@ -904,19 +1082,22 @@ def pad_lm_head(model):
     model). Keeps the single-kernel lm_head — no per-token decode cost, unlike
     ``chunk_lm_head`` (the fallback when even a smooth count can't fit).
 
-    No-op when ``model`` has no ``lm_head`` (e.g. backbones loaded via
-    ``AutoModel`` for embedding workloads).
+    ``min_vocab_size`` can request a common local width for uneven TP shards;
+    the result is still rounded up to a suitable stick count. No-op when
+    ``model`` has no ``lm_head`` (e.g. backbones loaded via ``AutoModel`` for
+    embedding workloads).
     """
     head = _get_lm_head(model)
     if head is None:
         return
     w = head.weight
     vocab = w.shape[0]
+    target_vocab = max(vocab, min_vocab_size or vocab)
     hidden = w.shape[1]
     dtype_bytes = w.element_size()
     # Max residual sticks whose per-core span fits the EAR limit.
     max_residual = _EAR_LIMIT_BYTES // (hidden * BLOCK_SIZE * dtype_bytes)
-    sticks = (vocab + BLOCK_SIZE - 1) // BLOCK_SIZE
+    sticks = (target_vocab + BLOCK_SIZE - 1) // BLOCK_SIZE
     while _largest_prime_factor(sticks) > max_residual:
         sticks += 1
     padded = sticks * BLOCK_SIZE
@@ -924,6 +1105,125 @@ def pad_lm_head(model):
         head.weight = nn.Parameter(
             F.pad(w, (0, 0, 0, padded - vocab)), requires_grad=False
         )
+
+
+def prepare_lm_head_for_spyre(
+    model,
+    *,
+    logits_processor: Callable[[torch.Tensor], torch.Tensor] | None = None,
+):
+    """Pad and compile an LM head, including tied-vocabulary TP gathering.
+
+    Hugging Face shards a tied output projection together with its rowwise
+    token embedding. Adapters bypass the stock Transformers causal-LM forward,
+    so they must reconstruct those rank-local vocabulary logits themselves.
+    Keep that policy here rather than teaching each model adapter about TP.
+
+    TP sharding is inferred only for a head that was tied to the input
+    embedding before :func:`untie_embedding_and_lm_head` cloned it. Merely
+    finding a device mesh on a replicated embedding is not sufficient. The
+    local projection, compiled all-gather, removal of per-rank padding, and any
+    model-specific logit transform are captured in one graph.
+
+    ``logits_processor`` runs after a possible gather. It can crop the padded
+    vocabulary or apply architecture-specific scaling/softcapping.
+    """
+    head = _get_lm_head(model)
+    if head is None:
+        model._spyre_lm_head_forward = None
+        model._spyre_lm_head_tp_mesh = None
+        return
+
+    embedding = (
+        model.get_input_embeddings() if hasattr(model, "get_input_embeddings") else None
+    )
+    was_tied = getattr(model, "_spyre_lm_head_was_tied", None)
+    if was_tied is None:
+        was_tied = (
+            embedding is not None
+            and embedding.weight.data_ptr() == head.weight.data_ptr()
+        )
+
+    unpadded_local_vocab = head.weight.shape[0]
+    mesh = getattr(embedding, "_hf_device_mesh", None) if was_tied else None
+    shard_sizes: tuple[int, ...] | None = None
+    if mesh is not None and mesh.size() > 1:
+        from torch.distributed.tensor.placement_types import Shard
+
+        global_vocab = text_config(model.config).vocab_size
+        rank = mesh.get_local_rank()
+        expected_local_vocab, _ = Shard.local_shard_size_and_offset(
+            global_vocab, mesh.size(), rank
+        )
+        if unpadded_local_vocab == expected_local_vocab:
+            shard_sizes = tuple(
+                int(
+                    Shard.local_shard_size_and_offset(
+                        global_vocab, mesh.size(), shard_rank
+                    )[0]
+                )
+                for shard_rank in range(mesh.size())
+            )
+        else:
+            assert unpadded_local_vocab == global_vocab, (
+                "tied LM head has an unexpected vocabulary shape: "
+                f"local={unpadded_local_vocab}, global={global_vocab}, "
+                f"expected_shard={expected_local_vocab}"
+            )
+
+    # all_gather requires equal input shapes, even when the global vocabulary
+    # is not evenly divisible by the TP degree.
+    pad_lm_head(
+        model,
+        min_vocab_size=max(shard_sizes) if shard_sizes is not None else None,
+    )
+    model._spyre_lm_head_tp_mesh = mesh if shard_sizes is not None else None
+
+    gathered_shard_sizes: tuple[int, ...] | None = None
+    if shard_sizes is not None:
+        assert mesh is not None
+        padded_local_vocab = head.weight.shape[0]
+        if any(size != padded_local_vocab for size in shard_sizes):
+            gathered_shard_sizes = shard_sizes
+        group_size = mesh.size()
+        group_name = mesh.get_group().group_name
+
+    if shard_sizes is not None:
+        from hf_adapters.spyre_tensor_parallel import (
+            spyre_compiled_all_gather_last_dim,
+        )
+
+        def lm_head_forward(hidden_states):
+            logits = head(hidden_states)
+            logits = spyre_compiled_all_gather_last_dim(
+                logits,
+                group_size,
+                group_name,
+                shard_sizes=gathered_shard_sizes,
+            )
+            if logits_processor is not None:
+                logits = logits_processor(logits)
+            return logits
+
+    else:
+
+        def lm_head_forward(hidden_states):
+            logits = head(hidden_states)
+            if logits_processor is not None:
+                logits = logits_processor(logits)
+            return logits
+
+    model._spyre_lm_head_forward = torch.compile(
+        lm_head_forward, dynamic=False, fullgraph=True
+    )
+
+
+def run_lm_head(model, hidden_states):
+    """Run the LM-head callable installed by :func:`prepare_lm_head_for_spyre`."""
+    lm_head_forward = getattr(model, "_spyre_lm_head_forward", None)
+    if lm_head_forward is None:
+        raise RuntimeError("the model has not had an LM head prepared for Spyre")
+    return lm_head_forward(hidden_states)
 
 
 def chunk_lm_head(model, num_chunks=8):
@@ -1467,7 +1767,9 @@ def untie_embedding_and_lm_head(model):
         )
     if embed is None:
         return
-    if embed.weight.data_ptr() == head.weight.data_ptr():
+    was_tied = embed.weight.data_ptr() == head.weight.data_ptr()
+    model._spyre_lm_head_was_tied = was_tied
+    if was_tied:
         # Under TP the weights are already on Spyre after ``from_pretrained``;
         # leave the clone on CPU and let ``_move_to_spyre_with_layout``
         # place it, as on the single-device path.
@@ -1509,45 +1811,63 @@ def _move_to_spyre_with_layout(model, dtype):
     model.to(dtype=dtype, device=DEVICE)
 
 
-def _resolve_tp_plan(model_path, auto_model_cls, tp_plan):
-    """Resolve a caller's ``tp_plan`` into a dict HF can shard on Spyre.
+def _resolve_tp_plan(
+    model_path, auto_model_cls, tp_plan, adapter_module, trust_remote_code=None
+):
+    """Resolve and translate an HF TP plan to Spyre placement styles.
 
-    ``tp_plan="auto"`` expands (via the model's ``base_model_tp_plan`` +
-    class ``_tp_plan``) to a plan that shards attention/MLP **and** the
-    ``lm_head`` with ``colwise_gather_output``. On Spyre we keep the ``lm_head``
-    replicated instead:
-
-    - HF's ``validate_module`` rejects ``colwise_gather_output`` when
-      ``vocab_size`` isn't divisible by the rank count (e.g. granite-3.3-8b's
-      49159), which would fail at load before the model ever runs.
-    - Our ``pad_lm_head`` pads the vocab to a Spyre stick boundary *after* load,
-      so sharding the head upstream fights that layout pass.
-
-    Dropping ``lm_head`` from the plan leaves it unmatched, which HF treats as
-    replicated (full head on every rank).
-    Similarly, we also drop ``model.embed_tokens``, which is automatically added
-    for models with tied embeddings, and currently involves unsupported bool
-    comparisons of int32 tensors.
-
-    We resolve the fully-namespaced plan
-    by instantiating the model on the ``meta`` device (no weights allocated) and
-    reading its ``.tp_plan`` — this uses HF's own namespacing rather than
-    reconstructing it, so it stays correct across model families.
-
-    A dict ``tp_plan`` is returned unchanged (the caller is explicit).
+    The model is instantiated on ``meta`` both to obtain HF's fully-namespaced
+    auto plan and to find unplanned Linear/Embedding modules.  Those unplanned
+    weights also need explicit placement entries: otherwise Transformers sends
+    them through generic ``Tensor.to(spyre)`` and torch-spyre never sees enough
+    module semantics to choose the Linear or embedding DMA layout.
     """
-    if tp_plan != "auto":
-        return tp_plan
-
     from transformers import AutoConfig
 
-    cfg = AutoConfig.from_pretrained(model_path)
+    from hf_adapters.spyre_tensor_parallel import prepare_spyre_tp_plan
+
+    cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
     with torch.device("meta"):
         probe = auto_model_cls.from_config(cfg)
-    plan = dict(probe.tp_plan or {})
-    plan.pop("lm_head", None)
-    plan.pop("model.embed_tokens", None)
-    return plan
+    auto_plan = tp_plan == "auto"
+    plan = dict(probe.tp_plan or {}) if auto_plan else dict(tp_plan)
+    replicated_linear_modules = {"lm_head"} if auto_plan else set()
+    adapter_replication_policy = getattr(
+        adapter_module, "spyre_tp_replicated_linear_modules", None
+    )
+    if auto_plan and adapter_replication_policy is not None:
+        replicated_linear_modules.update(
+            adapter_replication_policy(probe, _resolve_tp_size())
+        )
+    cpu_replication_policy = getattr(
+        adapter_module, "spyre_tp_cpu_replicated_modules", None
+    )
+    cpu_replicated_modules = (
+        cpu_replication_policy(probe, _resolve_tp_size())
+        if auto_plan and cpu_replication_policy is not None
+        else set()
+    )
+    grouped_colwise_policy = getattr(
+        adapter_module, "spyre_tp_grouped_colwise_modules", None
+    )
+    grouped_colwise_modules = (
+        grouped_colwise_policy(probe, _resolve_tp_size())
+        if auto_plan and grouped_colwise_policy is not None
+        else {}
+    )
+    return prepare_spyre_tp_plan(
+        probe,
+        plan,
+        cpu_staged_modules=getattr(adapter_module, "SPYRE_TP_CPU_STAGED_MODULES", ()),
+        cpu_replicated_modules=cpu_replicated_modules,
+        # hf-adapters pads/prepares the output projection after loading, and
+        # historically keeps the common top-level text embedding replicated.
+        # Preserve those auto-plan policies without overriding an explicit
+        # caller-provided plan.
+        replicated_linear_modules=replicated_linear_modules,
+        replicated_embedding_modules=("model.embed_tokens",) if auto_plan else (),
+        grouped_colwise_modules=grouped_colwise_modules,
+    )
 
 
 def _resolve_tp_size():
@@ -1563,6 +1883,60 @@ def _resolve_tp_size():
     except ValueError as exc:
         raise ValueError(f"WORLD_SIZE must be an integer, got {world_size!r}") from exc
     return tp_size
+
+
+@contextmanager
+def _without_spyre_allocator_warmup():
+    """Skip Transformers' single-allocation cache warmup for Spyre TP loads.
+
+    Flex pre-allocates its device-memory regions, so the caching-allocator
+    warmup provides no benefit.  More importantly, Transformers requests one
+    allocation as large as all parameters assigned to the rank.  That can
+    exceed Flex's 16 GiB per-region limit even though the individual model
+    tensors and their aggregate fit comfortably on the device.
+    """
+    from transformers import modeling_utils
+
+    original = modeling_utils.caching_allocator_warmup
+    modeling_utils.caching_allocator_warmup = lambda *_args, **_kwargs: None
+    try:
+        yield
+    finally:
+        modeling_utils.caching_allocator_warmup = original
+
+
+@contextmanager
+def _prefer_exact_tp_plan_entries():
+    """Honor exact per-layer TP entries before Transformers' wildcard lookup.
+
+    Transformers documents exact TP rules, but its current lookup immediately
+    replaces every numeric layer index with ``*``. That makes a generic rule
+    win even when an exact override is present. Gemma 4 needs exact overrides
+    for only the full-attention K/V projections whose KV-head count is smaller
+    than the TP degree.
+    """
+    from transformers import modeling_utils
+    from transformers.integrations import tensor_parallel
+
+    original = tensor_parallel._get_parameter_tp_plan
+
+    def exact_first(parameter_name, tp_plan, is_weight=True):
+        if parameter_name in tp_plan:
+            return tp_plan[parameter_name]
+        if is_weight and "." in parameter_name:
+            module_name = parameter_name.rsplit(".", 1)[0]
+            if module_name in tp_plan:
+                return tp_plan[module_name]
+        return original(parameter_name, tp_plan, is_weight=is_weight)
+
+    original_modeling_lookup = modeling_utils._get_parameter_tp_plan
+    tensor_parallel._get_parameter_tp_plan = exact_first
+    modeling_utils._get_parameter_tp_plan = exact_first
+    try:
+        yield
+    finally:
+        tensor_parallel._get_parameter_tp_plan = original
+        modeling_utils._get_parameter_tp_plan = original_modeling_lookup
 
 
 def load_model_common(
@@ -1584,8 +1958,8 @@ def load_model_common(
         tp_plan: Optional tensor-parallel plan (e.g. ``"auto"``). When set, HF
             shards the model across the ``torchrun`` process group and
             ``device_map`` is omitted so HF's TP placement is authoritative.
-            ``"auto"`` is resolved to a plan that keeps ``lm_head`` replicated
-            (see ``_resolve_tp_plan``).
+            ``"auto"`` is resolved to an explicit, fully namespaced HF plan
+            before loading (see ``_resolve_tp_plan``).
         trust_remote_code: Passed through to the adapter's ``load_hf_model`` (or
             to HF's ``from_pretrained``) so checkpoints shipping custom modeling
             code load only when the caller explicitly opts in.
@@ -1595,28 +1969,38 @@ def load_model_common(
 
         auto_model_cls = AutoModel
 
-    if tp_plan is not None and hasattr(module, "load_hf_model"):
-        raise SpyreUnsupportedModelError(
-            "tensor-parallel loading is not supported by this adapter's custom loader"
-        )
-
     if hasattr(module, "load_hf_model"):
-        model = module.load_hf_model(
-            model_path, dtype, trust_remote_code=trust_remote_code
-        )
+        # _sig was already inspected above (for the tp_plan support check).
+        # Re-inspect here to determine which optional kwargs this loader accepts.
+        import inspect as _inspect
+
+        _sig = _inspect.signature(module.load_hf_model)
+        _kwargs: dict = {}
+        if tp_plan is not None and "tp_plan" in _sig.parameters:
+            _kwargs["tp_plan"] = tp_plan
+        if "trust_remote_code" in _sig.parameters:
+            _kwargs["trust_remote_code"] = trust_remote_code
+        model = module.load_hf_model(model_path, dtype, **_kwargs)
     elif tp_plan is not None:
         from transformers.distributed import DistributedConfig
 
         distributed_config = DistributedConfig(
             tp_size=_resolve_tp_size(),
-            tp_plan=_resolve_tp_plan(model_path, auto_model_cls, tp_plan),
+            tp_plan=_resolve_tp_plan(
+                model_path,
+                auto_model_cls,
+                tp_plan,
+                adapter_module=module,
+                trust_remote_code=trust_remote_code,
+            ),
         )
-        model = auto_model_cls.from_pretrained(
-            model_path,
-            dtype=dtype,
-            distributed_config=distributed_config,
-            trust_remote_code=trust_remote_code,
-        )
+        with _without_spyre_allocator_warmup(), _prefer_exact_tp_plan_entries():
+            model = auto_model_cls.from_pretrained(
+                model_path,
+                dtype=dtype,
+                distributed_config=distributed_config,
+                trust_remote_code=trust_remote_code,
+            )
     else:
         model = auto_model_cls.from_pretrained(
             model_path,
@@ -1633,9 +2017,21 @@ def load_model_common(
 def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
     untie_embedding_and_lm_head(model)
     module.prepare_for_spyre(model)
+    cpu_submodules = getattr(model, "_spyre_cpu_submodules", [])
+    saved_cpu_modules = {}
+    for path in cpu_submodules:
+        parent_path, _, attr = path.rpartition(".")
+        parent = model.get_submodule(parent_path) if parent_path else model
+        saved_cpu_modules[path] = (parent, attr, getattr(parent, attr))
+        setattr(parent, attr, torch.nn.Module())
+
     _move_to_spyre_with_layout(model, dtype)
-    for submod_name in getattr(model, "_spyre_cpu_submodules", []):
-        model.get_submodule(submod_name).to("cpu")
+
+    for parent, attr, submod in saved_cpu_modules.values():
+        # Explicitly move to CPU: when DistributedConfig already placed the
+        # model on device before move_model_to_spyre runs, the saved submodule
+        # is on-device too; the restore would leave it on device rather than CPU.
+        setattr(parent, attr, submod.to(device="cpu", dtype=dtype))
     print("Model on Spyre ready.")
 
 
@@ -2337,7 +2733,11 @@ def generate(
 def _standard_gqa_attention_dim_names(query, key, value):
     """Return named-dim declarations and per-tensor names for Spyre SDPA.
 
-    Names match ``spyre__sdpa_overrideable``; unit axes are omitted.
+    The K/V sequence axis is intentionally untracked. ``for_each_tile`` carries
+    that relationship structurally; propagating the full ``max_seqlen_kv`` name
+    into the tile body incorrectly treats the tile index and the within-tile
+    index as a reshape split. K/V retain names for their other axes because
+    those axes still participate in ordinary ``spyre_hint`` tiling.
     """
     q_shape = tuple(int(d) for d in query.shape)
     k_shape = tuple(int(d) for d in key.shape)
@@ -2356,19 +2756,20 @@ def _standard_gqa_attention_dim_names(query, key, value):
             f"num_kvheads must divide num_heads: {q_shape[1]}, {k_shape[1]}"
         )
 
+    kv_sequence_placeholder = f"_untracked_{k_shape[2]}"
     declarations = (
         ("_b", q_shape[0]),
         ("num_heads", q_shape[1]),
         ("num_kvheads", k_shape[1]),
         ("max_seqlen_q", q_shape[2]),
-        ("max_seqlen_kv", k_shape[2]),
+        (kv_sequence_placeholder, k_shape[2]),
         ("head_dim", q_shape[3]),
         ("value_head_dim", v_shape[3]),
     )
     logical_names = (
         ("_b", "num_heads", "max_seqlen_q", "head_dim"),
-        ("_b", "num_kvheads", "max_seqlen_kv", "head_dim"),
-        ("_b", "num_kvheads", "max_seqlen_kv", "value_head_dim"),
+        ("_b", "num_kvheads", kv_sequence_placeholder, "head_dim"),
+        ("_b", "num_kvheads", kv_sequence_placeholder, "value_head_dim"),
     )
     tensor_names = tuple(
         [name for size, name in zip(shape, names, strict=True) if size != 1]
@@ -2739,7 +3140,7 @@ def standard_gqa_forward(
         value_caches,
         cache_index,
     )
-    return model.lm_head(h)
+    return run_lm_head(model, h)
 
 
 # ---------------------------------------------------------------------------
@@ -3036,7 +3437,7 @@ def prepare_standard_gqa(model):
         model: HF model (on CPU, eval mode, requires_grad=False).
     """
     prepare_rope_and_heads(model)
-    pad_lm_head(model)
+    prepare_lm_head_for_spyre(model)
     backbone = get_backbone(model)
     model._spyre_compiled_blocks = prepare_standard_gqa_blocks(backbone.layers)
     model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)

@@ -4,7 +4,14 @@ models:
   - ibm-granite/granite-3.3-2b-instruct                         # granite2b
   - ibm-granite/granite-4.0-1b-base                             # granite4
   - ibm-granite/granite-4.0-1b                                  # granite4_instruct
-  - ibm-research/granite-4.1-20b                                # granite41_20b
   # Embedding models
   - BAAI/bge-base-en-v1.5                                       # bge_base (embed-compare)
   - BAAI/bge-m3                                                 # bge_m3 (load)
+  # VLM / vision models (tests/spyre/test_vlm_e2e_spyre.py, suite key "vlm")
+  - ibm-granite/granite-vision-4.1-4b                           # granite_vision_mm
+  - mistralai/Ministral-3-3B-Instruct-2512                      # ministral3_3b_vision_mm
+  - google/gemma-4-E2B-it                                       # gemma4_e2b_mm
+  - google/gemma-4-12B-it                                       # gemma4_mm
+  - google/gemma-4-26B-A4B-it                                   # gemma4_moe_mm
+  # CLIP models (tests/spyre/test_e2e_clip_compare_spyre.py, suite key "clip")
+  - sentence-transformers/clip-ViT-B-32                         # clip_vit_b_32

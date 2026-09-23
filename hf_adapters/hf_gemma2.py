@@ -29,7 +29,8 @@ from hf_adapters.hf_common import (
     apply_rope_matmul,
     get_backbone,
     kv_cache_update,
-    pad_lm_head,
+    prepare_lm_head_for_spyre,
+    run_lm_head,
 )
 from hf_adapters.hf_gemma3 import _patch_gemma_rmsnorm
 
@@ -183,11 +184,7 @@ def _run_forward(
         value_caches,
         cache_index,
     )
-    logits = model.lm_head(h)[..., : model._spyre_original_vocab_size]
-    cap = model.config.final_logit_softcapping
-    if cap is not None:
-        logits = torch.tanh(logits / cap) * cap
-    return logits
+    return run_lm_head(model, h)
 
 
 def prepare_for_spyre(model):
@@ -212,8 +209,16 @@ def prepare_for_spyre(model):
     model._spyre_kv_shapes = [
         (num_kv_heads, head_dim, head_dim) for _ in backbone.layers
     ]
-    model._spyre_original_vocab_size = cfg.vocab_size
-    pad_lm_head(model)
+    vocab_size = cfg.vocab_size
+    cap = cfg.final_logit_softcapping
+
+    def process_logits(logits):
+        logits = logits[..., :vocab_size]
+        if cap is not None:
+            logits = torch.tanh(logits / cap) * cap
+        return logits
+
+    prepare_lm_head_for_spyre(model, logits_processor=process_logits)
     model._spyre_compiled_blocks = [
         _make_compiled_block(layer, num_q_heads, num_kv_heads, head_dim)
         for layer in backbone.layers

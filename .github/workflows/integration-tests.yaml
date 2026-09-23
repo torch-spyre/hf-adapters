@@ -66,6 +66,11 @@ on:
         required: false
         type: string
         default: ''
+      prebaked_image:
+        description: When true, skip resolve-torch-spyre and use the runner image's torch-spyre as-is.
+        required: false
+        type: boolean
+        default: false
       test_type:
         description: >-
           Test tier to run: unit | integration | regression | trunk -- literal,
@@ -95,6 +100,15 @@ on:
           - integration
           - regression
           - trunk
+      run_id:
+        description: >-
+          UUID for this TEST RUN, minted by the dispatching orchestrator above the CI split.
+          Threaded so artifact_results (Jenkins-written) and test_case_runs (ingest-written)
+          share ONE identity instead of each hashing its own run coordinate. Empty on a
+          GHA-initiated run, which derives its own.
+        required: false
+        type: string
+        default: ''
       models:
         description: >-
           Space-separated list of model paths to restrict every matrix job
@@ -223,6 +237,7 @@ jobs:
     # downloads.
     secrets: inherit
     with:
+      run_id: ${{ inputs.run_id }}
       image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
       extra_test_flags: -vvv -s
       extra_test_flags_multi_spyre: -vvv -s
@@ -230,13 +245,8 @@ jobs:
       repository: ${{ inputs.repository || '' }}
       test_type: ${{ inputs.test_type || 'integration' }}
       models: ${{ (inputs.models != '' && inputs.models) || needs.resolve-models.outputs.models || '' }}
-      # Run on the torch-spyre baked into the (possibly ephemeral, per-PR) image
-      # this run was dispatched onto -- do NOT resolve/pin origin/main, which
-      # would `git checkout --force` away the exact torch-spyre version this
-      # integration run exists to test (issue #449 review). Every other caller
-      # (test_pull_request / test_daily / push-to-clickhouse) omits this, keeping
-      # the default false = pin origin/main once across the run.
-      prebaked_image: true
+      # Caller's choice: true for a per-PR/ephemeral image already baked with the exact torch-spyre under test;default false pins origin/main like every other caller.
+      prebaked_image: ${{ inputs.prebaked_image }}
 
   # ----------------------------------------------------------------------------------
   # Fan-in gate job so callers can poll a single stable job name for pass/fail.
