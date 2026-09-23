@@ -11,7 +11,7 @@ which models are supported on Spyre.
 |-------|-----------|---------|-----|--------------|-------------|---------------|-----------|
 | Qwen3 0.6B | qwen3 | 128 | 64 | Yes | Yes | Yes | Yes |
 | Qwen3.5 2B | qwen3\_5 | 256 (64 rotary) | 32 rotary | Yes | Yes | Yes | Yes |
-| Qwen3.5 35B-A3B | qwen3\_5\_moe | 256 (64 rotary) | 32 rotary | Yes | Yes | Yes | Yes (single card; TP compiler-blocked) |
+| Qwen3.5 35B-A3B | qwen3\_5\_moe | 256 (64 rotary) | 32 rotary | Yes | Yes | Yes | Yes (single card and 2-card TP) |
 | LFM2 350M | lfm2 | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | Granite 3.3 8B | granite | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite 3.3 2B | granite | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
@@ -211,7 +211,7 @@ pattern, norms, and weight layout.
 | hf\_granite.py | granite | 3 | Granite 3.3 8B/2B Base, Granite 3.2 8B, Granite 3.1 8B/2B, Granite 3.0 8B, Granite Code 8B/3B |
 | hf\_qwen3.py | qwen3 | 2 | Qwen3 1.7B, Qwen3 4B, Qwen3 8B |
 | hf\_qwen3\_5.py | qwen3\_5 / qwen3\_5\_text | 1 | Qwen3.5 dense checkpoints with hybrid Gated DeltaNet/full-attention layers; stateful recurrence is CPU-staged between compiled Spyre regions |
-| hf\_qwen3\_5\_moe.py | qwen3\_5\_moe / qwen3\_5\_moe\_text | 1 | Qwen3.5 35B-A3B routed/shared-expert variants; single-card 5/5 token match. TP preparation is implemented by sharding routed experts and replicating dense branches; full two-card execution remains compiler-blocked. |
+| hf\_qwen3\_5\_moe.py | qwen3\_5\_moe / qwen3\_5\_moe\_text | 1 | Qwen3.5 35B-A3B routed/shared-expert variants |
 | hf\_mistral.py | mistral | 2 | Mistral 7B v0.1/v0.2, Mistral 7B Instruct v0.1–v0.3, Zephyr 7B |
 | hf\_mistral3.py | mistral3 | 2 | Mistral-Small-3.2 24B, Ministral-3 14B (multimodal text decoder) |
 | hf\_ministral.py | ministral | 1 | Ministral-8B Instruct fine-tunes |
