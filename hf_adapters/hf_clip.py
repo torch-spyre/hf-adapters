@@ -22,8 +22,8 @@ Supports:
 
 CLIP Transformer encoders are **pre-LN, bidirectional, no-RoPE, no-KV-cache**
 transformer encoders.
-- Vision tower: Conv2d patch embedding + class token + learned position embeddings on CPU.
 - Text tower: Token embedding + learned position embeddings on CPU.
+- Vision tower: Conv2d patch embedding + class token + learned position embeddings on CPU.
 - Encoder blocks: pre-LN SDPA + MLP compiled on Spyre.
 """
 
