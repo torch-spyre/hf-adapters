@@ -20,8 +20,8 @@ sentence-transformers/all-MiniLM-L6-v2).
 
 Key differences from decoder adapters:
 - No RoPE: absolute learned position embeddings in the embedding table.
-- No lm_head: returns last_hidden_state directly.
 - No KV cache: bidirectional full attention, prefill-only.
+- No lm_head: returns last_hidden_state directly.
 - Block signature: (hidden_states, attn_mask) -> hidden_states (no cache args).
 - Norm: nn.LayerNorm (post-attention, residual-then-LN), used as-is.
   ``encoder_backbone_forward`` clones each block's output between
