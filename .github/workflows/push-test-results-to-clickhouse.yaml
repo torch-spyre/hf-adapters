@@ -18,6 +18,7 @@ on:
     workflows:
       - integration-tests
       - test_pull_request
+      - test_daily
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -26,7 +27,7 @@ on:
         required: false
         default: ''
       workflow_name:
-        description: Workflow name (integration-tests | test_pull_request)
+        description: Workflow name (integration-tests | test_pull_request | test_daily)
         required: false
         default: integration-tests
 
@@ -307,10 +308,10 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Ingest raw GHA job logs from spyre-model-module-tests into ClickHouse.
-  # Runs alongside the existing XML ingest whenever integration-tests or
-  # test_pull_request completes — those are the only two workflows that actually
-  # run spyre-model-module-tests (test_daily sets edge_cases_only:true which
-  # skips module tests entirely, so it is deliberately not in the trigger list).
+  # Fires when integration-tests or test_daily completes — those are the only
+  # two workflows that run spyre-model-module-tests.
+  # test_pull_request is excluded. test_daily now runs module tests alongside
+  # its edge-case leg (run-module-tests job, test_type: model_module).
   # Produces two richer tables: module_test_suites + module_test_variants.
   # ---------------------------------------------------------------------------
   ingest-module-logs:
@@ -320,12 +321,13 @@ jobs:
       - linux
       - image_ingest
     timeout-minutes: 20
-    # Only fire when integration-tests completes (not on every PR / test_pull_request run).
-    # For manual re-ingest, only accept workflow_name == 'integration-tests'.
+    # Fire when integration-tests or test_daily completes (not on every
+    # PR / test_pull_request run). For manual re-ingest, accept either name.
     if: |
-      (github.event_name == 'workflow_dispatch' && inputs.workflow_name == 'integration-tests') ||
+      (github.event_name == 'workflow_dispatch' &&
+       (inputs.workflow_name == 'integration-tests' || inputs.workflow_name == 'test_daily')) ||
       (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.name == 'integration-tests' &&
+       (github.event.workflow_run.name == 'integration-tests' || github.event.workflow_run.name == 'test_daily') &&
        github.event.workflow_run.conclusion != 'cancelled')
 
     env:
