@@ -10,7 +10,7 @@ Credentials are loaded from a .env file at the repo root, then fall back to
 environment variables already set in the shell. Copy .env.example → .env and fill
 in the values before running.
 
-  CLICKHOUSE_HOST, CLICKHOUSE_PORT, CLICKHOUSE_USER, CLICKHOUSE_PASS, CLICKHOUSE_DB
+  CLICKHOUSE_HOST, CLICKHOUSE_PORT, CLICKHOUSE_USER, CLICKHOUSE_PASSWORD, CLICKHOUSE_DB
 """
 
 import os
@@ -52,7 +52,7 @@ def get_client():
         host=os.environ["CLICKHOUSE_HOST"],
         port=int(os.environ.get("CLICKHOUSE_PORT", 443)),
         user=os.environ.get("CLICKHOUSE_USER", "default"),
-        password=os.environ["CLICKHOUSE_PASS"],
+        password=os.environ["CLICKHOUSE_PASSWORD"],
         database=os.environ.get("CLICKHOUSE_DB", ".."),
         secure=True,
     )

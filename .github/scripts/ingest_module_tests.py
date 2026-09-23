@@ -29,7 +29,7 @@ Usage:
 
 Environment variables (required):
     CLICKHOUSE_HOST   CLICKHOUSE_PORT   CLICKHOUSE_USER
-    CLICKHOUSE_PASS   CLICKHOUSE_DB
+    CLICKHOUSE_PASSWORD   CLICKHOUSE_DB
 """
 
 import argparse
@@ -222,7 +222,7 @@ def get_client():
         host=os.environ["CLICKHOUSE_HOST"],
         port=int(os.environ.get("CLICKHOUSE_PORT", 443)),
         user=os.environ.get("CLICKHOUSE_USER", "default"),
-        password=os.environ["CLICKHOUSE_PASS"],
+        password=os.environ["CLICKHOUSE_PASSWORD"],
         database=os.environ.get("CLICKHOUSE_DB", "spyre"),
         secure=True,
         verify=False,

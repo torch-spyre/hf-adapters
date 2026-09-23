@@ -58,13 +58,13 @@ jobs:
       #   CLICKHOUSE_HOST   e.g. clickhouse.internal.example.com
       #   CLICKHOUSE_PORT   e.g. 8123  (HTTP interface)
       #   CLICKHOUSE_USER   e.g. spyre_writer
-      #   CLICKHOUSE_PASS   the password
+      #   CLICKHOUSE_PASSWORD   the password
       #   CLICKHOUSE_DB     e.g. spyre
       # ---------------------------------------------------------------------------
       CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
       CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
       CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
-      CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
+      CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
       CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
       # Schema-v2 database. Reached by QUALIFYING every v2 statement rather than by a second
       # connection: test_cases exists in both generations with incompatible shapes, so an
@@ -332,7 +332,7 @@ jobs:
       CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
       CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
       CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
-      CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
+      CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
       CLICKHOUSE_DB:   ${{ secrets.CLICKHOUSE_DB }}
       TRIGGERING_RUN_ID:  ${{ github.event.workflow_run.id || inputs.gha_run_id }}
       TRIGGERING_BRANCH:  ${{ github.event.workflow_run.head_branch || github.ref_name }}
