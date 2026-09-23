@@ -135,6 +135,8 @@ def _shared_expert(x, mlp):
 
 def _reduce_expert_output_fp32(output, tp_group_name):
     """Reduce a materialized routed-expert output through an FP32 graph."""
+    if tp_group_name is None:
+        return output
     output_dtype = output.dtype
     return spyre_compiled_all_reduce(output.float(), tp_group_name).to(output_dtype)
 
