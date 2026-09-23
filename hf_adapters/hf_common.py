@@ -692,11 +692,18 @@ def permute_proj_for_rope(proj, num_heads, head_dim, perm):
     reordering as the weight or the rotary dims pick up the wrong offsets).
     Bias-free projections (Phi-3) skip the bias branch.
     """
-    w = proj.weight.data.view(num_heads, head_dim, -1)
-    proj.weight.data = w[:, perm, :].contiguous().view(num_heads * head_dim, -1)
+    # TP may load the shard directly on Spyre, whose eager backend cannot perform the advanced indexing used by this one-time permutation.
+    weight_device = proj.weight.device
+    w = proj.weight.data.to("cpu").view(num_heads, head_dim, -1)
+    proj.weight.data = (
+        w[:, perm, :].contiguous().view(num_heads * head_dim, -1).to(weight_device)
+    )
     if proj.bias is not None:
-        b = proj.bias.data.view(num_heads, head_dim)
-        proj.bias.data = b[:, perm].contiguous().view(num_heads * head_dim)
+        bias_device = proj.bias.device
+        b = proj.bias.data.to("cpu").view(num_heads, head_dim)
+        proj.bias.data = (
+            b[:, perm].contiguous().view(num_heads * head_dim).to(bias_device)
+        )
 
 
 def pad_qk_proj_for_rope(proj, n_heads, orig_head_dim, padded_head_dim):
