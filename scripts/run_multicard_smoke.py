@@ -45,7 +45,17 @@ Single-card::
 The --model argument accepts any HuggingFace repo ID or local path
 (default: ibm-granite/granite-3.3-8b-instruct).
 
-The script exits with code 0 on PASS and code 1 on FAIL or ERROR.
+The script exits with code 0 on PASS and code 1 on FAIL or ERROR. A FAIL is
+reported by that exit code alone, not by an exception, so under torchrun the
+only thing printed after the summary is the elastic agent's teardown:
+
+    Sending process <pid> closing signal SIGTERM
+    failed (exitcode: 1) local_rank: 0 ...
+    torch.distributed.elastic.multiprocessing.errors.ChildFailedError
+
+That SIGTERM goes to the ranks that were still running; torchrun stops the
+whole gang once any rank exits nonzero. It is the result of the failure, never
+the cause -- read the RESULTS SUMMARY above it for the real verdict.
 
 Note: a ``corrupted double-linked list`` / SIGABRT crash may appear after the
 RESULTS SUMMARY prints.  This is a known shutdown bug in the Spyre runtime
@@ -58,6 +68,7 @@ import os
 import sys
 
 import torch
+import torch.distributed as dist
 
 # Ensure the project root (parent of scripts/) is on sys.path so that
 # tests.spyre.test_multicard_spyre can be imported when running directly
@@ -221,7 +232,39 @@ def main(argv: list[str] | None = None) -> None:
     sys.stdout.write(_rank_summary(result))
     sys.stdout.flush()
 
-    os._exit(0 if result["status"] == "PASS" else 1)
+    failed = result["status"] != "PASS"
+
+    # A FAIL is reported by exiting nonzero, not by raising, so torchrun has no
+    # traceback to show. Say so explicitly: otherwise the only thing in the log
+    # is the agent's SIGTERM/ChildFailedError teardown, which reads like an
+    # abort or a timeout rather than a verdict this script already reached.
+    if failed and local_rank == 0:
+        sys.stdout.write(
+            "\n"
+            f"multicard smoke FAILED (status={result['status']!r}); "
+            "exiting rank 0 with code 1.\n"
+            "The torchrun 'SIGTERM' / ChildFailedError below is the elastic "
+            "agent tearing down the remaining ranks after this exit. It is the "
+            "consequence of this failure, not its cause; the real reason is in "
+            "the RESULTS SUMMARY above.\n"
+        )
+        sys.stdout.flush()
+
+    # Ranks reach their verdict a few ms apart. Whichever exits first leaves its
+    # siblings alive, and torchrun SIGTERMs them mid-print -- truncating their
+    # summaries and making one rank's failure look like an unrelated signal
+    # kill. Sync first so every rank prints fully and they exit together.
+    if world_size > 1 and dist.is_available() and dist.is_initialized():
+        try:
+            dist.barrier()
+        except Exception as e:  # pragma: no cover - teardown best effort
+            sys.stdout.write(f"\n[rank {local_rank}] exit barrier skipped: {e}\n")
+            sys.stdout.flush()
+
+    # os._exit (not sys.exit) is deliberate: it skips interpreter teardown and
+    # so avoids the libsenlib-dd2.so destructor SIGABRT described in the module
+    # docstring. It also skips atexit/buffer flushing, hence the flushes above.
+    os._exit(1 if failed else 0)
 
 
 if __name__ == "__main__":

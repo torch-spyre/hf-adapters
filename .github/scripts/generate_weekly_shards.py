@@ -161,6 +161,11 @@ def generate_shards(
         sink: ResultSink = create_sink(
             model_type=model_type,
             write_to_csv=write_to_csv,
+            # A shard name of its own: this job writes the TERMINAL verdicts (no adapter, too
+            # large, MoE) from a non-Spyre runner, so it is a writer alongside the real shards
+            # under the same run_id and needs its own dedup scope. Shaped like a shard file so
+            # _shard_of's stem logic needs no special case.
+            model_list_file=Path(f"{model_type}-prefilter-shard-000.json"),
         )
         with sink:
             rows: list[dict] = fetch_and_filter(

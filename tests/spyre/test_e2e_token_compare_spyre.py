@@ -119,6 +119,16 @@ def adapter_greedy_steps(
         prompt_offsets if isinstance(prompt_offsets, int) else prompt_offsets[0].item()
     )
 
+    # Mirror generate()'s per-sequence left-padding bookkeeping (hf_common.py:
+    # model._spyre_prompt_offsets = prompt_offsets). The band path reads its left
+    # padding out of the mask below, but the sliding-window op path cannot — an
+    # offset-and-length window has no way to skip pad columns, so it reads the
+    # padding from valid_start, which valid_start_for() pulls from this attribute.
+    # A harness that drives _run_forward directly must set it or the op attends the
+    # pad K/V (argmax flips while the logit magnitude barely moves).
+    model._spyre_prompt_offsets = prompt_offsets
+    model._spyre_padded_prompt_len = padded_len
+
     max_cache_len = generation_cache_len(padded_len, num_decode + 1)
     prefill_kv_len = _sdpa_compatible_kv_length(padded_len)
     dtype = get_model_dtype(model)
@@ -158,7 +168,7 @@ def adapter_greedy_steps(
                 prefill_value_caches,
                 cache_index=make_cache_index(chunk_start, query_chunk_size, DEVICE),
             )
-    logits_cpu = logits.to("cpu")[0, -1, :].float()[:vocab_size]
+    logits_cpu = logits[:, -1, :].to("cpu")[0].float()[:vocab_size]
     token = logits_cpu.argmax().item()
     results.append({"logits": logits_cpu, "token": token, "step": 0})
 
@@ -192,7 +202,7 @@ def adapter_greedy_steps(
                 value_caches,
                 cache_index=make_cache_index(current_cache_len, 1, DEVICE),
             )
-        last_logits = logits.to("cpu")[0, -1, :].float()[:vocab_size]
+        last_logits = logits[:, -1, :].to("cpu")[0].float()[:vocab_size]
         current_cache_len += 1
 
         token = last_logits.argmax().item()

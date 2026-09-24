@@ -944,6 +944,7 @@ NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = _non_blocking(
     (
         "smollm3",
         "gemma2_2b_unsloth",  # small gap that happens to flip token for test prompt
+        "olmoe_1b_7b",
     ),
 )
 

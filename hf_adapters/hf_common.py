@@ -23,7 +23,6 @@ compiled block functions.
 
 import math
 import os
-import sys
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -177,34 +176,6 @@ def moe_decode_selected_experts(
         return expert_out.sum(dim=1)
 
 
-@contextmanager
-def named_moe_prefill_inputs(x, gate, up, down):
-    """Name eager MoE inputs for the immediately following compiled prefill."""
-    if x.device.type != "spyre":
-        yield
-        return
-
-    named_dims = sys.modules["torch_spyre._inductor.wsr.propagate_named_dims"]
-    tokens = x.shape[0] * x.shape[1]
-    experts, hidden, intermediate = gate.shape
-    try:
-        for name, extent in (
-            ("E", experts),
-            ("T", tokens),
-            ("H", hidden),
-            ("M", intermediate),
-            ("ONE", 1),
-        ):
-            named_dims.declare_tensor_dim(name, extent)
-        named_dims.name_tensor_dims(x, ["T", "H"])
-        named_dims.name_tensor_dims(gate, ["E", "H", "M"])
-        named_dims.name_tensor_dims(up, ["E", "H", "M"])
-        named_dims.name_tensor_dims(down, ["E", "M", "H"])
-        yield
-    finally:
-        named_dims.reset()
-
-
 def moe_prefill_all_experts(x, routing_weight, gate, up, down, activation):
     """Evaluate every expert and sum its routed prefill output."""
     if activation not in ("silu", "gelu_tanh"):
@@ -214,8 +185,7 @@ def moe_prefill_all_experts(x, routing_weight, gate, up, down, activation):
         from torch_spyre._inductor.propagate_hints import spyre_hint
         from torch_spyre._inductor.wsr import for_each_tile
 
-        with spyre_hint(named_dims=["E", "T", "ONE"]):
-            route = routing_weight.permute(1, 0, 2).contiguous().clone()
+        route = routing_weight.permute(1, 0, 2).contiguous().clone()
 
         def expert_body(acc, tiles):
             x, route_tile, gate_tile, up_tile, down_tile = tiles
@@ -437,7 +407,8 @@ class PrecomputedRotaryEmbedding(nn.Module):
         rope_half = inv_freq.shape[0]  # type: ignore[index]
         t = torch.arange(target_len, dtype=inv_freq.dtype)  # type: ignore[arg-type]
         freqs = torch.outer(
-            t, inv_freq  # type: ignore[arg-type]
+            t,
+            inv_freq,  # type: ignore[arg-type]
         ).float()  # [S, rope_half] # type: ignore[arg-type]
         scaling = getattr(self.original, "attention_scaling", 1.0)
         rot = torch.stack(
@@ -449,7 +420,10 @@ class PrecomputedRotaryEmbedding(nn.Module):
             ],
             dim=1,
         ).view(
-            target_len, 2, 2, rope_half  # type: ignore[arg-type]
+            target_len,
+            2,
+            2,
+            rope_half,  # type: ignore[arg-type]
         )  # type: ignore[arg-type]
 
         if self.padded_head_dim is not None:
@@ -1330,6 +1304,151 @@ def build_prefill_mask(
     return mask
 
 
+class _ChunkedPrefillMaskBuilder:
+    """Build successive chunk masks without copying every full mask from CPU.
+
+    A chunk beginning at ``s + chunk_size`` has the same causal frontier as the
+    chunk beginning at ``s``, shifted right by ``chunk_size`` columns. Keeping
+    that causal mask resident on the device therefore reduces every later mask
+    to a fixed-shape ``cat`` followed by ``minimum`` with the (small, broadcast)
+    left-padding mask. Only the first full ``[B, 1, Lq, Lk]`` causal mask
+    crosses the host/device boundary.
+
+    Gemma's causal sliding-window mask follows the same recurrence, with the
+    columns shifted in on the left encoding the moving lower window boundary.
+    Sliding states are initialized lazily because most adapters only need the
+    plain causal mask.
+    """
+
+    def __init__(
+        self,
+        batch_size,
+        chunk_size,
+        max_cache_len,
+        prompt_offsets,
+        dtype=torch.float16,
+        *,
+        device=DEVICE,
+    ):
+        self.batch_size = batch_size
+        self.chunk_size = chunk_size
+        self.max_cache_len = max_cache_len
+        self.dtype = dtype
+        self.device = device
+        self._query_start = 0
+        self._sliding_states = {}
+
+        # Keep the real batch dimension. Spyre's elementwise lowering does not
+        # reliably materialize a batch-broadcast input here.
+        self._causal = build_prefill_mask(
+            batch_size, chunk_size, max_cache_len, 0, dtype=dtype
+        ).to(device)
+        self._zero_chunk = torch.zeros(
+            (batch_size, 1, chunk_size, chunk_size), dtype=dtype
+        ).to(device)
+        self._masked_chunk = None
+
+        padding_mask = torch.zeros((batch_size, 1, 1, max_cache_len), dtype=dtype)
+        fill = _mask_fill_value(dtype)
+        if isinstance(prompt_offsets, torch.Tensor):
+            for batch_idx in range(batch_size):
+                padding_mask[batch_idx, :, :, : prompt_offsets[batch_idx].item()] = fill
+        else:
+            padding_mask[:, :, :, :prompt_offsets] = fill
+        self._padding_mask = padding_mask.to(device)
+
+    def _advance(self, state, shifted_in):
+        return torch.cat((shifted_in, state[..., : -self.chunk_size]), dim=-1)
+
+    def build(self, query_start):
+        """Return the causal mask for the next sequential query chunk."""
+        if query_start != self._query_start:
+            raise ValueError(
+                "chunked prefill masks must be requested sequentially: "
+                f"expected query_start={self._query_start}, got {query_start}"
+            )
+        if query_start:
+            self._causal = self._advance(self._causal, self._zero_chunk)
+        mask = torch.minimum(self._causal, self._padding_mask)
+        # Gemma's shared sliding-window helper sees this tensor before it enters
+        # a compiled block. Keep the builder metadata on the Python Tensor
+        # wrapper so it can use the device-resident sliding recurrence too.
+        mask._spyre_chunked_prefill_builder = self
+        mask._spyre_chunked_prefill_query_start = query_start
+        self._query_start += self.chunk_size
+        return mask
+
+    def _build_sliding_state(self, query_start, sliding_window):
+        if query_start == 0 and sliding_window >= self.chunk_size:
+            return self._causal
+
+        state = build_prefill_mask(
+            self.batch_size,
+            self.chunk_size,
+            self.max_cache_len,
+            0,
+            dtype=self.dtype,
+            query_start=query_start,
+        )
+        fill = _mask_fill_value(self.dtype)
+        for row in range(self.chunk_size):
+            lower_bound = max(0, query_start + row - sliding_window + 1)
+            state[..., row, :lower_bound] = fill
+        return state.to(self.device)
+
+    def _sliding_shifted_in(self, query_start, sliding_window):
+        """Columns inserted while advancing a clipped sliding window."""
+        first_lower_bound = max(0, query_start - sliding_window + 1)
+        last_lower_bound = max(0, query_start + self.chunk_size - sliding_window)
+        if last_lower_bound == 0:
+            return self._zero_chunk
+        if first_lower_bound >= self.chunk_size:
+            if self._masked_chunk is None:
+                self._masked_chunk = torch.full(
+                    (
+                        self.batch_size,
+                        1,
+                        self.chunk_size,
+                        self.chunk_size,
+                    ),
+                    _mask_fill_value(self.dtype),
+                    dtype=self.dtype,
+                ).to(self.device)
+            return self._masked_chunk
+
+        # Exactly one advance can straddle either edge of the fixed-size
+        # shifted-in chunk. Transfer that small [B,1,Lq,Lq] pattern once; all
+        # other advances reuse the all-zero or all-masked resident tensors.
+        shifted_in = torch.zeros(
+            (self.batch_size, 1, self.chunk_size, self.chunk_size), dtype=self.dtype
+        )
+        fill = _mask_fill_value(self.dtype)
+        for row in range(self.chunk_size):
+            lower_bound = min(
+                self.chunk_size,
+                max(0, query_start + row - sliding_window + 1),
+            )
+            shifted_in[..., row, :lower_bound] = fill
+        return shifted_in.to(self.device)
+
+    def add_causal_sliding_window(self, mask, query_start, sliding_window):
+        """Intersect ``mask`` with Gemma's causal sliding window on-device."""
+        state_entry = self._sliding_states.get(sliding_window)
+        if state_entry is None:
+            sliding_state = self._build_sliding_state(query_start, sliding_window)
+        else:
+            state_start, sliding_state = state_entry
+            if query_start == state_start + self.chunk_size:
+                shifted_in = self._sliding_shifted_in(query_start, sliding_window)
+                sliding_state = self._advance(sliding_state, shifted_in)
+            elif query_start != state_start:
+                # This is not expected from generate(), but keeps the helper
+                # correct if an adapter asks for a discontinuous chunk.
+                sliding_state = self._build_sliding_state(query_start, sliding_window)
+        self._sliding_states[sliding_window] = (query_start, sliding_state)
+        return torch.minimum(mask, sliding_state)
+
+
 def build_expansion_mask(
     batch_size,
     block_size,
@@ -1452,7 +1571,13 @@ def add_sliding_window_band(mask, sliding_window):
     return mask + band[None, None, :, :]
 
 
-def add_causal_sliding_window_band(mask, query_cache_coords, sliding_window):
+def add_causal_sliding_window_band(
+    mask,
+    query_cache_coords,
+    sliding_window,
+    *,
+    key_cache_coords=None,
+):
     """Restrict an additive *causal* mask to a backward ``sliding_window`` band.
 
     Gemma 4's sliding ("local") attention layers are causal AND windowed: a
@@ -1478,23 +1603,61 @@ def add_causal_sliding_window_band(mask, query_cache_coords, sliding_window):
         query_cache_coords: ``[B, Lq]`` cache coordinate of each query row
             (column index the row's token occupies / will occupy in the cache).
         sliding_window: window size (number of keys, exclusive lower bound).
+        key_cache_coords: Optional ``[Lk_compact]`` mapping from each physical
+            cache column to its logical full-cache coordinate. Negative entries
+            name slots that have not been written yet. When present, the base
+            mask is gathered into physical cache order before the band is
+            applied; this is used by chunked prefill's compact ring buffer.
 
-    Returns a new mask with the base padding/causality preserved plus -inf on
-    every key outside ``(q - sliding_window, q]``. Same device/dtype as ``mask``.
+    Returns a new mask with the base padding/causality preserved plus a masked
+    fill value on every key outside ``(q - sliding_window, q]``. Same
+    device/dtype as ``mask``.
 
-    The band is computed on **CPU** (integer comparisons + a ``bool`` mask),
-    then added to ``mask`` **on CPU**, and the combined mask is moved back to
-    ``mask``'s original device. The comparisons must not run on Spyre: its
-    Inductor backend rejects ``int64`` compare-to-constant and ``bool``
-    intermediates. The *add* is also kept off-device because an on-device
-    ``-inf + -inf`` has been observed to produce NaN on Spyre in bf16 (see the
-    note at the return). Mirrors ``add_sliding_window_band``.
+    Ordinary masks take the CPU fallback below because Spyre's Inductor backend
+    rejects the integer comparisons and bool intermediates used to build the
+    band. Chunked-prefill masks in logical cache order carry a private builder
+    that advances a device-resident sliding state instead, avoiding a full mask
+    round-trip per chunk. Compact ring-buffer masks still use the CPU fallback
+    to gather the logical mask into physical cache order. Both paths avoid
+    combining two masked cells on-device by addition; ``-inf + -inf`` has been
+    observed to produce NaN on Spyre in bf16.
     """
-    lk = mask.shape[-1]
-    k_col = torch.arange(lk)[None, None, :]  # [1, 1, Lk] on CPU
+    chunked_builder = getattr(mask, "_spyre_chunked_prefill_builder", None)
+    if chunked_builder is not None and key_cache_coords is None:
+        return chunked_builder.add_causal_sliding_window(
+            mask,
+            mask._spyre_chunked_prefill_query_start,
+            sliding_window,
+        )
+
+    mask_cpu = mask.to("cpu")
+    if key_cache_coords is None:
+        lk = mask.shape[-1]
+        k_col = torch.arange(lk)[None, None, :]  # [1, 1, Lk] on CPU
+        invalid = None
+    else:
+        key_cache_coords = key_cache_coords.detach().to("cpu", dtype=torch.long)
+        if key_cache_coords.ndim != 1:
+            raise ValueError(
+                "key_cache_coords must be one-dimensional, got "
+                f"{tuple(key_cache_coords.shape)}"
+            )
+        logical_lk = mask.shape[-1]
+        valid = (key_cache_coords >= 0) & (key_cache_coords < logical_lk)
+        compact_shape = (*mask.shape[:-1], key_cache_coords.numel())
+        compact_mask = torch.zeros(compact_shape, dtype=mask.dtype)
+        if valid.any():
+            compact_mask[..., valid] = mask_cpu.index_select(
+                -1, key_cache_coords[valid]
+            )
+        mask_cpu = compact_mask
+        k_col = key_cache_coords[None, None, :]
+        invalid = ~valid[None, None, :]
     q_coord = query_cache_coords.to("cpu")[:, :, None].to(k_col.dtype)  # [B, Lq, 1]
     delta = q_coord - k_col  # [B, Lq, Lk]
     out_of_band = (delta < 0) | (delta >= sliding_window)  # CPU bool
+    if invalid is not None:
+        out_of_band = out_of_band | invalid
     band = torch.zeros(out_of_band.shape, dtype=mask.dtype)  # CPU float
     band = band.masked_fill(out_of_band, -torch.inf)
     # Combine on CPU, then move the result to the input's device. Doing the
@@ -1505,7 +1668,7 @@ def add_causal_sliding_window_band(mask, query_cache_coords, sliding_window):
     # can overflow once cells are summed. Combining on CPU avoids the issue; the
     # mask is tiny so the round-trip is cheap.
     orig_device = mask.device
-    combined = mask.to("cpu") + band[:, None, :, :]
+    combined = mask_cpu + band[:, None, :, :]
     return combined.to(orig_device)
 
 
@@ -1725,6 +1888,9 @@ def allocate_kv_caches(model, batch_size, max_cache_len, dtype, device=None):
     correctly-sized caches per layer. Returns ``(key_caches, value_caches)``
     lists. ``device`` defaults to the module ``DEVICE`` resolved at call time (so
     the conftest CPU patch applies).
+
+    Models that need specialized per-layer capacities may install a
+    ``model._spyre_cache_allocator`` hook.
     """
     if device is None:
         device = DEVICE
@@ -2523,6 +2689,19 @@ def generate(
     prefill_kv_len = (
         _sdpa_compatible_kv_length(padded_len) if chunked_prefill else max_cache_len
     )
+    # Compact-cache state needs the left-padding offsets so its runtime attention
+    # mask can exclude padding after prompt rows move to anchored coordinates.
+    model._spyre_prompt_offsets = prompt_offsets
+    # Specialized cache allocators and prefill/decode state transitions need the
+    # padded prompt extent before caches are allocated. Keep this as host metadata;
+    # it is not an input to compiled graphs.
+    model._spyre_padded_prompt_len = padded_len
+    # Specialized cache allocators can use the active chunk geometry to keep
+    # local-attention caches bounded during prefill. Store None for one-shot
+    # prefill so an earlier generate call cannot leave stale chunk metadata.
+    model._spyre_active_prefill_chunk_size = (
+        query_chunk_size if chunked_prefill else None
+    )
 
     # Initialize empty KV caches. Per-layer shapes come from the model
     # (``_spyre_kv_shapes``) for heterogeneous architectures like Gemma 4,
@@ -2584,29 +2763,32 @@ def generate(
                 # Keep Lk fixed at the complete prefill extent while advancing
                 # Lq. Future cache slots are zero and masked, and fixed shapes
                 # avoid compiling one attention graph for every prefix length.
+                prefill_mask_builder = _ChunkedPrefillMaskBuilder(
+                    batch_size,
+                    query_chunk_size,
+                    prefill_kv_len,
+                    prompt_offsets,
+                    dtype=model_d_type,
+                    device=DEVICE,
+                )
                 for chunk_start in range(0, padded_len, query_chunk_size):
                     chunk_end = chunk_start + query_chunk_size
-                    prefill_mask = build_prefill_mask(
-                        batch_size,
-                        query_chunk_size,
-                        prefill_kv_len,
-                        prompt_offsets,
-                        dtype=model_d_type,
-                        query_start=chunk_start,
-                    )
+                    prefill_mask = prefill_mask_builder.build(chunk_start)
                     logits = run_forward_fn(  # type: ignore[misc]
                         model,
                         input_ids[:, chunk_start:chunk_end].to(DEVICE),
                         position_ids[:, chunk_start:chunk_end].to(DEVICE),
-                        prefill_mask.to(DEVICE),
+                        prefill_mask,
                         prefill_key_caches,
                         prefill_value_caches,
                         cache_index=make_cache_index(
                             chunk_start, query_chunk_size, DEVICE
                         ),
                     )
-            # Only the last chunk's logits matter for next-token selection.
-            next_logits = logits.to("cpu")[:, -1, :]
+            # Only the last chunk's final-token logits matter for next-token
+            # selection. Slice on Spyre so the D2H copy transfers [B, V]
+            # instead of the full [B, S, V] prefill output.
+            next_logits = logits[:, -1, :].to("cpu")
             current_cache_len = padded_len
 
         else:
@@ -2652,7 +2834,10 @@ def generate(
                     value_caches=value_caches,
                     cache_index=cache_index,
                 )
-            next_logits = logits.to("cpu")[:, -1, :]
+            # Keep the transfer shape consistent with prefill. Decode normally
+            # has S == 1, but slicing first avoids copying unused rows for any
+            # adapter that returns a wider decode output.
+            next_logits = logits[:, -1, :].to("cpu")
             current_cache_len += 1
 
         # Crop away Spyre LM-head padding before exposing logits or selecting a
@@ -2704,11 +2889,11 @@ def generate(
             break
 
     if timing and times_list:
-        print(f"\nFirst-token latency: {times_list[0]*1000:.3f} ms")
+        print(f"\nFirst-token latency: {times_list[0] * 1000:.3f} ms")
         if len(times_list) > 1:
             avg = sum(times_list[1:]) / len(times_list[1:])
-            print(f"Avg next-token latency: {avg*1000:.3f} ms")
-        print("Per-token: " + ", ".join(f"{t*1000:.1f}" for t in times_list) + " ms")
+            print(f"Avg next-token latency: {avg * 1000:.3f} ms")
+        print("Per-token: " + ", ".join(f"{t * 1000:.1f}" for t in times_list) + " ms")
 
     if generated_columns:
         generated_ids = torch.stack(generated_columns, dim=1)
@@ -2730,94 +2915,8 @@ def generate(
 # ---------------------------------------------------------------------------
 
 
-def _standard_gqa_attention_dim_names(query, key, value):
-    """Return named-dim declarations and per-tensor names for Spyre SDPA.
-
-    The K/V sequence axis is intentionally untracked. ``for_each_tile`` carries
-    that relationship structurally; propagating the full ``max_seqlen_kv`` name
-    into the tile body incorrectly treats the tile index and the within-tile
-    index as a reshape split. K/V retain names for their other axes because
-    those axes still participate in ordinary ``spyre_hint`` tiling.
-    """
-    q_shape = tuple(int(d) for d in query.shape)
-    k_shape = tuple(int(d) for d in key.shape)
-    v_shape = tuple(int(d) for d in value.shape)
-    for name, shape in [("query", q_shape), ("key", k_shape), ("value", v_shape)]:
-        if len(shape) != 4:
-            raise ValueError(f"GQA requires rank-4 {name}, got {shape}")
-    if q_shape[0] != k_shape[0] or k_shape[:3] != v_shape[:3]:
-        raise ValueError(
-            f"Q/K/V batch or K/V prefix mismatch: {q_shape}, {k_shape}, {v_shape}"
-        )
-    if q_shape[3] != k_shape[3]:
-        raise ValueError(f"Q/K head_dim mismatch: {q_shape}, {k_shape}")
-    if q_shape[1] % k_shape[1] != 0:
-        raise ValueError(
-            f"num_kvheads must divide num_heads: {q_shape[1]}, {k_shape[1]}"
-        )
-
-    kv_sequence_placeholder = f"_untracked_{k_shape[2]}"
-    declarations = (
-        ("_b", q_shape[0]),
-        ("num_heads", q_shape[1]),
-        ("num_kvheads", k_shape[1]),
-        ("max_seqlen_q", q_shape[2]),
-        (kv_sequence_placeholder, k_shape[2]),
-        ("head_dim", q_shape[3]),
-        ("value_head_dim", v_shape[3]),
-    )
-    logical_names = (
-        ("_b", "num_heads", "max_seqlen_q", "head_dim"),
-        ("_b", "num_kvheads", kv_sequence_placeholder, "head_dim"),
-        ("_b", "num_kvheads", kv_sequence_placeholder, "value_head_dim"),
-    )
-    tensor_names = tuple(
-        [name for size, name in zip(shape, names, strict=True) if size != 1]
-        for shape, names in zip((q_shape, k_shape, v_shape), logical_names, strict=True)
-    )
-    return declarations, tensor_names
-
-
-def _apply_standard_gqa_attention_dim_names(
-    query, key, value, declare_tensor_dim, name_tensor_dims
-):
-    declarations, tensor_names = _standard_gqa_attention_dim_names(query, key, value)
-    for name, size in declarations:
-        declare_tensor_dim(name, size)
-    for tensor, names in zip((query, key, value), tensor_names, strict=True):
-        name_tensor_dims(tensor, names)
-
-
-@contextmanager
-def _named_standard_gqa_attention_inputs(query, key, value):
-    """Name eager Q/K/V inputs for the immediately following compiled SDPA."""
-    if query.device.type != "spyre":
-        # CPU adapter tests exercise the same block without the Spyre package.
-        yield
-        return
-
-    # Access the module registered by PyTorch's Spyre backend auto-loader.
-    # Importing torch_spyre here can recurse through backend initialization.
-    named_dims = sys.modules["torch_spyre._inductor.wsr.propagate_named_dims"]
-
-    try:
-        _apply_standard_gqa_attention_dim_names(
-            query,
-            key,
-            value,
-            named_dims.declare_tensor_dim,
-            named_dims.name_tensor_dims,
-        )
-        yield
-    finally:
-        # Compilation consumes and clears these globals itself. A cache-hit
-        # execution does not, so clear them here to avoid leaking annotations
-        # into a later, unrelated compilation.
-        named_dims.reset()
-
-
 class StandardGQAAttention(nn.Module):
-    """Split into ``pre_attn`` and ``attn_core`` for eager dim-naming."""
+    """Standard GQA attention split into projection and attention regions."""
 
     def __init__(self, attn):
         super().__init__()
@@ -2897,7 +2996,7 @@ class StandardGQAAttention(nn.Module):
 
 
 class StandardGQABlock(nn.Module):
-    """Two compiled regions with an eager dim-naming boundary between them."""
+    """Standard GQA block with independently compiled attention regions."""
 
     def __init__(self, layer, is_res_mul: bool | None = None):
         super().__init__()
@@ -2957,10 +3056,7 @@ class StandardGQABlock(nn.Module):
         q, key_cache, value_cache = self._pre_attn(
             hidden_states, selected_freqs, key_cache, value_cache, cache_index
         )
-        with _named_standard_gqa_attention_inputs(q, key_cache, value_cache):
-            h = self._attention_tail(
-                hidden_states, q, key_cache, value_cache, attn_mask
-            )
+        h = self._attention_tail(hidden_states, q, key_cache, value_cache, attn_mask)
         return h, key_cache, value_cache
 
 

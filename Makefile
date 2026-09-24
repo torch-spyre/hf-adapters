@@ -103,7 +103,7 @@ token-compare-tests: ## Run token-compare tests (suite key: token_compare)
 	$(PYTEST) $(PYTEST_ARGS) --suite token_compare tests/spyre/test_e2e_token_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 model-components-tests: ## Run model component tests (suite key: model_components)
-	$(PYTEST) $(PYTEST_ARGS) --suite model_components tests/spyre/test_model_components_spyre.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) --suite model_components tests/spyre/test_model_components_spyre.py tests/spyre/test_swa_layer_ab_spyre.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 embed-compare-tests: ## Run embed-compare tests (suite key: embed_compare)
 	$(PYTEST) $(PYTEST_ARGS) --suite embed_compare tests/spyre/test_e2e_embed_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))

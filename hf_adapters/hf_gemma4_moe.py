@@ -23,11 +23,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from hf_adapters import hf_common
 from hf_adapters.hf_common import (
     moe_decode_selected_experts,
     moe_prefill_all_experts,
     moe_topk,
-    named_moe_prefill_inputs,
     optional_spyre_config_patch,
     prepare_moe_expert_weights,
     text_config,
@@ -42,6 +42,7 @@ from hf_adapters.hf_gemma4 import (
     spyre_tp_grouped_colwise_modules,
 )
 from hf_adapters.spyre_tensor_parallel import spyre_compiled_all_reduce
+from hf_adapters.swa_attention import allocate_swa_caches
 
 # The HF checkpoint conversion first merges each expert's 2D gate/up tensors
 # into these 3D parameters.  Keep the local TP shards on CPU until
@@ -149,6 +150,10 @@ class Gemma4MoEBlock(nn.Module):
         is_kv_eq_v,
         moe_k,
         stick_size,
+        is_sliding=False,
+        window_size=None,
+        swa_mode=None,
+        is_causal=True,
     ):
         super().__init__()
         self.self_attn = Gemma4Attention(
@@ -157,6 +162,10 @@ class Gemma4MoEBlock(nn.Module):
             num_kv_heads,
             head_dim,
             is_kv_eq_v,
+            is_sliding=is_sliding,
+            window_size=window_size,
+            swa_mode=swa_mode,
+            is_causal=is_causal,
         )
         self.mlp = layer.mlp
         self.input_layernorm = layer.input_layernorm
@@ -397,19 +406,8 @@ class Gemma4MoEBlock(nn.Module):
                 value_cache,
                 cache_index,
             )
-            experts = self.experts
-            with named_moe_prefill_inputs(
-                hidden_states,
-                experts.gate_proj,
-                experts.up_proj,
-                experts.down_proj,
-            ):
-                with optional_spyre_config_patch(
-                    {"allow_all_ops_in_lx_planning": True}
-                ):
-                    hidden_states = self._compiled_prefill_ffn(
-                        hidden_states, layer_scalar
-                    )
+            with optional_spyre_config_patch({"allow_all_ops_in_lx_planning": True}):
+                hidden_states = self._compiled_prefill_ffn(hidden_states, layer_scalar)
         else:
             hidden_states, key_cache, value_cache = self._compiled_decode(
                 hidden_states,
@@ -441,6 +439,12 @@ def prepare_text_decoder_for_spyre(model):
     num_q_heads, kv_shapes, kv_equals_v = _setup_gemma4_text_decoder(
         model, allow_moe=True
     )
+    if not hasattr(model, "_spyre_swa_mode"):
+        model._spyre_swa_mode = "anchored"
+    if not hasattr(model, "_spyre_swa_is_causal"):
+        model._spyre_swa_is_causal = True
+    if model._spyre_swa_mode == "anchored":
+        model._spyre_cache_allocator = allocate_swa_caches
 
     blocks = []
     for i, layer in enumerate(list(backbone.layers)):
@@ -452,16 +456,25 @@ def prepare_text_decoder_for_spyre(model):
             kv_equals_v[i],
             moe_k,
             stick_size,
+            is_sliding=cfg.layer_types[i] == "sliding_attention",
+            window_size=cfg.sliding_window,
+            swa_mode=model._spyre_swa_mode,
+            is_causal=model._spyre_swa_is_causal,
         )
         # Under TP this parameter was loaded directly on Spyre.  Widening the
         # per-expert scalar to one stick is intentionally a host operation.
         expert_scale = block.router.per_expert_scale.detach().cpu()
         block.router.route_identity = torch.eye(
             stick_size, dtype=expert_scale.dtype
-        ).to("spyre")
-        block.router.per_expert_scale_stick = dma_moe_per_expert_scale_to_spyre(
-            expert_scale
-        )
+        ).to(hf_common.DEVICE)
+        if str(hf_common.DEVICE).startswith("spyre"):
+            block.router.per_expert_scale_stick = dma_moe_per_expert_scale_to_spyre(
+                expert_scale
+            )
+        else:
+            block.router.per_expert_scale_stick = (
+                expert_scale[:, None].expand(-1, stick_size).contiguous()
+            )
         prepare_moe_expert_weights(block.experts, pad_to_multiple=stick_size)
         backbone.layers[i] = block
         blocks.append(block)

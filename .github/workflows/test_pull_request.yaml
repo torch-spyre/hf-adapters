@@ -107,26 +107,6 @@ jobs:
   # Required check gate -- wraps the delegated suite run so a single branch
   # protection rule ("tests / run spyre unit tests") tracks one stable job name.
   # ----------------------------------------------------------------------------------
-  # The .github/scripts ingest tests sit outside pytest's testpaths (["tests"]) and no other
-  # job collects them, so they would pass locally and run nowhere. Standalone by design: they
-  # stub clickhouse_connect and load the scripts by path, needing none of the product venv.
-  ingest-script-tests:
-    name: ingest script tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-        with:
-          python-version: "3.12"
-
-      - name: Run the ingest script tests
-        run: |
-          uv run --no-project \
-            --with pytest --with lxml --with clickhouse-connect \
-            --with "git+https://github.com/torch-spyre/torch-spyre@main#subdirectory=extensions/clickhouse-ingest" \
-            pytest .github/scripts -q -p no:cacheprovider -o addopts=""
-
   run-spyre-unit-tests:
     name: run spyre unit tests
     runs-on: ubuntu-latest

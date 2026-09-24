@@ -174,6 +174,35 @@ jobs:
             echo "| hf-adapters ref | ${{ inputs.ref || github.sha }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # push-test-results-to-clickhouse.yaml ALREADY looks for this artifact (see its
+      # "Recover threaded run_id" step) -- nothing was uploading it, so that step always
+      # recovered empty and the ingest derived its own id. Measured: 0 of 227 hf-adapters
+      # runs in spyre_v2 join artifact_results, against 60 of 233 for torch-spyre.
+      #
+      # An artifact is the channel because that workflow runs on workflow_run, AFTER this
+      # one, so it cannot receive a dispatch input; it is also the channel it already
+      # enumerates to find the junit XML, so the uuid rides an existing transport.
+      #
+      # Uploaded from `provenance` because it is the first job and needs no runner of its
+      # own: the id is a workflow INPUT, known before any test starts, so a later job would
+      # only narrow the window in which the ingest could find it.
+      #
+      # Skipped when empty, so a GHA-initiated run uploads nothing and the ingest derives
+      # its own id, exactly as before.
+      - name: Record threaded run_id for the ingest
+        if: ${{ inputs.run_id != '' }}
+        env:
+          THREADED_RUN_ID: ${{ inputs.run_id }}
+        run: printf '%s' "${THREADED_RUN_ID}" > run-id.txt
+
+      - name: Upload threaded run_id
+        if: ${{ inputs.run_id != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: run-id
+          path: run-id.txt
+          retention-days: 1
+
   # ---------------------------------------------------------------------------
   # Read tests/model_lists/integration.yaml and emit a space-separated model
   # list as a step output. Only runs when test_type is "integration" (the
