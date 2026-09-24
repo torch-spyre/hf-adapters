@@ -282,11 +282,35 @@ jobs:
       - name: Remove local venv before shared ingest action
         run: rm -rf .venv  # the shared action below creates its own .venv in this same workspace and fails if one already exists
 
+      # The shared action's ingest_xml.py globs --xml-dir with Path.glob("*.xml") --
+      # NON-recursive -- while xml_artifacts/ nests files one level deep in
+      # per-artifact subdirectories (see the "Download XML artifacts" step above).
+      # A non-recursive glob against that nesting finds nothing, so flatten into a
+      # dedicated directory first, prefixing each filename with its artifact
+      # subdirectory to preserve the same-model-different-suite uniqueness the
+      # nesting existed for.
+      - name: Flatten XML artifacts for v2 ingest (non-recursive glob)
+        run: |
+          mkdir -p xml_artifacts_flat
+          python3 <<'PYEOF'
+          import shutil
+          from pathlib import Path
+
+          src_root = Path("xml_artifacts")
+          dest_root = Path("xml_artifacts_flat")
+          for xml_path in sorted(src_root.rglob("*.xml")):
+              rel = xml_path.relative_to(src_root)
+              flat_name = "__".join(rel.parts)
+              shutil.copy2(xml_path, dest_root / flat_name)
+          PYEOF
+          echo "Flattened XML files:"
+          find xml_artifacts_flat -name "*.xml" 2>/dev/null || echo "(none)"
+
       # Schema-v2: the same test_cases/test_case_runs tables torch-spyre writes, via its reusable action -- never installs the library locally.
       - name: Ingest XML into shared v2 ClickHouse tables
         uses: torch-spyre/torch-spyre/.github/actions/ingest-xml-to-clickhouse@main
         with:
-          xml-dir: xml_artifacts
+          xml-dir: xml_artifacts_flat
           workflow: ${{ env.TRIGGERING_WORKFLOW }}
           branch: ${{ env.TRIGGERING_BRANCH }}
           sha: ${{ env.TRIGGERING_SHA }}
