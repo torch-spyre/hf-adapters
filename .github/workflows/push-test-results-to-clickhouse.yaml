@@ -279,6 +279,9 @@ jobs:
             --trigger-type "${TIER}" \
             --platform "${LEG_ARCH}"
 
+      - name: Remove local venv before shared ingest action
+        run: rm -rf .venv  # the shared action below creates its own .venv in this same workspace and fails if one already exists
+
       # Schema-v2: the same test_cases/test_case_runs tables torch-spyre writes, via its reusable action -- never installs the library locally.
       - name: Ingest XML into shared v2 ClickHouse tables
         uses: torch-spyre/torch-spyre/.github/actions/ingest-xml-to-clickhouse@main

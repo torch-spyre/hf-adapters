@@ -168,7 +168,7 @@ def adapter_greedy_steps(
                 prefill_value_caches,
                 cache_index=make_cache_index(chunk_start, query_chunk_size, DEVICE),
             )
-    logits_cpu = logits.to("cpu")[0, -1, :].float()[:vocab_size]
+    logits_cpu = logits[:, -1, :].to("cpu")[0].float()[:vocab_size]
     token = logits_cpu.argmax().item()
     results.append({"logits": logits_cpu, "token": token, "step": 0})
 
@@ -202,7 +202,7 @@ def adapter_greedy_steps(
                 value_caches,
                 cache_index=make_cache_index(current_cache_len, 1, DEVICE),
             )
-        last_logits = logits.to("cpu")[0, -1, :].float()[:vocab_size]
+        last_logits = logits[:, -1, :].to("cpu")[0].float()[:vocab_size]
         current_cache_len += 1
 
         token = last_logits.argmax().item()

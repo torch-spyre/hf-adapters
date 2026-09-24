@@ -112,6 +112,17 @@ env:
   CLICKHOUSE_USER: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_USER_DEV || secrets.CLICKHOUSE_USER }}
   CLICKHOUSE_PASS: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_PASS_DEV || secrets.CLICKHOUSE_PASS }}
   CLICKHOUSE_DB: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_DB_DEV || secrets.CLICKHOUSE_DB }}
+  # The schema-v2 database, which the scan dual-writes capability rows to alongside every v1
+  # insert. Unset is a no-op, not a failure: v1 is what this scan exists to produce, so a
+  # deployment without v2 tables writes v1 exactly as before. v1 and v2 never share a database.
+  CLICKHOUSE_DB_V2: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_DB_V2_DEV || secrets.CLICKHOUSE_DB_V2 }}
+
+  # The shared schema-v2 write path, installed per job rather than declared in pyproject.toml:
+  # build-hf-adapters runs `uv sync --frozen`, which would both require a lock entry and pin the
+  # library to a locked commit, so a fix there would need an hf-adapters re-lock to take effect.
+  # Installed from git so the identity helpers stay ONE implementation -- run_id and
+  # capability_id are content hashes that independent writers must agree on byte-for-byte.
+  CH_INGEST_LIB: "git+https://github.com/torch-spyre/torch-spyre@main#subdirectory=extensions/clickhouse-ingest"
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -180,6 +191,7 @@ jobs:
           source .venv/bin/activate
           uv pip install huggingface_hub tqdm transformers clickhouse-connect python-dotenv
           uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+          uv pip install "${CH_INGEST_LIB}"
 
       # TEMPORARY debug step: confirms HF_TOKEN actually reaches this job as a
       # working credential, and re-runs the real keep()-filter checks against
@@ -425,6 +437,13 @@ jobs:
           fi
           echo "| ${{ matrix.mode }} shard ${{ matrix.shard_index }} | ${ACTUAL} |" >> "$GITHUB_STEP_SUMMARY"
 
+      # Must come AFTER build-hf-adapters: its `uv sync --frozen` prunes anything not in the
+      # lock, so installing before it would have this removed again.
+      - name: Install the shared ClickHouse ingest library
+        run: |
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv pip install "${CH_INGEST_LIB}"
+
       - name: Download shard
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -531,6 +550,13 @@ jobs:
           fi
           echo "| ${{ matrix.mode }} shard ${{ matrix.shard_index }} | ${ACTUAL} |" >> "$GITHUB_STEP_SUMMARY"
 
+      # Must come AFTER build-hf-adapters: its `uv sync --frozen` prunes anything not in the
+      # lock, so installing before it would have this removed again.
+      - name: Install the shared ClickHouse ingest library
+        run: |
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv pip install "${CH_INGEST_LIB}"
+
       - name: Download shard
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -636,6 +662,13 @@ jobs:
             exit 1
           fi
           echo "| ${{ matrix.mode }} shard ${{ matrix.shard_index }} | ${ACTUAL} |" >> "$GITHUB_STEP_SUMMARY"
+
+      # Must come AFTER build-hf-adapters: its `uv sync --frozen` prunes anything not in the
+      # lock, so installing before it would have this removed again.
+      - name: Install the shared ClickHouse ingest library
+        run: |
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv pip install "${CH_INGEST_LIB}"
 
       - name: Download shard
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0

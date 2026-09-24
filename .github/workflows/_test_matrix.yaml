@@ -836,6 +836,10 @@ jobs:
           MODEL_PATH: ${{ matrix.model_key }}
           MODEL_DTYPE: float16
           SPYRE_DEVICES: "0,1"
+          # spyre-comms 173 made Offload_AllGatherSum the default below 8 MiB,
+          # but it corrupts Granite's rank-local residual reductions. Keep this
+          # TP=2 correctness test on the previously stable algorithm.
+          COLL_ALLREDUCE_ALGO: "PairwisePow2"
           HF_DEACTIVATE_ASYNC_LOAD: "1"
           PYTHONUNBUFFERED: "1"
         run: |
@@ -2195,6 +2199,8 @@ jobs:
           MODEL_PATH: ${{ matrix.model_key }}
           MODEL_DTYPE: float16
           SPYRE_DEVICES: "0,1"
+          # Match the primary TP job's stable all-reduce selection.
+          COLL_ALLREDUCE_ALGO: "PairwisePow2"
           HF_DEACTIVATE_ASYNC_LOAD: "1"
           PYTHONUNBUFFERED: "1"
         run: |

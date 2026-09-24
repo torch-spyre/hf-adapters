@@ -2785,8 +2785,10 @@ def generate(
                             chunk_start, query_chunk_size, DEVICE
                         ),
                     )
-            # Only the last chunk's logits matter for next-token selection.
-            next_logits = logits.to("cpu")[:, -1, :]
+            # Only the last chunk's final-token logits matter for next-token
+            # selection. Slice on Spyre so the D2H copy transfers [B, V]
+            # instead of the full [B, S, V] prefill output.
+            next_logits = logits[:, -1, :].to("cpu")
             current_cache_len = padded_len
 
         else:
@@ -2832,7 +2834,10 @@ def generate(
                     value_caches=value_caches,
                     cache_index=cache_index,
                 )
-            next_logits = logits.to("cpu")[:, -1, :]
+            # Keep the transfer shape consistent with prefill. Decode normally
+            # has S == 1, but slicing first avoids copying unused rows for any
+            # adapter that returns a wider decode output.
+            next_logits = logits[:, -1, :].to("cpu")
             current_cache_len += 1
 
         # Crop away Spyre LM-head padding before exposing logits or selecting a
