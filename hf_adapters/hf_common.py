@@ -25,7 +25,7 @@ import math
 import os
 import time
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterator, Optional
 
 import torch
@@ -2452,6 +2452,32 @@ def normalize_generation_inputs(
     )
 
 
+def _compact_default_prefill(normalized, chunk_size, max_new_tokens):
+    """Keep a short request in one cache tile without adding prefill chunks."""
+    prompt_len = math.ceil(normalized.compact_len / BLOCK_SIZE) * BLOCK_SIZE
+    if (
+        prompt_len >= chunk_size
+        or prompt_len + max_new_tokens > _SDPA_MAX_SEQUENCE_TILE_SIZE
+    ):
+        return normalized, chunk_size
+
+    # Rebuild offsets and positions before any masks or cache state are created.
+    ids, padded_len, offsets, positions = pad_and_position(
+        normalized.input_ids[:, -normalized.compact_len :],
+        normalized.actual_lengths,
+    )
+    return (
+        replace(
+            normalized,
+            input_ids=ids,
+            padded_len=padded_len,
+            prompt_offsets=offsets,
+            position_ids=positions,
+        ),
+        padded_len,
+    )
+
+
 def generation_begin_index(input_ids_seq_length, forced_bos_token_id):
     """Return stock HF's sequence length for begin-token suppression."""
     begin_index = input_ids_seq_length
@@ -2617,6 +2643,7 @@ def generate(
     )
 
     prefill_chunk_size = getattr(cfg, "prefill_chunk_size", None)
+    default_prefill_chunk = prefill_chunk_size is None
     if prefill_chunk_size is None:
         prefill_chunk_size = getattr(model, "_spyre_prefill_chunk_size", None)
     if prefill_chunk_size is not None and (
@@ -2643,14 +2670,6 @@ def generate(
         input_ids, attention_mask, pad_to_multiple=pad_to_multiple
     )
     orig_input_ids = normalized.original_input_ids
-    input_ids = normalized.input_ids
-    padded_len = normalized.padded_len
-    prompt_offsets = normalized.prompt_offsets
-    position_ids = normalized.position_ids
-    normalized_token_inputs = {
-        name: normalized.normalize_token_aligned(value, pad_value=pad_value)
-        for name, (value, pad_value) in (token_aligned_inputs or {}).items()
-    }
 
     input_length = orig_input_ids.shape[1]
     cfg = model._prepare_generated_length(
@@ -2667,6 +2686,19 @@ def generate(
         has_default_max_length=has_default_max_length,
     )
     effective_max_new_tokens = cfg.max_length - input_length
+    # Explicit chunk sizes and specialized prefill hooks keep their fixed shapes.
+    if chunked_prefill and default_prefill_chunk:
+        normalized, prefill_chunk_size = _compact_default_prefill(
+            normalized, prefill_chunk_size, effective_max_new_tokens
+        )
+    input_ids = normalized.input_ids
+    padded_len = normalized.padded_len
+    prompt_offsets = normalized.prompt_offsets
+    position_ids = normalized.position_ids
+    normalized_token_inputs = {
+        name: normalized.normalize_token_aligned(value, pad_value=pad_value)
+        for name, (value, pad_value) in (token_aligned_inputs or {}).items()
+    }
     min_new_tokens = cfg.min_new_tokens or 0
     begin_suppress_index = generation_begin_index(input_length, cfg.forced_bos_token_id)
 
