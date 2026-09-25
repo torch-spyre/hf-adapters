@@ -248,3 +248,6 @@ config.local.*
 
 # torch.compile inductor debug scratch
 torch_compile_debug/
+
+# hatch-vcs generated version file
+hf_adapters/_version.py

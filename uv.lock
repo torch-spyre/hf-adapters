@@ -600,7 +600,6 @@ wheels = [
 
 [[package]]
 name = "hf-adapters-spyre"
-version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
