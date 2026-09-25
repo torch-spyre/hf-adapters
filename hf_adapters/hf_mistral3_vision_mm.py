@@ -50,10 +50,10 @@ Vision's deepstack multi-layer injection):
 2. Select the configured ``vision_feature_layer`` (or last layer).
 3. Apply ``multi_modal_projector`` (RMSNorm → PatchMerger → linear × 2)
    on CPU to produce ``image_features``.
-4. Zero the ``<image>`` token slots in the text embeddings, then scatter
-   ``image_features`` into those slots via a CPU-built additive tensor
-   (same technique as ``hf_granite_vision_mm._inject_deepstack`` — avoids
-   Spyre-incompatible boolean indexing).
+4. Zero the ``<image>`` token slots in the text embeddings via a CPU-built
+   0/1 keep-mask multiply (workaround #2 — ``aten::masked_fill_`` not yet on
+   Spyre, torch-spyre#1004), then scatter ``image_features`` into those slots
+   via ``masked_scatter`` on Spyre (torch-spyre#3308).
 5. Run the full text decoder with the resulting ``inputs_embeds``; no
    further per-layer injection.
 
@@ -165,37 +165,36 @@ def _image_features(model, pixel_values, image_sizes):
 
 
 def _vision_mask(model, input_ids):
-    """``[B, L, 1]`` bool mask, True at ``image_token_index`` positions."""
-    return (input_ids == model.config.image_token_index).unsqueeze(-1)
+    """``[B, L]`` bool mask on CPU, True at ``image_token_index`` positions."""
+    return (input_ids == model.config.image_token_index).cpu()
 
 
-def _inject_image_features(hidden_states, features, vision_mask_cpu):
+def _inject_image_features(hidden_states, features, vision_mask):
     """Scatter ``features`` into the image-token slots of ``hidden_states``.
 
-    Mirrors ``Mistral3Model.forward``'s ``inputs_embeds.masked_scatter``.
-    On Spyre the on-device boolean reduction and ``masked_scatter`` don't
-    lower; we build an additive tensor on **CPU** and move it to the device
-    for a plain elementwise add — same technique as
-    ``hf_granite_vision_mm._inject_deepstack``.
+    Replaces the old CPU additive-tensor workaround with a native
+    ``masked_scatter`` on Spyre (torch-spyre#3308).
 
-    The image-token slots are zeroed at embed time, so the injection reduces
-    to ``h + additive`` where ``additive`` is ``features`` scattered at image
-    positions and zero elsewhere.
+    The image-token slots are pre-zeroed by the keep-mask multiply in
+    ``_prefill_forward`` (workaround #2, torch-spyre#1004 still open), so
+    this scatter only needs to write the projected features into those slots.
+
+    Shape contract required by the Spyre ``masked_scatter`` decomposition:
+    - mask: ``[B, L, 1]`` bool — broadcasts over the hidden dim (whole-row
+      selection); must NOT be expanded to ``[B, L, hidden]``.
+    - source: ``[n_image_tokens, hidden]`` (rank-2) — not a flat 1-D tensor.
+    Both ``vision_mask`` (CPU bool) and ``features`` (CPU tensor from the
+    projector) are moved to device here at the ``masked_scatter`` call.
+    ``vision_mask`` is kept CPU until this point to avoid sending a bool
+    tensor to Spyre earlier (Spyre does not natively support bool).
     """
-    flat_mask = vision_mask_cpu.squeeze(-1)  # [B, L] bool on CPU
-    hidden = hidden_states.shape[-1]
-    features = features.to("cpu", hidden_states.dtype)
-    n_image_tokens = int(flat_mask.sum())
-    if n_image_tokens * hidden != features.numel():
-        raise ValueError(
-            f"image tokens and features do not match: "
-            f"tokens {n_image_tokens}, features {tuple(features.shape)}"
-        )
-    additive = torch.zeros(
-        flat_mask.shape[0], flat_mask.shape[1], hidden, dtype=hidden_states.dtype
+    mask_3d = vision_mask.unsqueeze(-1)  # [B, L, 1] on CPU
+    return hidden_states.masked_scatter(
+        mask_3d.to(hidden_states.device),
+        features.to(
+            device=hidden_states.device, dtype=hidden_states.dtype
+        ),  # [n_image_tokens, hidden]
     )
-    additive[flat_mask] = features.view(n_image_tokens, hidden)
-    return hidden_states + additive.to(hidden_states.device)
 
 
 # ---------------------------------------------------------------------------
@@ -225,8 +224,8 @@ def _run_text_backbone(
 
     At prefill ``image_features`` + ``vision_mask`` carry the image injection:
     image-token slots (zeroed at embed time) receive the projected features via
-    a CPU additive scatter before the first decoder layer. Decode steps pass
-    ``image_features=None`` (pure text).
+    ``masked_scatter`` on Spyre before the first decoder layer. Decode steps
+    pass ``image_features=None`` (pure text).
     """
     h = inputs_embeds
 
@@ -302,9 +301,10 @@ def _prefill_forward(
 
     inputs_embeds = _embed_text(model, input_ids)
     vision_mask = _vision_mask(model, input_ids)
-    # Zero the <image> slots: multiply by a (0/1) keep factor built on CPU
-    # (masked_fill_ and boolean ops don't lower on Spyre).
-    keep = (~vision_mask).to(model_dtype).to(inputs_embeds.device)
+    # Zero the <image> slots: multiply by a (0/1) keep factor built on CPU.
+    # aten::masked_fill_ is not yet supported on Spyre (torch-spyre#1004);
+    # once it lands this can be replaced with inputs_embeds.masked_fill_(…, 0).
+    keep = (~vision_mask).to(model_dtype).unsqueeze(-1).to(inputs_embeds.device)
     inputs_embeds = inputs_embeds * keep
 
     image_feats = _image_features(model, pixel_values, image_sizes)
@@ -317,6 +317,6 @@ def _prefill_forward(
         key_caches,
         value_caches,
         cache_index=cache_index,
-        image_features=image_feats,  # on CPU; _inject_image_features moves it
-        vision_mask=vision_mask,  # on CPU
+        image_features=image_feats,  # on CPU; _inject_image_features moves to device
+        vision_mask=vision_mask,  # CPU bool; _inject_image_features moves to device
     )
