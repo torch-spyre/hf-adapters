@@ -32,6 +32,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sympy import factorint
+from torch.compiler import nested_compile_region
 from transformers import GenerationConfig
 from transformers.generation import GenerateDecoderOnlyOutput
 
@@ -3069,6 +3070,65 @@ def prepare_standard_gqa_blocks(layers, is_res_mul: bool | None = None):
         block = StandardGQABlock(layer, is_res_mul)
         layers[i] = block
         blocks.append(torch.compile(block, dynamic=False))
+    return blocks
+
+
+@nested_compile_region
+def _shared_region_block(block, *args):
+    """The ONE nested compile region shared across every decoder layer.
+
+    ``block`` is a positional argument, NOT closed over — this is load-bearing.
+    ``nested_compile_region`` traces the region body exactly ONCE and reuses that
+    single subgraph for every ``invoke_subgraph`` call (that reuse is the whole
+    point: it keeps whole-forward compile time flat across N layers). Anything the
+    region *closes over* is captured from the FIRST trace only, so if ``block``
+    were a closure cell every layer would silently run with layer 0's weights
+    (the block's ``nn.Linear``/RMSNorm params are ``self.`` attributes). Passing
+    ``block`` as an argument makes Dynamo lift each layer's own parameters as
+    region inputs, so layer i computes with layer i's weights.
+
+    The block's ``(key_cache, value_cache)`` return is dropped; only ``h`` is
+    exposed. ``StandardGQABlock`` updates the KV caches IN PLACE
+    (``kv_cache_update`` slice-assignment) and returns those same buffers for the
+    eager (non-region) callers, but the whole-forward compile turns the region
+    into an ``invoke_subgraph`` HOP call that rejects a subgraph output aliasing a
+    subgraph input. In-place mutation of a HOP input IS supported
+    (``auto_functionalize`` handles it) and is copy-free, so we keep the mutation
+    and discard the aliasing return here — leaving the shared ``StandardGQABlock``
+    contract untouched for eager adapters (olmo, granite_vision_mm,
+    mistral3_vision_mm).
+    """
+    h, _key_cache, _value_cache = block.forward(*args)
+    return h
+
+
+def nested_region_block(block):
+    """Return a per-layer callable that dispatches to the shared compile region.
+
+    The returned callable forwards ``block`` to ``_shared_region_block`` as a
+    positional argument (never a closure cell — see that function's docstring for
+    why). All layers therefore share ONE subgraph while each still runs with its
+    own weights.
+    """
+
+    def call(*args, **kwargs):
+        return _shared_region_block(block, *args, **kwargs)
+
+    return call
+
+
+def prepare_standard_gqa_region_blocks(layers, is_res_mul=None):
+    """Register decoder layers as Spyre blocks and wrap each in a compile region.
+
+    Mirrors ``prepare_standard_gqa_blocks`` but returns region-wrapped callables
+    (not ``torch.compile``d), for use inside a single whole-forward
+    ``torch.compile`` graph.
+    """
+    blocks = []
+    for i, layer in enumerate(list(layers)):
+        block = StandardGQABlock(layer, is_res_mul)
+        layers[i] = block
+        blocks.append(nested_region_block(block))
     return blocks
 
 

@@ -30,7 +30,7 @@ import pytest
 import torch
 from transformers import PreTrainedModel
 
-from hf_adapters.auto_spyre_model import dtype_for_model_path
+from hf_adapters.auto_spyre_model import _resolve_run_forward_fn, dtype_for_model_path
 from hf_adapters.hf_common import (
     DEVICE,
     encode_prompts,
@@ -325,8 +325,11 @@ def _run_model_test(
     )
     move_model_to_spyre(model=model, module=adapter, dtype=spyre_dtype)
     print("  Running adapter on Spyre ...")
+    # Same shim generate() uses: prefers model._spyre_run_forward (the compiled
+    # whole-forward, when the adapter attaches one) over the eager _run_forward.
+    run_forward_fn = _resolve_run_forward_fn(model, adapter._run_forward)
     adapter_results = adapter_greedy_steps(
-        adapter._run_forward,
+        run_forward_fn,
         model,
         input_ids,
         num_decode=num_decode,
