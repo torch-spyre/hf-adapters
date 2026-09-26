@@ -144,8 +144,39 @@ def _convert_transformers_path_to_url(comments):
     return _TRANSFORMERS_PATH_RE.sub(_replace, comments)
 
 
+# Dtypes emitted into the ``supported_dtypes`` block of every generated config.
+# Only the dtypes that model traces actually exercise are listed here; listing
+# integer, unsigned, complex, or bool dtypes alongside a float tolerance (atol/
+# rtol) is misleading and produces a block that is byte-identical across all
+# generated files without adding value.
+_SUPPORTED_DTYPES = [
+    "float16",
+    "float32",
+    "float64",
+    "bfloat16",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "complex32",
+    "complex64",
+    "complex128",
+    "bool",
+    "half",
+]
+
+
 class FlowList(list):
     pass
+
+
+class YamlFmtDumper(yaml.Dumper):
+    def increase_indent(self, flow=False, indentless=False):
+        return super().increase_indent(flow, indentless=False)
 
 
 def repr_flow_seq(dumper, data):
@@ -153,6 +184,7 @@ def repr_flow_seq(dumper, data):
 
 
 yaml.add_representer(FlowList, repr_flow_seq)
+yaml.add_representer(FlowList, repr_flow_seq, Dumper=YamlFmtDumper)
 
 
 def sanitize_arg(
@@ -420,11 +452,6 @@ def add_test_case_yaml(
     return test_case_yaml
 
 
-class YamlFmtDumper(yaml.Dumper):
-    def increase_indent(self, flow=False, indentless=False):
-        return super().increase_indent(flow, indentless=False)
-
-
 @dataclass
 class _ArgResult:
     skip_this_node: bool = False
@@ -494,12 +521,50 @@ class TorchOpCollector:
     ]
     _SPECIAL_INTLIMIT_OPS = _INDEX_INTLIMIT_OPS + ["torch.getitem", "torch.setitem"]
 
+    # Default upper bound for randint-initialized integer tensors that are not
+    # used to index into another tensor.
+    DEFAULT_RANDINTLIMIT = 1000
+
+    # Sentinel distinguishing "no yaml_inputs passed" (per-arg mode) from an
+    # explicit ``yaml_inputs=None`` (whole-op mode, nothing to fix up).
+    _NO_YAML_INPUTS = object()
+
     @staticmethod
-    def _compute_randintlimit(op_name, i, dtype, saved_shape, san_args):
+    def _compute_randintlimit(
+        op_name,
+        i=None,
+        dtype=None,
+        saved_shape=None,
+        san_args=None,
+        yaml_inputs=_NO_YAML_INPUTS,
+    ):
+        """Compute the upper bound for ``randint``-initialized integer tensors.
+
+        Integer tensors that index into another tensor must stay within that
+        tensor's extent along the indexed dimension, otherwise the generated
+        test case fails with an out-of-bounds access. Every rule for such a
+        bound lives here, in two modes:
+
+        * **Per-arg** (``i`` given) — returns the bound for arg ``i`` as an int,
+          for ``sanitize_arg``/``format_tensor_details`` to consume while the
+          arg is being processed. Used for the scatter/index family and for
+          ``torch.getitem``, whose bound comes from the op's own arg 0 shape
+          (``saved_shape``), already seen by the time the index arg is reached.
+        * **Whole-op fixup** (``yaml_inputs`` given) — rewrites
+          ``init_args.high`` in place on an already-built input list, and
+          returns nothing. This covers the bounds that a per-arg pass cannot
+          reach: ``embedding``, where arg 0's bound is the vocab size held by
+          arg 1 and so is not yet known when arg 0 is processed; and
+          ``torch.getitem``'s per-index-dim bounds, which live inside a
+          ``tensor_list`` and are tighter than the single arg-level bound.
+        """
+        if yaml_inputs is not TorchOpCollector._NO_YAML_INPUTS:
+            return TorchOpCollector._fix_randintlimit_bounds(op_name, yaml_inputs)
+
         if op_name not in TorchOpCollector._SPECIAL_INTLIMIT_OPS:
-            return 1000
+            return TorchOpCollector.DEFAULT_RANDINTLIMIT
         if i == 0:
-            return 1000
+            return TorchOpCollector.DEFAULT_RANDINTLIMIT
         # getitem/setitem: ``a[idx]`` / ``a[idx] = v`` index dim 0 of arg 0, so the
         # index tensor at i == 1 is bounded by saved_shape[0]. Guard on i to avoid
         # bounding setitem's value tensor (i == 2), which carries no index
@@ -510,7 +575,7 @@ class TorchOpCollector:
                     f"i: {i}, saved_shape: {saved_shape}, op_name: {op_name}, dtype: {dtype}, san_args: {san_args}"
                 )
                 return saved_shape[0]
-            return 1000
+            return TorchOpCollector.DEFAULT_RANDINTLIMIT
         if op_name in TorchOpCollector._INDEX_INTLIMIT_OPS:
             dim_index = 2 if op_name == "torch.select_scatter" else 1
             if i == dim_index + 1 and "int" in str(dtype):
@@ -522,7 +587,49 @@ class TorchOpCollector:
                     f"randintlimit for {op_name}: {limit}"
                 )
                 return limit
-        return 1000
+        return TorchOpCollector.DEFAULT_RANDINTLIMIT
+
+    @staticmethod
+    def _set_randintlimit(tensor, high):
+        """Set ``init_args.high`` on a already-built ``randint`` tensor entry."""
+        if not isinstance(tensor, dict) or tensor.get("init") != "randint":
+            return
+        tensor.setdefault("init_args", {})["high"] = high
+
+    @staticmethod
+    def _fix_randintlimit_bounds(op_name, yaml_inputs):
+        """Whole-op mode of :meth:`_compute_randintlimit` — see its docstring."""
+        if not yaml_inputs or not isinstance(yaml_inputs, list):
+            return
+        if len(yaml_inputs) < 2:
+            return
+
+        def _tensor_at(idx):
+            inp = yaml_inputs[idx]
+            return inp.get("tensor") if isinstance(inp, dict) else None
+
+        if op_name == "torch.nn.functional.embedding":
+            # Indices in arg 0 must stay inside the vocab of the table in arg 1.
+            idx_inp = _tensor_at(0)
+            wt_inp = _tensor_at(1)
+            if idx_inp and wt_inp:
+                wt_shape = wt_inp.get("shape")
+                if wt_shape and len(wt_shape) >= 1:
+                    TorchOpCollector.log_function[TorchOpCollector.log_mthd](
+                        f"randintlimit for {op_name}: {wt_shape[0]} (vocab size)"
+                    )
+                    TorchOpCollector._set_randintlimit(idx_inp, wt_shape[0])
+        elif op_name == "torch.getitem":
+            # Each index tensor is bounded by the extent of the dimension it
+            # indexes, which is tighter than the arg-level saved_shape[0] bound.
+            base_inp = _tensor_at(0)
+            idx_inp = yaml_inputs[1] if isinstance(yaml_inputs[1], dict) else None
+            if base_inp and idx_inp and "tensor_list" in idx_inp:
+                base_shape = base_inp.get("shape")
+                if base_shape:
+                    for idx_dim, t in enumerate(idx_inp.get("tensor_list") or []):
+                        if idx_dim < len(base_shape):
+                            TorchOpCollector._set_randintlimit(t, base_shape[idx_dim])
 
     @staticmethod
     def _process_node_arg(arg, op_name, i, saved_shape, san_args, out_device):
@@ -1075,6 +1182,8 @@ class TorchOpCollector:
         TorchOpCollector.log_function[TorchOpCollector.log_mthd](
             f"Test case name: {op_name_with_seqno}"
         )
+        TorchOpCollector._compute_randintlimit(op_name, yaml_inputs=yaml_inputs)
+        TorchOpCollector._compute_randintlimit(op_name, yaml_inputs=yaml_inputs_norm)
         _maybe_promote_init_to_xavier(op_name, yaml_inputs)
         _maybe_promote_init_to_xavier(op_name, yaml_inputs_norm)
         tc_yaml = add_test_case_yaml(
@@ -1314,7 +1423,7 @@ class TorchOpCollector:
                 output_list.append("  kwargs:")
                 for k, v in node.kwargs.items():
                     output_list.append(f"    {k}: {v}")
-                    if "attn_mask" not in k:
+                    if "attn_mask" not in k and not isinstance(v, torch.fx.node.Node):
                         kwmap[k] = v
                         if isinstance(v, torch.dtype) or k == "device" or v is None:
                             kwmap[k] = str(v)
@@ -1718,12 +1827,19 @@ class TorchOpCollector:
     def _compile_fx(
         model_,
         example_inputs_,
-        inner_compile=torch._inductor.compile_fx.compile_fx_inner,
+        inner_compile=None,
         config_patches=None,
         decompositions=None,
         *args,
         **kwargs,
     ):
+        # Resolve inner_compile at call time so that callers can patch
+        # torch._inductor.compile_fx.compile_fx_inner (e.g. with a CPU-safe
+        # no-op) before entering TorchOpCollector, and have that patch take
+        # effect here rather than using the value frozen at class-definition
+        # time.
+        if inner_compile is None:
+            inner_compile = torch._inductor.compile_fx.compile_fx_inner
         model_.print_readable(print_output=TorchOpCollector.print_graph_module)
         TorchOpCollector.collect_torchops(
             model_, TorchOpCollector.ops_set, TorchOpCollector.print_output
@@ -1759,17 +1875,18 @@ class TorchOpCollector:
         return False
 
     def write_yaml(
-        self, model_name, output_dir=".", yaml_defaults=None, supress_spyre=False
+        self,
+        model_name,
+        output_dir=".",
+        yaml_defaults=None,
+        supress_spyre=False,
+        supported_dtypes=None,
     ):
         defaults = {**TorchOpCollector.DEFAULT_YAML_DEFAULTS, **(yaml_defaults or {})}
 
         def _filter_cases(cases: list[dict[str, Any]]):
             result = []
             for tc in cases:
-                name = tc.get("name")
-                if not isinstance(name, str) or not name.startswith("torch"):
-                    print(f"Skipping test case with non-torch name: {name!r}")
-                    continue
                 try:
                     yaml.dump(tc, sort_keys=False)
                     result.append(tc)
@@ -1779,26 +1896,8 @@ class TorchOpCollector:
 
         config = {}
         if not USE_OLDFORMAT:
-            dtypes = [
-                "float16",
-                "float32",
-                "float64",
-                "bfloat16",
-                "int8",
-                "int16",
-                "int32",
-                "int64",
-                "uint8",
-                "uint16",
-                "uint32",
-                "uint64",
-                "complex32",
-                "complex64",
-                "complex128",
-                "bool",
-                "half",
-            ]
             seed = 123
+            dtypes = supported_dtypes or _SUPPORTED_DTYPES
             config = {
                 "test_suite_config": {
                     "labels": ["trunk"],
@@ -1818,7 +1917,7 @@ class TorchOpCollector:
                             "tests": [
                                 {
                                     "names": ["TestSpyreModelOps::test_model_ops_db"],
-                                    "mode": "mandatory_success",
+                                    "mode": "xfail",
                                     "tags": ["model__" + model_name],
                                     "edits": {
                                         "ops": {

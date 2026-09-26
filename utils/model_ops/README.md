@@ -13,6 +13,10 @@ Currently, we confirmed that a yaml file can be generated for the following mode
 - llama 3.1
 - mistral small
 - ministral3-14b
+- granite-embedding-278m-multilingual
+- roberta-base-squad2
+- bert-base-uncased
+- bert-large-uncased
 
 
 ## How to generate a yaml file
