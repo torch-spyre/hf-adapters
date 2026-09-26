@@ -419,6 +419,12 @@ jobs:
       - uses: ./.github/actions/build-hf-adapters
         with:
           uv_groups: "dev spyre test models-ops"
+          # Forward the token so build-hf-adapters' own "Verify HF_TOKEN" step
+          # logs its presence/fingerprint/whoami. The composite action reads the
+          # token from this input, NOT from the job env, so without it the action
+          # falsely reports "HF_TOKEN is EMPTY" even though the scan step below
+          # (which reads job env directly) is authenticated.
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this scan (issue #449).
           torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
@@ -532,6 +538,12 @@ jobs:
       - uses: ./.github/actions/build-hf-adapters
         with:
           uv_groups: "dev spyre test models-ops"
+          # Forward the token so build-hf-adapters' own "Verify HF_TOKEN" step
+          # logs its presence/fingerprint/whoami. The composite action reads the
+          # token from this input, NOT from the job env, so without it the action
+          # falsely reports "HF_TOKEN is EMPTY" even though the scan step below
+          # (which reads job env directly) is authenticated.
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this scan (issue #449).
           torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
@@ -645,6 +657,12 @@ jobs:
       - uses: ./.github/actions/build-hf-adapters
         with:
           uv_groups: "dev spyre test models-ops"
+          # Forward the token so build-hf-adapters' own "Verify HF_TOKEN" step
+          # logs its presence/fingerprint/whoami. The composite action reads the
+          # token from this input, NOT from the job env, so without it the action
+          # falsely reports "HF_TOKEN is EMPTY" even though the scan step below
+          # (which reads job env directly) is authenticated.
+          hf_token: ${{ secrets.HF_TOKEN }}
           # Pin torch-spyre to the SHA resolved once for this scan (issue #449).
           torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 

@@ -23,6 +23,14 @@ inputs:
       ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY). Set by the Test-With: flow.
     required: false
     default: ''
+  hf_token:
+    description: >
+      HF Hub token, forwarded from the caller's secrets.HF_TOKEN so this action
+      can log a non-reversible fingerprint proving the token reached the runner
+      (see the "Verify HF_TOKEN" step). Empty on fork PRs (GitHub withholds
+      secrets there) -- the step then reports it as empty rather than failing.
+    required: false
+    default: ''
   torch_spyre_sha:
     description: >
       Full 40-char torch-spyre commit SHA to pin (issue #449). When set, the
@@ -123,6 +131,31 @@ runs:
       with:
         verbose: 'true'
 
+    # Runs in every test job (each one builds via this action), so this single
+    # step logs the HF_TOKEN status for ALL suites. Prints only a non-reversible
+    # SHA-256 fingerprint + length, never the token itself -- enough to confirm
+    # the secret reached the runner and to tell two tokens apart across runs.
+    # When the token is set, also asks the HF Hub whoami-v2 endpoint which
+    # account it authenticates as (name + type) so the owner is visible in the
+    # log -- again without ever printing the token.
+    - name: Verify HF_TOKEN
+      shell: bash
+      env:
+        HF_TOKEN: ${{ inputs.hf_token }}
+      run: |
+        if [[ -n "$HF_TOKEN" ]]; then
+          FP="$(printf '%s' "$HF_TOKEN" | sha256sum | cut -c1-12)"
+          echo "HF_TOKEN is set (length=${#HF_TOKEN}, sha256=${FP}...)"
+          # Non-fatal: a whoami failure (network, revoked token) must not fail the build.
+          WHOAMI="$(curl -sf https://huggingface.co/api/whoami-v2 -H "Authorization: Bearer ${HF_TOKEN}" || true)"
+          if [[ -n "$WHOAMI" ]]; then
+            echo "$WHOAMI" | python3 -c "import sys, json; d = json.load(sys.stdin); print(f\"HF_TOKEN owner: {d.get('name', '<unknown>')} (type={d.get('type', '<unknown>')})\")" || echo "HF_TOKEN owner: <could not parse whoami response>"
+          else
+            echo "HF_TOKEN owner: <whoami request failed (network or invalid token)>"
+          fi
+        else
+          echo "HF_TOKEN is EMPTY (unauthenticated HF Hub access -- expected on fork PRs)"
+        fi
 
     - name: Build hf-adapters
       shell: bash
