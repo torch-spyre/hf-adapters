@@ -83,10 +83,24 @@ class SpyreColwiseParallel(ColwiseParallel):
     """Colwise checkpoint slicing followed by a Linear-aware Spyre DMA."""
 
     def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
+        # Weight converters for modules with auxiliary scalar state (for
+        # example Gemma 4 clipped linears) reuse the projection's distributed
+        # operation for every source tensor. Scalars have no shardable axis and
+        # must be replicated even though the associated matrix is colwise.
+        ndim = (
+            param.dim() if isinstance(param, torch.Tensor) else len(param.get_shape())
+        )
+        if ndim == 0:
+            return _copy_default(param[...], device=device, dtype=dtype)
         shard = super().shard_tensor(
             param, tensor_idx=tensor_idx, device="cpu", dtype=dtype
         )
         return _copy_linear(shard, device=device, dtype=dtype)
+
+    def get_expected_sharded_shape(self, full_shape):
+        if len(full_shape) == 0:
+            return tuple(full_shape)
+        return super().get_expected_sharded_shape(full_shape)
 
 
 class SpyreColwiseGatherOutputParallel(SpyreColwiseParallel):
@@ -100,10 +114,22 @@ class SpyreRowwiseParallel(RowwiseParallel):
     """Rowwise checkpoint slicing followed by a Linear-aware Spyre DMA."""
 
     def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
+        # See SpyreColwiseParallel: scalar metadata belonging to a sharded
+        # projection is replicated, not indexed along a nonexistent axis.
+        ndim = (
+            param.dim() if isinstance(param, torch.Tensor) else len(param.get_shape())
+        )
+        if ndim == 0:
+            return _copy_default(param[...], device=device, dtype=dtype)
         shard = super().shard_tensor(
             param, tensor_idx=tensor_idx, device="cpu", dtype=dtype
         )
         return _copy_linear(shard, device=device, dtype=dtype)
+
+    def get_expected_sharded_shape(self, full_shape):
+        if len(full_shape) == 0:
+            return tuple(full_shape)
+        return super().get_expected_sharded_shape(full_shape)
 
 
 class SpyreRowwiseSplitInputParallel(SpyreRowwiseParallel):
