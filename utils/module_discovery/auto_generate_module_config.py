@@ -2152,7 +2152,9 @@ def _build_module_entry_dict(module_info: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def generate_unified_yaml_config(
-    captured_modules: List[Dict[str, Any]], model_name: str
+    captured_modules: List[Dict[str, Any]],
+    model_name: str,
+    extra_tags: Tuple[str, ...] = (),
 ) -> str:
     """Generate unified YAML configuration using yaml.dump().
 
@@ -2175,7 +2177,7 @@ def generate_unified_yaml_config(
                         {
                             "names": ["*TestModule*::test_forward"],
                             "mode": "xfail",
-                            "tags": [f"model__{model_name}"],
+                            "tags": [f"model__{model_name}", *extra_tags],
                             # Spyre's custom ops have no registered autograd
                             # formula, so upstream's test_forward (which builds
                             # modules with ordinary requires_grad=True
@@ -2198,7 +2200,11 @@ def generate_unified_yaml_config(
                                 "*TestModuleCustom*::test_layout_stride",
                             ],
                             "mode": "xfail",
-                            "tags": [f"model__{model_name}", "custom_tests"],
+                            "tags": [
+                                f"model__{model_name}",
+                                "custom_tests",
+                                *extra_tags,
+                            ],
                             # Same AOTAutograd/no_grad issue as test_forward
                             # above: these custom tests also build modules
                             # with requires_grad=True parameters and compile
@@ -2699,7 +2705,15 @@ def generate_spyre_module_config(
     for module_data in capture.module_data.values():
         module_data["apply_device_layout"] = True
 
-    return write_module_config(capture, model_path, output, filename_suffix="_adapter")
+    # Both loaders capture same-named modules for one model; without this tag the
+    # <model>.yaml and <model>_adapter.yaml cases would share one case identity.
+    return write_module_config(
+        capture,
+        model_path,
+        output,
+        filename_suffix="_adapter",
+        extra_tags=("loader__spyre",),
+    )
 
 
 def write_module_config(
@@ -2707,6 +2721,7 @@ def write_module_config(
     model_path: str,
     output: str = None,
     filename_suffix: str = "",
+    extra_tags: Tuple[str, ...] = (),
 ):
     """Generate the unified YAML config from captured modules and write it out.
 
@@ -2727,7 +2742,7 @@ def write_module_config(
 
     # Generate unified YAML config (new format)
     unified_yaml_content = generate_unified_yaml_config(
-        capture.get_captured_modules(), model_name_normalized
+        capture.get_captured_modules(), model_name_normalized, extra_tags
     )
 
     # Determine output path

@@ -12,6 +12,7 @@ test_suite_config:
           mode: xfail
           tags:
             - model__granite-3.3-8b-instruct
+            - loader__spyre
           no_grad: true
           edits:
             modules:
@@ -706,6 +707,7 @@ test_suite_config:
           tags:
             - model__granite-3.3-8b-instruct
             - custom_tests
+            - loader__spyre
           no_grad: true
           edits:
             modules:

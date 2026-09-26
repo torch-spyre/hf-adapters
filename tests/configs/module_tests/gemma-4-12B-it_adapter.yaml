@@ -12,6 +12,7 @@ test_suite_config:
           mode: xfail
           tags:
             - model__gemma-4-12B-it
+            - loader__spyre
           no_grad: true
           edits:
             modules:
@@ -1135,6 +1136,7 @@ test_suite_config:
           tags:
             - model__gemma-4-12B-it
             - custom_tests
+            - loader__spyre
           no_grad: true
           edits:
             modules:
