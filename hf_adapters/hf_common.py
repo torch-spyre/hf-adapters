@@ -1337,6 +1337,17 @@ class _ChunkedPrefillMaskBuilder:
         self.device = device
         self._query_start = 0
         self._sliding_states = {}
+        offsets = (
+            prompt_offsets.detach().to("cpu").tolist()
+            if isinstance(prompt_offsets, torch.Tensor)
+            else [prompt_offsets] * batch_size
+        )
+        # Match the prefix slices used by build_prefill_mask, including their
+        # clipping at the cache boundary. Retain only O(batch) CPU metadata.
+        self._padding_end = torch.tensor(
+            [slice(None, int(offset)).indices(max_cache_len)[1] for offset in offsets],
+            dtype=torch.long,
+        )
 
         # Keep the real batch dimension. Spyre's elementwise lowering does not
         # reliably materialize a batch-broadcast input here.
@@ -1350,11 +1361,8 @@ class _ChunkedPrefillMaskBuilder:
 
         padding_mask = torch.zeros((batch_size, 1, 1, max_cache_len), dtype=dtype)
         fill = _mask_fill_value(dtype)
-        if isinstance(prompt_offsets, torch.Tensor):
-            for batch_idx in range(batch_size):
-                padding_mask[batch_idx, :, :, : prompt_offsets[batch_idx].item()] = fill
-        else:
-            padding_mask[:, :, :, :prompt_offsets] = fill
+        for batch_idx in range(batch_size):
+            padding_mask[batch_idx, :, :, : self._padding_end[batch_idx].item()] = fill
         self._padding_mask = padding_mask.to(device)
 
     def _advance(self, state, shifted_in):
@@ -1377,6 +1385,45 @@ class _ChunkedPrefillMaskBuilder:
         mask._spyre_chunked_prefill_query_start = query_start
         self._query_start += self.chunk_size
         return mask
+
+    def live_query_rows(self, query_start):
+        """Return CPU row validity from the causal mask's padding boundary."""
+        query = query_start + torch.arange(self.chunk_size)
+        return (query[None, :] >= self._padding_end[:, None]) & (
+            self._padding_end[:, None] < self.max_cache_len
+        )
+
+    def compact_sliding_mask(
+        self, mask, query_start, query_cache_coords, sliding_window, key_cache_coords
+    ):
+        """Build only the ring-cache columns of a known chunked causal mask.
+
+        The builder already knows every logical mask entry from the causal
+        frontier and left-padding boundary. Reconstruct the compact input on
+        CPU rather than transferring the full device mask back to gather it.
+        """
+        keys = key_cache_coords.detach().to("cpu", dtype=torch.long)
+        if keys.ndim != 1:
+            raise ValueError(
+                f"key_cache_coords must be one-dimensional, got {tuple(keys.shape)}"
+            )
+        keys = keys[None, None, :]
+        query = query_start + torch.arange(self.chunk_size)
+        allowed = (keys >= self._padding_end[:, None, None]) & (
+            keys <= query[None, :, None]
+        )
+        compact = torch.full(
+            allowed.shape, _mask_fill_value(mask.dtype), dtype=mask.dtype
+        ).masked_fill(allowed, 0)
+        # Keep the ordinary helper's distinction between finite base-mask
+        # padding and -inf outside the sliding band or in unwritten slots.
+        band_query = query_cache_coords.detach().to("cpu", dtype=torch.long)
+        delta = band_query[:, :, None] - keys
+        invalid = (keys < 0) | (keys >= self.max_cache_len)
+        out_of_band = (delta < 0) | (delta >= sliding_window) | invalid
+        return compact.masked_fill(out_of_band, -torch.inf)[:, None, :, :].to(
+            mask.device
+        )
 
     def _build_sliding_state(self, query_start, sliding_window):
         if query_start == 0 and sliding_window >= self.chunk_size:
@@ -1615,15 +1662,23 @@ def add_causal_sliding_window_band(
 
     Ordinary masks take the CPU fallback below because Spyre's Inductor backend
     rejects the integer comparisons and bool intermediates used to build the
-    band. Chunked-prefill masks in logical cache order carry a private builder
-    that advances a device-resident sliding state instead, avoiding a full mask
-    round-trip per chunk. Compact ring-buffer masks still use the CPU fallback
-    to gather the logical mask into physical cache order. Both paths avoid
+    band. Chunked-prefill masks carry a private builder that advances a
+    device-resident sliding state in logical cache order, or reconstructs only
+    the compact ring-cache columns from its causal/padding metadata. Both avoid
+    a full mask round-trip per chunk. All paths avoid
     combining two masked cells on-device by addition; ``-inf + -inf`` has been
     observed to produce NaN on Spyre in bf16.
     """
     chunked_builder = getattr(mask, "_spyre_chunked_prefill_builder", None)
-    if chunked_builder is not None and key_cache_coords is None:
+    if chunked_builder is not None and key_cache_coords is not None:
+        return chunked_builder.compact_sliding_mask(
+            mask,
+            mask._spyre_chunked_prefill_query_start,
+            query_cache_coords,
+            sliding_window,
+            key_cache_coords,
+        )
+    if chunked_builder is not None:
         return chunked_builder.add_causal_sliding_window(
             mask,
             mask._spyre_chunked_prefill_query_start,
@@ -1666,7 +1721,7 @@ def add_causal_sliding_window_band(
     # SDPA softmax, giving all-NaN Gemma 4 logits. fp16 happened not to hit this.
     # A finite sentinel (e.g. finfo.min) is not a reliable substitute here — it
     # can overflow once cells are summed. Combining on CPU avoids the issue; the
-    # mask is tiny so the round-trip is cheap.
+    # mask retains any restrictions not described by a chunked causal builder.
     orig_device = mask.device
     combined = mask_cpu + band[:, None, :, :]
     return combined.to(orig_device)
