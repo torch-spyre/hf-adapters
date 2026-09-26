@@ -264,6 +264,43 @@ def test_shared_replicated_lm_head_is_not_mistaken_for_tp_after_padding(monkeypa
     assert run_lm_head(model, torch.ones(1, 1, 2)).shape[-1] == 128
 
 
+@pytest.mark.parametrize("sharded", [False, True])
+def test_lm_head_trailing_positions_preserve_logits_and_skip_projection_rows(
+    monkeypatch, sharded
+):
+    mesh = _FakeMesh(size=2, rank=0)
+    embedding = SimpleNamespace(_hf_device_mesh=mesh)
+    model = nn.Module()
+    model.lm_head = nn.Linear(2, 65, bias=False)
+    model.config = SimpleNamespace(vocab_size=129 if sharded else 65)
+    model.get_input_embeddings = lambda: embedding
+    model._spyre_lm_head_was_tied = sharded
+    monkeypatch.setattr(torch, "compile", lambda fn, **_kwargs: fn)
+
+    def fake_all_gather(logits, group_size, group_name, *, shard_sizes):
+        assert group_size == 2
+        return torch.cat(
+            [logits[..., : shard_sizes[0]], logits[..., : shard_sizes[1]] + 17],
+            dim=-1,
+        )
+
+    monkeypatch.setattr(
+        "hf_adapters.spyre_tensor_parallel.spyre_compiled_all_gather_last_dim",
+        fake_all_gather,
+    )
+    prepare_lm_head_for_spyre(model, logits_processor=lambda logits: logits / 2)
+    projected_shapes = []
+    model.lm_head.register_forward_pre_hook(
+        lambda _module, args: projected_shapes.append(tuple(args[0].shape))
+    )
+    hidden_states = torch.arange(12, dtype=torch.float32).reshape(2, 3, 2)
+    full = run_lm_head(model, hidden_states)
+    for keep in (1, 2):
+        actual = run_lm_head(model, hidden_states, logits_to_keep=keep)
+        torch.testing.assert_close(actual, full[:, -keep:])
+    assert projected_shapes == [(2, 3, 2), (2, 1, 2), (2, 2, 2)]
+
+
 def test_gemma4_multimodal_logits_use_shared_lm_head(monkeypatch):
     hidden_states = torch.tensor([[[1.0, 2.0]]])
     monkeypatch.setattr(

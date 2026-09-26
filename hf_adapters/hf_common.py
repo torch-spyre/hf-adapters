@@ -1167,7 +1167,9 @@ def prepare_lm_head_for_spyre(
             spyre_compiled_all_gather_last_dim,
         )
 
-        def lm_head_forward(hidden_states):
+        def lm_head_forward(hidden_states, logits_to_keep=0):
+            if logits_to_keep:
+                hidden_states = hidden_states[:, -logits_to_keep:, :]
             logits = head(hidden_states)
             logits = spyre_compiled_all_gather_last_dim(
                 logits,
@@ -1181,7 +1183,9 @@ def prepare_lm_head_for_spyre(
 
     else:
 
-        def lm_head_forward(hidden_states):
+        def lm_head_forward(hidden_states, logits_to_keep=0):
+            if logits_to_keep:
+                hidden_states = hidden_states[:, -logits_to_keep:, :]
             logits = head(hidden_states)
             if logits_processor is not None:
                 logits = logits_processor(logits)
@@ -1192,11 +1196,17 @@ def prepare_lm_head_for_spyre(
     )
 
 
-def run_lm_head(model, hidden_states):
-    """Run the LM-head callable installed by :func:`prepare_lm_head_for_spyre`."""
+def run_lm_head(model, hidden_states, *, logits_to_keep=0):
+    """Project all positions, or just the requested trailing positions.
+
+    Slice inside the compiled head so generation avoids projecting and
+    transferring the complete padded prefill sequence. Zero keeps all logits.
+    """
     lm_head_forward = getattr(model, "_spyre_lm_head_forward", None)
     if lm_head_forward is None:
         raise RuntimeError("the model has not had an LM head prepared for Spyre")
+    if logits_to_keep:
+        return lm_head_forward(hidden_states, logits_to_keep=logits_to_keep)
     return lm_head_forward(hidden_states)
 
 

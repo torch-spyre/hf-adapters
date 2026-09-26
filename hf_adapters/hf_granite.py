@@ -27,6 +27,8 @@ Usage::
     outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
+from functools import partial
+
 import torch
 
 from hf_adapters.hf_common import (
@@ -37,6 +39,9 @@ from hf_adapters.hf_common import (
     prepare_standard_gqa_blocks,
     run_lm_head,
     text_config,
+)
+from hf_adapters.hf_common import (
+    generate as generate_common,
 )
 
 
@@ -78,6 +83,8 @@ def _run_forward(
     key_caches,
     value_caches,
     cache_index,
+    *,
+    logits_to_keep=0,
 ):
     """Granite 3.3 causal-LM forward: backbone + head / scaling."""
     h = _run_backbone_forward(
@@ -89,7 +96,18 @@ def _run_forward(
         value_caches,
         cache_index,
     )
-    return run_lm_head(model, h)
+    return run_lm_head(model, h, logits_to_keep=logits_to_keep)
+
+
+def generate(model, input_ids, attention_mask=None, **kwargs):
+    """Generate using only the final prefill position's vocabulary logits."""
+    return generate_common(
+        partial(_run_forward, logits_to_keep=1),
+        model,
+        input_ids,
+        attention_mask=attention_mask,
+        **kwargs,
+    )
 
 
 def prepare_for_spyre(model):
