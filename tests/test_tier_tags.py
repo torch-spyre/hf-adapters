@@ -25,9 +25,11 @@ Two invariants matter here:
 
 from __future__ import annotations
 
+import importlib.util
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tests._tier_tags import (
@@ -40,6 +42,10 @@ from tests._tier_tags import (
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "_test_matrix.yaml"
 _MAKEFILE = _REPO_ROOT / "Makefile"
+_MODULE_CONFIGS = _REPO_ROOT / "tests" / "configs" / "module_tests"
+_MODULE_CONFIG_GENERATOR = (
+    _REPO_ROOT / "utils" / "module_discovery" / "auto_generate_module_config.py"
+)
 
 _TIERS = ("smoke", "unit", "integration", "regression", "trunk")
 
@@ -103,6 +109,38 @@ def test_every_tiered_table_entry_is_a_real_workflow_suite():
 
 def test_untiered_suites_are_absent_from_the_table():
     assert not (_UNTIERED & set(SUITE_TIERS))
+
+
+# ── model_module is tagged by the oot_framework, from each config's labels ─────
+
+
+def test_module_configs_declare_the_workflow_tiers():
+    """Unlabelled configs emit no testtype__ tag, so their cases drop out of every tier."""
+    want = sorted(_workflow_gates()["model_module"])
+    configs = sorted(_MODULE_CONFIGS.glob("*.yaml"))
+    assert configs, f"no module configs under {_MODULE_CONFIGS}"
+    labels = {
+        p.name: sorted(
+            yaml.safe_load(p.read_text())["test_suite_config"].get("labels") or []
+        )
+        for p in configs
+    }
+    wrong = {name: got for name, got in labels.items() if got != want}
+    assert not wrong, f"module configs whose labels differ from {want}: {wrong}"
+
+
+def test_module_config_generator_emits_the_workflow_tiers():
+    """Regenerating a config must not drop the labels the checked-in ones carry."""
+    pytest.importorskip("transformers")
+    spec = importlib.util.spec_from_file_location(
+        "auto_generate_module_config", _MODULE_CONFIG_GENERATOR
+    )
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    doc = yaml.safe_load(gen.generate_unified_yaml_config([], "some-model"))
+    assert sorted(doc["test_suite_config"]["labels"]) == sorted(
+        _workflow_gates()["model_module"]
+    )
 
 
 # ── the Makefile carries a SECOND, already-drifted copy ─────────────────────────

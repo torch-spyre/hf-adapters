@@ -48,6 +48,7 @@ import yaml
 
 # Reuse the device/backend-independent helpers from the HF generator.
 from auto_generate_module_config import (
+    MODULE_TEST_TIER_LABELS,
     PrettyDumper,
     _build_module_entry_dict,
     _process_pytree_structure,
@@ -526,6 +527,7 @@ def generate_unified_yaml_config_vllm(
 
     config = {
         "test_suite_config": {
+            "labels": list(MODULE_TEST_TIER_LABELS),
             "files": [
                 {
                     "path": "${TORCH_DEVICE_ROOT}/tests/test_modules_custom.py",

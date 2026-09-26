@@ -58,6 +58,10 @@ logger = logging.getLogger(__name__)
 # filter. ``excluded_types`` still drops containers and no-op wrappers.
 existing_modules: set = set()
 
+# Tiers whose runs include the model_module suite, stamped as testtype__<tier> tags.
+# Mirrors that job's `if:` gate in _test_matrix.yaml; tests/test_tier_tags.py pins it.
+MODULE_TEST_TIER_LABELS = ["regression", "trunk", "unit"]
+
 
 class PrettyDumper(yaml.SafeDumper):
     """Custom YAML dumper with consistent 2-space indentation."""
@@ -2167,6 +2171,7 @@ def generate_unified_yaml_config(
     # Build the complete configuration dictionary
     config = {
         "test_suite_config": {
+            "labels": list(MODULE_TEST_TIER_LABELS),
             "files": [
                 {
                     "path": "${TORCH_ROOT}/test/test_modules.py",

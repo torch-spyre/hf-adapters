@@ -56,8 +56,8 @@ from __future__ import annotations
 #                       pytest, so it emits no JUnit XML at all.
 #   adapter_coverage -- runs with --noconftest (Makefile), so the autouse fixture never
 #                       binds; passing --suite there would be an unknown-option error.
-#   model_module     -- delegates to the oot_framework run_test.sh, which does its own
-#                       marker-based tagging (torch-spyre's mechanism), not this one.
+#   model_module     -- delegates to the oot_framework run_test.sh, which tags from each
+#                       config's test_suite_config.labels (tests/configs/module_tests).
 SUITE_TIERS: dict[str, tuple[str, ...]] = {
     "clip": ("regression", "trunk", "unit"),
     "embed_compare": ("regression", "trunk", "unit"),
