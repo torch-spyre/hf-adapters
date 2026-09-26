@@ -466,10 +466,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        # Without this, a dispatched run (per-PR image, Test-With) checks adapter coverage against main instead of the PR's own model_registry.py.
+        # Without ref/repository, a dispatched run (per-PR image, Test-With) checks adapter coverage against main instead of the PR's own model_registry.py.
+        # fetch-depth: 0 gives full history so test_adapter_added_dates.py can
+        # verify resources/adapter_added_dates.json against git add-dates; with
+        # the default shallow checkout that test self-skips (issue #372).
         with:
           ref: ${{ inputs.ref || '' }}
           repository: ${{ inputs.repository != '' && inputs.repository || github.repository }}
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
