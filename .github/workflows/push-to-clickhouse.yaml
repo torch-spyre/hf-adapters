@@ -124,6 +124,9 @@ env:
   # capability_id are content hashes that independent writers must agree on byte-for-byte.
   CH_INGEST_LIB: "git+https://github.com/torch-spyre/torch-spyre@main#subdirectory=extensions/clickhouse-ingest"
 
+  # Without this, `uv run`'s implicit sync strips the unlocked CH_INGEST_LIB back out before weekly_test.py can import it, so v2 capability rows silently never got written.
+  UV_NO_SYNC: "1"
+
 jobs:
   # ---------------------------------------------------------------------------
   # Fetch the top-K list once per mode, filter it, and shard the survivors for
