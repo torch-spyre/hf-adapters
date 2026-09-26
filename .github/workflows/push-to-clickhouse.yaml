@@ -378,7 +378,11 @@ jobs:
   #   - manual workflow_dispatch shares the fleet with PR/daily CI, so it stays
   #     small: 10*1 + 2*2 + 1*4 = 18 cards (~2 nodes).
   #   - the scheduled weekly scan (Saturday 22:00) effectively owns the fleet, so
-  #     it spreads wider to finish sooner: 25*1 + 10*2 + 4*4 = 61 cards.
+  #     it spreads wider to finish sooner: 15*1 + 6*2 + 2*4 = 35 cards.
+  #     (Reduced from 61: at 61 the 2026-09-20 run lost ~92/99 runners to
+  #     node-level memory starvation — the runners were OOM-killed. 35 keeps the
+  #     scan well ahead of the manual tier's 18 while backing off the per-node
+  #     pressure that was reaping the whole fleet at once.)
   #
   # The three expressions are repeated inline rather than hoisted into one place.
   # `env` can't be used: jobs.<job_id>.strategy only accepts the github/needs/
@@ -399,7 +403,7 @@ jobs:
     timeout-minutes: 4320
     strategy:
       fail-fast: false
-      max-parallel: ${{ github.event_name == 'workflow_dispatch' && 10 || 25 }}
+      max-parallel: ${{ github.event_name == 'workflow_dispatch' && 10 || 15 }}
       matrix:
         include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x1) }}
     env:
@@ -512,7 +516,7 @@ jobs:
     timeout-minutes: 4320
     strategy:
       fail-fast: false
-      max-parallel: ${{ github.event_name == 'workflow_dispatch' && 2 || 10 }}
+      max-parallel: ${{ github.event_name == 'workflow_dispatch' && 2 || 6 }}
       matrix:
         include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x2) }}
     env:
@@ -625,7 +629,7 @@ jobs:
     timeout-minutes: 4320
     strategy:
       fail-fast: false
-      max-parallel: ${{ github.event_name == 'workflow_dispatch' && 1 || 4 }}
+      max-parallel: ${{ github.event_name == 'workflow_dispatch' && 1 || 2 }}
       matrix:
         include: ${{ fromJSON(needs.generate-matrix.outputs.matrix_x4) }}
     env:
