@@ -212,6 +212,21 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_qwen3.py",
         "size": "0.6b",
     },
+    # hf_qwen3_5.py
+    "qwen3_5_2b": {
+        "name": "Qwen3.5 2B",
+        "path": "Qwen/Qwen3.5-2B",
+        "adapter": "hf_qwen3_5.py",
+        "size": "2b",
+    },
+    # hf_qwen3_5_moe.py
+    "qwen3_5_35b_a3b": {
+        "name": "Qwen3.5 35B A3B",
+        "path": "Qwen/Qwen3.5-35B-A3B",
+        "adapter": "hf_qwen3_5_moe.py",
+        "size": "35b",
+        "multicard_smoke": True,
+    },
     # hf_mistral.py
     "ministral": {
         "name": "Ministral 3B",
