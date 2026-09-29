@@ -17,6 +17,7 @@ import torch
 
 from hf_adapters.hf_common import (
     _ChunkedPrefillMaskBuilder,
+    _compact_default_prefill,
     _mask_fill_value,
     _materialize_decode_mask_heads,
     _prefill_cache_inputs,
@@ -160,6 +161,127 @@ def test_cache_capacity_is_based_on_padded_prefill_extent():
     assert normalized.padded_len == 1536
     assert max_cache_len == 2048
     assert normalized.padded_len + 5 <= max_cache_len
+
+
+@pytest.mark.parametrize(
+    ("prompt_length", "new_tokens", "expected_chunk", "expected_cache"),
+    [
+        (1, 64, 64, 512),
+        (64, 64, 64, 512),
+        (65, 64, 128, 512),
+        (448, 64, 448, 512),
+        (449, 64, 512, 1024),
+        (64, 449, 512, 1024),
+        (513, 64, 512, 1536),
+    ],
+)
+def test_compact_default_prefill_geometry(
+    prompt_length, new_tokens, expected_chunk, expected_cache
+):
+    ids = torch.arange(prompt_length).unsqueeze(0)
+    normalized = normalize_generation_inputs(ids, pad_to_multiple=512)
+
+    compact, chunk = _compact_default_prefill(normalized, 512, new_tokens)
+
+    assert chunk == expected_chunk
+    assert generation_cache_len(compact.padded_len, new_tokens) == expected_cache
+    assert compact.padded_len % chunk == 0
+    assert torch.equal(compact.input_ids[:, -prompt_length:], ids)
+    assert compact.position_ids[0, -prompt_length:].tolist() == list(
+        range(prompt_length)
+    )
+    if expected_chunk == 512:
+        assert compact is normalized
+
+
+def test_compact_default_prefill_rebuilds_mixed_batch_offsets_and_aligned_inputs():
+    ids = torch.tensor([[11, 12, 0, 0], [21, 22, 23, 24]])
+    mask = torch.tensor([[1, 1, 0, 0], [1, 1, 1, 1]])
+    normalized = normalize_generation_inputs(ids, mask, pad_to_multiple=512)
+
+    compact, chunk = _compact_default_prefill(normalized, 512, 64)
+
+    assert chunk == 64
+    assert compact.prompt_offsets.tolist() == [62, 60]
+    assert compact.position_ids[0, -2:].tolist() == [0, 1]
+    assert compact.position_ids[1, -4:].tolist() == [0, 1, 2, 3]
+    assert torch.equal(compact.normalize_token_aligned(ids), compact.input_ids)
+    assert compact.original_input_ids is normalized.original_input_ids
+
+
+def test_granite_short_prompt_generation_preserves_explicit_chunks(monkeypatch):
+    from transformers import GraniteConfig, GraniteForCausalLM
+
+    from hf_adapters import hf_granite
+    from hf_adapters.hf_common import generate
+
+    monkeypatch.setattr(torch, "compile", lambda fn, **kwargs: fn)
+    torch.manual_seed(7)
+    model = GraniteForCausalLM(
+        GraniteConfig(
+            vocab_size=128,
+            hidden_size=256,
+            intermediate_size=256,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            max_position_embeddings=2048,
+            pad_token_id=0,
+            eos_token_id=None,
+        )
+    ).eval()
+    hf_granite.prepare_for_spyre(model)
+    model._spyre_rope.set_dtype(torch.float32)
+    ids = torch.tensor([[11, 12, 0, 0], [21, 22, 23, 24]])
+    mask = torch.tensor([[1, 1, 0, 0], [1, 1, 1, 1]])
+    geometries = []
+
+    def forward(model, input_ids, positions, attn_mask, keys, values, cache_index):
+        geometries.append((input_ids.shape[1], keys[0].shape[2]))
+        return hf_granite._run_forward(
+            model, input_ids, positions, attn_mask, keys, values, cache_index
+        )
+
+    def run(**kwargs):
+        geometries.clear()
+        with torch.no_grad():
+            result = generate(
+                forward,
+                model,
+                ids,
+                attention_mask=mask,
+                max_new_tokens=3,
+                do_sample=False,
+                **kwargs,
+            )
+        return result, list(geometries)
+
+    explicit, explicit_geometry = run(prefill_chunk_size=512)
+    automatic, auto_geometry = run()
+    assert torch.equal(automatic, explicit)
+    assert explicit_geometry == [(512, 512), (1, 1024), (1, 1024)]
+    assert auto_geometry == [(64, 512), (1, 512), (1, 512)]
+
+    model.generation_config.prefill_chunk_size = 512
+    configured, configured_geometry = run()
+    assert torch.equal(configured, explicit)
+    assert configured_geometry == explicit_geometry
+
+    def prefill(**kwargs):
+        return forward(
+            kwargs["model"],
+            kwargs["input_ids"],
+            kwargs["position_ids"],
+            kwargs["attention_mask"],
+            kwargs["key_caches"],
+            kwargs["value_caches"],
+            kwargs["cache_index"],
+        )
+
+    model.generation_config.prefill_chunk_size = None
+    specialized, specialized_geometry = run(prefill_fn=prefill)
+    assert torch.equal(specialized, explicit)
+    assert specialized_geometry == [(512, 1024), (1, 1024), (1, 1024)]
 
 
 def test_one_shot_prefill_preserves_cache_tensor_identity():
