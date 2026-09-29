@@ -61,8 +61,6 @@ __all__ = [
     "spyre_tp_grouped_colwise_modules",
 ]
 
-_MOE_TILE = 32  # Decode gather requires tiles with at least two rows.
-
 
 def _router_probs(x, weight, scale, root_size, eps):
     x = _gemma4_rms_norm(x, None, eps)
@@ -80,7 +78,6 @@ def _compiled_moe_loop_region(
     up_dev,
     down_dev,
     top_k,
-    tile,
     stick_size,
     eps,
 ):
@@ -102,7 +99,6 @@ def _compiled_moe_loop_region(
         up_dev,
         down_dev,
         top_k,
-        tile,
         stick_size,
         "gelu_tanh",
         per_expert_scale_stick=per_expert_scale_stick,
@@ -326,7 +322,6 @@ class Gemma4MoEBlock(nn.Module):
             experts.up_proj,
             experts.down_proj,
             self._moe_k,
-            _MOE_TILE,
             self._stick_size,
             self._moe_rms_eps,
         )

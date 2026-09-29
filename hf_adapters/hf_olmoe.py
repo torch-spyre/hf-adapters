@@ -44,7 +44,6 @@ from hf_adapters.hf_common import (
 
 _run_forward = standard_gqa_forward
 _run_backbone_forward = standard_gqa_backbone_forward
-_MOE_TILE = 32
 
 
 def _router_topk(x, weight, top_k, norm_topk_prob):
@@ -69,7 +68,6 @@ def _moe_decode(
     down_dev,
     top_k,
     norm_topk_prob,
-    tile,
     stick_size,
 ):
     """Run the selected-expert decode FFN and combine outputs on device."""
@@ -82,7 +80,6 @@ def _moe_decode(
         up_dev,
         down_dev,
         top_k,
-        tile,
         stick_size,
         "silu",
     )
@@ -214,7 +211,6 @@ class OlmoeMoEBlock(nn.Module):
             experts.down_proj,
             self._top_k,
             self._norm_topk_prob,
-            _MOE_TILE,
             self._stick_size,
         )
         return residual + moe_out.to(residual.dtype).reshape_as(residual)
