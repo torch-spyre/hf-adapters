@@ -70,6 +70,20 @@ def test_encode_prompts_uses_chat_template_by_default():
     assert tokenizer.pad_token == tokenizer.eos_token
 
 
+def test_encode_prompts_forwards_chat_template_kwargs():
+    tokenizer = _RecordingTokenizer(chat_template="template")
+
+    encode_prompts(
+        tokenizer,
+        "hello",
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    kind, _, kwargs = tokenizer.call
+    assert kind == "chat"
+    assert kwargs["enable_thinking"] is False
+
+
 def test_encode_prompts_can_force_plain_right_padding():
     tokenizer = _RecordingTokenizer(chat_template="template")
 
