@@ -211,20 +211,32 @@ runs:
           # then check it out and re-sync submodules so the working tree matches
           # the pinned commit exactly before `uv add` builds from it.
           cd /home/senuser/torch-spyre
-          echo "Pinning torch-spyre to ${TORCH_SPYRE_SHA}"
-          git fetch --tags --force origin "${TORCH_SPYRE_SHA}" || \
-            git fetch --tags --force origin
-          git checkout --force "${TORCH_SPYRE_SHA}"
-          git submodule sync --recursive
-          git submodule update --init --recursive --force
+          # The image venv already has torch-spyre built from this checkout, so a
+          # baked HEAD equal to the pin needs no checkout and no rebuild.
+          BAKED_SHA="$(git rev-parse HEAD)"
+          if [[ "$BAKED_SHA" == "$TORCH_SPYRE_SHA" ]]; then
+            echo "Baked torch-spyre already at pinned ${TORCH_SPYRE_SHA}; reusing the installed build."
+            SKIP_TORCH_SPYRE_INSTALL=1
+          else
+            echo "Pinning torch-spyre to ${TORCH_SPYRE_SHA} (baked HEAD ${BAKED_SHA})"
+            git fetch --tags --force origin "${TORCH_SPYRE_SHA}" || \
+              git fetch --tags --force origin
+            git checkout --force "${TORCH_SPYRE_SHA}"
+            git submodule sync --recursive
+            git submodule update --init --recursive --force
+          fi
           git log -1 --oneline
           cd "$CLONED_HF_ADAPTERS_DIR"
-          # Same install tail as the unpinned branch below -- the ONLY difference
-          # is the fetch/checkout preamble above, so a pinned run behaves exactly
-          # like today's install, just at a fixed SHA.
+          # Same install tail as the unpinned branch below, just at a fixed SHA
+          # (and without rebuilding torch-spyre when the baked HEAD already matches).
           uv add torch-spyre /home/senuser/torch-spyre
           uv lock --upgrade-package torch-spyre
-          uv sync --frozen --verbose --refresh $GROUP_FLAGS
+          if [[ -n "${SKIP_TORCH_SPYRE_INSTALL:-}" ]]; then
+            # --inexact: without it, uv uninstalls a --no-install-package target.
+            uv sync --frozen --verbose --refresh --inexact --no-install-package torch-spyre $GROUP_FLAGS
+          else
+            uv sync --frozen --verbose --refresh $GROUP_FLAGS
+          fi
         else
           cd "$CLONED_HF_ADAPTERS_DIR"
           # though we pin to main
