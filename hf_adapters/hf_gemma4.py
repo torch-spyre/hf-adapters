@@ -101,6 +101,7 @@ from hf_adapters.hf_common import (
     kv_cache_update,
     optional_spyre_config_patch,
     prepare_lm_head_for_spyre,
+    query_validity_mask,
     run_lm_head,
     text_config,
 )
@@ -274,17 +275,12 @@ def _query_row_mask(h, attn_mask):
     K/V they write in the following layer) neutral throughout the decoder.
     Valid query rows always contain at least one zero-valued, attendable entry.
 
-    The fully-masked test is derived on **CPU** (a boolean reduction) and only
-    the resulting float multiplier is moved to ``h``'s device, mirroring
-    ``add_causal_sliding_window_band`` — Spyre's compiled backend rejects
-    on-device boolean reductions. This runs in the eager block driver, outside
-    any compiled region, so it is static and Spyre-safe.
+    The comparison and reductions are compiled together on Spyre so deriving
+    the multiplier does not copy the full attention mask back to the host.
     """
     # attn_mask: [B, 1, S, cache_len]. Allowed entries are exactly zero;
     # disallowed entries use the finite value returned by _mask_fill_value.
-    am = attn_mask.to("cpu")
-    live_rows = (am == 0).any(dim=-1).any(dim=1).to(h.dtype)  # [B, S]
-    return live_rows.to(h.device)[:, :, None]
+    return query_validity_mask(attn_mask).to(device=h.device, dtype=h.dtype)[:, :, None]
 
 
 def _patch_gemma4_rmsnorm(rmsnorm_cls):
