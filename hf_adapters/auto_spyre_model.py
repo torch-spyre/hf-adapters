@@ -455,6 +455,7 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
                 self,
                 input_ids,
                 attention_mask=attention_mask,
+                prefill_backbone_fn=module._run_backbone_forward,
                 **kwargs,
             )
 
@@ -903,7 +904,9 @@ def _generate_image_text_to_text(
     }
 
     # Only prefill is multimodal; subsequent decode steps are ordinary text.
-    prefill_fn = partial(module._prefill_forward, **pass_through_inputs)
+    prefill_fn = partial(
+        module._prefill_forward, logits_to_keep=1, **pass_through_inputs
+    )
     run_forward_fn = partial(_run_vlm_text_forward, module)
 
     return hf_common.generate(

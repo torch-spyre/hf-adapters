@@ -34,6 +34,16 @@ stopping, but diverges from stock HF in several ways worth documenting.
 
 ## Internal block alignment
 
+- Autoregressive generation projects only the final prompt token through the
+  vocabulary head. Chunked text prefill runs every chunk through the backbone
+  to populate KV caches, then runs the head once. Multimodal prefill also keeps
+  only the final row for the head. The prepared head still applies model-specific
+  scaling, softcapping, and TP vocabulary gathering. Direct full-forward helpers
+  retain all-token logits by default. Diffusion decoding uses its own loop and
+  needs logits for every canvas position.
+- Attention and KV shapes stay fixed across a prompt's prefill chunks to avoid
+  compiling a different graph for every populated prefix length.
+
 - External left and right padding are both accepted when each row has one
   contiguous valid span. The caller's padding width does not affect KV-cache
   capacity.

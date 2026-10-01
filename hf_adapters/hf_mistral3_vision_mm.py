@@ -258,6 +258,8 @@ def _logits_from_embeds(
     image_features=None,
     vision_mask=None,
     input_ids=None,
+    *,
+    logits_to_keep=0,
 ):
     """Run text backbone over embeds + LM head → logits."""
     h = _run_text_backbone(
@@ -271,7 +273,7 @@ def _logits_from_embeds(
         image_features=image_features,
         vision_mask=vision_mask,
     )
-    return run_lm_head(model, h)
+    return run_lm_head(model, h, logits_to_keep=logits_to_keep)
 
 
 # ---------------------------------------------------------------------------
@@ -290,13 +292,15 @@ def _prefill_forward(
     cache_index,
     pixel_values,
     image_sizes,
+    logits_to_keep=0,
 ):
     """Shared multimodal prefill: padded ids + image → first-step logits.
 
     Builds scaled text embeddings, zeroes the ``<image>`` slots, runs the
     Pixtral tower + projector for image features, then runs the Mistral
-    decoder once with the features injected before layer 0.  Returns
-    full-sequence logits ``[B, padded_len, padded_vocab]``.
+    decoder once with the features injected before layer 0. By default, returns
+    full-sequence logits ``[B, padded_len, padded_vocab]``; generation passes
+    ``logits_to_keep=1`` to project only the final row.
     """
     model_dtype = get_model_dtype(model)
 
@@ -319,4 +323,5 @@ def _prefill_forward(
         cache_index=cache_index,
         image_features=image_feats,  # on CPU; _inject_image_features moves it
         vision_mask=vision_mask,  # on CPU
+        logits_to_keep=logits_to_keep,
     )

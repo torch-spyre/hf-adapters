@@ -1192,11 +1192,13 @@ def prepare_lm_head_for_spyre(
     )
 
 
-def run_lm_head(model, hidden_states):
-    """Run the LM-head callable installed by :func:`prepare_lm_head_for_spyre`."""
+def run_lm_head(model, hidden_states, *, logits_to_keep: int = 0):
+    """Run the prepared head on the last requested rows (0 keeps every row)."""
     lm_head_forward = getattr(model, "_spyre_lm_head_forward", None)
     if lm_head_forward is None:
         raise RuntimeError("the model has not had an LM head prepared for Spyre")
+    if logits_to_keep:
+        hidden_states = hidden_states[:, -logits_to_keep:, :].contiguous()
     return lm_head_forward(hidden_states)
 
 
@@ -2529,6 +2531,7 @@ def generate(
     top_p=None,
     eos_token_id=_UNSET,
     timing=False,
+    prefill_backbone_fn: Optional[Callable] = None,
     prefill_fn: Optional[Callable] = None,
     decode_fn: Optional[Callable] = None,
     token_aligned_inputs: Optional[dict[str, tuple[torch.Tensor, Any]]] = None,
@@ -2584,6 +2587,10 @@ def generate(
             generation config; pass ``None`` to disable EOS stopping (matches
             stock ``generate()``).
         timing: Print per-token latency.
+        prefill_backbone_fn: Optional adapter backbone with the same arguments
+            as ``run_forward_fn``, returning hidden states. Text prefill runs
+            this for every chunk, then applies the prepared LM head only to
+            the last token. Custom ``prefill_fn`` hooks take precedence.
         prefill_chunk_size (via generation_config or kwargs): Query length for
             each prefill chunk. Falls back to the adapter's configured chunk
             size, or one-shot prefill when the adapter has no override.
@@ -2670,8 +2677,10 @@ def generate(
     min_new_tokens = cfg.min_new_tokens or 0
     begin_suppress_index = generation_begin_index(input_length, cfg.forced_bos_token_id)
 
-    if prefill_fn is None and run_forward_fn is None:
-        raise ValueError("run_forward_fn or prefill_fn must be provided")
+    if prefill_fn is None and prefill_backbone_fn is None and run_forward_fn is None:
+        raise ValueError(
+            "run_forward_fn, prefill_backbone_fn or prefill_fn must be provided"
+        )
     if decode_fn is None and run_forward_fn is None and effective_max_new_tokens > 1:
         raise ValueError("run_forward_fn or decode_fn must be provided")
 
@@ -2771,10 +2780,11 @@ def generate(
                     dtype=model_d_type,
                     device=DEVICE,
                 )
+                text_prefill_fn = prefill_backbone_fn or run_forward_fn
                 for chunk_start in range(0, padded_len, query_chunk_size):
                     chunk_end = chunk_start + query_chunk_size
                     prefill_mask = prefill_mask_builder.build(chunk_start)
-                    logits = run_forward_fn(  # type: ignore[misc]
+                    prefill_output = text_prefill_fn(  # type: ignore[misc]
                         model,
                         input_ids[:, chunk_start:chunk_end].to(DEVICE),
                         position_ids[:, chunk_start:chunk_end].to(DEVICE),
@@ -2785,6 +2795,13 @@ def generate(
                             chunk_start, query_chunk_size, DEVICE
                         ),
                     )
+                # Every chunk must populate KV, but only the final prompt
+                # token needs a vocabulary projection for generation.
+                logits = (
+                    run_lm_head(model, prefill_output, logits_to_keep=1)
+                    if prefill_backbone_fn is not None
+                    else prefill_output
+                )
             # Only the last chunk's final-token logits matter for next-token
             # selection. Slice on Spyre so the D2H copy transfers [B, V]
             # instead of the full [B, S, V] prefill output.

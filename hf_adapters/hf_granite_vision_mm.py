@@ -274,13 +274,15 @@ def _prefill_forward(
     cache_index,
     pixel_values,
     image_sizes,
+    logits_to_keep=0,
 ):
     """The shared multimodal prefill: padded ids + image → first-step logits.
 
     Builds scaled text embeddings, zeroes the ``<image>`` slots, builds the
     deepstack/spatial features, and runs the Granite decoder once with injection
-    at the mapped layers (writing into the supplied KV caches). Returns
-    full-sequence logits ``[B, padded_len, padded_vocab]``. The vision mask is
+    at the mapped layers (writing into the supplied KV caches). By default,
+    returns full-sequence logits ``[B, padded_len, padded_vocab]``; generation
+    passes ``logits_to_keep=1`` to project only the final row. The vision mask is
     built on the *padded* ids so it aligns with the embeddings.
 
     KV caches are passed in so the generation loop can size them for the full
@@ -307,6 +309,7 @@ def _prefill_forward(
         cache_index=cache_index,
         deepstack=deepstack,
         vision_mask=vision_mask,  # kept on CPU: _inject_deepstack scatters on CPU
+        logits_to_keep=logits_to_keep,
     )
 
 
@@ -321,6 +324,8 @@ def _logits_from_embeds(
     deepstack=None,
     vision_mask=None,
     input_ids=None,
+    *,
+    logits_to_keep=0,
 ):
     """Run text backbone over embeds + LM head / logits scaling -> logits.
 
@@ -339,4 +344,4 @@ def _logits_from_embeds(
         deepstack=deepstack,
         vision_mask=vision_mask,
     )
-    return run_lm_head(model, h)
+    return run_lm_head(model, h, logits_to_keep=logits_to_keep)
