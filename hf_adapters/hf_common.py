@@ -24,6 +24,7 @@ compiled block functions.
 import math
 import os
 import time
+import warnings
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Optional
@@ -329,6 +330,7 @@ def encode_prompts(
     padding_side: str = "left",
     add_generation_prompt: bool = True,
     chat: bool | None = None,
+    chat_template_kwargs: dict | None = None,
 ):
     """Tokenize prompt(s) following the model's canonical input scheme.
 
@@ -336,6 +338,7 @@ def encode_prompts(
     trailing generation prompt. Base models use the tokenizer directly, which
     preserves the checkpoint's own special-token post-processor. ``chat`` can
     force either behavior; by default, the presence of a chat template decides.
+    ``chat_template_kwargs`` passes model-specific options to the chat template.
 
     Returns a padded ``BatchEncoding`` containing ``input_ids`` and
     ``attention_mask``. A single string is normalized to a one-row batch.
@@ -356,6 +359,7 @@ def encode_prompts(
             return_tensors="pt",
             padding=True,
             padding_side=padding_side,
+            **(chat_template_kwargs or {}),
         )
     return tokenizer(
         prompt_list,
@@ -692,11 +696,28 @@ def permute_proj_for_rope(proj, num_heads, head_dim, perm):
     reordering as the weight or the rotary dims pick up the wrong offsets).
     Bias-free projections (Phi-3) skip the bias branch.
     """
-    w = proj.weight.data.view(num_heads, head_dim, -1)
-    proj.weight.data = w[:, perm, :].contiguous().view(num_heads * head_dim, -1)
+    # TP may load the shard directly on Spyre, whose eager backend cannot perform the advanced indexing used by this one-time permutation.
+    weight_device = proj.weight.device
+    weight_dtype = proj.weight.dtype
+    w = proj.weight.data.to("cpu").view(num_heads, head_dim, -1)
+    permuted_weight = w[:, perm, :].contiguous().view(num_heads * head_dim, -1)
+    if weight_device.type == "spyre":
+        from hf_adapters.spyre_tensor_parallel import _copy_linear
+
+        permuted_weight = _copy_linear(
+            permuted_weight,
+            dtype=weight_dtype,
+            device=weight_device,
+        )
+    else:
+        permuted_weight = permuted_weight.to(weight_device)
+    proj.weight = nn.Parameter(permuted_weight, requires_grad=False)
     if proj.bias is not None:
-        b = proj.bias.data.view(num_heads, head_dim)
-        proj.bias.data = b[:, perm].contiguous().view(num_heads * head_dim)
+        bias_device = proj.bias.device
+        b = proj.bias.data.to("cpu").view(num_heads, head_dim)
+        proj.bias.data = (
+            b[:, perm].contiguous().view(num_heads * head_dim).to(bias_device)
+        )
 
 
 def pad_qk_proj_for_rope(proj, n_heads, orig_head_dim, padded_head_dim):
@@ -2585,8 +2606,9 @@ def generate(
             stock ``generate()``).
         timing: Print per-token latency.
         prefill_chunk_size (via generation_config or kwargs): Query length for
-            each prefill chunk. Falls back to the adapter's configured chunk
-            size, or one-shot prefill when the adapter has no override.
+            each prefill chunk when the adapter does not configure one. An
+            adapter-configured chunk size takes precedence; an explicit caller
+            value is ignored with a warning. Without either, prefill is one-shot.
     """
     overrides = {
         "max_new_tokens": max_new_tokens,
@@ -2616,9 +2638,23 @@ def generate(
         model, generation_config, overrides, kwargs
     )
 
-    prefill_chunk_size = getattr(cfg, "prefill_chunk_size", None)
-    if prefill_chunk_size is None:
-        prefill_chunk_size = getattr(model, "_spyre_prefill_chunk_size", None)
+    configured_prefill_chunk_size = getattr(model, "_spyre_prefill_chunk_size", None)
+    requested_prefill_chunk_size = getattr(cfg, "prefill_chunk_size", None)
+    if (
+        configured_prefill_chunk_size is not None
+        and requested_prefill_chunk_size is not None
+    ):
+        warnings.warn(
+            f"Ignoring prefill_chunk_size={requested_prefill_chunk_size!r}; "
+            f"this model requires prefill_chunk_size={configured_prefill_chunk_size!r}.",
+            UserWarning,
+            stacklevel=2,
+        )
+    prefill_chunk_size = (
+        configured_prefill_chunk_size
+        if configured_prefill_chunk_size is not None
+        else requested_prefill_chunk_size
+    )
     if prefill_chunk_size is not None and (
         isinstance(prefill_chunk_size, bool)
         or not isinstance(prefill_chunk_size, int)
