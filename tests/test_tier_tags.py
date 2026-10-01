@@ -32,9 +32,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+import tests._tier_tags as tier_tags_module
 from tests._tier_tags import (
     SUITE_TIERS,
     model_tag,
+    platform_tag,
     result_tags,
     tier_tags,
 )
@@ -290,6 +292,7 @@ def test_result_tags_emits_model_then_tiers():
     pairs = result_tags("token_compare", {"model_path": "ibm/granite"})
     assert [n for n, _ in pairs] == ["tag"] * len(pairs)
     assert [v for _, v in pairs] == [
+        platform_tag(),
         "model__ibm/granite",
         "testtype__integration",
         "testtype__regression",
@@ -298,8 +301,21 @@ def test_result_tags_emits_model_then_tiers():
     ]
 
 
-def test_result_tags_is_empty_when_there_is_nothing_to_say():
-    assert result_tags("", {}) == []
+def test_result_tags_carries_only_the_platform_when_there_is_nothing_else():
+    assert result_tags("", {}) == [("tag", platform_tag())]
+
+
+@pytest.mark.parametrize(
+    "machine, expected",
+    [
+        ("x86_64", "platform__x86_64"),
+        ("ppc64le", "platform__ppc64le"),
+        ("", "platform__unknown"),
+    ],
+)
+def test_platform_tag_matches_torch_spyre_normalization(monkeypatch, machine, expected):
+    monkeypatch.setattr(tier_tags_module.platform, "machine", lambda: machine)
+    assert platform_tag() == expected
 
 
 def test_tag_values_match_the_ingest_namespace_form():
