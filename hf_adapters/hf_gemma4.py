@@ -274,16 +274,21 @@ def _query_row_mask(h, attn_mask):
     K/V they write in the following layer) neutral throughout the decoder.
     Valid query rows always contain at least one zero-valued, attendable entry.
 
-    The fully-masked test is derived on **CPU** (a boolean reduction) and only
-    the resulting float multiplier is moved to ``h``'s device, mirroring
-    ``add_causal_sliding_window_band`` — Spyre's compiled backend rejects
-    on-device boolean reductions. This runs in the eager block driver, outside
-    any compiled region, so it is static and Spyre-safe.
+    A chunked causal mask's builder can derive row validity directly from its
+    padding boundary. Other masks use a CPU boolean reduction. Only the small
+    resulting multiplier needs to move to ``h``'s device for the chunked path;
+    Spyre's compiled backend rejects on-device boolean reductions.
     """
     # attn_mask: [B, 1, S, cache_len]. Allowed entries are exactly zero;
     # disallowed entries use the finite value returned by _mask_fill_value.
-    am = attn_mask.to("cpu")
-    live_rows = (am == 0).any(dim=-1).any(dim=1).to(h.dtype)  # [B, S]
+    builder = getattr(attn_mask, "_spyre_chunked_prefill_builder", None)
+    if builder is not None:
+        live_rows = builder.live_query_rows(
+            attn_mask._spyre_chunked_prefill_query_start
+        ).to(h.dtype)
+    else:
+        am = attn_mask.to("cpu")
+        live_rows = (am == 0).any(dim=-1).any(dim=1).to(h.dtype)  # [B, S]
     return live_rows.to(h.device)[:, :, None]
 
 
