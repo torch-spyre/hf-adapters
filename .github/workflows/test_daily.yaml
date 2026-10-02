@@ -1,12 +1,16 @@
 name: test_daily
 
 # ---------------------------------------------------------------------------
-# Daily edge-case sweep. Delegates entirely to _test_matrix.yaml with
-# test_type: regression and edge_cases_only: true, so only the
-# tests/spyre/edge_cases/ suite runs on the standing image_torch_spyre set.
+# Daily sweep. Runs two independent legs via _test_matrix.yaml:
+#   1. edge-cases  — test_type: regression, edge_cases_only: true
+#                    (tests/spyre/edge_cases/ only)
+#   2. module-tests — test_type: model_module, edge_cases_only: false (default)
+#                    (spyre-model-module-tests, one leg per
+#                     tests/configs/module_tests/*.yaml)
 #
-# pre-commit / mypy / check-uv-lock still run as usual; every standard
-# spyre-*-tests suite short-circuits on !inputs.edge_cases_only and skips.
+# Module-test results are ingested into ClickHouse by the ingest-module-logs
+# job in push-test-results-to-clickhouse.yaml, which fires on test_daily
+# completion via workflow_run.
 # ---------------------------------------------------------------------------
 on:
   schedule:
@@ -53,6 +57,9 @@ permissions:
   actions: read
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Leg 1: edge-case tests (unchanged behaviour)
+  # ---------------------------------------------------------------------------
   run-tests:
     uses: ./.github/workflows/_test_matrix.yaml
     with:
@@ -65,23 +72,42 @@ jobs:
       edge_cases_only: true
       models: ${{ inputs.models || '' }}
 
-  # ----------------------------------------------------------------------------------
-  # Required check gate -- fans in the delegated suite run so a single
-  # stable job name reports pass/fail.
-  # ----------------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # Leg 2: module tests — runs independently of edge-cases so a failure in
+  # one leg does not cancel the other.
+  # edge_cases_only is omitted (defaults false) so the module-test jobs are
+  # not suppressed by the edge-cases guard in _test_matrix.yaml.
+  # ---------------------------------------------------------------------------
+  run-module-tests:
+    uses: ./.github/workflows/_test_matrix.yaml
+    with:
+      image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
+      extra_test_flags: -vvv -s
+      extra_test_flags_multi_spyre: -vvv -s
+      ref: ${{ inputs.ref || '' }}
+      repository: ${{ inputs.repository || '' }}
+      test_type: model_module
+      models: ${{ inputs.models || '' }}
+
+  # ---------------------------------------------------------------------------
+  # Fan-in gate: single stable job name for pass/fail polling.
+  # Waits for both legs; fails if either failed or was cancelled.
+  # ---------------------------------------------------------------------------
   daily-test-result:
     name: Daily test result
     runs-on: ubuntu-latest
-    needs: run-tests
+    needs: [run-tests, run-module-tests]
     if: always()
     steps:
       - name: Evaluate test results
         run: |
-          RESULT="${{ needs.run-tests.result }}"
-          echo "run-tests result: ${RESULT}"
-          if [[ "${RESULT}" == "success" ]]; then
-            echo "Daily edge-case suite passed."
+          EDGE="${{ needs.run-tests.result }}"
+          MODULE="${{ needs.run-module-tests.result }}"
+          echo "edge-cases result:  ${EDGE}"
+          echo "module-tests result: ${MODULE}"
+          if [[ "${EDGE}" == "success" && "${MODULE}" == "success" ]]; then
+            echo "Daily suite passed (edge-cases + module-tests)."
             exit 0
           fi
-          echo "Daily edge-case suite failed or was cancelled."
+          echo "Daily suite failed or was cancelled."
           exit 1
