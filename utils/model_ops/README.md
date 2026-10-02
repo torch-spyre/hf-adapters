@@ -31,6 +31,8 @@ PyTorch separately. The exact index URL depends on your CUDA version (replace
 ```
 uv pip install --upgrade --force-reinstall "torch==2.13.0+cu130" --index-url https://download.pytorch.org/whl/cu130
 uv pip install mistral_common[opencv]
+uv pip install sentence_transformers
+uv pip install PIL
 ```
 
 Then change directory into `utils/models_ops/` to run the drivers (the absolute
