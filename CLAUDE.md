@@ -54,6 +54,7 @@ Import shared utilities from `hf_common.py`: `PrecomputedRotaryEmbedding`, `appl
 - [ ] Registry entry in `tests/model_registry.py`
 - [ ] Compiles + runs end-to-end on Spyre (`tests/spyre/test_e2e_*_spyre.py`, no crash/NaN)
 - [ ] Added to the Verified Checkpoints + Model Family Coverage tables in `ARCHITECTURE.md` (the single source of truth; bump the README badge counts)
+- [ ] Regenerated `resources/adapter_added_dates.json` from a full checkout (`python tests/spyre/weekly_generation/regenerate_adapter_added_dates.py`) so the weekly scan stamps the new adapter's real add-date — `tests/test_adapter_added_dates.py` fails CI otherwise
 
 ## Critical Rules
 
