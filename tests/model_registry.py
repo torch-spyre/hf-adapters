@@ -26,6 +26,7 @@ automatically cover them by selecting one representative model per adapter.
 from __future__ import annotations
 
 import os
+import platform
 import types
 
 import pytest
@@ -767,18 +768,39 @@ def _select_representative_paths(
 
 
 def _load_excluded_paths() -> frozenset[str]:
-    """Load excluded model paths from tests/model_lists/exclude.yaml."""
+    """Load excluded model paths from tests/model_lists/exclude.yaml.
+
+    Always loads the ``models:`` section.  On ppc64le also loads the
+    ``ppc64le_models:`` section so Qwen (and any future ppc64le-only exclusions)
+    are never downloaded or run on that architecture.
+    """
     exclude_file = os.path.join(
         os.path.dirname(__file__), "model_lists", "exclude.yaml"
     )
     if not os.path.isfile(exclude_file):
         return frozenset()
+
+    on_ppc64le = platform.machine() == "ppc64le"
+
     excluded: set[str] = set()
+    # Simple line-by-line parse: track which top-level key we are under so we
+    # can apply per-section logic without pulling in a YAML library.
+    current_section: str | None = None
     with open(exclude_file) as f:
         for line in f:
             stripped = line.split("#", 1)[0].strip()
+            if not stripped:
+                continue
+            # Detect top-level section headers (no leading whitespace, ends with ':')
+            if not line[0].isspace() and stripped.endswith(":"):
+                current_section = stripped[:-1]
+                continue
             if stripped.startswith("- "):
-                excluded.add(stripped[2:].strip())
+                path = stripped[2:].strip()
+                if current_section == "models":
+                    excluded.add(path)
+                elif current_section == "ppc64le_models" and on_ppc64le:
+                    excluded.add(path)
     return frozenset(excluded)
 
 
