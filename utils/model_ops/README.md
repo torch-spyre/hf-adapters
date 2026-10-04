@@ -29,7 +29,7 @@ PyTorch separately. The exact index URL depends on your CUDA version (replace
 `cu130` with the build that matches your driver, e.g. `cu121`, `cu124`):
 
 ```
-uv pip install --upgrade --force-reinstall "torch==2.13.0+cu130" --index-url https://download.pytorch.org/whl/cu130
+uv pip install --upgrade --force-reinstall "torch==2.13.0+cu130" torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
 uv pip install mistral_common[opencv]
 ```
 
