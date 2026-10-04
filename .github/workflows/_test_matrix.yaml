@@ -276,20 +276,15 @@ jobs:
     outputs:
       torch_spyre_sha: ${{ steps.resolve.outputs.torch_spyre_sha }}
     steps:
-      - name: Resolve origin/main to a pinned SHA
+      - name: Pin torch-spyre v0.5.0-rc.2
         id: resolve
         working-directory: /home/senuser/torch-spyre
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           git config --global --add safe.directory '*'
-          git fetch --force origin
-          SHA="$(git rev-parse origin/main)"
-          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "resolve-torch-spyre: origin/main did not resolve to a 40-char SHA (got '$SHA')" >&2
-            exit 1
-          fi
-          echo "Resolved torch-spyre origin/main -> ${SHA}"
+          SHA="36137c8d3fce4cc75f25609ca2d93a583b6213c2"
+          echo "Resolved torch-spyre v0.5.0-rc.2 -> ${SHA}"
           echo "torch_spyre_sha=${SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Record pinned SHA in the run summary
