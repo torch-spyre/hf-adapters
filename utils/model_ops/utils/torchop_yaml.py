@@ -1759,7 +1759,12 @@ class TorchOpCollector:
         return False
 
     def write_yaml(
-        self, model_name, output_dir=".", yaml_defaults=None, supress_spyre=False
+        self,
+        model_name,
+        *,
+        output_dir=".",
+        yaml_defaults=None,
+        supress_spyre=False,
     ):
         defaults = {**TorchOpCollector.DEFAULT_YAML_DEFAULTS, **(yaml_defaults or {})}
 

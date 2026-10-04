@@ -16,8 +16,8 @@ import os
 
 import torch
 from transformers import (
-    AutoProcessor,
     AutoModelForMultimodalLM,
+    AutoProcessor,
     StaticCache,
 )
 from utils.torchop_yaml import TorchOpCollector, require_cuda, setup_logging
@@ -52,10 +52,10 @@ def main():
     encoded_input = tokenizer.apply_chat_template(
         messages,
         tokenize=True,
-        return_dict=True, 
+        return_dict=True,
         return_tensors="pt",
         add_generation_prompt=True,
-        enable_thinking=False
+        enable_thinking=False,
     ).to(device)
     input_ids = encoded_input["input_ids"]
     batch, input_len = input_ids.shape[0], input_ids.shape[-1]
@@ -89,7 +89,12 @@ def main():
         print(op, ctx.test_case_count[op])
     print(f"Total ops with test configs generated: {len(ctx.test_gen_ops)}")
 
-    ctx.write_yaml(os.path.basename(model_path))
+    ctx.write_yaml(
+        os.path.basename(model_path),
+        batch=batch,
+        input_len=input_len,
+        output_len=output_len,
+    )
 
 
 if __name__ == "__main__":
