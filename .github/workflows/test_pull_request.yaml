@@ -96,8 +96,9 @@ jobs:
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.auto_merge != null) }}
     uses: ./.github/workflows/_test_matrix.yaml
     with:
-      # Per-PR ephemeral image label when provided, else the standing set for this event.
-      image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
+      # Immutable release image containing torch-spyre v0.5.0-rc.2 and its matching runtime.
+      image_label: image_id_d69ed0b28b96_r35023
+      prebaked_image: true
       extra_test_flags: -vvv -s
       extra_test_flags_multi_spyre: -vvv -s
       ref: v0.5.0-rc.1
