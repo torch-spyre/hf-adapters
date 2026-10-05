@@ -34,6 +34,7 @@ from matplotlib.patches import Patch
 
 # Column indices within a CSV row (see table_schema.TABLE_COLUMNS).
 COL_MODEL: int = 0
+COL_ADAPTER: int = 2
 COL_SNAPSHOT: int = 4
 COL_VERIFIED_SPYRE: int = 7
 
@@ -82,6 +83,31 @@ def aggregate(path: Path) -> dict[str, tuple[int, int]]:
     return {d: (len(verified[d]), len(not_verified[d])) for d in dates}
 
 
+def adapters_per_date(path: Path) -> dict[str, int]:
+    """Count distinct adapters (``adapter_name``) per snapshot date.
+
+    Returns ``{snapshot_date: n_adapters}``. Counts unique adapter names, so
+    the many models a single adapter covers collapse to one.
+    """
+    adapters: dict[str, set[str]] = defaultdict(set)
+    with path.open(newline="") as handle:
+        for row in csv.reader(handle):
+            if not row:
+                continue
+            date: str = row[COL_SNAPSHOT].strip().strip('"')
+            adapters[date].add(row[COL_ADAPTER].strip().strip('"'))
+    return {d: len(names) for d, names in adapters.items()}
+
+
+def dummy_adapters(dates: list[str]) -> dict[str, int]:
+    """Synthesize a plausible adapter-count ramp (1 -> ~25) over ``dates``."""
+    n: int = len(dates)
+    return {
+        date: (1 if n <= 1 else round(1 + 24 * i / (n - 1)))
+        for i, date in enumerate(sorted(dates))
+    }
+
+
 def dummy_aggregate(scale: int) -> dict[str, tuple[int, int]]:
     """Synthesize a plausible ``{snapshot_date: (verified, not_verified)}``.
 
@@ -111,17 +137,23 @@ def dummy_aggregate(scale: int) -> dict[str, tuple[int, int]]:
     return out
 
 
-def resolve_table(path: Path | None, dummy_scale: int) -> dict[str, tuple[int, int]]:
+def resolve_table(
+    path: Path | None,
+    dummy_scale: int,
+) -> tuple[dict[str, tuple[int, int]], dict[str, int]]:
     """Aggregate a table from its CSV, or fall back to dummy data.
 
-    Returns dummy data when ``path`` is ``None`` (flag not provided) or points
-    at a file that does not exist; otherwise reads and aggregates the CSV.
+    Returns ``(model_counts, adapter_counts)`` where ``model_counts`` is
+    ``{date: (verified, not_verified)}`` and ``adapter_counts`` is
+    ``{date: n_adapters}``. Falls back to dummy data when ``path`` is ``None``
+    (flag not provided) or points at a file that does not exist.
     """
     if path is None or not path.exists():
         reason: str = "no path provided" if path is None else f"file not found: {path}"
         print(f"[dummy] {reason} — generating dummy data (scale={dummy_scale:,})")
-        return dummy_aggregate(dummy_scale)
-    return aggregate(path)
+        models: dict[str, tuple[int, int]] = dummy_aggregate(dummy_scale)
+        return models, dummy_adapters(list(models))
+    return aggregate(path), adapters_per_date(path)
 
 
 def _short(date: str) -> str:
@@ -133,12 +165,15 @@ def _short(date: str) -> str:
 def build_rows(
     gen: dict[str, tuple[int, int]],
     emb: dict[str, tuple[int, int]],
+    gen_adapters: dict[str, int],
+    emb_adapters: dict[str, int],
 ) -> list[dict[str, object]]:
     """Merge the two tables onto the union of their snapshot dates.
 
-    Each row is ``{"date", "gen": (tested, verified) | None, "emb": ...}``;
-    a table absent on a date yields ``None`` so its column and line break
-    rather than interpolating across a snapshot that was never measured.
+    Each row is ``{"date", "gen": (tested, verified) | None, "emb": ...,
+    "gen_adapters": int | None, "emb_adapters": int | None}``; a table absent
+    on a date yields ``None`` so its column and line break rather than
+    interpolating across a snapshot that was never measured.
     """
     all_dates: list[str] = sorted(set(gen) | set(emb))
     rows: list[dict[str, object]] = []
@@ -154,6 +189,8 @@ def build_rows(
             row["emb"] = (v + nv, v)
         else:
             row["emb"] = None
+        row["gen_adapters"] = gen_adapters.get(date)
+        row["emb_adapters"] = emb_adapters.get(date)
         rows.append(row)
     return rows
 
@@ -235,21 +272,101 @@ def _draw_line_and_labels(
         )
 
 
+def _draw_adapter_line(
+    ax: plt.Axes,
+    xpos: np.ndarray,
+    series: list[int | None],
+    color: str,
+) -> None:
+    """Draw one table's adapter-count line (broken across gaps).
+
+    Labels only the last present point, since the lower panel's small 0..max
+    scale makes per-point labels crowd; the endpoint shows the current count.
+    """
+    seg_x: list[float] = []
+    seg_y: list[int] = []
+
+    def flush() -> None:
+        if seg_x:
+            ax.plot(
+                seg_x,
+                seg_y,
+                color=color,
+                lw=2,
+                zorder=5,
+                solid_capstyle="round",
+                solid_joinstyle="round",
+            )
+            ax.scatter(
+                seg_x,
+                seg_y,
+                s=30,
+                color=color,
+                zorder=6,
+                edgecolors=SURFACE,
+                linewidths=2,
+            )
+
+    last_x: float | None = None
+    last_y: int | None = None
+    for x, value in zip(xpos, series):
+        if value is None:
+            flush()
+            seg_x, seg_y = [], []
+        else:
+            seg_x.append(float(x))
+            seg_y.append(value)
+            last_x, last_y = float(x), value
+    flush()
+
+    if last_x is not None and last_y is not None:
+        ax.annotate(
+            f"{last_y}",
+            (last_x, last_y),
+            textcoords="offset points",
+            xytext=(0, 8),
+            ha="center",
+            va="bottom",
+            fontsize=8.5,
+            fontweight="bold",
+            color=color,
+            zorder=7,
+            path_effects=[pe.withStroke(linewidth=3, foreground=SURFACE)],
+        )
+
+
 def render(rows: list[dict[str, object]], out_path: Path) -> None:
-    """Draw the full chart for the merged rows and save it to ``out_path``."""
+    """Draw the full chart for the merged rows and save it to ``out_path``.
+
+    Two stacked panels share the x-axis: the top panel shows models tested
+    (stacked bars + verified-count lines, ~10k scale); the bottom panel shows
+    the number of adapters per snapshot (two lines, ~0..30 scale). The scales
+    differ by ~400x, so each metric gets its own panel rather than a dual axis.
+    """
     dates: list[str] = [str(r["date"]) for r in rows]
     gen_series: list[tuple[int, int] | None] = [r["gen"] for r in rows]  # type: ignore[misc]
     emb_series: list[tuple[int, int] | None] = [r["emb"] for r in rows]  # type: ignore[misc]
+    gen_adapters: list[int | None] = [r["gen_adapters"] for r in rows]  # type: ignore[misc]
+    emb_adapters: list[int | None] = [r["emb_adapters"] for r in rows]  # type: ignore[misc]
 
     n: int = len(dates)
     x: np.ndarray = np.arange(n, dtype=float)
     bar_width: float = 0.34
     offset: float = 0.19  # each column sits ±offset from the date center
 
-    fig, ax = plt.subplots(figsize=(13.5, 5.8), dpi=150)
+    fig, (ax, ax_bot) = plt.subplots(
+        2,
+        1,
+        figsize=(13.5, 7.2),
+        dpi=150,
+        sharex=True,
+        gridspec_kw={"height_ratios": [3, 1], "hspace": 0.12},
+    )
     fig.patch.set_facecolor(SURFACE)
     ax.set_facecolor(SURFACE)
+    ax_bot.set_facecolor(SURFACE)
 
+    # --- top panel: models tested (bars + verified-count lines) ---
     _draw_bars(ax, x - offset, gen_series, GEN_VER, GEN_NOT, bar_width)
     _draw_bars(ax, x + offset, emb_series, EMB_VER, EMB_NOT, bar_width)
     _draw_line_and_labels(ax, x - offset, gen_series, GEN_LINE)
@@ -264,14 +381,38 @@ def render(rows: list[dict[str, object]], out_path: Path) -> None:
     ax.set_yticklabels(
         [f"{int(v):,}" for v in np.linspace(0, nice_top, 6)], color=MUTED, fontsize=9
     )
-    ax.set_xticks(x)
-    ax.set_xticklabels(dates, color=MUTED, fontsize=9)
+    ax.set_ylabel("models tested", color=SECONDARY, fontsize=10)
     ax.yaxis.grid(True, color=GRID, lw=1, zorder=0)
     ax.set_axisbelow(True)
     for spine in ("top", "right", "left"):
         ax.spines[spine].set_visible(False)
     ax.spines["bottom"].set_color(BASELINE)
     ax.tick_params(length=0)
+
+    # --- bottom panel: adapter counts (two lines, own scale) ---
+    _draw_adapter_line(ax_bot, x - offset, gen_adapters, GEN_LINE)
+    _draw_adapter_line(ax_bot, x + offset, emb_adapters, EMB_LINE)
+
+    adapter_values: list[int] = [
+        a for a in gen_adapters + emb_adapters if a is not None
+    ]
+    adapter_top: int = (
+        int(np.ceil(max(adapter_values) / 5.0) * 5) if adapter_values else 5
+    )
+    ax_bot.set_ylim(0, adapter_top * 1.15)
+    ax_bot.set_yticks(np.linspace(0, adapter_top, 3))
+    ax_bot.set_yticklabels(
+        [f"{int(v)}" for v in np.linspace(0, adapter_top, 3)], color=MUTED, fontsize=9
+    )
+    ax_bot.set_ylabel("adapters", color=SECONDARY, fontsize=10)
+    ax_bot.yaxis.grid(True, color=GRID, lw=1, zorder=0)
+    ax_bot.set_axisbelow(True)
+    for spine in ("top", "right", "left"):
+        ax_bot.spines[spine].set_visible(False)
+    ax_bot.spines["bottom"].set_color(BASELINE)
+    ax_bot.tick_params(length=0)
+    ax_bot.set_xticks(x)
+    ax_bot.set_xticklabels(dates, color=MUTED, fontsize=9)
 
     fig.suptitle(
         "Spyre support by snapshot date — generative vs embedding",
@@ -332,13 +473,14 @@ def render(rows: list[dict[str, object]], out_path: Path) -> None:
     fig.text(
         0.5,
         0.004,
-        "Verified + not-verified = total tested (column height).",
+        "Top: verified + not-verified = total tested (column height). "
+        "Bottom: distinct adapters per snapshot (same colors as the verified-count lines).",
         ha="center",
         color=MUTED,
         fontsize=7.5,
     )
 
-    fig.subplots_adjust(top=0.82, bottom=0.10, left=0.055, right=0.985)
+    fig.subplots_adjust(top=0.86, bottom=0.08, left=0.055, right=0.985)
     fig.savefig(out_path, facecolor=SURFACE)
     print(f"wrote {out_path}")
 
@@ -369,9 +511,9 @@ def main() -> None:
 
     # Fall back to dummy data per-table when its path is not provided or missing.
     # Distinct scales give the two tables visibly different populations.
-    gen: dict[str, tuple[int, int]] = resolve_table(args.generative, dummy_scale=8100)
-    emb: dict[str, tuple[int, int]] = resolve_table(args.embedding, dummy_scale=9900)
-    rows: list[dict[str, object]] = build_rows(gen, emb)
+    gen, gen_adapters = resolve_table(args.generative, dummy_scale=8100)
+    emb, emb_adapters = resolve_table(args.embedding, dummy_scale=9900)
+    rows: list[dict[str, object]] = build_rows(gen, emb, gen_adapters, emb_adapters)
     render(rows, args.output)
 
 
