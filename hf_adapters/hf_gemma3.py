@@ -99,9 +99,9 @@ def _patch_gemma_rmsnorm(rmsnorm_cls):
     lowers the fp32-upcast pattern), Gemma2/3's RMSNorm needs a dedicated patch
     because it:
       - uses ``self.eps`` (not ``variance_epsilon``),
+      - is always scaled (no scale-free variant — there is no V-norm).
       - is **unit-offset**: scales by ``(1.0 + weight)`` rather than ``weight``
         (Gemma stores norm weights centered at 0),
-      - is always scaled (no scale-free variant — there is no V-norm).
 
     On Spyre we keep the reduction at input dtype; on CPU we upcast to fp32 to
     match stock HF, whose Gemma RMSNorm computes the norm and the
