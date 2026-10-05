@@ -16,7 +16,6 @@ from __future__ import annotations
 import numpy as np
 import spyre_support_common as common
 from matplotlib.axes import Axes
-from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from spyre_support_common import (
     BAR_WIDTH,
@@ -27,7 +26,6 @@ from spyre_support_common import (
     GEN_NOT,
     GEN_VER,
     OFFSET,
-    SURFACE,
     Record,
     TopPanel,
     draw_line_all_labels,
@@ -88,36 +86,20 @@ def _draw_top(
 
 
 def _top_panel() -> TopPanel:
-    """Bundle the absolute-count top panel: drawing, text and legend."""
-    # One row per table (Generative, Embedding). matplotlib fills a legend
-    # column-major, so the handles are interleaved (gen, emb, ...) with ncol=3.
+    """Bundle the absolute-count top panel: drawing, text and legend.
+
+    The verified-count lines are still drawn in :func:`_draw_top`; they are
+    just omitted from the legend, which shows only the verified / not-verified
+    bar swatches. One row per table (Generative, Embedding); matplotlib fills a
+    legend column-major, so the handles are interleaved (gen, emb, ...).
+    """
     gen_row: list[object] = [
         Patch(facecolor=GEN_VER, label="Generative — verified"),
         Patch(facecolor=GEN_NOT, label="Generative — not verified"),
-        Line2D(
-            [0],
-            [0],
-            color=GEN_LINE,
-            lw=2,
-            marker="o",
-            mfc=GEN_LINE,
-            mec=SURFACE,
-            label="Generative verified count",
-        ),
     ]
     emb_row: list[object] = [
         Patch(facecolor=EMB_VER, label="Embedding — verified"),
         Patch(facecolor=EMB_NOT, label="Embedding — not verified"),
-        Line2D(
-            [0],
-            [0],
-            color=EMB_LINE,
-            lw=2,
-            marker="o",
-            mfc=EMB_LINE,
-            mec=SURFACE,
-            label="Embedding verified count",
-        ),
     ]
     return TopPanel(
         draw=_draw_top,
@@ -128,7 +110,7 @@ def _top_panel() -> TopPanel:
             "verified-count lines)."
         ),
         legend_handles=[h for pair in zip(gen_row, emb_row) for h in pair],
-        legend_ncol=3,
+        legend_ncol=2,
     )
 
 
