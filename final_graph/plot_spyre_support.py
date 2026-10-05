@@ -94,18 +94,18 @@ def _top_panel() -> TopPanel:
     legend column-major, so the handles are interleaved (gen, emb, ...).
     """
     gen_row: list[object] = [
-        Patch(facecolor=GEN_VER, label="Generative — verified"),
-        Patch(facecolor=GEN_NOT, label="Generative — not verified"),
+        Patch(facecolor=GEN_VER, label="Generative — supported"),
+        Patch(facecolor=GEN_NOT, label="Generative — total tested"),
     ]
     emb_row: list[object] = [
-        Patch(facecolor=EMB_VER, label="Embedding — verified"),
-        Patch(facecolor=EMB_NOT, label="Embedding — not verified"),
+        Patch(facecolor=EMB_VER, label="Embedding — supported"),
+        Patch(facecolor=EMB_NOT, label="Embedding — total tested"),
     ]
     return TopPanel(
         draw=_draw_top,
         title="Spyre support by snapshot date — generative vs embedding",
         footer=(
-            "Top: verified + not-verified = total tested (column height). "
+            "Top: supported upon total tested (column height). "
             "Bottom: distinct adapters per snapshot (same colors as the "
             "verified-count lines)."
         ),
