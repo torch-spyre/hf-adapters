@@ -1,0 +1,56 @@
+name: Mark a pod-level retry's JUnit report
+description: >-
+  Call with if: always() from a *-retry job, after its tests and before the
+  upload that overwrites the first attempt's report. Stamps every testcase
+  result.retried=pod and, from the first attempt's report, keeps each earlier
+  failure as result.prior_status/result.prior_message. Never fails the job.
+
+inputs:
+  artifact_name:
+    description: Artifact name the retry's upload overwrites (the first attempt's report).
+    required: true
+  report:
+    description: The retry's JUnit XML, as passed to the upload's path (relative to the workspace or absolute).
+    required: true
+  ingest_lib:
+    description: pip spec for the library providing spyre_clickhouse_ingest.mark_retried.
+    required: false
+    default: "git+https://github.com/torch-spyre/torch-spyre@main#subdirectory=extensions/clickhouse-ingest"
+
+runs:
+  using: composite
+  steps:
+    - name: Download the first attempt's JUnit report
+      continue-on-error: true
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: ${{ runner.temp }}/replaced-report
+
+    - name: Mark the retry's report
+      shell: bash
+      env:
+        REPORT: ${{ inputs.report }}
+        INGEST_LIB: ${{ inputs.ingest_lib }}
+      run: |
+        set +e
+        source "$HOME/.bashrc" >/dev/null 2>&1
+        [[ "$REPORT" = /* ]] || REPORT="${GITHUB_WORKSPACE}/${REPORT}"
+        if [[ ! -f "$REPORT" ]]; then
+          echo "::warning::no retry report at ${REPORT}; nothing to mark"
+          exit 0
+        fi
+        # A single-file upload stores only the basename; fall back to the artifact's sole XML.
+        replaced_dir="${RUNNER_TEMP}/replaced-report"
+        replaced="${replaced_dir}/$(basename "$REPORT")"
+        if [[ ! -f "$replaced" ]]; then
+          shopt -s nullglob
+          xmls=("$replaced_dir"/*.xml)
+          replaced=""
+          [[ ${#xmls[@]} -eq 1 ]] && replaced="${xmls[0]}"
+        fi
+        [[ -n "$replaced" ]] || echo "::warning::first attempt's report not found; marking retried=pod only"
+        uv run --no-project --with "$INGEST_LIB" \
+          python -m spyre_clickhouse_ingest.mark_retried pod "$REPORT" ${replaced:+"$replaced"} \
+          || echo "::warning::mark_retried failed; the report is uploaded unmarked"
+        exit 0

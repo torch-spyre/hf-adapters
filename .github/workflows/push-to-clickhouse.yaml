@@ -189,11 +189,11 @@ jobs:
           source .venv/bin/activate
           echo "VIRTUAL_ENV $VIRTUAL_ENV"
 
+      # From uv.lock, so the prefilter loads configs with the same transformers the scans run.
       - name: Install Python dependencies
         run: |
           source .venv/bin/activate
-          uv pip install huggingface_hub tqdm transformers clickhouse-connect python-dotenv
-          uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+          uv sync --frozen --no-install-project --no-default-groups --group models-ops
           uv pip install "${CH_INGEST_LIB}"
 
       # TEMPORARY debug step: confirms HF_TOKEN actually reaches this job as a

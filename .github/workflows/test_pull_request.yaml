@@ -95,6 +95,8 @@ jobs:
     # Skip entirely once auto_merge is enabled on the PR -- native GHA checks aren't required there; run-spyre-unit-tests below still reports green since "skipped" isn't a failure.
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.auto_merge != null) }}
     uses: ./.github/workflows/_test_matrix.yaml
+    # Reusable workflows get no secrets unless passed; without this HF_TOKEN resolves to "" in every test job.
+    secrets: inherit
     with:
       # Per-PR ephemeral image label when provided, else the standing set for this event.
       image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}

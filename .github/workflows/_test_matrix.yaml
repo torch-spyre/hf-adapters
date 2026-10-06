@@ -1203,6 +1203,8 @@ jobs:
       - name: Run test_vlm_e2e_spyre.py for ${{ matrix.model_key }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Unbuffered so print() progress survives a timeout/OOM kill instead of vanishing from the log.
+          PYTHONUNBUFFERED: "1"
         run: |
           echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
@@ -2126,7 +2128,14 @@ jobs:
           make load-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-load-${{ matrix.model_key }}.xml
           echo "tests done"
 
-      # overwrite: true replaces the failed first attempt's report (same name) so downstream consumers see only the corrected result.
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-load-${{ env.SAFE_MODEL_KEY }}
+          report: junit-load-${{ matrix.model_key }}.xml
+
+      # overwrite: true replaces the first attempt's report (same name); its failures survive as result.prior_* marks.
       - name: Upload JUnit results
         if: always()
         uses: actions/upload-artifact@v4
@@ -2191,6 +2200,13 @@ jobs:
           echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
           make smoke-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-smoke-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-smoke-${{ env.SAFE_MODEL_KEY }}
+          report: junit-smoke-${{ matrix.model_key }}.xml
 
       - name: Upload JUnit results
         if: always()
@@ -2327,6 +2343,13 @@ jobs:
           make token-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-token-compare-${{ env.SAFE_MODEL_KEY }}
+          report: junit-token-compare-${{ matrix.model_key }}.xml
+
       - name: Upload JUnit results
         if: always()
         uses: actions/upload-artifact@v4
@@ -2390,6 +2413,13 @@ jobs:
           cd "$CLONED_HF_ADAPTERS_DIR"
           make model-components-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' JUNIT_XML=junit-model-components.xml
           echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-model-components
+          report: junit-model-components.xml
 
       - name: Upload JUnit results
         if: always()
@@ -2456,6 +2486,13 @@ jobs:
           make embed-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-embed-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-embed-compare-${{ env.SAFE_MODEL_KEY }}
+          report: junit-embed-compare-${{ matrix.model_key }}.xml
+
       - name: Upload JUnit results
         if: always()
         uses: actions/upload-artifact@v4
@@ -2512,6 +2549,8 @@ jobs:
       - name: Run test_vlm_e2e_spyre.py for ${{ matrix.model_key }} (pod-level retry)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Unbuffered so print() progress survives a timeout/OOM kill instead of vanishing from the log.
+          PYTHONUNBUFFERED: "1"
         run: |
           echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
@@ -2520,6 +2559,13 @@ jobs:
           echo "Running test_vlm_e2e_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
           make vlm-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-vlm-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-vlm-${{ env.SAFE_MODEL_KEY }}
+          report: junit-vlm-${{ matrix.model_key }}.xml
 
       - name: Upload JUnit results
         if: always()
@@ -2589,6 +2635,13 @@ jobs:
           make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
           echo "tests done"
 
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-clip-${{ env.SAFE_MODEL_KEY }}
+          report: junit-clip-${{ matrix.model_key }}.xml
+
       - name: Upload JUnit results
         if: always()
         uses: actions/upload-artifact@v4
@@ -2652,6 +2705,13 @@ jobs:
           echo "Running test_e2e_reranker_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
           make reranker-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-reranker-compare-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-reranker-compare-${{ env.SAFE_MODEL_KEY }}
+          report: junit-reranker-compare-${{ matrix.model_key }}.xml
 
       - name: Upload JUnit results
         if: always()
@@ -2717,6 +2777,13 @@ jobs:
           make masked-lm-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-masked-lm-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-masked-lm-compare-${{ env.SAFE_MODEL_KEY }}
+          report: junit-masked-lm-compare-${{ matrix.model_key }}.xml
+
       - name: Upload JUnit results
         if: always()
         uses: actions/upload-artifact@v4
@@ -2780,6 +2847,13 @@ jobs:
           echo "Running test_e2e_question_answering_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
           make question-answering-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-question-answering-compare-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-question-answering-compare-${{ env.SAFE_MODEL_KEY }}
+          report: junit-question-answering-compare-${{ matrix.model_key }}.xml
 
       - name: Upload JUnit results
         if: always()
@@ -2845,6 +2919,13 @@ jobs:
           make seq-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-seq-classification-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-seq-classification-compare-${{ env.SAFE_MODEL_KEY }}
+          report: junit-seq-classification-compare-${{ matrix.model_key }}.xml
+
       - name: Upload JUnit results
         if: always()
         uses: actions/upload-artifact@v4
@@ -2908,6 +2989,13 @@ jobs:
           echo "Running test_e2e_token_classification_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
           make token-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-classification-compare-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-token-classification-compare-${{ env.SAFE_MODEL_KEY }}
+          report: junit-token-classification-compare-${{ matrix.model_key }}.xml
 
       - name: Upload JUnit results
         if: always()
@@ -2980,6 +3068,13 @@ jobs:
             JUNIT_XML="junit-edge-cases-${SAFE_TEST_FILE}-${SAFE_MODEL_KEY}.xml"
           echo "tests done"
 
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-edge-cases-${{ env.SAFE_TEST_FILE }}-${{ env.SAFE_MODEL_KEY }}
+          report: junit-edge-cases-${{ env.SAFE_TEST_FILE }}-${{ env.SAFE_MODEL_KEY }}.xml
+
       - name: Upload JUnit results
         if: always()
         uses: actions/upload-artifact@v4
@@ -3043,6 +3138,13 @@ jobs:
             JUNIT_XML=1 RESULTS_DIR=.
           mv "model-module-${{ matrix.config }}.xml" \
             "junit-model-module-${{ matrix.config }}-${{ matrix.shard }}.xml"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-model-module-${{ matrix.config }}-${{ matrix.shard }}
+          report: ${{ env.CLONED_HF_ADAPTERS_DIR }}/junit-model-module-${{ matrix.config }}-${{ matrix.shard }}.xml
 
       - name: Upload JUnit results
         if: always()
