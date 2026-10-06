@@ -105,12 +105,7 @@ def main():
         print(op, ctx.test_case_count[op])
     print(f"Total ops with test configs generated: {len(ctx.test_gen_ops)}")
 
-    ctx.write_yaml(
-        os.path.basename(model_path),
-        batch=batch,
-        input_len=input_len,
-        output_len=output_len,
-    )
+    ctx.write_yaml(os.path.basename(model_path))
 
 
 if __name__ == "__main__":
