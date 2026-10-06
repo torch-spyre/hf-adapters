@@ -204,12 +204,14 @@ _OPERATOR_OP_NAMES = {
 
 # Ops whose tensor inputs should use Xavier init when dtype/rank also qualify.
 _XAVIER_OPS = {
+    "torch.sum",
     "torch.conv2d",
     "torch.bmm",
     "torch.matmul",
     "torch._grouped_mm",
     "torch.nn.functional.linear",
     "torch.nn.functional.grouped_mm",
+    "torch.nn.functional.scaled_dot_product_attention",
 }
 _XAVIER_DTYPES = {"torch.float16", "torch.float32", "torch.bfloat16"}
 
@@ -418,6 +420,30 @@ def add_test_case_yaml(
             test_case_yaml["kwmap"] = kwmap
 
     return test_case_yaml
+
+
+def _format_parameters_header(batch=None, input_len=None, output_len=None):
+    """Return the ``%%%`` comment block describing the run parameters, or ``""``.
+
+    Written at the top of each generated YAML so a reader can tell which
+    batch / sequence-length configuration the captured ops came from. Only the
+    parameters that were actually supplied are listed; when all three are
+    ``None`` there is nothing to describe and the block is omitted entirely.
+    """
+    params = [
+        ("batch_size", batch),
+        ("input_token_length", input_len),
+        ("output_token_length", output_len),
+    ]
+    lines = [f"# {name} : {value}" for name, value in params if value is not None]
+    if not lines:
+        return ""
+    return (
+        "#%%% start parameters\n"
+        "#parameters : {\n" + "\n".join(lines) + "\n"
+        "#}\n"
+        "#%%% end parameters\n"
+    )
 
 
 class YamlFmtDumper(yaml.Dumper):
@@ -1764,7 +1790,10 @@ class TorchOpCollector:
         *,
         output_dir=".",
         yaml_defaults=None,
-        supress_spyre=False,
+        supress_spyre=True,
+        batch=None,
+        input_len=None,
+        output_len=None,
     ):
         defaults = {**TorchOpCollector.DEFAULT_YAML_DEFAULTS, **(yaml_defaults or {})}
 
@@ -1852,7 +1881,10 @@ class TorchOpCollector:
             }
             print(f"Total no. of test cases: {len(config['cases'])}")
 
+        params_header = _format_parameters_header(batch, input_len, output_len)
+
         with open(os.path.join(output_dir, model_name + ".yaml"), "w") as f:
+            f.write(params_header)
             yaml.dump(
                 config,
                 f,
@@ -1876,6 +1908,7 @@ class TorchOpCollector:
             else:
                 config["cases"] = _filter_cases(self.test_cases_norm_yaml)
             with open(os.path.join(output_dir, model_name + "_spyre.yaml"), "w") as f:
+                f.write(params_header)
                 yaml.dump(
                     config,
                     f,
