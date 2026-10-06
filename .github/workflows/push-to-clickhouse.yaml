@@ -189,11 +189,33 @@ jobs:
           source .venv/bin/activate
           echo "VIRTUAL_ENV $VIRTUAL_ENV"
 
+      # Install from uv.lock rather than resolving a fresh dependency set here.
+      # The hand-written `uv pip install transformers ...` this replaces was
+      # unpinned, so the resolver was free to prefer the newest
+      # huggingface_hub and backtrack transformers to satisfy it. After
+      # huggingface_hub 2.1.0 (2026-10-01) it settled on transformers 4.12.2,
+      # whose tokenizers<0.11 pin has no cp312 wheel -- so the install tried to
+      # build tokenizers 0.10.3 from source and died on `can't find Rust
+      # compiler`. Nothing in this repo changed; PyPI did, which is why the
+      # 09-26 run passed and 10-03 failed on the same command.
+      #
+      # --frozen installs exactly the locked closure (transformers 5.15.0,
+      # tokenizers 0.22.2 -- a cp39-abi3 wheel) and never re-resolves, so this
+      # job no longer depends on what PyPI published that morning.
+      #
+      # Groups: models-ops carries huggingface_hub/python-dotenv, dev carries
+      # clickhouse-connect. spyre is excluded because torch-spyre is a Spyre
+      # hardware dep this catalog-only job does not need. torch comes from the
+      # lock via tool.uv.sources (already the +cpu build from the PyTorch CPU
+      # index), so the separate --index-url install is no longer needed.
       - name: Install Python dependencies
         run: |
           source .venv/bin/activate
-          uv pip install huggingface_hub tqdm transformers clickhouse-connect python-dotenv
-          uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+          uv sync --frozen --group models-ops --group dev --no-group spyre
+          # Deliberately unlocked: a moving git ref kept as ONE implementation
+          # so run_id/capability_id content hashes stay byte-identical across
+          # writers (see CH_INGEST_LIB above). Installed after the sync because
+          # uv sync would otherwise strip it back out.
           uv pip install "${CH_INGEST_LIB}"
 
       # TEMPORARY debug step: confirms HF_TOKEN actually reaches this job as a
