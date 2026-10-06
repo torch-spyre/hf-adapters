@@ -55,6 +55,8 @@ permissions:
 jobs:
   run-tests:
     uses: ./.github/workflows/_test_matrix.yaml
+    # Reusable workflows get no secrets unless passed; without this HF_TOKEN resolves to "" in every test job.
+    secrets: inherit
     with:
       image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
       extra_test_flags: -vvv -s
