@@ -1203,6 +1203,8 @@ jobs:
       - name: Run test_vlm_e2e_spyre.py for ${{ matrix.model_key }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Unbuffered so print() progress survives a timeout/OOM kill instead of vanishing from the log.
+          PYTHONUNBUFFERED: "1"
         run: |
           echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
@@ -2512,6 +2514,8 @@ jobs:
       - name: Run test_vlm_e2e_spyre.py for ${{ matrix.model_key }} (pod-level retry)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Unbuffered so print() progress survives a timeout/OOM kill instead of vanishing from the log.
+          PYTHONUNBUFFERED: "1"
         run: |
           echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
