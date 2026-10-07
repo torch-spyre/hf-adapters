@@ -63,10 +63,15 @@ def test_structured_decision_cpu_accuracy(model_path, explicit_positions):
     assert torch.equal(option_logits.argmax(-1), ref_option_logits.argmax(-1))
     assert torch.equal(act_logits.argmax(-1), ref_act_logits.argmax(-1))
     assert (
-        F.cosine_similarity(option_logits[valid], ref_option_logits[valid], dim=0)
+        F.cosine_similarity(
+            option_logits[valid].float(), ref_option_logits[valid].float(), dim=0
+        )
         > 0.998
     )
-    assert F.cosine_similarity(act_logits, ref_act_logits, dim=-1).min() > 0.999
+    assert (
+        F.cosine_similarity(act_logits.float(), ref_act_logits.float(), dim=-1).min()
+        > 0.999
+    )
 
 
 @pytest.mark.parametrize(
@@ -122,5 +127,5 @@ def test_laya_agent_predict(model_path):
 
 
 def test_laya_load_rejects_unsupported_checkpoint():
-    with pytest.raises(ValueError, match="root convaiinnovations/laya"):
-        laya_backend.load("convaiinnovations/laya-typed-decisions")
+    with pytest.raises(ValueError, match="Unsupported Laya checkpoint"):
+        laya_backend.load("convaiinnovations/unknown")

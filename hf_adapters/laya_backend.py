@@ -40,6 +40,11 @@ from hf_adapters.hf_common import BLOCK_SIZE, get_model_dtype
 
 _MIN_LAYA_VERSION = "0.3.28"
 _MAX_LAYA_VERSION = "0.4"
+_SUPPORTED_MODEL_IDS = {
+    "convaiinnovations/laya",
+    "convaiinnovations/laya-typed-decisions",
+    "convaiinnovations/laya-multilingual",
+}
 
 
 def _require_laya():
@@ -63,7 +68,7 @@ def _require_laya():
 
 
 def _resolve_model_dir(
-    model_path, *, include_tokenizer=False, token=None, revision=None
+    model_path, *, subfolder=None, include_tokenizer=False, token=None, revision=None
 ):
     model_path = os.fspath(model_path)
     if os.path.isdir(model_path):
@@ -73,14 +78,15 @@ def _resolve_model_dir(
     from laya.revisions import resolve_revision
 
     revision = resolve_revision(model_path, revision)
+    prefix = f"{subfolder}/" if subfolder else ""
     allow_patterns = [
         "config.json",
-        "rl_agent_config.json",
-        "model.safetensors",
-        "encoder/*",
+        prefix + "rl_agent_config.json",
+        prefix + "model.safetensors",
+        prefix + "encoder/*",
     ]
     if include_tokenizer:
-        allow_patterns.append("tokenizer/*")
+        allow_patterns.append(prefix + "tokenizer/*")
     kwargs = {
         "token": token or os.environ.get("HF_TOKEN") or None,
         "allow_patterns": allow_patterns,
@@ -90,7 +96,7 @@ def _resolve_model_dir(
     return snapshot_download(model_path, **kwargs)
 
 
-def _validate_root_checkpoint(model_dir):
+def _validate_checkpoint(model_dir, subfolder=None):
     root_config_path = os.path.join(model_dir, "config.json")
     if not os.path.isfile(root_config_path):
         raise FileNotFoundError(
@@ -101,15 +107,20 @@ def _validate_root_checkpoint(model_dir):
     if root_config.get("model_type") != "laya" or "LayaTypedDecisions" not in (
         root_config.get("architectures") or []
     ):
-        raise ValueError(
-            "Laya support currently targets a root LayaTypedDecisions checkpoint"
-        )
+        raise ValueError("Expected a LayaTypedDecisions checkpoint bundle")
+    checkpoint_dir = os.path.join(model_dir, subfolder) if subfolder else model_dir
+    for name in ("rl_agent_config.json", "model.safetensors", "encoder", "tokenizer"):
+        if not os.path.exists(os.path.join(checkpoint_dir, name)):
+            raise FileNotFoundError(
+                f"Laya checkpoint does not contain the required {name!r} artifact"
+            )
 
 
 def load(
     model_id_or_path="convaiinnovations/laya",
     dtype=None,
     token=None,
+    subfolder=None,
     revision=None,
     expected_sha256=None,
     lang_temperatures=None,
@@ -121,22 +132,23 @@ def load(
     hooks_timeout=None,
     calibration=None,
 ):
-    """Load the root Laya Agent with its ModernBERT encoder on Spyre."""
+    """Load a supported Laya Agent with its ModernBERT encoder on Spyre."""
     _require_laya()
+    if subfolder not in (None, "typed-decisions", "multilingual"):
+        raise ValueError(f"Unsupported Laya checkpoint subfolder: {subfolder!r}")
     if (
         not os.path.isdir(model_id_or_path)
-        and os.fspath(model_id_or_path) != "convaiinnovations/laya"
+        and os.fspath(model_id_or_path) not in _SUPPORTED_MODEL_IDS
     ):
-        raise ValueError(
-            "Laya support currently targets the root convaiinnovations/laya checkpoint"
-        )
+        raise ValueError(f"Unsupported Laya checkpoint: {model_id_or_path!r}")
     model_dir = _resolve_model_dir(
         model_id_or_path,
+        subfolder=subfolder,
         include_tokenizer=True,
         token=token,
         revision=revision,
     )
-    _validate_root_checkpoint(model_dir)
+    _validate_checkpoint(model_dir, subfolder)
 
     from laya import load as load_laya
 
@@ -146,6 +158,7 @@ def load(
         model_dir,
         device="cpu",
         token=token,
+        subfolder=subfolder,
         expected_sha256=expected_sha256,
         lang_temperatures=lang_temperatures,
         hooks=hooks,

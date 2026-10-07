@@ -615,6 +615,18 @@ STRUCTURED_DECISION_MODELS = {
         "adapter": "laya_backend.py",
         "size": "0.4b",
     },
+    "laya_typed_decisions": {
+        "name": "Laya Typed Decisions",
+        "path": "convaiinnovations/laya-typed-decisions",
+        "adapter": "laya_backend.py",
+        "size": "0.4b",
+    },
+    "laya_multilingual": {
+        "name": "Laya Multilingual",
+        "path": "convaiinnovations/laya-multilingual",
+        "adapter": "laya_backend.py",
+        "size": "0.3b",
+    },
 }
 
 

@@ -117,8 +117,8 @@ result = agent.predict(
 ```
 
 The Agent and decision heads remain on CPU; only `agent.model.encoder` runs on
-Spyre. Support currently covers the root English checkpoint, not automatic
-Router selection of the multilingual or typed-decisions variants.
+Spyre. Select a bundled checkpoint explicitly with `subfolder="typed-decisions"`
+or `subfolder="multilingual"`. This does not enable automatic Router selection.
 
 ## Embedding Models
 
