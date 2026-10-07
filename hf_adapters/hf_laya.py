@@ -238,10 +238,30 @@ def _encoder_forward(
     return BaseModelOutput(last_hidden_state=hidden)
 
 
-def _decision_forward(model, *args, **kwargs):
-    if kwargs.get("position_ids") is not None and kwargs.get("option_ids") is None:
-        kwargs["option_ids"] = torch.zeros_like(kwargs["position_ids"])
-    return model._spyre_original_forward(*args, **kwargs)
+def _decision_forward(
+    model,
+    input_ids,
+    attention_mask,
+    marker_pos,
+    marker_mask,
+    qtype,
+    return_dict=False,
+    position_ids=None,
+    option_ids=None,
+):
+    if position_ids is not None and option_ids is None:
+        option_ids = torch.zeros_like(position_ids)
+
+    return model._spyre_original_forward(
+        input_ids,
+        attention_mask,
+        marker_pos,
+        marker_mask,
+        qtype,
+        return_dict,
+        position_ids,
+        option_ids,
+    )
 
 
 def prepare_for_spyre(model):
@@ -254,6 +274,8 @@ def prepare_for_spyre(model):
 
     hf_common.assert_spyre_dimensions(model.encoder.config, model_name="Laya encoder")
     hf_modernbert.prepare_for_spyre(model.encoder)
+    model._spyre_rope = model.encoder._spyre_rope
+    model.config = model.encoder.config
     model.encoder.forward = MethodType(_encoder_forward, model.encoder)
 
     model._spyre_original_forward = model.forward

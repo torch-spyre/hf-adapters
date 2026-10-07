@@ -39,7 +39,12 @@ def test_structured_decision_cpu_accuracy(model_path, explicit_positions):
     with torch.no_grad():
         ref_option_logits, ref_act_logits = model(**batch)
 
-    move_model_to_spyre(model, hf_laya, next(model.parameters()).dtype)
+    dtype = next(model.parameters()).dtype
+    move_model_to_spyre(model, hf_laya, dtype)
+    for rope in model.encoder._spyre_rope.values():
+        assert rope._freq_cache is not None
+        assert rope._freq_cache.dtype == dtype
+        assert rope._cached_len >= model.encoder.config.max_position_embeddings
     _unwrap_compiled_blocks(model)
     with torch.no_grad():
         option_logits, act_logits = model(**batch)

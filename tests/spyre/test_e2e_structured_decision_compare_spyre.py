@@ -41,13 +41,19 @@ def test_e2e_structured_decision_compare_spyre(model_path, explicit_positions):
         ref_option_logits, ref_act_logits = model(**batch)
 
     move_model_to_spyre(model, hf_laya, dtype)
+    for rope in model.encoder._spyre_rope.values():
+        assert rope._freq_cache is not None
+        assert rope._freq_cache.dtype == dtype
+        assert rope._cached_len >= model.encoder.config.max_position_embeddings
     with torch.no_grad():
         option_logits, act_logits = model(**batch)
         repeat_option_logits, repeat_act_logits = model(**batch)
 
     valid = batch["marker_mask"]
     option_cos = F.cosine_similarity(
-        option_logits[valid], ref_option_logits[valid], dim=0
+        option_logits.masked_fill(~valid, 0),
+        ref_option_logits.masked_fill(~valid, 0),
+        dim=-1,
     )
     act_cos = F.cosine_similarity(act_logits, ref_act_logits, dim=-1)
 
@@ -58,7 +64,7 @@ def test_e2e_structured_decision_compare_spyre(model_path, explicit_positions):
             assert next(module.parameters()).device.type == "cpu"
     assert torch.isfinite(option_logits[valid]).all()
     assert torch.isfinite(act_logits).all()
-    assert option_cos >= 0.98
+    assert option_cos.min() >= 0.98
     assert act_cos.min() >= 0.99
     assert torch.equal(option_logits.argmax(-1), ref_option_logits.argmax(-1))
     assert torch.equal(act_logits.argmax(-1), ref_act_logits.argmax(-1))
