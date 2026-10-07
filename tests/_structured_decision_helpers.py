@@ -12,13 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
+from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
 
 def build_structured_decision_batch(model_path, *, explicit_positions=False):
     from laya.common import QTYPES, build_sequence, collate_items, parallel_layout
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path, subfolder="tokenizer")
+    model_dir = snapshot_download(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(os.path.join(model_dir, "tokenizer"))
     questions = [
         {
             "t": "choice",
