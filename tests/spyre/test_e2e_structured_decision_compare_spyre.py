@@ -18,6 +18,7 @@ import torch.nn.functional as F
 from _structured_decision_helpers import build_structured_decision_batch
 from model_registry import STRUCTURED_DECISION_PATHS
 
+from hf_adapters import hf_laya
 from hf_adapters.auto_spyre_model import dtype_for_model_path
 from hf_adapters.hf_common import move_model_to_spyre
 from tests.conftest import load_ref_model
@@ -30,18 +31,16 @@ pytestmark = pytest.mark.model_harness("structured_decision")
 )
 @pytest.mark.parametrize("explicit_positions", [False, True])
 def test_e2e_structured_decision_compare_spyre(model_path, explicit_positions):
-    adapter = pytest.importorskip("hf_adapters.hf_laya")
-    pytest.importorskip("laya")
     batch = build_structured_decision_batch(
         model_path, explicit_positions=explicit_positions
     )
     dtype = dtype_for_model_path(model_path, target_device="spyre")
-    model = load_ref_model(model_path, adapter_mod=adapter)
+    model = load_ref_model(model_path, adapter_mod=hf_laya)
 
     with torch.no_grad():
         ref_option_logits, ref_act_logits = model(**batch)
 
-    move_model_to_spyre(model, adapter, dtype)
+    move_model_to_spyre(model, hf_laya, dtype)
     with torch.no_grad():
         option_logits, act_logits = model(**batch)
         repeat_option_logits, repeat_act_logits = model(**batch)
