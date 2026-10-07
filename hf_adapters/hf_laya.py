@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 from importlib.metadata import PackageNotFoundError, version
 from types import MethodType
 
@@ -39,7 +40,6 @@ from hf_adapters.hf_common import BLOCK_SIZE, get_model_dtype
 
 _MIN_LAYA_VERSION = "0.3.28"
 _MAX_LAYA_VERSION = "0.4"
-_SUPPORTED_MODEL_TYPE = "modernbert"
 
 
 def _require_laya():
@@ -62,7 +62,9 @@ def _require_laya():
         )
 
 
-def _resolve_model_dir(model_path):
+def _resolve_model_dir(
+    model_path, *, include_tokenizer=False, token=None, revision=None
+):
     model_path = os.fspath(model_path)
     if os.path.isdir(model_path):
         return model_path
@@ -70,32 +72,25 @@ def _resolve_model_dir(model_path):
     from huggingface_hub import snapshot_download
     from laya.revisions import resolve_revision
 
-    revision = resolve_revision(model_path, None)
+    revision = resolve_revision(model_path, revision)
+    allow_patterns = [
+        "config.json",
+        "rl_agent_config.json",
+        "model.safetensors",
+        "encoder/*",
+    ]
+    if include_tokenizer:
+        allow_patterns.append("tokenizer/*")
     kwargs = {
-        "token": os.environ.get("HF_TOKEN") or None,
-        "allow_patterns": [
-            "config.json",
-            "rl_agent_config.json",
-            "model.safetensors",
-            "encoder/*",
-        ],
+        "token": token or os.environ.get("HF_TOKEN") or None,
+        "allow_patterns": allow_patterns,
     }
     if revision:
         kwargs["revision"] = revision
     return snapshot_download(model_path, **kwargs)
 
 
-def load_hf_model(model_path, dtype, trust_remote_code=None):
-    """Construct the upstream Laya model and strictly load its root checkpoint."""
-    del trust_remote_code
-
-    _require_laya()
-
-    from laya.agent import _verify_compatibility
-    from laya.common import build_model, uses_parallel_layout
-
-    model_dir = _resolve_model_dir(model_path)
-
+def _validate_root_checkpoint(model_dir):
     root_config_path = os.path.join(model_dir, "config.json")
     if not os.path.isfile(root_config_path):
         raise FileNotFoundError(
@@ -110,40 +105,62 @@ def load_hf_model(model_path, dtype, trust_remote_code=None):
             "Laya support currently targets a root LayaTypedDecisions checkpoint"
         )
 
-    cfg_path = os.path.join(model_dir, "rl_agent_config.json")
-    weights_path = os.path.join(model_dir, "model.safetensors")
-    encoder_dir = os.path.join(model_dir, "encoder")
-    if not os.path.isfile(cfg_path) or not os.path.isfile(weights_path):
-        raise FileNotFoundError(
-            f"{model_path!r} is not a Laya checkpoint: expected "
-            "rl_agent_config.json and model.safetensors"
-        )
-    if not os.path.isdir(encoder_dir):
-        raise FileNotFoundError(
-            f"{model_path!r} does not contain the required encoder/ subfolder"
-        )
 
-    with open(cfg_path) as f:
-        cfg = json.load(f)
-    uses_parallel_layout(cfg)
-
-    with open(os.path.join(encoder_dir, "config.json")) as f:
-        encoder_cfg = json.load(f)
-    if encoder_cfg.get("model_type") != _SUPPORTED_MODEL_TYPE:
+def load(
+    model_id_or_path="convaiinnovations/laya",
+    dtype=None,
+    token=None,
+    revision=None,
+    expected_sha256=None,
+    lang_temperatures=None,
+    hooks=None,
+    on_predict_start=None,
+    on_predict_end=None,
+    hooks_raise=True,
+    hooks_concurrent=True,
+    hooks_timeout=None,
+    calibration=None,
+):
+    """Load the root Laya Agent with its ModernBERT encoder on Spyre."""
+    _require_laya()
+    if (
+        not os.path.isdir(model_id_or_path)
+        and os.fspath(model_id_or_path) != "convaiinnovations/laya"
+    ):
         raise ValueError(
-            "Laya support currently requires a ModernBERT encoder, got "
-            f"{encoder_cfg.get('model_type')!r}"
+            "Laya support currently targets the root convaiinnovations/laya checkpoint"
         )
+    model_dir = _resolve_model_dir(
+        model_id_or_path,
+        include_tokenizer=True,
+        token=token,
+        revision=revision,
+    )
+    _validate_root_checkpoint(model_dir)
 
-    from safetensors.torch import load_file
+    from laya import load as load_laya
 
-    model = build_model(cfg, encoder_dir=encoder_dir, pretrained=False)
-    weights = load_file(weights_path)
-    _verify_compatibility(model, cfg, weights, os.fspath(model_path))
-    model.load_state_dict(weights, strict=True)
-    model.to(device="cpu", dtype=dtype)
-    model._spyre_laya_config = cfg
-    return model
+    from hf_adapters.auto_spyre_model import dtype_for_model_path
+
+    agent = load_laya(
+        model_dir,
+        device="cpu",
+        token=token,
+        expected_sha256=expected_sha256,
+        lang_temperatures=lang_temperatures,
+        hooks=hooks,
+        on_predict_start=on_predict_start,
+        on_predict_end=on_predict_end,
+        hooks_raise=hooks_raise,
+        hooks_concurrent=hooks_concurrent,
+        hooks_timeout=hooks_timeout,
+        calibration=calibration,
+        backend="eager",
+    )
+    if dtype is None:
+        dtype = dtype_for_model_path(model_id_or_path, target_device=hf_common.DEVICE)
+    hf_common.move_model_to_spyre(agent.model, sys.modules[__name__], dtype)
+    return agent
 
 
 def _pad_explicit_masks(masks, pad_amount, *, batch_size=None, sequence_length=None):
@@ -245,7 +262,7 @@ def _decision_forward(
     marker_pos,
     marker_mask,
     qtype,
-    return_dict=False,
+    detach_encoder=False,
     position_ids=None,
     option_ids=None,
 ):
@@ -258,14 +275,16 @@ def _decision_forward(
         marker_pos,
         marker_mask,
         qtype,
-        return_dict,
-        position_ids,
-        option_ids,
+        detach_encoder=detach_encoder,
+        position_ids=position_ids,
+        option_ids=option_ids,
     )
 
 
 def prepare_for_spyre(model):
     """Prepare Laya's nested ModernBERT encoder and preserve its CPU decision heads."""
+    if hasattr(model, "_spyre_original_forward"):
+        raise RuntimeError("Laya model is already prepared for Spyre")
     if not isinstance(model.encoder, ModernBertModel):
         raise TypeError(
             "Laya support currently requires model.encoder to be ModernBertModel, got "

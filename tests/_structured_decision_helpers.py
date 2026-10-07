@@ -17,6 +17,27 @@ import os
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
+STRUCTURED_DECISION_STATE = (
+    "The primary color is blue. The production API is down and customers cannot log in."
+)
+STRUCTURED_DECISION_QUESTIONS = {
+    "department": {
+        "type": "choice",
+        "instructions": "Which team should handle this?",
+        "criteria": {
+            "billing": "payments and refunds",
+            "technical": "bugs and outages",
+            "other": "anything else",
+        },
+    },
+    "urgency": {
+        "type": "score",
+        "instructions": "Rate the urgency.",
+        "criteria": ["low", "medium", "high", "critical"],
+    },
+    "urgent": {"type": "noul", "instructions": "Is this urgent?"},
+}
+
 
 def build_structured_decision_batch(model_path, *, explicit_positions=False):
     from laya.common import QTYPES, build_sequence, collate_items, parallel_layout
@@ -25,22 +46,17 @@ def build_structured_decision_batch(model_path, *, explicit_positions=False):
     tokenizer = AutoTokenizer.from_pretrained(os.path.join(model_dir, "tokenizer"))
     questions = [
         {
-            "t": "choice",
-            "ins": "Choose the primary color named in the state.",
-            "crit": {"red": "red", "blue": "blue", "green": "green"},
-        },
-        {
-            "t": "score",
-            "ins": "Rate the urgency.",
-            "crit": ["low", "medium", "high", "critical"],
-        },
-        {"t": "noul", "ins": "Does the state request immediate help?"},
+            "t": question["type"],
+            "ins": question["instructions"],
+            "crit": question.get("criteria"),
+        }
+        for question in STRUCTURED_DECISION_QUESTIONS.values()
     ]
     items = []
     for question in questions:
         ids, markers = build_sequence(
             tokenizer,
-            "The primary color is blue. The request needs immediate help.",
+            STRUCTURED_DECISION_STATE,
             question,
         )
         item = {"ids": ids, "markers": markers, "qtype": QTYPES[question["t"]]}

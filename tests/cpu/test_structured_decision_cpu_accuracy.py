@@ -15,11 +15,15 @@
 import pytest
 import torch
 import torch.nn.functional as F
-from _structured_decision_helpers import build_structured_decision_batch
+from _structured_decision_helpers import (
+    STRUCTURED_DECISION_QUESTIONS,
+    STRUCTURED_DECISION_STATE,
+    build_structured_decision_batch,
+)
 
 from hf_adapters import hf_laya
+from hf_adapters.auto_spyre_model import dtype_for_model_path
 from hf_adapters.hf_common import move_model_to_spyre
-from tests.conftest import load_ref_model
 from tests.cpu.conftest import _unwrap_compiled_blocks
 from tests.model_registry import STRUCTURED_DECISION_PATHS
 
@@ -34,12 +38,14 @@ def test_structured_decision_cpu_accuracy(model_path, explicit_positions):
     batch = build_structured_decision_batch(
         model_path, explicit_positions=explicit_positions
     )
-    model = load_ref_model(model_path, adapter_mod=hf_laya)
+    from laya import load as load_laya
+
+    dtype = dtype_for_model_path(model_path, target_device="cpu")
+    model = load_laya(model_path, device="cpu", backend="eager").model.to(dtype=dtype)
 
     with torch.no_grad():
         ref_option_logits, ref_act_logits = model(**batch)
 
-    dtype = next(model.parameters()).dtype
     move_model_to_spyre(model, hf_laya, dtype)
     for rope in model.encoder._spyre_rope.values():
         assert rope._freq_cache is not None
@@ -61,3 +67,60 @@ def test_structured_decision_cpu_accuracy(model_path, explicit_positions):
         > 0.998
     )
     assert F.cosine_similarity(act_logits, ref_act_logits, dim=-1).min() > 0.999
+
+
+@pytest.mark.parametrize(
+    "model_path", STRUCTURED_DECISION_PATHS, ids=STRUCTURED_DECISION_PATHS
+)
+def test_laya_agent_predict(model_path):
+    from laya import load as load_laya
+
+    reference = load_laya(model_path, device="cpu", backend="eager")
+    expected = reference.predict(
+        STRUCTURED_DECISION_STATE, STRUCTURED_DECISION_QUESTIONS
+    )
+
+    agent = hf_laya.load(model_path)
+    _unwrap_compiled_blocks(agent.model)
+    actual = agent.predict(STRUCTURED_DECISION_STATE, STRUCTURED_DECISION_QUESTIONS)
+
+    assert agent.device.type == "cpu"
+    assert type(agent) is type(reference)
+    assert actual["answers"].keys() == expected["answers"].keys()
+    for key in expected["answers"]:
+        expected_answer = expected["answers"][key]
+        actual_answer = actual["answers"][key]
+        assert actual_answer["type"] == expected_answer["type"]
+        if expected_answer["type"] == "choice":
+            assert actual_answer["choice"] == expected_answer["choice"]
+        elif expected_answer["type"] == "score":
+            assert actual_answer["score"] == pytest.approx(
+                expected_answer["score"], abs=0.05
+            )
+        else:
+            assert (actual_answer["noul"] >= 0.5) == (expected_answer["noul"] >= 0.5)
+            assert actual_answer["noul"] == pytest.approx(
+                expected_answer["noul"], abs=0.01
+            )
+        for option, probability in expected_answer.get("probabilities", {}).items():
+            assert actual_answer["probabilities"][option] == pytest.approx(
+                probability, abs=0.01
+            )
+        assert actual_answer["confidence"] == pytest.approx(
+            expected_answer["confidence"], abs=0.01
+        )
+        assert actual_answer["action"] == expected_answer["action"]
+
+    repeated = agent.predict(STRUCTURED_DECISION_STATE, STRUCTURED_DECISION_QUESTIONS)
+    assert repeated == actual
+
+    batch = agent.predict_batch(
+        [STRUCTURED_DECISION_STATE, STRUCTURED_DECISION_STATE],
+        STRUCTURED_DECISION_QUESTIONS,
+    )
+    assert batch == [actual, actual]
+
+
+def test_laya_load_rejects_unsupported_checkpoint():
+    with pytest.raises(ValueError, match="root convaiinnovations/laya"):
+        hf_laya.load("convaiinnovations/laya-typed-decisions")

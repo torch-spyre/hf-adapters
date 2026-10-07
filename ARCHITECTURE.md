@@ -141,8 +141,8 @@ RoBERTa large MNLI uses `hf_xlm_roberta.py` (shared with the XLM-RoBERTa and rer
 ### Structured Decisions
 
 Laya combines a ModernBERT encoder with a custom two-layer decision transformer,
-variable option scorer, and action head. `AutoSpyreModelForTypedDecisions` runs
-the ModernBERT encoder on Spyre and keeps the decision modules on CPU. Install
+variable option scorer, and action head. `hf_adapters.hf_laya.load()` returns the
+upstream Laya Agent with its ModernBERT encoder on Spyre and decision modules on CPU. Install
 the optional runtime with `pip install 'hf-adapters-spyre[laya]'`.
 
 | Model | model\_type | head\_dim | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |

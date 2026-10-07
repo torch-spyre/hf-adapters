@@ -92,6 +92,34 @@ inputs = encode_prompts(tokenizer, ["What is 2+2?"])
 sequences = model.generate(**inputs, max_new_tokens=5)
 ```
 
+## Structured Decisions
+
+Laya keeps its native Agent API while running the ModernBERT encoder on Spyre:
+
+```python
+from hf_adapters import hf_laya
+
+agent = hf_laya.load("convaiinnovations/laya")
+result = agent.predict(
+    "The production API is down and customers cannot log in.",
+    {
+        "department": {
+            "type": "choice",
+            "instructions": "Which team should handle this?",
+            "criteria": {
+                "billing": "payments and refunds",
+                "technical": "bugs and outages",
+                "other": "anything else",
+            },
+        }
+    },
+)
+```
+
+The Agent and decision heads remain on CPU; only `agent.model.encoder` runs on
+Spyre. Support currently covers the root English checkpoint, not automatic
+Router selection of the multilingual or typed-decisions variants.
+
 ## Embedding Models
 
 For embedding models, use the `sentence-transformers` library with the `backend="spyre"` parameter:
