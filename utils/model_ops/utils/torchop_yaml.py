@@ -1741,21 +1741,17 @@ class TorchOpCollector:
         return skip, skip_arg_and_cont, is_scalar, is_list
 
     @staticmethod
-    def _compile_fx(
-        model_,
-        example_inputs_,
-        inner_compile=torch._inductor.compile_fx.compile_fx_inner,
-        config_patches=None,
-        decompositions=None,
-        *args,
-        **kwargs,
-    ):
+    def _compile_fx(model_, example_inputs_, *args, **kwargs):
+        # Forward the caller's arguments untouched. Re-spelling them positionally
+        # (and baking in an ``inner_compile`` default) collides with wrappers
+        # such as torch-spyre's, which ``kwargs.setdefault("decompositions", ...)``
+        # and would raise "got multiple values for argument 'decompositions'".
         model_.print_readable(print_output=TorchOpCollector.print_graph_module)
         TorchOpCollector.collect_torchops(
             model_, TorchOpCollector.ops_set, TorchOpCollector.print_output
         )
         return TorchOpCollector.orig_compile_fx(
-            model_, example_inputs_, inner_compile, config_patches, decompositions
+            model_, example_inputs_, *args, **kwargs
         )
 
     def __init__(self, print_output=False, print_graph_module=False):
