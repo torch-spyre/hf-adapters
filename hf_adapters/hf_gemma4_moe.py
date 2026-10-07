@@ -63,6 +63,7 @@ __all__ = [
 ]
 
 _MOE_TILE = 32  # Decode gather requires tiles with at least two rows.
+_MOE_CHUNKS = 4  # One 704-wide hidden slice per selected-expert gather entry.
 
 
 def _router_probs(x, weight, scale, root_size, eps):
@@ -107,6 +108,7 @@ def _compiled_moe_loop_region(
         stick_size,
         "gelu_tanh",
         per_expert_scale_stick=per_expert_scale_stick,
+        decode_chunks=_MOE_CHUNKS,
     )
 
 
@@ -323,9 +325,9 @@ class Gemma4MoEBlock(nn.Module):
             router.scale,
             router.scalar_root_size,
             router.per_expert_scale_stick,
-            experts.gate_proj,
-            experts.up_proj,
-            experts.down_proj,
+            experts.decode_gate_proj,
+            experts.decode_up_proj,
+            experts.decode_down_proj,
             self._moe_k,
             _MOE_TILE,
             self._stick_size,
@@ -487,7 +489,9 @@ def prepare_text_decoder_for_spyre(model):
             block.router.per_expert_scale_stick = (
                 expert_scale[:, None].expand(-1, stick_size).contiguous()
             )
-        prepare_moe_expert_weights(block.experts, pad_to_multiple=stick_size)
+        prepare_moe_expert_weights(
+            block.experts, pad_to_multiple=stick_size, decode_chunks=_MOE_CHUNKS
+        )
         backbone.layers[i] = block
         blocks.append(block)
 

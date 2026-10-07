@@ -72,18 +72,80 @@ def optional_spyre_config_patch(options: dict[str, Any]) -> Iterator[None]:
         yield
 
 
-def _move_moe_expert_weight(weight):
+def _move_moe_expert_weight(weight, *, matmul_order=False):
     if not str(DEVICE).startswith("spyre"):
         return weight
 
     from torch_spyre.model_utils import dma_moe_expert_weight_to_spyre
 
-    moved = dma_moe_expert_weight_to_spyre(weight)
+    if matmul_order:
+        from torch_spyre._C import (
+            SpyreTensorLayout,
+            copy_tensor,
+            spyre_empty_with_layout,
+        )
+
+        layout = SpyreTensorLayout(
+            list(weight.shape), list(weight.stride()), weight.dtype, [1, 0, 2]
+        )
+        moved = spyre_empty_with_layout(
+            weight.size(),
+            weight.stride(),
+            weight.dtype,
+            layout,
+            device=torch.device(DEVICE),
+        )
+        copy_tensor(weight, moved, non_blocking=False)
+        return moved
+    moved = dma_moe_expert_weight_to_spyre(weight, device=DEVICE)
     return moved if moved is not None else weight.to(DEVICE)
 
 
-def prepare_moe_expert_weights(experts, *, pad_to_multiple=None):
+def _moe_decode_weight_view(pool, chunks, *, down=False):
+    """Interpret one persistent expert stack as expert-major decode chunks."""
+    experts, contract, free = pool.shape
+    if not str(DEVICE).startswith("spyre"):
+        if down:
+            return (
+                pool.reshape(experts, contract, chunks, free // chunks)
+                .permute(0, 2, 1, 3)
+                .reshape(experts * chunks, contract, free // chunks)
+            )
+        return pool.reshape(experts * chunks, contract // chunks, free)
+
+    from torch_spyre._C import (
+        SpyreTensorLayout,
+        get_device_dtype,
+        get_elem_in_stick,
+        reinterpret_tensor_with_layout,
+    )
+
+    if down:
+        size = [experts * chunks, contract, free // chunks]
+        stride = [contract * size[-1], size[-1], 1]
+        layout = SpyreTensorLayout(size, stride, pool.dtype, [1, 0, 2])
+    else:
+        size = [experts * chunks, contract // chunks, free]
+        stride = [size[1] * free, free, 1]
+        stick = get_elem_in_stick(pool.dtype)
+        layout = SpyreTensorLayout(
+            [size[0], size[1], free // stick, stick],
+            [stride[0], stride[1], stick, 1],
+            get_device_dtype(pool.dtype),
+        )
+    return reinterpret_tensor_with_layout(pool, size, stride, 0, layout)
+
+
+def prepare_moe_expert_weights(experts, *, pad_to_multiple=None, decode_chunks=1):
     """Split, transpose, pad, and move persistent MoE weights in place."""
+    if decode_chunks != 1:
+        hidden_size = experts.gate_up_proj.shape[-1]
+        if (
+            pad_to_multiple is None
+            or hidden_size % decode_chunks
+            or (hidden_size // decode_chunks) % pad_to_multiple
+        ):
+            raise ValueError("MoE decode chunks must each span whole hidden sticks")
     gate_up = experts.gate_up_proj.detach()
     del experts.gate_up_proj
 
@@ -95,12 +157,18 @@ def prepare_moe_expert_weights(experts, *, pad_to_multiple=None):
     if intermediate_pad:
         gate = F.pad(gate, (0, intermediate_pad))
     experts.gate_proj = _move_moe_expert_weight(gate)
+    if decode_chunks != 1:
+        experts.decode_gate_proj = _moe_decode_weight_view(
+            experts.gate_proj, decode_chunks
+        )
     del gate
 
     up = gate_up[:, intermediate_size:].transpose(1, 2).contiguous()
     if intermediate_pad:
         up = F.pad(up, (0, intermediate_pad))
     experts.up_proj = _move_moe_expert_weight(up)
+    if decode_chunks != 1:
+        experts.decode_up_proj = _moe_decode_weight_view(experts.up_proj, decode_chunks)
     del up
     del gate_up
 
@@ -110,7 +178,11 @@ def prepare_moe_expert_weights(experts, *, pad_to_multiple=None):
         # Match the zero-padded local gate/up channels. The added down rows are
         # zero, so each rank's partial output is unchanged before TP all-reduce.
         down = F.pad(down, (0, 0, 0, intermediate_pad))
-    experts.down_proj = _move_moe_expert_weight(down)
+    experts.down_proj = _move_moe_expert_weight(down, matmul_order=decode_chunks != 1)
+    if decode_chunks != 1:
+        experts.decode_down_proj = _moe_decode_weight_view(
+            experts.down_proj, decode_chunks, down=True
+        )
 
 
 def moe_topk(probabilities, top_k):
@@ -135,6 +207,7 @@ def moe_decode_selected_experts(
     stick_size,
     activation,
     per_expert_scale_stick=None,
+    decode_chunks=1,
 ):
     """Gather selected experts and combine their decode outputs."""
     if activation not in ("silu", "gelu_tanh"):
@@ -145,35 +218,115 @@ def moe_decode_selected_experts(
         from torch_spyre._inductor.propagate_hints import spyre_hint
 
         # Widen topk's fp16 indices onto a stick before converting them to the
-        # device's int32 gather indices. The layout pass inserts the restickify.
-        index_stick = (
-            expert_indices[..., None].expand(T, top_k, stick_size).contiguous()
-        )
-        index_stick = index_stick.to(torch.float32)
-        index_address = index_stick[..., : stick_size // 2].to(torch.int32)
-        expert_indices = index_address[..., 0]
+        # device's int32 gather indices. Chunked decode addresses expert-major
+        # entries in flattened (token, selected expert) order.
+        if decode_chunks == 1:
+            index_stick = (
+                expert_indices[..., None].expand(T, top_k, stick_size).contiguous()
+            ).to(torch.float32)
+            expert_indices = index_stick[..., : stick_size // 2].to(torch.int32)[..., 0]
+        else:
+            expert_fp32 = (
+                expert_indices.reshape(T * top_k, 1)
+                .expand(T * top_k, stick_size)
+                .contiguous()
+                .to(torch.float32)
+            )
+            expert_indices = expert_fp32[..., : stick_size // 2].to(torch.int32)[:, 0]
         hint = spyre_hint(tiles={"row": tile})
     else:
         hint = nullcontext()
+        if decode_chunks != 1:
+            expert_fp32 = (
+                expert_indices.reshape(T * top_k, 1)
+                .expand(T * top_k, stick_size)
+                .contiguous()
+                .to(torch.float32)
+            )
+            expert_indices = expert_indices.reshape(T * top_k)
 
     with hint:
         rows = T * top_k
         intermediate = gate.shape[-1]
-        inputs = x[:, None, :].expand(T, top_k, H).contiguous().reshape(rows, 1, H)
-        selected_gate = gate[expert_indices].reshape(rows, H, intermediate)
-        selected_up = up[expert_indices].reshape(rows, H, intermediate)
-        selected_down = down[expert_indices].reshape(rows, intermediate, H)
+        if decode_chunks == 1:
+            inputs = x[:, None, :].expand(T, top_k, H).contiguous().reshape(rows, 1, H)
+            selected_gate = gate[expert_indices].reshape(rows, H, intermediate)
+            selected_up = up[expert_indices].reshape(rows, H, intermediate)
+            selected_down = down[expert_indices].reshape(rows, intermediate, H)
+            gate_out = torch.bmm(inputs, selected_gate)
+            up_out = torch.bmm(inputs, selected_up)
+        else:
+            if H % decode_chunks or H // decode_chunks % stick_size:
+                raise ValueError("MoE decode hidden chunks must span whole sticks")
+            slice_rows = H // decode_chunks
+            if (
+                gate.shape[1:] != (slice_rows, intermediate)
+                or up.shape != gate.shape
+                or down.shape != (gate.shape[0], intermediate, slice_rows)
+            ):
+                raise ValueError("MoE decode weights must be expert-major chunks")
+            # e*chunks+c addresses one input/output slice of expert e. The
+            # original indices remain available for per-expert scaling.
+            entries = torch.cat(
+                [
+                    expert_fp32 * float(decode_chunks) + float(c)
+                    for c in range(decode_chunks)
+                ],
+                dim=0,
+            )[..., : stick_size // 2].to(torch.int32)[:, 0]
+            inputs = torch.cat(
+                [
+                    x[:, c * slice_rows : (c + 1) * slice_rows]
+                    .reshape(T, 1, slice_rows)
+                    .expand(T, top_k, slice_rows)
+                    .reshape(rows, 1, slice_rows)
+                    for c in range(decode_chunks)
+                ],
+                dim=0,
+            )
+            gate_out = (
+                torch.bmm(
+                    inputs,
+                    gate[entries].reshape(
+                        rows * decode_chunks, slice_rows, intermediate
+                    ),
+                )
+                .reshape(decode_chunks, T, top_k, intermediate)
+                .permute(1, 2, 0, 3)
+                .sum(dim=2)
+                .reshape(rows, 1, intermediate)
+            )
+            up_out = (
+                torch.bmm(
+                    inputs,
+                    up[entries].reshape(rows * decode_chunks, slice_rows, intermediate),
+                )
+                .reshape(decode_chunks, T, top_k, intermediate)
+                .permute(1, 2, 0, 3)
+                .sum(dim=2)
+                .reshape(rows, 1, intermediate)
+            )
 
-        gate_out = torch.bmm(inputs, selected_gate)
-        up_out = torch.bmm(inputs, selected_up)
         if activation == "silu":
             activated = F.silu(gate_out) * up_out
         else:
             activated = F.gelu(gate_out, approximate="tanh") * up_out
-        expert_out = torch.bmm(activated, selected_down).reshape(T, top_k, H)
+        if decode_chunks == 1:
+            expert_out = torch.bmm(activated, selected_down).reshape(T, top_k, H)
+        else:
+            parts = torch.bmm(
+                torch.cat([activated for _ in range(decode_chunks)], dim=0),
+                down[entries].reshape(rows * decode_chunks, intermediate, slice_rows),
+            ).reshape(decode_chunks, T, top_k, slice_rows)
+            expert_out = torch.cat([parts[c] for c in range(decode_chunks)], dim=-1)
         expert_out = expert_out * weights[..., None]
         if per_expert_scale_stick is not None:
-            expert_scale = per_expert_scale_stick[expert_indices][..., :1]
+            if decode_chunks == 1:
+                expert_scale = per_expert_scale_stick[expert_indices][..., :1]
+            else:
+                expert_scale = per_expert_scale_stick[expert_indices][:, :1].reshape(
+                    T, top_k, 1
+                )
             expert_out = expert_out * expert_scale
         return expert_out.sum(dim=1)
 
