@@ -2366,15 +2366,13 @@ jobs:
     # failed, every primary suite skipped, so nothing ran, so has_failed_model_components
     # is false and this retry never fires. See spyre-load-tests-retry for the full note.
     if: ${{ always() && needs.collect-failed-suites.outputs.has_failed_model_components == 'true' }}
+    # No strategy.matrix: this singleton suite's matrix is {"include": [{}]}, which GitHub expands to zero jobs and silently skips.
     runs-on:
       - x86_64
       - spyre_pf_x1
       - linux
       - ${{ inputs.image_label }}
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.collect-failed-suites.outputs.matrix_model_components) }}
 
     steps:
       - name: Checkout composite actions
