@@ -23,6 +23,7 @@ compiled block functions.
 
 import math
 import os
+import sys
 import time
 import warnings
 from contextlib import contextmanager, nullcontext
@@ -175,6 +176,45 @@ def moe_decode_selected_experts(
             expert_scale = per_expert_scale_stick[expert_indices][..., :1]
             expert_out = expert_out * expert_scale
         return expert_out.sum(dim=1)
+
+
+@contextmanager
+def named_moe_prefill_inputs(x, gate, up, down):
+    """Keep the prefill token work division attached to its eager inputs.
+
+    The expert loop's ``work_div={"T": 32}`` needs these names to resolve to
+    the token axis. Without them the compiler can leave most cores idle.
+    Accept flattened [T, H] or batched [B, T, H] inputs. Keep batch and sequence
+    names separate so flattening them for the expert loop and restoring the
+    batch shape both preserve dimension propagation.
+    """
+    if x.device.type != "spyre":
+        yield
+        return
+
+    named_dims = sys.modules["torch_spyre._inductor.wsr.propagate_named_dims"]
+    batch, tokens, _ = (1, *x.shape) if x.ndim == 2 else x.shape
+    input_names = ("T", "H") if x.ndim == 2 else ("B", "T", "H")
+    experts, hidden, intermediate = gate.shape
+    try:
+        for name, extent in (
+            ("B", batch),
+            ("E", experts),
+            ("T", tokens),
+            ("H", hidden),
+            ("M", intermediate),
+        ):
+            named_dims.declare_tensor_dim(name, extent)
+        named_dims.name_tensor_dims(
+            x, [name for name, size in zip(input_names, x.shape) if size != 1]
+        )
+        named_dims.name_tensor_dims(gate, ["E", "H", "M"])
+        named_dims.name_tensor_dims(up, ["E", "H", "M"])
+        named_dims.name_tensor_dims(down, ["E", "M", "H"])
+        yield
+    finally:
+        # Compilation consumes these globals; a cache hit does not.
+        named_dims.reset()
 
 
 def moe_prefill_all_experts(x, routing_weight, gate, up, down, activation):
