@@ -15,7 +15,7 @@
 import pytest
 import torch
 
-from hf_adapters.hf_laya import _pad_explicit_masks
+from hf_adapters.laya_backend import _pad_explicit_masks
 
 
 def test_pad_explicit_masks_blocks_padded_queries_and_keys():

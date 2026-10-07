@@ -612,7 +612,7 @@ STRUCTURED_DECISION_MODELS = {
     "laya": {
         "name": "Laya",
         "path": "convaiinnovations/laya",
-        "adapter": "hf_laya.py",
+        "adapter": "laya_backend.py",
         "size": "0.4b",
     },
 }

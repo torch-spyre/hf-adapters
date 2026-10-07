@@ -61,13 +61,13 @@ def get_adapter_files():
     # Get the hf_adapters directory path
     hf_adapters_dir = Path(__file__).parent.parent / "hf_adapters"
 
-    # Collect all files matching hf_*.py pattern, excluding hf_common.py
-    adapter_files = set()
-    for file_path in hf_adapters_dir.glob("hf_*.py"):
-        # Skip hf_common.py as it's a utilities module, not an adapter
-        if file_path.name != "hf_common.py":
-            adapter_files.add(file_path.name)
-
+    # Collect architecture adapters and task-specific backend integrations.
+    adapter_files = {
+        file_path.name
+        for file_path in hf_adapters_dir.glob("hf_*.py")
+        if file_path.name != "hf_common.py"
+    }
+    adapter_files.add("laya_backend.py")
     return adapter_files
 
 
@@ -139,7 +139,7 @@ def get_registered_adapters():
 
 def test_all_adapters_are_registered():
     """
-    Test that every hf_*.py file in hf_adapters/ is registered in model_registry.py.
+    Test that every adapter or backend file is registered in model_registry.py.
 
     This ensures that:
     1. All adapter files are discoverable

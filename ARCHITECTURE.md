@@ -141,7 +141,7 @@ RoBERTa large MNLI uses `hf_xlm_roberta.py` (shared with the XLM-RoBERTa and rer
 ### Structured Decisions
 
 Laya combines a ModernBERT encoder with a custom two-layer decision transformer,
-variable option scorer, and action head. `hf_adapters.hf_laya.load()` returns the
+variable option scorer, and action head. `hf_adapters.laya_backend.load()` returns the
 upstream Laya Agent with its ModernBERT encoder on Spyre and decision modules on CPU. Install
 the optional runtime with `pip install 'hf-adapters-spyre[laya]'`.
 
@@ -260,7 +260,7 @@ pattern, norms, and weight layout.
 | hf\_xlm\_roberta.py | xlm-roberta / roberta | 3 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes, RoBERTa NER/QA/classifier fine-tunes |
 | hf\_mpnet.py | mpnet | 1 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base, all-mpnet-base-v1 |
 | hf\_modernbert.py | modernbert | 3 | answerdotai/ModernBERT-base, answerdotai/ModernBERT-large, other ModernBERT embed/classifier fine-tunes |
-| hf\_laya.py | laya (ModernBERT encoder) | 1 | Root `convaiinnovations/laya` typed-decision checkpoint; bundled typed-decisions and multilingual variants require separate verification |
+| laya\_backend.py | laya (ModernBERT encoder) | 1 | Root `convaiinnovations/laya` typed-decision checkpoint; bundled typed-decisions and multilingual variants require separate verification |
 
 **Verified** = checkpoints tested in CI (appear in the matrix above).
 **Also Compatible** = same `model_type` in HuggingFace config; expected

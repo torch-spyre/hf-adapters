@@ -97,9 +97,9 @@ sequences = model.generate(**inputs, max_new_tokens=5)
 Laya keeps its native Agent API while running the ModernBERT encoder on Spyre:
 
 ```python
-from hf_adapters import hf_laya
+from hf_adapters import laya_backend
 
-agent = hf_laya.load("convaiinnovations/laya")
+agent = laya_backend.load("convaiinnovations/laya")
 result = agent.predict(
     "The production API is down and customers cannot log in.",
     {

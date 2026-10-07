@@ -21,7 +21,7 @@ from _structured_decision_helpers import (
     build_structured_decision_batch,
 )
 
-from hf_adapters import hf_laya
+from hf_adapters import laya_backend
 from hf_adapters.auto_spyre_model import dtype_for_model_path
 from hf_adapters.hf_common import move_model_to_spyre
 from tests.cpu.conftest import _unwrap_compiled_blocks
@@ -46,7 +46,7 @@ def test_structured_decision_cpu_accuracy(model_path, explicit_positions):
     with torch.no_grad():
         ref_option_logits, ref_act_logits = model(**batch)
 
-    move_model_to_spyre(model, hf_laya, dtype)
+    move_model_to_spyre(model, laya_backend, dtype)
     for rope in model.encoder._spyre_rope.values():
         assert rope._freq_cache is not None
         assert rope._freq_cache.dtype == dtype
@@ -80,7 +80,7 @@ def test_laya_agent_predict(model_path):
         STRUCTURED_DECISION_STATE, STRUCTURED_DECISION_QUESTIONS
     )
 
-    agent = hf_laya.load(model_path)
+    agent = laya_backend.load(model_path)
     _unwrap_compiled_blocks(agent.model)
     actual = agent.predict(STRUCTURED_DECISION_STATE, STRUCTURED_DECISION_QUESTIONS)
 
@@ -123,4 +123,4 @@ def test_laya_agent_predict(model_path):
 
 def test_laya_load_rejects_unsupported_checkpoint():
     with pytest.raises(ValueError, match="root convaiinnovations/laya"):
-        hf_laya.load("convaiinnovations/laya-typed-decisions")
+        laya_backend.load("convaiinnovations/laya-typed-decisions")
