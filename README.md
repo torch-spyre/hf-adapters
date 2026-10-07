@@ -1,6 +1,6 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-39-blue)
+![adapters](https://img.shields.io/badge/adapters-40-blue)
 ![compatible](https://img.shields.io/badge/compatible_models-10K%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -13,17 +13,19 @@ from `transformers`.
 
 ## Supported Models
 
-**39 adapters · 10K+ compatible models**
+**40 adapters · 10K+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
-**sequence classification** (sentiment / text categorisation),
-**token classification** (NER/POS), **vision-language** (image→text), and
+**sequence classification** (sentiment / text categorisation), **structured
+decisions** (variable options plus action selection), **token classification**
+(NER/POS), **vision-language** (image→text), and
 **speculative-decoding drafter** models — from
 Llama / Qwen / Granite / Mistral / Phi / Gemma / OLMo / GPT decoders to BERT /
 XLM-RoBERTa / MPNet / ModernBERT encoders, the Granite Vision 4.1 (SigLIP tower +
 Granite text), Mistral3 Vision (Pixtral tower + Mistral text), and Gemma 4
 (encoder-free and full-vision) multimodal VLMs, plus the DSpark block-propose drafters for
-Qwen 3 / Granite / Gemma 4.
+Qwen 3 / Granite / Gemma 4. Laya support uses its optional upstream package to
+construct the stock decision model; hf-adapters patches only its ModernBERT encoder.
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. The **canonical, per-adapter model lists** — verified
@@ -35,6 +37,9 @@ Spyre numerical accuracy — live in **[ARCHITECTURE.md](ARCHITECTURE.md#verifie
 ```bash
 # Install core deps
 uv sync
+
+# Optional Laya typed-decision support
+uv sync --extra laya
 
 # Install core + dev deps
 uv sync --group dev

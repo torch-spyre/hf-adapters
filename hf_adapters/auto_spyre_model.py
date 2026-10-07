@@ -129,6 +129,7 @@ from hf_adapters import (
     hf_granite_vision,
     hf_granite_vision_mm,
     hf_granitemoehybrid,
+    hf_laya,
     hf_lfm2,
     hf_llama,
     hf_ministral,
@@ -208,6 +209,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
 # them to the drafter adapter instead. Normal targets have no entry here and fall
 # through to ``CONFIG_TO_ADAPTER_MODULE_MAPPING`` unchanged.
 ARCH_TO_ADAPTER_MODULE_MAPPING: dict[str, ModuleType] = {
+    "LayaTypedDecisions": hf_laya,
     "Qwen3DSparkModel": hf_dspark_qwen3,
     "Gemma4DSparkModel": hf_dspark_gemma4,
     "GraniteDSparkModel": hf_dspark_granite,
@@ -255,6 +257,7 @@ class ModelDTypePolicy:
 
 
 MODEL_DTYPE_POLICIES: dict[str, ModelDTypePolicy] = {
+    "convaiinnovations/laya": ModelDTypePolicy(dtype=torch.float16),
     "google/embeddinggemma-300m": ModelDTypePolicy(dtype=torch.bfloat16),
     "ibm-granite/granite-4.0-1b-base": ModelDTypePolicy(cpu_dtype=torch.float32),
     "ibm-granite/granite-4.0-1b": ModelDTypePolicy(cpu_dtype=torch.float32),
@@ -348,6 +351,10 @@ def resolve_adapter_module(
         model_name_or_path, trust_remote_code=trust_remote_code
     )
     if model_config is None:
+        config_dict, _ = PretrainedConfig.get_config_dict(model_name_or_path)
+        for architecture in config_dict.get("architectures") or []:
+            if architecture in ARCH_TO_ADAPTER_MODULE_MAPPING:
+                return ARCH_TO_ADAPTER_MODULE_MAPPING[architecture]
         raise SpyreNoAdapterError(f"Could not load config for {model_name_or_path}")
 
     # Architecture-name dispatch first: DSpark drafters share their base model's
@@ -418,6 +425,28 @@ class AutoSpyreModel:
         )
         move_model_to_spyre(model, module, dtype)
         return model
+
+
+class AutoSpyreModelForTypedDecisions(AutoSpyreModel):
+    """Load an upstream Laya typed-decision model with its encoder on Spyre."""
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_name_or_path: Union[str, os.PathLike[str]],
+        dtype: torch.dtype | None = None,
+        tp_plan: Optional[Union[dict, str]] = None,
+        trust_remote_code: bool | None = None,
+    ) -> PreTrainedModel:
+        if tp_plan is not None:
+            raise SpyreUnsupportedFeatureError(
+                "Tensor parallelism is not supported for typed-decision models"
+            )
+        return super().from_pretrained(
+            model_name_or_path,
+            dtype=dtype,
+            trust_remote_code=trust_remote_code,
+        )
 
 
 class AutoSpyreModelForCausalLM(AutoSpyreModel):

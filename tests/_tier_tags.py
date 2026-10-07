@@ -71,6 +71,7 @@ SUITE_TIERS: dict[str, tuple[str, ...]] = {
     "reranker_compare": ("regression", "trunk", "unit"),
     "seq_classification_compare": ("regression", "trunk", "unit"),
     "smoke": ("regression", "trunk"),
+    "structured_decision_compare": ("regression", "trunk", "unit"),
     "token_classification_compare": ("regression", "trunk", "unit"),
     "token_compare": ("integration", "regression", "trunk", "unit"),
     "vlm": ("regression", "trunk", "unit"),

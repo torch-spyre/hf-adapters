@@ -70,6 +70,10 @@ def generate_matrices(exclude_models=None, only_models=None):
             registry.TOKEN_CLASSIFICATION_PATHS,
             registry.ALL_TOKEN_CLASSIFICATION_PATHS,
         ),
+        "structured_decision": (
+            registry.STRUCTURED_DECISION_PATHS,
+            registry.ALL_STRUCTURED_DECISION_PATHS,
+        ),
     }
 
     if only_models:
@@ -114,6 +118,7 @@ def generate_matrices(exclude_models=None, only_models=None):
         "reranker": paths["reranker"],
         "seq_classification": paths["seq_classification"],
         "token_classification": paths["token_classification"],
+        "structured_decision": paths["structured_decision"],
     }
 
 
@@ -139,6 +144,7 @@ def format_for_github_actions(matrices):
         "reranker_matrix": json.dumps(matrices["reranker"]),
         "seq_classification_matrix": json.dumps(matrices["seq_classification"]),
         "token_classification_matrix": json.dumps(matrices["token_classification"]),
+        "structured_decision_matrix": json.dumps(matrices["structured_decision"]),
     }
 
 
@@ -224,6 +230,10 @@ def main():
     print(
         f"  Token-classification models ({len(matrices['token_classification'])}): "
         f"{', '.join(matrices['token_classification'])}"
+    )
+    print(
+        f"  Structured-decision models ({len(matrices['structured_decision'])}): "
+        f"{', '.join(matrices['structured_decision'])}"
     )
 
     if args.exclude:

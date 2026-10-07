@@ -31,6 +31,7 @@ from tests.model_registry import (
     QUESTION_ANSWERING_MODELS,
     RERANKER_MODELS,
     SEQ_CLASSIFICATION_MODELS,
+    STRUCTURED_DECISION_MODELS,
     TOKEN_CLASSIFICATION_MODELS,
     VISION_MODELS,
 )
@@ -123,6 +124,12 @@ def get_registered_adapters():
 
     # Collect adapters from TOKEN_CLASSIFICATION_MODELS
     for model_info in TOKEN_CLASSIFICATION_MODELS.values():
+        adapter = model_info.get("adapter")
+        if adapter:
+            registered_adapters.add(adapter)
+
+    # Collect adapters from STRUCTURED_DECISION_MODELS
+    for model_info in STRUCTURED_DECISION_MODELS.values():
         adapter = model_info.get("adapter")
         if adapter:
             registered_adapters.add(adapter)
@@ -280,6 +287,7 @@ def test_adapter_coverage_details():
         + list(RERANKER_MODELS.values())
         + list(SEQ_CLASSIFICATION_MODELS.values())
         + list(TOKEN_CLASSIFICATION_MODELS.values())
+        + list(STRUCTURED_DECISION_MODELS.values())
     ):
         adapter = model_info.get("adapter")
         if adapter:
