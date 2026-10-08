@@ -185,7 +185,14 @@ def sanitize_arg(
 # Op-name prefixes that never denote a tensor operation, so they get no test case.
 # torch.cuda.* are host-side device queries (e.g. get_device_capability(), called
 # from transformers' _can_use_grouped_mm) that return Python values, not tensors.
-_SKIPPED_OP_PREFIXES = ("torch.cuda.",)
+# torch.ops.spyre.*, torch_spyre._monkey_patch.* and torch._C._autograd.* come from
+# torch-spyre's own device-copy / dtype plumbing, not from the model.
+_SKIPPED_OP_PREFIXES = (
+    "torch.cuda.",
+    "torch.ops.spyre.",
+    "torch_spyre._monkey_patch.",
+    "torch._C._autograd.",
+)
 
 # ``_operator`` names that must not be spelled "torch." + name, because the
 # trailing underscore in ``operator.and_`` / ``or_`` is only Python
