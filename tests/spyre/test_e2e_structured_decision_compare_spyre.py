@@ -29,6 +29,12 @@ from hf_adapters.hf_common import move_model_to_spyre
 pytestmark = pytest.mark.model_harness("structured_decision")
 
 
+def _assert_module_device(module, expected):
+    devices = {parameter.device.type for parameter in module.parameters()}
+    devices.update(buffer.device.type for buffer in module.buffers())
+    assert devices == {expected}
+
+
 @pytest.mark.parametrize(
     "model_path", STRUCTURED_DECISION_PATHS, ids=STRUCTURED_DECISION_PATHS
 )
@@ -62,11 +68,12 @@ def test_e2e_structured_decision_compare_spyre(model_path, explicit_positions):
     )
     act_cos = F.cosine_similarity(act_logits, ref_act_logits, dim=-1)
 
-    assert next(model.encoder.parameters()).device.type == "spyre"
-    for name in ("head", "type_emb", "scorer", "act_head"):
+    _assert_module_device(model.encoder, "spyre")
+    _assert_module_device(model.head, "spyre")
+    for name in ("type_emb", "scorer", "act_head"):
         module = getattr(model, name)
         if module is not None:
-            assert next(module.parameters()).device.type == "cpu"
+            _assert_module_device(module, "cpu")
     assert torch.isfinite(option_logits[valid]).all()
     assert torch.isfinite(act_logits).all()
     assert option_cos.min() >= 0.98
@@ -93,11 +100,12 @@ def test_laya_agent_predict_spyre(model_path):
     repeated = agent.predict(STRUCTURED_DECISION_STATE, STRUCTURED_DECISION_QUESTIONS)
 
     assert agent.device.type == "cpu"
-    assert next(agent.model.encoder.parameters()).device.type == "spyre"
-    for name in ("head", "type_emb", "scorer", "act_head"):
+    _assert_module_device(agent.model.encoder, "spyre")
+    _assert_module_device(agent.model.head, "spyre")
+    for name in ("type_emb", "scorer", "act_head"):
         module = getattr(agent.model, name)
         if module is not None:
-            assert next(module.parameters()).device.type == "cpu"
+            _assert_module_device(module, "cpu")
 
     assert actual["answers"].keys() == expected["answers"].keys()
     for key in expected["answers"]:

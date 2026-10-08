@@ -15,7 +15,7 @@
 import pytest
 import torch
 
-from hf_adapters.laya_backend import _pad_explicit_masks
+from hf_adapters.laya_backend import _decision_keep_mask, _pad_explicit_masks
 
 
 def test_pad_explicit_masks_blocks_padded_queries_and_keys():
@@ -56,3 +56,31 @@ def test_pad_explicit_masks_rejects_additive_masks():
     }
     with pytest.raises(ValueError, match="must be boolean"):
         _pad_explicit_masks(masks, 0)
+
+
+def test_decision_keep_mask_blocks_batch_and_compiler_padding():
+    padding = torch.tensor([[False, False, False], [False, True, True]])
+
+    mask = _decision_keep_mask(padding, 5)
+
+    assert mask.shape == (2, 1, 5, 5)
+    assert mask[0, 0, :, :3].all()
+    assert not mask[0, 0, :, 3:].any()
+    assert mask[1, 0, :, 0].all()
+    assert not mask[1, 0, :, 1:].any()
+
+
+def test_decision_keep_mask_rejects_left_padding():
+    padding = torch.tensor([[True, False, False]])
+
+    with pytest.raises(ValueError, match="right-padded"):
+        _decision_keep_mask(padding, 64)
+
+
+def test_decision_keep_mask_rejects_invalid_shape_and_dtype():
+    with pytest.raises(ValueError, match="boolean"):
+        _decision_keep_mask(torch.zeros((1, 3)), 64)
+    with pytest.raises(ValueError, match="boolean"):
+        _decision_keep_mask(torch.zeros((1, 1, 3), dtype=torch.bool), 64)
+    with pytest.raises(ValueError, match="sequence length"):
+        _decision_keep_mask(torch.zeros((1, 0), dtype=torch.bool), 0)

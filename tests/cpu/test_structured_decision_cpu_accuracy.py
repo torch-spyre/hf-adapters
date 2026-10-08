@@ -51,9 +51,11 @@ def test_structured_decision_cpu_accuracy(model_path, explicit_positions):
         assert rope._freq_cache is not None
         assert rope._freq_cache.dtype == dtype
         assert rope._cached_len >= model.encoder.config.max_position_embeddings
+    assert all(len(layer._spyre_compiled_blocks) == 1 for layer in model.head.layers)
     _unwrap_compiled_blocks(model)
     with torch.no_grad():
         option_logits, act_logits = model(**batch)
+        repeat_option_logits, repeat_act_logits = model(**batch)
 
     valid = batch["marker_mask"]
     assert option_logits.shape == ref_option_logits.shape
@@ -72,6 +74,8 @@ def test_structured_decision_cpu_accuracy(model_path, explicit_positions):
         F.cosine_similarity(act_logits.float(), ref_act_logits.float(), dim=-1).min()
         > 0.999
     )
+    assert torch.equal(repeat_option_logits, option_logits)
+    assert torch.equal(repeat_act_logits, act_logits)
 
 
 @pytest.mark.parametrize(

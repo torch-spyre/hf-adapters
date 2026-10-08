@@ -94,7 +94,8 @@ sequences = model.generate(**inputs, max_new_tokens=5)
 
 ## Structured Decisions
 
-Laya keeps its native Agent API while running the ModernBERT encoder on Spyre:
+Laya keeps its native Agent API while running the ModernBERT encoder and
+two-layer decision transformer on Spyre:
 
 ```python
 from hf_adapters import laya_backend
@@ -116,9 +117,10 @@ result = agent.predict(
 )
 ```
 
-The Agent and decision heads remain on CPU; only `agent.model.encoder` runs on
-Spyre. Select a bundled checkpoint explicitly with `subfolder="typed-decisions"`
-or `subfolder="multilingual"`. This does not enable automatic Router selection.
+The encoder and two-layer decision transformer run on Spyre. Question-type
+embedding, option scoring, action scoring, and Agent orchestration remain on CPU.
+Select a bundled checkpoint explicitly with `subfolder="typed-decisions"` or
+`subfolder="multilingual"`. This does not enable automatic Router selection.
 
 ## Embedding Models
 

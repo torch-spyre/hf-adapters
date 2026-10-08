@@ -15,9 +15,9 @@
 """Adapter for Laya typed-decision models.
 
 Laya wraps a stock ModernBERT encoder in a custom decision model. The encoder
-runs on Spyre through :mod:`hf_modernbert`; the decision transformer and scoring
-heads remain on CPU. The upstream ``laya`` package is optional and supplies the
-model class and checkpoint construction logic.
+and two-layer decision transformer run on Spyre; type embedding, option scoring,
+and action scoring remain on CPU. The upstream ``laya`` package is optional and
+supplies the model class and checkpoint construction logic.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from importlib.metadata import PackageNotFoundError, version
 from types import MethodType
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from transformers import ModernBertModel
 from transformers.modeling_outputs import BaseModelOutput
@@ -268,6 +269,142 @@ def _encoder_forward(
     return BaseModelOutput(last_hidden_state=hidden)
 
 
+def _split_decision_qkv(attn):
+    """Replace packed MultiheadAttention QKV parameters with separate linears."""
+    embed_dim = attn.embed_dim
+    weights = attn.in_proj_weight.detach().split(embed_dim, dim=0)
+    biases = (
+        (None, None, None)
+        if attn.in_proj_bias is None
+        else attn.in_proj_bias.detach().split(embed_dim, dim=0)
+    )
+
+    projections = []
+    for weight, bias in zip(weights, biases):
+        projection = nn.Linear(
+            embed_dim,
+            embed_dim,
+            bias=bias is not None,
+            device=weight.device,
+            dtype=weight.dtype,
+        )
+        projection.weight = nn.Parameter(weight.clone(), requires_grad=False)
+        if bias is not None:
+            projection.bias = nn.Parameter(bias.clone(), requires_grad=False)
+        projections.append(projection)
+
+    attn._spyre_q_proj, attn._spyre_k_proj, attn._spyre_v_proj = projections
+
+    def remove_split_projections(module, state_dict, prefix, local_metadata):
+        del module, local_metadata
+        for name in ("q", "k", "v"):
+            state_dict.pop(f"{prefix}_spyre_{name}_proj.weight", None)
+            state_dict.pop(f"{prefix}_spyre_{name}_proj.bias", None)
+
+    attn.register_state_dict_post_hook(remove_split_projections)
+
+
+def _make_compiled_decision_block(layer):
+    """Compile one pre-norm Laya decision-transformer layer."""
+    attn = layer.self_attn
+    num_heads = attn.num_heads
+    head_dim = attn.head_dim
+    scale = head_dim**-0.5
+
+    def block_forward(hidden_states, attn_mask):
+        bsz, seq_len, _ = hidden_states.shape
+        residual = hidden_states
+        h = layer.norm1(hidden_states)
+        q = (
+            attn._spyre_q_proj(h)
+            .reshape(bsz, seq_len, num_heads, head_dim)
+            .permute(0, 2, 1, 3)
+            .contiguous()
+        )
+        k = (
+            attn._spyre_k_proj(h)
+            .reshape(bsz, seq_len, num_heads, head_dim)
+            .permute(0, 2, 1, 3)
+            .contiguous()
+        )
+        v = (
+            attn._spyre_v_proj(h)
+            .reshape(bsz, seq_len, num_heads, head_dim)
+            .permute(0, 2, 1, 3)
+            .contiguous()
+        )
+        attn_out = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            is_causal=False,
+            scale=scale,
+        )
+        attn_out = attn_out.permute(0, 2, 1, 3).contiguous().reshape(bsz, seq_len, -1)
+        hidden_states = residual + attn.out_proj(attn_out)
+
+        residual = hidden_states
+        h = layer.norm2(hidden_states)
+        hidden_states = residual + layer.linear2(layer.activation(layer.linear1(h)))
+        return hidden_states
+
+    return torch.compile(block_forward, dynamic=False)
+
+
+def _decision_keep_mask(key_padding_mask, padded_len):
+    """Convert a key-padding mask to an SDPA keep mask, including block padding."""
+    key_padding_mask = key_padding_mask.to("cpu")
+    if key_padding_mask.ndim != 2 or key_padding_mask.dtype != torch.bool:
+        raise ValueError(
+            "Laya decision key-padding mask must be boolean [batch, sequence]"
+        )
+    if key_padding_mask.shape[1] == 0 or padded_len < key_padding_mask.shape[1]:
+        raise ValueError("Invalid Laya decision sequence length")
+    if torch.any(key_padding_mask[:, :-1] & ~key_padding_mask[:, 1:]):
+        raise ValueError("Laya decision inputs must be right-padded")
+
+    keep = ~key_padding_mask
+    if padded_len > keep.shape[1]:
+        keep = F.pad(keep, (0, padded_len - keep.shape[1]), value=False)
+    return keep[:, None, None, :].expand(-1, 1, padded_len, -1)
+
+
+def _decision_layer_forward(
+    layer,
+    hidden_states,
+    src_mask=None,
+    src_key_padding_mask=None,
+    is_causal=False,
+):
+    if layer.training or torch.is_grad_enabled():
+        raise RuntimeError("Laya decision layers on Spyre support inference only")
+    if src_mask is not None or is_causal:
+        raise ValueError(
+            "Laya decision layers support only bidirectional padding masks"
+        )
+    if src_key_padding_mask is None:
+        raise ValueError("Laya decision layers require a key-padding mask")
+
+    logical_len = src_key_padding_mask.shape[1]
+    if hidden_states.shape[1] == logical_len:
+        padded_len = math.ceil(logical_len / BLOCK_SIZE) * BLOCK_SIZE
+        if padded_len > logical_len:
+            hidden_states = F.pad(hidden_states, (0, 0, 0, padded_len - logical_len))
+        hidden_states = hidden_states.to(hf_common.DEVICE).clone()
+    else:
+        padded_len = hidden_states.shape[1]
+
+    attn_mask = _decision_keep_mask(src_key_padding_mask, padded_len).to(
+        hf_common.DEVICE
+    )
+    hidden_states = layer._spyre_compiled_blocks[0](hidden_states, attn_mask).clone()
+    if layer._spyre_is_last:
+        hidden_states = hidden_states[:, :logical_len].to("cpu")
+    return hidden_states
+
+
 def _decision_forward(
     model,
     input_ids,
@@ -310,11 +447,25 @@ def prepare_for_spyre(model):
     model.config = model.encoder.config
     model.encoder.forward = MethodType(_encoder_forward, model.encoder)
 
+    if model.head is not None:
+        layers = list(model.head.layers)
+        for layer in layers:
+            if layer.self_attn.head_dim != BLOCK_SIZE:
+                raise ValueError(
+                    "Laya decision attention requires a 64-element head dimension, got "
+                    f"{layer.self_attn.head_dim}"
+                )
+            _split_decision_qkv(layer.self_attn)
+        for index, layer in enumerate(layers):
+            layer._spyre_compiled_blocks = [_make_compiled_decision_block(layer)]
+            layer._spyre_is_last = index == len(layers) - 1
+            layer.forward = MethodType(_decision_layer_forward, layer)
+
     model._spyre_original_forward = model.forward
     model.forward = MethodType(_decision_forward, model)
     model._spyre_cpu_submodules = [
         name
-        for name in ("head", "type_emb", "scorer", "act_head")
+        for name in ("type_emb", "scorer", "act_head")
         if getattr(model, name, None) is not None
     ]
 

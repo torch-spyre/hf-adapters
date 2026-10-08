@@ -142,14 +142,18 @@ RoBERTa large MNLI uses `hf_xlm_roberta.py` (shared with the XLM-RoBERTa and rer
 
 Laya combines a ModernBERT encoder with a custom two-layer decision transformer,
 variable option scorer, and action head. `hf_adapters.laya_backend.load()` returns the
-upstream Laya Agent with its ModernBERT encoder on Spyre and decision modules on CPU. Install
-the optional runtime with `pip install 'hf-adapters-spyre[laya]'`.
+upstream Laya Agent with its ModernBERT encoder and decision transformer on Spyre. Question-type
+embedding, option scoring, action scoring, and Agent orchestration remain on CPU. Install the
+optional runtime with `pip install 'hf-adapters-spyre[laya]'`.
 
 | Model | model\_type | head\_dim | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
 |-------|-----------|---------|--------------|-------------|---------------|-----------|
 | Laya (`convaiinnovations/laya`) | laya (ModernBERT-large encoder) | 64→128 | Yes (padded) | Yes | Yes | Yes |
 | Laya Typed Decisions (`typed-decisions`) | laya (ModernBERT-large encoder) | 64→128 | Yes (padded) | Yes | Yes | Yes |
 | Laya Multilingual (`multilingual`) | laya (mmBERT, 768 hidden / 22 layers) | 64→128 | Yes (padded) | Yes | Yes | Yes |
+
+The table's `64→128` dimension applies to the RoPE encoder attention. The non-RoPE
+decision-transformer attention runs at its native stick-aligned head dimension of 64.
 
 **CPU Accurate** = option/action argmax matches the upstream Laya forward and
 valid-option logit cosine is ≥ 0.998. **Spyre Runs** = the structured-decision comparison
