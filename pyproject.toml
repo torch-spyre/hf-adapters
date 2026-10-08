@@ -102,7 +102,7 @@ markers = [
 ]
 
 [tool.uv.sources]
-torch-spyre = { git = "https://github.com/torch-spyre/torch-spyre", tag = "v0.5.0-rc.1" }
+torch-spyre = { git = "https://github.com/torch-spyre/torch-spyre", tag = "v0.5.0-rc.4" }
 oot-framework = { git = "https://github.com/torch-spyre/torch-spyre", subdirectory = "tests/oot_framework", rev = "main" }
 # torch resolves to the +cpu build (via torch-spyre's index). torchvision must
 # come from the SAME PyTorch CPU index or PyPI hands us a CUDA-built wheel whose
