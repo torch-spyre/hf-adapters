@@ -197,7 +197,7 @@ def _pad_explicit_masks(masks, pad_amount, *, batch_size=None, sequence_length=N
     return padded
 
 
-def _encoder_forward(
+def _run_encoder_on_spyre(
     encoder,
     input_ids=None,
     attention_mask=None,
@@ -265,7 +265,26 @@ def _encoder_forward(
         position_ids.to(hf_common.DEVICE),
         None,
     )
-    hidden = hidden[:, :seq_len].to("cpu")
+    return hidden, seq_len
+
+
+def _encoder_forward(
+    encoder,
+    input_ids=None,
+    attention_mask=None,
+    position_ids=None,
+    _spyre_keep_padded=False,
+    **kwargs,
+):
+    hidden, seq_len = _run_encoder_on_spyre(
+        encoder,
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        **kwargs,
+    )
+    if not _spyre_keep_padded:
+        hidden = hidden[:, :seq_len].to("cpu")
     return BaseModelOutput(last_hidden_state=hidden)
 
 
@@ -304,14 +323,14 @@ def _split_decision_qkv(attn):
     attn.register_state_dict_post_hook(remove_split_projections)
 
 
-def _make_compiled_decision_block(layer):
+def _make_compiled_decision_block(layer, *, add_type_embedding=False):
     """Compile one pre-norm Laya decision-transformer layer."""
     attn = layer.self_attn
     num_heads = attn.num_heads
     head_dim = attn.head_dim
     scale = head_dim**-0.5
 
-    def block_forward(hidden_states, attn_mask):
+    def run_block(hidden_states, attn_mask):
         bsz, seq_len, _ = hidden_states.shape
         residual = hidden_states
         h = layer.norm1(hidden_states)
@@ -350,6 +369,17 @@ def _make_compiled_decision_block(layer):
         hidden_states = residual + layer.linear2(layer.activation(layer.linear1(h)))
         return hidden_states
 
+    if add_type_embedding:
+
+        def block_forward_with_type(hidden_states, attn_mask, type_embedding):
+            hidden_states = hidden_states + type_embedding[:, None, :]
+            return run_block(hidden_states, attn_mask)
+
+        return torch.compile(block_forward_with_type, dynamic=False)
+
+    def block_forward(hidden_states, attn_mask):
+        return run_block(hidden_states, attn_mask)
+
     return torch.compile(block_forward, dynamic=False)
 
 
@@ -377,6 +407,7 @@ def _decision_layer_forward(
     src_mask=None,
     src_key_padding_mask=None,
     is_causal=False,
+    type_embedding=None,
 ):
     if layer.training or torch.is_grad_enabled():
         raise RuntimeError("Laya decision layers on Spyre support inference only")
@@ -387,22 +418,51 @@ def _decision_layer_forward(
     if src_key_padding_mask is None:
         raise ValueError("Laya decision layers require a key-padding mask")
 
-    logical_len = src_key_padding_mask.shape[1]
-    if hidden_states.shape[1] == logical_len:
-        padded_len = math.ceil(logical_len / BLOCK_SIZE) * BLOCK_SIZE
-        if padded_len > logical_len:
-            hidden_states = F.pad(hidden_states, (0, 0, 0, padded_len - logical_len))
-        hidden_states = hidden_states.to(hf_common.DEVICE).clone()
-    else:
-        padded_len = hidden_states.shape[1]
+    attn_mask = src_key_padding_mask
+    if attn_mask.ndim == 2:
+        attn_mask = _decision_keep_mask(attn_mask, hidden_states.shape[1])
+    attn_mask = attn_mask.to(hf_common.DEVICE)
+    block = layer._spyre_compiled_blocks[0]
+    if layer._spyre_adds_type_embedding:
+        if type_embedding is None:
+            raise ValueError("The first Laya decision layer requires a type embedding")
+        return block(hidden_states, attn_mask, type_embedding).clone()
+    return block(hidden_states, attn_mask).clone()
 
-    attn_mask = _decision_keep_mask(src_key_padding_mask, padded_len).to(
-        hf_common.DEVICE
+
+def _decision_cpu_tail(model, hidden_states, marker_pos, marker_mask):
+    """Run Laya's gather, scoring, confidence, and action path on CPU."""
+    from laya.common import _autocast_enabled
+
+    idx = marker_pos.clamp(min=0)[:, :, None].expand(-1, -1, hidden_states.shape[-1])
+    markers = torch.gather(hidden_states, 1, idx)
+    logits = model.scorer(markers).squeeze(-1).float()
+    logits = logits.masked_fill(~marker_mask, -1e4)
+
+    probabilities = torch.softmax(logits.detach(), -1)
+    option_count = marker_mask.sum(-1).clamp(min=2).float()
+    entropy = -(probabilities * torch.log(probabilities.clamp_min(1e-9))).sum(
+        -1
+    ) / torch.log(option_count)
+    if probabilities.shape[-1] >= 2:
+        top_two = probabilities.topk(2, -1).values
+    else:
+        top_one = probabilities.topk(1, -1).values
+        top_two = torch.cat([top_one, torch.zeros_like(top_one)], dim=-1)
+    features = torch.stack(
+        [
+            top_two[:, 0],
+            top_two[:, 0] - top_two[:, 1],
+            entropy,
+            option_count / 255.0,
+        ],
+        -1,
     )
-    hidden_states = layer._spyre_compiled_blocks[0](hidden_states, attn_mask).clone()
-    if layer._spyre_is_last:
-        hidden_states = hidden_states[:, :logical_len].to("cpu")
-    return hidden_states
+    pooled = hidden_states[:, 0].float()
+    action_input = torch.cat([pooled, features], -1)
+    if not _autocast_enabled(hidden_states.device.type):
+        action_input = action_input.to(model.act_head[0].weight.dtype)
+    return logits, model.act_head(action_input)
 
 
 def _decision_forward(
@@ -416,19 +476,57 @@ def _decision_forward(
     position_ids=None,
     option_ids=None,
 ):
+    if model.head is not None and (model.training or torch.is_grad_enabled()):
+        raise RuntimeError("Laya decision models on Spyre support inference only")
     if position_ids is not None and option_ids is None:
         option_ids = torch.zeros_like(position_ids)
 
-    return model._spyre_original_forward(
-        input_ids,
-        attention_mask,
-        marker_pos,
-        marker_mask,
-        qtype,
-        detach_encoder=detach_encoder,
-        position_ids=position_ids,
-        option_ids=option_ids,
+    if option_ids is None:
+        encoder_attention_mask = attention_mask
+        encoder_position_ids = None
+    else:
+        from laya.common import parallel_option_masks
+
+        encoder_attention_mask = parallel_option_masks(
+            attention_mask,
+            position_ids,
+            option_ids,
+            getattr(model.encoder.config, "sliding_window", None),
+        )
+        encoder_position_ids = position_ids
+
+    logical_len = input_ids.shape[1]
+    hidden_states = model.encoder(
+        input_ids=input_ids,
+        attention_mask=encoder_attention_mask,
+        position_ids=encoder_position_ids,
+        _spyre_keep_padded=True,
+    ).last_hidden_state
+    if detach_encoder:
+        hidden_states = hidden_states.detach()
+
+    type_embedding = model.type_emb(qtype.to("cpu"))
+    if model.head is None:
+        hidden_states = hidden_states[:, :logical_len].to("cpu")
+        hidden_states = hidden_states + type_embedding[:, None, :]
+        return _decision_cpu_tail(model, hidden_states, marker_pos, marker_mask)
+
+    padded_len = hidden_states.shape[1]
+    key_padding_mask = ~attention_mask.to("cpu").bool()
+    decision_mask = _decision_keep_mask(key_padding_mask, padded_len).to(
+        hf_common.DEVICE
     )
+    hidden_states = hidden_states.clone()
+    type_embedding = type_embedding.to(hf_common.DEVICE)
+    for index, layer in enumerate(model.head.layers):
+        hidden_states = layer(
+            hidden_states,
+            src_key_padding_mask=decision_mask,
+            type_embedding=type_embedding if index == 0 else None,
+        )
+
+    hidden_states = hidden_states[:, :logical_len].to("cpu")
+    return _decision_cpu_tail(model, hidden_states, marker_pos, marker_mask)
 
 
 def prepare_for_spyre(model):
@@ -457,8 +555,12 @@ def prepare_for_spyre(model):
                 )
             _split_decision_qkv(layer.self_attn)
         for index, layer in enumerate(layers):
-            layer._spyre_compiled_blocks = [_make_compiled_decision_block(layer)]
-            layer._spyre_is_last = index == len(layers) - 1
+            layer._spyre_adds_type_embedding = index == 0
+            layer._spyre_compiled_blocks = [
+                _make_compiled_decision_block(
+                    layer, add_type_embedding=layer._spyre_adds_type_embedding
+                )
+            ]
             layer.forward = MethodType(_decision_layer_forward, layer)
 
     model._spyre_original_forward = model.forward

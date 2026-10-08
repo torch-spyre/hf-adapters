@@ -59,6 +59,9 @@ def test_e2e_structured_decision_compare_spyre(model_path, explicit_positions):
     with torch.no_grad():
         option_logits, act_logits = model(**batch)
         repeat_option_logits, repeat_act_logits = model(**batch)
+        detached_option_logits, detached_act_logits = model(
+            **batch, detach_encoder=True
+        )
 
     valid = batch["marker_mask"]
     option_cos = F.cosine_similarity(
@@ -82,6 +85,8 @@ def test_e2e_structured_decision_compare_spyre(model_path, explicit_positions):
     assert torch.equal(act_logits.argmax(-1), ref_act_logits.argmax(-1))
     assert torch.equal(repeat_option_logits, option_logits)
     assert torch.equal(repeat_act_logits, act_logits)
+    assert torch.equal(detached_option_logits, option_logits)
+    assert torch.equal(detached_act_logits, act_logits)
 
 
 @pytest.mark.parametrize(

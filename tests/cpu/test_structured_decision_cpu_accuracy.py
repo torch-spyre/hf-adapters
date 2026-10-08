@@ -46,7 +46,10 @@ def test_structured_decision_cpu_accuracy(model_path, explicit_positions):
     with torch.no_grad():
         ref_option_logits, ref_act_logits = model(**batch)
 
+    original_head_keys = {key for key in model.state_dict() if key.startswith("head.")}
     move_model_to_spyre(model, laya_backend, dtype)
+    prepared_head_keys = {key for key in model.state_dict() if key.startswith("head.")}
+    assert prepared_head_keys == original_head_keys
     for rope in model.encoder._spyre_rope.values():
         assert rope._freq_cache is not None
         assert rope._freq_cache.dtype == dtype
@@ -54,8 +57,32 @@ def test_structured_decision_cpu_accuracy(model_path, explicit_positions):
     assert all(len(layer._spyre_compiled_blocks) == 1 for layer in model.head.layers)
     _unwrap_compiled_blocks(model)
     with torch.no_grad():
-        option_logits, act_logits = model(**batch)
-        repeat_option_logits, repeat_act_logits = model(**batch)
+        encoder_output = model.encoder(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+        ).last_hidden_state
+        assert encoder_output.device.type == "cpu"
+        assert encoder_output.shape[:2] == batch["input_ids"].shape
+
+        encoder_calls = []
+
+        def record_encoder_call(module, args, kwargs, output):
+            del module, args
+            encoder_calls.append((kwargs.get("_spyre_keep_padded", False), output))
+
+        handle = model.encoder.register_forward_hook(
+            record_encoder_call, with_kwargs=True
+        )
+        try:
+            option_logits, act_logits = model(**batch)
+            repeat_option_logits, repeat_act_logits = model(**batch)
+            detached_option_logits, detached_act_logits = model(
+                **batch, detach_encoder=True
+            )
+        finally:
+            handle.remove()
+        assert encoder_calls
+        assert all(keep_padded for keep_padded, _ in encoder_calls)
 
     valid = batch["marker_mask"]
     assert option_logits.shape == ref_option_logits.shape
@@ -76,6 +103,8 @@ def test_structured_decision_cpu_accuracy(model_path, explicit_positions):
     )
     assert torch.equal(repeat_option_logits, option_logits)
     assert torch.equal(repeat_act_logits, act_logits)
+    assert torch.equal(detached_option_logits, option_logits)
+    assert torch.equal(detached_act_logits, act_logits)
 
 
 @pytest.mark.parametrize(
