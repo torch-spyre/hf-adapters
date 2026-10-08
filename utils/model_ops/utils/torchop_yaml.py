@@ -28,6 +28,7 @@ import torch
 import torch._inductor.compile_fx
 import yaml
 from dotenv import load_dotenv
+from torch._library.fake_class_registry import FakeScriptObject
 from torch.fx.experimental.symbolic_shapes import has_free_symbols, is_concrete_int
 
 USE_OLDFORMAT = os.getenv("USE_OLDFORMAT", None) is not None
@@ -1573,6 +1574,13 @@ class TorchOpCollector:
         elif isinstance(meta_val, (int, float)):
             # workaround for Gemma3
             TorchOpCollector.log_function[TorchOpCollector.log_mthd]("Case 6")
+            shape = stride = storage_offset = dtype = device = None
+        elif isinstance(meta_val, (FakeScriptObject, torch.ScriptObject)):
+            # Opaque graph input with no tensor metadata, e.g. the encoded layer
+            # name vLLM passes to unified_attention_with_output
+            TorchOpCollector.log_function[TorchOpCollector.log_mthd](
+                "Case 6b: opaque script object"
+            )
             shape = stride = storage_offset = dtype = device = None
         else:
             TorchOpCollector.log_function[TorchOpCollector.log_mthd]("Case 7: unknown")

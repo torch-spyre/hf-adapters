@@ -110,3 +110,27 @@ def test_collector_restores_compile_fx_on_exit(collector):
     with collector():
         assert cfx.compile_fx is not before
     assert cfx.compile_fx is before
+
+
+def test_extract_meta_info_accepts_opaque_script_objects(collector):
+    """Opaque graph inputs carry no tensor metadata and must not abort tracing.
+
+    vLLM (torch >= 2.11) passes the encoded layer name to
+    ``unified_attention_with_output`` as a ``FakeScriptObject`` graph input.
+    ``_extract_meta_info`` used to fall through to ``raise RuntimeError``. The
+    ``FakeScriptObject`` below is built directly (it deep-copies the wrapped
+    object), so this checks the type handling, not vLLM's real graph; the
+    end-to-end failure was reproduced on a Spyre pod.
+    """
+    from torch._library.fake_class_registry import FakeScriptObject
+
+    fake = FakeScriptObject(object(), "test.OpaqueLayerName", object())
+    real = torch.jit.script(torch.nn.Linear(1, 1))._c
+
+    for opaque in (fake, real):
+        assert collector._extract_meta_info(opaque) == (None,) * 5
+
+
+def test_extract_meta_info_still_rejects_unknown_types(collector):
+    with pytest.raises(RuntimeError):
+        collector._extract_meta_info(object())
