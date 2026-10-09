@@ -88,21 +88,25 @@ def _make_compiled_block(layer, res_mult, gate_proj, up_proj):
         k = apply_rope_matmul(k, selected_freqs)
 
         key_cache, value_cache = kv_cache_update(
-            k,
-            v,
-            key_cache,
-            value_cache,
-            cache_index,
+            k, v, key_cache, value_cache, cache_index
         )
-
+        # Manually expand KV heads to match query heads.
+        # enable_gqa=True produces wrong results on Spyre for GQA ratio=4
+        # (granite-4.0: 16 query heads / 4 kv heads). Expanding explicitly
+        # and using enable_gqa=False is the safe workaround.
+        num_kv = key_cache.shape[1]
+        num_q = q.shape[1]
+        groups = num_q // num_kv
+        k_exp = key_cache.repeat_interleave(groups, dim=1)
+        v_exp = value_cache.repeat_interleave(groups, dim=1)
         attn_out = F.scaled_dot_product_attention(
             q,
-            key_cache,
-            value_cache,
+            k_exp,
+            v_exp,
             attn_mask=attn_mask,
             dropout_p=0.0,
             scale=attn.scaling,
-            enable_gqa=True,
+            enable_gqa=False,
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
         attn_out = attn.o_proj(attn_out)
