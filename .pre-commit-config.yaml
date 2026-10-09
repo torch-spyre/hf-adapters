@@ -42,6 +42,18 @@ repos:
         pass_filenames: false
         always_run: false
 
+  # Enforce that resources/adapter_added_dates.json is regenerated whenever an
+  # adapter file changes (issue #372). The script self-scopes to commits that
+  # touch an adapter or the JSON, and only checks — never writes.
+  - repo: local
+    hooks:
+      - id: adapter-added-dates
+        name: adapter_added_dates.json up-to-date
+        entry: scripts/check_adapter_added_dates.sh
+        language: script
+        pass_filenames: false
+        always_run: false
+
   # MyPy - Static type checker (uses project venv so torch/transformers stubs resolve)
   - repo: local
     hooks:
