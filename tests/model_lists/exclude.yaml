@@ -4,3 +4,15 @@ models:
   - tiiuae/Falcon3-1B-Base
   - mistralai/Mistral-Small-3.1-24B-Instruct-2503
   - ibm-research/granite-4.1-20b  # not yet publicly accessible
+
+# Models excluded only on ppc64le -- not downloaded or run on that architecture.
+# tests/model_registry.py reads this section and merges it into _EXCLUDED_PATHS
+# when platform.machine() == "ppc64le".
+ppc64le_models:
+  - Qwen/Qwen2.5-1.5B
+  - Qwen/Qwen3-0.6B
+  - Qwen/Qwen3.5-2B
+  - Qwen/Qwen3.8-27B
+  - Qwen/Qwen3.6-35B-A3B
+  - Qwen/Qwen3-Embedding-0.6B
+  - deepseek-ai/dspark_qwen3_4b_block7  # DSpark Qwen3 drafter uses Qwen3 backbone
