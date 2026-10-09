@@ -277,7 +277,8 @@ jobs:
       - spyre_pf_x1
       - linux
       - ${{ inputs.image_label }}
-    timeout-minutes: 15
+    # 15 min plus the uv cache snapshot save's 5.
+    timeout-minutes: 20
     outputs:
       torch_spyre_sha: ${{ steps.resolve.outputs.torch_spyre_sha }}
     steps:
@@ -296,6 +297,64 @@ jobs:
           fi
           echo "Resolved torch-spyre origin/main -> ${SHA}"
           echo "torch_spyre_sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+      # Prime the run's torch-spyre wheel cache (see
+      # .github/actions/build-hf-adapters/torch_spyre_wheel_cache.sh): run the
+      # same install every Spyre job runs, at the SHA just resolved, and publish
+      # the wheel uv built to /storage-1. Every job of this run (and its retries
+      # and re-runs) then installs that wheel instead of compiling torch-spyre
+      # (~80 s each). Best effort: a failure here only means jobs build as before.
+      # This job is also the only writer of the uv cache snapshot every Spyre
+      # job restores (see hfa_uv_snapshot_restore in build-hf-adapters): it
+      # starts from the snapshot of this uv.lock or cold (never from another
+      # lock's), installs the union of the Spyre jobs' groups, and the save
+      # step below ships its uv cache when this uv.lock has none in a scope
+      # this run reads. Writing from one job keeps ~140 jobs from tarring the
+      # same cache, and the Spyre jobs start after it, so even a run with a new
+      # uv.lock gets the snapshot.
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - name: Prime the torch-spyre wheel cache
+        id: prime
+        uses: ./.github/actions/build-hf-adapters
+        continue-on-error: true
+        timeout-minutes: 12
+        env:
+          TS_WHEEL_CACHE_ROLE: prime
+          HFA_UV_SNAPSHOT: write
+        with:
+          # Union of the Spyre jobs' uv_groups ("dev spyre test" and
+          # "dev spyre test oot"), so the snapshot covers both.
+          uv_groups: "dev spyre test oot"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          torch_spyre_sha: ${{ steps.resolve.outputs.torch_spyre_sha }}
+
+      # Only after a clean install (the step above is continue-on-error, so
+      # success() alone would also ship a failed one's cache). Writes the
+      # "main" scope on push to main and "pr-<N>" on PR N, nothing otherwise;
+      # skipped when the key is already readable; temp tar + rename. Never
+      # fails the job.
+      - name: Save the uv cache snapshot
+        if: ${{ steps.prime.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          if [[ ! -f "${HFA_UV_SNAPSHOT_HELPER:-}" || -z "${HFA_UV_SNAPSHOT_KEYDIR:-}" || -z "${HFA_UV_SNAPSHOT_ROOT:-}" || -z "${HFA_UV_SNAPSHOT_SAVE_DIR:-}" ]]; then
+            echo "uv cache snapshot: no snapshot state in this job; nothing to save"
+            exit 0
+          fi
+          t0=$(date +%s.%N)
+          python3 -I "$HFA_UV_SNAPSHOT_HELPER" save --nfs-root "$HFA_UV_SNAPSHOT_ROOT" \
+            --local-dir "$HFA_UV_SNAPSHOT_SAVE_DIR" \
+            --key-file "$HFA_UV_SNAPSHOT_KEYDIR/uv.lock" --key-file "$HFA_UV_SNAPSHOT_KEYDIR/uv-version" || \
+            echo "::warning::uv cache snapshot: save errored; continuing"
+          awk -v a="$t0" -v b="$(date +%s.%N)" \
+            'BEGIN { printf "SETUP-TIMING phase=uv-snapshot-save seconds=%.1f\n", b - a }'
 
       - name: Record pinned SHA in the run summary
         run: |

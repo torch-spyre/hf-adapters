@@ -108,6 +108,21 @@ runs:
           fi
         done
 
+        # Also stage the uv cache snapshot helper (nfs_uv_cache.py, used by the
+        # install step and by the resolve-torch-spyre job's save step): the next
+        # step replaces the workspace that holds this action with the target
+        # commit, which need not have it (Test-With: refs). Staged here, not in
+        # a step of its own, because /spyre-test runs load main's action.yaml
+        # and then check out the PR's copy; a different step count fails the
+        # action's Post step ("Index was out of range"). Not staged = the
+        # target commit's copy if it has one, else no snapshot.
+        dest="${RUNNER_TEMP:-/tmp}/build-hf-adapters"
+        if mkdir -p "$dest" && cp "${GITHUB_ACTION_PATH}/nfs_uv_cache.py" "$dest/"; then
+          echo "HFA_UV_SNAPSHOT_HELPER=${dest}/nfs_uv_cache.py" >> "$GITHUB_ENV"
+        else
+          echo "::warning::could not stage nfs_uv_cache.py; using the target commit's, if any"
+        fi
+
     - name: Checkout target commit
       id: resolve-sha
       shell: bash
@@ -217,6 +232,89 @@ runs:
           GROUP_FLAGS="$GROUP_FLAGS --group $group"
         done
 
+        # Start uv from a snapshot of its cache on the storage PVC that already
+        # holds HF_HOME, so `uv add` and `uv sync` below find the registry
+        # wheels, index pages and build requirements they need instead of
+        # downloading them (nfs_uv_cache.py, adapted from spyre-inference
+        # #1193). One plain tar per key, keyed by the target commit's
+        # uv.lock (copied before `uv add` rewrites it) and the uv version,
+        # extracted into a fresh local dir and hardlink-merged into uv's own
+        # default cache (no clobber); uv never works on the mount itself. Scopes: push to main reads/writes "main";
+        # PR N reads "pr-N" then "main" and writes only "pr-N". Only the
+        # resolve-torch-spyre job writes (HFA_UV_SNAPSHOT=write: exact key or
+        # cold, saved by its own later step); every other job only reads, and
+        # takes the newest tar of its scopes on a key miss. The snapshot never
+        # holds anything uv built from a local tree (torch-spyre, hf-adapters),
+        # so a stale build cannot be reused. Any miss or error = uv's default
+        # cache as it was. Usage: hfa_uv_snapshot_restore <uv.lock>
+        hfa_uv_snapshot_restore() {
+          local lock="$1" helper="${HFA_UV_SNAPSHOT_HELPER:-}" mode="${HFA_UV_SNAPSHOT:-read}"
+          local root="${STORAGE_1_DIR:-/storage-1/hf-adapters}/.cache/uv-snapshots"
+          local local_dir="${HOME}/.cache/uv-snapshot" keydir="${RUNNER_TEMP:-/tmp}/uv-snapshot-key"
+          local t0 out rc status extra=()
+          t0=$(date +%s.%N)
+          [[ -f "$helper" ]] || helper="${GITHUB_ACTION_PATH:-}/nfs_uv_cache.py"
+          if [[ "$mode" == off || ! -f "$helper" || ! -f "$lock" ]]; then
+            echo "uv cache snapshot: off (mode=${mode}, helper=${helper})"
+            status=off
+          elif ! { mkdir -p "$keydir" && cp "$lock" "$keydir/uv.lock" && uv --version > "$keydir/uv-version"; }; then
+            echo "::warning::uv cache snapshot: could not record the key; using uv's default cache"
+            status=error
+          else
+            [[ "$mode" == write ]] && extra=(--no-partial)
+            out="$(mktemp)"
+            # Bounded: a stuck mount must not hold the job; a killed restore
+            # leaves only an unused dir behind.
+            timeout 120 python3 -I "$helper" restore --nfs-root "$root" --local-dir "$local_dir" \
+              --key-file "$keydir/uv.lock" --key-file "$keydir/uv-version" \
+              --github-env "" --github-output "$out" "${extra[@]}"
+            rc=$?
+            status="$(sed -n 's/^status=//p' "$out" 2>/dev/null)"
+            rm -f "$out"
+            if (( rc == 0 )) && [[ -n "$status" ]]; then
+              # Merge the snapshot into uv's own default cache rather than
+              # pointing UV_CACHE_DIR at it: the image's default cache holds the
+              # warm build envs (torch-spyre's metadata build, hf-adapters'
+              # editable build) that the snapshot deliberately excludes, and
+              # running any step on the snapshot dir rebuilt them (CI: `uv add`
+              # 28.6 s instead of 8.7 s, or the final sync 28.6 s instead of
+              # 16.3 s). Hardlinks, no clobber: the image's entries always win;
+              # archives first, so no entry points at an archive not yet there.
+              local default merged=ok
+              default="$(env -u UV_CACHE_DIR uv cache dir 2>/dev/null)"
+              if [[ -z "$default" || "$status" == miss ]]; then
+                merged=skip
+              elif mkdir -p "$default" && \
+                   ( for d in "$local_dir"/archive-v*; do
+                       [[ -d "$d" ]] || continue
+                       cp -al -n "$d" "$default/" 2>/dev/null || cp -a -n "$d" "$default/" || exit 1
+                     done ) && \
+                   { cp -al -n "$local_dir/." "$default/" 2>/dev/null || cp -a -n "$local_dir/." "$default/"; }; then
+                merged=ok
+              else
+                merged=error
+                echo "::warning::uv cache snapshot: merge into ${default} failed; the sync downloads what is missing"
+              fi
+              # For the resolve-torch-spyre job's save step: it ships this
+              # job's default cache (minus path builds and build envs).
+              if [[ -n "$default" ]]; then
+                {
+                  echo "HFA_UV_SNAPSHOT_SAVE_DIR=${default}"
+                  echo "HFA_UV_SNAPSHOT_ROOT=${root}"
+                  echo "HFA_UV_SNAPSHOT_KEYDIR=${keydir}"
+                } >> "$GITHUB_ENV"
+              fi
+              echo "uv cache snapshot: ${status}; merged into ${default:-?}: ${merged}" \
+                "($(find "${default:-/nonexistent}/archive-v0" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l) archives now)"
+            else
+              echo "::warning::uv cache snapshot: restore failed (rc=${rc}); using uv's default cache"
+              status=error
+            fi
+          fi
+          awk -v a="$t0" -v b="$(date +%s.%N)" -v s="$status" \
+            'BEGIN { printf "SETUP-TIMING phase=uv-snapshot-restore seconds=%.1f status=%s\n", b - a, s }'
+        }
+
         if [[ "$PREBAKED_IMAGE" == "true" ]]; then
           # -----------------------------------------------------------------
           # Prebaked-image mode (integration-tests; issue #449 review).
@@ -256,6 +354,13 @@ runs:
           # when this pod's checkout predates it (with a full-fetch fallback);
           # then check it out and re-sync submodules so the working tree matches
           # the pinned commit exactly before `uv add` builds from it.
+          # SETUP-TIMING lines feed the CI setup-time parser; timing only.
+          setup_t0=$(date +%s.%N)
+          setup_timing() { awk -v p="$1" -v a="$2" -v b="$(date +%s.%N)" -v s="$3" \
+            'BEGIN { printf "SETUP-TIMING phase=%s seconds=%.1f status=%s\n", p, b - a, s }'; }
+          hfa_uv_snapshot_restore "$CLONED_HF_ADAPTERS_DIR/uv.lock" || \
+            echo "::warning::uv cache snapshot: restore errored; using uv's default cache"
+          t=$(date +%s.%N)
           cd /home/senuser/torch-spyre
           echo "Pinning torch-spyre to ${TORCH_SPYRE_SHA}"
           git fetch --tags --force origin "${TORCH_SPYRE_SHA}" || \
@@ -264,19 +369,37 @@ runs:
           git submodule sync --recursive
           git submodule update --init --recursive --force
           git log -1 --oneline
+          setup_timing ts-pin "$t" ok
           cd "$CLONED_HF_ADAPTERS_DIR"
-          # Same install tail as the unpinned branch below -- the ONLY difference
-          # is the fetch/checkout preamble above, so a pinned run behaves exactly
-          # like today's install, just at a fixed SHA.
+          # Same install as the unpinned branch below, at a fixed SHA, except
+          # that it skips the `uv lock --upgrade-package torch-spyre` that branch
+          # runs: `uv add` already re-locks torch-spyre from this checkout, so the
+          # extra lock left uv.lock unchanged and only cost ~7 s per job.
+          t=$(date +%s.%N)
           uv add torch-spyre /home/senuser/torch-spyre
-          uv lock --upgrade-package torch-spyre
-          uv sync --frozen --verbose --refresh $GROUP_FLAGS
+          setup_timing uv-add "$t" ok
+          # `uv sync --frozen --verbose --refresh $GROUP_FLAGS`, except that
+          # torch-spyre comes from the wheel this run's resolve-torch-spyre job
+          # built (TS_WHEEL_CACHE_ROLE=prime there) when one with a matching key
+          # is on /storage-1; any miss or error runs the plain sync. See the script.
+          TS_WHEEL_CACHE="${GITHUB_ACTION_PATH:-}/torch_spyre_wheel_cache.sh"
+          TS_WHEEL_CACHE_STATUS_FILE="$(mktemp)"
+          export TS_WHEEL_CACHE_STATUS_FILE
+          if [[ -f "$TS_WHEEL_CACHE" ]]; then
+            bash "$TS_WHEEL_CACHE" sync $GROUP_FLAGS
+          else
+            echo "off" > "$TS_WHEEL_CACHE_STATUS_FILE"
+            uv sync --frozen --verbose --refresh $GROUP_FLAGS
+          fi
+          setup_timing setup-total "$setup_t0" "$(cat "$TS_WHEEL_CACHE_STATUS_FILE" 2>/dev/null || echo '?')"
         else
           cd "$CLONED_HF_ADAPTERS_DIR"
           # though we pin to main
           # frozen installation takes pinned commit when locked
           # we want to relax on torch-spyre to use floating version
           # and have other dependencies locked
+          hfa_uv_snapshot_restore "$CLONED_HF_ADAPTERS_DIR/uv.lock" || \
+            echo "::warning::uv cache snapshot: restore errored; using uv's default cache"
           uv add torch-spyre /home/senuser/torch-spyre
           uv lock --upgrade-package torch-spyre
           uv sync --frozen --verbose --refresh $GROUP_FLAGS
