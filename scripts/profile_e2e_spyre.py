@@ -50,6 +50,11 @@ be traced back to its origin in the viewer. It is off by default because it
 adds per-event overhead and enlarges the trace.
 
 Open the resulting trace in https://ui.perfetto.dev/ or chrome://tracing.
+
+Prompts use the model's chat template when available, as in the e2e tests.
+Use ``--raw-prompt`` to profile unformatted text. ``--prompt-tokens`` creates
+a synthetic fixed-length workload by repeating/truncating tokenized inputs;
+its output is not a semantic correctness check.
 """
 
 import argparse
@@ -86,15 +91,17 @@ import torch  # noqa: E402
 from torch.profiler import ProfilerActivity, profile  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
-from hf_adapters import AutoSpyreModelForCausalLM  # noqa: E402
+from hf_adapters.auto_spyre_model import (  # noqa: E402
+    AutoSpyreModelForCausalLM,
+    dtype_for_model_path,
+)
+from hf_adapters.hf_common import encode_prompts  # noqa: E402
 
-# Registry key -> (HF path, Spyre-safe dtype). Kept inline so this script has
-# no dependency on the tests/ package. These match the checkpoints' configured
-# dtypes resolved by hf_adapters.auto_spyre_model.dtype_for_model_path.
-MODELS: dict[str, tuple[str, "torch.dtype"]] = {
-    "gemma4_26b_a4b": ("google/gemma-4-26B-A4B-it", torch.float16),
-    "ministral3": ("mistralai/Ministral-3-14B-Instruct-2512", torch.bfloat16),
-    "granite8b": ("ibm-granite/granite-3.3-8b-instruct", torch.float16),
+# Resolve dtype through the same checkpoint policy as the e2e tests.
+MODELS: dict[str, str] = {
+    "gemma4_26b_a4b": "google/gemma-4-26B-A4B-it",
+    "ministral3": "mistralai/Ministral-3-14B-Instruct-2512",
+    "granite8b": "ibm-granite/granite-3.3-8b-instruct",
 }
 
 DEFAULT_PROMPT = "The capital of France is"
@@ -130,6 +137,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--prompt",
         default=DEFAULT_PROMPT,
         help=f"Prompt to generate from (default: {DEFAULT_PROMPT!r}).",
+    )
+    parser.add_argument(
+        "--raw-prompt",
+        action="store_true",
+        help="Tokenize the prompt directly instead of applying the model's chat template.",
     )
     parser.add_argument(
         "--prompt-tokens",
@@ -175,6 +187,7 @@ def build_inputs(
     prompt: str,
     batch_size: int,
     prompt_tokens: int | None,
+    raw_prompt: bool = False,
 ) -> dict[str, "torch.Tensor"]:
     """Tokenize *prompt* and return an exact, uniformly sized input batch."""
     if batch_size <= 0:
@@ -182,7 +195,9 @@ def build_inputs(
     if prompt_tokens is not None and prompt_tokens <= 0:
         raise ValueError(f"prompt_tokens must be positive, got {prompt_tokens}")
 
-    input_ids = tokenizer(prompt, return_tensors="pt")["input_ids"]
+    input_ids = encode_prompts(tokenizer, prompt, chat=False if raw_prompt else None)[
+        "input_ids"
+    ]
     if prompt_tokens is not None:
         if input_ids.shape[1] < prompt_tokens:
             # Repeat ordinary prompt tokens rather than inserting padding: the
@@ -214,6 +229,7 @@ def run_profile(
     prompt_tokens: int | None,
     out_path: str,
     with_stack: bool = False,
+    raw_prompt: bool = False,
 ) -> None:
     """Load *model_path*, warm the compile cache, then profile one generate."""
     rank = int(os.environ.get("RANK", "0"))
@@ -235,7 +251,7 @@ def run_profile(
     print(f"  Load time: {time.time() - t0:.1f}s")
     print(f"  Prompt seed: {prompt!r}")
 
-    encoded = build_inputs(tokenizer, prompt, batch_size, prompt_tokens)
+    encoded = build_inputs(tokenizer, prompt, batch_size, prompt_tokens, raw_prompt)
     actual_prompt_len = encoded["input_ids"].shape[1]
     if max_length is not None and max_length <= actual_prompt_len:
         raise ValueError(
@@ -306,7 +322,8 @@ def main(argv: list[str] | None = None) -> None:
     from huggingface_hub import constants
 
     print(f"  HF hub cache: {constants.HF_HUB_CACHE}")
-    path, dtype = MODELS[args.model]
+    path = MODELS[args.model]
+    dtype = dtype_for_model_path(path, target_device="spyre")
     out = args.out or f"{args.model}_trace.json"
     run_profile(
         model_path=path,
@@ -318,6 +335,7 @@ def main(argv: list[str] | None = None) -> None:
         prompt_tokens=args.prompt_tokens,
         out_path=out,
         with_stack=args.with_stack,
+        raw_prompt=args.raw_prompt,
     )
 
 

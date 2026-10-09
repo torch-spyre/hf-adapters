@@ -32,6 +32,23 @@ stopping, but diverges from stock HF in several ways worth documenting.
   default of 20 new tokens. `min_new_tokens` suppresses EOS until the minimum
   continuation length is reached.
 
+## Profiling generation
+
+[`scripts/profile_e2e_spyre.py`](../scripts/profile_e2e_spyre.py) uses
+`encode_prompts()` and the shared checkpoint dtype policy. For example:
+
+```bash
+python scripts/profile_e2e_spyre.py --model gemma4_26b_a4b --max-new-tokens 10 --batch 1
+```
+
+Chat templates supply the instruct model's turn delimiters and generation
+prefix. Gemma 4's direct tokenizer does not add BOS, so a raw prompt can produce
+repetitive output even when stock CPU inference receives the same input.
+Use `--raw-prompt` to explicitly request direct tokenization for experiments.
+`--prompt-tokens` creates a synthetic fixed-length workload by repeating or
+truncating tokenized input, including any chat framing; use the natural prompt
+length when checking response correctness.
+
 ## Internal block alignment
 
 - Autoregressive generation projects only the final prompt token through the
