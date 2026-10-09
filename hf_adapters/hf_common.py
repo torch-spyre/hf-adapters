@@ -26,7 +26,7 @@ import os
 import sys
 import time
 import warnings
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Optional
 
@@ -131,7 +131,6 @@ def moe_decode_selected_experts(
     up,
     down,
     top_k,
-    tile,
     stick_size,
     activation,
     per_expert_scale_stick=None,
@@ -142,8 +141,6 @@ def moe_decode_selected_experts(
 
     T, H = x.shape
     if x.device.type == "spyre":
-        from torch_spyre._inductor.propagate_hints import spyre_hint
-
         # Widen topk's fp16 indices onto a stick before converting them to the
         # device's int32 gather indices. The layout pass inserts the restickify.
         index_stick = (
@@ -152,30 +149,26 @@ def moe_decode_selected_experts(
         index_stick = index_stick.to(torch.float32)
         index_address = index_stick[..., : stick_size // 2].to(torch.int32)
         expert_indices = index_address[..., 0]
-        hint = spyre_hint(tiles={"row": tile})
+
+    rows = T * top_k
+    intermediate = gate.shape[-1]
+    inputs = x[:, None, :].expand(T, top_k, H).contiguous().reshape(rows, 1, H)
+    selected_gate = gate[expert_indices].reshape(rows, H, intermediate)
+    selected_up = up[expert_indices].reshape(rows, H, intermediate)
+    selected_down = down[expert_indices].reshape(rows, intermediate, H)
+
+    gate_out = torch.bmm(inputs, selected_gate)
+    up_out = torch.bmm(inputs, selected_up)
+    if activation == "silu":
+        activated = F.silu(gate_out) * up_out
     else:
-        hint = nullcontext()
-
-    with hint:
-        rows = T * top_k
-        intermediate = gate.shape[-1]
-        inputs = x[:, None, :].expand(T, top_k, H).contiguous().reshape(rows, 1, H)
-        selected_gate = gate[expert_indices].reshape(rows, H, intermediate)
-        selected_up = up[expert_indices].reshape(rows, H, intermediate)
-        selected_down = down[expert_indices].reshape(rows, intermediate, H)
-
-        gate_out = torch.bmm(inputs, selected_gate)
-        up_out = torch.bmm(inputs, selected_up)
-        if activation == "silu":
-            activated = F.silu(gate_out) * up_out
-        else:
-            activated = F.gelu(gate_out, approximate="tanh") * up_out
-        expert_out = torch.bmm(activated, selected_down).reshape(T, top_k, H)
-        expert_out = expert_out * weights[..., None]
-        if per_expert_scale_stick is not None:
-            expert_scale = per_expert_scale_stick[expert_indices][..., :1]
-            expert_out = expert_out * expert_scale
-        return expert_out.sum(dim=1)
+        activated = F.gelu(gate_out, approximate="tanh") * up_out
+    expert_out = torch.bmm(activated, selected_down).reshape(T, top_k, H)
+    expert_out = expert_out * weights[..., None]
+    if per_expert_scale_stick is not None:
+        expert_scale = per_expert_scale_stick[expert_indices][..., :1]
+        expert_out = expert_out * expert_scale
+    return expert_out.sum(dim=1)
 
 
 @contextmanager
