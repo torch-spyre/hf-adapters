@@ -66,10 +66,15 @@ CPU Accurate does not apply: DiffusionGemma has no greedy AR token sequence to c
 
 **Gemma 4 26B-A4B (MoE):** 128 experts, top-8 routing. Prefill uses a persistent
 expert loop (all experts evaluated, routed via `keep_by_index` + coarse-tile
-carried sum). Decode uses per-token expert gather with BMM. Both paths compile
-and run end-to-end; the decode path is a single compiled graph (attention +
-layernorms + FFN/MoE fused). Token-compare: 5/5 top-1 agreement with proper
-chat-template tokenization (PR#385).
+carried sum). Decode gathers four 704-wide hidden/output chunks per selected
+expert and sums gate/up projections **before** GELU; down outputs are concatenated.
+Gate/up keep their prefill layout, and down is stored in matmul-weight order.
+All three decode chunk views alias the prefill expert pools, avoiding a second
+weight stack. Decode still runs attention, layernorms, FFN and MoE on Spyre.
+Run `scripts/benchmark_gemma4_decode_moe.py` with either
+`--layout baseline` or `--layout chunked` to time the isolated decode MoE at
+production expert dimensions; the smoke and token-compare tests cover full-model
+generation.
 
 **OLMoE 1B-7B:** 64 experts, top-8 routing with the checkpoint's
 unnormalized selected probabilities. Prefill evaluates all experts persistently;
@@ -223,7 +228,7 @@ pattern, norms, and weight layout.
 | hf\_lfm2.py | lfm2 | 1 | LFM2 700M/1.2B and dense LFM2 fine-tunes with hybrid convolution/attention layers |
 | hf\_gemma4.py | gemma4\_unified / gemma4 (dense + PLE/KV-share) | 4 | Gemma 4 31B (dense). Not 26B-A4B (MoE). |
 | hf\_gemma4\_mm.py | gemma4\_unified / gemma4 (multimodal) | 4 | Encoder-free dense unified VLMs plus full-vision PLE/KV-share and MoE variants. Combined MoE+PLE/KV-share remains unsupported. |
-| hf\_gemma4\_moe.py | gemma4 (MoE, `enable_moe_block`) | 1 | Gemma 4 26B-A4B (128 experts, top-8 routing). Persistent prefill + gathered decode, 5/5 token match. |
+| hf\_gemma4\_moe.py | gemma4 (MoE, `enable_moe_block`) | 1 | Gemma 4 26B-A4B (128 experts, top-8 routing). Persistent prefill + shared-storage four-chunk gathered decode. |
 | hf\_diffusion\_gemma.py | diffusion\_gemma | 1 | google/diffusiongemma-26B-A4B-it. MoE runs on CPU; attention + dense MLP compiled on Spyre. Block-diffusion generate loop. Gated. |
 | hf\_gemma3.py | gemma3\_text / gemma3 (dense) | 2 | Gemma 3 4B/12B/27B (text decoder of the multimodal checkpoints); EmbeddingGemma (bidirectional embedder). Not Gemma 3n (PLE). |
 | hf\_gemma2.py | gemma2 | 1 | Gemma 2 2B and Gemma 2 fine-tunes. |
