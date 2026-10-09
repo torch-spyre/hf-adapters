@@ -55,6 +55,26 @@ stopping, but diverges from stock HF in several ways worth documenting.
 - Custom `position_ids`, arbitrary sparse/higher-rank masks, and `inputs_embeds`
   are not supported by this input path.
 
+## Prefill backbone callback contract
+
+A `prefill_backbone_fn` supplied to `hf_common.generate()` must accept the
+keyword `rows_to_keep=1` and return `[B, 1, H]` hidden states. Every chunk still
+processes all its input tokens and updates their KV-cache positions; only the
+returned hidden states are restricted to the final row. All registered adapters
+using this text-generation path implement the contract, including wrappers
+that forward the keyword through `**kwargs`.
+
+A callback that does not accept the keyword raises `TypeError`. A callback that
+ignores it and returns extra rows raises `ValueError`. Generation does not retry
+the callback or fall back to a full-row call, since doing so could repeat KV
+updates. Existing custom callbacks must implement or forward the row request.
+
+Final norms can select the row inside their compiled graph, or normalize the
+full input and copy the requested row through `run_final_norm`. Both satisfy
+the backbone contract. Full-forward calls without a prefill backbone retain
+their logits contract; custom `prefill_fn` hooks take precedence, and diffusion
+generation retains its separate loop.
+
 ## Unsupported decoding modes
 
 Only **greedy** and **top-k / top-p / temperature sampling** are implemented.

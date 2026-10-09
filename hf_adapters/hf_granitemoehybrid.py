@@ -53,6 +53,7 @@ from hf_adapters.hf_common import (
     kv_cache_update,
     prepare_lm_head_for_spyre,
     prepare_rope_and_heads,
+    row_selecting_norm,
     split_fused_linear,
 )
 
@@ -154,4 +155,6 @@ def prepare_for_spyre(model):
             model._spyre_up_projs,
         )
     ]
-    model._spyre_compiled_norm = torch.compile(get_backbone(model).norm, dynamic=False)
+    model._spyre_compiled_norm = torch.compile(
+        row_selecting_norm(get_backbone(model).norm), dynamic=False
+    )

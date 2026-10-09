@@ -52,11 +52,15 @@ def test_standard_gqa_factories_compile_each_complete_block_once(monkeypatch):
 
     monkeypatch.setattr(torch, "compile", fake_compile)
 
-    compiled = make_standard_gqa_block(_Layer())
+    layers = nn.ModuleList([_Layer()])
+    compiled = make_standard_gqa_block(layers, 0)
 
     assert len(compile_calls) == 1
     module, kwargs, result = compile_calls[0]
     assert isinstance(module, StandardGQABlock)
+    # The block replaces the layer, so the model tree (and its move to Spyre)
+    # reaches every parameter the block uses.
+    assert layers[0] is module
     assert kwargs == {"dynamic": False}
     assert compiled is result
 

@@ -51,6 +51,8 @@ from hf_adapters.hf_common import (
     permute_proj_for_rope,
     prepare_lm_head_for_spyre,
     rope_dim_permutation,
+    row_selecting_norm,
+    run_final_norm,
     run_lm_head,
     split_fused_linear,
 )
@@ -164,8 +166,13 @@ def _run_backbone_forward(
     key_caches,
     value_caches,
     cache_index,
+    *,
+    rows_to_keep=0,
 ):
-    """Phi-3 backbone: embedding, blocks, norm."""
+    """Phi-3 backbone: embedding, blocks, norm.
+
+    ``rows_to_keep`` > 0 returns only the trailing positions.
+    """
     h = embed_text_tokens(model, input_ids)
     selected_freqs = model._spyre_rope(h, position_ids)
 
@@ -179,7 +186,7 @@ def _run_backbone_forward(
             cache_index,
         )
 
-    h = model._spyre_compiled_norm(h)
+    h = run_final_norm(model._spyre_compiled_norm, h, rows_to_keep=rows_to_keep)
     return h
 
 
@@ -282,4 +289,6 @@ def prepare_for_spyre(model):
             model._spyre_up_projs,
         )
     ]
-    model._spyre_compiled_norm = torch.compile(get_backbone(model).norm, dynamic=False)
+    model._spyre_compiled_norm = torch.compile(
+        row_selecting_norm(get_backbone(model).norm), dynamic=False
+    )

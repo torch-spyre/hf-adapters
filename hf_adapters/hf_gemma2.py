@@ -31,6 +31,7 @@ from hf_adapters.hf_common import (
     get_backbone,
     kv_cache_update,
     prepare_lm_head_for_spyre,
+    run_final_norm,
     run_lm_head,
 )
 from hf_adapters.hf_gemma3 import _patch_gemma_rmsnorm
@@ -120,6 +121,8 @@ def _run_backbone_forward(
     key_caches,
     value_caches,
     cache_index,
+    *,
+    rows_to_keep=0,
 ):
     backbone = get_backbone(model)
     cfg = model.config
@@ -164,7 +167,7 @@ def _run_backbone_forward(
             cache_index,
         )
 
-    return backbone.norm(h)
+    return run_final_norm(backbone.norm, h, rows_to_keep=rows_to_keep)
 
 
 def _run_forward(

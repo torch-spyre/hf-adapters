@@ -35,6 +35,8 @@ from hf_adapters.hf_common import (
     permute_proj_for_rope,
     prepare_lm_head_for_spyre,
     rope_dim_permutation,
+    row_selecting_norm,
+    run_final_norm,
     run_lm_head,
     text_config,
 )
@@ -344,6 +346,8 @@ def _run_backbone_forward(
     key_caches,
     value_caches,
     cache_index,
+    *,
+    rows_to_keep=0,
 ):
     backbone = get_backbone(model)
     hidden_states = embed_text_tokens(model, input_ids)
@@ -453,7 +457,9 @@ def _run_backbone_forward(
             conv_state.copy_(new_conv_state)
             recurrent_state.copy_(new_recurrent_state)
 
-    return model._spyre_compiled_norm(hidden_states)
+    return run_final_norm(
+        model._spyre_compiled_norm, hidden_states, rows_to_keep=rows_to_keep
+    )
 
 
 def _run_forward(
@@ -628,7 +634,10 @@ def _setup_qwen3_5_text_decoder(model):
     model._spyre_q_projs = nn.ModuleList()
     model._spyre_gate_projs = nn.ModuleList()
     model._spyre_compiled_norm = torch.compile(
-        lambda hidden_states: _rms_norm(hidden_states, backbone.norm), dynamic=False
+        row_selecting_norm(
+            lambda hidden_states: _rms_norm(hidden_states, backbone.norm)
+        ),
+        dynamic=False,
     )
 
     rope_permutation = (

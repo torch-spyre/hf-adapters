@@ -21,6 +21,8 @@ Per-model adapters import from this module and provide only model-specific
 compiled block functions.
 """
 
+import inspect
+import logging
 import math
 import os
 import sys
@@ -36,6 +38,8 @@ import torch.nn.functional as F
 from sympy import factorint
 from transformers import GenerationConfig
 from transformers.generation import GenerateDecoderOnlyOutput
+
+logger = logging.getLogger(__name__)
 
 # Rank-aware device for multi-Spyre (tensor-parallel) runs. torchrun sets
 # LOCAL_RANK before this module is imported, so each process binds to its local
@@ -1299,6 +1303,62 @@ def run_lm_head(model, hidden_states, *, logits_to_keep: int = 0):
     return lm_head_forward(hidden_states)
 
 
+def last_rows(hidden_states, rows_to_keep: int = 0):
+    """The trailing ``rows_to_keep`` positions of ``[B, S, H]`` (0 keeps every row).
+
+    A backbone's final norm (and anything after it, before the LM head) acts on
+    each position independently, so applying it to the kept rows equals applying
+    it to every row and slicing afterwards. :func:`generate` asks a prefill
+    backbone for the one row its LM head projects.
+    """
+    if rows_to_keep:
+        hidden_states = hidden_states[:, -rows_to_keep:, :]
+    return hidden_states
+
+
+def row_selecting_norm(norm):
+    """Wrap a final norm so it normalizes only the trailing ``rows_to_keep`` rows.
+
+    The wrapper is called as ``norm_fn(hidden_states, *args, rows_to_keep=0)``;
+    ``args`` are passed on to ``norm``. Adapters compile the wrapper in place of
+    the bare norm, so the row selection happens inside the compiled norm graph:
+    the norm writes the kept rows to a fresh ``[B, rows, H]`` buffer, which for
+    one row is the input a decode step gives the LM head. Sliced off the full
+    norm output instead, the batch-1 row is a view at a storage offset, and
+    Torch-Spyre keeps a matmul that reads an offset slice on its fixed work
+    division, so the LM head would not get the decode head's plan.
+    With ``dynamic=False``, each distinct Python ``rows_to_keep`` value
+    specializes a separate graph, including values forwarded by VLM callers.
+    """
+
+    def final_norm(hidden_states, *args, rows_to_keep: int = 0):
+        return norm(last_rows(hidden_states, rows_to_keep), *args)
+
+    # torch.compile preserves a function's attributes. Only this wrapper
+    # promises to select rows inside the norm's compiled graph.
+    setattr(final_norm, "_spyre_selects_rows", True)
+    return final_norm
+
+
+def run_final_norm(norm, hidden_states, *args, rows_to_keep: int = 0):
+    """Apply a backbone's compiled final norm, to the trailing rows only when asked.
+
+    ``rows_to_keep=0`` calls ``norm(hidden_states, *args)`` exactly as before, so
+    decode, full-position and embedding callers (and any final-norm callable)
+    are unchanged. A norm compiled from :func:`row_selecting_norm` selects
+    rows inside its graph. Legacy/custom norms are called without a new keyword,
+    then the kept rows are copied into fresh storage.
+    Generation requests one row on every prefill chunk, so legacy norms also
+    copy that row on non-final chunks whose output is subsequently discarded.
+    """
+    if rows_to_keep:
+        if getattr(norm, "_spyre_selects_rows", False):
+            return norm(hidden_states, *args, rows_to_keep=rows_to_keep)
+        # contiguous() can retain a batch-1 view with a nonzero storage offset.
+        return last_rows(norm(hidden_states, *args), rows_to_keep).clone()
+    return norm(hidden_states, *args)
+
+
 def chunk_lm_head(model, num_chunks=8):
     """Split the LM head weight into N stick-padded chunks along the vocab dim.
 
@@ -1358,6 +1418,132 @@ def split_fused_linear(w: torch.Tensor) -> tuple[nn.Linear, nn.Linear]:
         return p
 
     return _mk(w[:half]), _mk(w[half:])
+
+
+def _identity_tp_hook_kind(hook) -> Optional[str]:
+    """Name ``hook`` if it is a Transformers TP hook with no forward effect.
+
+    The ``colwise`` TP style (``ColwiseParallel``; hf-adapters'
+    ``SpyreColwiseParallel`` subclasses it) wraps two of its methods in
+    ``distribute_module`` lambdas and registers them on each projection. The
+    forward pre-hook calls ``_prepare_input_fn``, which applies
+    ``all_reduce_backward``: it returns its input unchanged and acts only in
+    the backward pass, which inference never runs. The forward hook calls
+    ``_prepare_output_fn``, which returns the output unchanged unless the
+    style sets ``gather_output`` (``colwise_gather_output``); then it
+    all-gathers the output across ranks.
+
+    Returns ``"colwise input"`` or ``"colwise output"`` for those two hooks,
+    and ``None`` for any other hook, including a gathering output hook.
+    When updating the Transformers pin, run
+    ``test_fused_qkv_drops_only_colwise_hooks_without_forward_effect[transformers]``
+    in ``tests/cpu/test_standard_gqa_fused_qkv.py`` to check this hook contract.
+    """
+    if not inspect.isfunction(hook) or (hook.__module__, hook.__qualname__) != (
+        "transformers.integrations.tensor_parallel",
+        "distribute_module.<locals>.<lambda>",
+    ):
+        return None
+    from transformers.integrations.tensor_parallel import ColwiseParallel
+
+    wrapped = inspect.getclosurevars(hook).nonlocals
+    input_fn = wrapped.get("input_fn")
+    if getattr(input_fn, "__func__", None) is ColwiseParallel._prepare_input_fn:
+        return "colwise input"
+    output_fn = wrapped.get("output_fn")
+    if getattr(output_fn, "__func__", None) is ColwiseParallel._prepare_output_fn:
+        # The style object that registered the hook decides whether to gather.
+        style = getattr(output_fn, "__self__", None)
+        if not getattr(style, "gather_output", True):
+            return "colwise output"
+    return None
+
+
+def _fuse_linears_refusal(linears) -> Optional[str]:
+    """Say why ``fuse_linears`` must keep ``linears`` separate; ``None`` if not."""
+    if not all(type(p) is nn.Linear for p in linears):
+        return "a layer is not a plain nn.Linear"
+    first = linears[0]
+    has_bias = first.bias is not None
+    if not all(
+        p.weight.shape[1] == first.weight.shape[1]
+        and p.weight.dtype == first.weight.dtype
+        and p.weight.device == first.weight.device
+        and (p.bias is not None) == has_bias
+        and (not has_bias or p.bias.dtype == first.bias.dtype)
+        for p in linears
+    ):
+        return (
+            "the layers differ in input width, weight dtype or device, "
+            "or bias presence or dtype"
+        )
+    widths = [p.weight.shape[0] for p in linears]
+    if any(sum(widths[:i]) % BLOCK_SIZE for i in range(1, len(widths))):
+        return f"output widths {widths} put a split point inside a stick"
+    # The fused layer is a new module: it runs none of its sources' hooks.
+    hook_kinds = []
+    for i, p in enumerate(linears):
+        if "forward" in vars(p) or p._backward_pre_hooks or p._backward_hooks:
+            return f"layer {i} has a replaced forward or a backward hook"
+        kinds = []
+        # Every per-module forward hook sits in one of these two dicts; the
+        # with-kwargs and always-call variants only add flags elsewhere.
+        for hook in (*p._forward_pre_hooks.values(), *p._forward_hooks.values()):
+            kind = _identity_tp_hook_kind(hook)
+            if kind is None:
+                return f"layer {i} has a forward hook fusion cannot drop: {hook!r}"
+            kinds.append(kind)
+        hook_kinds.append(kinds)
+    if any(kinds != hook_kinds[0] for kinds in hook_kinds):
+        return f"the layers carry different hooks: {hook_kinds}"
+    return None
+
+
+def fuse_linears(linears) -> Optional[nn.Linear]:
+    """Stack same-input ``nn.Linear`` layers into one along ``out_features``.
+
+    The reverse of ``split_fused_linear``. Every output column of the fused
+    layer is the same dot product its source layer computed, so splitting the
+    fused output at the source widths returns the source outputs. One matmul
+    then reads the shared input once instead of once per layer.
+
+    Callers pass layers that read the same input. Returns ``None`` (callers
+    keep the separate layers) unless every layer is a plain ``nn.Linear``
+    with the same ``in_features``, one weight dtype and device, and the same
+    bias presence and bias dtype, and every split point falls on a stick
+    boundary (``BLOCK_SIZE``), so that the split outputs stay views on Spyre.
+
+    The fused layer is a new module, so it runs none of its sources' hooks.
+    Fusing is therefore allowed only when every hook on every source is known
+    to leave the forward pass unchanged and all sources carry the same hooks.
+    Today the only such hooks are the two that Transformers' plain ``colwise``
+    TP style puts on each projection (``_identity_tp_hook_kind``). Any other
+    forward hook, the output hook of ``colwise_gather_output``, a backward hook
+    or a replaced ``forward`` keeps the layers separate, where their hooks
+    still run. A debug log says why a call declined.
+
+    The fused weight is assembled on the host; weights already on Spyre (TP
+    shards) are read back once. The model's move to Spyre
+    (``_move_to_spyre_with_layout``) then gives it the ``dim_order=[1, 0]``
+    layout every Linear weight gets, so the module that owns the fused layer
+    must be registered in the model.
+    """
+    reason = _fuse_linears_refusal(linears)
+    if reason is not None:
+        logger.debug("fuse_linears keeps %d layers separate: %s", len(linears), reason)
+        return None
+    first = linears[0]
+    has_bias = first.bias is not None
+    widths = [p.weight.shape[0] for p in linears]
+    fused = nn.Linear(first.weight.shape[1], sum(widths), bias=has_bias, device="meta")
+    fused.weight = nn.Parameter(
+        torch.cat([p.weight.detach().cpu() for p in linears]), requires_grad=False
+    )
+    if has_bias:
+        fused.bias = nn.Parameter(
+            torch.cat([p.bias.detach().cpu() for p in linears]), requires_grad=False
+        )
+    return fused
 
 
 # ---------------------------------------------------------------------------
@@ -1776,28 +1962,34 @@ def add_causal_sliding_window_band(
 # ---------------------------------------------------------------------------
 
 
-def _projection_head_count(proj, config_count, head_dim):
-    """Derive head count from a projection module, falling back to config.
+def _projection_width(self_attn, name):
+    """Local output width of ``self_attn.<name>`` (``q_proj``/``k_proj``), or None.
 
     Under tensor parallelism, ``out_features`` reflects the local output
-    contract; ``weight.shape[0]`` is the fallback for custom modules.
+    contract; ``weight.shape[0]`` is the fallback for custom modules. A fused
+    Q/K/V projection (``StandardGQAAttention``) keeps each part's local width
+    in ``qkv_sizes``.
     """
+    sizes = getattr(self_attn, "qkv_sizes", None)
+    if sizes is not None:
+        return sizes[("q_proj", "k_proj", "v_proj").index(name)]
+    proj = getattr(self_attn, name, None)
+    width = getattr(proj, "out_features", None)
+    if width is None:
+        weight = getattr(proj, "weight", None)
+        width = None if weight is None else weight.shape[0]
+    return width
+
+
+def _projection_head_count(projection_width, config_count, head_dim):
+    """Derive head count from a local projection width, falling back to config."""
     if head_dim <= 0:
         raise ValueError(f"head_dim must be positive, got {head_dim}")
-    if proj is None:
+    if projection_width is None:
         count = int(config_count)
         if count <= 0:
             raise ValueError(f"head count must be positive, got {count}")
         return count
-    projection_width = getattr(proj, "out_features", None)
-    if projection_width is None:
-        weight = getattr(proj, "weight", None)
-        if weight is None:
-            count = int(config_count)
-            if count <= 0:
-                raise ValueError(f"head count must be positive, got {count}")
-            return count
-        projection_width = weight.shape[0]
     projection_width = int(projection_width)
     if projection_width <= 0 or projection_width % head_dim != 0:
         raise ValueError(
@@ -1812,8 +2004,8 @@ def _local_query_head_count(model, head_dim):
     cfg = text_config(model.config)
     layers = getattr(get_backbone(model), "layers", None)
     self_attn = getattr(layers[0], "self_attn", None) if layers else None
-    q_proj = getattr(self_attn, "q_proj", None)
-    return _projection_head_count(q_proj, cfg.num_attention_heads, head_dim)
+    q_width = _projection_width(self_attn, "q_proj")
+    return _projection_head_count(q_width, cfg.num_attention_heads, head_dim)
 
 
 def kv_cache_shapes(model):
@@ -1835,8 +2027,8 @@ def kv_cache_shapes(model):
     )
     layers = getattr(get_backbone(model), "layers", None)
     self_attn = getattr(layers[0], "self_attn", None) if layers else None
-    k_proj = getattr(self_attn, "k_proj", None)
-    num_kv_heads = _projection_head_count(k_proj, cfg.num_key_value_heads, head_dim)
+    k_width = _projection_width(self_attn, "k_proj")
+    num_kv_heads = _projection_head_count(k_width, cfg.num_key_value_heads, head_dim)
     v_head_dim = getattr(model, "_spyre_v_head_dim", head_dim)
     return [(num_kv_heads, head_dim, v_head_dim) for _ in range(num_layers)]
 
@@ -2690,8 +2882,13 @@ def generate(
         timing: Print per-token latency.
         prefill_backbone_fn: Optional adapter backbone with the same arguments
             as ``run_forward_fn``, returning hidden states. Text prefill runs
-            this for every chunk, then applies the prepared LM head only to
-            the last token. Custom ``prefill_fn`` hooks take precedence.
+            this for every chunk, then applies the prepared LM head only to the
+            last token. Every supplied backbone must accept ``rows_to_keep=1``
+            and return hidden states shaped ``[B, 1, H]``. Adapters select the
+            row through :func:`last_rows` or :func:`run_final_norm`; supported
+            norms use :func:`row_selecting_norm` to select inside their compiled
+            graph. Unsupported callbacks fail without a fallback or retry of
+            KV-cache updates. Custom ``prefill_fn`` hooks take precedence.
         prefill_chunk_size (via generation_config or kwargs): Query length for
             each prefill chunk when the adapter does not configure one. An
             adapter-configured chunk size takes precedence; an explicit caller
@@ -2897,6 +3094,11 @@ def generate(
                     device=DEVICE,
                 )
                 text_prefill_fn = prefill_backbone_fn or run_forward_fn
+                # The head below projects one row, so a prefill backbone
+                # normalizes only that row (into its own buffer).
+                backbone_rows = (
+                    {"rows_to_keep": 1} if prefill_backbone_fn is not None else {}
+                )
                 for chunk_start in range(0, padded_len, query_chunk_size):
                     chunk_end = chunk_start + query_chunk_size
                     prefill_mask = prefill_mask_builder.build(chunk_start)
@@ -2910,7 +3112,15 @@ def generate(
                         cache_index=make_cache_index(
                             chunk_start, query_chunk_size, DEVICE
                         ),
+                        **backbone_rows,
                     )
+                    if prefill_backbone_fn is not None and (
+                        prefill_output.ndim != 3 or prefill_output.shape[1] != 1
+                    ):
+                        raise ValueError(
+                            "prefill_backbone_fn must return [B, 1, H] hidden states "
+                            "when called with rows_to_keep=1"
+                        )
                 # Every chunk must populate KV, but only the final prompt
                 # token needs a vocabulary projection for generation.
                 logits = (
@@ -3049,13 +3259,27 @@ def generate(
 
 
 class StandardGQAAttention(nn.Module):
-    """Standard GQA attention split into projection and attention regions."""
+    """Standard GQA attention split into projection and attention regions.
+
+    Q, K and V project the same input. With ``SPYRE_FUSE_QKV=1`` set before
+    preparation, when ``fuse_linears`` accepts them,
+    they run as one ``qkv_proj`` matmul, built here from the projections as
+    loading left them (rank-local TP shards, padded heads), and ``pre_attn``
+    splits its output into Q, K and V views. Otherwise they run separately.
+    """
 
     def __init__(self, attn):
         super().__init__()
-        self.q_proj = attn.q_proj
-        self.k_proj = attn.k_proj
-        self.v_proj = attn.v_proj
+        projections = (attn.q_proj, attn.k_proj, attn.v_proj)
+        self.qkv_proj = (
+            fuse_linears(projections)
+            if os.getenv("SPYRE_FUSE_QKV", "0") == "1"
+            else None
+        )
+        if self.qkv_proj is None:
+            self.q_proj, self.k_proj, self.v_proj = projections
+        else:
+            self.qkv_sizes = tuple(p.weight.shape[0] for p in projections)
         self.o_proj = attn.o_proj
         self.head_dim = attn.head_dim
         self.v_head_dim = getattr(attn, "v_head_dim", attn.head_dim)
@@ -3070,21 +3294,15 @@ class StandardGQAAttention(nn.Module):
         cache_index,
     ):
         bsz, seq_len, _ = hidden_states.shape
-        q = (
-            self.q_proj(hidden_states)
-            .view(bsz, seq_len, -1, self.head_dim)
-            .transpose(1, 2)
-        )
-        k = (
-            self.k_proj(hidden_states)
-            .view(bsz, seq_len, -1, self.head_dim)
-            .transpose(1, 2)
-        )
-        v = (
-            self.v_proj(hidden_states)
-            .view(bsz, seq_len, -1, self.v_head_dim)
-            .transpose(1, 2)
-        )
+        if self.qkv_proj is None:
+            q = self.q_proj(hidden_states)
+            k = self.k_proj(hidden_states)
+            v = self.v_proj(hidden_states)
+        else:
+            q, k, v = self.qkv_proj(hidden_states).split(self.qkv_sizes, dim=-1)
+        q = q.view(bsz, seq_len, -1, self.head_dim).transpose(1, 2)
+        k = k.view(bsz, seq_len, -1, self.head_dim).transpose(1, 2)
+        v = v.view(bsz, seq_len, -1, self.v_head_dim).transpose(1, 2)
 
         q = apply_rope_matmul(q, selected_freqs)
         k = apply_rope_matmul(k, selected_freqs)
@@ -3190,19 +3408,22 @@ class StandardGQABlock(nn.Module):
         return h, key_cache, value_cache
 
 
-def make_standard_gqa_block(layer, is_res_mul: bool | None = None):
-    """Build and compile one complete standard GQA block."""
-    return torch.compile(StandardGQABlock(layer, is_res_mul), dynamic=False)
+def make_standard_gqa_block(layers, index, is_res_mul: bool | None = None):
+    """Replace ``layers[index]`` with a standard GQA block and compile it.
+
+    The block takes over the decoder layer's modules, so it replaces the layer
+    in its ``ModuleList``: the model's move to Spyre
+    (``_move_to_spyre_with_layout``) places only parameters registered in the
+    model tree, and a parameter the block owns itself must be among them.
+    """
+    block = StandardGQABlock(layers[index], is_res_mul)
+    layers[index] = block
+    return torch.compile(block, dynamic=False)
 
 
 def prepare_standard_gqa_blocks(layers, is_res_mul: bool | None = None):
     """Replace decoder layers with registered, fully compiled Spyre blocks."""
-    blocks = []
-    for i, layer in enumerate(list(layers)):
-        block = StandardGQABlock(layer, is_res_mul)
-        layers[i] = block
-        blocks.append(torch.compile(block, dynamic=False))
-    return blocks
+    return [make_standard_gqa_block(layers, i, is_res_mul) for i in range(len(layers))]
 
 
 def make_decoder_block(
@@ -3318,11 +3539,14 @@ def standard_gqa_backbone_forward(
     key_caches,
     value_caches,
     cache_index,
+    *,
+    rows_to_keep=0,
 ):
     """Standard GQA backbone: embedding, RoPE, compiled blocks, norm.
 
-    Returns ``last_hidden_state`` (no ``lm_head``). Used directly by embedding
-    callers; wrapped by ``standard_gqa_forward`` for causal-LM callers.
+    Returns ``last_hidden_state`` (no ``lm_head``); ``rows_to_keep`` > 0 returns
+    only the trailing positions, selected inside the compiled norm. Used directly
+    by embedding callers; wrapped by ``standard_gqa_forward`` for causal-LM callers.
     """
     h = embed_text_tokens(model, input_ids)
 
@@ -3338,7 +3562,7 @@ def standard_gqa_backbone_forward(
             cache_index,
         )
 
-    h = model._spyre_compiled_norm(h)
+    h = run_final_norm(model._spyre_compiled_norm, h, rows_to_keep=rows_to_keep)
     return h
 
 
@@ -3661,7 +3885,9 @@ def prepare_standard_gqa(model):
     prepare_lm_head_for_spyre(model)
     backbone = get_backbone(model)
     model._spyre_compiled_blocks = prepare_standard_gqa_blocks(backbone.layers)
-    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
+    model._spyre_compiled_norm = torch.compile(
+        row_selecting_norm(backbone.norm), dynamic=False
+    )
 
 
 # ---------------------------------------------------------------------------

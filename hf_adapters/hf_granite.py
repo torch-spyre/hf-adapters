@@ -36,6 +36,8 @@ from hf_adapters.hf_common import (
     prepare_lm_head_for_spyre,
     prepare_rope_and_heads,
     prepare_standard_gqa_blocks,
+    row_selecting_norm,
+    run_final_norm,
     run_lm_head,
     text_config,
 )
@@ -49,8 +51,14 @@ def _run_backbone_forward(
     key_caches,
     value_caches,
     cache_index,
+    *,
+    rows_to_keep=0,
 ):
-    """Granite 3.3 backbone: embedding * multiplier, blocks, norm."""
+    """Granite 3.3 backbone: embedding * multiplier, blocks, norm.
+
+    ``rows_to_keep`` > 0 returns only the trailing positions, selected inside the
+    compiled norm (see :func:`hf_adapters.hf_common.row_selecting_norm`).
+    """
     h = embed_text_tokens(model, input_ids)
 
     selected_freqs = model._spyre_rope(h, position_ids)
@@ -65,7 +73,7 @@ def _run_backbone_forward(
             cache_index,
         )
 
-    h = model._spyre_compiled_norm(h)
+    h = run_final_norm(model._spyre_compiled_norm, h, rows_to_keep=rows_to_keep)
     return h
 
 
@@ -100,5 +108,7 @@ def prepare_for_spyre(model):
     )
     backbone = get_backbone(model)
     model._spyre_compiled_blocks = prepare_standard_gqa_blocks(backbone.layers, True)
-    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
+    model._spyre_compiled_norm = torch.compile(
+        row_selecting_norm(backbone.norm), dynamic=False
+    )
     model._spyre_prefill_chunk_size = _SDPA_MAX_SEQUENCE_TILE_SIZE

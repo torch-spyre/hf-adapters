@@ -152,6 +152,90 @@ def test_prefill_head_matches_full_logits(prepared_model, chunk_size, batch_size
 
 
 @torch.no_grad()
+def test_forwarding_prefill_backbone_matches_full_logits(prepared_model):
+    """A wrapper can forward the row contract without declaring its signature."""
+    model, adapter = prepared_model
+    model._spyre_prefill_chunk_size = 64
+    ids = torch.randint(1, 129, (2, 139))
+    mask = torch.ones_like(ids)
+    mask[0, 71:] = 0
+    ids[0, 71:] = 0
+    options = dict(
+        attention_mask=mask,
+        max_new_tokens=3,
+        do_sample=False,
+        eos_token_id=None,
+        return_dict_in_generate=True,
+        output_logits=True,
+    )
+    expected = hf_common.generate(adapter._run_forward, model, ids, **options)
+    calls = []
+
+    def forwarding(model, ids, positions, mask, keys, values, cache_index, **kwargs):
+        assert kwargs == {"rows_to_keep": 1}
+        calls.append(ids.shape[1])
+        return adapter._run_backbone_forward(
+            model, ids, positions, mask, keys, values, cache_index, **kwargs
+        )
+
+    actual = hf_common.generate(
+        adapter._run_forward,
+        model,
+        ids,
+        prefill_backbone_fn=forwarding,
+        **options,
+    )
+    assert calls == [64, 64, 64]
+    torch.testing.assert_close(actual.sequences, expected.sequences)
+    for got, want in zip(actual.logits, expected.logits, strict=True):
+        torch.testing.assert_close(got, want)
+
+
+@torch.no_grad()
+@pytest.mark.parametrize(
+    "failure", ["missing_keyword", "ignored_rows", "internal_error"]
+)
+def test_invalid_prefill_backbone_fails_without_retry(prepared_model, failure):
+    """Reject unsupported callbacks without repeating any KV-cache updates."""
+    model, adapter = prepared_model
+    model._spyre_prefill_chunk_size = 64
+    ids = torch.randint(1, 129, (1, 139))
+    calls = []
+
+    def missing_keyword(model, ids, positions, mask, keys, values, cache_index):
+        pytest.fail("missing rows_to_keep must fail before entering the callback")
+
+    def invalid(*args, **kwargs):
+        calls.append(kwargs["rows_to_keep"])
+        if failure == "ignored_rows":
+            kwargs.pop("rows_to_keep")
+        hidden = adapter._run_backbone_forward(*args, **kwargs)
+        if failure == "internal_error":
+            raise TypeError("backbone failure after KV update")
+        return hidden
+
+    def unused_head(hidden):
+        pytest.fail("a failed prefill backbone must not reach the LM head")
+
+    model._spyre_lm_head_forward = unused_head
+    error = ValueError if failure == "ignored_rows" else TypeError
+    message = "KV update" if failure == "internal_error" else "rows_to_keep"
+    with pytest.raises(error, match=message):
+        hf_common.generate(
+            adapter._run_forward,
+            model,
+            ids,
+            prefill_backbone_fn=(
+                missing_keyword if failure == "missing_keyword" else invalid
+            ),
+            max_new_tokens=2,
+            do_sample=False,
+            eos_token_id=None,
+        )
+    assert calls == ([] if failure == "missing_keyword" else [1])
+
+
+@torch.no_grad()
 def test_custom_prefill_hook_takes_precedence(prepared_model):
     model, adapter = prepared_model
     ids = torch.tensor([[11, 12, 13]])
@@ -217,6 +301,8 @@ def test_registered_decoders_use_prefill_backbone(monkeypatch, adapter_name):
     else:
         backbone = adapter._run_backbone_forward
         inspect.signature(backbone).bind(*([None] * 7))
+        # generate() asks the prefill backbone for the projected row only.
+        inspect.signature(backbone).bind(*([None] * 7), rows_to_keep=1)
         expected = object()
 
         def generate(forward, actual_model, input_ids, **kwargs):

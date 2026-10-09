@@ -64,6 +64,8 @@ from hf_adapters.hf_common import (
     prepare_lm_head_for_spyre,
     prepare_rope_and_heads,
     prepare_standard_gqa_blocks,
+    row_selecting_norm,
+    run_final_norm,
     run_lm_head,
 )
 
@@ -90,7 +92,9 @@ def prepare_for_spyre(model):
     )
     backbone = get_backbone(model)
     model._spyre_text_blocks = prepare_standard_gqa_blocks(backbone.layers, True)
-    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
+    model._spyre_compiled_norm = torch.compile(
+        row_selecting_norm(backbone.norm), dynamic=False
+    )
 
 
 def _deepstack_features(model, pixel_values, image_sizes):
@@ -225,6 +229,8 @@ def _run_text_backbone(
     cache_index,
     deepstack=None,
     vision_mask=None,
+    *,
+    rows_to_keep=0,
 ):
     """Granite text backbone over precomputed ``inputs_embeds`` (already scaled).
 
@@ -233,7 +239,9 @@ def _run_text_backbone(
     layer, the projected vision features are summed into the image-token
     positions (which were zeroed at embed time). The injection's scatter runs on
     CPU (see ``_inject_deepstack``). Used at prefill only — decode steps pass
-    ``deepstack=None``.
+    ``deepstack=None``. ``rows_to_keep`` > 0 returns only the trailing positions,
+    selected inside the compiled norm (see
+    :func:`hf_adapters.hf_common.row_selecting_norm`).
     """
     h = inputs_embeds
     selected_freqs = model._spyre_rope(h, position_ids)
@@ -248,7 +256,7 @@ def _run_text_backbone(
             value_caches[i],
             cache_index,
         )
-    return model._spyre_compiled_norm(h)
+    return run_final_norm(model._spyre_compiled_norm, h, rows_to_keep=rows_to_keep)
 
 
 def _prefill_forward(
@@ -320,6 +328,8 @@ def _logits_from_embeds(
     ``cache_index`` is the KV-write coordinate forwarded verbatim to the
     backbone: the int64 destination positions along the cache's sequence dim
     (``0..padded_len`` at prefill, a single slot per decode step).
+    ``logits_to_keep`` > 0 also asks the backbone's final norm for only those
+    trailing rows, so the LM head reads its own buffer, as in decode.
     """
     h = _run_text_backbone(
         model,
@@ -331,5 +341,6 @@ def _logits_from_embeds(
         cache_index,
         deepstack=deepstack,
         vision_mask=vision_mask,
+        rows_to_keep=logits_to_keep,
     )
     return run_lm_head(model, h, logits_to_keep=logits_to_keep)

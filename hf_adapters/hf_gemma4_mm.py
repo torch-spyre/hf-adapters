@@ -425,6 +425,8 @@ def _logits_from_embeds(
     ``ple_context_embeds`` optionally carries stock's pre-scatter multimodal PLE
     context: scaled text embeddings with image positions replaced by the raw,
     unscaled pad embedding. Decode omits it and uses ``inputs_embeds`` directly.
+    ``logits_to_keep`` > 0 also asks the shared walk's final norm for only those
+    trailing rows, so the LM head reads its own buffer, as in decode.
     """
     cfg = text_config(model.config)
     query_row_mask = None
@@ -456,6 +458,7 @@ def _logits_from_embeds(
         masks=masks,
         per_layer_inputs=per_layer_inputs,
         query_row_mask=query_row_mask,
+        rows_to_keep=logits_to_keep,
     )
     return run_lm_head(model, h, logits_to_keep=logits_to_keep)
 

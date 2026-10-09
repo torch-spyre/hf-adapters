@@ -34,6 +34,8 @@ from hf_adapters.hf_common import (
     kv_cache_update,
     pad_attention_heads,
     prepare_lm_head_for_spyre,
+    row_selecting_norm,
+    run_final_norm,
     run_lm_head,
 )
 
@@ -282,6 +284,8 @@ def _run_backbone_forward(
     key_caches,
     value_caches,
     cache_index,
+    *,
+    rows_to_keep=0,
 ):
     h = embed_text_tokens(model, input_ids)
     selected_freqs = model._spyre_rope(h, position_ids)
@@ -313,7 +317,7 @@ def _run_backbone_forward(
             h = post_conv(h_for_conv, C, conv_out)
             if decode:
                 h = h[:, :1]
-    h = model._spyre_compiled_norm(h)
+    h = run_final_norm(model._spyre_compiled_norm, h, rows_to_keep=rows_to_keep)
     return h
 
 
@@ -436,4 +440,6 @@ def prepare_for_spyre(model):
         )
         for layer in backbone.layers
     ]
-    model._spyre_compiled_norm = torch.compile(backbone.embedding_norm, dynamic=False)
+    model._spyre_compiled_norm = torch.compile(
+        row_selecting_norm(backbone.embedding_norm), dynamic=False
+    )
