@@ -34,6 +34,7 @@ from hf_adapters.hf_common import (
     kv_cache_update,
     permute_proj_for_rope,
     prepare_lm_head_for_spyre,
+    query_validity_mask,
     rope_dim_permutation,
     run_lm_head,
     text_config,
@@ -330,10 +331,7 @@ def _make_linear_attention_block(layer):
 
 def _padding_mask(attention_mask, sequence_length, cache_index):
     """Recover the per-token validity mask from the additive causal mask."""
-    block_start = int(cache_index[0].to("cpu"))
-    rows = torch.arange(sequence_length)
-    diagonal = attention_mask.to("cpu")[:, 0, rows, block_start + rows]
-    return (diagonal == 0).to(dtype=attention_mask.dtype, device=attention_mask.device)
+    return query_validity_mask(attention_mask)
 
 
 def _run_backbone_forward(

@@ -160,9 +160,10 @@ class SpyreEmbeddingRowwiseParallel(_SpyreEmbeddingParallel):
 
         masked_input = host_input.clone() - vocab_start
         masked_input[invalid] = 0
-        # Spyre does not yet support comparisons producing bool from int32, so
-        # construct the small ownership mask on the host.  Transfer it once and
-        # keep both masking the embedding result and the collective on-device.
+        # Integer comparisons now lower through fp32, but casting the resulting
+        # packed ownership mask to fp16/bf16 leaves a staggered layout that
+        # cannot multiply the embedding's standard layout (torch-spyre#2252).
+        # Stage the small mask on CPU until that mixed-layout path is supported.
         valid = (~invalid).to(mod.weight.dtype).unsqueeze(-1).to(input_tensor.device)
         return masked_input.to(input_tensor.device), valid
 

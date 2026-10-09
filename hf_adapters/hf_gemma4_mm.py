@@ -258,6 +258,23 @@ def _image_features(model, pixel_values, image_position_ids):
     return features
 
 
+def _replace_image_token_ids(input_ids, image_token_id, pad_token_id):
+    """Select PLE token IDs on device; return a numeric image mask for CPU scatter."""
+    if input_ids.device.type == "spyre" and not torch.compiler.is_compiling():
+        return _compiled_replace_image_token_ids(
+            input_ids, image_token_id, pad_token_id
+        )
+    image_mask = input_ids == image_token_id
+    return torch.where(image_mask, pad_token_id, input_ids), image_mask.to(
+        torch.float32
+    )
+
+
+_compiled_replace_image_token_ids = torch.compile(
+    _replace_image_token_ids, dynamic=False, fullgraph=True
+)
+
+
 def _embed_and_scatter(model, input_ids, image_features):
     """Build decoder and PLE-context embeddings for multimodal prefill.
 
@@ -276,11 +293,18 @@ def _embed_and_scatter(model, input_ids, image_features):
     image_token_id = model.config.image_token_id
     dtype = get_model_dtype(model)
 
-    input_ids_cpu = input_ids.to("cpu").clone()
-    image_mask = input_ids_cpu == image_token_id  # [B, L] bool
-    input_ids_cpu[image_mask] = text_config(model.config).pad_token_id
+    device = backbone.embed_tokens.weight.device
+    ids = input_ids.to(
+        device=device, dtype=torch.int32 if device.type == "spyre" else input_ids.dtype
+    )
+    ids, image_mask = _replace_image_token_ids(
+        ids, image_token_id, text_config(model.config).pad_token_id
+    )
+    # The additive feature scatter still needs CPU indexing. Only its compact
+    # mask crosses back; token IDs and their image-to-pad selection stay on device.
+    image_mask = image_mask.to(device="cpu", dtype=torch.bool)
     # Scaled word embeddings, on the embedding's device.
-    h = embed_text_tokens(model, input_ids_cpu)
+    h = embed_text_tokens(model, ids)
 
     n_image_tokens = int(image_mask.sum())
     hidden = h.shape[-1]
@@ -303,7 +327,7 @@ def _embed_and_scatter(model, input_ids, image_features):
         raw_pad = backbone.embed_tokens.weight[text_config(model.config).pad_token_id]
         pad_additive = image_mask.to(dtype).unsqueeze(-1).to(h.device) * raw_pad
         ple_context_embeds = text_embeds + pad_additive
-    return inputs_embeds, ple_context_embeds, input_ids_cpu
+    return inputs_embeds, ple_context_embeds, ids
 
 
 def _blockwise_band(mm_token_type_ids, padded_len, max_cache_len, dtype):
@@ -311,8 +335,8 @@ def _blockwise_band(mm_token_type_ids, padded_len, max_cache_len, dtype):
 
     Reproduces stock ``blockwise_overlay(get_block_sequence_ids_for_mask(...))``:
     two tokens attend to each other iff they share the same image group id
-    (>= 0). Built and kept on CPU (int/bool ops don't lower on Spyre; also avoids
-    the bf16 ``-inf + -inf`` NaN hazard when OR-combined). Only used at prefill.
+    (>= 0). Kept on CPU for the prefix sum and the fp32-predicate/fp16-mask
+    layout mismatch (torch-spyre#2252). Only used at prefill.
 
     ``mm_token_type_ids`` is the left-padded ``[B, padded_len]`` type map
     (0=text, 1=image). Cache column ``c`` at prefill holds the token at padded
@@ -361,8 +385,9 @@ def _sliding_window_lower_band(mask, sliding_window):
     coordinate is its row index ``q`` and the key column is the cache slot ``k``.
     ``mask`` is ``[B, 1, Lq, Lk]`` where ``Lk`` (the cache length) may exceed
     ``Lq`` (unused decode slots), so the band is the rectangular ``q - k`` over
-    ``[Lq, Lk]``. Built and combined on CPU (int/bool off Spyre; add off-device
-    to dodge the bf16 ``-inf + -inf`` NaN).
+    ``[Lq, Lk]``. Built and combined on CPU until fp32 comparison predicates
+    can be combined with fp16/bf16 masks (torch-spyre#2252). Keeping the add
+    off-device also avoids the bf16 ``-inf + -inf`` NaN.
     """
     lq, lk = mask.shape[-2], mask.shape[-1]
     q = torch.arange(lq)[:, None]  # [Lq, 1]

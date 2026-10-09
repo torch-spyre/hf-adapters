@@ -1375,6 +1375,24 @@ def _mask_fill_value(dtype):
     return torch.finfo(storage_dtype).min / 2
 
 
+def query_validity_mask(attention_mask):
+    """Return ``[B, Lq]`` validity from a zero/negative additive attention mask.
+
+    A real query in the adapters' causal masks can attend to its own cache
+    slot. Left-padding queries have no zero entry anywhere in their row. This
+    also handles masks with more than one head, without extracting a diagonal
+    or reading cache positions back to the host.
+    """
+    if attention_mask.device.type == "spyre" and not torch.compiler.is_compiling():
+        return _compiled_query_validity_mask(attention_mask)
+    return (attention_mask == 0).any(dim=-1).any(dim=1).to(attention_mask.dtype)
+
+
+_compiled_query_validity_mask = torch.compile(
+    query_validity_mask, dynamic=False, fullgraph=True
+)
+
+
 def build_prefill_mask(
     batch_size,
     padded_len,
@@ -1712,11 +1730,13 @@ def add_causal_sliding_window_band(
     fill value on every key outside ``(q - sliding_window, q]``. Same
     device/dtype as ``mask``.
 
-    Ordinary masks take the CPU fallback below because Spyre's Inductor backend
-    rejects the integer comparisons and bool intermediates used to build the
-    band. Chunked-prefill masks in logical cache order carry a private builder
-    that advances a device-resident sliding state instead, avoiding a full mask
-    round-trip per chunk. Compact ring-buffer masks still use the CPU fallback
+    Integer comparisons now lower through fp32 on Spyre, but their predicates
+    cannot yet be combined with the fp16/bf16 base mask: the cast leaves a
+    staggered element arrangement (torch-spyre#2252). Ordinary masks retain
+    the CPU path for that combination. Chunked-prefill masks in logical cache
+    order carry a private builder that advances a device-resident sliding state
+    instead, avoiding a full mask round-trip per chunk. Compact ring-buffer masks
+    still use the CPU fallback
     to gather the logical mask into physical cache order. Both paths avoid
     combining two masked cells on-device by addition; ``-inf + -inf`` has been
     observed to produce NaN on Spyre in bf16.
@@ -3377,15 +3397,26 @@ def fairseq_position_ids(input_ids: torch.Tensor, padding_idx: int) -> torch.Ten
     Padding slots map to ``padding_idx``; the attention mask zeros them out
     later, so the embedding picked there is irrelevant.
 
-    Computed on CPU even when ``input_ids`` lives on Spyre: the natural form
-    ``input_ids.ne(padding_idx).int()`` materializes a bool tensor and the
-    Spyre Inductor backend rejects ``bool → int32`` conversions. The CPU
-    round-trip on a ``[B, L]`` int tensor is negligible.
+    Comparisons and selection stay on the input device. Spyre's prefix sum
+    still uses the backend's cumsum fallback, but it only transfers int32
+    counts; token IDs and the padding selections remain on device.
     """
-    ids_cpu = input_ids.to("cpu")
-    mask = ids_cpu.ne(padding_idx).int()
-    incremental = torch.cumsum(mask, dim=1).type_as(mask) * mask
-    return (incremental.long() + padding_idx).to(DEVICE)
+    if input_ids.device.type == "spyre" and not torch.compiler.is_compiling():
+        return _compiled_fairseq_position_ids(input_ids, padding_idx)
+    is_token = input_ids != padding_idx
+    counts = torch.where(is_token, torch.ones_like(input_ids, dtype=torch.int32), 0)
+    incremental = torch.cumsum(counts, dim=1, dtype=torch.int32)
+    positions = torch.where(is_token, incremental, 0)
+    if input_ids.device.type == "spyre":
+        # Spyre supports int32 indices but not int32 addition. Sequence
+        # positions fit exactly in fp32, and int64 casts would fall back again.
+        return (positions.float() + padding_idx).to(torch.int32)
+    return (positions.long() + padding_idx).to(DEVICE)
+
+
+_compiled_fairseq_position_ids = torch.compile(
+    fairseq_position_ids, dynamic=False, fullgraph=True
+)
 
 
 def make_encoder_block(
@@ -3870,7 +3901,7 @@ def prefill_encoder(
 
     h = run_encoder_forward_fn(
         model,
-        input_ids.to(DEVICE),
+        input_ids.to(device=DEVICE, dtype=torch.int32),
         mask.to(DEVICE),
         position_ids.to(DEVICE),
         tt_ids.to(DEVICE),
