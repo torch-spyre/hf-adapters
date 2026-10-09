@@ -15,7 +15,11 @@
 import pytest
 import torch
 
-from hf_adapters.laya_backend import _decision_keep_mask, _pad_explicit_masks
+from hf_adapters.laya_backend import (
+    _build_marker_selector,
+    _decision_keep_mask,
+    _pad_explicit_masks,
+)
 
 
 def test_pad_explicit_masks_blocks_padded_queries_and_keys():
@@ -84,3 +88,23 @@ def test_decision_keep_mask_rejects_invalid_shape_and_dtype():
         _decision_keep_mask(torch.zeros((1, 1, 3), dtype=torch.bool), 64)
     with pytest.raises(ValueError, match="sequence length"):
         _decision_keep_mask(torch.zeros((1, 0), dtype=torch.bool), 0)
+
+
+def test_build_marker_selector_packs_cls_and_markers():
+    positions = torch.tensor([[3, 3, 1, 99], [4, -2, 0, 99]])
+    mask = torch.tensor([[True, True, True, False], [True, True, False, False]])
+
+    selector = _build_marker_selector(positions, mask, 5, torch.bfloat16)
+
+    assert selector.shape == (2, 5, 5)
+    assert selector.dtype == torch.bfloat16
+    assert torch.equal(selector.sum(-1), torch.ones((2, 5), dtype=torch.bfloat16))
+    assert selector[0].argmax(-1).tolist() == [0, 3, 3, 1, 0]
+    assert selector[1].argmax(-1).tolist() == [0, 4, 0, 0, 0]
+
+
+def test_build_marker_selector_rejects_valid_out_of_range_position():
+    with pytest.raises(ValueError, match="exceeds"):
+        _build_marker_selector(
+            torch.tensor([[5]]), torch.tensor([[True]]), 5, torch.bfloat16
+        )

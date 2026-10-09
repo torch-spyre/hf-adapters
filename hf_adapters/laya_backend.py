@@ -430,12 +430,59 @@ def _decision_layer_forward(
     return block(hidden_states, attn_mask).clone()
 
 
-def _decision_cpu_tail(model, hidden_states, marker_pos, marker_mask):
-    """Run Laya's gather, scoring, confidence, and action path on CPU."""
+def _build_marker_selector(marker_pos, marker_mask, sequence_length, dtype):
+    """Build a CPU one-hot selector packing CLS followed by marker rows."""
+    marker_pos = marker_pos.to("cpu")
+    marker_mask = marker_mask.to("cpu")
+    if marker_pos.ndim != 2 or marker_mask.shape != marker_pos.shape:
+        raise ValueError(
+            "Laya marker positions and mask must have matching [batch, marker] shapes"
+        )
+
+    safe_pos = marker_pos.clamp(min=0)
+    safe_pos = torch.where(marker_mask, safe_pos, torch.zeros_like(safe_pos))
+    if torch.any(safe_pos >= sequence_length):
+        raise ValueError("Laya marker position exceeds the logical sequence length")
+
+    batch_size, marker_count = safe_pos.shape
+    selector = torch.zeros(
+        batch_size,
+        marker_count + 1,
+        sequence_length,
+        dtype=dtype,
+    )
+    selector[:, 0, 0] = 1
+    for batch_index in range(batch_size):
+        for marker_index in range(marker_count):
+            selector[
+                batch_index, marker_index + 1, safe_pos[batch_index, marker_index]
+            ] = 1
+    return selector
+
+
+def _make_compiled_marker_selector():
+    def select_rows(hidden_states, selector):
+        return selector @ hidden_states
+
+    return torch.compile(select_rows, dynamic=False)
+
+
+def _pack_marker_rows_cpu(hidden_states, marker_pos, marker_mask):
+    selector = _build_marker_selector(
+        marker_pos,
+        marker_mask,
+        hidden_states.shape[1],
+        hidden_states.dtype,
+    )
+    return selector @ hidden_states
+
+
+def _decision_cpu_tail(model, packed_hidden, marker_mask):
+    """Run Laya's scoring, confidence, and action path on packed CPU rows."""
     from laya.common import _autocast_enabled
 
-    idx = marker_pos.clamp(min=0)[:, :, None].expand(-1, -1, hidden_states.shape[-1])
-    markers = torch.gather(hidden_states, 1, idx)
+    pooled = packed_hidden[:, 0]
+    markers = packed_hidden[:, 1:]
     logits = model.scorer(markers).squeeze(-1).float()
     logits = logits.masked_fill(~marker_mask, -1e4)
 
@@ -458,9 +505,9 @@ def _decision_cpu_tail(model, hidden_states, marker_pos, marker_mask):
         ],
         -1,
     )
-    pooled = hidden_states[:, 0].float()
+    pooled = pooled.float()
     action_input = torch.cat([pooled, features], -1)
-    if not _autocast_enabled(hidden_states.device.type):
+    if not _autocast_enabled(packed_hidden.device.type):
         action_input = action_input.to(model.act_head[0].weight.dtype)
     return logits, model.act_head(action_input)
 
@@ -505,11 +552,12 @@ def _decision_forward(
     if detach_encoder:
         hidden_states = hidden_states.detach()
 
-    type_embedding = model.type_emb(qtype.to("cpu"))
     if model.head is None:
+        type_embedding = model.type_emb(qtype.to("cpu"))
         hidden_states = hidden_states[:, :logical_len].to("cpu")
         hidden_states = hidden_states + type_embedding[:, None, :]
-        return _decision_cpu_tail(model, hidden_states, marker_pos, marker_mask)
+        packed_hidden = _pack_marker_rows_cpu(hidden_states, marker_pos, marker_mask)
+        return _decision_cpu_tail(model, packed_hidden, marker_mask)
 
     padded_len = hidden_states.shape[1]
     key_padding_mask = ~attention_mask.to("cpu").bool()
@@ -517,7 +565,7 @@ def _decision_forward(
         hf_common.DEVICE
     )
     hidden_states = hidden_states.clone()
-    type_embedding = type_embedding.to(hf_common.DEVICE)
+    type_embedding = model.type_emb(qtype.to("cpu")).to(hf_common.DEVICE)
     for index, layer in enumerate(model.head.layers):
         hidden_states = layer(
             hidden_states,
@@ -525,8 +573,18 @@ def _decision_forward(
             type_embedding=type_embedding if index == 0 else None,
         )
 
-    hidden_states = hidden_states[:, :logical_len].to("cpu")
-    return _decision_cpu_tail(model, hidden_states, marker_pos, marker_mask)
+    selector = _build_marker_selector(
+        marker_pos,
+        marker_mask,
+        logical_len,
+        hidden_states.dtype,
+    )
+    if hidden_states.shape[1] > logical_len:
+        selector = F.pad(selector, (0, hidden_states.shape[1] - logical_len))
+    packed_hidden = model._spyre_compiled_marker_selector(
+        hidden_states, selector.to(hf_common.DEVICE)
+    ).to("cpu")
+    return _decision_cpu_tail(model, packed_hidden, marker_mask)
 
 
 def prepare_for_spyre(model):
@@ -563,6 +621,7 @@ def prepare_for_spyre(model):
             ]
             layer.forward = MethodType(_decision_layer_forward, layer)
 
+    model._spyre_compiled_marker_selector = _make_compiled_marker_selector()
     model._spyre_original_forward = model.forward
     model.forward = MethodType(_decision_forward, model)
     model._spyre_cpu_submodules = [
