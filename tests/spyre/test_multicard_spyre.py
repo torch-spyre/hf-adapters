@@ -64,7 +64,7 @@ import re
 import statistics
 import time
 import traceback
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 import torch
@@ -149,6 +149,7 @@ def run_multicard_smoke_test(
     batch_size: int = _DEFAULT_BATCH_SIZE,
     trust_remote_code: bool | None = None,
     prompt: str = _DEFAULT_PROMPT,
+    generate_ctx: "Callable[[], contextlib.AbstractContextManager] | None" = None,
 ) -> dict[str, Any]:
     """Load model and generate tokens; return a diagnostics dict.
 
@@ -163,6 +164,10 @@ def run_multicard_smoke_test(
         max_new_tokens: Token generation budget.
         dtype:          Torch dtype passed to from_pretrained (None = model default).
         batch_size:     Number of identical prompts to batch together (default 1).
+        generate_ctx:   Optional factory for a context manager wrapped around the
+                        timed (post-warmup) generate call only — e.g. a
+                        torch.profiler.profile — so load, compile and warmup
+                        are excluded.  None = no wrapping.
 
     Returns a dict with keys:
         model              - model path used
@@ -330,8 +335,10 @@ def run_multicard_smoke_test(
     print(f"\n{'=' * 20} Run Model...")
     gen_t0 = time.time()
     try:
-        output_texts, captured = _run_generate()
-        result["gen_s"] = time.time() - gen_t0
+        with generate_ctx() if generate_ctx is not None else contextlib.nullcontext():
+            output_texts, captured = _run_generate()
+            # Inside the ctx so gen_s excludes e.g. profiler trace export on exit.
+            result["gen_s"] = time.time() - gen_t0
 
         ttft, decode, per_token = _parse_timing(captured)
         result["ttft_ms"] = ttft
