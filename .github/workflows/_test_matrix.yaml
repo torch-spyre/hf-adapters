@@ -179,6 +179,11 @@ env:
   # regenerate on CPU. The test keys these compact references by model commit,
   # stack versions, generation settings, dtype, prompt, and input tensor bytes.
   HF_ADAPTERS_VLM_REF_CACHE: /storage-1/hf-adapters/.cache/vlm-references
+  # Line-buffered test output, so the step log timestamps each phase print
+  # instead of receiving the whole test's stdout in one block at exit.
+  # (Thread-pool sizes come from the build-hf-adapters action: a workflow-level
+  # env cannot read the runner pod's CPU limit.)
+  PYTHONUNBUFFERED: "1"
   # Single source of truth for the set of models exercised by the CPU
   # test matrix's `-k` filter. PR is the fast smoke — qwen3 (causal LM) and
   # bge_base (embedding) on CPU; the same bge_base runs on the Spyre
@@ -312,7 +317,7 @@ jobs:
   artifact-identity:
     name: Derive artifact identity
     needs: [resolve-torch-spyre]
-    if: ${{ always() && !inputs.skip_tests && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') }}
+    if: ${{ !cancelled() && !inputs.skip_tests && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') }}
     continue-on-error: true
     runs-on:
       - x86_64
@@ -531,7 +536,8 @@ jobs:
         run: |
           echo "Checking that all adapter files are registered in model_registry.py..."
           python -m pip install --quiet pytest
-          make adapter-coverage-tests PYTEST="python -m pytest" JUNIT_XML=junit-adapter-coverage.xml
+          source .github/scripts/run-with-pod-stdout.sh
+          run_teed make adapter-coverage-tests PYTEST="python -m pytest" JUNIT_XML=junit-adapter-coverage.xml
           echo "Adapter coverage check passed."
 
       - name: Upload JUnit results
@@ -675,8 +681,8 @@ jobs:
     # The resolve-torch-spyre guard lets this job run when the pin succeeded
     # (pinned mode) OR was skipped (prebaked_image mode) but NOT when it failed
     # -- a failed pin must skip the matrix, not silently run on baked-in
-    # torch-spyre (issue #449). `always() &&` is required: without a literal status-check function GitHub auto-prepends success(), which is false when resolve-torch-spyre is skipped, silently skipping this job under prebaked_image.
-    if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' load ')) }}
+    # torch-spyre (issue #449). `!cancelled() &&` is required: without a literal status-check function GitHub auto-prepends success(), which is false when resolve-torch-spyre is skipped, silently skipping this job under prebaked_image. Not always(): that also makes the job ignore run cancellation, so a superseding run waits for it.
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' load ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-load-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -731,8 +737,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_load_spyre.py for ${{ matrix.model_key }}..."
-          make load-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-load-${{ matrix.model_key }}.xml
+          run_teed make load-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-load-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -760,7 +767,7 @@ jobs:
     # copy this `if:` line with that key; no existing job needs to change.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' smoke ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' smoke ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-smoke-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -815,8 +822,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
-          make smoke-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-smoke-${{ matrix.model_key }}.xml
+          run_teed make smoke-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-smoke-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -841,7 +849,7 @@ jobs:
     # tiers or when selected explicitly.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && needs.generate-matrix.outputs.multicard_smoke_matrix != '[]' && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' multicard_smoke ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && needs.generate-matrix.outputs.multicard_smoke_matrix != '[]' && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' multicard_smoke ')) }}
     # Don't let the initial pod failure fail the workflow outright -- the
     # fresh-pod retry and spyre-tests-result decide the authoritative result.
     continue-on-error: true
@@ -902,7 +910,8 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          uv run --active --no-sync torchrun \
+          source .github/scripts/run-with-pod-stdout.sh
+          run_teed uv run --active --no-sync torchrun \
             --standalone \
             --nnodes=1 \
             --nproc-per-node=2 \
@@ -924,7 +933,7 @@ jobs:
     # Suite key: "token_compare". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'integration' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_compare ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'integration' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-token-compare-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -979,8 +988,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}..."
-          make token-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-compare-${{ matrix.model_key }}.xml
+          run_teed make token-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1004,7 +1014,7 @@ jobs:
     # Suite key: "model_components". Part of the "unit" and "integration" coarse tiers.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'integration' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_components ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'integration' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_components ')) }}
     # Don't let a failed run fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -1049,7 +1059,8 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          make model-components-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' JUNIT_XML=junit-model-components.xml
+          source .github/scripts/run-with-pod-stdout.sh
+          run_teed make model-components-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' JUNIT_XML=junit-model-components.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1073,7 +1084,7 @@ jobs:
     # Suite key: "embed_compare". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' embed_compare ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' embed_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-embed-compare-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -1128,8 +1139,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}..."
-          make embed-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-embed-compare-${{ matrix.model_key }}.xml
+          run_teed make embed-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-embed-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1153,7 +1165,7 @@ jobs:
     # Suite key: "vlm". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' vlm ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' vlm ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-vlm-e2e-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -1211,8 +1223,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_vlm_e2e_spyre.py for ${{ matrix.model_key }}..."
-          make vlm-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-vlm-${{ matrix.model_key }}.xml
+          run_teed make vlm-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-vlm-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1236,7 +1249,7 @@ jobs:
     # Suite key: "clip". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' clip ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' clip ')) }}
     continue-on-error: true
     runs-on:
       - x86_64
@@ -1288,8 +1301,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }}..."
-          make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
+          run_teed make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1376,7 +1390,7 @@ jobs:
     # Suite key: "reranker_compare". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' reranker_compare ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' reranker_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-reranker-compare-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -1428,8 +1442,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_reranker_compare_spyre.py for ${{ matrix.model_key }}..."
-          make reranker-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-reranker-compare-${{ matrix.model_key }}.xml
+          run_teed make reranker-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-reranker-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1453,7 +1468,7 @@ jobs:
     # Suite key: "masked_lm_compare". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' masked_lm_compare ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' masked_lm_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-masked-lm-compare-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -1505,8 +1520,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_masked_lm_compare_spyre.py for ${{ matrix.model_key }}..."
-          make masked-lm-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-masked-lm-compare-${{ matrix.model_key }}.xml
+          run_teed make masked-lm-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-masked-lm-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1530,7 +1546,7 @@ jobs:
     # Suite key: "question_answering_compare". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' question_answering_compare ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' question_answering_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-question-answering-compare-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -1582,8 +1598,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_question_answering_compare_spyre.py for ${{ matrix.model_key }}..."
-          make question-answering-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-question-answering-compare-${{ matrix.model_key }}.xml
+          run_teed make question-answering-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-question-answering-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1607,7 +1624,7 @@ jobs:
     # Suite key: "seq_classification_compare". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' seq_classification_compare ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' seq_classification_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-seq-classification-compare-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -1659,8 +1676,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_seq_classification_compare_spyre.py for ${{ matrix.model_key }}..."
-          make seq-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-seq-classification-compare-${{ matrix.model_key }}.xml
+          run_teed make seq-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-seq-classification-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1684,7 +1702,7 @@ jobs:
     # Suite key: "token_classification_compare". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_classification_compare ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' token_classification_compare ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-token-classification-compare-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -1736,8 +1754,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_token_classification_compare_spyre.py for ${{ matrix.model_key }}..."
-          make token-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-classification-compare-${{ matrix.model_key }}.xml
+          run_teed make token-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-classification-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1839,7 +1858,7 @@ jobs:
     needs: [generate-matrix, resolve-torch-spyre]
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && inputs.edge_cases_only }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && inputs.edge_cases_only }}
     # Don't let one failed (model, test_file) leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-edge-cases-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -1902,8 +1921,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running ${{ matrix.test_file }} for ${{ matrix.model_key }}..."
-          make edge-cases-tests \
+          run_teed make edge-cases-tests \
             PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             EDGE_CASE_FILE='${{ matrix.test_file }}' \
             MODEL_PATH='${{ matrix.model_key }}' \
@@ -1931,7 +1951,7 @@ jobs:
     # Suite key: "model_module". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_module ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_module ')) }}
     # Don't let one failed config leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-model-module-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
     runs-on:
@@ -1982,7 +2002,8 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cd "$CLONED_HF_ADAPTERS_DIR"
-          make model-module-tests MODULE_CONFIG=${{ matrix.config }} \
+          source .github/scripts/run-with-pod-stdout.sh
+          run_teed make model-module-tests MODULE_CONFIG=${{ matrix.config }} \
             MODULE_TEST_FILTER='${{ matrix.pytest_filter }}' PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             JUNIT_XML=1 RESULTS_DIR=.
           mv "model-module-${{ matrix.config }}.xml" \
@@ -2002,6 +2023,60 @@ jobs:
         with:
           job_key: model_module
           payload: '{"config": ${{ toJSON(matrix.config) }}, "shard": ${{ toJSON(matrix.shard) }}, "pytest_filter": ${{ toJSON(matrix.pytest_filter) }}}'
+
+  spyre-model-support-tests:
+    name: Spyre model-support scan
+    needs: [resolve-test-type, resolve-torch-spyre]
+    # Suite key "model_support" only (no tier includes it): a bounded Hub scan of the build
+    # under test, which the orchestrator's nightly/weekly dispatches. No pod-level retry: a
+    # survey's failing models are its verdicts, not flakes.
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_support ') }}
+    continue-on-error: true
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 480
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        id: build
+        with:
+          uv_groups: "dev spyre test models-ops"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          prebaked_image: ${{ inputs.prebaked_image }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
+
+      - name: Run the model-support scan
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
+          run_teed make model-support-tests RESULTS_DIR=model-support-results
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-model-support
+          path: ${{ env.CLONED_HF_ADAPTERS_DIR }}/model-support-results/junit-model-support/junit-model-support.xml
+          retention-days: 14
 
   # Pod-level retry (mirrors torch-spyre's _test_matrix.yaml): every spyre-*-tests job above is continue-on-error and uploads a "failed-suite-<key>-<attempt>-<idx>" descriptor artifact on a failed leg; this job downloads those descriptors and rebuilds one retry matrix per suite type for the *-retry jobs below to re-run on brand-new pods.
   collect-failed-suites:
@@ -2133,7 +2208,7 @@ jobs:
           echo "--- has_failed_* lines written to GITHUB_OUTPUT ---"
           grep '^has_failed_' "$GITHUB_OUTPUT"
 
-  # `always() &&` below is required on every *-retry job, not cosmetic: without a status-check function, GitHub applies an implicit success() gate on top of the condition and can skip the job outright.
+  # `!cancelled() &&` below is required on every *-retry job, not cosmetic: without a status-check function, GitHub applies an implicit success() gate on top of the condition and can skip the job outright.
   spyre-load-tests-retry:
     name: Spyre load (${{ matrix.model_key }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
@@ -2142,10 +2217,10 @@ jobs:
     # failure is emergent here. If resolve-torch-spyre failed, every primary suite
     # skipped (their result == guard), so nothing ran, so no suite failed, so
     # collect-failed-suites reports has_failed_* == 'false' and this retry never
-    # fires. The always() gate only keeps the retry alive across the expected
+    # fires. The !cancelled() gate only keeps the retry alive across the expected
     # failure() of its primary; it never resurrects a run that skipped on pin
     # failure. All *-retry jobs share this rationale.
-    if: ${{ always() && needs.collect-failed-suites.outputs.has_failed_load == 'true' }}
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_load == 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -2194,8 +2269,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_load_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make load-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-load-${{ matrix.model_key }}.xml
+          run_teed make load-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-load-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Mark the retry's report with the first attempt's failures
@@ -2218,7 +2294,7 @@ jobs:
   spyre-smoke-tests-retry:
     name: Spyre smoke (${{ matrix.model_key }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
-    if: ${{ always() && needs.collect-failed-suites.outputs.has_failed_smoke == 'true' }}
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_smoke == 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -2267,8 +2343,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make smoke-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-smoke-${{ matrix.model_key }}.xml
+          run_teed make smoke-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-smoke-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Mark the retry's report with the first attempt's failures
@@ -2293,7 +2370,7 @@ jobs:
     # Fail-closed on pin failure is emergent, not gated here: if resolve-torch-spyre
     # failed, every primary suite skipped, so nothing ran, so has_failed_multicard_smoke
     # is false and this retry never fires. See spyre-load-tests-retry for the full note.
-    if: ${{ always() && needs.collect-failed-suites.outputs.has_failed_multicard_smoke == 'true' }}
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_multicard_smoke == 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x2
@@ -2348,7 +2425,8 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          uv run --active --no-sync torchrun \
+          source .github/scripts/run-with-pod-stdout.sh
+          run_teed uv run --active --no-sync torchrun \
             --standalone \
             --nnodes=1 \
             --nproc-per-node=2 \
@@ -2360,7 +2438,7 @@ jobs:
   spyre-token-compare-tests-retry:
     name: Spyre token compare (${{ matrix.model_key }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
-    if: ${{ always() && needs.collect-failed-suites.outputs.has_failed_token_compare == 'true' }}
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_token_compare == 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -2409,8 +2487,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_token_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make token-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-compare-${{ matrix.model_key }}.xml
+          run_teed make token-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Mark the retry's report with the first attempt's failures
@@ -2435,7 +2514,7 @@ jobs:
     # Fail-closed on pin failure is emergent, not gated here: if resolve-torch-spyre
     # failed, every primary suite skipped, so nothing ran, so has_failed_model_components
     # is false and this retry never fires. See spyre-load-tests-retry for the full note.
-    if: ${{ always() && needs.collect-failed-suites.outputs.has_failed_model_components == 'true' }}
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_model_components == 'true' }}
     # No strategy.matrix: this singleton suite's matrix is {"include": [{}]}, which GitHub expands to zero jobs and silently skips.
     runs-on:
       - x86_64
@@ -2479,7 +2558,8 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          make model-components-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' JUNIT_XML=junit-model-components.xml
+          source .github/scripts/run-with-pod-stdout.sh
+          run_teed make model-components-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' JUNIT_XML=junit-model-components.xml
           echo "tests done"
 
       - name: Mark the retry's report with the first attempt's failures
@@ -2501,7 +2581,7 @@ jobs:
   spyre-embed-compare-tests-retry:
     name: Spyre embed compare (${{ matrix.model_key }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
-    if: ${{ always() && needs.collect-failed-suites.outputs.has_failed_embed_compare == 'true' }}
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_embed_compare == 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -2550,8 +2630,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make embed-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-embed-compare-${{ matrix.model_key }}.xml
+          run_teed make embed-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-embed-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Mark the retry's report with the first attempt's failures
@@ -2573,7 +2654,7 @@ jobs:
   spyre-vlm-e2e-tests-retry:
     name: Spyre VLM e2e (${{ matrix.model_key }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
-    if: ${{ always() && needs.collect-failed-suites.outputs.has_failed_vlm == 'true' }}
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_vlm == 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -2624,8 +2705,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_vlm_e2e_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make vlm-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-vlm-${{ matrix.model_key }}.xml
+          run_teed make vlm-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-vlm-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Mark the retry's report with the first attempt's failures
@@ -2650,7 +2732,7 @@ jobs:
     # Fail-closed on pin failure is emergent, not gated here: if resolve-torch-spyre
     # failed, every primary suite skipped, so nothing ran, so has_failed_clip
     # is false and this retry never fires. See spyre-load-tests-retry for the full note.
-    if: ${{ always() && needs.collect-failed-suites.outputs.has_failed_clip == 'true' }}
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_clip == 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -2699,8 +2781,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
+          run_teed make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Mark the retry's report with the first attempt's failures
@@ -2722,7 +2805,7 @@ jobs:
   spyre-reranker-compare-tests-retry:
     name: Spyre reranker compare (${{ matrix.model_key }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
-    if: ${{ always() && needs.collect-failed-suites.outputs.has_failed_reranker == 'true' }}
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_reranker == 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -2770,8 +2853,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_reranker_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make reranker-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-reranker-compare-${{ matrix.model_key }}.xml
+          run_teed make reranker-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-reranker-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Mark the retry's report with the first attempt's failures
@@ -2793,7 +2877,7 @@ jobs:
   spyre-masked-lm-compare-tests-retry:
     name: Spyre masked-LM compare (${{ matrix.model_key }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
-    if: ${{ always() && needs.collect-failed-suites.outputs.has_failed_masked_lm == 'true' }}
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_masked_lm == 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -2841,8 +2925,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_masked_lm_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make masked-lm-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-masked-lm-compare-${{ matrix.model_key }}.xml
+          run_teed make masked-lm-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-masked-lm-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Mark the retry's report with the first attempt's failures
@@ -2864,7 +2949,7 @@ jobs:
   spyre-question-answering-compare-tests-retry:
     name: Spyre question-answering compare (${{ matrix.model_key }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
-    if: ${{ always() && needs.collect-failed-suites.outputs.has_failed_qa == 'true' }}
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_qa == 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -2912,8 +2997,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_question_answering_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make question-answering-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-question-answering-compare-${{ matrix.model_key }}.xml
+          run_teed make question-answering-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-question-answering-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Mark the retry's report with the first attempt's failures
@@ -2935,7 +3021,7 @@ jobs:
   spyre-seq-classification-compare-tests-retry:
     name: Spyre seq-classification compare (${{ matrix.model_key }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
-    if: ${{ always() && needs.collect-failed-suites.outputs.has_failed_seq_classification == 'true' }}
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_seq_classification == 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -2983,8 +3069,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_seq_classification_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make seq-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-seq-classification-compare-${{ matrix.model_key }}.xml
+          run_teed make seq-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-seq-classification-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Mark the retry's report with the first attempt's failures
@@ -3006,7 +3093,7 @@ jobs:
   spyre-token-classification-compare-tests-retry:
     name: Spyre token-classification compare (${{ matrix.model_key }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
-    if: ${{ always() && needs.collect-failed-suites.outputs.has_failed_token_classification == 'true' }}
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_token_classification == 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -3054,8 +3141,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running test_e2e_token_classification_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make token-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-classification-compare-${{ matrix.model_key }}.xml
+          run_teed make token-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-classification-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Mark the retry's report with the first attempt's failures
@@ -3140,7 +3228,7 @@ jobs:
   spyre-edge-cases-tests-retry:
     name: Spyre edge case ${{ matrix.test_file }} (${{ matrix.model_key }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
-    if: ${{ always() && needs.collect-failed-suites.outputs.has_failed_edge_cases == 'true' }}
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_edge_cases == 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -3191,8 +3279,9 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          source .github/scripts/run-with-pod-stdout.sh
           echo "Running ${{ matrix.test_file }} for ${{ matrix.model_key }} (pod-level retry)..."
-          make edge-cases-tests \
+          run_teed make edge-cases-tests \
             PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             EDGE_CASE_FILE='${{ matrix.test_file }}' \
             MODEL_PATH='${{ matrix.model_key }}' \
@@ -3218,7 +3307,7 @@ jobs:
   spyre-model-module-tests-retry:
     name: Spyre model-module tests (${{ matrix.config }}, ${{ matrix.shard }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
-    if: ${{ always() && needs.collect-failed-suites.outputs.has_failed_model_module == 'true' }}
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_model_module == 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -3264,7 +3353,8 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cd "$CLONED_HF_ADAPTERS_DIR"
-          make model-module-tests MODULE_CONFIG=${{ matrix.config }} \
+          source .github/scripts/run-with-pod-stdout.sh
+          run_teed make model-module-tests MODULE_CONFIG=${{ matrix.config }} \
             MODULE_TEST_FILTER='${{ matrix.pytest_filter }}' PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             JUNIT_XML=1 RESULTS_DIR=.
           mv "model-module-${{ matrix.config }}.xml" \

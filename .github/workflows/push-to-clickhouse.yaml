@@ -508,6 +508,13 @@ jobs:
             --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }}
           echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
 
+      - name: Link this shard's verdicts to its image
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/link-scan-artifact
+        with:
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          scan_date: ${{ needs.generate-matrix.outputs.snapshot_date }}
+
   weekly-model-scan-x2:
     name: Weekly model scan x2 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
     needs: [generate-matrix, resolve-torch-spyre]
@@ -621,6 +628,13 @@ jobs:
             --model-list-file shards/${{ matrix.shard_file }} \
             --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }}
           echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
+
+      - name: Link this shard's verdicts to its image
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/link-scan-artifact
+        with:
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          scan_date: ${{ needs.generate-matrix.outputs.snapshot_date }}
 
   weekly-model-scan-x4:
     name: Weekly model scan x4 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
@@ -736,13 +750,20 @@ jobs:
             --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }}
           echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
 
-  # One artifact_results leg per scan, tying the v2 capability verdicts to the image the shards
-  # ran on. Needs that image (the base artifact_id lives in its filesystem) but no card, and runs
-  # after every shard has flushed. Never fails the scan.
+      - name: Link this shard's verdicts to its image
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/link-scan-artifact
+        with:
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          scan_date: ${{ needs.generate-matrix.outputs.snapshot_date }}
+
+  # The scan's leg when no shard wrote one (an 'error' leg for a scan that recorded nothing);
+  # each shard links from its own pod. Needs the image (the base artifact_id lives in its
+  # filesystem) but no card. Never fails the scan.
   link-artifact:
     name: Link verdicts to the scanned image
-    needs: [resolve-torch-spyre, weekly-model-scan-x1, weekly-model-scan-x2, weekly-model-scan-x4]
-    if: ${{ always() && needs.resolve-torch-spyre.result == 'success' }}
+    needs: [generate-matrix, resolve-torch-spyre, weekly-model-scan-x1, weekly-model-scan-x2, weekly-model-scan-x4]
+    if: ${{ !cancelled() && needs.resolve-torch-spyre.result == 'success' }}
     continue-on-error: true
     runs-on: [x86_64, spyre_pf_x0, linux, image_torch_spyre]
     timeout-minutes: 15
@@ -788,6 +809,8 @@ jobs:
 
       - name: Write the artifact leg
         if: steps.derive.outputs.artifact_id != ''
+        env:
+          SCAN_DATE: ${{ needs.generate-matrix.outputs.snapshot_date }}
         run: |
           REC="$(tr -d '[:space:]' < artifact-id.txt)"
           uv run --no-project --with "${CH_INGEST_LIB}" \

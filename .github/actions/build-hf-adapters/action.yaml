@@ -62,6 +62,52 @@ outputs:
 runs:
   using: composite
   steps:
+    # Runs first so every later step (and every later step of the calling job)
+    # sees the values through GITHUB_ENV. The runner image exports
+    # OMP_NUM_THREADS=192 -- the whole node, not the pod's CPU limit -- and
+    # /etc/profile.d/ibm-aiu-setup.sh would set `nproc --all` if it were unset.
+    # 192 OpenMP threads under a 10-CPU CFS quota throttle every CPU-side torch
+    # op (token-compare tests ran ~2x slower).
+    - name: Size CPU thread pools to the pod CPU limit
+      shell: bash
+      run: |
+        # GHA_RUNNER_POD_CPU_LIMIT is the runner pod's Kubernetes CPU limit
+        # ("10", "10.5" or "10500m"). Fall back to the cgroup v2 quota, then to
+        # the CPUs this process may run on.
+        limit="${GHA_RUNNER_POD_CPU_LIMIT:-}"
+        source="GHA_RUNNER_POD_CPU_LIMIT=${limit}"
+        if [[ "$limit" =~ ^([0-9]+)m$ ]]; then
+          cpus=$(( BASH_REMATCH[1] / 1000 ))
+        elif [[ "$limit" =~ ^([0-9]+)(\.[0-9]+)?$ ]]; then
+          cpus=${BASH_REMATCH[1]}
+        elif read -r quota period < /sys/fs/cgroup/cpu.max 2>/dev/null && [[ "$quota" != "max" ]]; then
+          cpus=$(( quota / period ))
+          source="cgroup cpu.max=${quota} ${period}"
+        else
+          cpus=$(nproc)
+          source="nproc"
+        fi
+        (( cpus >= 1 )) || cpus=1
+        echo "pod CPUs=${cpus} (from ${source})"
+        # OMP_NUM_THREADS: torch CPU ops. TORCHINDUCTOR_COMPILE_THREADS: the
+        # Inductor compile pool running Spyre backend compiles, otherwise
+        # min(32, affinity CPUs). SPYRE_NUM_CPUS: torch-spyre's CP-SAT search
+        # workers. Neither of the latter two sees the CFS quota through
+        # sched_getaffinity, so all three get the pod limit explicitly.
+        # A preset value is kept only when it fits the pod: the runner image
+        # itself exports OMP_NUM_THREADS=192 (node CPUs), so "already set" does
+        # not mean someone chose it.
+        for var in OMP_NUM_THREADS TORCHINDUCTOR_COMPILE_THREADS SPYRE_NUM_CPUS; do
+          preset="${!var:-}"
+          if [[ "$preset" =~ ^[0-9]+$ ]] && (( preset >= 1 && preset <= cpus )); then
+            echo "${var} already set to ${preset}; leaving it"
+          else
+            [[ -n "$preset" ]] && echo "${var}=${preset} does not fit the pod's ${cpus} CPUs; overriding"
+            echo "${var}=${cpus}" >> "$GITHUB_ENV"
+            echo "${var}=${cpus}"
+          fi
+        done
+
     - name: Checkout target commit
       id: resolve-sha
       shell: bash
