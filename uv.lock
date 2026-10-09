@@ -611,6 +611,11 @@ dependencies = [
     { name = "transformers" },
 ]
 
+[package.optional-dependencies]
+laya = [
+    { name = "laya" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "black" },
@@ -636,6 +641,7 @@ spyre = [
     { name = "torch-spyre" },
 ]
 test = [
+    { name = "laya" },
     { name = "pillow" },
     { name = "pytest" },
     { name = "torchvision", version = "0.28.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
@@ -645,12 +651,14 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate" },
+    { name = "laya", marker = "extra == 'laya'", specifier = ">=0.3.28,<0.4" },
     { name = "mistral-common", specifier = "==1.11.7" },
     { name = "sentence-transformers" },
     { name = "sentencepiece" },
     { name = "torch", specifier = ">=2.0" },
     { name = "transformers", specifier = "==5.15.0" },
 ]
+provides-extras = ["laya"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -673,6 +681,7 @@ models-ops = [
 oot = [{ name = "oot-framework", git = "https://github.com/torch-spyre/torch-spyre?subdirectory=tests%2Foot_framework&rev=main" }]
 spyre = [{ name = "torch-spyre", git = "https://github.com/torch-spyre/torch-spyre?tag=v0.5.0-rc.1" }]
 test = [
+    { name = "laya", specifier = ">=0.3.28,<0.4" },
     { name = "pillow" },
     { name = "pytest", specifier = ">=9.0,<9.1" },
     { name = "torchvision", specifier = "~=0.28.0", index = "https://download.pytorch.org/whl/cpu" },
@@ -835,6 +844,24 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/19/74/a633ee74eb36c44aa6d1095e7cc5569bebf04342ee146178e2d36600708b/jsonschema_specifications-2025.9.1.tar.gz", hash = "sha256:b540987f239e745613c7a9176f3edb72b832a4ac465cf02712288397832b5e8d", size = 32855, upload-time = "2025-09-08T01:34:59.186Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl", hash = "sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe", size = 18437, upload-time = "2025-09-08T01:34:57.871Z" },
+]
+
+[[package]]
+name = "laya"
+version = "0.3.28"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
+    { name = "safetensors" },
+    { name = "torch", version = "2.13.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
+    { name = "torch", version = "2.13.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ed/52/108b9fda4e5bcd56d64db83e2c173981b64793c1f20b7e97f6cfc7542d5e/laya-0.3.28.tar.gz", hash = "sha256:8122301a5021e9fa56d8a6dba11d3bc7ae262d4f2f25dd9504344ebed9b26cbd", size = 995350, upload-time = "2026-10-05T18:05:14.58Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f1/73/c2beaece06283911d53823f1735c7a033e07a1e690735ea02d8d57706d69/laya-0.3.28-py3-none-any.whl", hash = "sha256:a1493cff474c0a5d84861db55c0c5c9b17f1db8561e458764da9a322dc542a88", size = 360039, upload-time = "2026-10-05T18:05:12.64Z" },
 ]
 
 [[package]]
