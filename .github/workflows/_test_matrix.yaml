@@ -297,6 +297,30 @@ jobs:
           echo "Resolved torch-spyre origin/main -> ${SHA}"
           echo "torch_spyre_sha=${SHA}" >> "$GITHUB_OUTPUT"
 
+      # Prime the run's torch-spyre wheel cache (see
+      # .github/actions/build-hf-adapters/torch_spyre_wheel_cache.sh): run the
+      # same install every Spyre job runs, at the SHA just resolved, and publish
+      # the wheel uv built to /storage-1. Every job of this run (and its retries
+      # and re-runs) then installs that wheel instead of compiling torch-spyre
+      # (~80 s each). Best effort: a failure here only means jobs build as before.
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - name: Prime the torch-spyre wheel cache
+        uses: ./.github/actions/build-hf-adapters
+        continue-on-error: true
+        timeout-minutes: 12
+        env:
+          TS_WHEEL_CACHE_ROLE: prime
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          torch_spyre_sha: ${{ steps.resolve.outputs.torch_spyre_sha }}
+
       - name: Record pinned SHA in the run summary
         run: |
           {

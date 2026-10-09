@@ -256,6 +256,10 @@ runs:
           # when this pod's checkout predates it (with a full-fetch fallback);
           # then check it out and re-sync submodules so the working tree matches
           # the pinned commit exactly before `uv add` builds from it.
+          # SETUP-TIMING lines feed the CI setup-time parser; timing only.
+          setup_t0=$(date +%s.%N)
+          setup_timing() { awk -v p="$1" -v a="$2" -v b="$(date +%s.%N)" -v s="$3" \
+            'BEGIN { printf "SETUP-TIMING phase=%s seconds=%.1f status=%s\n", p, b - a, s }'; }
           cd /home/senuser/torch-spyre
           echo "Pinning torch-spyre to ${TORCH_SPYRE_SHA}"
           git fetch --tags --force origin "${TORCH_SPYRE_SHA}" || \
@@ -264,13 +268,29 @@ runs:
           git submodule sync --recursive
           git submodule update --init --recursive --force
           git log -1 --oneline
+          setup_timing ts-pin "$setup_t0" ok
           cd "$CLONED_HF_ADAPTERS_DIR"
-          # Same install tail as the unpinned branch below -- the ONLY difference
-          # is the fetch/checkout preamble above, so a pinned run behaves exactly
-          # like today's install, just at a fixed SHA.
+          # Same install as the unpinned branch below, at a fixed SHA, except
+          # that it skips the `uv lock --upgrade-package torch-spyre` that branch
+          # runs: `uv add` already re-locks torch-spyre from this checkout, so the
+          # extra lock left uv.lock unchanged and only cost ~7 s per job.
+          t=$(date +%s.%N)
           uv add torch-spyre /home/senuser/torch-spyre
-          uv lock --upgrade-package torch-spyre
-          uv sync --frozen --verbose --refresh $GROUP_FLAGS
+          setup_timing uv-add "$t" ok
+          # `uv sync --frozen --verbose --refresh $GROUP_FLAGS`, except that
+          # torch-spyre comes from the wheel this run's resolve-torch-spyre job
+          # built (TS_WHEEL_CACHE_ROLE=prime there) when one with a matching key
+          # is on /storage-1; any miss or error runs the plain sync. See the script.
+          TS_WHEEL_CACHE="${GITHUB_ACTION_PATH:-}/torch_spyre_wheel_cache.sh"
+          TS_WHEEL_CACHE_STATUS_FILE="$(mktemp)"
+          export TS_WHEEL_CACHE_STATUS_FILE
+          if [[ -f "$TS_WHEEL_CACHE" ]]; then
+            bash "$TS_WHEEL_CACHE" sync $GROUP_FLAGS
+          else
+            echo "off" > "$TS_WHEEL_CACHE_STATUS_FILE"
+            uv sync --frozen --verbose --refresh $GROUP_FLAGS
+          fi
+          setup_timing setup-total "$setup_t0" "$(cat "$TS_WHEEL_CACHE_STATUS_FILE" 2>/dev/null || echo '?')"
         else
           cd "$CLONED_HF_ADAPTERS_DIR"
           # though we pin to main
