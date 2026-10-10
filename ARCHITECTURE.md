@@ -122,10 +122,11 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 ### Sequence Classification
 
 Encoder models fine-tuned for sequence-level label prediction (sentiment
-analysis, topic classification, NLI). The encoder backbone runs on Spyre;
-the two-stage classification head (`pre_classifier` + `classifier`) runs on
-CPU (pinned via `_spyre_cpu_submodules`). Use `AutoSpyreModelForSequenceClassification`;
-returns a standard `SequenceClassifierOutput` with `logits [B, num_labels]` on CPU.
+analysis, topic classification, NLI). The encoder backbone and the
+classification head both run on Spyre, so only the `[B, num_labels]` logits are
+copied back rather than the full `[B, L, H]` hidden state. Use
+`AutoSpyreModelForSequenceClassification`; returns a standard
+`SequenceClassifierOutput` with `logits [B, num_labels]` on CPU.
 
 | Model | model\_type | head\_dim | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
 |-------|-----------|---------|--------------|-------------|---------------|-----------|
@@ -141,8 +142,8 @@ RoBERTa large MNLI uses `hf_xlm_roberta.py` (shared with the XLM-RoBERTa and rer
 ### Token Classification (NER)
 
 Encoder models fine-tuned for token-level label prediction (NER, POS, chunking).
-The encoder backbone runs on Spyre via the existing adapter; the linear
-`classifier` head runs on CPU (pinned via `_spyre_cpu_submodules`).
+The encoder backbone runs on Spyre via the existing adapter, as does the linear
+`classifier` head, so only `[B, L, num_labels]` logits leave the device.
 Use `AutoSpyreModelForTokenClassification`; returns a standard
 `TokenClassifierOutput` with per-token `logits [B, L, num_labels]` on CPU.
 
@@ -276,14 +277,17 @@ outputs = tokenizer.batch_decode(
 `AutoSpyreModelForMaskedLM` loads encoder models through `AutoModelForMaskedLM`.
 Calling `model(**inputs)` returns a standard `MaskedLMOutput`. The
 bidirectional encoder runs on Spyre and the complete
-model-specific MLM head runs on CPU.
+model-specific MLM head runs on CPU (pinned via `_spyre_cpu_submodules`). Unlike
+the other encoder task heads, its `[B, L, vocab]` logits are larger than the
+`[B, L, H]` hidden state, so running it on device would grow the device-to-host
+copy rather than shrink it.
 
 ### Sequence-Classification Auto API
 
 `AutoSpyreModelForSequenceClassification` loads encoder models through
 `AutoModelForSequenceClassification`. Calling `model(**inputs)` returns a
 standard `SequenceClassifierOutput` with CPU `logits [B, num_labels]`. The
-bidirectional encoder runs on Spyre; the task head runs on CPU. For DistilBERT
+bidirectional encoder and the task head both run on Spyre. For DistilBERT
 the two-stage head (`pre_classifier` Linear + ReLU, then `classifier` Linear with
 CLS extraction) is wrapped into a single `_DistilBertClassifierHead` so the
 `prefill_sequence_classification` call-site is uniform across all adapters.
@@ -295,7 +299,7 @@ only (no training/loss, no custom embeddings, attentions, or hidden-state collec
 `AutoSpyreModelForQuestionAnswering` loads through
 `AutoModelForQuestionAnswering`. Calling `model(**inputs)` returns a standard
 `QuestionAnsweringModelOutput` with CPU `start_logits` and `end_logits`; the
-encoder runs on Spyre and `qa_outputs` runs on CPU. Both encoder task APIs are
+encoder and `qa_outputs` both run on Spyre. Both encoder task APIs are
 right-padded, `input_ids`-based inference only and do not currently support
 training/loss, custom embeddings, attentions, or hidden-state collection.
 

@@ -3925,7 +3925,7 @@ def prefill_question_answering(
     attention_mask,
     token_type_ids=None,
 ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
-    """Run an encoder on Spyre and its extractive-QA head on CPU."""
+    """Run an encoder and its extractive-QA head on Spyre."""
     last_hidden_state = prefill_encoder(
         run_encoder_forward_fn,
         model,
@@ -3957,7 +3957,7 @@ def prefill_sequence_classification(
     attention_mask,
     token_type_ids=None,
 ) -> torch.Tensor:
-    """Run an encoder on Spyre and its sequence-classification head on CPU."""
+    """Run an encoder and its sequence-classification head on Spyre."""
     last_hidden_state = prefill_encoder(
         run_encoder_forward_fn,
         model,
@@ -3984,15 +3984,12 @@ def prefill_token_classification(
     attention_mask,
     token_type_ids=None,
 ) -> torch.Tensor:
-    """Run an encoder on Spyre and its token-classification head on CPU.
+    """Run an encoder and its token-classification head on Spyre.
 
     Drives the encoder backbone via ``prefill_encoder``, then applies
     ``model.classifier`` (a single linear layer whose output dim equals
-    ``config.num_labels``) to every token position.  The head is kept on
-    CPU (via ``_spyre_cpu_submodules``) to avoid:
-
-    - ``aten.slice`` (index operations that don't lower on Spyre).
-    - Any Dropout path that uses ``torch.bernoulli``.
+    ``config.num_labels``) to every token position on device, so only the
+    ``[B, L, num_labels]`` logits are copied to CPU.
 
     Args:
         run_encoder_forward_fn: ``fn(model, input_ids, attn_mask, position_ids,

@@ -134,8 +134,9 @@ left-to-right causal generation.
 ## Extractive Question Answering
 
 Use `AutoSpyreModelForQuestionAnswering` with fine-tuned BERT-family QA models.
-The encoder runs on Spyre, the small token-classification head runs on CPU, and
-the normal Hugging Face output contract is preserved:
+The encoder and the `qa_outputs` head both run on Spyre, so only the start/end
+logits are copied back to CPU, and the normal Hugging Face output contract is
+preserved:
 
 ```python
 from transformers import AutoTokenizer
@@ -163,9 +164,9 @@ and hidden-state collection are not currently supported.
 
 Use `AutoSpyreModelForSequenceClassification` for models that return a single
 label per input (sentiment analysis, topic classification, natural language
-inference). The encoder runs on Spyre; the classification head runs on CPU.
-Returns a standard HuggingFace `SequenceClassifierOutput` with
-`logits [B, num_labels]` on CPU:
+inference). The encoder and the classification head both run on Spyre, so only
+the logits leave the device. Returns a standard HuggingFace
+`SequenceClassifierOutput` with `logits [B, num_labels]` on CPU:
 
 ```python
 from transformers import AutoTokenizer
@@ -189,8 +190,8 @@ print(labels)  # → ['POSITIVE', 'NEGATIVE']
 
 Use `AutoSpyreModelForTokenClassification` for token-level label prediction
 (named-entity recognition, part-of-speech tagging, chunking). The encoder runs on
-Spyre; the linear `classifier` head runs on CPU. Returns a standard HuggingFace
-`TokenClassifierOutput` with `logits [B, L, num_labels]`:
+Spyre, as does the linear `classifier` head. Returns a standard HuggingFace
+`TokenClassifierOutput` with `logits [B, L, num_labels]` on CPU:
 
 ```python
 from transformers import AutoTokenizer

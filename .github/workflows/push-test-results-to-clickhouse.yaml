@@ -212,45 +212,23 @@ jobs:
           echo "Downloaded XML files:"
           find xml_artifacts -name "*.xml" 2>/dev/null || echo "(none)"
 
-      # The orchestrator's uuid, uploaded by _test_matrix as the `run-id` artifact (this
-      # workflow runs on workflow_run, so it cannot receive it as a dispatch input). Absent on
-      # a GHA-initiated run => empty => the ingest derives its own id from the run coordinate.
+      # Both ids are one-file artifacts of the triggering run (workflow_run gets no dispatch
+      # inputs). Empty is normal and the ingest derives its own run_id / writes cases only.
       - name: Recover threaded run_id
         id: threaded-run-id
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          RID=""
-          AID=$(gh api --paginate \
-            "/repos/${{ github.repository }}/actions/runs/${TRIGGERING_RUN_ID}/artifacts?per_page=100" \
-            --jq '.artifacts[] | select(.name == "run-id") | .id' | head -1)
-          if [[ -n "${AID}" ]]; then
-            gh api "/repos/${{ github.repository }}/actions/artifacts/${AID}/zip" > run-id.zip || true
-            unzip -o -q run-id.zip -d run-id-dir || true
-            RID=$(tr -d '[:space:]' < run-id-dir/run-id.txt 2>/dev/null || echo "")
-          fi
-          echo "Threaded run_id: ${RID:-<none, ingest will derive>}"
-          echo "run_id=${RID}" >> "${GITHUB_OUTPUT}"
+        uses: torch-spyre/torch-spyre/.github/actions/recover-threaded-run-id@main
+        with:
+          triggering-run-id: ${{ env.TRIGGERING_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Uploaded by _test_matrix's artifact-identity job. Empty (unadopted run, image with no
-      # stamped id, any fetch error) makes the v2 ingest write cases only, never fail.
       - name: Recover this run's artifact_id
         id: leg-artifact-id
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          REC=""
-          AID=$(gh api --paginate \
-            "/repos/${{ github.repository }}/actions/runs/${TRIGGERING_RUN_ID}/artifacts?per_page=100" \
-            --jq '.artifacts[] | select(.name == "artifact-id" and (.expired | not)) | .id' | head -1) || true
-          if [[ -n "${AID}" ]]; then
-            gh api "/repos/${{ github.repository }}/actions/artifacts/${AID}/zip" > artifact-id.zip || true
-            unzip -o -q artifact-id.zip -d artifact-id-dir || true
-            REC=$(tr -d '[:space:]' < artifact-id-dir/artifact-id.txt 2>/dev/null || echo "")
-          fi
-          LEG_AID="${REC%%|*}"
-          echo "Leg artifact_id: ${LEG_AID:-<none, no artifact rows>}"
-          echo "value=${REC}" >> "${GITHUB_OUTPUT}"
+        uses: torch-spyre/torch-spyre/.github/actions/recover-threaded-run-id@main
+        with:
+          triggering-run-id: ${{ env.TRIGGERING_RUN_ID }}
+          artifact-name: artifact-id
+          label: Leg artifact_id
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract suite tier from display title
         id: extract-tier
@@ -341,6 +319,8 @@ jobs:
           repository: ${{ github.repository }}
           triggered-at: ${{ env.TRIGGERING_AT }}
           pr-number: ${{ steps.resolve-pr.outputs.pr_number }}
+          # Tags the leg's artifact <repo>@<sha12> (push to main) or <repo>#<pr>[@<sha12>] (PR).
+          ci-event: ${{ env.TRIGGERING_EVENT }}
           trigger-type: ${{ steps.extract-tier.outputs.tier }}
           platform: x86_64
           component: hf-adapters

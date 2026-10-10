@@ -602,7 +602,7 @@ class AutoSpyreModelForMaskedLM(AutoSpyreModel):
 
 
 class AutoSpyreModelForQuestionAnswering(AutoSpyreModel):
-    """Load an extractive-QA model with its encoder on Spyre and head on CPU."""
+    """Load an extractive-QA model with its encoder and head on Spyre."""
 
     _auto_model_cls = AutoModelForQuestionAnswering  # type: ignore[assignment]
 
@@ -683,7 +683,7 @@ class AutoSpyreModelForQuestionAnswering(AutoSpyreModel):
 
 
 class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
-    """Load a sequence-classification model with its encoder on Spyre and head on CPU.
+    """Load a sequence-classification model with its encoder and head on Spyre.
 
     Loads via ``AutoModelForSequenceClassification`` and attaches a native
     ``forward`` that accepts standard Hugging Face sequence-classification inputs
@@ -765,16 +765,16 @@ class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
 
 
 class AutoSpyreModelForTokenClassification(AutoSpyreModel):
-    """Load a token-classification model with its encoder on Spyre and head on CPU.
+    """Load a token-classification model with its encoder and head on Spyre.
 
     Loads via ``AutoModelForTokenClassification``, compiles the encoder
     backbone on Spyre, and attaches a native ``forward`` that takes
     right-padded ``input_ids`` / ``attention_mask`` and returns a standard
     ``TokenClassifierOutput`` with per-token ``logits`` on CPU.
 
-    The ``classifier`` linear head is automatically pinned to CPU by
-    ``prepare_for_spyre`` (via ``_spyre_cpu_submodules``), so Dropout and
-    any non-stick-aligned head dimensions never enter the Spyre graph.
+    The ``classifier`` linear head runs on Spyre too, so only the
+    ``[B, L, num_labels]`` logits are copied back rather than the full hidden
+    state.
 
     Example::
 

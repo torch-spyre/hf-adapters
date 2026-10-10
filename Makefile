@@ -11,7 +11,12 @@ SHELL := /bin/bash
 #   regression  — everything
 #   trunk       — same coverage as regression; push-to-main CI label (see
 #                 resolve_test_type.sh)
-#   perf        — spyre-perf-suite benchmark, one run per model in tests/model_lists/perf.yaml (perf-tests)
+#   perf        — spyre-perf-suite's MODEL benchmarks (--hf-only), one run per model in tests/model_lists/perf.yaml (perf-tests).
+#                 The op/kernel half of that suite is measured in torch-spyre instead
+#                 (--ops-only there), so each image measures the layer it owns
+#                 and the op suite is not run twice. Models live here because
+#                 they need hf-adapters' exact transformers pin, which only this
+#                 image carries. -dev only: -minimal has no perf wheel.
 # Also accepts a space-separated list of individual suite keys (matches
 # _test_matrix.yaml's `test_type` semantics), e.g. TEST_TYPE="smoke load".
 # Empty / unset defaults to "regression" (every suite).
@@ -67,7 +72,7 @@ else
 MODEL_PATH_ARGS :=
 endif
 
-.PHONY: help test tests adapter-coverage-tests smoke-tests load-tests \
+.PHONY: help test tests model-support-tests adapter-coverage-tests smoke-tests load-tests \
         token-compare-tests embed-compare-tests vlm-tests reranker-tests model-module-tests \
         masked-lm-compare-tests question-answering-compare-tests seq-classification-compare-tests \
         token-classification-compare-tests model-components-tests edge-cases-tests perf-tests
@@ -139,6 +144,7 @@ edge-cases-tests: ## Run edge-case tests (suite key: edge_cases; EDGE_CASE_FILE=
 # Every output is suffixed with the model slug so per-model legs never collide in ingest's workflow/run_id/<basename> dedup key.
 perf-tests: ## Run spyre-perf-suite once per MODEL_PATH model into RESULTS_DIR (suite key: perf)
 	@if [[ -z "$(strip $(MODEL_PATH))" ]]; then echo "ERROR: perf-tests needs MODEL_PATH (see tests/model_lists/perf.yaml)" >&2; exit 1; fi
+	@$(PERF_SUITE) --help >/dev/null 2>&1 || { echo "ERROR: spyre-perf-suite is not installed in this image. The perf suite ships as a wheel into hf-adapters-dev; a -minimal image has no perf harness." >&2; exit 1; }
 	@results="$$(mkdir -p "$(RESULTS_DIR)" && cd "$(RESULTS_DIR)" && pwd)"; \
 	rc=0; \
 	for model in $(MODEL_PATH); do \
@@ -197,6 +203,30 @@ model-module-tests: ## Run oot_framework module tests (suite key: model_module; 
 	done; \
 	exit $$rc
 
+# MODEL_SUPPORT_TOP_K bounds the per-build model-support scan (suite key: model_support) to
+# the top-K Hub models per mode; the weekly push-to-clickhouse scan owns the full catalog.
+MODEL_SUPPORT_TOP_K ?= 25
+MODEL_SUPPORT_MAX_PARAMS ?= 7000000000
+model-support-tests: ## Scan the top MODEL_SUPPORT_TOP_K Hub models per mode on this build; capability JUnit in RESULTS_DIR
+	set +e; \
+	source "$$HOME/.bashrc"; \
+	source /etc/profile.d/ibm-aiu-setup.sh; \
+	set -e; \
+	out="$$(mkdir -p "$(RESULTS_DIR)" && cd "$(RESULTS_DIR)" && pwd)"; \
+	day="$$(date -u +%Y-%m-%d)"; \
+	rc=0; \
+	for mode in generative embedding; do \
+	  uv run --active --no-sync python tests/spyre/weekly_generation/weekly_test.py \
+	    --mode "$$mode" --fetch --top-k $(MODEL_SUPPORT_TOP_K) \
+	    --max-params $(MODEL_SUPPORT_MAX_PARAMS) --snapshot-date "$$day" \
+	    --write-to-csv "$$out/model-support.csv" || rc=1; \
+	done; \
+	mkdir -p "$$out/junit-model-support"; \
+	uv run --active --no-sync python -m tests.spyre.weekly_generation.capability_junit \
+	  --out "$$out/junit-model-support/junit-model-support.xml" \
+	  "$$out/model-support-generative.csv" "$$out/model-support-embedding.csv" || rc=1; \
+	exit $$rc
+
 # Aggregate target: every suite named in TEST_TYPE (unit|integration|
 # regression|trunk|space-separated suite keys), each writing its own flat
 # JUnit file into RESULTS_DIR so a caller can glob the whole directory in one
@@ -246,9 +276,10 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	                        mkdir -p "$(RESULTS_DIR)/$$base"; \
 	                        mv "$$f" "$(RESULTS_DIR)/$$base/$$base.xml"; \
 	                      done ;; \
+	    model_support)    $(MAKE) model-support-tests RESULTS_DIR="$(RESULTS_DIR)" || rc=1 ;; \
 	    edge_cases)       mkdir -p "$(RESULTS_DIR)/junit-edge-cases" && $(MAKE) edge-cases-tests        JUNIT_XML="$(RESULTS_DIR)/junit-edge-cases/junit-edge-cases.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" EDGE_CASE_FILE="$(EDGE_CASE_FILE)" || rc=1 ;; \
 	    perf)             $(MAKE) perf-tests RESULTS_DIR="$(RESULTS_DIR)" MODEL_PATH="$$model_path" || rc=1 ;; \
-	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare model_components embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module edge_cases perf"; rc=1 ;; \
+	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare model_components embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module model_support edge_cases perf"; rc=1 ;; \
 	  esac; \
 	done; \
 	exit $$rc
