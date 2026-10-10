@@ -11,10 +11,7 @@ SHELL := /bin/bash
 #   regression  — everything
 #   trunk       — same coverage as regression; push-to-main CI label (see
 #                 resolve_test_type.sh)
-#   perf        — SCAFFOLD ONLY: no benchmark harness yet, writes a placeholder
-#                 empty JUnit XML (no .benchmark classname, so ingest reads it
-#                 as 0 rows). A real producer (like torch-spyre's
-#                 spyre-perf-suite) is a follow-up.
+#   perf        — spyre-perf-suite benchmark, one run per model in tests/model_lists/perf.yaml (perf-tests)
 # Also accepts a space-separated list of individual suite keys (matches
 # _test_matrix.yaml's `test_type` semantics), e.g. TEST_TYPE="smoke load".
 # Empty / unset defaults to "regression" (every suite).
@@ -48,6 +45,9 @@ PYTEST_ARGS ?= -s -vvv
 # so any resolve fails there even though the venv already has a local torch build.
 PYTEST ?= uv run --active --no-sync pytest
 
+# Benchmark invocation for perf-tests; same --active --no-sync reasoning as PYTEST above.
+PERF_SUITE ?= uv run --active --no-sync spyre-perf-suite
+
 # When set, write JUnit XML here. Unset = no JUnit file (plain local run).
 JUNIT_XML ?=
 
@@ -70,12 +70,12 @@ endif
 .PHONY: help test tests adapter-coverage-tests smoke-tests load-tests \
         token-compare-tests embed-compare-tests vlm-tests reranker-tests model-module-tests \
         masked-lm-compare-tests question-answering-compare-tests seq-classification-compare-tests \
-        token-classification-compare-tests model-components-tests edge-cases-tests
+        token-classification-compare-tests model-components-tests edge-cases-tests perf-tests
 
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-24s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
-	@echo "Variables: TEST_TYPE=unit|integration|regression|trunk|<space-separated suite keys, e.g. smoke> (default regression),"
+	@echo "Variables: TEST_TYPE=unit|integration|regression|trunk|perf|<space-separated suite keys, e.g. smoke> (default regression),"
 	@echo "  MODEL_KEY (pytest -k filter, default all), MODEL_PATH (exact model path via --model-path, overrides registry parametrization),"
 	@echo "  PYTEST_ARGS (default '$(PYTEST_ARGS)'), JUNIT_XML (single-suite targets only), RESULTS_DIR (default '$(RESULTS_DIR)')"
 
@@ -135,6 +135,27 @@ token-classification-compare-tests: ## Run token-classification compare tests (s
 EDGE_CASE_FILE ?=
 edge-cases-tests: ## Run edge-case tests (suite key: edge_cases; EDGE_CASE_FILE=<file>.py narrows to one)
 	$(PYTEST) $(PYTEST_ARGS) --suite edge_cases --run-slow $(if $(EDGE_CASE_FILE),tests/spyre/edge_cases/$(EDGE_CASE_FILE),tests/spyre/edge_cases/) $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+
+# Every output is suffixed with the model slug so per-model legs never collide in ingest's workflow/run_id/<basename> dedup key.
+perf-tests: ## Run spyre-perf-suite once per MODEL_PATH model into RESULTS_DIR (suite key: perf)
+	@if [[ -z "$(strip $(MODEL_PATH))" ]]; then echo "ERROR: perf-tests needs MODEL_PATH (see tests/model_lists/perf.yaml)" >&2; exit 1; fi
+	@results="$$(mkdir -p "$(RESULTS_DIR)" && cd "$(RESULTS_DIR)" && pwd)"; \
+	rc=0; \
+	for model in $(MODEL_PATH); do \
+	  slug="$${model//\//_}"; \
+	  echo "=== perf: $$model ==="; \
+	  SENPERFORMANCE="$${SENPERFORMANCE:-2}" \
+	  TORCHINDUCTOR_CACHE_DIR="$$results/inductor-logs-$$slug" \
+	  PYTHONPATH="$$PWD$${PYTHONPATH:+:$$PYTHONPATH}" \
+	  $(PERF_SUITE) --hf-only --hf-model "$$model" --no-experimental --stacks torch-spyre \
+	    --perf-dir "$$results/perf-$$slug" \
+	    --report "$$results/report-$$slug.txt" \
+	    --spyre_kernel_report "$$results/spyre_kernel_report-$$slug.txt" \
+	    --cpu_kernel_report "$$results/cpu_kernel_report-$$slug.txt" \
+	    --sdsc_report "$$results/sdsc_report-$$slug.txt" || rc=1; \
+	  if [[ ! -s "$$results/report-$$slug.xml" ]]; then echo "ERROR: spyre-perf-suite wrote no report XML for $$model" >&2; rc=1; fi; \
+	done; \
+	exit $$rc
 
 # MODULE_CONFIG narrows model-module-tests to one YAML config (matrix-style
 # per-config CI jobs pass this); empty = run every config in tests/configs/module_tests.
@@ -226,12 +247,7 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	                        mv "$$f" "$(RESULTS_DIR)/$$base/$$base.xml"; \
 	                      done ;; \
 	    edge_cases)       mkdir -p "$(RESULTS_DIR)/junit-edge-cases" && $(MAKE) edge-cases-tests        JUNIT_XML="$(RESULTS_DIR)/junit-edge-cases/junit-edge-cases.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" EDGE_CASE_FILE="$(EDGE_CASE_FILE)" || rc=1 ;; \
-	    perf)             printf '%s\n' \
-	                        '<?xml version="1.0" encoding="utf-8"?>' \
-	                        '<testsuites name="hf-adapters-perf">' \
-	                        '  <testsuite name="hf-adapters-perf" tests="0" skipped="0" failures="0" errors="0"/>' \
-	                        '</testsuites>' > "$(RESULTS_DIR)/report.xml"; \
-	                      echo "hf-adapters has no perf harness yet (scaffold stub): wrote placeholder $(RESULTS_DIR)/report.xml" ;; \
+	    perf)             $(MAKE) perf-tests RESULTS_DIR="$(RESULTS_DIR)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare model_components embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module edge_cases perf"; rc=1 ;; \
 	  esac; \
 	done; \

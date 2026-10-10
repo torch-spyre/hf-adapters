@@ -50,8 +50,7 @@ import re
 # Mirrors the `if:` gate of each suite job in .github/workflows/_test_matrix.yaml.
 # Five suites are deliberately absent. tier_tags() returns [] for any of them, so their
 # cases still carry a model tag -- they simply contribute no tier-coverage data.
-#   perf             -- a scaffold that echoes an empty JUnit file with no <testcase>
-#                       elements (Makefile `tests` target): nothing to tag.
+#   perf             -- spyre-perf-suite benchmark XML, not pytest JUnit: nothing to tag.
 #   edge_cases       -- gated on `inputs.edge_cases_only`, never on a tier, and absent
 #                       from every suites= list. Its target still passes --suite so the
 #                       key is declared in one place if it ever joins a tier.
