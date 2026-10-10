@@ -26,7 +26,7 @@ import os
 import sys
 import time
 import warnings
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Optional
 
@@ -142,7 +142,7 @@ def moe_decode_selected_experts(
 
     T, H = x.shape
     if x.device.type == "spyre":
-        from torch_spyre._inductor.propagate_hints import spyre_hint
+        from torch_spyre._inductor.wsr import for_each_tile
 
         # Widen topk's fp16 indices onto a stick before converting them to the
         # device's int32 gather indices. The layout pass inserts the restickify.
@@ -152,17 +152,19 @@ def moe_decode_selected_experts(
         index_stick = index_stick.to(torch.float32)
         index_address = index_stick[..., : stick_size // 2].to(torch.int32)
         expert_indices = index_address[..., 0]
-        hint = spyre_hint(tiles={"row": tile})
     else:
-        hint = nullcontext()
+        index_address = expert_indices[..., None]
 
-    with hint:
-        rows = T * top_k
-        intermediate = gate.shape[-1]
-        inputs = x[:, None, :].expand(T, top_k, H).contiguous().reshape(rows, 1, H)
-        selected_gate = gate[expert_indices].reshape(rows, H, intermediate)
-        selected_up = up[expert_indices].reshape(rows, H, intermediate)
-        selected_down = down[expert_indices].reshape(rows, intermediate, H)
+    rows = T * top_k
+    inputs = x[:, None, :].expand(T, top_k, H).contiguous().reshape(rows, 1, H)
+    indices = index_address.reshape(rows, -1)
+
+    def expert_body(_, tiles):
+        inputs, indices, gate, up, down = tiles
+        selected = indices[:, 0]
+        selected_gate = gate[selected]
+        selected_up = up[selected]
+        selected_down = down[selected]
 
         gate_out = torch.bmm(inputs, selected_gate)
         up_out = torch.bmm(inputs, selected_up)
@@ -170,12 +172,27 @@ def moe_decode_selected_experts(
             activated = F.silu(gate_out) * up_out
         else:
             activated = F.gelu(gate_out, approximate="tanh") * up_out
-        expert_out = torch.bmm(activated, selected_down).reshape(T, top_k, H)
-        expert_out = expert_out * weights[..., None]
-        if per_expert_scale_stick is not None:
-            expert_scale = per_expert_scale_stick[expert_indices][..., :1]
-            expert_out = expert_out * expert_scale
-        return expert_out.sum(dim=1)
+        return None, torch.bmm(activated, selected_down)
+
+    operands = (inputs, indices, gate, up, down)
+    if x.device.type == "spyre":
+        # Gather weights inside each tile so only its selected experts are
+        # materialized. Use a divisor of rows: for_each_tile needs full tiles.
+        _, expert_out = for_each_tile(
+            expert_body,
+            operands,
+            dims=(0, 0, None, None, None),
+            tile_size=math.gcd(rows, tile),
+            out_dim=0,
+        )
+    else:
+        _, expert_out = expert_body(None, operands)
+
+    expert_out = expert_out * weights.reshape(rows, 1, 1)
+    if per_expert_scale_stick is not None:
+        expert_scale = per_expert_scale_stick[expert_indices][..., :1]
+        expert_out = expert_out * expert_scale.reshape(rows, 1, 1)
+    return expert_out.reshape(T, top_k, H).sum(dim=1)
 
 
 @contextmanager
