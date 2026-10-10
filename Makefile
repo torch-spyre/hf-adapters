@@ -141,25 +141,29 @@ EDGE_CASE_FILE ?=
 edge-cases-tests: ## Run edge-case tests (suite key: edge_cases; EDGE_CASE_FILE=<file>.py narrows to one)
 	$(PYTEST) $(PYTEST_ARGS) --suite edge_cases --run-slow $(if $(EDGE_CASE_FILE),tests/spyre/edge_cases/$(EDGE_CASE_FILE),tests/spyre/edge_cases/) $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
-# Every output is suffixed with the model slug so per-model legs never collide in ingest's workflow/run_id/<basename> dedup key.
-perf-tests: ## Run spyre-perf-suite once per MODEL_PATH model into RESULTS_DIR (suite key: perf)
+# split: per-model file names, so parallel GHA legs never collide in ingest's workflow/run_id/<basename> dedup key.
+# combined: one shared perf dir, so the last run's report.xml covers every model (Jenkins product-test's require_results_file).
+PERF_REPORT ?= split
+perf-tests: ## Run spyre-perf-suite once per MODEL_PATH model into RESULTS_DIR (suite key: perf; PERF_REPORT=split|combined)
 	@if [[ -z "$(strip $(MODEL_PATH))" ]]; then echo "ERROR: perf-tests needs MODEL_PATH (see tests/model_lists/perf.yaml)" >&2; exit 1; fi
+	@if [[ "$(PERF_REPORT)" != split && "$(PERF_REPORT)" != combined ]]; then echo "ERROR: PERF_REPORT must be split or combined" >&2; exit 1; fi
 	@$(PERF_SUITE) --help >/dev/null 2>&1 || { echo "ERROR: spyre-perf-suite is not installed in this image. The perf suite ships as a wheel into hf-adapters-dev; a -minimal image has no perf harness." >&2; exit 1; }
 	@results="$$(mkdir -p "$(RESULTS_DIR)" && cd "$(RESULTS_DIR)" && pwd)"; \
 	rc=0; \
 	for model in $(MODEL_PATH); do \
 	  slug="$${model//\//_}"; \
+	  tag=""; [[ "$(PERF_REPORT)" == split ]] && tag="-$$slug"; \
 	  echo "=== perf: $$model ==="; \
 	  SENPERFORMANCE="$${SENPERFORMANCE:-2}" \
 	  TORCHINDUCTOR_CACHE_DIR="$$results/inductor-logs-$$slug" \
 	  PYTHONPATH="$$PWD$${PYTHONPATH:+:$$PYTHONPATH}" \
 	  $(PERF_SUITE) --hf-only --hf-model "$$model" --no-experimental --stacks torch-spyre \
-	    --perf-dir "$$results/perf-$$slug" \
-	    --report "$$results/report-$$slug.txt" \
-	    --spyre_kernel_report "$$results/spyre_kernel_report-$$slug.txt" \
-	    --cpu_kernel_report "$$results/cpu_kernel_report-$$slug.txt" \
-	    --sdsc_report "$$results/sdsc_report-$$slug.txt" || rc=1; \
-	  if [[ ! -s "$$results/report-$$slug.xml" ]]; then echo "ERROR: spyre-perf-suite wrote no report XML for $$model" >&2; rc=1; fi; \
+	    --perf-dir "$$results/perf$$tag" \
+	    --report "$$results/report$$tag.txt" \
+	    --spyre_kernel_report "$$results/spyre_kernel_report$$tag.txt" \
+	    --cpu_kernel_report "$$results/cpu_kernel_report$$tag.txt" \
+	    --sdsc_report "$$results/sdsc_report$$tag.txt" || rc=1; \
+	  if [[ ! -s "$$results/report$$tag.xml" ]]; then echo "ERROR: spyre-perf-suite wrote no report XML for $$model" >&2; rc=1; fi; \
 	done; \
 	exit $$rc
 
@@ -278,7 +282,7 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	                      done ;; \
 	    model_support)    $(MAKE) model-support-tests RESULTS_DIR="$(RESULTS_DIR)" || rc=1 ;; \
 	    edge_cases)       mkdir -p "$(RESULTS_DIR)/junit-edge-cases" && $(MAKE) edge-cases-tests        JUNIT_XML="$(RESULTS_DIR)/junit-edge-cases/junit-edge-cases.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" EDGE_CASE_FILE="$(EDGE_CASE_FILE)" || rc=1 ;; \
-	    perf)             $(MAKE) perf-tests RESULTS_DIR="$(RESULTS_DIR)" MODEL_PATH="$$model_path" || rc=1 ;; \
+	    perf)             $(MAKE) perf-tests RESULTS_DIR="$(RESULTS_DIR)" MODEL_PATH="$$model_path" PERF_REPORT=combined || rc=1 ;; \
 	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare model_components embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module model_support edge_cases perf"; rc=1 ;; \
 	  esac; \
 	done; \
