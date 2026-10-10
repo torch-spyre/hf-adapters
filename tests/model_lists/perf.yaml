@@ -1,0 +1,5 @@
+# Models benchmarked by TEST_TYPE=perf (one GHA matrix leg each); must be causal-LM paths in tests/model_registry.py.
+models:
+  - ibm-granite/granite-4.1-8b
+  - mistralai/Ministral-3-14B-Instruct-2512
+  - google/gemma-4-26B-A4B-it

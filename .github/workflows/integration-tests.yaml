@@ -92,6 +92,7 @@ on:
           the REST API dispatch too, not just the web UI dropdown, so every
           value a real caller sends (like the "unit"/"trunk" tiers above)
           must be listed explicitly below.
+          "perf" runs spyre-perf-suite once per model in tests/model_lists/perf.yaml, one matrix leg each.
         required: false
         type: choice
         default: integration
@@ -100,6 +101,7 @@ on:
           - integration
           - regression
           - trunk
+          - perf
       run_id:
         description: >-
           UUID for this TEST RUN, minted by the dispatching orchestrator above the CI split.
@@ -117,9 +119,9 @@ on:
           paths exactly as they appear in tests/model_registry.py -- any
           registered path works, not just the smallest-per-adapter default
           used when this input is left empty. Leave empty (default) to fall
-          back to the model list in tests/model_lists/integration.yaml when
-          test_type is "integration" (the default), or to every registered
-          model per suite for any other test_type -- see run-tests below.
+          back to tests/model_lists/<test_type>.yaml when one exists
+          (integration.yaml, perf.yaml), or to every registered model per
+          suite for any other test_type -- see resolve-models below.
           An explicit models value applies to every test_type, including
           "integration".
         required: false
@@ -203,14 +205,9 @@ jobs:
           path: run-id.txt
           retention-days: 14
 
-  # ---------------------------------------------------------------------------
-  # Read tests/model_lists/integration.yaml and emit a space-separated model
-  # list as a step output. Only runs when test_type is "integration" (the
-  # default); for all other tiers the output is left empty so _test_matrix.yaml
-  # runs its full registry.
-  # ---------------------------------------------------------------------------
+  # Emit tests/model_lists/<test_type>.yaml as a space-separated list; '' (full registry) when the tier has no file.
   resolve-models:
-    name: Resolve integration model list
+    name: Resolve tier model list
     needs: provenance
     runs-on: ubuntu-latest
     outputs:
@@ -220,23 +217,28 @@ jobs:
         with:
           ref: ${{ inputs.ref || '' }}
           repository: ${{ inputs.repository != '' && inputs.repository || github.repository }}
-          sparse-checkout: tests/model_lists/integration.yaml
+          sparse-checkout: tests/model_lists
           sparse-checkout-cone-mode: false
-      - name: Read integration model list
+      - name: Read tier model list
         id: read-models
+        env:
+          TEST_TYPE: ${{ inputs.test_type || 'integration' }}
         run: |
           set -euo pipefail
-          if [[ "${{ inputs.test_type || 'integration' }}" != "integration" ]]; then
-            # Non-integration tiers get '' -> _test_matrix.yaml runs full registry.
+          list="tests/model_lists/${TEST_TYPE}.yaml"
+          # exclude.yaml is the standing exclusion list, not a tier list.
+          if [[ ! "${TEST_TYPE}" =~ ^[a-z_]+$ || "${TEST_TYPE}" == "exclude" || ! -f "${list}" ]]; then
+            echo "No ${list}: running the full registry for test_type=${TEST_TYPE}"
             echo "models=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # yq (mikefarah/yq) is preinstalled on ubuntu-latest runners.
-          models=$(yq '.models | join(" ")' tests/model_lists/integration.yaml)
+          models=$(yq '.models | join(" ")' "${list}")
           if [[ -z "${models}" || "${models}" == "null" ]]; then
-            echo "tests/model_lists/integration.yaml has no models" >&2
+            echo "${list} has no models" >&2
             exit 1
           fi
+          echo "Models from ${list}: ${models}"
           echo "models=${models}" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------

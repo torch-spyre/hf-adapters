@@ -114,6 +114,8 @@ def generate_matrices(exclude_models=None, only_models=None):
         "reranker": paths["reranker"],
         "seq_classification": paths["seq_classification"],
         "token_classification": paths["token_classification"],
+        # Perf only benchmarks an explicit list (tests/model_lists/perf.yaml), never the whole registry.
+        "perf": paths["causal"] if only_models else [],
     }
 
 
@@ -139,6 +141,7 @@ def format_for_github_actions(matrices):
         "reranker_matrix": json.dumps(matrices["reranker"]),
         "seq_classification_matrix": json.dumps(matrices["seq_classification"]),
         "token_classification_matrix": json.dumps(matrices["token_classification"]),
+        "perf_matrix": json.dumps(matrices["perf"]),
     }
 
 
@@ -225,6 +228,7 @@ def main():
         f"  Token-classification models ({len(matrices['token_classification'])}): "
         f"{', '.join(matrices['token_classification'])}"
     )
+    print(f"  Perf models ({len(matrices['perf'])}): {', '.join(matrices['perf'])}")
 
     if args.exclude:
         print(f"\nExcluded models: {', '.join(args.exclude)}")

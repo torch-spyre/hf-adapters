@@ -70,7 +70,8 @@ on:
           token_classification_compare, model_module);
           "integration" runs token_compare and model_components;
           "regression"/"trunk" (default: regression) run the
-          standard Spyre suite set. The tests/spyre/edge_cases/ suite is opted
+          standard Spyre suite set. "perf" runs only spyre-perf-tests, over the `models` list.
+          The tests/spyre/edge_cases/ suite is opted
           into separately via the edge_cases_only boolean input below -- it
           is deliberately outside this shared test_type contract so callers
           in sister repos stay compatible. The resolve-test-type job below
@@ -413,6 +414,7 @@ jobs:
       reranker_matrix: ${{ steps.generate.outputs.reranker_matrix }}
       seq_classification_matrix: ${{ steps.generate.outputs.seq_classification_matrix }}
       token_classification_matrix: ${{ steps.generate.outputs.token_classification_matrix }}
+      perf_matrix: ${{ steps.generate.outputs.perf_matrix }}
     defaults:
       run:
         working-directory: .
@@ -1879,6 +1881,91 @@ jobs:
           job_key: edge_cases
           payload: '{"model_key": ${{ toJSON(matrix.model_key) }}, "test_file": ${{ toJSON(matrix.test_file) }}}'
 
+  # test_type=perf only: one spyre-perf-suite leg per tests/model_lists/perf.yaml model, ingested inline (never uploaded).
+  spyre-perf-tests:
+    name: Spyre perf (${{ matrix.model_key }})
+    needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
+    # Plain equality, not the contains(' <key> ') suite-key form: tests/test_tier_tags.py requires that form to name a tier.
+    if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && needs.resolve-test-type.outputs.test_type == 'perf' && needs.generate-matrix.outputs.perf_matrix != '[]' }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.perf_matrix) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        id: build
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          prebaked_image: ${{ inputs.prebaked_image }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
+
+      - name: Run spyre-perf-suite for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          # A non-prebaked `uv sync` prunes image-only packages, so reinstall the suite from the image's baked source.
+          if [[ ! -x "$UV_PROJECT_ENVIRONMENT/bin/spyre-perf-suite" ]]; then
+            uv pip install --python "$UV_PROJECT_ENVIRONMENT/bin/python" --no-deps /home/senuser/spyre-perf-suite
+          fi
+          source .github/scripts/run-with-pod-stdout.sh
+          run_teed make perf-tests MODEL_PATH="${{ matrix.model_key }}" RESULTS_DIR="$CLONED_HF_ADAPTERS_DIR/perf-results"
+
+      # The shared ingest action runs `uv venv` in the workspace and fails if a .venv is already there.
+      - name: Clear workspace venv before ingest
+        if: ${{ !cancelled() }}
+        run: rm -rf "$GITHUB_WORKSPACE/.venv"
+
+      - name: Ingest perf report into ClickHouse (inline, no artifact)
+        if: ${{ !cancelled() }}
+        uses: torch-spyre/torch-spyre/.github/actions/ingest-xml-to-clickhouse@main
+        # Keeps the action's `uv venv` off the baked venv that the workflow-level UV_PROJECT_ENVIRONMENT points at.
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
+        with:
+          xml-dir: ${{ github.workspace }}/perf-results
+          workflow: ${{ github.workflow }}
+          branch: ${{ inputs.ref || github.ref_name }}
+          sha: ${{ steps.build.outputs.target_sha }}
+          run-id: ${{ inputs.run_id }}
+          gha-run-id: ${{ github.run_id }}
+          repository: ${{ github.repository }}
+          trigger-type: perf
+          component: hf-adapters
+          platform: x86_64
+          schema: both
+          clickhouse-host: ${{ secrets.CLICKHOUSE_HOST }}
+          clickhouse-port: ${{ secrets.CLICKHOUSE_PORT }}
+          clickhouse-user: ${{ secrets.CLICKHOUSE_USER }}
+          clickhouse-pass: ${{ secrets.CLICKHOUSE_PASS }}
+          clickhouse-db: ${{ secrets.CLICKHOUSE_DB }}
+          clickhouse-db-v2: ${{ secrets.CLICKHOUSE_DB_V2 }}
+
   spyre-model-module-tests:
     name: Spyre model-module tests (${{ matrix.config }}, ${{ matrix.shard }})
     needs: [resolve-test-type, generate-module-config-matrix, resolve-torch-spyre]
@@ -3330,6 +3417,8 @@ jobs:
       - resolve-torch-spyre
       # Depends on the aggregator, not the individual spyre-*-tests jobs, since those are continue-on-error and always report "success"; spyre-tests-result still transitively waits for the whole matrix via collect-failed-suites and the *-retry jobs.
       - spyre-tests-result
+      # No pod-level retry for perf (a retried benchmark is a different measurement), so gate on the legs directly.
+      - spyre-perf-tests
     if: always()
     steps:
       - name: Check all suites passed
@@ -3346,7 +3435,8 @@ jobs:
                  contains(needs.adapter-coverage.result, 'failure') || contains(needs.adapter-coverage.result, 'cancelled') ||
                  contains(needs.check-uv-lock.result, 'failure') || contains(needs.check-uv-lock.result, 'cancelled') ||
                  contains(needs.resolve-torch-spyre.result, 'failure') || contains(needs.resolve-torch-spyre.result, 'cancelled') ||
-                 contains(needs.spyre-tests-result.result, 'failure') || contains(needs.spyre-tests-result.result, 'cancelled') }}; then
+                 contains(needs.spyre-tests-result.result, 'failure') || contains(needs.spyre-tests-result.result, 'cancelled') ||
+                 contains(needs.spyre-perf-tests.result, 'failure') || contains(needs.spyre-perf-tests.result, 'cancelled') }}; then
             echo "One or more test suites failed."
             exit 1
           fi
