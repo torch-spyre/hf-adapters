@@ -136,6 +136,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of identical prompts to batch together (default: 1).",
     )
     parser.add_argument(
+        "--iterations",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Number of timed generate runs to perform (default: 1).",
+    )
+    parser.add_argument(
         "--prompt-file",
         default=None,
         help=f"Read prompt from the file (default: {DEFAULT_PROMPT})",
@@ -189,6 +196,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  Model            : {args.model}")
         print(f"  max_new_tokens   : {args.max_new_tokens}")
         print(f"  batch            : {args.batch}")
+        print(f"  iterations       : {args.iterations}")
         print(f"  dtype            : {args.dtype or '(not set — model default)'}")
         print(f"  Prompt File      : {args.prompt_file}")
         print("=" * 70)
@@ -211,6 +219,7 @@ def main(argv: list[str] | None = None) -> None:
         dtype=dtype,
         batch_size=args.batch,
         prompt=prompt,
+        num_iterations=args.iterations,
     )
 
     # ── Summary table ──────────────────────────────────────────────────────

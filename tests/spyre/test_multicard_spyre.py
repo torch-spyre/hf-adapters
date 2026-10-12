@@ -149,6 +149,7 @@ def run_multicard_smoke_test(
     batch_size: int = _DEFAULT_BATCH_SIZE,
     trust_remote_code: bool | None = None,
     prompt: str = _DEFAULT_PROMPT,
+    num_iterations: int = 1,
 ) -> dict[str, Any]:
     """Load model and generate tokens; return a diagnostics dict.
 
@@ -163,6 +164,7 @@ def run_multicard_smoke_test(
         max_new_tokens: Token generation budget.
         dtype:          Torch dtype passed to from_pretrained (None = model default).
         batch_size:     Number of identical prompts to batch together (default 1).
+        num_iterations: Number of timed generate runs to perform (default 1).
 
     Returns a dict with keys:
         model              - model path used
@@ -327,60 +329,63 @@ def run_multicard_smoke_test(
         return result
 
     # ── Phase 3: generation ────────────────────────────────────────────────
-    print(f"\n{'=' * 20} Run Model...")
-    gen_t0 = time.time()
-    try:
-        output_texts, captured = _run_generate()
-        result["gen_s"] = time.time() - gen_t0
+    for run_idx in range(num_iterations):
+        print(f"\n{'=' * 20} Run Model... (run {run_idx + 1}/{num_iterations})")
+        gen_t0 = time.time()
+        try:
+            output_texts, captured = _run_generate()
+            result["gen_s"] = time.time() - gen_t0
 
-        ttft, decode, per_token = _parse_timing(captured)
-        result["ttft_ms"] = ttft
-        result["decode_ms"] = decode
-        result["steady_itl_ms"] = _steady_state_itl(per_token)
+            ttft, decode, per_token = _parse_timing(captured)
+            result["ttft_ms"] = ttft
+            result["decode_ms"] = decode
+            result["steady_itl_ms"] = _steady_state_itl(per_token)
 
-        result["outputs"] = output_texts
-        result["output"] = output_texts[0] if output_texts else ""
+            result["outputs"] = output_texts
+            result["output"] = output_texts[0] if output_texts else ""
 
-        for i, text in enumerate(output_texts):
-            print(f"  Output[{i}]  : {text!r}")
-        print(f"  Gen time   : {result['gen_s']:.1f}s  [OK]")
-        if result["steady_itl_ms"] is not None:
+            for i, text in enumerate(output_texts):
+                print(f"  Output[{i}]  : {text!r}")
+            print(f"  Gen time   : {result['gen_s']:.1f}s  [OK]")
+            if result["steady_itl_ms"] is not None:
+                print(
+                    f"  Steady ITL : {result['steady_itl_ms']:.1f} ms  (outliers excluded)"
+                )
+
+            # Validate every sequence: non-empty, has tokens, not all-zero, not all-same.
+            seq_checks: list[dict] = []
+            for text in output_texts:
+                c: dict[str, Any] = {
+                    "non_empty": len(text.strip()) > 0,
+                    "not_all_spaces": text.strip() != "",
+                }
+                if text:
+                    gen_ids = tokenizer.encode(text, add_special_tokens=False)
+                    c["has_tokens"] = len(gen_ids) > 0
+                    c["not_all_zero"] = not all(t == 0 for t in gen_ids)
+                    c["not_all_same"] = len(set(gen_ids)) > 1 or len(gen_ids) <= 1
+                else:
+                    c["has_tokens"] = False
+                    c["not_all_zero"] = False
+                    c["not_all_same"] = False
+                seq_checks.append(c)
+
+            result["seq_checks"] = seq_checks
+            all_pass = all(v for c in seq_checks for k, v in c.items())
+            result["status"] = "PASS" if all_pass else "FAIL"
+            if not all_pass:
+                for i, c in enumerate(seq_checks):
+                    failed = [k for k, v in c.items() if not v]
+                    if failed:
+                        print(f"  [seq {i}] FAIL checks: {failed}")
+                break  # stop at the first failing run
+        except Exception:
+            result["gen_s"] = time.time() - gen_t0
+            result["error"] = "GENERATE FAILED\n" + traceback.format_exc()
             print(
-                f"  Steady ITL : {result['steady_itl_ms']:.1f} ms  (outliers excluded)"
+                f"  [rank {local_rank}] Generate FAILED (after {result['gen_s']:.1f}s):\n{result['error']}"
             )
-
-        # Validate every sequence: non-empty, has tokens, not all-zero, not all-same.
-        seq_checks: list[dict] = []
-        for text in output_texts:
-            c: dict[str, Any] = {
-                "non_empty": len(text.strip()) > 0,
-                "not_all_spaces": text.strip() != "",
-            }
-            if text:
-                gen_ids = tokenizer.encode(text, add_special_tokens=False)
-                c["has_tokens"] = len(gen_ids) > 0
-                c["not_all_zero"] = not all(t == 0 for t in gen_ids)
-                c["not_all_same"] = len(set(gen_ids)) > 1 or len(gen_ids) <= 1
-            else:
-                c["has_tokens"] = False
-                c["not_all_zero"] = False
-                c["not_all_same"] = False
-            seq_checks.append(c)
-
-        result["seq_checks"] = seq_checks
-        all_pass = all(v for c in seq_checks for k, v in c.items())
-        result["status"] = "PASS" if all_pass else "FAIL"
-        if not all_pass:
-            for i, c in enumerate(seq_checks):
-                failed = [k for k, v in c.items() if not v]
-                if failed:
-                    print(f"  [seq {i}] FAIL checks: {failed}")
-    except Exception:
-        result["gen_s"] = time.time() - gen_t0
-        result["error"] = "GENERATE FAILED\n" + traceback.format_exc()
-        print(
-            f"  [rank {local_rank}] Generate FAILED (after {result['gen_s']:.1f}s):\n{result['error']}"
-        )
+            break  # stop at the first failing run
 
     return result
 
