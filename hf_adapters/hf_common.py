@@ -146,11 +146,13 @@ def moe_decode_selected_experts(
 
         # Widen topk's fp16 indices onto a stick before converting them to the
         # device's int32 gather indices. The layout pass inserts the restickify.
+        # Convert the first element alone: the float32 holds each pair of sticks
+        # in an interleaved order, and a slice that splits a pair has no layout.
         index_stick = (
             expert_indices[..., None].expand(T, top_k, stick_size).contiguous()
         )
         index_stick = index_stick.to(torch.float32)
-        index_address = index_stick[..., : stick_size // 2].to(torch.int32)
+        index_address = index_stick[..., :1].to(torch.int32)
         expert_indices = index_address[..., 0]
     else:
         index_address = expert_indices[..., None]
