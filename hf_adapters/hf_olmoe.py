@@ -72,6 +72,7 @@ def _moe_decode(
     norm_topk_prob,
     tile,
     stick_size,
+    stick_identity,
 ):
     """Run the selected-expert decode FFN and combine outputs on device."""
     _, weights, expert_indices = _router_topk(x, router_weight, top_k, norm_topk_prob)
@@ -86,6 +87,7 @@ def _moe_decode(
         tile,
         stick_size,
         "silu",
+        stick_identity=stick_identity,
     )
 
 
@@ -217,6 +219,7 @@ class OlmoeMoEBlock(nn.Module):
             self._norm_topk_prob,
             _MOE_TILE,
             self._stick_size,
+            self.gate.route_identity,
         )
         return residual + moe_out.to(residual.dtype).reshape_as(residual)
 

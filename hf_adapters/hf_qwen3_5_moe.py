@@ -109,7 +109,7 @@ def _moe_decode(x, mlp, weights, expert_indices, top_k, stick_size):
     experts = mlp.experts
     return moe_decode_selected_experts(
         x,
-        weights[..., 0],
+        weights,
         expert_indices[..., 0],
         experts.gate_proj,
         experts.up_proj,

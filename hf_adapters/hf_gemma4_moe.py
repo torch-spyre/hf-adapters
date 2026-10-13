@@ -84,6 +84,7 @@ def _compiled_moe_loop_region(
     tile,
     stick_size,
     eps,
+    stick_identity,
 ):
     """Run the routed decode FFN and combine its expert outputs on device."""
     probs = _router_probs(
@@ -107,6 +108,7 @@ def _compiled_moe_loop_region(
         stick_size,
         "gelu_tanh",
         per_expert_scale_stick=per_expert_scale_stick,
+        stick_identity=stick_identity,
     )
 
 
@@ -330,6 +332,7 @@ class Gemma4MoEBlock(nn.Module):
             _MOE_TILE,
             self._stick_size,
             self._moe_rms_eps,
+            router.route_identity,
         )
         moe_out = moe_out.to(expert_input.dtype)
         return dense_out, moe_out

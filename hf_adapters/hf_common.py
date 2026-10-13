@@ -123,6 +123,49 @@ def moe_topk(probabilities, top_k):
     return weights[:tokens], expert_indices[:tokens]
 
 
+def _expert_matmul(lhs, rhs):
+    """Batch matmul that keeps every leading axis.
+
+    ``torch.matmul`` on more than two batch axes is decomposed into a
+    flattened ``bmm`` plus a view. Spyre cannot lower that view, so the device
+    path uses ``batched_matmul``, whose lowering keeps the batch axes.
+    """
+    if lhs.device.type == "spyre":
+        return torch.ops.spyre.batched_matmul(lhs, rhs)
+    return torch.matmul(lhs, rhs)
+
+
+def _as_stick_scale(scale, stick_size, stick_identity):
+    """Return ``[T, K, stick]`` with the scale on every lane.
+
+    ``scale`` is ``[T, K]`` or already ``[T, K, stick]``. A ``[T, K]`` tensor
+    has no hidden-dimension stick, so it cannot broadcast onto the expert
+    output. Routing weights are non-negative: ReLU materializes the repeat and
+    the identity matmul writes a real stick, as prefill already does.
+    """
+    if scale.ndim == 2:
+        if stick_identity is None:
+            stick_identity = torch.eye(
+                stick_size, dtype=scale.dtype, device=scale.device
+            )
+        scale = torch.relu(scale.unsqueeze(-1).expand(-1, -1, stick_size))
+        scale = scale @ stick_identity
+    return scale
+
+
+def _mul_hidden_sticks(hidden, scale_stick):
+    """Multiply ``[T, K, H]`` by ``[T, K, stick]``, one stick at a time."""
+    tokens, experts, hidden_size = hidden.shape
+    stick = scale_stick.shape[-1]
+    if hidden_size % stick != 0:
+        raise ValueError(
+            f"hidden size {hidden_size} is not a multiple of the stick ({stick})"
+        )
+    groups = hidden_size // stick
+    grouped = hidden.reshape(tokens, experts, groups, stick)
+    return (grouped * scale_stick[:, :, None, :]).reshape(tokens, experts, hidden_size)
+
+
 def moe_decode_selected_experts(
     x,
     weights,
@@ -135,6 +178,7 @@ def moe_decode_selected_experts(
     stick_size,
     activation,
     per_expert_scale_stick=None,
+    stick_identity=None,
 ):
     """Gather selected experts and combine their decode outputs."""
     if activation not in ("silu", "gelu_tanh"):
@@ -157,24 +201,26 @@ def moe_decode_selected_experts(
         hint = nullcontext()
 
     with hint:
-        rows = T * top_k
-        intermediate = gate.shape[-1]
-        inputs = x[:, None, :].expand(T, top_k, H).contiguous().reshape(rows, 1, H)
-        selected_gate = gate[expert_indices].reshape(rows, H, intermediate)
-        selected_up = up[expert_indices].reshape(rows, H, intermediate)
-        selected_down = down[expert_indices].reshape(rows, intermediate, H)
+        # [T, K, 1, H] @ [T, K, H, I] -> [T, K, 1, I]. T and K stay separate
+        # batch axes; collapsing them to T*K is the view Spyre cannot lower.
+        inputs = x[:, None, :].expand(T, top_k, H).contiguous().unsqueeze(-2)
+        selected_gate = gate[expert_indices]
+        selected_up = up[expert_indices]
+        selected_down = down[expert_indices]
 
-        gate_out = torch.bmm(inputs, selected_gate)
-        up_out = torch.bmm(inputs, selected_up)
+        gate_out = _expert_matmul(inputs, selected_gate)
+        up_out = _expert_matmul(inputs, selected_up)
         if activation == "silu":
             activated = F.silu(gate_out) * up_out
         else:
             activated = F.gelu(gate_out, approximate="tanh") * up_out
-        expert_out = torch.bmm(activated, selected_down).reshape(T, top_k, H)
-        expert_out = expert_out * weights[..., None]
+        expert_out = _expert_matmul(activated, selected_down).squeeze(-2)
+
+        scale_stick = _as_stick_scale(weights, stick_size, stick_identity)
+        expert_out = _mul_hidden_sticks(expert_out, scale_stick)
         if per_expert_scale_stick is not None:
-            expert_scale = per_expert_scale_stick[expert_indices][..., :1]
-            expert_out = expert_out * expert_scale
+            expert_scale = per_expert_scale_stick[expert_indices]
+            expert_out = _mul_hidden_sticks(expert_out, expert_scale)
         return expert_out.sum(dim=1)
 
 
