@@ -52,6 +52,20 @@ every run — useful for consistent latency benchmarking::
         scripts/run_multicard_smoke.py --dtype float16 \\
         --max-new-tokens 256 --min-new-tokens 256
 
+Pass ``--with-profiling`` to wrap the timed generate call in
+``torch.profiler.profile`` (CPU + PrivateUse1 activities, shapes, memory).
+Model load, torch.compile and the warmup generate run before the profiler
+starts, so the trace covers steady-state generation only.  Each rank writes a
+TensorBoard trace to ``--trace-dir`` (one ``<hostname>_<pid>.pt.trace.json``
+per rank); view with ``tensorboard --logdir`` or https://ui.perfetto.dev.
+Profiling adds overhead, so TTFT / ITL from a profiled run are not comparable
+to an unprofiled one::
+
+    export SPYRE_DEVICES=0
+    torchrun --nproc-per-node=1 --master-port=29500 \\
+        scripts/run_multicard_smoke.py --dtype float16 \\
+        --with-profiling --trace-dir ./spyre_traces
+
 The --model argument accepts any HuggingFace repo ID or local path
 (default: ibm-granite/granite-3.3-8b-instruct).
 
@@ -92,6 +106,7 @@ from tests.spyre.test_multicard_spyre import run_multicard_smoke_test  # noqa: E
 DEFAULT_PROMPT = "The capital of France is"
 DEFAULT_MODEL = "ibm-granite/granite-3.3-8b-instruct"
 DEFAULT_MAX_NEW_TOKENS = 8
+DEFAULT_TRACE_DIR = "./spyre_traces"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -139,6 +154,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--prompt-file",
         default=None,
         help=f"Read prompt from the file (default: {DEFAULT_PROMPT})",
+    )
+    parser.add_argument(
+        "--with-profiling",
+        action="store_true",
+        help=(
+            "Profile the timed generate call with torch.profiler "
+            "(load, compile and warmup excluded)."
+        ),
+    )
+    parser.add_argument(
+        "--trace-dir",
+        default=DEFAULT_TRACE_DIR,
+        help=(
+            "Directory for TensorBoard profiler traces, used with "
+            f"--with-profiling (default: {DEFAULT_TRACE_DIR})."
+        ),
     )
     return parser
 
@@ -191,6 +222,9 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  batch            : {args.batch}")
         print(f"  dtype            : {args.dtype or '(not set — model default)'}")
         print(f"  Prompt File      : {args.prompt_file}")
+        print(
+            f"  Profiling        : {args.trace_dir if args.with_profiling else 'off'}"
+        )
         print("=" * 70)
 
     if args.prompt_file is not None:
@@ -204,6 +238,20 @@ def main(argv: list[str] | None = None) -> None:
     else:
         prompt = DEFAULT_PROMPT
 
+    generate_ctx = None
+    if args.with_profiling:
+        from torch.profiler import ProfilerActivity, profile
+
+        def generate_ctx():
+            # Exits (and on_trace_ready fires) inside run_multicard_smoke_test,
+            # well before the os._exit() below skips all teardown.
+            return profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.PrivateUse1],
+                record_shapes=True,
+                profile_memory=True,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(args.trace_dir),
+            )
+
     result = run_multicard_smoke_test(
         args.model,
         max_new_tokens=args.max_new_tokens,
@@ -211,6 +259,7 @@ def main(argv: list[str] | None = None) -> None:
         dtype=dtype,
         batch_size=args.batch,
         prompt=prompt,
+        generate_ctx=generate_ctx,
     )
 
     # ── Summary table ──────────────────────────────────────────────────────
@@ -243,6 +292,9 @@ def main(argv: list[str] | None = None) -> None:
             f"  Steady ITL : {_fmt(r['steady_itl_ms'], ' ms')}  (outliers excluded)",
             f"  Output     : {r['output']!r}",
         ]
+        # gen_s is None when load or warmup failed, i.e. the profiler never ran.
+        if args.with_profiling and r["gen_s"] is not None:
+            lines.append(f"  Trace dir  : {args.trace_dir}")
         if r["error"]:
             lines += ["", "  ERROR DETAIL:"]
             lines += [f"    {line}" for line in r["error"].splitlines()]
