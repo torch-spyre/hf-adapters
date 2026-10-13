@@ -56,7 +56,6 @@ SPYRE_TP_CPU_STAGED_MODULES = {
     "model.language_model.layers.*.mlp.experts.down_proj",
 }
 
-_MOE_TILE = 32
 _run_backbone_forward = hf_qwen3_5._run_backbone_forward
 _run_forward = hf_qwen3_5._run_forward
 
@@ -115,7 +114,6 @@ def _moe_decode(x, mlp, weights, expert_indices, top_k, stick_size):
         experts.up_proj,
         experts.down_proj,
         top_k,
-        _MOE_TILE,
         stick_size,
         "silu",
     )
