@@ -255,6 +255,7 @@ class ModelDTypePolicy:
 
 
 MODEL_DTYPE_POLICIES: dict[str, ModelDTypePolicy] = {
+    "convaiinnovations/laya": ModelDTypePolicy(dtype=torch.float16),
     "google/embeddinggemma-300m": ModelDTypePolicy(dtype=torch.bfloat16),
     "ibm-granite/granite-4.0-1b-base": ModelDTypePolicy(cpu_dtype=torch.float32),
     "ibm-granite/granite-4.0-1b": ModelDTypePolicy(cpu_dtype=torch.float32),

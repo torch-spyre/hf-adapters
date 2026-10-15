@@ -74,6 +74,10 @@ def generate_matrices(
             registry.TOKEN_CLASSIFICATION_PATHS,
             registry.ALL_TOKEN_CLASSIFICATION_PATHS,
         ),
+        "structured_decision": (
+            registry.STRUCTURED_DECISION_PATHS,
+            registry.ALL_STRUCTURED_DECISION_PATHS,
+        ),
     }
 
     if only_models:
@@ -136,6 +140,7 @@ def generate_matrices(
         "reranker": paths["reranker"],
         "seq_classification": paths["seq_classification"],
         "token_classification": paths["token_classification"],
+        "structured_decision": paths["structured_decision"],
         # Perf only benchmarks an explicit list (tests/model_lists/perf.yaml), never the whole registry.
         "perf": paths["causal"] if only_models else [],
     }
@@ -163,6 +168,7 @@ def format_for_github_actions(matrices):
         "reranker_matrix": json.dumps(matrices["reranker"]),
         "seq_classification_matrix": json.dumps(matrices["seq_classification"]),
         "token_classification_matrix": json.dumps(matrices["token_classification"]),
+        "structured_decision_matrix": json.dumps(matrices["structured_decision"]),
         "perf_matrix": json.dumps(matrices["perf"]),
     }
 
@@ -260,6 +266,10 @@ def main():
     print(
         f"  Token-classification models ({len(matrices['token_classification'])}): "
         f"{', '.join(matrices['token_classification'])}"
+    )
+    print(
+        f"  Structured-decision models ({len(matrices['structured_decision'])}): "
+        f"{', '.join(matrices['structured_decision'])}"
     )
     print(f"  Perf models ({len(matrices['perf'])}): {', '.join(matrices['perf'])}")
 
