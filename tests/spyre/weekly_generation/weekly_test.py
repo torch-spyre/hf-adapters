@@ -61,7 +61,6 @@ import argparse
 import json
 import logging
 import multiprocessing
-import subprocess
 import sys
 import time
 from datetime import date
@@ -77,6 +76,7 @@ from tests.spyre.weekly_generation.model_prefilter import fetch_and_filter
 from tests.spyre.weekly_generation.model_type import ModelType
 from tests.spyre.weekly_generation.sink.sink_factory import create_sink, csv_path_for
 from tests.spyre.weekly_generation.weekly_sub_process import _process_batch
+from utils.hf_model_catalog import RESOURCES_DIR
 from utils.utilities import human_bytes, ts
 
 logging.getLogger("transformers").setLevel(logging.ERROR)
@@ -167,36 +167,42 @@ def _repos_with_weights(repo_ids: list[str]) -> set[str]:
     return have
 
 
+# Committed map of adapter module name -> ISO git add-date, read by
+# _get_adapter_dates(). Lives in resources/ alongside the other checked-in scan
+# data (curated lists, top-model CSVs). Regenerated from full git history by
+# regenerate_adapter_added_dates.py; see that script and issue #372 for why the
+# date is read from here rather than derived from git at scan time.
+_ADAPTER_DATES_JSON: Path = RESOURCES_DIR / "adapter_added_dates.json"
+
+
 def _get_adapter_dates() -> dict[str, str | None]:
     """Map adapter module name (e.g. 'hf_qwen3') -> ISO date it was first added.
 
-    Derived from the git add-date of each hf_adapters/hf_*.py file.
+    Read from the committed ``resources/adapter_added_dates.json``, NOT derived
+    from git at scan time. The weekly workflow runs inside a ``--depth=1`` clone
+    (see ``.github/actions/build-hf-adapters``), where ``git log --diff-filter=A
+    --follow`` cannot see a file's real add-commit and returns the shallow-root
+    (tip) commit's date for every adapter — the wrong, run-varying date that
+    issue #372 tracked. Reading a committed map makes ``added_date`` a stable
+    per-adapter attribute independent of clone depth.
+
+    The map is regenerated from full history by
+    ``regenerate_adapter_added_dates.py`` and kept honest by
+    ``tests/test_adapter_added_dates.py``. An adapter present on disk but absent
+    from the map (a new adapter added without regenerating) maps to ``None``
+    rather than a guessed date, so a stale map under-reports but never poisons.
     """
+    try:
+        raw: dict[str, str | None] = json.loads(
+            _ADAPTER_DATES_JSON.read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError) as e:
+        print(f"{ts()} warn: could not read {_ADAPTER_DATES_JSON}: {e}", flush=True)
+        raw = {}
     dates: dict[str, str | None] = {}
     adapter_dir: Path = _REPO_ROOT / "hf_adapters"
     for f in sorted(adapter_dir.glob("hf_*.py")):
-        module_name: str = f.stem
-        try:
-            out = subprocess.run(
-                [
-                    "git",
-                    "log",
-                    "--diff-filter=A",
-                    "--follow",
-                    "--format=%aI",
-                    "-1",
-                    "--",
-                    str(f.relative_to(_REPO_ROOT)),
-                ],
-                cwd=_REPO_ROOT,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            iso: list[str] = out.stdout.strip().splitlines()
-            dates[module_name] = iso[-1][:10] if iso else None
-        except OSError:
-            dates[module_name] = None
+        dates[f.stem] = raw.get(f.stem)
     return dates
 
 
