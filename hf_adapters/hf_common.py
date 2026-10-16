@@ -1650,6 +1650,62 @@ def run_lm_head(model, hidden_states, *, logits_to_keep: int = 0):
     return lm_head_forward(hidden_states)
 
 
+def last_rows(hidden_states, rows_to_keep: int = 0):
+    """The trailing ``rows_to_keep`` positions of ``[B, S, H]`` (0 keeps every row).
+
+    A backbone's final norm (and anything after it, before the LM head) acts on
+    each position independently, so applying it to the kept rows equals applying
+    it to every row and slicing afterwards. :func:`generate` asks a prefill
+    backbone for the one row its LM head projects.
+    """
+    if rows_to_keep:
+        hidden_states = hidden_states[:, -rows_to_keep:, :]
+    return hidden_states
+
+
+def row_selecting_norm(norm):
+    """Wrap a final norm so it normalizes only the trailing ``rows_to_keep`` rows.
+
+    The wrapper is called as ``norm_fn(hidden_states, *args, rows_to_keep=0)``;
+    ``args`` are passed on to ``norm``. Adapters compile the wrapper in place of
+    the bare norm, so the row selection happens inside the compiled norm graph:
+    the norm writes the kept rows to a fresh ``[B, rows, H]`` buffer, which for
+    one row is the input a decode step gives the LM head. Sliced off the full
+    norm output instead, the batch-1 row is a view at a storage offset, and
+    Torch-Spyre keeps a matmul that reads an offset slice on its fixed work
+    division, so the LM head would not get the decode head's plan.
+    With ``dynamic=False``, each distinct Python ``rows_to_keep`` value
+    specializes a separate graph, including values forwarded by VLM callers.
+    """
+
+    def final_norm(hidden_states, *args, rows_to_keep: int = 0):
+        return norm(last_rows(hidden_states, rows_to_keep), *args)
+
+    # torch.compile preserves a function's attributes. Only this wrapper
+    # promises to select rows inside the norm's compiled graph.
+    setattr(final_norm, "_spyre_selects_rows", True)
+    return final_norm
+
+
+def run_final_norm(norm, hidden_states, *args, rows_to_keep: int = 0):
+    """Apply a backbone's compiled final norm, to the trailing rows only when asked.
+
+    ``rows_to_keep=0`` calls ``norm(hidden_states, *args)`` exactly as before, so
+    decode, full-position and embedding callers (and any final-norm callable)
+    are unchanged. A norm compiled from :func:`row_selecting_norm` selects
+    rows inside its graph. Legacy/custom norms are called without a new keyword,
+    then the kept rows are copied into fresh storage.
+    Generation requests one row on every prefill chunk, so legacy norms also
+    copy that row on non-final chunks whose output is subsequently discarded.
+    """
+    if rows_to_keep:
+        if getattr(norm, "_spyre_selects_rows", False):
+            return norm(hidden_states, *args, rows_to_keep=rows_to_keep)
+        # contiguous() can retain a batch-1 view with a nonzero storage offset.
+        return last_rows(norm(hidden_states, *args), rows_to_keep).clone()
+    return norm(hidden_states, *args)
+
+
 def chunk_lm_head(model, num_chunks=8):
     """Split the LM head weight into N stick-padded chunks along the vocab dim.
 
@@ -3050,8 +3106,13 @@ def generate(
             receives the prompt, then each selected token. Batch size 1 only.
         prefill_backbone_fn: Optional adapter backbone with the same arguments
             as ``run_forward_fn``, returning hidden states. Text prefill runs
-            this for every chunk, then applies the prepared LM head only to
-            the last token. Custom ``prefill_fn`` hooks take precedence.
+            this for every chunk, then applies the prepared LM head only to the
+            last token. Every supplied backbone must accept ``rows_to_keep=1``
+            and return hidden states shaped ``[B, 1, H]``. Adapters select the
+            row through :func:`last_rows` or :func:`run_final_norm`; supported
+            norms use :func:`row_selecting_norm` to select inside their compiled
+            graph. Unsupported callbacks fail without a fallback or retry of
+            KV-cache updates. Custom ``prefill_fn`` hooks take precedence.
         prefill_chunk_size (via generation_config or kwargs): Query length for
             each prefill chunk when the adapter does not configure one. An
             adapter-configured chunk size takes precedence; an explicit caller
@@ -3262,6 +3323,11 @@ def generate(
                     device=DEVICE,
                 )
                 text_prefill_fn = prefill_backbone_fn or run_forward_fn
+                # The head below projects one row, so a prefill backbone
+                # normalizes only that row (into its own buffer).
+                backbone_rows = (
+                    {"rows_to_keep": 1} if prefill_backbone_fn is not None else {}
+                )
                 for chunk_start in range(0, padded_len, query_chunk_size):
                     chunk_end = chunk_start + query_chunk_size
                     prefill_mask = prefill_mask_builder.build(chunk_start)
@@ -3275,7 +3341,15 @@ def generate(
                         cache_index=make_cache_index(
                             chunk_start, query_chunk_size, DEVICE
                         ),
+                        **backbone_rows,
                     )
+                    if prefill_backbone_fn is not None and (
+                        prefill_output.ndim != 3 or prefill_output.shape[1] != 1
+                    ):
+                        raise ValueError(
+                            "prefill_backbone_fn must return [B, 1, H] hidden states "
+                            "when called with rows_to_keep=1"
+                        )
                 # Every chunk must populate KV, but only the final prompt
                 # token needs a vocabulary projection for generation.
                 logits = (
@@ -3688,11 +3762,14 @@ def standard_gqa_backbone_forward(
     key_caches,
     value_caches,
     cache_index,
+    *,
+    rows_to_keep=0,
 ):
     """Standard GQA backbone: embedding, RoPE, compiled blocks, norm.
 
-    Returns ``last_hidden_state`` (no ``lm_head``). Used directly by embedding
-    callers; wrapped by ``standard_gqa_forward`` for causal-LM callers.
+    Returns ``last_hidden_state`` (no ``lm_head``); ``rows_to_keep`` > 0 returns
+    only the trailing positions, selected inside the compiled norm. Used directly
+    by embedding callers; wrapped by ``standard_gqa_forward`` for causal-LM callers.
     """
     h = embed_text_tokens(model, input_ids)
 
@@ -3708,7 +3785,7 @@ def standard_gqa_backbone_forward(
             cache_index,
         )
 
-    h = model._spyre_compiled_norm(h)
+    h = run_final_norm(model._spyre_compiled_norm, h, rows_to_keep=rows_to_keep)
     return h
 
 
@@ -4031,7 +4108,9 @@ def prepare_standard_gqa(model):
     prepare_lm_head_for_spyre(model)
     backbone = get_backbone(model)
     model._spyre_compiled_blocks = prepare_standard_gqa_blocks(backbone.layers)
-    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
+    model._spyre_compiled_norm = torch.compile(
+        row_selecting_norm(backbone.norm), dynamic=False
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -19,10 +19,12 @@ from hf_adapters.hf_common import (
     SpyreUnsupportedModelError,
     embed_text_tokens,
     get_backbone,
+    last_rows,
     make_decoder_block,
     pad_attention_heads_linear,
     patch_new_gelu,
     prepare_lm_head_for_spyre,
+    run_final_norm,
     run_lm_head,
 )
 
@@ -55,6 +57,8 @@ def _run_backbone_forward(
     key_caches,
     value_caches,
     cache_index,
+    *,
+    rows_to_keep=0,
 ):
     decoder = get_backbone(model).decoder
     h = embed_text_tokens(model, input_ids, backbone=decoder)
@@ -72,8 +76,11 @@ def _run_backbone_forward(
             cache_index,
         )
 
+    # Preserve full-row normalization and give the final projection owned rows.
     if decoder.final_layer_norm is not None:
-        h = decoder.final_layer_norm(h)
+        h = run_final_norm(decoder.final_layer_norm, h, rows_to_keep=rows_to_keep)
+    elif rows_to_keep:
+        h = last_rows(h, rows_to_keep).clone()
     if decoder.project_out is not None:
         h = decoder.project_out(h)
     return h

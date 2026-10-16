@@ -39,6 +39,7 @@ from hf_adapters.hf_common import (
     prepare_lm_head_for_spyre,
     prepare_moe_expert_weights,
     prepare_rope_and_heads,
+    row_selecting_norm,
     standard_gqa_backbone_forward,
     standard_gqa_forward,
 )
@@ -353,4 +354,6 @@ def prepare_for_spyre(model):
         blocks.append(block)
 
     model._spyre_compiled_blocks = blocks
-    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
+    model._spyre_compiled_norm = torch.compile(
+        row_selecting_norm(backbone.norm), dynamic=False
+    )

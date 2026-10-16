@@ -75,6 +75,8 @@ from hf_adapters.hf_common import (
     prepare_lm_head_for_spyre,
     prepare_rope_and_heads,
     prepare_standard_gqa_blocks,
+    row_selecting_norm,
+    run_final_norm,
     run_lm_head,
 )
 
@@ -118,7 +120,9 @@ def prepare_for_spyre(model):
 
     backbone = get_backbone(model)
     model._spyre_text_blocks = prepare_standard_gqa_blocks(backbone.layers)
-    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
+    model._spyre_compiled_norm = torch.compile(
+        row_selecting_norm(backbone.norm), dynamic=False
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -213,13 +217,17 @@ def _run_text_backbone(
     cache_index,
     image_features=None,
     vision_mask=None,
+    *,
+    rows_to_keep=0,
 ):
     """Mistral text backbone over pre-computed ``inputs_embeds``.
 
     At prefill ``image_features`` + ``vision_mask`` carry the image injection:
     image-token slots (zeroed at embed time) receive the projected features via
     ``masked_scatter`` on Spyre before the first decoder layer. Decode steps
-    pass ``image_features=None`` (pure text).
+    pass ``image_features=None`` (pure text). ``rows_to_keep`` > 0 returns only
+    the trailing positions, selected inside the compiled norm (see
+    :func:`hf_adapters.hf_common.row_selecting_norm`).
     """
     h = inputs_embeds
 
@@ -237,7 +245,7 @@ def _run_text_backbone(
             value_caches[i],
             cache_index,
         )
-    return model._spyre_compiled_norm(h)
+    return run_final_norm(model._spyre_compiled_norm, h, rows_to_keep=rows_to_keep)
 
 
 def _logits_from_embeds(
@@ -254,7 +262,11 @@ def _logits_from_embeds(
     *,
     logits_to_keep=0,
 ):
-    """Run text backbone over embeds + LM head → logits."""
+    """Run text backbone over embeds + LM head → logits.
+
+    ``logits_to_keep`` > 0 also asks the backbone's final norm for only those
+    trailing rows, so the LM head reads its own buffer, as in decode.
+    """
     h = _run_text_backbone(
         model,
         inputs_embeds,
@@ -265,6 +277,7 @@ def _logits_from_embeds(
         cache_index,
         image_features=image_features,
         vision_mask=vision_mask,
+        rows_to_keep=logits_to_keep,
     )
     return run_lm_head(model, h, logits_to_keep=logits_to_keep)
 

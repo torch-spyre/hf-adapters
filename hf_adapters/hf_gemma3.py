@@ -76,6 +76,7 @@ from hf_adapters.hf_common import (
     get_backbone,
     kv_cache_update,
     prepare_lm_head_for_spyre,
+    run_final_norm,
     run_lm_head,
     text_config,
 )
@@ -298,6 +299,8 @@ def _run_backbone_forward(
     key_caches,
     value_caches,
     cache_index,
+    *,
+    rows_to_keep=0,
 ):
     """Gemma 3 backbone: scaled embedding, per-type RoPE + masks, blocks, norm.
 
@@ -437,7 +440,7 @@ def _run_backbone_forward(
     if swa_mode == "anchored" and state is not None and seq_len == 1:
         state.advance()
 
-    h = backbone.norm(h)
+    h = run_final_norm(backbone.norm, h, rows_to_keep=rows_to_keep)
     return h
 
 
