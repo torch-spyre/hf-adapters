@@ -2482,6 +2482,9 @@ def _resolve_tp_plan(
         plan,
         cpu_staged_modules=getattr(adapter_module, "SPYRE_TP_CPU_STAGED_MODULES", ()),
         cpu_replicated_modules=cpu_replicated_modules,
+        deferred_rowwise_modules=getattr(
+            adapter_module, "SPYRE_TP_DEFERRED_ROWWISE_MODULES", ()
+        ),
         # hf-adapters pads/prepares the output projection after loading, and
         # historically keeps the common top-level text embedding replicated.
         # Preserve those auto-plan policies without overriding an explicit
