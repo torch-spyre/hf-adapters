@@ -374,15 +374,16 @@ def moe_decode_selected_experts(
         # Widen topk's fp16 indices onto a stick before converting them to the
         # device's int32 gather indices. Chunked decode addresses expert-major
         # entries in flattened (token, selected expert) order.
-        # Convert the first element alone: the float32 holds each pair of sticks
-        # in an interleaved order, and a slice that splits a pair has no layout.
+        # Every lane holds the index, so take it as the max over the stick: the
+        # float32 holds each pair of sticks in an interleaved order, and a
+        # reduction reads it whole where a slice would split a pair.
         if decode_chunks == 1:
             # The layout pass inserts the restickify.
             index_stick = (
                 expert_indices[..., None].expand(T, top_k, stick_size).contiguous()
             )
             index_stick = index_stick.to(torch.float32)
-            index_address = index_stick[..., :1].to(torch.int32)
+            index_address = index_stick.amax(-1, keepdim=True).to(torch.int32)
             expert_indices = index_address[..., 0]
         else:
             expert_fp32 = (
@@ -391,7 +392,7 @@ def moe_decode_selected_experts(
                 .contiguous()
                 .to(torch.float32)
             )
-            expert_indices = expert_fp32[..., :1].to(torch.int32)[:, 0]
+            expert_indices = expert_fp32.amax(-1).to(torch.int32)
     else:
         index_address = None
         if decode_chunks == 1:
@@ -476,7 +477,7 @@ def moe_decode_selected_experts(
     entries = (expert_fp32[:, None, :] * chunk_scale + chunk_offsets).reshape(
         rows * decode_chunks, stick_size
     )
-    slice_index = entries[..., : stick_size // 2].to(torch.int32)[:, 0]
+    slice_index = entries.amax(-1).to(torch.int32)
     inputs = (
         x.reshape(T, 1, decode_chunks, slice_rows)
         .expand(T, top_k, decode_chunks, slice_rows)
