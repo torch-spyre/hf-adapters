@@ -34,6 +34,7 @@ from hf_adapters.hf_common import (
     named_moe_prefill_inputs,
     optional_spyre_config_patch,
     prepare_moe_expert_weights,
+    spyre_compiled_all_reduce,
     text_config,
 )
 from hf_adapters.hf_qwen3_5 import (
@@ -45,7 +46,6 @@ from hf_adapters.hf_qwen3_5 import (
     _rms_norm,
     _setup_qwen3_5_text_decoder,
 )
-from hf_adapters.spyre_tensor_parallel import spyre_compiled_all_reduce
 
 # Keep local TP expert shards on CPU until ``prepare_moe_expert_weights`` performs
 # their split/transpose/pad and final device transfer.

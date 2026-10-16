@@ -139,8 +139,20 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 | GTE-ModernBERT-base | modernbert | 64→128 | Yes (padded) | Yes | Yes | Yes |
 | Granite-Embedding-97m-multilingual-r2 | modernbert | 32→128 | Yes (padded) | Yes | Yes | Yes |
 | EmbeddingGemma 300M | gemma3\_text | 256 | Yes | Yes | Yes | Yes (bf16) |
+| EmbeddingGemma 2 (pending device validation) | embedding\_gemma2 | 256 / 512 | Yes | Yes (text + image) | Not run | Not run |
 
 **CPU Accurate** = adapter hidden-states have cosine similarity ≥ 0.999 vs stock HF on CPU (the bound accommodates the bf16-native EmbeddingGemma; fp16 models clear it with wide margin).
+
+EmbeddingGemma 2 currently requires an isolated environment with Transformers
+5.19.0 and SentenceTransformers 6.1+, then `pip install --no-deps -e .`.
+The default dependency pin stays at 5.15.0 because the newer release changes
+the tensor-parallel API. Its text and Gemma 4 vision transformer
+bodies use compiled Spyre blocks; patch embedding, media merging, audio, PLE
+projection, output projection and pooling run on CPU. Use bf16. Text, image and
+interleaved text/image embeddings match the bf16 CPU reference with cosine
+≥ 0.999954. Hardware verification is pending: the development pod's device was
+occupied by a separate performance run. The newer Transformers version
+uses a different tensor-parallel API; this adapter currently targets one device.
 **Spyre Compiles / Spyre Runs** = via `test_e2e_embed_compare_spyre.py`. GTE-Qwen2 compiles and executes end-to-end on Spyre but its pooled embeddings drift from the CPU reference; the Qwen3/Mistral/BERT/XLM-RoBERTa/MPNet/ModernBERT encoder paths match within fp16 noise. EmbeddingGemma runs in **bf16** (fp16 overflows its residual stream) and matches the bf16 CPU reference within bf16 noise (per-token cosine ≥ 0.999; pooled ≥ 0.99).
 
 ### Sequence Classification
@@ -210,7 +222,7 @@ all pass that check.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 40 adapters · 63 verified checkpoints · 10K+ compatible models.
+**Coverage:** 41 adapters · 63 verified checkpoints · 10K+ compatible models.
 The 63 verified rows are 39 generative + 13 embedding + 2 seq-classification +
 2 token-classification + 6 vision-language + 1 speculative-decoding drafter (see
 the Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are bare vision-tower components
@@ -253,6 +265,7 @@ pattern, norms, and weight layout.
 | hf\_xpress\_qwen3.py | qwen3 (`Qwen3XPressModel` drafter) | 1 | XPress speculative-decoding drafter: DFlash block backbone (Qwen3-style layers, mixed sliding/full) + causal refiner, block 16, K=6 Jacobi passes, top-C=512. Vocab weights from the target. UIUC-SSAIL/gemma4-26b-a4b-XPress-b16 (Gemma 4 26B-A4B target); same adapter should load UIUC-SSAIL/Qwen3-8B-XPress-b16. Block-propose API (`propose_block`). Spyre (bf16) vs fp32 speculators-math oracle: block-hidden cos 0.9998, base-logit cos 0.9999; ~50 ms per 15-token proposal at top-C=512. |
 | hf\_diffusion\_gemma.py | diffusion\_gemma | 1 | google/diffusiongemma-26B-A4B-it. MoE runs on CPU; attention + dense MLP compiled on Spyre. Block-diffusion generate loop. Gated. |
 | hf\_gemma3.py | gemma3\_text / gemma3 (dense) | 2 | Gemma 3 4B/12B/27B (text decoder of the multimodal checkpoints); EmbeddingGemma (bidirectional embedder). Not Gemma 3n (PLE). |
+| hf\_embeddinggemma2.py | embedding\_gemma2 / embedding\_gemma2\_text | 0 (Spyre validation pending) | EmbeddingGemma 2 text, image and audio inputs; text and vision transformers on Spyre, audio tower on CPU. |
 | hf\_gemma2.py | gemma2 | 1 | Gemma 2 2B and Gemma 2 fine-tunes. |
 | hf\_olmo.py | olmo | 1 | OLMo 7B |
 | hf\_olmo2.py | olmo2 | 1 | OLMo 2 7B |

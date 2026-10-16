@@ -446,6 +446,13 @@ CAUSAL_LM_MODELS = {
 }
 
 EMBEDDING_MODELS = {
+    "embeddinggemma2": {
+        "name": "EmbeddingGemma 2",
+        "path": "google/embeddinggemma-2",
+        "adapter": "hf_embeddinggemma2.py",
+        "is_gated": True,
+        "size": "0.7b",
+    },
     # hf_gemma3.py
     "embeddinggemma": {
         "name": "EmbeddingGemma 300M",

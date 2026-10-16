@@ -28,7 +28,7 @@ import time
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional, cast
 
 import torch
 import torch.nn as nn
@@ -2399,6 +2399,14 @@ def untie_embedding_and_lm_head(model):
         head.weight = nn.Parameter(cloned, requires_grad=False)
         if hasattr(model, "config"):
             model.config.tie_word_embeddings = False
+
+
+def spyre_compiled_all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
+    """All-reduce through Spyre's graph-lowered functional collective."""
+    reduced: torch.Tensor = torch.ops._c10d_functional.all_reduce(
+        tensor, "sum", group_name
+    )
+    return cast(torch.Tensor, torch.ops._c10d_functional.wait_tensor(reduced))
 
 
 def get_model_dtype(model: nn.Module) -> torch.dtype:
