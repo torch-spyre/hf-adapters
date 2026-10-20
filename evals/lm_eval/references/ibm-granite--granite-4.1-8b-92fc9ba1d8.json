@@ -623,13 +623,13 @@
           {
             "task": "gpqa_diamond_zeroshot",
             "metric": "acc,none",
-            "value": 0.22,
+            "value": 0.2,
             "higher_is_better": true
           },
           {
             "task": "gpqa_diamond_zeroshot",
             "metric": "acc_norm,none",
-            "value": 0.22,
+            "value": 0.2,
             "higher_is_better": true
           }
         ],
@@ -715,11 +715,19 @@
                 195,
                 197
               ],
-              "sha256": "159a959ab46755ec5fd27f523e6456315ff486639abdd5b9dba2000e52e431df"
+              "sha256": "fc6109a76cfafe77e16a556d95f0e0eb45b3f862d93e3e628dbf4eed35057aa6"
             }
           },
           "model_sha": "1504002f650e656a0a3789d99574df12e3e94ed0",
-          "model_dtype": "torch.bfloat16"
+          "model_dtype": "torch.bfloat16",
+          "preprocessing": {
+            "gpqa_diamond_zeroshot": {
+              "gpqa_choice_order": {
+                "version": "sha256_per_document_v1",
+                "seed": 1234
+              }
+            }
+          }
         },
         "versions": {
           "lm_eval": "0.4.13",
@@ -736,7 +744,7 @@
             "effective": 50
           }
         },
-        "elapsed_seconds": 54.95717057958245,
+        "elapsed_seconds": 153.7590546500869,
         "exit_code": 0
       },
       "aime24": {

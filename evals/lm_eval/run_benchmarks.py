@@ -231,7 +231,7 @@ def summarize_result(raw, spec, versions):
             )
     if not metrics:
         raise ValueError("Harness returned no metrics")
-    return {
+    result = {
         "status": "completed",
         "metrics": metrics,
         "protocol": {
@@ -252,6 +252,18 @@ def summarize_result(raw, spec, versions):
         "versions": versions,
         "sample_counts": raw.get("n-samples", {}),
     }
+    # Record only preprocessing actually used by loaded tasks. Unrelated
+    # benchmarks retain their existing protocol and reusable references.
+    from evals.lm_eval.gpqa import METADATA_KEY
+
+    preprocessing = {
+        task: {METADATA_KEY: cfg["metadata"][METADATA_KEY]}
+        for task, cfg in raw.get("configs", {}).items()
+        if METADATA_KEY in (cfg.get("metadata") or {})
+    }
+    if preprocessing:
+        result["protocol"]["preprocessing"] = preprocessing
+    return result
 
 
 def run_worker(args, spec):
@@ -261,6 +273,8 @@ def run_worker(args, spec):
         import lm_eval
         from langdetect import DetectorFactory
         from lm_eval.tasks import TaskManager
+
+        from evals.lm_eval.gpqa import install_gpqa_preprocessing
 
         samples = {}
 
@@ -282,6 +296,7 @@ def run_worker(args, spec):
         # IFEval's language checks use a separate RNG, outside the harness seeds.
         DetectorFactory.seed = spec["seed"]
         manager = SamplingTaskManager()
+        install_gpqa_preprocessing(manager, spec["seed"])
         missing = set(spec["tasks"]) - set(manager.all_tasks)
         if missing:
             raise ValueError(f"Tasks not registered in lm_eval: {sorted(missing)}")
