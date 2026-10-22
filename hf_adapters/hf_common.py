@@ -26,7 +26,7 @@ import os
 import sys
 import time
 import warnings
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Optional
 
@@ -72,18 +72,218 @@ def optional_spyre_config_patch(options: dict[str, Any]) -> Iterator[None]:
         yield
 
 
-def _move_moe_expert_weight(weight):
+def _move_moe_expert_weight(weight, *, matmul_order=False):
     if not str(DEVICE).startswith("spyre"):
         return weight
 
     from torch_spyre.model_utils import dma_moe_expert_weight_to_spyre
 
-    moved = dma_moe_expert_weight_to_spyre(weight)
+    if matmul_order:
+        from torch_spyre._C import (
+            SpyreTensorLayout,
+            copy_tensor,
+            get_elem_in_stick,
+            spyre_empty_with_layout,
+        )
+
+        weight = weight.contiguous()
+        stick = get_elem_in_stick(weight.dtype)
+        if weight.shape[-1] % stick:
+            raise ValueError(
+                f"MoE expert weight free dim {weight.shape[-1]} must span whole "
+                f"{stick}-element sticks."
+            )
+        layout = SpyreTensorLayout(
+            list(weight.shape), list(weight.stride()), weight.dtype, [1, 0, 2]
+        )
+        moved = spyre_empty_with_layout(
+            weight.size(),
+            weight.stride(),
+            weight.dtype,
+            layout,
+            device=torch.device(DEVICE),
+        )
+        copy_tensor(weight, moved, non_blocking=False)
+        return moved
+    moved = dma_moe_expert_weight_to_spyre(weight, device=DEVICE)
     return moved if moved is not None else weight.to(DEVICE)
 
 
-def prepare_moe_expert_weights(experts, *, pad_to_multiple=None):
+def derive_moe_chunks(hidden, top_k, stick, max_cores=None, override=None):
+    """Choose the fewest stick-legal hidden chunks that fill the most cores.
+
+    The gathered decode kernel splits work only across its ``top_k * chunks``
+    entries. A core holds ``top_k * hidden * intermediate / cores_used`` weight
+    elements whatever the chunk count, so the split that fills the most cores
+    also has the smallest per-core working set. ``SPYRE_MOE_CHUNKS`` overrides
+    the selection when set.
+    """
+    if override is None:
+        raw = os.getenv("SPYRE_MOE_CHUNKS")
+        override = int(raw) if raw is not None else None
+    if hidden <= 0 or top_k <= 0 or stick <= 0:
+        raise ValueError(
+            "MoE chunk selection requires positive dimensions, top_k, and stick size"
+        )
+    if hidden % stick:
+        raise ValueError(
+            f"Spyre MoE hidden size {hidden} must be a multiple of "
+            f"{stick}-element sticks."
+        )
+    if override is not None:
+        if override <= 0:
+            raise ValueError(f"SPYRE_MOE_CHUNKS must be positive, got {override}")
+        if hidden % (override * stick):
+            raise ValueError(
+                f"SPYRE_MOE_CHUNKS={override} requires hidden size {hidden} to split "
+                f"into {override} whole {stick}-element-stick chunks."
+            )
+        return override
+
+    if max_cores is None:
+        # Only the core-count derivation needs torch_spyre; the override path
+        # above returns without it, keeping CPU-lane callers import-clean.
+        try:
+            from torch_spyre._inductor import config as spyre_config
+        except ImportError as e:
+            raise ImportError(
+                "Deriving MoE decode chunks from the Spyre core count requires "
+                "torch_spyre; pass max_cores= or set SPYRE_MOE_CHUNKS to run "
+                "without it."
+            ) from e
+        max_cores = spyre_config.sencores
+    if max_cores <= 0:
+        raise ValueError(
+            f"MoE chunk selection requires at least one core, got {max_cores}"
+        )
+
+    hidden_sticks = hidden // stick
+    best_cores, best_chunks = 0, 1
+    for chunks in range(1, hidden_sticks + 1):
+        if hidden_sticks % chunks:
+            continue
+        entries = top_k * chunks
+        cores_used = max(
+            split
+            for split in range(1, min(entries, max_cores) + 1)
+            if entries % split == 0
+        )
+        if cores_used > best_cores:
+            best_cores, best_chunks = cores_used, chunks
+    return best_chunks
+
+
+def moe_chunk_entry_constants(chunks):
+    """fp32 scale ``[1, 1, 1]`` and offsets ``[1, chunks, 1]`` of entry ``e*chunks+c``.
+
+    Region inputs rather than in-graph scalars, so the compiled decode needs no
+    per-call constants; the size-1 stick dim lets them broadcast against the
+    widened fp32 expert index. Moved to the Spyre device once at load.
+    """
+    scale = torch.full((1, 1, 1), float(chunks), dtype=torch.float32)
+    offsets = torch.arange(chunks, dtype=torch.float32).reshape(1, chunks, 1)
+    if str(DEVICE).startswith("spyre"):
+        scale, offsets = scale.to(DEVICE), offsets.to(DEVICE)
+    return scale, offsets
+
+
+def _moe_decode_weight_view(pool, chunks, *, down=False):
+    """Interpret one persistent expert stack as expert-major decode chunks.
+
+    On Spyre the view reinterprets the pool's storage; on CPU it is a reshape
+    (and, for the down pool, a permute) that copies.
+    """
+    experts, contract, free = pool.shape
+    if not str(DEVICE).startswith("spyre"):
+        if down:
+            if free % chunks:
+                raise ValueError(
+                    f"MoE down pool free dim {free} must divide into {chunks} chunks"
+                )
+            return (
+                pool.reshape(experts, contract, chunks, free // chunks)
+                .permute(0, 2, 1, 3)
+                .reshape(experts * chunks, contract, free // chunks)
+            )
+        if contract % chunks:
+            raise ValueError(
+                f"MoE gate/up contract dim {contract} must divide into "
+                f"{chunks} chunks"
+            )
+        return pool.reshape(experts * chunks, contract // chunks, free)
+
+    from torch_spyre._C import (
+        SpyreTensorLayout,
+        get_device_dtype,
+        get_elem_in_stick,
+        get_spyre_tensor_layout,
+        reinterpret_tensor_with_layout,
+    )
+
+    stick = get_elem_in_stick(pool.dtype)
+
+    def check_pool_layout(expected):
+        actual = get_spyre_tensor_layout(pool)
+        if (actual.device_size, actual.stride_map) != (
+            expected.device_size,
+            expected.stride_map,
+        ):
+            raise RuntimeError(
+                f"MoE pool device layout {actual.device_size} / {actual.stride_map} "
+                f"differs from the {expected.device_size} / {expected.stride_map} "
+                "its decode chunk view reinterprets."
+            )
+
+    if down:
+        if free % chunks:
+            raise ValueError(
+                f"MoE down pool free dim {free} must divide into {chunks} chunks"
+            )
+        size = [experts * chunks, contract, free // chunks]
+        stride = [contract * size[-1], size[-1], 1]
+        layout = SpyreTensorLayout(size, stride, pool.dtype, [1, 0, 2])
+        # The persistent down pool must sit in matmul order: the H sticks are
+        # outer to M, so chunking H preserves flat physical order.
+        check_pool_layout(
+            SpyreTensorLayout(
+                list(pool.shape), list(pool.stride()), pool.dtype, [1, 0, 2]
+            )
+        )
+    else:
+        if contract % chunks:
+            raise ValueError(
+                f"MoE gate/up contract dim {contract} must divide into "
+                f"{chunks} chunks"
+            )
+        size = [experts * chunks, contract // chunks, free]
+        stride = [size[1] * free, free, 1]
+        layout = SpyreTensorLayout(
+            [size[0], size[1], free // stick, stick],
+            [stride[0], stride[1], stick, 1],
+            get_device_dtype(pool.dtype),
+        )
+        # The persistent gate/up pools must sit in gather order: contract is
+        # outer to the free-dim sticks, so chunking it preserves flat order.
+        check_pool_layout(
+            SpyreTensorLayout(
+                [experts, contract, free // stick, stick],
+                [contract * free, free, stick, 1],
+                get_device_dtype(pool.dtype),
+            )
+        )
+    return reinterpret_tensor_with_layout(pool, size, stride, 0, layout)
+
+
+def prepare_moe_expert_weights(experts, *, pad_to_multiple=None, decode_chunks=1):
     """Split, transpose, pad, and move persistent MoE weights in place."""
+    if decode_chunks != 1:
+        hidden_size = experts.gate_up_proj.shape[-1]
+        if (
+            pad_to_multiple is None
+            or hidden_size % decode_chunks
+            or (hidden_size // decode_chunks) % pad_to_multiple
+        ):
+            raise ValueError("MoE decode chunks must each span whole hidden sticks")
     gate_up = experts.gate_up_proj.detach()
     del experts.gate_up_proj
 
@@ -95,12 +295,24 @@ def prepare_moe_expert_weights(experts, *, pad_to_multiple=None):
     if intermediate_pad:
         gate = F.pad(gate, (0, intermediate_pad))
     experts.gate_proj = _move_moe_expert_weight(gate)
+    if decode_chunks != 1:
+        experts.decode_gate_proj = _moe_decode_weight_view(
+            experts.gate_proj, decode_chunks
+        )
+    else:
+        # One chunk: the persistent pools are the decode views, and the
+        # whole-expert for_each_tile path consumes them directly.
+        experts.decode_gate_proj = experts.gate_proj
     del gate
 
     up = gate_up[:, intermediate_size:].transpose(1, 2).contiguous()
     if intermediate_pad:
         up = F.pad(up, (0, intermediate_pad))
     experts.up_proj = _move_moe_expert_weight(up)
+    if decode_chunks != 1:
+        experts.decode_up_proj = _moe_decode_weight_view(experts.up_proj, decode_chunks)
+    else:
+        experts.decode_up_proj = experts.up_proj
     del up
     del gate_up
 
@@ -110,7 +322,19 @@ def prepare_moe_expert_weights(experts, *, pad_to_multiple=None):
         # Match the zero-padded local gate/up channels. The added down rows are
         # zero, so each rank's partial output is unchanged before TP all-reduce.
         down = F.pad(down, (0, 0, 0, intermediate_pad))
-    experts.down_proj = _move_moe_expert_weight(down)
+    experts.down_proj = _move_moe_expert_weight(down, matmul_order=decode_chunks != 1)
+    if decode_chunks != 1:
+        experts.decode_down_proj = _moe_decode_weight_view(
+            experts.down_proj, decode_chunks, down=True
+        )
+        experts.decode_chunk_scale, experts.decode_chunk_offsets = (
+            moe_chunk_entry_constants(decode_chunks)
+        )
+    else:
+        experts.decode_down_proj = experts.down_proj
+        experts.decode_chunk_scale, experts.decode_chunk_offsets = (
+            moe_chunk_entry_constants(1)
+        )
 
 
 def moe_topk(probabilities, top_k):
@@ -135,6 +359,9 @@ def moe_decode_selected_experts(
     stick_size,
     activation,
     per_expert_scale_stick=None,
+    decode_chunks=1,
+    chunk_scale=None,
+    chunk_offsets=None,
 ):
     """Gather selected experts and combine their decode outputs."""
     if activation not in ("silu", "gelu_tanh"):
@@ -142,40 +369,157 @@ def moe_decode_selected_experts(
 
     T, H = x.shape
     if x.device.type == "spyre":
-        from torch_spyre._inductor.propagate_hints import spyre_hint
+        from torch_spyre._inductor.wsr import for_each_tile
 
         # Widen topk's fp16 indices onto a stick before converting them to the
-        # device's int32 gather indices. The layout pass inserts the restickify.
-        index_stick = (
-            expert_indices[..., None].expand(T, top_k, stick_size).contiguous()
-        )
-        index_stick = index_stick.to(torch.float32)
-        index_address = index_stick[..., : stick_size // 2].to(torch.int32)
-        expert_indices = index_address[..., 0]
-        hint = spyre_hint(tiles={"row": tile})
-    else:
-        hint = nullcontext()
-
-    with hint:
-        rows = T * top_k
-        intermediate = gate.shape[-1]
-        inputs = x[:, None, :].expand(T, top_k, H).contiguous().reshape(rows, 1, H)
-        selected_gate = gate[expert_indices].reshape(rows, H, intermediate)
-        selected_up = up[expert_indices].reshape(rows, H, intermediate)
-        selected_down = down[expert_indices].reshape(rows, intermediate, H)
-
-        gate_out = torch.bmm(inputs, selected_gate)
-        up_out = torch.bmm(inputs, selected_up)
-        if activation == "silu":
-            activated = F.silu(gate_out) * up_out
+        # device's int32 gather indices. Chunked decode addresses expert-major
+        # entries in flattened (token, selected expert) order.
+        # Every lane holds the index, so take it as the max over the stick: the
+        # float32 holds each pair of sticks in an interleaved order, and a
+        # reduction reads it whole where a slice would split a pair.
+        if decode_chunks == 1:
+            # The layout pass inserts the restickify.
+            index_stick = (
+                expert_indices[..., None].expand(T, top_k, stick_size).contiguous()
+            )
+            index_stick = index_stick.to(torch.float32)
+            index_address = index_stick.amax(-1, keepdim=True).to(torch.int32)
+            expert_indices = index_address[..., 0]
         else:
-            activated = F.gelu(gate_out, approximate="tanh") * up_out
-        expert_out = torch.bmm(activated, selected_down).reshape(T, top_k, H)
-        expert_out = expert_out * weights[..., None]
+            expert_fp32 = (
+                expert_indices.reshape(T * top_k, 1)
+                .expand(T * top_k, stick_size)
+                .contiguous()
+                .to(torch.float32)
+            )
+            expert_indices = expert_fp32.amax(-1).to(torch.int32)
+    else:
+        index_address = None
+        if decode_chunks == 1:
+            index_address = expert_indices[..., None]
+        else:
+            # The chunked entry math reads the widened fp32 index regardless
+            # of device; only the spyre gather needs the int32 conversion.
+            expert_fp32 = (
+                expert_indices.reshape(T * top_k, 1)
+                .expand(T * top_k, stick_size)
+                .contiguous()
+                .to(torch.float32)
+            )
+            expert_indices = expert_indices.reshape(T * top_k)
+
+    rows = T * top_k
+    intermediate = gate.shape[-1]
+    if decode_chunks == 1:
+        inputs = x[:, None, :].expand(T, top_k, H).contiguous().reshape(rows, 1, H)
+        indices = index_address.reshape(rows, -1)
+
+        def expert_body(_, tiles):
+            inputs, indices, gate, up, down = tiles
+            selected = indices[:, 0]
+            selected_gate = gate[selected]
+            selected_up = up[selected]
+            selected_down = down[selected]
+
+            gate_out = torch.bmm(inputs, selected_gate)
+            up_out = torch.bmm(inputs, selected_up)
+            if activation == "silu":
+                activated = F.silu(gate_out) * up_out
+            else:
+                activated = F.gelu(gate_out, approximate="tanh") * up_out
+            return None, torch.bmm(activated, selected_down)
+
+        operands = (inputs, indices, gate, up, down)
+        if x.device.type == "spyre":
+            # Gather weights inside each tile so only its selected experts are
+            # materialized. Use a divisor of rows: for_each_tile needs full tiles.
+            _, expert_out = for_each_tile(
+                expert_body,
+                operands,
+                dims=(0, 0, None, None, None),
+                tile_size=math.gcd(rows, tile),
+                out_dim=0,
+            )
+        else:
+            _, expert_out = expert_body(None, operands)
+
+        expert_out = expert_out * weights.reshape(rows, 1, 1)
         if per_expert_scale_stick is not None:
             expert_scale = per_expert_scale_stick[expert_indices][..., :1]
-            expert_out = expert_out * expert_scale
-        return expert_out.sum(dim=1)
+            expert_out = expert_out * expert_scale.reshape(rows, 1, 1)
+        return expert_out.reshape(T, top_k, H).sum(dim=1)
+
+    # Chunked decode: shares expert-major weight chunks across decode steps.
+    # Entry e*chunks+c selects chunk c of expert e, in (row, chunk) order.
+    # Broadcasting the widened expert index against the [1, chunks, 1] device
+    # offsets -- not a cat of per-chunk index tensors -- keeps the region one
+    # kernel without per-call constants (the cat version splits into
+    # chunks+1 kernels whose launch cost outweighs the narrower slices at
+    # small TP shards).
+    if H % decode_chunks or H // decode_chunks % stick_size:
+        raise ValueError("MoE decode hidden chunks must span whole sticks")
+    slice_rows = H // decode_chunks
+    if (
+        gate.shape[1:] != (slice_rows, intermediate)
+        or up.shape != gate.shape
+        or down.shape != (gate.shape[0], intermediate, slice_rows)
+    ):
+        raise ValueError("MoE decode weights must be expert-major chunks")
+
+    if chunk_scale is None or chunk_offsets is None:
+        # CPU callers and ad-hoc regions build the broadcast constants here.
+        chunk_scale = torch.full((1, 1, 1), float(decode_chunks))
+        chunk_offsets = torch.arange(decode_chunks, dtype=torch.float32).reshape(
+            1, decode_chunks, 1
+        )
+    # The widened fp32 index is [rows, stick]; the constants broadcast to
+    # [rows, chunks, stick] so entries cover every (row, chunk) pair.
+    entries = (expert_fp32[:, None, :] * chunk_scale + chunk_offsets).reshape(
+        rows * decode_chunks, stick_size
+    )
+    slice_index = entries.amax(-1).to(torch.int32)
+    inputs = (
+        x.reshape(T, 1, decode_chunks, slice_rows)
+        .expand(T, top_k, decode_chunks, slice_rows)
+        .contiguous()
+        .reshape(rows * decode_chunks, 1, slice_rows)
+    )
+    gate_out = torch.bmm(
+        inputs,
+        gate[slice_index].reshape(rows * decode_chunks, slice_rows, intermediate),
+    )
+    up_out = torch.bmm(
+        inputs,
+        up[slice_index].reshape(rows * decode_chunks, slice_rows, intermediate),
+    )
+    # Sum the gate/up partial products over the contiguous chunk axis
+    # before the activation, matching the persistent form's rounding.
+    gate_out = gate_out.reshape(rows, decode_chunks, 1, intermediate).sum(dim=1)
+    up_out = up_out.reshape(rows, decode_chunks, 1, intermediate).sum(dim=1)
+
+    if activation == "silu":
+        activated = F.silu(gate_out) * up_out
+    else:
+        activated = F.gelu(gate_out, approximate="tanh") * up_out
+    # Output chunk c of every row is the c-th hidden slice, so the down
+    # parts reshape in place instead of concatenating.
+    act_rep = (
+        activated[:, None]
+        .expand(rows, decode_chunks, 1, intermediate)
+        .reshape(rows * decode_chunks, 1, intermediate)
+    )
+    parts = torch.bmm(
+        act_rep,
+        down[slice_index].reshape(rows * decode_chunks, intermediate, slice_rows),
+    )
+    expert_out = parts.reshape(T, top_k, H)
+    expert_out = expert_out * weights[..., None]
+    if per_expert_scale_stick is not None:
+        expert_scale = per_expert_scale_stick[expert_indices][:, :1].reshape(
+            T, top_k, 1
+        )
+        expert_out = expert_out * expert_scale
+    return expert_out.sum(dim=1)
 
 
 @contextmanager
@@ -1163,19 +1507,27 @@ def pad_lm_head(model, *, min_vocab_size: int | None = None):
         return
     w = head.weight
     vocab = w.shape[0]
-    target_vocab = max(vocab, min_vocab_size or vocab)
-    hidden = w.shape[1]
-    dtype_bytes = w.element_size()
-    # Max residual sticks whose per-core span fits the EAR limit.
-    max_residual = _EAR_LIMIT_BYTES // (hidden * BLOCK_SIZE * dtype_bytes)
-    sticks = (target_vocab + BLOCK_SIZE - 1) // BLOCK_SIZE
-    while _largest_prime_factor(sticks) > max_residual:
-        sticks += 1
-    padded = sticks * BLOCK_SIZE
+    padded = padded_vocab_size(
+        max(vocab, min_vocab_size or vocab), w.shape[1], w.element_size()
+    )
     if padded != vocab:
         head.weight = nn.Parameter(
             F.pad(w, (0, 0, 0, padded - vocab)), requires_grad=False
         )
+
+
+def padded_vocab_size(vocab: int, hidden: int, dtype_bytes: int) -> int:
+    """Smallest stick-aligned output width >= ``vocab`` that fits the EAR limit.
+
+    The padding rule of :func:`pad_lm_head`, for any ``[vocab, hidden]``
+    output-projection weight that is not the model's ``lm_head``.
+    """
+    # Max residual sticks whose per-core span fits the EAR limit.
+    max_residual = _EAR_LIMIT_BYTES // (hidden * BLOCK_SIZE * dtype_bytes)
+    sticks = (vocab + BLOCK_SIZE - 1) // BLOCK_SIZE
+    while _largest_prime_factor(sticks) > max_residual:
+        sticks += 1
+    return sticks * BLOCK_SIZE
 
 
 def prepare_lm_head_for_spyre(
@@ -1398,8 +1750,9 @@ def build_prefill_mask(
             mask[b, :, :, : prompt_offsets[b].item()] = fill
     else:
         mask[:, :, :, :prompt_offsets] = fill
-    for i in range(padded_len):
-        mask[:, :, i, query_start + i + 1 :] = fill
+    query_positions = query_start + torch.arange(padded_len)
+    future = torch.arange(max_cache_len).unsqueeze(0) > query_positions.unsqueeze(1)
+    mask.masked_fill_(future, fill)
     return mask
 
 
@@ -1442,9 +1795,9 @@ class _ChunkedPrefillMaskBuilder:
         self._causal = build_prefill_mask(
             batch_size, chunk_size, max_cache_len, 0, dtype=dtype
         ).to(device)
-        self._zero_chunk = torch.zeros(
-            (batch_size, 1, chunk_size, chunk_size), dtype=dtype
-        ).to(device)
+        # Single-chunk prefill never advances. Avoid allocating, converting and
+        # transferring the potentially large advance-only buffer in that case.
+        self._zero_chunk = None
         self._masked_chunk = None
 
         padding_mask = torch.zeros((batch_size, 1, 1, max_cache_len), dtype=dtype)
@@ -1467,6 +1820,11 @@ class _ChunkedPrefillMaskBuilder:
                 f"expected query_start={self._query_start}, got {query_start}"
             )
         if query_start:
+            if self._zero_chunk is None:
+                self._zero_chunk = torch.zeros(
+                    (self.batch_size, 1, self.chunk_size, self.chunk_size),
+                    dtype=self.dtype,
+                ).to(self.device)
             self._causal = self._advance(self._causal, self._zero_chunk)
         mask = torch.minimum(self._causal, self._padding_mask)
         # Gemma's shared sliding-window helper sees this tensor before it enters
@@ -2636,6 +2994,7 @@ def generate(
     prefill_fn: Optional[Callable] = None,
     decode_fn: Optional[Callable] = None,
     token_aligned_inputs: Optional[dict[str, tuple[torch.Tensor, Any]]] = None,
+    streamer=None,
     **kwargs,
 ):
     """Model-agnostic generation: optional chunked prefill, then token decode.
@@ -2688,6 +3047,8 @@ def generate(
             generation config; pass ``None`` to disable EOS stopping (matches
             stock ``generate()``).
         timing: Print per-token latency.
+        streamer: Optional HF ``BaseStreamer`` (e.g. ``TextIteratorStreamer``);
+            receives the prompt, then each selected token. Batch size 1 only.
         prefill_backbone_fn: Optional adapter backbone with the same arguments
             as ``run_forward_fn``, returning hidden states. Text prefill runs
             this for every chunk, then applies the prepared LM head only to
@@ -2841,6 +3202,11 @@ def generate(
     # ``current_cache_len``, so generated tokens are contiguous from ``padded_len``.
     previous_tokens = None
     current_cache_len = padded_len
+
+    if streamer is not None:
+        if batch_size > 1:
+            raise ValueError("`streamer` supports batch size 1 only")
+        streamer.put(orig_input_ids.cpu())
 
     times_list = []
     finished = torch.zeros(batch_size, dtype=torch.bool)
@@ -3014,12 +3380,17 @@ def generate(
             next_tokens = next_tokens.masked_fill(finished, pad_token_id)
         generated_columns.append(next_tokens.clone())
         previous_tokens = next_tokens
+        if streamer is not None:
+            streamer.put(next_tokens.cpu())
 
         if eos_ids is not None:
             finished |= torch.isin(next_tokens, eos_ids)
 
         if finished.all():
             break
+
+    if streamer is not None:
+        streamer.end()
 
     if timing and times_list:
         print(f"\nFirst-token latency: {times_list[0] * 1000:.3f} ms")
@@ -3925,7 +4296,7 @@ def prefill_question_answering(
     attention_mask,
     token_type_ids=None,
 ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
-    """Run an encoder on Spyre and its extractive-QA head on CPU."""
+    """Run an encoder and its extractive-QA head on Spyre."""
     last_hidden_state = prefill_encoder(
         run_encoder_forward_fn,
         model,
@@ -3957,7 +4328,7 @@ def prefill_sequence_classification(
     attention_mask,
     token_type_ids=None,
 ) -> torch.Tensor:
-    """Run an encoder on Spyre and its sequence-classification head on CPU."""
+    """Run an encoder and its sequence-classification head on Spyre."""
     last_hidden_state = prefill_encoder(
         run_encoder_forward_fn,
         model,
@@ -3984,15 +4355,12 @@ def prefill_token_classification(
     attention_mask,
     token_type_ids=None,
 ) -> torch.Tensor:
-    """Run an encoder on Spyre and its token-classification head on CPU.
+    """Run an encoder and its token-classification head on Spyre.
 
     Drives the encoder backbone via ``prefill_encoder``, then applies
     ``model.classifier`` (a single linear layer whose output dim equals
-    ``config.num_labels``) to every token position.  The head is kept on
-    CPU (via ``_spyre_cpu_submodules``) to avoid:
-
-    - ``aten.slice`` (index operations that don't lower on Spyre).
-    - Any Dropout path that uses ``torch.bernoulli``.
+    ``config.num_labels``) to every token position on device, so only the
+    ``[B, L, num_labels]`` logits are copied to CPU.
 
     Args:
         run_encoder_forward_fn: ``fn(model, input_ids, attn_mask, position_ids,

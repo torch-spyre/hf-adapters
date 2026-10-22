@@ -85,11 +85,14 @@ jobs:
     steps:
       # workflow_run always executes this file as it exists on the default
       # branch, so a plain checkout (no ref:) here pulls the canonical copy
-      # of the ingest script regardless of which ref triggered the run.
-      - name: Checkout ingest script
+      # of the ingest scripts regardless of which ref triggered the run.
+      - name: Checkout ingest scripts
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           sparse-checkout: |
+            .github/scripts/list_run_artifacts.py
+            .github/scripts/download_xml_artifacts.py
+            .github/scripts/flatten_xml_artifacts.py
             .github/scripts/ingest_xml_hf_adapters.py
           sparse-checkout-cone-mode: false
 
@@ -153,62 +156,21 @@ jobs:
       # Download every artifact from the triggering run and unzip it — artifact
       # *names* carry no file extension (only the file inside the zip does), so
       # filtering has to happen post-unzip by actual filename, not by artifact name.
-      #
-      # `--paginate` is required: the artifacts endpoint defaults to 30 per
-      # page, and a run with more jobs than that silently lost every artifact
-      # past the first page, with no error — rows just never showed up in
-      # ClickHouse. `--paginate` applies `--jq` per page and concatenates the
-      # filtered results across pages (`gh api` rejects `--slurp` combined
-      # with `--jq`), so the per-artifact objects come out as a JSON stream,
-      # not a single array; python3 slurps that stream into one array below.
+      # Listing is paginated (see list_run_artifacts.py for why that matters).
       # ---------------------------------------------------------------------------
       - name: List artifacts from triggering run
         id: list-artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ARTIFACTS=$(gh api --paginate \
-            "/repos/${{ github.repository }}/actions/runs/${TRIGGERING_RUN_ID}/artifacts?per_page=100" \
-            --jq '.artifacts[] | {id: .id, name: .name}' \
-            | python3 -c "import json,sys; print(json.dumps([json.loads(l) for l in sys.stdin if l.strip()]))")
-          echo "artifacts=$ARTIFACTS" >> "$GITHUB_OUTPUT"
-          echo "Found artifacts:"
-          echo "$ARTIFACTS" | python3 -c "import json,sys; [print(' •', a['name']) for a in json.load(sys.stdin)]"
+          python3 .github/scripts/list_run_artifacts.py --run-id "${TRIGGERING_RUN_ID}"
 
       - name: Download XML artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACTS: ${{ steps.list-artifacts.outputs.artifacts }}
         run: |
-          mkdir -p xml_artifacts
-          export ARTIFACTS='${{ steps.list-artifacts.outputs.artifacts }}'
-          python3 <<'PYEOF'
-          import json, os, subprocess, sys
-          from pathlib import Path
-
-          artifacts = json.loads(os.environ['ARTIFACTS'])
-          repo  = os.environ['GITHUB_REPOSITORY']
-          for a in artifacts:
-              print(f"Downloading: {a['name']} (id={a['id']})")
-              with open(f"xml_artifacts/{a['name']}.zip", "wb") as f:
-                result = subprocess.run([
-                    "gh", "api",
-                    f"/repos/{repo}/actions/artifacts/{a['id']}/zip",
-                ], check=True, env={**os.environ}, capture_output=True)
-                f.write(result.stdout)
-              # Each artifact unzips into its OWN subdirectory (named after
-              # the artifact, which is unique per suite+model) rather than a
-              # shared flat one: a single-file artifact's upload strips its
-              # model-key subdirectory, so two suites can both produce a
-              # "Qwen3-0.6B.xml" and would otherwise clobber each other.
-              # ingest_xml_hf_adapters.py globs --xml-dir recursively and
-              # derives a unique filename from the path relative to it, so
-              # this nesting is exactly what it expects.
-              dest = Path("xml_artifacts") / a["name"]
-              subprocess.run(
-                  ["unzip", "-o", f"xml_artifacts/{a['name']}.zip", "-d", str(dest)],
-                  check=True,
-              )
-          PYEOF
+          python3 .github/scripts/download_xml_artifacts.py --out-dir xml_artifacts
           echo "Downloaded XML files:"
           find xml_artifacts -name "*.xml" 2>/dev/null || echo "(none)"
 
@@ -281,27 +243,12 @@ jobs:
       - name: Remove local venv before shared ingest action
         run: rm -rf .venv  # the shared action below creates its own .venv in this same workspace and fails if one already exists
 
-      # The shared action's ingest_xml.py globs --xml-dir with Path.glob("*.xml") --
-      # NON-recursive -- while xml_artifacts/ nests files one level deep in
-      # per-artifact subdirectories (see the "Download XML artifacts" step above).
-      # A non-recursive glob against that nesting finds nothing, so flatten into a
-      # dedicated directory first, prefixing each filename with its artifact
-      # subdirectory to preserve the same-model-different-suite uniqueness the
-      # nesting existed for.
+      # The shared action's ingest_xml.py globs --xml-dir non-recursively, so the
+      # per-artifact subdirectories are flattened first (see flatten_xml_artifacts.py).
       - name: Flatten XML artifacts for v2 ingest (non-recursive glob)
         run: |
-          mkdir -p xml_artifacts_flat
-          python3 <<'PYEOF'
-          import shutil
-          from pathlib import Path
-
-          src_root = Path("xml_artifacts")
-          dest_root = Path("xml_artifacts_flat")
-          for xml_path in sorted(src_root.rglob("*.xml")):
-              rel = xml_path.relative_to(src_root)
-              flat_name = "__".join(rel.parts)
-              shutil.copy2(xml_path, dest_root / flat_name)
-          PYEOF
+          python3 .github/scripts/flatten_xml_artifacts.py \
+            --src-dir xml_artifacts --dest-dir xml_artifacts_flat
           echo "Flattened XML files:"
           find xml_artifacts_flat -name "*.xml" 2>/dev/null || echo "(none)"
 
@@ -319,6 +266,8 @@ jobs:
           repository: ${{ github.repository }}
           triggered-at: ${{ env.TRIGGERING_AT }}
           pr-number: ${{ steps.resolve-pr.outputs.pr_number }}
+          # Tags the leg's artifact <repo>@<sha12> (push to main) or <repo>#<pr>[@<sha12>] (PR).
+          ci-event: ${{ env.TRIGGERING_EVENT }}
           trigger-type: ${{ steps.extract-tier.outputs.tier }}
           platform: x86_64
           component: hf-adapters
@@ -388,6 +337,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           sparse-checkout: |
+            .github/scripts/download_module_test_logs.py
             .github/scripts/parse_module_test_logs.py
             .github/scripts/ingest_module_tests.py
             tests/configs/module_tests
@@ -420,59 +370,15 @@ jobs:
 
       # ---------------------------------------------------------------------------
       # Download the raw job logs for every "Spyre model-module tests" job leg
-      # from the triggering run. Each leg corresponds to one config/model YAML.
-      # The GHA jobs API lists all jobs for the run; we filter by name prefix and
-      # download the text log for each matching job into raw_logs/.
+      # from the triggering run into raw_logs/ (one leg per config/model YAML).
       # ---------------------------------------------------------------------------
       - name: Download model-module test job logs
         id: download-logs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          mkdir -p raw_logs
-
-          # List all jobs for the triggering run, filter to "Spyre model-module tests" legs
-          gh api --paginate \
-            "/repos/${{ github.repository }}/actions/runs/${TRIGGERING_RUN_ID}/jobs?per_page=100" \
-            --jq '.jobs[] | select(.name | startswith("Spyre model-module tests")) | {id: .id, name: .name}' \
-          | python3 -c "
-          import json, sys
-          jobs = [json.loads(l) for l in sys.stdin if l.strip()]
-          print(json.dumps(jobs))
-          " > jobs.json
-
-          JOB_COUNT=$(python3 -c "import json; print(len(json.load(open('jobs.json'))))")
-          echo "Found ${JOB_COUNT} model-module test job(s)"
-          echo "job_count=${JOB_COUNT}" >> "${GITHUB_OUTPUT}"
-
-          python3 - <<'PYEOF'
-          import json, os, subprocess
-          from pathlib import Path
-
-          jobs    = json.load(open("jobs.json"))
-          repo    = os.environ["GITHUB_REPOSITORY"]
-          run_id  = os.environ["TRIGGERING_RUN_ID"]
-          token   = os.environ["GH_TOKEN"]
-
-          for job in jobs:
-              job_id   = job["id"]
-              job_name = job["name"]
-              # Sanitise for use as filename: replace / and spaces
-              safe     = job_name.replace("/", "_").replace(" ", "_")
-              out_path = Path("raw_logs") / f"{job_id}_{safe}.txt"
-              result   = subprocess.run(
-                  ["gh", "api", f"/repos/{repo}/actions/jobs/{job_id}/logs"],
-                  capture_output=True,
-                  env={**os.environ},
-              )
-              if result.returncode == 0 and result.stdout:
-                  out_path.write_bytes(result.stdout)
-                  print(f"  saved: {out_path.name} ({len(result.stdout)} bytes)")
-              else:
-                  print(f"  WARN: no log for job {job_id} ({job_name}): {result.stderr.decode()[:200]}")
-          PYEOF
-
+          python3 .github/scripts/download_module_test_logs.py \
+            --run-id "${TRIGGERING_RUN_ID}" --out-dir raw_logs
           echo "Log files downloaded:"
           ls -lh raw_logs/ || echo "(none)"
 
@@ -493,9 +399,6 @@ jobs:
           python3 .github/scripts/parse_module_test_logs.py \
             raw_logs \
             --output "module_tests_${TRIGGERING_RUN_ID}.json"
-          echo "Produced module_tests_${TRIGGERING_RUN_ID}.json"
-          cat "module_tests_${TRIGGERING_RUN_ID}.json" | python3 -c \
-            "import json,sys; d=json.load(sys.stdin); print(f'  {len(d)} suite record(s)')"
 
       # ---------------------------------------------------------------------------
       # Ingest the JSON into ClickHouse: module_test_suites + module_test_variants

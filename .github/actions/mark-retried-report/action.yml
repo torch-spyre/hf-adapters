@@ -12,10 +12,12 @@ inputs:
   report:
     description: The retry's JUnit XML, as passed to the upload's path (relative to the workspace or absolute).
     required: true
-  ingest_lib:
-    description: pip spec for the library providing spyre_clickhouse_ingest.mark_retried.
+  helper_url:
+    description: >-
+      torch-spyre's mark_retried.py. Stdlib-only, so it is fetched and run by path rather than
+      installed; @main, like the ingest that reads its marks.
     required: false
-    default: "git+https://github.com/torch-spyre/torch-spyre@main#subdirectory=extensions/clickhouse-ingest"
+    default: https://raw.githubusercontent.com/torch-spyre/torch-spyre/main/extensions/clickhouse-ingest/spyre_clickhouse_ingest/mark_retried.py
 
 runs:
   using: composite
@@ -31,13 +33,17 @@ runs:
       shell: bash
       env:
         REPORT: ${{ inputs.report }}
-        INGEST_LIB: ${{ inputs.ingest_lib }}
+        HELPER_URL: ${{ inputs.helper_url }}
       run: |
         set +e
-        source "$HOME/.bashrc" >/dev/null 2>&1
+        warn() {
+          echo "::warning::$1"
+          echo "- :warning: ${GITHUB_JOB}: $1" >> "$GITHUB_STEP_SUMMARY"
+        }
         [[ "$REPORT" = /* ]] || REPORT="${GITHUB_WORKSPACE}/${REPORT}"
         if [[ ! -f "$REPORT" ]]; then
-          echo "::warning::no retry report at ${REPORT}; nothing to mark"
+          # The XML-only upload then has nothing to send, so the first attempt's report stays.
+          warn "no retry report at ${REPORT}; the first attempt's report is kept unmarked"
           exit 0
         fi
         # A single-file upload stores only the basename; fall back to the artifact's sole XML.
@@ -49,8 +55,9 @@ runs:
           replaced=""
           [[ ${#xmls[@]} -eq 1 ]] && replaced="${xmls[0]}"
         fi
-        [[ -n "$replaced" ]] || echo "::warning::first attempt's report not found; marking retried=pod only"
-        uv run --no-project --with "$INGEST_LIB" \
-          python -m spyre_clickhouse_ingest.mark_retried pod "$REPORT" ${replaced:+"$replaced"} \
-          || echo "::warning::mark_retried failed; the report is uploaded unmarked"
+        [[ -n "$replaced" ]] || warn "first attempt's report not found; marking retried=pod only"
+        helper="${RUNNER_TEMP}/mark_retried.py"
+        curl -fsSL --retry 3 -o "$helper" "$HELPER_URL" \
+          && python3 -I "$helper" pod "$REPORT" ${replaced:+"$replaced"} \
+          || warn "mark_retried failed; the report is uploaded unmarked"
         exit 0

@@ -92,6 +92,8 @@ on:
           the REST API dispatch too, not just the web UI dropdown, so every
           value a real caller sends (like the "unit"/"trunk" tiers above)
           must be listed explicitly below.
+          "perf" runs spyre-perf-suite once per model in the perf_schedule
+          section of tests/model_lists/perf.yaml, one matrix leg each.
         required: false
         type: choice
         default: integration
@@ -100,6 +102,21 @@ on:
           - integration
           - regression
           - trunk
+          - perf
+      perf_schedule:
+        description: >-
+          Only used when test_type=perf: which section of
+          tests/model_lists/perf.yaml to benchmark. "nightly" is the small
+          hand-picked large-model set; "weekly" contains the registry entries
+          marked weekly_perf (exposed through WEEKLY_PERF_PATHS). Ignored for
+          every other test_type.
+          Mirrors the Makefile's PERF_SCHEDULE variable.
+        required: false
+        type: choice
+        default: nightly
+        options:
+          - nightly
+          - weekly
       run_id:
         description: >-
           UUID for this TEST RUN, minted by the dispatching orchestrator above the CI split.
@@ -117,9 +134,9 @@ on:
           paths exactly as they appear in tests/model_registry.py -- any
           registered path works, not just the smallest-per-adapter default
           used when this input is left empty. Leave empty (default) to fall
-          back to the model list in tests/model_lists/integration.yaml when
-          test_type is "integration" (the default), or to every registered
-          model per suite for any other test_type -- see run-tests below.
+          back to tests/model_lists/<test_type>.yaml when one exists
+          (integration.yaml, perf.yaml), or to every registered model per
+          suite for any other test_type -- see resolve-models below.
           An explicit models value applies to every test_type, including
           "integration".
         required: false
@@ -139,8 +156,9 @@ concurrency:
   # cancel-in-progress, silently killing a run mid-job with no test failure and
   # no error -- see the run/job-level symptoms this fixes. Disambiguating by
   # test_type stops different suites from colliding at all.
+  # perf also keys on perf_schedule, so a weekly perf dispatch never queues behind (and times out waiting on) a nightly one.
   group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.pull_request.html_url) || (github.event_name == 'workflow_dispatch'
-    && inputs.pr_url_hash != '' && inputs.pr_url_hash) || format('{0}-{1}', github.ref, inputs.test_type) }}
+    && inputs.pr_url_hash != '' && inputs.pr_url_hash) || format('{0}-{1}{2}', github.ref, inputs.test_type, inputs.test_type == 'perf' && format('-{0}', inputs.perf_schedule) || '') }}
   # Only cancel for a PR-context run (re-running the same PR should supersede
   # its own stale run). A non-PR dispatch is never "the same PR re-triggered" --
   # cancelling it destroys a run that has nothing superseding it, so a same
@@ -203,14 +221,9 @@ jobs:
           path: run-id.txt
           retention-days: 14
 
-  # ---------------------------------------------------------------------------
-  # Read tests/model_lists/integration.yaml and emit a space-separated model
-  # list as a step output. Only runs when test_type is "integration" (the
-  # default); for all other tiers the output is left empty so _test_matrix.yaml
-  # runs its full registry.
-  # ---------------------------------------------------------------------------
+  # Emit tests/model_lists/<test_type>.yaml as a space-separated list; '' (full registry) when the tier has no file.
   resolve-models:
-    name: Resolve integration model list
+    name: Resolve tier model list
     needs: provenance
     runs-on: ubuntu-latest
     outputs:
@@ -220,23 +233,41 @@ jobs:
         with:
           ref: ${{ inputs.ref || '' }}
           repository: ${{ inputs.repository != '' && inputs.repository || github.repository }}
-          sparse-checkout: tests/model_lists/integration.yaml
+          sparse-checkout: tests/model_lists
           sparse-checkout-cone-mode: false
-      - name: Read integration model list
+      - name: Read tier model list
         id: read-models
+        env:
+          TEST_TYPE: ${{ inputs.test_type || 'integration' }}
+          PERF_SCHEDULE: ${{ inputs.perf_schedule || 'nightly' }}
         run: |
           set -euo pipefail
-          if [[ "${{ inputs.test_type || 'integration' }}" != "integration" ]]; then
-            # Non-integration tiers get '' -> _test_matrix.yaml runs full registry.
+          list="tests/model_lists/${TEST_TYPE}.yaml"
+          # exclude.yaml is the standing exclusion list, not a tier list.
+          if [[ ! "${TEST_TYPE}" =~ ^[a-z_]+$ || "${TEST_TYPE}" == "exclude" || ! -f "${list}" ]]; then
+            echo "No ${list}: running the full registry for test_type=${TEST_TYPE}"
             echo "models=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # The perf tier's list is nested (nightly:/weekly:); every other tier is
+          # a flat top-level `models:` list. Pick the matching yq query -- this
+          # mirrors the Makefile's PERF_SCHEDULE section selection.
           # yq (mikefarah/yq) is preinstalled on ubuntu-latest runners.
-          models=$(yq '.models | join(" ")' tests/model_lists/integration.yaml)
+          if [[ "${TEST_TYPE}" == "perf" ]]; then
+            if [[ "${PERF_SCHEDULE}" != "nightly" && "${PERF_SCHEDULE}" != "weekly" ]]; then
+              echo "perf_schedule must be nightly or weekly (got '${PERF_SCHEDULE}')" >&2
+              exit 1
+            fi
+            query=".${PERF_SCHEDULE}.models | join(\" \")"
+          else
+            query='.models | join(" ")'
+          fi
+          models=$(yq "${query}" "${list}")
           if [[ -z "${models}" || "${models}" == "null" ]]; then
-            echo "tests/model_lists/integration.yaml has no models" >&2
+            echo "${list} has no models for query '${query}'" >&2
             exit 1
           fi
+          echo "Models from ${list} (${query}): ${models}"
           echo "models=${models}" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------

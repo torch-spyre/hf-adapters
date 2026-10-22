@@ -46,3 +46,26 @@ uv run --no-sync python -m models.<model folder>.run_huggingface
 The desired level of logging can be controlled via the environment variable **TEST_GEN_LOGGING_LEVEL**, which can be set to standard python logging levels, namely, one of **DEBUG**, **INFO**, **WARNING**, **ERROR**, and **CRITICAL**.
 
 The variable can be defined via command line or **.env** file in the current folder.
+
+## Generating a yaml file through spyre-inference (Spyre host)
+
+`models/gemma4-26b-a4b/run_spyre_inference.py` generates the Gemma4 yaml by loading
+`google/gemma-4-26B-A4B-it` through spyre-inference (vLLM with the `spyre_inference`
+plugin) instead of stock HuggingFace on CUDA. The generated yaml is kept in
+[torch-spyre/spyre-inference](https://github.com/torch-spyre/spyre-inference), not in this repository.
+
+It requires a Spyre host and the spyre-inference image. vLLM and the plugin are **not**
+dependencies of this repository (as with the vLLM script in `utils/module_discovery`), so
+do not run `uv sync` for it. Run it from `utils/model_ops/`:
+
+```
+python -m models.gemma4-26b-a4b.run_spyre_inference
+```
+
+The yaml is written to the current directory. Notes:
+
+- The model is gated, so `HF_TOKEN` must be set.
+- The first run downloads about 52 GB of weights and is slow.
+- Only one process may use a Spyre card at a time.
+- vLLM runs in-process (`VLLM_ENABLE_V1_MULTIPROCESSING=0`) and with its compile cache
+  disabled (`VLLM_DISABLE_COMPILE_CACHE=1`); otherwise the collector would see no graphs.

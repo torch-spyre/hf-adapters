@@ -110,3 +110,66 @@ def test_collector_restores_compile_fx_on_exit(collector):
     with collector():
         assert cfx.compile_fx is not before
     assert cfx.compile_fx is before
+
+
+def test_extract_meta_info_accepts_opaque_script_objects(collector):
+    """Opaque graph inputs carry no tensor metadata and must not abort tracing.
+
+    vLLM (torch >= 2.11) passes the encoded layer name to
+    ``unified_attention_with_output`` as a ``FakeScriptObject`` graph input.
+    ``_extract_meta_info`` used to fall through to ``raise RuntimeError``. The
+    ``FakeScriptObject`` below is built directly (it deep-copies the wrapped
+    object), so this checks the type handling, not vLLM's real graph; the
+    end-to-end failure was reproduced on a Spyre pod.
+    """
+    from torch._library.fake_class_registry import FakeScriptObject
+
+    fake = FakeScriptObject(object(), "test.OpaqueLayerName", object())
+    real = torch.jit.script(torch.nn.Linear(1, 1))._c
+
+    for opaque in (fake, real):
+        assert collector._extract_meta_info(opaque) == (None,) * 5
+
+
+def test_extract_meta_info_still_rejects_unknown_types(collector):
+    with pytest.raises(RuntimeError):
+        collector._extract_meta_info(object())
+
+
+@pytest.fixture(scope="module")
+def spyre_dummy_op():
+    """A custom op in a ``spyre`` namespace, standing in for torch-spyre's own ops.
+
+    A dedicated ``Library`` handle keeps the registration scoped to this module.
+    """
+    lib = torch.library.Library("spyre", "FRAGMENT")
+    lib.define("dummy_copy(Tensor x) -> Tensor")
+    lib.impl("dummy_copy", lambda x: x.clone(), "CompositeExplicitAutograd")
+    lib.impl("dummy_copy", lambda x: torch.empty_like(x), "Meta")
+    yield torch.ops.spyre.dummy_copy
+    lib._destroy()
+
+
+def test_torch_spyre_internal_ops_get_no_test_case(
+    collector, spyre_like_compile_fx, spyre_dummy_op
+):
+    """torch-spyre's own device-copy / dtype ops are not model ops.
+
+    They are skipped before ``ops_set`` and ``test_gen_ops_set`` are touched, so
+    they appear in neither list, while ordinary ops in the same graph still do.
+    """
+
+    def fn(x):
+        return spyre_dummy_op(x) * 2
+
+    # Test cases are only emitted for non-CPU float16 tensors; "meta" gives the
+    # collector that shape without a device.
+    x = torch.ones(4, 4, dtype=torch.float16, device="meta")
+    torch._dynamo.reset()
+    with collector() as ctx:
+        torch.compile(fn, backend="inductor")(x)
+
+    assert "torch.mul" in ctx.ops_list
+    assert "torch.mul" in ctx.test_gen_ops
+    assert not any(op.startswith("torch.ops.spyre.") for op in ctx.ops_list)
+    assert not any(op.startswith("torch.ops.spyre.") for op in ctx.test_gen_ops)

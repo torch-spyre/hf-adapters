@@ -1,6 +1,6 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-39-blue)
+![adapters](https://img.shields.io/badge/adapters-40-blue)
 ![compatible](https://img.shields.io/badge/compatible_models-10K%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -13,7 +13,7 @@ from `transformers`.
 
 ## Supported Models
 
-**39 adapters · 10K+ compatible models**
+**40 adapters · 10K+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
 **sequence classification** (sentiment / text categorisation),
@@ -23,7 +23,7 @@ Llama / Qwen / Granite / Mistral / Phi / Gemma / OLMo / GPT decoders to BERT /
 XLM-RoBERTa / MPNet / ModernBERT encoders, the Granite Vision 4.1 (SigLIP tower +
 Granite text), Mistral3 Vision (Pixtral tower + Mistral text), and Gemma 4
 (encoder-free and full-vision) multimodal VLMs, plus the DSpark block-propose drafters for
-Qwen 3 / Granite / Gemma 4.
+Qwen 3 / Granite / Gemma 4 and the XPress block-propose drafter (Gemma 4 26B-A4B).
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. The **canonical, per-adapter model lists** — verified
@@ -134,8 +134,9 @@ left-to-right causal generation.
 ## Extractive Question Answering
 
 Use `AutoSpyreModelForQuestionAnswering` with fine-tuned BERT-family QA models.
-The encoder runs on Spyre, the small token-classification head runs on CPU, and
-the normal Hugging Face output contract is preserved:
+The encoder and the `qa_outputs` head both run on Spyre, so only the start/end
+logits are copied back to CPU, and the normal Hugging Face output contract is
+preserved:
 
 ```python
 from transformers import AutoTokenizer
@@ -163,9 +164,9 @@ and hidden-state collection are not currently supported.
 
 Use `AutoSpyreModelForSequenceClassification` for models that return a single
 label per input (sentiment analysis, topic classification, natural language
-inference). The encoder runs on Spyre; the classification head runs on CPU.
-Returns a standard HuggingFace `SequenceClassifierOutput` with
-`logits [B, num_labels]` on CPU:
+inference). The encoder and the classification head both run on Spyre, so only
+the logits leave the device. Returns a standard HuggingFace
+`SequenceClassifierOutput` with `logits [B, num_labels]` on CPU:
 
 ```python
 from transformers import AutoTokenizer
@@ -189,8 +190,8 @@ print(labels)  # → ['POSITIVE', 'NEGATIVE']
 
 Use `AutoSpyreModelForTokenClassification` for token-level label prediction
 (named-entity recognition, part-of-speech tagging, chunking). The encoder runs on
-Spyre; the linear `classifier` head runs on CPU. Returns a standard HuggingFace
-`TokenClassifierOutput` with `logits [B, L, num_labels]`:
+Spyre, as does the linear `classifier` head. Returns a standard HuggingFace
+`TokenClassifierOutput` with `logits [B, L, num_labels]` on CPU:
 
 ```python
 from transformers import AutoTokenizer
