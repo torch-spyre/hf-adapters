@@ -491,6 +491,80 @@ def test_load_target_embedding_picks_text_decoder(module, tmp_path, sharded):
     torch.testing.assert_close(module.load_target_embedding(str(tmp_path)), embed)
 
 
+def _target_lm_head(seed: int = 4) -> torch.Tensor:
+    g = torch.Generator().manual_seed(seed)
+    return torch.randn(VOCAB, HIDDEN, generator=g) * 0.02
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@torch.no_grad()
+def test_untied_target_keeps_its_own_lm_head(module, tmp_path, dtype):
+    """Qwen3-8B-style targets (tie_word_embeddings=False) store a separate
+    lm_head: the drafter's base logits must use it, not the input embedding."""
+    _write_checkpoint(tmp_path, module)
+    embed, head = _target_embedding(), _target_lm_head()
+    model = module.load_model(
+        str(tmp_path),
+        target_embed_weight=embed,
+        target_lm_head_weight=head,
+        dtype=dtype,
+    )
+    torch.testing.assert_close(model.embed_tokens.weight, embed.to(dtype))
+    torch.testing.assert_close(model.lm_head.weight, head.to(dtype))
+    assert model.lm_head.weight is not model.embed_tokens.weight
+
+
+def test_untied_lm_head_drives_proposals(module):
+    """Swapping the target lm_head changes the drafts (it is really used)."""
+    feats, positions = _context()
+    drafts = []
+    for head in (None, _target_lm_head()):
+        model = module.build_drafter(_config())
+        weights = _backbone_weights(model) | _published(_training_head_weights())
+        module.load_drafter_weights(
+            model, weights, _target_embedding(), target_lm_head_weight=head
+        )
+        model = model.float().eval()
+        module.prepare_for_spyre(model, ctx_pad=CTX_PAD)
+        _unwrap_xpress(model)
+        drafts.append(module.propose_block(model, feats, positions, 7, num_passes=0))
+    assert not torch.equal(drafts[0], drafts[1])
+
+
+def test_load_rejects_mismatched_lm_head(module):
+    model = module.build_drafter(_config())
+    weights = _backbone_weights(model) | _published(_training_head_weights())
+    with pytest.raises(ValueError, match="lm_head"):
+        module.load_drafter_weights(
+            model,
+            weights,
+            _target_embedding(),
+            target_lm_head_weight=torch.zeros(VOCAB, HIDDEN + 1),
+        )
+
+
+@pytest.mark.parametrize("sharded", [False, True])
+def test_load_target_lm_head(module, tmp_path, sharded):
+    """Returns the stored lm_head of an untied target, None for a tied one."""
+    embed, head = _target_embedding(), _target_lm_head()
+    tensors = {"model.embed_tokens.weight": embed, "lm_head.weight": head}
+    if sharded:
+        weight_map = {}
+        for i, (name, t) in enumerate(tensors.items()):
+            save_file({name: t}, tmp_path / f"shard-{i}.safetensors")
+            weight_map[name] = f"shard-{i}.safetensors"
+        index = {"metadata": {}, "weight_map": weight_map}
+        (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
+    else:
+        save_file(tensors, tmp_path / "model.safetensors")
+    torch.testing.assert_close(module.load_target_lm_head(str(tmp_path)), head)
+
+    tied = tmp_path / "tied"
+    tied.mkdir()
+    save_file({"model.embed_tokens.weight": embed}, tied / "model.safetensors")
+    assert module.load_target_lm_head(str(tied)) is None
+
+
 def test_load_rejects_incomplete_backbone(module, tmp_path):
     model = module.build_drafter(_config())
     weights = _backbone_weights(model) | _published(_training_head_weights())
