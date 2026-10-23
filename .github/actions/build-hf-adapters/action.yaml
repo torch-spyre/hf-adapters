@@ -281,12 +281,20 @@ runs:
           setup_timing() { awk -v p="$1" -v a="$2" -v b="$(date +%s.%N)" -v s="$3" \
             'BEGIN { printf "SETUP-TIMING phase=%s seconds=%.1f status=%s\n", p, b - a, s }'; }
           cd /home/senuser/torch-spyre
-          echo "Pinning torch-spyre to ${TORCH_SPYRE_SHA}"
-          git fetch --tags --force origin "${TORCH_SPYRE_SHA}" || \
-            git fetch --tags --force origin
-          git checkout --force "${TORCH_SPYRE_SHA}"
-          git submodule sync --recursive
-          git submodule update --init --recursive --force
+          # The image venv already has torch-spyre built from this checkout, so a
+          # baked HEAD equal to the pin needs no checkout and no rebuild.
+          BAKED_SHA="$(git rev-parse HEAD)"
+          if [[ "$BAKED_SHA" == "$TORCH_SPYRE_SHA" ]]; then
+            echo "Baked torch-spyre already at pinned ${TORCH_SPYRE_SHA}; reusing the installed build."
+            SKIP_TORCH_SPYRE_INSTALL=1
+          else
+            echo "Pinning torch-spyre to ${TORCH_SPYRE_SHA} (baked HEAD ${BAKED_SHA})"
+            git fetch --tags --force origin "${TORCH_SPYRE_SHA}" || \
+              git fetch --tags --force origin
+            git checkout --force "${TORCH_SPYRE_SHA}"
+            git submodule sync --recursive
+            git submodule update --init --recursive --force
+          fi
           git log -1 --oneline
           setup_timing ts-pin "$setup_t0" ok
           cd "$CLONED_HF_ADAPTERS_DIR"
@@ -297,20 +305,26 @@ runs:
           t=$(date +%s.%N)
           uv add torch-spyre /home/senuser/torch-spyre
           setup_timing uv-add "$t" ok
-          # `uv sync --frozen --verbose --refresh $GROUP_FLAGS`, except that
-          # torch-spyre comes from the wheel this run's resolve-torch-spyre job
-          # built (TS_WHEEL_CACHE_ROLE=prime there) when one with a matching key
-          # is on /storage-1; any miss or error runs the plain sync. See the script.
-          TS_WHEEL_CACHE="${GITHUB_ACTION_PATH:-}/torch_spyre_wheel_cache.sh"
-          TS_WHEEL_CACHE_STATUS_FILE="$(mktemp)"
-          export TS_WHEEL_CACHE_STATUS_FILE
-          if [[ -f "$TS_WHEEL_CACHE" ]]; then
-            bash "$TS_WHEEL_CACHE" sync $GROUP_FLAGS
+          if [[ -n "${SKIP_TORCH_SPYRE_INSTALL:-}" ]]; then
+            # --inexact: without it, uv uninstalls a --no-install-package target.
+            uv sync --frozen --verbose --refresh --inexact --no-install-package torch-spyre $GROUP_FLAGS
+            setup_timing setup-total "$setup_t0" baked
           else
-            echo "off" > "$TS_WHEEL_CACHE_STATUS_FILE"
-            uv sync --frozen --verbose --refresh $GROUP_FLAGS
+            # `uv sync --frozen --verbose --refresh $GROUP_FLAGS`, except that
+            # torch-spyre comes from the wheel this run's resolve-torch-spyre job
+            # built (TS_WHEEL_CACHE_ROLE=prime there) when one with a matching key
+            # is on /storage-1; any miss or error runs the plain sync. See the script.
+            TS_WHEEL_CACHE="${GITHUB_ACTION_PATH:-}/torch_spyre_wheel_cache.sh"
+            TS_WHEEL_CACHE_STATUS_FILE="$(mktemp)"
+            export TS_WHEEL_CACHE_STATUS_FILE
+            if [[ -f "$TS_WHEEL_CACHE" ]]; then
+              bash "$TS_WHEEL_CACHE" sync $GROUP_FLAGS
+            else
+              echo "off" > "$TS_WHEEL_CACHE_STATUS_FILE"
+              uv sync --frozen --verbose --refresh $GROUP_FLAGS
+            fi
+            setup_timing setup-total "$setup_t0" "$(cat "$TS_WHEEL_CACHE_STATUS_FILE" 2>/dev/null || echo '?')"
           fi
-          setup_timing setup-total "$setup_t0" "$(cat "$TS_WHEEL_CACHE_STATUS_FILE" 2>/dev/null || echo '?')"
         else
           cd "$CLONED_HF_ADAPTERS_DIR"
           # though we pin to main
