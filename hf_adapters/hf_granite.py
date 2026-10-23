@@ -31,6 +31,7 @@ import torch
 
 from hf_adapters.hf_common import (
     _SDPA_MAX_SEQUENCE_TILE_SIZE,
+    PaddedGatedMLP,
     embed_text_tokens,
     get_backbone,
     prepare_lm_head_for_spyre,
@@ -39,6 +40,57 @@ from hf_adapters.hf_common import (
     run_lm_head,
     text_config,
 )
+
+
+def _can_pad_mlp(mlp):
+    """Only widen the standard inference MLP with local TP channel semantics."""
+    from transformers.activations import SiLUActivation
+    from transformers.models.granite.modeling_granite import GraniteMLP
+
+    if (
+        type(mlp) is not GraniteMLP
+        or mlp.training
+        or type(mlp.act_fn) not in (torch.nn.SiLU, SiLUActivation)
+        or "forward" in mlp.__dict__
+        or mlp._forward_pre_hooks
+        or mlp._forward_hooks
+        or mlp._backward_hooks
+        or "forward" in mlp.act_fn.__dict__
+        or mlp.act_fn._forward_pre_hooks
+        or mlp.act_fn._forward_hooks
+    ):
+        return False
+    for name, role in (
+        ("gate_proj", "colwise"),
+        ("up_proj", "colwise"),
+        ("down_proj", "rowwise"),
+    ):
+        proj = getattr(mlp, name)
+        if (
+            type(proj) is not torch.nn.Linear
+            or proj.weight.dtype not in (torch.float16, torch.bfloat16)
+            or "forward" in proj.__dict__
+        ):
+            return False
+        # Unhooked projections are local. Hooked projections need the exact
+        # supported Spyre style, with no extra hooks that could change channels.
+        if proj._forward_pre_hooks or proj._forward_hooks:
+            if (
+                getattr(proj, "_spyre_mlp_width_role", None) != role
+                or len(proj._forward_pre_hooks) != 1
+                or len(proj._forward_hooks) != 1
+                or getattr(proj, "_spyre_mlp_width_hooks", None)
+                != (
+                    tuple(proj._forward_pre_hooks.items()),
+                    tuple(proj._forward_hooks.items()),
+                )
+            ):
+                return False
+    width = mlp.down_proj.weight.shape[1]
+    return (
+        mlp.gate_proj.weight.shape[0] == mlp.up_proj.weight.shape[0] == width
+        and width % 256 != 0
+    )
 
 
 def _run_backbone_forward(
@@ -99,6 +151,11 @@ def prepare_for_spyre(model):
         model, logits_processor=lambda logits: logits / logits_scaling
     )
     backbone = get_backbone(model)
+    # Four fp16/bf16 output sticks balance the 32-core prefill projection.
+    # Apply after TP loading: each rank preserves its original channel prefix.
+    for layer in backbone.layers:
+        if _can_pad_mlp(layer.mlp):
+            layer.mlp = PaddedGatedMLP(layer.mlp, 256)
     model._spyre_compiled_blocks = prepare_standard_gqa_blocks(backbone.layers, True)
     model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
     model._spyre_prefill_chunk_size = _SDPA_MAX_SEQUENCE_TILE_SIZE

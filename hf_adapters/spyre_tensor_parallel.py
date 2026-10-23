@@ -82,6 +82,18 @@ def _copy_embedding(shard, *, device, dtype):
 class SpyreColwiseParallel(ColwiseParallel):
     """Colwise checkpoint slicing followed by a Linear-aware Spyre DMA."""
 
+    def prepare_module_tp(self, module, device_mesh, **kwargs):
+        super().prepare_module_tp(module, device_mesh, **kwargs)
+        module._spyre_mlp_width_role = (
+            "colwise"
+            if type(self) is SpyreColwiseParallel and not self.gather_output
+            else None
+        )
+        module._spyre_mlp_width_hooks = (
+            tuple(module._forward_pre_hooks.items()),
+            tuple(module._forward_hooks.items()),
+        )
+
     def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
         # Weight converters for modules with auxiliary scalar state (for
         # example Gemma 4 clipped linears) reuse the projection's distributed
@@ -112,6 +124,18 @@ class SpyreColwiseGatherOutputParallel(SpyreColwiseParallel):
 
 class SpyreRowwiseParallel(RowwiseParallel):
     """Rowwise checkpoint slicing followed by a Linear-aware Spyre DMA."""
+
+    def prepare_module_tp(self, module, device_mesh, **kwargs):
+        super().prepare_module_tp(module, device_mesh, **kwargs)
+        module._spyre_mlp_width_role = (
+            "rowwise"
+            if type(self) is SpyreRowwiseParallel and not self.split_input
+            else None
+        )
+        module._spyre_mlp_width_hooks = (
+            tuple(module._forward_pre_hooks.items()),
+            tuple(module._forward_hooks.items()),
+        )
 
     def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
         # See SpyreColwiseParallel: scalar metadata belonging to a sharded
