@@ -19,6 +19,7 @@ parent does all the writing, which keeps database credentials and connection
 state in one process.
 """
 
+import gc
 import os
 import sys
 import traceback as _traceback
@@ -162,6 +163,18 @@ def _process_batch(
             if rec["failure_category"] is None:
                 rec["failure_category"] = FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
         results.append(rec)
+        # Reclaim this model before loading the next one in the batch. When
+        # GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS > 1, several models are
+        # evaluated in the same living child, and eval_model's loaded weights
+        # are only dropped by scope on its return — with reference cycles that
+        # the torch/HF object graphs routinely have, that memory is not actually
+        # freed until the cyclic collector runs. Forcing gc.collect() here keeps
+        # peak RSS to roughly one model instead of the whole batch, which is the
+        # per-child driver of the node-level OOM the scheduled scan hit. (This is
+        # the opposite trade-off from the os._exit teardown below: there gc is
+        # pointless because the kernel reclaims on exit; here the process lives
+        # on to load more models, so the reclaim pays for itself.)
+        gc.collect()
         print(
             f"{ts()}       child[{os.getpid()}] finished model "
             f"{len(results)}/{len(batch)}: {model_path!r}  "
