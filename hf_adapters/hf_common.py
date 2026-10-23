@@ -35,7 +35,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from sympy import factorint
 from transformers import GenerationConfig
-from transformers.generation import GenerateDecoderOnlyOutput
+from transformers.generation import GenerateDecoderOnlyOutput, StoppingCriteriaList
 
 # Rank-aware device for multi-Spyre (tensor-parallel) runs. torchrun sets
 # LOCAL_RANK before this module is imported, so each process binds to its local
@@ -2974,6 +2974,122 @@ def select_next_token(
     return (tokens, scores) if return_scores else tokens
 
 
+@dataclass
+class _PrefillCacheState:
+    max_cache_len: int
+    prefill_kv_len: int
+    dtype: torch.dtype
+    key_caches: list[torch.Tensor]
+    value_caches: list[torch.Tensor]
+
+
+def _initialize_prefill_caches(
+    model,
+    batch_size,
+    padded_len,
+    prompt_offsets,
+    max_new_tokens=0,
+    *,
+    prefill_chunk_size=None,
+    device=None,
+):
+    """Initialize fresh KV caches for generation or scoring.
+
+    Set the model's prompt offsets, padded prompt length, and optional
+    prefill chunk size before allocating caches, because model-specific
+    cache allocators may use these values to determine cache sizes.
+
+    For one-shot prefill, set the chunk size to None, replacing any value
+    left by a previous chunked call. If device is omitted, use DEVICE.
+    """
+    max_cache_len = generation_cache_len(padded_len, max_new_tokens)
+    prefill_kv_len = (
+        _sdpa_compatible_kv_length(padded_len)
+        if prefill_chunk_size is not None
+        else max_cache_len
+    )
+    # Compact-cache state needs the left-padding offsets so its runtime attention
+    # mask can exclude padding after prompt rows move to anchored coordinates.
+    model._spyre_prompt_offsets = prompt_offsets
+    # Specialized cache allocators and prefill/decode state transitions need the
+    # padded prompt extent before caches are allocated. Keep this as host metadata;
+    # it is not an input to compiled graphs.
+    model._spyre_padded_prompt_len = padded_len
+    # Specialized cache allocators can use the active chunk geometry to keep
+    # local-attention caches bounded during prefill. Store None for one-shot
+    # prefill so an earlier generate call cannot leave stale chunk metadata.
+    model._spyre_active_prefill_chunk_size = prefill_chunk_size
+
+    # Initialize empty KV caches. Per-layer shapes come from the model
+    # (``_spyre_kv_shapes``) for heterogeneous architectures like Gemma 4,
+    # otherwise a single uniform shape derived from the config.
+    # Match KV cache and mask dtype to the model's weight dtype.
+    dtype = get_model_dtype(model)
+    key_caches, value_caches = allocate_kv_caches(
+        model, batch_size, max_cache_len, dtype, device=device
+    )
+    return _PrefillCacheState(
+        max_cache_len, prefill_kv_len, dtype, key_caches, value_caches
+    )
+
+
+def _iter_prefill_outputs(
+    run_forward_fn: Callable,
+    model,
+    input_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+    prompt_offsets: torch.Tensor,
+    cache_state: _PrefillCacheState,
+    *,
+    chunk_size=None,
+    device=DEVICE,
+) -> Iterator[torch.Tensor]:
+    """Yield text-prefill outputs in order, leaving output retention to callers.
+
+    The forward may return logits or hidden states. Generation keeps only the
+    final output; scoring collects every chunk. Execution stays in the caller's
+    grad context, including when this iterator is consumed by ``prefill_logits``.
+    """
+    batch_size, padded_len = input_ids.shape
+    chunked_prefill = chunk_size is not None
+    query_size = chunk_size if chunked_prefill else padded_len
+    # Chunked prefill uses prefix views of the full decode caches. One-shot
+    # prefill must retain the original tensors: compiled in-place updates
+    # through even full-extent views may not seed decode caches on Spyre.
+    key_caches = _prefill_cache_inputs(
+        cache_state.key_caches, cache_state.prefill_kv_len, chunked_prefill
+    )
+    value_caches = _prefill_cache_inputs(
+        cache_state.value_caches, cache_state.prefill_kv_len, chunked_prefill
+    )
+    # Fixed Lq/Lk avoids compiling a graph per prefix length. Use the builder
+    # even for one-shot prefill to retain its device-side sliding-window masks.
+    mask_builder = _ChunkedPrefillMaskBuilder(
+        batch_size,
+        query_size,
+        cache_state.prefill_kv_len,
+        prompt_offsets,
+        dtype=cache_state.dtype,
+        device=device,
+    )
+    for chunk_start in range(0, padded_len, query_size):
+        if chunked_prefill:
+            chunk_end = chunk_start + query_size
+            chunk_ids = input_ids[:, chunk_start:chunk_end]
+            chunk_positions = position_ids[:, chunk_start:chunk_end]
+        else:
+            chunk_ids, chunk_positions = input_ids, position_ids
+        yield run_forward_fn(
+            model,
+            chunk_ids.to(device),
+            chunk_positions.to(device),
+            mask_builder.build(chunk_start),
+            key_caches,
+            value_caches,
+            cache_index=make_cache_index(chunk_start, query_size, device),
+        )
+
+
 def generate(
     run_forward_fn: Optional[Callable],
     model,
@@ -2995,6 +3111,7 @@ def generate(
     decode_fn: Optional[Callable] = None,
     token_aligned_inputs: Optional[dict[str, tuple[torch.Tensor, Any]]] = None,
     streamer=None,
+    stopping_criteria=None,
     **kwargs,
 ):
     """Model-agnostic generation: optional chunked prefill, then token decode.
@@ -3049,6 +3166,10 @@ def generate(
         timing: Print per-token latency.
         streamer: Optional HF ``BaseStreamer`` (e.g. ``TextIteratorStreamer``);
             receives the prompt, then each selected token. Batch size 1 only.
+        stopping_criteria: Optional HF stopping-criteria callable/list. Evaluated
+            on CPU after each token using the caller-visible sequence (without
+            internal block padding) and accumulated processed scores when
+            ``return_dict_in_generate`` and ``output_scores`` are enabled.
         prefill_backbone_fn: Optional adapter backbone with the same arguments
             as ``run_forward_fn``, returning hidden states. Text prefill runs
             this for every chunk, then applies the prepared LM head only to
@@ -3085,6 +3206,9 @@ def generate(
     cfg, eos_ids, pad_token_id = _resolve_generation_params(
         model, generation_config, overrides, kwargs
     )
+
+    if isinstance(stopping_criteria, list) and not callable(stopping_criteria):
+        stopping_criteria = StoppingCriteriaList(stopping_criteria)
 
     configured_prefill_chunk_size = getattr(model, "_spyre_prefill_chunk_size", None)
     requested_prefill_chunk_size = getattr(cfg, "prefill_chunk_size", None)
@@ -3171,32 +3295,18 @@ def generate(
     query_chunk_size = prefill_chunk_size if chunked_prefill else padded_len
     assert query_chunk_size is not None
 
-    max_cache_len = generation_cache_len(padded_len, effective_max_new_tokens)
-    prefill_kv_len = (
-        _sdpa_compatible_kv_length(padded_len) if chunked_prefill else max_cache_len
+    cache_state = _initialize_prefill_caches(
+        model,
+        batch_size,
+        padded_len,
+        prompt_offsets,
+        effective_max_new_tokens,
+        prefill_chunk_size=query_chunk_size if chunked_prefill else None,
     )
-    # Compact-cache state needs the left-padding offsets so its runtime attention
-    # mask can exclude padding after prompt rows move to anchored coordinates.
-    model._spyre_prompt_offsets = prompt_offsets
-    # Specialized cache allocators and prefill/decode state transitions need the
-    # padded prompt extent before caches are allocated. Keep this as host metadata;
-    # it is not an input to compiled graphs.
-    model._spyre_padded_prompt_len = padded_len
-    # Specialized cache allocators can use the active chunk geometry to keep
-    # local-attention caches bounded during prefill. Store None for one-shot
-    # prefill so an earlier generate call cannot leave stale chunk metadata.
-    model._spyre_active_prefill_chunk_size = (
-        query_chunk_size if chunked_prefill else None
-    )
-
-    # Initialize empty KV caches. Per-layer shapes come from the model
-    # (``_spyre_kv_shapes``) for heterogeneous architectures like Gemma 4,
-    # otherwise a single uniform shape derived from the config.
-    # Match KV cache and mask dtype to the model's weight dtype.
-    model_d_type = get_model_dtype(model)
-    key_caches, value_caches = allocate_kv_caches(
-        model, batch_size, max_cache_len, model_d_type
-    )
+    max_cache_len = cache_state.max_cache_len
+    prefill_kv_len = cache_state.prefill_kv_len
+    model_d_type = cache_state.dtype
+    key_caches, value_caches = cache_state.key_caches, cache_state.value_caches
 
     # Decode state. Every decode step writes exactly one token at
     # ``current_cache_len``, so generated tokens are contiguous from ``padded_len``.
@@ -3217,22 +3327,9 @@ def generate(
 
         if i == 0:
             # --- PREFILL ---
-            # Keep prefill independent of the larger decode capacity.  Most
-            # prompt lengths remain square (including exact 8K/32K); irregular
-            # lengths gain only enough inactive KV columns for the selected
-            # compiler block to divide Lk.  These prefix views share storage,
-            # so in-place KV updates still seed the full decode caches.
-            # Preserve the original tensors for one-shot prefill. Even a
-            # full-extent slice is a view, and an in-place compiled update
-            # through that view does not reliably seed the tensors consumed by
-            # decode on Spyre.
-            prefill_key_caches = _prefill_cache_inputs(
-                key_caches, prefill_kv_len, chunked_prefill
-            )
-            prefill_value_caches = _prefill_cache_inputs(
-                value_caches, prefill_kv_len, chunked_prefill
-            )
             if prefill_fn is not None:
+                # Custom hooks force chunked_prefill=False above, so they use
+                # the original full caches, exactly as decode does (no views).
                 prefill_mask = build_prefill_mask(
                     batch_size,
                     padded_len,
@@ -3245,38 +3342,25 @@ def generate(
                     input_ids=input_ids,
                     position_ids=position_ids,
                     attention_mask=prefill_mask,
-                    key_caches=prefill_key_caches,
-                    value_caches=prefill_value_caches,
+                    key_caches=key_caches,
+                    value_caches=value_caches,
                     cache_index=make_cache_index(0, padded_len, DEVICE),
                     **normalized_token_inputs,
                 )
             else:
-                # Keep Lk fixed at the complete prefill extent while advancing
-                # Lq. Future cache slots are zero and masked, and fixed shapes
-                # avoid compiling one attention graph for every prefix length.
-                prefill_mask_builder = _ChunkedPrefillMaskBuilder(
-                    batch_size,
-                    query_chunk_size,
-                    prefill_kv_len,
-                    prompt_offsets,
-                    dtype=model_d_type,
-                    device=DEVICE,
-                )
                 text_prefill_fn = prefill_backbone_fn or run_forward_fn
-                for chunk_start in range(0, padded_len, query_chunk_size):
-                    chunk_end = chunk_start + query_chunk_size
-                    prefill_mask = prefill_mask_builder.build(chunk_start)
-                    prefill_output = text_prefill_fn(  # type: ignore[misc]
-                        model,
-                        input_ids[:, chunk_start:chunk_end].to(DEVICE),
-                        position_ids[:, chunk_start:chunk_end].to(DEVICE),
-                        prefill_mask,
-                        prefill_key_caches,
-                        prefill_value_caches,
-                        cache_index=make_cache_index(
-                            chunk_start, query_chunk_size, DEVICE
-                        ),
-                    )
+                assert text_prefill_fn is not None
+                for prefill_output in _iter_prefill_outputs(
+                    text_prefill_fn,
+                    model,
+                    input_ids,
+                    position_ids,
+                    prompt_offsets,
+                    cache_state,
+                    chunk_size=query_chunk_size if chunked_prefill else None,
+                    device=DEVICE,
+                ):
+                    pass  # Populate every chunk's KV; retain only the last output.
                 # Every chunk must populate KV, but only the final prompt
                 # token needs a vocabulary projection for generation.
                 logits = (
@@ -3385,6 +3469,18 @@ def generate(
 
         if eos_ids is not None:
             finished |= torch.isin(next_tokens, eos_ids)
+
+        if stopping_criteria is not None:
+            # Criteria see the original caller prefix, not internal block pads.
+            # Scores follow HF's contract: None unless score collection is on.
+            sequences_so_far = torch.cat(
+                [orig_input_ids, torch.stack(generated_columns, dim=1)], dim=1
+            ).to(torch.long)
+            stopped = stopping_criteria(
+                sequences_so_far,
+                tuple(generation_scores) if collect_scores else None,
+            )
+            finished |= torch.as_tensor(stopped, dtype=torch.bool, device="cpu")
 
         if finished.all():
             break
@@ -4033,6 +4129,65 @@ def prepare_standard_gqa(model):
     backbone = get_backbone(model)
     model._spyre_compiled_blocks = prepare_standard_gqa_blocks(backbone.layers)
     model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
+
+
+# ---------------------------------------------------------------------------
+# Causal-LM scoring prefill driver
+# ---------------------------------------------------------------------------
+
+
+@torch.no_grad()
+def prefill_logits(
+    run_forward_fn: Callable,
+    model,
+    input_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+    prompt_offsets: torch.Tensor,
+):
+    """Run fresh-cache prefill and return logits for every supplied position.
+
+    The caller owns input validation, padding and positions. Pad ``input_ids``
+    to the model's ``_spyre_prefill_chunk_size`` when configured, otherwise to
+    ``BLOCK_SIZE``. Supply matching ``position_ids`` of shape ``[B, L]`` already
+    on the model's device, plus CPU ``prompt_offsets`` of shape ``[B]`` giving
+    the number of left-padding columns to exclude from attention (zero for
+    right padding). Pass the adapter's ``_run_forward`` as ``run_forward_fn``.
+
+    Returns the adapter's raw ``[B, L, padded_vocab]`` logits.
+
+    Chunked prefill reuses generation's masks and KV-cache geometry, but applies
+    the LM head to every chunk and concatenates all logits in input order.
+    There is no sampling or decode.
+    """
+    batch_size, padded_len = input_ids.shape
+    chunk_size = getattr(model, "_spyre_prefill_chunk_size", None)
+    if chunk_size is not None and padded_len % chunk_size:
+        raise ValueError(
+            f"prefill_logits input length ({padded_len}) must be padded to "
+            f"the model's prefill chunk size ({chunk_size})"
+        )
+    device = model.device
+    cache_state = _initialize_prefill_caches(
+        model,
+        batch_size,
+        padded_len,
+        prompt_offsets,
+        prefill_chunk_size=chunk_size,
+        device=device,
+    )
+    outputs = list(
+        _iter_prefill_outputs(
+            run_forward_fn,
+            model,
+            input_ids,
+            position_ids,
+            prompt_offsets,
+            cache_state,
+            chunk_size=chunk_size,
+            device=device,
+        )
+    )
+    return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=1)
 
 
 # ---------------------------------------------------------------------------

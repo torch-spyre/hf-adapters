@@ -1,0 +1,130 @@
+name: LM evaluation
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/lm-eval.yaml"
+      - "evals/lm_eval/**"
+      - "tests/model_lists/perf.yaml"
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      config:
+        description: Benchmark YAML/JSON path in this checkout
+        type: string
+        default: evals/lm_eval/benchmarks.yaml
+      models:
+        description: Space-separated model paths; empty uses perf.yaml nightly.models
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lm-eval-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      source_sha: ${{ steps.plan.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install PyYAML==6.0.3
+      - name: Validate config and select models
+        id: plan
+        env:
+          EVAL_CONFIG: ${{ inputs.config || 'evals/lm_eval/benchmarks.yaml' }}
+          EVAL_MODELS: ${{ inputs.models || '' }}
+        shell: bash
+        run: |
+          args=()
+          if [[ -n "$EVAL_MODELS" ]]; then
+            read -r -a models <<< "$EVAL_MODELS"
+            for model in "${models[@]}"; do
+              args+=(--model "$model")
+            done
+          fi
+          matrix=$(python -m evals.lm_eval.run_benchmarks \
+            --config "$EVAL_CONFIG" --print-matrix "${args[@]}")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  evaluate:
+    name: LM eval (${{ matrix.model }})
+    needs: plan
+    runs-on: [x86_64, spyre_pf_x1, linux, image_torch_spyre]
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      UV_NO_SYNC: "1"
+      UV_PROJECT_ENVIRONMENT: /home/senuser/.venv
+      CI: ""
+      CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
+      HF_HOME: /storage-1/hf-adapters/.cache/huggingface
+      # Datasets need network access even when model weights are cached.
+      HF_HUB_OFFLINE: "0"
+      HF_DATASETS_OFFLINE: "0"
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      EVAL_MODEL: ${{ matrix.model }}
+      EVAL_CONFIG: ${{ inputs.config || 'evals/lm_eval/benchmarks.yaml' }}
+      EVAL_RESULTS: ${{ github.workspace }}/evals/lm_eval/runs/ci-${{ matrix.key }}
+    steps:
+      - name: Checkout CI helpers
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
+          sparse-checkout-cone-mode: false
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ needs.plan.outputs.source_sha }}
+          # Exercise the torch-spyre supplied by the runner image.
+          prebaked_image: "true"
+      - name: Install pinned eval dependencies
+        shell: bash
+        run: |
+          source /etc/bashrc
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv pip install --python "$UV_PROJECT_ENVIRONMENT/bin/python" \
+            -r evals/lm_eval/requirements.txt
+      - name: Run benchmark suite and compare references
+        shell: bash
+        run: |
+          source /etc/bashrc
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          export PYTHONPATH="$CLONED_HF_ADAPTERS_DIR${PYTHONPATH:+:$PYTHONPATH}"
+          "$UV_PROJECT_ENVIRONMENT/bin/python" -u -m evals.lm_eval.run_benchmarks \
+            --backend spyre --model "$EVAL_MODEL" --config "$EVAL_CONFIG" \
+            --reference-dir evals/lm_eval/references --output-dir "$EVAL_RESULTS"
+      - name: Publish metric summary
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "$EVAL_RESULTS/summary.md" ]]; then
+            cat "$EVAL_RESULTS/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No benchmark summary was produced; check setup and run logs." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload results and per-benchmark logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lm-eval-${{ matrix.key }}
+          path: ${{ env.EVAL_RESULTS }}
+          if-no-files-found: warn
+          retention-days: 30
