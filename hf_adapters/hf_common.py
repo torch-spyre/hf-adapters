@@ -1647,7 +1647,14 @@ def run_lm_head(model, hidden_states, *, logits_to_keep: int = 0):
     if lm_head_forward is None:
         raise RuntimeError("the model has not had an LM head prepared for Spyre")
     if logits_to_keep:
-        hidden_states = hidden_states[:, -logits_to_keep:, :].contiguous()
+        selected = hidden_states[:, -logits_to_keep:, :]
+        if logits_to_keep == 1 and hidden_states.shape[-2] > 1:
+            # A last-row view can be logically contiguous while retaining the
+            # full prefill buffer's device layout. Materialize a compact row
+            # so the head can use the same vector plan as decode.
+            hidden_states = selected.clone(memory_format=torch.contiguous_format)
+        else:
+            hidden_states = selected.contiguous()
     return lm_head_forward(hidden_states)
 
 
@@ -3564,6 +3571,54 @@ class StandardGQABlock(nn.Module):
 def make_standard_gqa_block(layer, is_res_mul: bool | None = None):
     """Build and compile one complete standard GQA block."""
     return torch.compile(StandardGQABlock(layer, is_res_mul), dynamic=False)
+
+
+class PaddedGatedMLP(nn.Module):
+    """An explicit wider pointwise chain with the original down-projection K.
+
+    Construct after checkpoint loading and TP sharding. Keep the projection
+    modules themselves so their TP hooks and the down projection stay intact.
+    The discarded channels never participate in a reduction, even if they
+    contain NaNs. Parameter names and external activation shapes are unchanged.
+    """
+
+    def __init__(self, mlp, multiple: int):
+        super().__init__()
+        self.gate_proj = mlp.gate_proj
+        self.up_proj = mlp.up_proj
+        self.down_proj = mlp.down_proj
+        self.act_fn = mlp.act_fn
+        self.logical_width = int(self.down_proj.weight.shape[1])
+        width = math.ceil(self.logical_width / multiple) * multiple
+        for proj in (self.gate_proj, self.up_proj):
+            if proj.weight.shape[0] != self.logical_width:
+                raise ValueError("Gated MLP projections must share the local TP width")
+            device, dtype = proj.weight.device, proj.weight.dtype
+            # CPU preparation also handles already placed TP shards. Reuse the
+            # normal Linear DMA once; no padding or copies enter the forward.
+            weight = proj.weight.detach().cpu()
+            padded = weight.new_zeros((width, weight.shape[1]))
+            padded[: self.logical_width].copy_(weight)
+            if device.type == "spyre":
+                from hf_adapters.spyre_tensor_parallel import _copy_linear
+
+                padded = _copy_linear(padded, device=device, dtype=dtype)
+            else:
+                padded = padded.to(device)
+            proj.weight = nn.Parameter(padded, requires_grad=proj.weight.requires_grad)
+            if proj.bias is not None:
+                bias = proj.bias.detach().cpu()
+                padded_bias = bias.new_zeros(width)
+                padded_bias[: self.logical_width].copy_(bias)
+                proj.bias = nn.Parameter(
+                    padded_bias.to(device), requires_grad=proj.bias.requires_grad
+                )
+            proj.out_features = width
+        self.train(mlp.training)
+
+    def forward(self, x):
+        product = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+        return self.down_proj(product[..., : self.logical_width])
 
 
 def prepare_standard_gqa_blocks(layers, is_res_mul: bool | None = None):
