@@ -2659,6 +2659,13 @@ def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
         # model on device before move_model_to_spyre runs, the saved submodule
         # is on-device too; the restore would leave it on device rather than CPU.
         setattr(parent, attr, submod.to(device="cpu", dtype=dtype))
+
+    # Prevent the HF pipeline from calling model.to("cuda:0") which would
+    # displace Spyre-resident weights.  The pipeline skips its device-move
+    # when hf_device_map is set (mirrors accelerate-loaded model behaviour).
+    if not hasattr(model, "hf_device_map"):
+        model.hf_device_map = {"": DEVICE}
+
     print("Model on Spyre ready.")
 
 
@@ -4281,6 +4288,17 @@ def prefill_masked_lm(
         head = model.lm_head
         head_device = next(head.parameters()).device
         logits = head(last_hidden_state.to(head_device))
+    elif hasattr(model, "vocab_transform") and hasattr(model, "vocab_projector"):
+        # DistilBERT-style head: vocab_transform -> activation -> vocab_layer_norm
+        # -> vocab_projector.  All three submodules are kept on CPU.
+        head_device = next(model.vocab_transform.parameters()).device
+        hidden = last_hidden_state.to(head_device)
+        hidden = model.vocab_transform(hidden)
+        if hasattr(model, "activation"):
+            hidden = model.activation(hidden)
+        if hasattr(model, "vocab_layer_norm"):
+            hidden = model.vocab_layer_norm(hidden)
+        logits = model.vocab_projector(hidden)
     else:
         raise SpyreUnsupportedModelError(
             f"Unsupported masked-LM head layout for {type(model).__name__}"

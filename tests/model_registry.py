@@ -618,6 +618,12 @@ MASKED_LM_MODELS = {
         "adapter": "hf_bert.py",
         "size": "0.1b",
     },
+    "distilbert_mlm": {
+        "name": "DistilBERT base uncased",
+        "path": "distilbert/distilbert-base-uncased",
+        "adapter": "hf_distilbert.py",
+        "size": "0.1b",
+    },
     "modernbert_mlm": {
         "name": "ModernBERT base",
         "path": "answerdotai/ModernBERT-base",
