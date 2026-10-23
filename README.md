@@ -16,14 +16,17 @@ from `transformers`.
 **40 adapters · 10K+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
-**sequence classification** (sentiment / text categorisation),
-**token classification** (NER/POS), **vision-language** (image→text), and
+**sequence classification** (sentiment / text categorisation), **structured
+decisions** (variable options plus action selection), **token classification**
+(NER/POS), **vision-language** (image→text), and
 **speculative-decoding drafter** models — from
 Llama / Qwen / Granite / Mistral / Phi / Gemma / OLMo / GPT decoders to BERT /
 XLM-RoBERTa / MPNet / ModernBERT encoders, the Granite Vision 4.1 (SigLIP tower +
 Granite text), Mistral3 Vision (Pixtral tower + Mistral text), and Gemma 4
 (encoder-free and full-vision) multimodal VLMs, plus the DSpark block-propose drafters for
 Qwen 3 / Granite / Gemma 4 and the XPress block-propose drafter (Gemma 4 26B-A4B).
+Laya support uses its optional upstream package to
+construct the stock decision model; hf-adapters patches only its ModernBERT encoder.
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. The **canonical, per-adapter model lists** — verified
@@ -35,6 +38,9 @@ Spyre numerical accuracy — live in **[ARCHITECTURE.md](ARCHITECTURE.md#verifie
 ```bash
 # Install core deps
 uv sync
+
+# Optional Laya typed-decision support
+uv sync --extra laya
 
 # Install core + dev deps
 uv sync --group dev
@@ -86,6 +92,36 @@ from hf_adapters import AutoSpyreModelForCausalLM, encode_prompts
 inputs = encode_prompts(tokenizer, ["What is 2+2?"])
 sequences = model.generate(**inputs, max_new_tokens=5)
 ```
+
+## Structured Decisions
+
+Laya keeps its native Agent API while running the ModernBERT encoder and
+two-layer decision transformer on Spyre:
+
+```python
+from hf_adapters import laya_backend
+
+agent = laya_backend.load("convaiinnovations/laya")
+result = agent.predict(
+    "The production API is down and customers cannot log in.",
+    {
+        "department": {
+            "type": "choice",
+            "instructions": "Which team should handle this?",
+            "criteria": {
+                "billing": "payments and refunds",
+                "technical": "bugs and outages",
+                "other": "anything else",
+            },
+        }
+    },
+)
+```
+
+The encoder and two-layer decision transformer run on Spyre. Question-type
+embedding, option scoring, action scoring, and Agent orchestration remain on CPU.
+Select a bundled checkpoint explicitly with `subfolder="typed-decisions"` or
+`subfolder="multilingual"`. This does not enable automatic Router selection.
 
 ## Embedding Models
 
