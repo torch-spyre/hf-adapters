@@ -18,7 +18,7 @@ Two invariants matter here:
 
 1. `SUITE_TIERS` matches the workflow's `if:` gates, which are what actually decide
    whether a suite runs. A drifted table silently mis-reports coverage.
-2. Membership is never expanded up a tier ladder. 11 of the gated suites are
+2. Membership is never expanded up a tier ladder. Most gated suites are
    `[regression, trunk, unit]` with NO `integration`, so closing the ladder would claim
    integration coverage for suites that never ran under it and skip real tests.
 """
@@ -168,7 +168,7 @@ def _makefile_suites_by_tier() -> dict[str, set[str]]:
     return out
 
 
-def test_the_makefile_copy_is_known_to_disagree_with_the_workflow():
+def test_the_makefile_copy_is_known_to_disagree_with_the_workflow() -> None:
     """Documents a PRE-EXISTING divergence rather than asserting the two agree.
 
     `make tests` and CI maintain the tier->suite mapping separately, and they have
@@ -190,9 +190,6 @@ def test_the_makefile_copy_is_known_to_disagree_with_the_workflow():
     assert diffs == {
         # CI has no tier gate for it (runs unconditionally); the Makefile tiers it.
         "adapter_coverage": (None, ["regression", "trunk", "unit"]),
-        # Has a Makefile target but appears in no suites= list, so `make tests` never
-        # runs it.
-        "clip": (["regression", "trunk", "unit"], None),
         # CI-only: no Makefile target at all (CI drives torchrun directly).
         "multicard_smoke": (["regression", "trunk", "unit"], None),
         # Makefile:8 documents this as an integration suite and CI agrees; the

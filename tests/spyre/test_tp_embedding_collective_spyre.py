@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Two-card coverage for the Spyre vocab-parallel embedding data path.
+"""One-/two-card coverage for compiled Spyre TP embedding and linear paths.
 
 Run with::
 
@@ -21,40 +21,42 @@ Run with::
 """
 
 import os
+from copy import deepcopy
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch_spyre  # noqa: F401
+from torch.distributed.device_mesh import DeviceMesh
 from torch_spyre.model_utils import _dma_to_spyre_indirect_access
+from transformers.distributed import DistributedConfig
 
-from hf_adapters.spyre_tensor_parallel import SpyreEmbeddingRowwiseParallel
+from hf_adapters.spyre_tensor_parallel import (
+    SpyreColwiseParallel,
+    SpyreEmbeddingRowwiseParallel,
+    SpyreRowwiseParallel,
+    _initialize_tp_mesh,
+    finalize_spyre_tp,
+)
 
-if int(os.environ.get("WORLD_SIZE", "1")) != 2:
-    pytest.skip("requires a two-rank torchrun", allow_module_level=True)
-
-
-class _WorldMesh:
-    @staticmethod
-    def size():
-        return dist.get_world_size()
-
-    @staticmethod
-    def get_group():
-        return dist.group.WORLD
-
-    @staticmethod
-    def get_local_rank():
-        return dist.get_rank()
+if "RANK" not in os.environ or int(os.environ.get("WORLD_SIZE", "1")) not in (1, 2):
+    pytest.skip("requires a one- or two-rank torchrun", allow_module_level=True)
 
 
-def test_mask_on_host_then_compile_embedding_and_reduce_on_device():
-    if not dist.is_initialized():
-        dist.init_process_group("cpu:gloo,spyre:spyreccl")
+def _runtime_mesh() -> DeviceMesh:
+    _, meshes = _initialize_tp_mesh(
+        DistributedConfig(tp_size=int(os.environ["WORLD_SIZE"])), "spyre"
+    )
+    return meshes.get_mesh("tp")
+
+
+def test_mask_on_host_then_compile_embedding_and_reduce_on_device() -> None:
+    mesh = _runtime_mesh()
 
     rank = dist.get_rank()
+    world_size = dist.get_world_size()
     device = torch.device("spyre", rank)
-    local_vocab = 512
+    local_vocab = 1024 // world_size
     hidden_size = 2816  # Gemma 4 26B-A4B text hidden size.
     vocab_start = rank * local_vocab
 
@@ -70,13 +72,49 @@ def test_mask_on_host_then_compile_embedding_and_reduce_on_device():
     weight = _dma_to_spyre_indirect_access(weight_cpu, device=device)
 
     global_ids = torch.tensor([[0, 511, 512, 1000]], dtype=torch.int32).repeat(1, 16)
-    embedding = torch.nn.Embedding(local_vocab, hidden_size)
-    embedding.weight = torch.nn.Parameter(weight, requires_grad=False)
+    # HF installs the style on the full-sized meta module before replacing its
+    # weight with a local shard. Reproduce that order, including the global
+    # vocabulary size used to calculate ownership on rank 1.
+    embedding = torch.nn.Embedding(local_vocab * world_size, hidden_size, device="meta")
     style = SpyreEmbeddingRowwiseParallel()
-    style.prepare_module_tp(embedding, _WorldMesh())
+    style.install_forward(embedding, mesh)
+    embedding.weight = torch.nn.Parameter(weight, requires_grad=False)
     reduced = embedding(global_ids.to(device))
     expected = global_ids.to(torch.float16).unsqueeze(-1).expand_as(reduced.cpu())
     torch.testing.assert_close(reduced.cpu(), expected, rtol=0, atol=0)
 
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+def test_local_linear_styles_compile_with_layouts_and_one_bias() -> None:
+    mesh = _runtime_mesh()
+    torch.manual_seed(123)
+    model = (
+        torch.nn.Sequential(
+            torch.nn.Linear(128, 256), torch.nn.SiLU(), torch.nn.Linear(256, 128)
+        )
+        .to(dtype=torch.float16)
+        .eval()
+        .requires_grad_(False)
+    )
+    reference = deepcopy(model)
+    inputs = torch.randn(64, 128, dtype=torch.float16)
+    expected = reference(inputs)
+
+    for index, style in ((0, SpyreColwiseParallel()), (2, SpyreRowwiseParallel())):
+        for name, _ in list(model[index].named_parameters()):
+            style.shard_param(model[index], name, mesh)
+        style.install_forward(model[index], mesh)
+    finalize_spyre_tp(model)
+    model.to(f"spyre:{mesh.get_local_rank()}")
+    bias = model[2].bias
+    compiled = torch.compile(model, dynamic=False, fullgraph=True)
+    device_inputs = inputs.to(f"spyre:{mesh.get_local_rank()}")
+    with torch.no_grad():
+        for _ in range(2):
+            actual = compiled(device_inputs).cpu()
+            torch.testing.assert_close(actual, expected, rtol=5e-3, atol=5e-3)
+    assert model[2].bias is bias
     dist.barrier()
     dist.destroy_process_group()

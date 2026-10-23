@@ -28,13 +28,14 @@ import time
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Optional
+from types import ModuleType
+from typing import Any, Callable, Iterator, Optional, cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sympy import factorint
-from transformers import GenerationConfig
+from transformers import GenerationConfig, PretrainedConfig, PreTrainedModel
 from transformers.generation import GenerateDecoderOnlyOutput
 
 # Rank-aware device for multi-Spyre (tensor-parallel) runs. torchrun sets
@@ -2402,6 +2403,15 @@ def untie_embedding_and_lm_head(model):
             model.config.tie_word_embeddings = False
 
 
+def spyre_compiled_all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
+    """All-reduce through Spyre's graph-lowered functional collective."""
+    reduced: torch.Tensor = torch.ops._c10d_functional.all_reduce(
+        tensor, "sum", group_name
+    )
+    result: torch.Tensor = torch.ops._c10d_functional.wait_tensor(reduced)
+    return result
+
+
 def get_model_dtype(model: nn.Module) -> torch.dtype:
     """Infer the floating-point dtype of a prepared model from its parameters.
 
@@ -2435,15 +2445,17 @@ def _move_to_spyre_with_layout(model, dtype):
 
 
 def _resolve_tp_plan(
-    model_path, auto_model_cls, tp_plan, adapter_module, trust_remote_code=None
-):
+    model_path: str | os.PathLike[str],
+    auto_model_cls: Any,
+    tp_plan: str | dict[str, str],
+    adapter_module: ModuleType,
+    trust_remote_code: bool | None = None,
+) -> tuple[dict[str, str], PretrainedConfig]:
     """Resolve and translate an HF TP plan to Spyre placement styles.
 
-    The model is instantiated on ``meta`` both to obtain HF's fully-namespaced
-    auto plan and to find unplanned Linear/Embedding modules.  Those unplanned
-    weights also need explicit placement entries: otherwise Transformers sends
-    them through generic ``Tensor.to(spyre)`` and torch-spyre never sees enough
-    module semantics to choose the Linear or embedding DMA layout.
+    The meta model supplies HF's fully-namespaced plan and the adapter's
+    replication/grouped-KV policies. All shards are loaded on CPU before the
+    normal module-aware Spyre transfer.
     """
     from transformers import AutoConfig
 
@@ -2453,8 +2465,12 @@ def _resolve_tp_plan(
     with torch.device("meta"):
         probe = auto_model_cls.from_config(cfg)
     auto_plan = tp_plan == "auto"
-    plan = dict(probe.tp_plan or {}) if auto_plan else dict(tp_plan)
-    replicated_linear_modules = {"lm_head"} if auto_plan else set()
+    if isinstance(tp_plan, str) and not auto_plan:
+        raise ValueError("tp_plan must be 'auto' or an explicit dictionary")
+    plan: dict[str, str] = (
+        dict(probe.tp_plan or {}) if auto_plan else dict(cast(dict[str, str], tp_plan))
+    )
+    replicated_linear_modules: set[str] = {"lm_head"} if auto_plan else set()
     adapter_replication_policy = getattr(
         adapter_module, "spyre_tp_replicated_linear_modules", None
     )
@@ -2465,7 +2481,7 @@ def _resolve_tp_plan(
     cpu_replication_policy = getattr(
         adapter_module, "spyre_tp_cpu_replicated_modules", None
     )
-    cpu_replicated_modules = (
+    cpu_replicated_modules: set[str] = (
         cpu_replication_policy(probe, _resolve_tp_size())
         if auto_plan and cpu_replication_policy is not None
         else set()
@@ -2473,7 +2489,7 @@ def _resolve_tp_plan(
     grouped_colwise_policy = getattr(
         adapter_module, "spyre_tp_grouped_colwise_modules", None
     )
-    grouped_colwise_modules = (
+    grouped_colwise_modules: dict[str, int] = (
         grouped_colwise_policy(probe, _resolve_tp_size())
         if auto_plan and grouped_colwise_policy is not None
         else {}
@@ -2495,7 +2511,7 @@ def _resolve_tp_plan(
     return plan, cfg
 
 
-def _resolve_tp_size():
+def _resolve_tp_size() -> int:
     """Resolve and validate the TP degree required by ``DistributedConfig``."""
     world_size = os.getenv("WORLD_SIZE")
     if world_size is None:
@@ -2507,11 +2523,13 @@ def _resolve_tp_size():
         tp_size = int(world_size)
     except ValueError as exc:
         raise ValueError(f"WORLD_SIZE must be an integer, got {world_size!r}") from exc
+    if tp_size < 1:
+        raise ValueError("WORLD_SIZE must be positive")
     return tp_size
 
 
 @contextmanager
-def _without_spyre_allocator_warmup():
+def _without_spyre_allocator_warmup() -> Iterator[None]:
     """Skip Transformers' single-allocation cache warmup for Spyre TP loads.
 
     Flex pre-allocates its device-memory regions, so the caching-allocator
@@ -2523,7 +2541,11 @@ def _without_spyre_allocator_warmup():
     from transformers import modeling_utils
 
     original = modeling_utils.caching_allocator_warmup
-    modeling_utils.caching_allocator_warmup = lambda *_args, **_kwargs: None
+
+    def skip_warmup(*_args: Any, **_kwargs: Any) -> None:
+        pass
+
+    modeling_utils.caching_allocator_warmup = skip_warmup
     try:
         yield
     finally:
@@ -2531,7 +2553,7 @@ def _without_spyre_allocator_warmup():
 
 
 @contextmanager
-def _prefer_exact_tp_plan_entries():
+def _prefer_exact_tp_plan_entries() -> Iterator[None]:
     """Honor exact per-layer TP entries before Transformers' wildcard lookup.
 
     Transformers documents exact TP rules, but its current lookup immediately
@@ -2541,37 +2563,42 @@ def _prefer_exact_tp_plan_entries():
     than the TP degree.
     """
     from transformers import modeling_utils
-    from transformers.integrations import tensor_parallel
+    from transformers.distributed import tensor_parallel
 
-    original = tensor_parallel._get_parameter_tp_plan
+    original: Callable[..., str | None] = tensor_parallel._get_parameter_plan
 
-    def exact_first(parameter_name, tp_plan, is_weight=True):
-        if parameter_name in tp_plan:
-            return tp_plan[parameter_name]
+    def exact_first(
+        parameter_name: str, plan: dict[str, str], is_weight: bool = True
+    ) -> str | None:
+        if parameter_name in plan:
+            return plan[parameter_name]
         if is_weight and "." in parameter_name:
             module_name = parameter_name.rsplit(".", 1)[0]
-            if module_name in tp_plan:
-                return tp_plan[module_name]
-        return original(parameter_name, tp_plan, is_weight=is_weight)
+            if module_name in plan:
+                return plan[module_name]
+        return original(parameter_name, plan, is_weight=is_weight)
 
-    original_modeling_lookup = modeling_utils._get_parameter_tp_plan
-    tensor_parallel._get_parameter_tp_plan = exact_first
-    modeling_utils._get_parameter_tp_plan = exact_first
+    # This private re-export exists at runtime but is absent from the HF stubs.
+    original_modeling_lookup: Callable[..., str | None] = getattr(
+        modeling_utils, "_get_parameter_plan"
+    )
+    tensor_parallel._get_parameter_plan = exact_first
+    setattr(modeling_utils, "_get_parameter_plan", exact_first)
     try:
         yield
     finally:
-        tensor_parallel._get_parameter_tp_plan = original
-        modeling_utils._get_parameter_tp_plan = original_modeling_lookup
+        tensor_parallel._get_parameter_plan = original
+        setattr(modeling_utils, "_get_parameter_plan", original_modeling_lookup)
 
 
 def load_model_common(
-    model_path,
-    module,
-    dtype=torch.float16,
-    auto_model_cls=None,
-    tp_plan=None,
-    trust_remote_code=None,
-):
+    model_path: str | os.PathLike[str],
+    module: ModuleType,
+    dtype: torch.dtype = torch.float16,
+    auto_model_cls: Any = None,
+    tp_plan: str | dict[str, str] | None = None,
+    trust_remote_code: bool | None = None,
+) -> PreTrainedModel:
     """Load an HF model.
 
     Args:
@@ -2594,20 +2621,29 @@ def load_model_common(
 
         auto_model_cls = AutoModel
 
+    if isinstance(tp_plan, str) and tp_plan != "auto":
+        raise ValueError("tp_plan must be 'auto' or an explicit dictionary")
+
+    model: PreTrainedModel
     if hasattr(module, "load_hf_model"):
         # _sig was already inspected above (for the tp_plan support check).
         # Re-inspect here to determine which optional kwargs this loader accepts.
         import inspect as _inspect
 
         _sig = _inspect.signature(module.load_hf_model)
-        _kwargs: dict = {}
+        _kwargs: dict[str, Any] = {}
         if tp_plan is not None and "tp_plan" in _sig.parameters:
             _kwargs["tp_plan"] = tp_plan
         if "trust_remote_code" in _sig.parameters:
             _kwargs["trust_remote_code"] = trust_remote_code
         model = module.load_hf_model(model_path, dtype, **_kwargs)
-    elif tp_plan is not None:
+    elif tp_plan is not None and _resolve_tp_size() > 1:
         from transformers.distributed import DistributedConfig
+
+        from hf_adapters.spyre_tensor_parallel import (
+            finalize_spyre_tp,
+            spyre_tp_loading,
+        )
 
         resolved_tp_plan, cfg = _resolve_tp_plan(
             model_path,
@@ -2620,7 +2656,11 @@ def load_model_common(
             tp_size=_resolve_tp_size(),
             tp_plan=resolved_tp_plan,
         )
-        with _without_spyre_allocator_warmup(), _prefer_exact_tp_plan_entries():
+        with (
+            spyre_tp_loading(distributed_config, target_device=DEVICE),
+            _without_spyre_allocator_warmup(),
+            _prefer_exact_tp_plan_entries(),
+        ):
             model = auto_model_cls.from_pretrained(
                 model_path,
                 config=cfg,
@@ -2628,6 +2668,7 @@ def load_model_common(
                 distributed_config=distributed_config,
                 trust_remote_code=trust_remote_code,
             )
+        finalize_spyre_tp(model)
     else:
         model = auto_model_cls.from_pretrained(
             model_path,

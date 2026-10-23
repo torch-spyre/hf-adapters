@@ -71,7 +71,6 @@ from transformers import (
     Granite4VisionConfig,
     GraniteConfig,
     GraniteMoeHybridConfig,
-    GraniteSWAConfig,
     Lfm2Config,
     LlamaConfig,
     MistralConfig,
@@ -103,6 +102,11 @@ from transformers.modeling_outputs import (
 from transformers.models.diffusion_gemma.configuration_diffusion_gemma import (
     DiffusionGemmaConfig,
 )
+from transformers.models.embedding_gemma2.configuration_embedding_gemma2 import (
+    EmbeddingGemma2Config,
+    EmbeddingGemma2TextConfig,
+)
+from transformers.models.granite_swa.configuration_granite_swa import GraniteSWAConfig
 from transformers.models.ministral.configuration_ministral import MinistralConfig
 from transformers.models.mistral3.configuration_mistral3 import Mistral3Config
 
@@ -116,6 +120,7 @@ from hf_adapters import (
     hf_dspark_gemma4,
     hf_dspark_granite,
     hf_dspark_qwen3,
+    hf_embeddinggemma2,
     hf_gemma2,
     hf_gemma3,
     hf_gemma4,
@@ -164,6 +169,8 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     CLIPConfig: hf_clip,
     DiffusionGemmaConfig: hf_diffusion_gemma,
     DistilBertConfig: hf_distilbert,
+    EmbeddingGemma2Config: hf_embeddinggemma2,
+    EmbeddingGemma2TextConfig: hf_embeddinggemma2,
     Gemma2Config: hf_gemma2,
     Gemma3Config: hf_gemma3,
     Gemma3TextConfig: hf_gemma3,
@@ -209,6 +216,8 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
 # them to the drafter adapter instead. Normal targets have no entry here and fall
 # through to ``CONFIG_TO_ADAPTER_MODULE_MAPPING`` unchanged.
 ARCH_TO_ADAPTER_MODULE_MAPPING: dict[str, ModuleType] = {
+    "EmbeddingGemma2Model": hf_embeddinggemma2,
+    "EmbeddingGemma2TextModel": hf_embeddinggemma2,
     "Qwen3DSparkModel": hf_dspark_qwen3,
     "Gemma4DSparkModel": hf_dspark_gemma4,
     "GraniteDSparkModel": hf_dspark_granite,
@@ -259,6 +268,12 @@ class ModelDTypePolicy:
 
 MODEL_DTYPE_POLICIES: dict[str, ModelDTypePolicy] = {
     "google/embeddinggemma-300m": ModelDTypePolicy(dtype=torch.bfloat16),
+    "google/embeddinggemma-2": ModelDTypePolicy(dtype=torch.bfloat16),
+    # CLIP's config omits dtype; preserve its FP32 stock CPU reference while
+    # keeping the Spyre execution in FP16 when using the shared harness.
+    "sentence-transformers/clip-ViT-B-32": ModelDTypePolicy(
+        dtype=torch.float16, cpu_dtype=torch.float32
+    ),
     "ibm-granite/granite-4.0-1b-base": ModelDTypePolicy(cpu_dtype=torch.float32),
     "ibm-granite/granite-4.0-1b": ModelDTypePolicy(cpu_dtype=torch.float32),
 }

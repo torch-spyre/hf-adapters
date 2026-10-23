@@ -34,6 +34,7 @@ import gc
 import os
 import sys
 import types
+from typing import Any
 
 import pytest
 import torch
@@ -102,7 +103,7 @@ def cosine_per_row(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 
-def _unwrap_compiled_blocks(model: types.ModuleType) -> None:
+def _unwrap_compiled_blocks(model: torch.nn.Module) -> None:
     """Replace torch.compile-wrapped blocks with their CPU-runnable originals.
 
     Covers every block list an adapter may attach: ``_spyre_compiled_blocks``
@@ -112,15 +113,27 @@ def _unwrap_compiled_blocks(model: types.ModuleType) -> None:
     ``_spyre_vision_core`` (the attention-free vision projection).
     """
 
-    def _orig(cb):
+    def _orig(cb: Any) -> Any:
         return getattr(cb, "_orig_mod", getattr(cb, "_torchdynamo_orig_callable", None))
 
-    for module in model.modules():  # includes also `model` itself
-        for attr in ("_spyre_compiled_blocks", "_spyre_text_blocks"):
+    modules: list[Any] = list(model.modules())
+    # Some native multimodal forwards keep vision blocks in an unregistered
+    # wrapper rather than on the tower module itself.
+    modules.extend(
+        module._spyre_wrapper
+        for module in model.modules()
+        if hasattr(module, "_spyre_wrapper")
+    )
+    for module in modules:
+        for attr in (
+            "_spyre_compiled_blocks",
+            "_spyre_text_blocks",
+            "_spyre_gemma4_vision_blocks",
+        ):
             blocks = getattr(module, attr, None)
             if blocks is None:
                 continue
-            unwrapped = []
+            unwrapped: list[Any] = []
             for cb in blocks:
                 if isinstance(cb, tuple):
                     unwrapped.append(tuple(_orig(part) or part for part in cb))

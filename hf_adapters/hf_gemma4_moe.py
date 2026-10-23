@@ -31,6 +31,7 @@ from hf_adapters.hf_common import (
     named_moe_prefill_inputs,
     optional_spyre_config_patch,
     prepare_moe_expert_weights,
+    spyre_compiled_all_reduce,
     text_config,
 )
 from hf_adapters.hf_gemma4 import (
@@ -42,7 +43,6 @@ from hf_adapters.hf_gemma4 import (
     _setup_gemma4_text_decoder,
     spyre_tp_grouped_colwise_modules,
 )
-from hf_adapters.spyre_tensor_parallel import spyre_compiled_all_reduce
 from hf_adapters.swa_attention import allocate_swa_caches
 
 # The HF checkpoint conversion first merges each expert's 2D gate/up tensors
