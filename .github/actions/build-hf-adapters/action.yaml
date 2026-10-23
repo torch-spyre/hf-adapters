@@ -189,6 +189,13 @@ runs:
       with:
         verbose: 'true'
 
+    # Restores UV_CACHE_DIR from /storage-1 instead of PyPI; its post step saves it back at job end.
+    - name: uv cache (NFS)
+      if: inputs.prebaked_image != 'true'
+      uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache@e353b30d6311b5872ab1176c4a0b47a2e8d571ab
+      with:
+        storage-root: /storage-1/hf-adapters/.cache/uv
+        key-files: uv.lock
 
     - name: Build hf-adapters
       shell: bash
