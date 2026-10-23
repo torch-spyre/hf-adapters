@@ -53,6 +53,8 @@ Verified on CPU to match stock full-deepstack ``model.forward`` (first-token
 logits cosine ≥ 0.999, argmax match) and stock ``model.generate`` (token-exact).
 """
 
+from typing import TYPE_CHECKING
+
 import torch
 
 from hf_adapters import hf_siglip_vision
@@ -66,6 +68,9 @@ from hf_adapters.hf_common import (
     prepare_standard_gqa_blocks,
     run_lm_head,
 )
+
+if TYPE_CHECKING:
+    from transformers import Granite4VisionForConditionalGeneration
 
 _GENERATION_INPUT_NAMES: tuple = ("pixel_values", "image_sizes")
 _GENERATION_TOKEN_ALIGNED_INPUTS: dict = {}
@@ -93,7 +98,11 @@ def prepare_for_spyre(model):
     model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
 
 
-def _deepstack_features(model, pixel_values, image_sizes):
+def _deepstack_features(
+    model: "Granite4VisionForConditionalGeneration",
+    pixel_values: torch.Tensor,
+    image_sizes: torch.Tensor,
+) -> dict[int, torch.Tensor]:
     """Run the Spyre vision tower once, build ALL deepstack + spatial features.
 
     Reproduces stock ``Granite4VisionModel.get_image_features``, but the vision
@@ -113,10 +122,16 @@ def _deepstack_features(model, pixel_values, image_sizes):
         image_size_to_num_patches,
     )
 
+    # These optional constructor fields are resolved on the loaded HF config.
+    assert cfg.vision_config is not None and not isinstance(cfg.vision_config, dict)
+    assert cfg.deepstack_layer_map is not None
+    assert cfg.spatial_target_layers is not None
+
     # anyrES: pixel_values [B, T, C, H, W] -> [B*T, C, H, W]
     if pixel_values.dim() == 5:
         pixel_values = pixel_values.flatten(0, 1)
 
+    hidden_states: tuple[torch.Tensor, ...]
     _, hidden_states = hf_siglip_vision.prefill_vision_tower(
         model, pixel_values, output_hidden_states=True
     )
@@ -136,7 +151,7 @@ def _deepstack_features(model, pixel_values, image_sizes):
         inner.image_newline = torch.nn.Parameter(
             inner.image_newline.detach().to("cpu"), requires_grad=False
         )
-    image_num_patches = [
+    image_num_patches: list[int] = [
         image_size_to_num_patches(
             image_size=imsize,
             grid_pinpoints=cfg.image_grid_pinpoints,
@@ -146,23 +161,24 @@ def _deepstack_features(model, pixel_values, image_sizes):
     ]
     select_default = cfg.vision_feature_select_strategy == "default"
 
-    def _project_and_pack(selected_layer_feature, projector):
+    def _project_and_pack(
+        selected_layer_feature: torch.Tensor, projector: torch.nn.Module
+    ) -> torch.Tensor:
         feat = selected_layer_feature.to("cpu")
         if select_default:
             feat = feat[:, 1:]
-        projected = projector(feat.to(dtype))
-        projected = torch.split(projected, image_num_patches, dim=0)
-        packed, _ = inner.pack_image_features(
-            projected,
+        projected: torch.Tensor = projector(feat.to(dtype))
+        projected_images = torch.split(projected, image_num_patches, dim=0)
+        # Transformers 5.19 returns one tensor per image, without feature lengths.
+        packed: list[torch.Tensor] = inner.pack_image_features(
+            projected_images,
             image_sizes,
             vision_feature_select_strategy=cfg.vision_feature_select_strategy,
             image_newline=inner.image_newline,
         )
-        if isinstance(packed, (list, tuple)):
-            packed = torch.cat(list(packed), dim=0)
-        return packed
+        return torch.cat(packed, dim=0)
 
-    deepstack = {}
+    deepstack: dict[int, torch.Tensor] = {}
     # Deepstack: each vision layer -> its own projector -> a distinct text layer.
     for proj_idx, (vision_layer, llm_layer) in enumerate(cfg.deepstack_layer_map):
         deepstack[llm_layer] = _project_and_pack(

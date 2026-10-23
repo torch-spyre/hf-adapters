@@ -114,7 +114,10 @@ model-components-tests: ## Run model component tests (suite key: model_component
 	$(PYTEST) $(PYTEST_ARGS) --suite model_components tests/spyre/test_model_components_spyre.py tests/spyre/test_swa_layer_ab_spyre.py tests/spyre/test_moe_prefill_work_division_spyre.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 embed-compare-tests: ## Run embed-compare tests (suite key: embed_compare)
-	$(PYTEST) $(PYTEST_ARGS) --suite embed_compare tests/spyre/test_e2e_embed_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) --suite embed_compare \
+		tests/spyre/test_e2e_embed_compare_spyre.py \
+		tests/spyre/test_e2e_multimodal_embed_compare_spyre.py \
+		$(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 clip-tests: ## Run CLIP e2e tests (suite key: clip)
 	$(PYTEST) $(PYTEST_ARGS) --suite clip tests/spyre/test_e2e_clip_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))

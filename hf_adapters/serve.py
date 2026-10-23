@@ -470,7 +470,7 @@ class YOLO:
 
     def __init__(self, model_path, trust_remote_code):
         try:
-            from hf_adapters.ultralytics_yolo import (  # type: ignore[import-untyped]
+            from hf_adapters.ultralytics_yolo import (  # type: ignore[import-untyped,import-not-found]
                 load_model,
                 prepare_input,
             )

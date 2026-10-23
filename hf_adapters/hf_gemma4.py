@@ -103,13 +103,10 @@ from hf_adapters.hf_common import (
     optional_spyre_config_patch,
     prepare_lm_head_for_spyre,
     run_lm_head,
+    spyre_compiled_all_reduce,
     text_config,
 )
-from hf_adapters.spyre_tensor_parallel import (
-    SPYRE_REPLICATED_LINEAR,
-    SPYRE_ROWWISE,
-    spyre_compiled_all_reduce,
-)
+from hf_adapters.spyre_tensor_parallel import SPYRE_REPLICATED_LINEAR, SPYRE_ROWWISE
 from hf_adapters.swa_attention import (
     SlidingWindowCache,
     allocate_swa_caches,
