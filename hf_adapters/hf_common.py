@@ -1647,7 +1647,14 @@ def run_lm_head(model, hidden_states, *, logits_to_keep: int = 0):
     if lm_head_forward is None:
         raise RuntimeError("the model has not had an LM head prepared for Spyre")
     if logits_to_keep:
-        hidden_states = hidden_states[:, -logits_to_keep:, :].contiguous()
+        selected = hidden_states[:, -logits_to_keep:, :]
+        if logits_to_keep == 1 and hidden_states.shape[-2] > 1:
+            # A last-row view can be logically contiguous while retaining the
+            # full prefill buffer's device layout. Materialize a compact row
+            # so the head can use the same vector plan as decode.
+            hidden_states = selected.clone(memory_format=torch.contiguous_format)
+        else:
+            hidden_states = selected.contiguous()
     return lm_head_forward(hidden_states)
 
 
