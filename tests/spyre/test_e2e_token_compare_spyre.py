@@ -16,7 +16,10 @@
 E2E token-level comparison: HF stock forward (CPU) vs adapter forward (Spyre).
 
 For each model, runs prefill + 4 greedy decode steps on both CPU (stock HF)
-and Spyre (adapter), comparing logits and greedy tokens at each step.
+and Spyre (adapter), comparing logits and greedy tokens at each step. Spyre
+decode is teacher-forced with HF's tokens so every step compares the same
+context, and a top-1 flip between near-tied candidates is tolerated (see
+``tests/_token_compare_helpers.py``).
 
 Usage (on Spyre pod)::
 
@@ -37,6 +40,7 @@ from hf_adapters.hf_common import (
     get_model_dtype,
     move_model_to_spyre,
 )
+from tests._token_compare_helpers import TOP1_TIE_MARGIN, compare_step
 from tests.conftest import (
     encode_generation_inputs,
     load_ref_model,
@@ -93,8 +97,15 @@ def adapter_greedy_steps(
     model: PreTrainedModel,
     input_ids: torch.Tensor,
     num_decode: int = 4,
+    forced_tokens: list[int] | None = None,
 ) -> list[dict[str, Any]]:
-    """Run adapter forward on Spyre for prefill + N decode steps."""
+    """Run adapter forward on Spyre for prefill + N decode steps.
+
+    ``forced_tokens[i]`` (the HF token of step ``i``) is fed as the input of
+    decode step ``i + 1`` instead of Spyre's own pick. Without it, one prefill
+    flip between near-tied tokens sends Spyre down a different continuation and
+    every later step compares different contexts (#494).
+    """
     from hf_adapters.hf_common import (
         BLOCK_SIZE,
         _materialize_decode_mask_heads,
@@ -181,6 +192,8 @@ def adapter_greedy_steps(
     # FMS block walk — BLOCK_SIZE tokens in, one slot written — but generate() no
     # longer does that, and a per-step logits comparison is only meaningful if it
     # exercises the same path production uses.)
+    if forced_tokens is not None:
+        token = forced_tokens[0]
     result = torch.cat([padded_ids, torch.tensor([[token]])], dim=1)
     current_cache_len = padded_len
 
@@ -210,6 +223,8 @@ def adapter_greedy_steps(
 
         token = last_logits.argmax().item()
         results.append({"logits": last_logits, "token": token, "step": step})
+        if forced_tokens is not None and step < len(forced_tokens):
+            token = forced_tokens[step]
         result = torch.cat([result, torch.tensor([[token]])], dim=1)
 
     return results
@@ -225,37 +240,15 @@ def _compare_results(
     rows = []
     for hf_r, ad_r in zip(hf_results, adapter_results):
         step = hf_r["step"]
-        h_logits = hf_r["logits"]
-        a_logits = ad_r["logits"]
-
-        min_vocab = min(h_logits.shape[0], a_logits.shape[0])
-        h = h_logits[:min_vocab]
-        a = a_logits[:min_vocab]
-
-        diff = (h - a).abs()
-        max_diff = diff.max().item()
-        mean_diff = diff.mean().item()
-
-        h_top1 = h.argmax().item()
-        a_top1 = a.argmax().item()
-        match = h_top1 == a_top1
-
-        step_label = "prefill" if step == 0 else f"decode-{step}"
-        h_str = tokenizer.decode([hf_r["token"]])
-        a_str = tokenizer.decode([ad_r["token"]])
         rows.append(
             {
                 "model": model_name,
-                "step": step_label,
+                "step": "prefill" if step == 0 else f"decode-{step}",
                 "hf_token": hf_r["token"],
-                "hf_str": h_str,
+                "hf_str": tokenizer.decode([hf_r["token"]]),
                 "spyre_token": ad_r["token"],
-                "spyre_str": a_str,
-                "top1_match": match,
-                "max_diff": max_diff,
-                "mean_diff": mean_diff,
-                "hf_nan": h_logits.isnan().any().item(),
-                "spyre_nan": a_logits.isnan().any().item(),
+                "spyre_str": tokenizer.decode([ad_r["token"]]),
+                **compare_step(hf_r["logits"], ad_r["logits"]),
             }
         )
     return rows
@@ -265,22 +258,22 @@ def _print_table(rows: list[dict[str, Any]]) -> None:
     """Markdown comparison table — one line per step."""
     print("\n## E2E Token Comparison: HF (CPU) vs Adapter (Spyre)\n")
     print(
-        "| Model | Step | HF Token | Spyre Token | Match "
+        "| Model | Step | HF Token | Spyre Token | Match | HF Margin "
         "| Max Diff | Mean Diff | HF NaN | Spyre NaN |"
     )
     print(
-        "|-------|------|----------|-------------|-------"
+        "|-------|------|----------|-------------|-------|-----------"
         "|----------|-----------|--------|-----------|"
     )
     for r in rows:
-        match = "OK" if r["top1_match"] else "FAIL"
+        match = "OK" if r["top1_match"] else "TIE" if r["top1_ok"] else "FAIL"
         hf_col = f"{r['hf_token']:>5} {r['hf_str']!r}"
         sp_col = f"{r['spyre_token']:>5} {r['spyre_str']!r}"
         hn = "Yes" if r["hf_nan"] else "No"
         sn = "Yes" if r["spyre_nan"] else "No"
         print(
             f"| {r['model']} | {r['step']} | {hf_col} | {sp_col} "
-            f"| {match} | {r['max_diff']:.4f} | {r['mean_diff']:.6f} "
+            f"| {match} | {r['hf_margin']:.4f} | {r['max_diff']:.4f} | {r['mean_diff']:.6f} "
             f"| {hn} | {sn} |"
         )
 
@@ -332,6 +325,7 @@ def _run_model_test(
         model,
         input_ids,
         num_decode=num_decode,
+        forced_tokens=[r["token"] for r in hf_results],
     )
 
     return _compare_results(hf_results, adapter_results, tokenizer, model_path)
@@ -342,7 +336,7 @@ def token_compare_spyre(
     trust_remote_code: bool | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rows = _run_model_test(model_path, trust_remote_code=trust_remote_code)
-    mismatches = [r for r in rows if not r["top1_match"]]
+    mismatches = [r for r in rows if not r["top1_ok"]]
     return mismatches, rows
 
 
@@ -357,5 +351,9 @@ def test_e2e_token_compare_spyre(
     )
     _print_table(rows)
     n_match = sum(1 for r in rows if r["top1_match"])
-    print(f"\nTop-1 agreement: {n_match}/{len(rows)} steps")
+    n_tie = sum(1 for r in rows if r["near_tie"])
+    print(
+        f"\nTop-1 agreement: {n_match}/{len(rows)} steps "
+        f"(+{n_tie} near-tie within {TOP1_TIE_MARGIN} logits)"
+    )
     assert not mismatches, mismatches
