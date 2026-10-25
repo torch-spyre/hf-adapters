@@ -18,7 +18,7 @@ For real tensor-parallel multi-card runs, launch with torchrun (one process
 per card).  For single-card, plain python works.
 
 Requirements:
-  - transformers==5.15.x  (uv pip install "transformers==5.15.0")
+  - transformers==5.19.0 (use the project's locked environment)
 
 SPYRE_DEVICES tells the Flex runtime which card indices to use per rank.
 Index-to-physical-card mapping is handled internally by Flex and is not

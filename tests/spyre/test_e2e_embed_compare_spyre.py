@@ -26,6 +26,8 @@ feature dict (``token_embeddings``, ``attention_mask``, ``sentence_embedding``).
 This lets us report both the final sentence-embedding cosine and the detailed
 per-token metrics (mean/min token cosine, pooled cosine) from the raw
 ``last_hidden_state`` — the same diagnostics the original raw-backbone test had.
+Models declaring ``supports_token_embeddings=False`` are compared through their
+projected sentence embeddings; missing token outputs remain an error otherwise.
 
 Usage (on Spyre pod)::
 
@@ -42,7 +44,7 @@ import torch.nn.functional as F
 # Registers the "spyre" backend with sentence_transformers on import.
 import hf_adapters.st_backend  # noqa: F401
 from hf_adapters.auto_spyre_model import dtype_for_model_path
-from tests.model_registry import EMBED_PATHS
+from tests.model_registry import EMBED_PATHS, EMBEDDING_MODELS
 
 pytestmark = pytest.mark.model_harness("embedding")
 
@@ -56,14 +58,17 @@ PROMPTS = [
 COSINE_THRESHOLD = 0.99
 
 
-def _encode(model, prompts: list[str]) -> list[dict[str, torch.Tensor]]:
+def _encode(model: Any, prompts: list[str]) -> list[dict[str, torch.Tensor]]:
     """Encode prompts, returning ST's full per-sequence feature dicts.
 
     ``output_value=None`` yields a list (one dict per prompt) carrying
     ``token_embeddings`` (padded ``[seq, hidden]``), ``attention_mask``, and the
     final ``sentence_embedding``.
     """
-    return model.encode(prompts, output_value=None, convert_to_numpy=False)
+    outputs: list[dict[str, torch.Tensor]] = model.encode(
+        prompts, output_value=None, convert_to_numpy=False
+    )
+    return outputs
 
 
 def _mean_pool(hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -77,14 +82,49 @@ def _compare_results(
     cpu_out: list[dict[str, torch.Tensor]],
     spyre_out: list[dict[str, torch.Tensor]],
     model_name: str,
+    *,
+    supports_token_embeddings: bool = True,
 ) -> list[dict[str, Any]]:
     """Compare per-prompt: token-level cosine/diff, pooled cosine, sentence cosine."""
     assert len(cpu_out) == len(
         spyre_out
     ), f"row count mismatch: cpu {len(cpu_out)} vs spyre {len(spyre_out)}"
 
-    rows = []
+    rows: list[dict[str, Any]] = []
     for b, (c, s) in enumerate(zip(cpu_out, spyre_out)):
+        sent_c = c["sentence_embedding"].float().cpu()
+        sent_s = s["sentence_embedding"].float().cpu()
+        assert sent_c.shape == sent_s.shape and sent_c.ndim == 1, (
+            f"row {b} sentence shape mismatch: CPU {tuple(sent_c.shape)} "
+            f"vs Spyre {tuple(sent_s.shape)}"
+        )
+        assert torch.isfinite(sent_c).all() and torch.isfinite(sent_s).all()
+        sent_cos = F.cosine_similarity(sent_c, sent_s, dim=0).item()
+        has_tokens = "token_embeddings" in c
+        assert has_tokens == (
+            "token_embeddings" in s
+        ), f"row {b}: CPU/Spyre token embedding availability differs"
+        assert (
+            has_tokens or not supports_token_embeddings
+        ), f"{model_name}: expected token embeddings, but neither path returned them"
+        if not has_tokens:
+            rows.append(
+                {
+                    "model": model_name,
+                    "row": b,
+                    "n_real": "-",
+                    "mean_cos": None,
+                    "min_cos": None,
+                    "pooled_cos": None,
+                    "sent_cos": sent_cos,
+                    "max_diff": None,
+                    "mean_diff": None,
+                    "cpu_nan": False,
+                    "spyre_nan": False,
+                    "match": sent_cos >= COSINE_THRESHOLD,
+                }
+            )
+            continue
         c_tok = c["token_embeddings"].float().cpu()
         s_tok = s["token_embeddings"].float().cpu()
         assert c_tok.shape == s_tok.shape, (
@@ -101,10 +141,6 @@ def _compare_results(
         pooled_c = _mean_pool(c_tok, c["attention_mask"].cpu())
         pooled_s = _mean_pool(s_tok, s["attention_mask"].cpu())
         pooled_cos = F.cosine_similarity(pooled_c, pooled_s, dim=0).item()
-
-        sent_c = c["sentence_embedding"].float().cpu()
-        sent_s = s["sentence_embedding"].float().cpu()
-        sent_cos = F.cosine_similarity(sent_c, sent_s, dim=0).item()
 
         rows.append(
             {
@@ -156,11 +192,21 @@ def _run_model_test(model_path: str) -> list[dict[str, Any]]:
     print("  Encoding on Spyre ...")
     spyre_out = _encode(spyre_model, PROMPTS)
 
-    return _compare_results(cpu_out, spyre_out, model_path)
+    supports_tokens = not any(
+        info["path"] == model_path and not info.get("supports_token_embeddings", True)
+        for info in EMBEDDING_MODELS.values()
+    )
+    return _compare_results(
+        cpu_out, spyre_out, model_path, supports_token_embeddings=supports_tokens
+    )
 
 
 def _print_table(rows: list[dict[str, Any]]) -> None:
     """Markdown comparison table — one line per prompt row."""
+
+    def metric(value: float | None, precision: int = 6) -> str:
+        return "N/A" if value is None else f"{value:.{precision}f}"
+
     print("\n## E2E Embedding Comparison: ST (CPU) vs backend='spyre'\n")
     print(
         "| Model | Row | Real Len | Mean Cos | Min Cos | Pooled Cos | Sent Cos "
@@ -176,8 +222,8 @@ def _print_table(rows: list[dict[str, Any]]) -> None:
         sn = "Yes" if r["spyre_nan"] else "No"
         print(
             f"| {r['model']} | {r['row']} | {r['n_real']} "
-            f"| {r['mean_cos']:.6f} | {r['min_cos']:.6f} | {r['pooled_cos']:.6f} "
-            f"| {r['sent_cos']:.6f} | {r['max_diff']:.4f} | {r['mean_diff']:.6f} "
+            f"| {metric(r['mean_cos'])} | {metric(r['min_cos'])} | {metric(r['pooled_cos'])} "
+            f"| {r['sent_cos']:.6f} | {metric(r['max_diff'], 4)} | {metric(r['mean_diff'])} "
             f"| {cn} | {sn} | {match} |"
         )
 
@@ -195,5 +241,5 @@ def test_e2e_embed_compare_spyre(model_path: str) -> None:
     mismatches, rows = embed_compare_spyre(model_path)
     _print_table(rows)
     n_match = sum(1 for r in rows if r["match"])
-    print(f"\nPer-row min-cosine >= {COSINE_THRESHOLD}: {n_match}/{len(rows)} rows")
+    print(f"\nPer-row cosine checks >= {COSINE_THRESHOLD}: {n_match}/{len(rows)} rows")
     assert not mismatches, mismatches

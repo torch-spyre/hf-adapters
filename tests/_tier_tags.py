@@ -26,7 +26,7 @@ mapping lives in the CI job gates, and CI calls the per-suite targets directly, 
 declared. `--suite <key>` names the suite, and this table turns that into the tier set.
 
 MEMBERSHIP IS DECLARED, NEVER INFERRED FROM A LADDER. It is tempting to treat the tiers as
-nested (unit < integration < regression < trunk) and expand upward. Do not: 11 of the 15
+nested (unit < integration < regression < trunk) and expand upward. Do not: most
 suites below are `[regression, trunk, unit]` with NO `integration`, so closing the ladder
 would claim integration coverage for suites that never ran under it and silently skip real
 tests. torch-spyre learned the same lesson -- see the "never inferred from a ladder" note
@@ -35,8 +35,8 @@ in its filter_configs.py.
 SOURCE OF TRUTH is each suite job's `if:` gate in .github/workflows/_test_matrix.yaml,
 because that is what actually decides whether a suite runs. The Makefile's `tests` target
 carries a second, HAND-MAINTAINED copy in its `case` block, and the two have already
-drifted (see tests/test_tier_tags.py, which pins the difference): the Makefile omits `clip`
-from every suites= list, has no `multicard_smoke` target, and puts `model_components` only
+drifted (see tests/test_tier_tags.py, which pins the difference): the Makefile
+has no `multicard_smoke` target, and puts `model_components` only
 in regression/trunk even though Makefile:8 documents it as an integration suite. Keep this
 table in step with the WORKFLOW; the test reports drift rather than guessing.
 """
@@ -61,7 +61,6 @@ import re
 #   model_module     -- delegates to the oot_framework run_test.sh, which tags from each
 #                       config's test_suite_config.labels (tests/configs/module_tests).
 SUITE_TIERS: dict[str, tuple[str, ...]] = {
-    "clip": ("regression", "trunk", "unit"),
     "embed_compare": ("regression", "trunk", "unit"),
     "load": ("regression", "trunk", "unit"),
     "masked_lm_compare": ("regression", "trunk", "unit"),

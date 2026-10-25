@@ -21,8 +21,9 @@ import sys
 import threading
 import urllib.error
 import urllib.request
+from collections.abc import Callable, Iterator
+from typing import Any
 
-import numpy as np
 import pytest
 import torch
 from PIL import Image
@@ -77,22 +78,64 @@ class _VLMModel:
 
 
 class _ST:
-    def encode(self, items, convert_to_numpy):
-        return np.array(
-            [[1.0, 0.0] if isinstance(x, str) else [0.0, float(x.width)] for x in items]
+    """Independent text/image encoders, with no support for combined inputs."""
+
+    modalities: list[str | tuple[str, ...]] = ["text", "image"]
+    image_tokens = 0
+
+    def __init__(self) -> None:
+        self.batches: list[list[serve.EmbeddingInput]] = []
+
+    def supports(self, modality: str | tuple[str, ...]) -> bool:
+        return modality in self.modalities or (
+            isinstance(modality, tuple)
+            and "message" in self.modalities
+            and all(part in self.modalities for part in modality)
         )
 
-    def tokenize(self, texts):
-        return {"attention_mask": torch.ones(len(texts), 4)}
+    def encode(
+        self,
+        items: list[serve.EmbeddingInput],
+        *,
+        output_value: None,
+        convert_to_numpy: bool,
+    ) -> list[dict[str, torch.Tensor]]:
+        assert output_value is None and not convert_to_numpy
+        self.batches.append(items)
+        assert len({tuple(sorted(item)) for item in items}) == 1
+        outputs: list[dict[str, torch.Tensor]] = []
+        for item in items:
+            modality: str | tuple[str, ...] = (
+                next(iter(item)) if len(item) == 1 else tuple(sorted(item))
+            )
+            assert self.supports(modality)
+            image: Any = item.get("image")
+            vector = torch.tensor(
+                [
+                    float("text" in item),
+                    float(image.width) if image is not None else 0.0,
+                ]
+            )
+            output: dict[str, torch.Tensor] = {"sentence_embedding": vector}
+            tokens = (4 if "text" in item else 0) + (self.image_tokens if image else 0)
+            if tokens:
+                # Include padding to ensure usage sums the mask, not its length.
+                output["attention_mask"] = torch.tensor([1] * tokens + [0, 0])
+            outputs.append(output)
+        return outputs
 
 
 class _TextST(_ST):
     modalities = ["text"]
 
-    def encode(self, items, convert_to_numpy):
-        if any(not isinstance(x, str) for x in items):
-            raise ValueError("Modality 'image' is not supported")
-        return super().encode(items, convert_to_numpy)
+
+class _MultimodalST(_ST):
+    modalities = ["text", "image", ("image", "text")]
+    image_tokens = 6
+
+
+class _MessageST(_MultimodalST):
+    modalities = ["text", "image", "message"]
 
 
 def _vlm(monkeypatch):
@@ -106,11 +149,11 @@ def _vlm(monkeypatch):
     monkeypatch.setattr(serve.VLM, "__init__", init)
 
 
-def _clip(monkeypatch, st=_ST):
-    def init(self, model_path, trust_remote_code):
+def _embedding(monkeypatch: pytest.MonkeyPatch, st: type[_ST] = _ST) -> None:
+    def init(self: serve.Embedding, model_path: str, trust_remote_code: bool) -> None:
         self.st = st()
 
-    monkeypatch.setattr(serve.CLIP, "__init__", init)
+    monkeypatch.setattr(serve.Embedding, "__init__", init)
 
 
 class _LMTokenizer(_Tokenizer):
@@ -173,13 +216,21 @@ def _rerank(monkeypatch, logits=((0.0,), (2.0,), (-3.0,))):
     monkeypatch.setattr(serve.Rerank, "__init__", init)
 
 
-@pytest.fixture
-def start(monkeypatch):
-    servers = []
+StartServer = Callable[..., tuple[serve.Server, str]]
 
-    def _start(task, load=True, st=_ST, template="{{ messages }}"):
-        if task == "clip":
-            _clip(monkeypatch, st)
+
+@pytest.fixture
+def start(monkeypatch: pytest.MonkeyPatch) -> Iterator[StartServer]:
+    servers: list[serve.Server] = []
+
+    def _start(
+        task: str,
+        load: bool = True,
+        st: type[_ST] = _ST,
+        template: str | None = "{{ messages }}",
+    ) -> tuple[serve.Server, str]:
+        if task in ("embedding", "clip"):
+            _embedding(monkeypatch, st)
         elif task == "chat":
             _lm(monkeypatch, template)
         elif task == "rerank":
@@ -236,17 +287,18 @@ def test_health_waits_for_load_and_warmup(start):
     assert srv.backend.model.kwargs == {"max_new_tokens": 2, "do_sample": False}
 
 
-def test_models_lists_served_name(start):
-    _, url = start("clip")
+@pytest.mark.parametrize("task", ["embedding", "clip"])
+def test_models_lists_served_name(start: StartServer, task: str) -> None:
+    _, url = start(task)
     status, body = _get(url + "/v1/models")
     assert status == 200
     assert body["data"][0]["id"] == "m"
     assert body["data"][0]["root"] == "org/model"
-    assert body["data"][0]["task"] == "clip"
+    assert body["data"][0]["task"] == task
 
 
-def test_wrong_task_route_is_404(start):
-    _, url = start("clip")
+def test_wrong_task_route_is_404(start: StartServer) -> None:
+    _, url = start("embedding")
     assert _post(url + "/v1/chat/completions", _chat())[0] == 404
 
 
@@ -323,8 +375,11 @@ def test_chat_rejects_bad_requests(start, messages, error):
     assert error in json.loads(text)["error"]["message"]
 
 
-def test_embeddings_keep_input_order_across_text_and_images(start):
-    _, url = start("clip")
+@pytest.mark.parametrize("task", ["embedding", "clip"])
+def test_embeddings_keep_input_order_across_text_and_images(
+    start: StartServer, task: str
+) -> None:
+    _, url = start(task)
     image = {"type": "image_url", "image_url": {"url": _data_url((7, 7))}}
     status, _, text = _post(
         url + "/v1/embeddings",
@@ -341,20 +396,125 @@ def test_embeddings_keep_input_order_across_text_and_images(start):
     assert body["usage"] == {"prompt_tokens": 8, "total_tokens": 8}
 
 
-def test_embeddings_accept_a_single_string(start):
-    _, url = start("clip")
+def test_embeddings_accept_a_single_string(start: StartServer) -> None:
+    _, url = start("embedding")
     status, _, text = _post(url + "/v1/embeddings", {"input": "hello"})
     assert status == 200
     assert len(json.loads(text)["data"]) == 1
 
 
-def test_text_only_embedder_loads_and_refuses_images(start):
-    _, url = start("clip", st=_TextST)
+def test_text_only_embedder_loads_and_refuses_images(start: StartServer) -> None:
+    _, url = start("embedding", st=_TextST)
     image = {"type": "image_url", "image_url": {"url": _data_url((7, 7))}}
     assert _post(url + "/v1/embeddings", {"input": "hello"})[0] == 200
     status, _, text = _post(url + "/v1/embeddings", {"input": ["hi", image]})
     assert status == 400
-    assert "embeds text only" in json.loads(text)["error"]["message"]
+    assert "does not support 'image'" in json.loads(text)["error"]["message"]
+
+
+@pytest.mark.parametrize("st", [_MultimodalST, _MessageST])
+def test_embeddings_keep_combined_inputs_and_count_media_tokens(
+    start: StartServer, st: type[_ST]
+) -> None:
+    srv, url = start("embedding", st=st)
+    image: dict[str, Any] = {
+        "type": "image_url",
+        "image_url": {"url": _data_url((7, 7))},
+    }
+    combined: dict[str, Any] = {
+        "text": "A cat <image>",
+        "image_url": image["image_url"],
+    }
+    status, _, text = _post(
+        url + "/v1/embeddings", {"input": [combined, "a dog", image, combined]}
+    )
+    assert status == 200
+    body: dict[str, Any] = json.loads(text)
+    assert [item["index"] for item in body["data"]] == [0, 1, 2, 3]
+    assert [item["embedding"] for item in body["data"]] == [
+        [1.0, 7.0],
+        [1.0, 0.0],
+        [0.0, 7.0],
+        [1.0, 7.0],
+    ]
+    assert body["usage"] == {"prompt_tokens": 30, "total_tokens": 30}
+    joint: serve.EmbeddingInput = srv.backend.st.batches[-3][0]
+    assert joint["text"] == "A cat <image>"
+    assert isinstance(joint["image"], Image.Image)
+
+
+def test_embeddings_accept_one_combined_object(start: StartServer) -> None:
+    _, url = start("embedding", st=_MultimodalST)
+    status, _, text = _post(
+        url + "/v1/embeddings",
+        {"input": {"text": "caption", "image_url": {"url": _data_url()}}},
+    )
+    assert status == 200
+    assert len(json.loads(text)["data"]) == 1
+
+
+@pytest.mark.parametrize("st", [_ST, _TextST])
+def test_embeddings_reject_unsupported_combination(
+    start: StartServer, st: type[_ST]
+) -> None:
+    srv, url = start("embedding", st=st)
+    n_calls: int = len(srv.backend.st.batches)
+    status, _, text = _post(
+        url + "/v1/embeddings",
+        {"input": {"text": "caption", "image_url": {"url": _data_url()}}},
+    )
+    assert status == 400
+    assert "does not support ('image', 'text')" in json.loads(text)["error"]["message"]
+    assert len(srv.backend.st.batches) == n_calls
+
+
+@pytest.mark.parametrize("value", [None, [], "", 1, {"type": "text", "text": None}])
+def test_embeddings_reject_invalid_inputs(start: StartServer, value: Any) -> None:
+    _, url = start("embedding")
+    assert _post(url + "/v1/embeddings", {"input": value})[0] == 400
+
+
+@pytest.mark.parametrize("combined", [False, True])
+def test_embeddings_reject_remote_images(start: StartServer, combined: bool) -> None:
+    _, url = start("embedding", st=_MultimodalST)
+    item: dict[str, Any] = {"image_url": {"url": "https://example.com/image.png"}}
+    item.update({"text": "caption"} if combined else {"type": "image_url"})
+    status, _, text = _post(url + "/v1/embeddings", {"input": item})
+    assert status == 400
+    assert "base64 data: URLs" in json.loads(text)["error"]["message"]
+
+
+def test_embeddings_keep_url_like_text_as_text(start: StartServer) -> None:
+    srv, url = start("embedding")
+    literal = "https://example.com/image.png"
+    assert _post(url + "/v1/embeddings", {"input": literal})[0] == 200
+    assert srv.backend.st.batches[-1] == [{"text": literal}]
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        [],
+        [{"sentence_embedding": torch.tensor([float("nan"), 0.0])}],
+        [{"sentence_embedding": torch.tensor([[1.0, 0.0]])}],
+    ],
+)
+def test_embeddings_report_invalid_model_outputs(
+    start: StartServer,
+    monkeypatch: pytest.MonkeyPatch,
+    outputs: list[dict[str, torch.Tensor]],
+) -> None:
+    srv, url = start("embedding")
+
+    def encode(
+        items: list[serve.EmbeddingInput], *, output_value: None, convert_to_numpy: bool
+    ) -> list[dict[str, torch.Tensor]]:
+        return outputs
+
+    monkeypatch.setattr(srv.backend.st, "encode", encode)
+    status, _, text = _post(url + "/v1/embeddings", {"input": "hello"})
+    assert status == 500
+    assert "error" in json.loads(text)
 
 
 def test_yolo_reports_unsupported_build(monkeypatch):

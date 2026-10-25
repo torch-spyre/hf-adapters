@@ -26,8 +26,13 @@ and ``GET /v1/models``, plus one task endpoint:
   checkpoint without a chat template is sent the messages joined as a plain prompt.
 - ``rerank``: ``POST /v1/rerank`` ``{"query": ..., "documents": [...], "top_n": n}``
   -> ``results`` of ``index``, ``document`` and ``relevance_score``, best first.
-- ``clip``: ``POST /v1/embeddings``; each ``input`` item is a string, a
-  ``{"type": "text", "text": ...}`` part or an ``image_url`` part.
+- ``embedding``: ``POST /v1/embeddings``; each ``input`` item is a string, a
+  ``{"type": "text", "text": ...}`` part, an ``image_url`` part, or a combined
+  ``{"text": ..., "image_url": {"url": "data:..."}}`` object. Combined inputs
+  produce one embedding and require model support; include any image placeholder
+  required by the model in ``text``. ``clip`` remains a compatibility task alias.
+  Usage counts attention-mask tokens returned by the model, including media tokens
+  when exposed; image towers without token masks contribute zero tokens.
 - ``yolo``: ``POST /v1/segment`` ``{"image": "data:...", "conf": 0.25,
   "iou": 0.45}`` -> boxes, classes, scores and mask polygons in image pixels.
   Needs ``hf_adapters.ultralytics_yolo``, which not every build ships.
@@ -47,6 +52,7 @@ import time
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 
 import torch
 from PIL import Image
@@ -402,62 +408,108 @@ class Rerank:
         )
 
 
-class CLIP:
+EmbeddingInput = dict[str, str | Image.Image]
+
+
+class Embedding:
+    """Text and multimodal embeddings, gated by the loaded model's capabilities."""
+
     path = "/v1/embeddings"
 
-    def __init__(self, model_path, trust_remote_code):
+    def __init__(self, model_path: str, trust_remote_code: bool) -> None:
         from sentence_transformers import SentenceTransformer
 
         import hf_adapters.st_backend  # noqa: F401  (registers backend="spyre")
 
-        self.st = SentenceTransformer(
+        self.st: SentenceTransformer = SentenceTransformer(
             model_path, backend="spyre", trust_remote_code=trust_remote_code
         )
 
-    def warmup(self):
-        # A text-only model (any plain SentenceTransformer) raises on an image input.
-        self.images = "image" in getattr(self.st, "modalities", ["text", "image"])
-        self.embed(["warmup"] + ([Image.new("RGB", (224, 224))] if self.images else []))
+    def warmup(self) -> None:
+        # Do not invent architecture-specific placeholders for combined inputs.
+        # Warm up supported standalone modalities; combined shapes compile on use.
+        items: list[EmbeddingInput] = []
+        if self.st.supports("text"):
+            items.append({"text": "warmup"})
+        if self.st.supports("image"):
+            items.append({"image": Image.new("RGB", (224, 224))})
+        if items:
+            self.embed(items)
 
-    def embed(self, items):
-        """Embeddings in input order; texts and images go in separate batches."""
-        vectors: list = [None] * len(items)
-        for kind in (str, Image.Image):
-            idx = [i for i, x in enumerate(items) if isinstance(x, kind)]
-            if idx:
-                encoded = self.st.encode([items[i] for i in idx], convert_to_numpy=True)
-                for i, v in zip(idx, encoded):
-                    vectors[i] = v.tolist()
-        return vectors
+    def embed(self, items: list[EmbeddingInput]) -> tuple[list[list[float]], int]:
+        """Batch by modality combination, preserving each input and its output index."""
+        groups: dict[tuple[str, ...], list[int]] = {}
+        for index, item in enumerate(items):
+            groups.setdefault(tuple(sorted(item)), []).append(index)
 
-    def handle(self, h, body):
-        raw = body.get("input")
+        vectors: list[list[float]] = [[] for _ in items]
+        tokens = 0
+        for indices in groups.values():
+            # Explicit modality dicts also keep text resembling a URL/file path
+            # from being inferred as media and fetched by SentenceTransformer.
+            outputs: list[dict[str, Any]] = self.st.encode(
+                [items[index] for index in indices],
+                output_value=None,
+                convert_to_numpy=False,
+            )
+            for index, output in zip(indices, outputs, strict=True):
+                vector: torch.Tensor = output["sentence_embedding"]
+                if vector.ndim != 1 or not torch.isfinite(vector).all():
+                    raise RuntimeError("model returned an invalid sentence embedding")
+                vectors[index] = vector.detach().float().cpu().tolist()
+                mask: torch.Tensor | None = output.get("attention_mask")
+                if mask is not None:
+                    tokens += int(mask.sum().item())
+        return vectors, tokens
+
+    def _parse_item(self, raw: Any) -> EmbeddingInput:
+        item: EmbeddingInput
+        if isinstance(raw, str):
+            item = {"text": raw}
+        elif (
+            isinstance(raw, dict)
+            and raw.get("type") == "text"
+            and set(raw) == {"type", "text"}
+        ):
+            item = {"text": raw["text"]}
+        elif (
+            isinstance(raw, dict)
+            and raw.get("type") == "image_url"
+            and set(raw) == {"type", "image_url"}
+        ):
+            item = {"image": decode_image(raw)}
+        elif isinstance(raw, dict) and set(raw) == {"text", "image_url"}:
+            item = {"text": raw["text"], "image": decode_image(raw["image_url"])}
+        else:
+            raise BadRequestError(
+                "input items must be strings, text or image_url parts, "
+                "or combined objects with text and image_url"
+            )
+        if "text" in item and (not isinstance(item["text"], str) or not item["text"]):
+            raise BadRequestError("input text must be a non-empty string")
+        modality: str | tuple[str, ...] = (
+            next(iter(item)) if len(item) == 1 else tuple(sorted(item))
+        )
+        if not self.st.supports(modality):
+            raise BadRequestError(
+                f"this model does not support {modality!r} embedding inputs"
+            )
+        return item
+
+    def handle(self, h: "Handler", body: dict[str, Any]) -> None:
+        raw: Any = body.get("input")
         raw = raw if isinstance(raw, list) else [raw]
-        items = []
-        for x in raw:
-            if isinstance(x, dict) and x.get("type") == "text":
-                x = x.get("text")
-            if isinstance(x, str):
-                if not x:
-                    raise BadRequestError("input strings must be non-empty")
-                items.append(x)
-            elif isinstance(x, dict) and x.get("type") == "image_url":
-                if not self.images:
-                    raise BadRequestError(f"{h.server.model_name} embeds text only")
-                items.append(decode_image(x))
-            else:
-                raise BadRequestError(
-                    "input items must be strings, text or image_url parts"
-                )
-        texts = [x for x in items if isinstance(x, str)]
-        tokens = int(self.st.tokenize(texts)["attention_mask"].sum()) if texts else 0
+        if not raw:
+            raise BadRequestError("input must not be empty")
+        items: list[EmbeddingInput] = [self._parse_item(item) for item in raw]
+        vectors, tokens = self.embed(items)
         h.send_json(
             {
                 "object": "list",
                 "model": h.server.model_name,
                 "data": [
                     {"object": "embedding", "index": i, "embedding": v}
-                    for i, v in enumerate(self.embed(items))
+                    for i, v in enumerate(vectors)
                 ],
                 "usage": {"prompt_tokens": tokens, "total_tokens": tokens},
             }
@@ -470,7 +522,7 @@ class YOLO:
 
     def __init__(self, model_path, trust_remote_code):
         try:
-            from hf_adapters.ultralytics_yolo import (  # type: ignore[import-untyped]
+            from hf_adapters.ultralytics_yolo import (  # type: ignore[import-untyped,import-not-found]
                 load_model,
                 prepare_input,
             )
@@ -559,7 +611,14 @@ class YOLO:
         )
 
 
-TASKS = {"vlm": VLM, "chat": CausalLM, "rerank": Rerank, "clip": CLIP, "yolo": YOLO}
+TASKS = {
+    "vlm": VLM,
+    "chat": CausalLM,
+    "rerank": Rerank,
+    "embedding": Embedding,
+    "clip": Embedding,  # Compatibility alias; no separate model-specific backend.
+    "yolo": YOLO,
+}
 
 
 class Handler(BaseHTTPRequestHandler):

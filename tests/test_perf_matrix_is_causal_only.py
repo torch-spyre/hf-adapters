@@ -17,9 +17,13 @@ from tests.model_registry import (
     ALL_CAUSAL_PATHS,
     CAUSAL_PATHS,
     EMBED_PATHS,
+    EMBEDDING_MODELS,
     MASKED_LM_PATHS,
+    MULTIMODAL_EMBED_PATHS,
+    MULTIMODAL_EMBEDDING_MODELS,
     QUESTION_ANSWERING_PATHS,
     TOKEN_CLASSIFICATION_PATHS,
+    VISION_MODELS,
     VISION_PATHS,
 )
 
@@ -44,6 +48,26 @@ _WEEKLY_SCOPE = sorted(
     | set(MASKED_LM_PATHS)
     | set(VISION_PATHS)
 )
+
+
+def test_multimodal_registry_is_part_of_embedding_not_vision() -> None:
+    assert MULTIMODAL_EMBEDDING_MODELS
+    assert MULTIMODAL_EMBEDDING_MODELS.keys() <= EMBEDDING_MODELS.keys()
+    assert MULTIMODAL_EMBEDDING_MODELS.keys().isdisjoint(VISION_MODELS)
+
+
+@pytest.mark.parametrize("checkpoint", MULTIMODAL_EMBED_PATHS)
+def test_multimodal_models_use_embedding_and_load_matrices(checkpoint: str) -> None:
+    matrices: dict[str, list[str]] = generate_test_matrix.generate_matrices(
+        only_models=[checkpoint]
+    )
+    assert matrices["embed"] == [checkpoint]
+    assert matrices["combined"] == [checkpoint]
+    assert matrices["vision"] == []
+    assert matrices["perf"] == []
+    assert "clip" not in matrices
+    outputs: dict[str, str] = generate_test_matrix.format_for_github_actions(matrices)
+    assert "clip_matrix" not in outputs
 
 
 def test_causal_only_perf_list_is_accepted() -> None:

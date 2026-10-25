@@ -42,12 +42,12 @@ repos:
         pass_filenames: false
         always_run: false
 
-  # MyPy - Static type checker (uses project venv so torch/transformers stubs resolve)
+  # MyPy - Static type checker (isolated Python 3.11, matching CI and mypy config)
   - repo: local
     hooks:
       - id: mypy
         name: mypy
-        entry: mypy --config-file=pyproject.toml --explicit-package-bases
+        entry: uv run --locked --isolated --python 3.11 --group dev mypy --config-file=pyproject.toml --explicit-package-bases
         language: system
         types: [python]
         files: ^hf_adapters/
