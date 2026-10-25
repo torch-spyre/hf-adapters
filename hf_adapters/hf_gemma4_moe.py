@@ -28,6 +28,8 @@ from hf_adapters.hf_common import (
     moe_decode_selected_experts,
     moe_prefill_all_experts,
     moe_topk,
+    moe_union_cap,
+    moe_union_selected_experts,
     named_moe_prefill_inputs,
     optional_spyre_config_patch,
     prepare_moe_expert_weights,
@@ -211,6 +213,8 @@ class Gemma4MoEBlock(nn.Module):
         )
         self._moe_k = moe_k
         self._stick_size = stick_size
+        # Set by prepare_text_decoder_for_spyre from SPYRE_MOE_UNION_CAP.
+        self._moe_union_cap = None
         self._moe_rms_eps = self.router.eps
         decode_forward = (
             self._full_tp_decode_forward
@@ -336,6 +340,35 @@ class Gemma4MoEBlock(nn.Module):
         )
         experts = self.experts
         router = self.router
+        tokens = router_input.shape[0]
+        cap = self._moe_union_cap
+        if cap is not None and 1 < tokens <= cap:
+            probs = _router_probs(
+                router_input,
+                router.proj.weight,
+                router.scale,
+                router.scalar_root_size,
+                self._moe_rms_eps,
+            )
+            moe_out = moe_union_selected_experts(
+                expert_input,
+                probs,
+                experts.decode_gate_proj,
+                experts.decode_up_proj,
+                experts.decode_down_proj,
+                self._moe_k,
+                cap,
+                32,
+                self._stick_size,
+                "gelu_tanh",
+                expert_ids=router.expert_ids,
+                slot_identity=router.slot_identity,
+                per_expert_scale_stick=router.per_expert_scale_stick,
+                decode_chunks=self._decode_chunks,
+                chunk_scale=experts.decode_chunk_scale,
+                chunk_offsets=experts.decode_chunk_offsets,
+            )
+            return dense_out, moe_out.to(expert_input.dtype)
         moe_out = _compiled_moe_loop_region(
             router_input,
             expert_input,
@@ -502,6 +535,17 @@ def prepare_text_decoder_for_spyre(model):
         block.router.route_identity = torch.eye(
             stick_size, dtype=expert_scale.dtype
         ).to(hf_common.DEVICE)
+        num_experts = expert_scale.shape[0]
+        block._moe_union_cap = moe_union_cap(moe_k, num_experts)
+        slots = block._moe_union_cap or 1
+        block.router.slot_identity = torch.eye(slots, dtype=expert_scale.dtype).to(
+            hf_common.DEVICE
+        )
+        block.router.expert_ids = (
+            torch.arange(num_experts, dtype=expert_scale.dtype)[:, None]
+            .contiguous()
+            .to(hf_common.DEVICE)
+        )
         if str(hf_common.DEVICE).startswith("spyre"):
             block.router.per_expert_scale_stick = dma_moe_per_expert_scale_to_spyre(
                 expert_scale
