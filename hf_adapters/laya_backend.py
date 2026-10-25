@@ -525,13 +525,13 @@ def _decision_forward(
 ):
     if model.head is not None and (model.training or torch.is_grad_enabled()):
         raise RuntimeError("Laya decision models on Spyre support inference only")
-    if position_ids is not None and option_ids is None:
-        option_ids = torch.zeros_like(position_ids)
 
     if option_ids is None:
         encoder_attention_mask = attention_mask
         encoder_position_ids = None
     else:
+        if position_ids is None:
+            raise ValueError("position_ids are required when option_ids are provided")
         from laya.common import parallel_option_masks
 
         encoder_attention_mask = parallel_option_masks(
