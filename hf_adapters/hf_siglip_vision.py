@@ -48,8 +48,13 @@ Usage::
     last_hidden = prefill_vision_tower(model, pixel_values)
 """
 
+from collections.abc import Callable
+from typing import Any, cast
+
 import torch
 import torch.nn.functional as F
+from transformers import SiglipTextConfig, SiglipVisionConfig, SiglipVisionModel
+from transformers.models.siglip.modeling_siglip import SiglipEncoder, SiglipEncoderLayer
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
@@ -132,28 +137,20 @@ def _make_patch_embed(inner):
     return patch_embed
 
 
-def prepare_for_spyre(model):
-    """Apply Spyre adaptations to a SigLIP vision tower in-place.
-
-    Pads attention heads and MLP intermediate dim to stick boundaries, builds
-    the CPU patch-embed closure and the compiled pre-LN encoder blocks, and
-    stashes the tower's final LayerNorm. After this the tower runs via
-    ``prefill_vision`` / ``vision_backbone_forward``.
-    """
-    tower = _get_vision_tower(model)
-    inner = _get_inner(tower)
-    cfg = inner.config
-
+def _prepare_encoder(
+    encoder: SiglipEncoder, cfg: SiglipTextConfig | SiglipVisionConfig
+) -> list[Callable[..., torch.Tensor]]:
+    """Pad and compile the shared SigLIP text/vision encoder architecture."""
     num_heads = cfg.num_attention_heads
     orig_head_dim = cfg.hidden_size // num_heads
     scale = orig_head_dim**-0.5
 
-    layers = inner.encoder.layers
+    layers = cast(list[SiglipEncoderLayer], list(encoder.layers))
 
     padded_head_dim = ((orig_head_dim + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
     if padded_head_dim > orig_head_dim:
         pad_attention_heads_linear(
-            model,
+            encoder,
             (layer.self_attn for layer in layers),
             orig_head_dim,
             padded_head_dim,
@@ -169,9 +166,7 @@ def prepare_for_spyre(model):
     if padded_inter > orig_inter:
         pad_encoder_mlp(layers, orig_inter, padded_inter)
 
-    model._spyre_patch_embed = _make_patch_embed(inner)
-    model._spyre_post_layernorm = inner.post_layernorm
-    model._spyre_compiled_blocks = [
+    return [
         make_vision_encoder_block(
             q_proj=layer.self_attn.q_proj,
             k_proj=layer.self_attn.k_proj,
@@ -188,6 +183,19 @@ def prepare_for_spyre(model):
         )
         for layer in layers
     ]
+
+
+def prepare_for_spyre(model: Any) -> None:
+    """Pad and compile a vision tower and capture its CPU patch embedding."""
+    tower: SiglipVisionModel = _get_vision_tower(model)
+    inner: SiglipVisionModel = _get_inner(tower)
+    model._spyre_patch_embed = _make_patch_embed(inner)
+    model._spyre_post_layernorm = inner.post_layernorm
+    cfg = cast(SiglipVisionConfig, inner.config)
+    model._spyre_compiled_blocks = _prepare_encoder(inner.encoder, cfg)
+    model._spyre_head_dim = (
+        (cfg.hidden_size // cfg.num_attention_heads + BLOCK_SIZE - 1) // BLOCK_SIZE
+    ) * BLOCK_SIZE
 
 
 def load_hf_model(model_path, dtype=torch.float16, trust_remote_code=None):

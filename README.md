@@ -1,6 +1,6 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-40-blue)
+![adapters](https://img.shields.io/badge/adapters-41-blue)
 ![compatible](https://img.shields.io/badge/compatible_models-10K%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -13,9 +13,10 @@ from `transformers`.
 
 ## Supported Models
 
-**40 adapters · 10K+ compatible models**
+**41 adapters · 10K+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
+**multimodal embedding** (SigLIP text/image vectors),
 **sequence classification** (sentiment / text categorisation),
 **token classification** (NER/POS), **vision-language** (image→text), and
 **speculative-decoding drafter** models — from

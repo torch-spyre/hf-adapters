@@ -296,6 +296,7 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
         "causal": model_registry.NON_BLOCKING_CAUSAL_MODELS,
         "vision": model_registry.NON_BLOCKING_VISION_MODELS,
         "embedding": {},
+        "multimodal_embedding": {},
         "masked_lm": {},
         "question_answering": {},
         "reranker": {},
