@@ -1,6 +1,6 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-40-blue)
+![adapters](https://img.shields.io/badge/adapters-41-blue)
 ![compatible](https://img.shields.io/badge/compatible_models-10K%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -13,7 +13,7 @@ from `transformers`.
 
 ## Supported Models
 
-**40 adapters · 10K+ compatible models**
+**41 adapters · 10K+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
 **sequence classification** (sentiment / text categorisation), **structured
@@ -25,8 +25,8 @@ XLM-RoBERTa / MPNet / ModernBERT encoders, the Granite Vision 4.1 (SigLIP tower 
 Granite text), Mistral3 Vision (Pixtral tower + Mistral text), and Gemma 4
 (encoder-free and full-vision) multimodal VLMs, plus the DSpark block-propose drafters for
 Qwen 3 / Granite / Gemma 4 and the XPress block-propose drafter (Gemma 4 26B-A4B).
-Laya support uses its optional upstream package to
-construct the stock decision model; hf-adapters patches only its ModernBERT encoder.
+Laya support uses its optional upstream package to construct the stock decision
+model; hf-adapters patches its encoder, decision transformer, and marker selection.
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. The **canonical, per-adapter model lists** — verified
@@ -95,8 +95,8 @@ sequences = model.generate(**inputs, max_new_tokens=5)
 
 ## Structured Decisions
 
-Laya keeps its native Agent API while running the ModernBERT encoder and
-two-layer decision transformer on Spyre:
+Laya keeps its native Agent API while patching its ModernBERT/mmBERT encoder,
+two-layer decision transformer, and marker/CLS selection to run on Spyre:
 
 ```python
 from hf_adapters import laya_backend
@@ -118,10 +118,8 @@ result = agent.predict(
 )
 ```
 
-The encoder and two-layer decision transformer run on Spyre. Question-type
-embedding, option scoring, action scoring, and Agent orchestration remain on CPU.
-Select a bundled checkpoint explicitly with `subfolder="typed-decisions"` or
-`subfolder="multilingual"`. This does not enable automatic Router selection.
+Question-type lookup, scoring, and Agent orchestration remain on CPU. Select a
+bundled checkpoint with `subfolder="typed-decisions"` or `subfolder="multilingual"`.
 
 ## Embedding Models
 
