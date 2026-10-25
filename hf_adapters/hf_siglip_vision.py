@@ -139,7 +139,7 @@ def _make_patch_embed(inner):
 
 def _prepare_encoder(
     encoder: SiglipEncoder, cfg: SiglipTextConfig | SiglipVisionConfig
-) -> list[Callable[..., torch.Tensor]]:
+) -> tuple[list[Callable[..., torch.Tensor]], int]:
     """Pad and compile the shared SigLIP text/vision encoder architecture."""
     num_heads = cfg.num_attention_heads
     orig_head_dim = cfg.hidden_size // num_heads
@@ -166,7 +166,7 @@ def _prepare_encoder(
     if padded_inter > orig_inter:
         pad_encoder_mlp(layers, orig_inter, padded_inter)
 
-    return [
+    blocks = [
         make_vision_encoder_block(
             q_proj=layer.self_attn.q_proj,
             k_proj=layer.self_attn.k_proj,
@@ -183,6 +183,7 @@ def _prepare_encoder(
         )
         for layer in layers
     ]
+    return blocks, padded_head_dim
 
 
 def prepare_for_spyre(model: Any) -> None:
@@ -192,10 +193,9 @@ def prepare_for_spyre(model: Any) -> None:
     model._spyre_patch_embed = _make_patch_embed(inner)
     model._spyre_post_layernorm = inner.post_layernorm
     cfg = cast(SiglipVisionConfig, inner.config)
-    model._spyre_compiled_blocks = _prepare_encoder(inner.encoder, cfg)
-    model._spyre_head_dim = (
-        (cfg.hidden_size // cfg.num_attention_heads + BLOCK_SIZE - 1) // BLOCK_SIZE
-    ) * BLOCK_SIZE
+    model._spyre_compiled_blocks, model._spyre_head_dim = _prepare_encoder(
+        inner.encoder, cfg
+    )
 
 
 def load_hf_model(model_path, dtype=torch.float16, trust_remote_code=None):

@@ -736,6 +736,12 @@ VISION_MODELS = {
         "adapter": "hf_clip.py",
         "kind": "clip",  # dual-encoder: image or text -> embedding
         "size": "0.15b",
+        "multimodal_test": {
+            "backend": "sentence_transformers",
+            "embedding_cosine": 0.97,
+            # CLIP compares retrieval and separated rankings, not score error.
+            "score_atol": None,
+        },
     },
 }
 
@@ -747,8 +753,39 @@ MULTIMODAL_EMBEDDING_MODELS: dict[str, dict[str, Any]] = {
         "adapter": "hf_siglip.py",
         "kind": "multimodal_embedding",
         "size": "1.8b",
+        "multimodal_test": {
+            "text_processor_kwargs": {"padding": "max_length", "truncation": True},
+            "require_hidden_states": True,
+            "hidden_state_xfails": {
+                "image": (
+                    "SigLIP fp16 vision drift vs fp32 CPU: minimum cat/dog patch "
+                    "cosine 0.104/0.558 after 40 blocks; full-fp32 Spyre compilation "
+                    "is unsupported. See docs/siglip_vision_accuracy.md."
+                ),
+            },
+            "xfail_cases": {
+                "uniform": "Uniform-color vision outputs can exceed cosine tolerances on Spyre",
+            },
+        },
     },
 }
+
+
+def _merge_multimodal_models(
+    embedding_models: dict[str, dict[str, Any]],
+    vision_models: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    clip_models = {
+        key: info for key, info in vision_models.items() if info.get("kind") == "clip"
+    }
+    collisions = embedding_models.keys() & clip_models.keys()
+    assert not collisions, f"Multimodal registry key collisions: {sorted(collisions)}"
+    return {**embedding_models, **clip_models}
+
+
+_MULTIMODAL_TEST_MODELS = _merge_multimodal_models(
+    MULTIMODAL_EMBEDDING_MODELS, VISION_MODELS
+)
 
 
 def _get_adapter_module_name(adapter_module: types.ModuleType) -> str:
@@ -903,7 +940,8 @@ EMBED_PATHS: list[str] = _exclude(
 )
 MULTIMODAL_EMBED_PATHS: list[str] = _exclude(
     _select_representative_paths(
-        MULTIMODAL_EMBEDDING_MODELS, include_gated=_include_gated_flag
+        _MULTIMODAL_TEST_MODELS,
+        include_gated=_include_gated_flag,
     )
 )
 MASKED_LM_PATHS: list[str] = _exclude(
@@ -973,6 +1011,7 @@ REMOTE_CODE_PATHS: frozenset[str] = frozenset(
         QUESTION_ANSWERING_MODELS,
         TOKEN_CLASSIFICATION_MODELS,
         VISION_MODELS,
+        MULTIMODAL_EMBEDDING_MODELS,
     )
     for info in models.values()
     if info.get("trust_remote_code", False)
@@ -989,6 +1028,9 @@ ALL_CAUSAL_PATHS: list[str] = _exclude(
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") not in (*DRAFTER_KINDS, "diffusion"),
     )
+)
+ALL_MULTIMODAL_EMBED_PATHS: list[str] = _exclude(
+    _all_paths(_MULTIMODAL_TEST_MODELS, include_gated=_include_gated_flag)
 )
 ALL_EMBED_PATHS: list[str] = _exclude(
     _all_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)

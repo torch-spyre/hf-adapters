@@ -275,10 +275,17 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
     # doesn't raise "duplicate parametrization" when we call metafunc.parametrize
     # below. Other parameter names on the same @parametrize marker are preserved.
     kept: list = []
+    model_path_scope = "function"
+    model_path_indirect = False
     for marker in metafunc.definition.iter_markers("parametrize"):
         argnames = marker.args[0] if marker.args else ""
         names = [n.strip() for n in argnames.replace(",", " ").split()]
         if "model_path" in names:
+            model_path_scope = marker.kwargs.get("scope", "function")
+            indirect: bool | list[str] = marker.kwargs.get("indirect", False)
+            model_path_indirect = (
+                indirect if isinstance(indirect, bool) else "model_path" in indirect
+            )
             continue
         kept.append(marker)
     metafunc.definition.own_markers = [
@@ -318,7 +325,13 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
         )
         for path in overrides
     ]
-    metafunc.parametrize("model_path", params, ids=overrides)
+    metafunc.parametrize(
+        "model_path",
+        params,
+        ids=overrides,
+        scope=model_path_scope,
+        indirect=model_path_indirect,
+    )
 
 
 def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:

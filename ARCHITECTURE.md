@@ -145,6 +145,43 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 
 ### Multimodal Embedding (text/image→vectors)
 
+`tests/spyre/test_e2e_multimodal_embed_compare_spyre.py` runs shared text-only,
+image-only (scalar/list), batched retrieval, and three-caption ranking scenarios
+over `MULTIMODAL_EMBED_PATHS`. That selection includes the multimodal embedding
+registry and the existing CLIP entries in the vision registry. Model-specific
+behavior belongs in each checkpoint's `multimodal_test` settings:
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `backend` | `huggingface` | `AutoModel` CPU reference / `AutoSpyreModel`, or `sentence_transformers` for stock / `backend="spyre"` encoding |
+| `text_processor_kwargs` | padding + truncation | Tokenization options, such as max-length padding for last-token pooling |
+| `embedding_cosine`, `hidden_state_cosine` | 0.99 | Minimum per-vector similarity against the CPU reference |
+| `score_atol` | 0.005 | Absolute cosine-score tolerance; `None` keeps ranking checks without a score-error assertion |
+| `ranking_atol` | 0.01 | Require pairwise ordering when the reference score gap exceeds this tolerance; correct top matches are always required |
+| `logit_atol`, `logit_rtol` | 1.0, 0.05 | Compare joint similarity logits directly against the CPU reference, including scale/bias |
+| `require_hidden_states` | false | Fail if feature APIs omit required tower outputs; returned hidden states are always compared |
+| `joint_forward` | true | Also exercise the HF joint forward when both modalities are supplied |
+| `xfail_cases` | empty | Map specific scenario names to non-strict expected-failure reasons for this checkpoint only |
+| `hidden_state_xfails` | empty | Isolate documented per-modality cosine limitations; malformed, missing or non-finite outputs still fail |
+
+The drivers in `tests/_multimodal_embedding_helpers.py` accept HF tensor or
+pooled-output feature APIs and SentenceTransformer encoding. Adding another
+checkpoint using one of those APIs requires registry metadata rather than new
+scenarios. Embedding widths come from the reference outputs, image sizes from
+the processor, and HF loading uses the shared Spyre dtype policy. Both CPU APIs
+use fp32. A module-scoped fixture loads each CPU and Spyre model once, computes
+all references before Spyre preparation, and caches outputs across embedding
+and hidden-state tests. CPU thread limits are restored after the model fixture.
+CLIP retains its 0.97 embedding threshold. Close distractors may exchange ranks;
+the correct image/caption must still win in both retrieval directions.
+The `multimodal_embed_compare` CI suite replaces the CLIP-only suite, with matrix
+entries for both APIs, retry/failure gating, and regression/trunk/unit tags.
+Run it with `make multimodal-embed-compare-tests`; `MODEL_PATH` selects a checkpoint.
+The Transformers 5.15.0 hardware run completed with **15 passed, 9 skipped,
+6 xfailed**. CLIP passed all six scenarios; its nine hidden-state checks skip
+because `SentenceTransformer.encode` does not expose tower states. SigLIP passed
+nine checks, with five vision hidden-state xfails and one uniform-image xfail.
+
 `hf_siglip.py` supports `google/siglip2-giant-opt-patch16-384` on Transformers
 5.15.0. This fixed-resolution checkpoint uses `model_type=siglip`, rather
 than the separate Siglip2 NaFlex architecture. Load it with `AutoSpyreModel`
@@ -169,28 +206,31 @@ Spyre model through `AutoSpyreModel.from_pretrained`, including default fp16
 selection. It uses a real cat/dog image batch and checks retrieval in both
 directions, cosine scores against HF with `atol=0.005`, pooled embeddings, and
 both towers' `last_hidden_state` (per-token/patch cosine ≥0.99). It also covers
-the CLIP test's three text prompts, image-only inference from a scalar PIL image
-or a one-image list, and the complete three-caption ranking for a cat image.
-These cases use SigLIP's native HF API; SentenceTransformer's CLIP backend is a
-separate integration. The test reports the imported Transformers version and
-restores the CPU thread count after each test.
+three text prompts, image-only inference from a scalar PIL image
+or a one-image list, and three-caption retrieval for a cat image.
+These cases use SigLIP's native HF API; the same scenarios exercise CLIP through
+SentenceTransformer's Spyre backend. The test reports the imported Transformers
+version without asserting a duplicate version pin.
 
-**Accuracy limitation exposed by the expanded test:** pooled image cosine is
-about 0.998 and text cosine is 0.99962–0.99995 for the cat/dog batch; both retrieval
-directions select the correct image/caption, with cosine-score differences below
-0.0013. However,
-the real-image vision patch vectors fail the hidden-state check: minimum patch
-cosine was 0.096 for the cat and 0.553 for the dog in the final expanded run.
-A diagnostic run found aggregate vision hidden-state cosine 0.961/0.990,
-with substantial vector magnitudes, so this is not just noise in near-zero vectors.
-The text-only three-prompt case passes. Single-image scalar/list inputs have
-pooled cosine 0.9980 but minimum patch cosine 0.204. The CLIP three-caption
-case preserves the full caption ranking but exceeds the cosine-score tolerance
-for the dog caption (difference 0.00507 vs 0.005 allowed).
-The real-image tests remain blocking. Synthetic uniform-color images are a
-separate parametrized `xfail(strict=False)` case; the final run failed the
-cosine-score tolerance with a maximum difference of 0.0094. This adapter is not a numerically exact replacement
-for HF logits, and full vision hidden-state accuracy remains unresolved.
+**Vision accuracy remains unresolved.** Against an fp32 CPU reference, the
+fp16 Spyre cat/dog minimum patch cosines are 0.104/0.558. The fp16 CPU model
+also drifts (0.285/0.731), so using an fp16 reference obscured part of the error.
+A trace of all 40 vision blocks shows accumulated divergence: Spyre first falls
+below 0.99 at blocks 12/20, versus CPU fp16 at blocks 20/31. Full-fp32 Spyre
+execution fails compilation with an unsupported reduction layout; fp32 residuals
+and LayerNorm on CPU did not resolve fp16 attention/MLP drift.
+The registry now marks only vision hidden-state cosine failures as expected,
+retaining the 0.99 threshold. Text hidden states, pooled embeddings, retrieval
+and reference logits are separate checks. Uniform-color images have a separate
+non-strict expected failure for pooled/retrieval accuracy.
+See [the layer investigation](docs/siglip_vision_accuracy.md) and its complete CSV.
+The earlier 0.00504 score discrepancy was from **SigLIP's three-caption scenario**
+against an fp16 CPU reference, for the dog distractor caption; it was not a CLIP
+score failure. Current comparisons use fp32 references.
+
+The shared block changes were also checked with Granite Vision 4.1 4B on
+Transformers 5.15.0: `test_vlm_e2e_spyre.py` passed, with 5/5 matching next tokens
+and logit cosine 0.999828–0.999981.
 
 ### Sequence Classification
 

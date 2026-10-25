@@ -109,8 +109,6 @@ def _patch_encoder(encoder: SiglipEncoder) -> None:
         mask: torch.Tensor | None = (
             attention_mask.cpu() if attention_mask is not None else None
         )
-        if mask is not None and mask.ndim == 2:
-            mask = mask[:, None, None, :].bool()
         if pad_len:
             hidden = F.pad(hidden, (0, 0, 0, pad_len))
             if mask is None:
@@ -120,9 +118,12 @@ def _patch_encoder(encoder: SiglipEncoder) -> None:
             fill_value: bool | float = (
                 False if mask.dtype == torch.bool else float("-inf")
             )
-            mask = F.pad(mask, (0, pad_len), value=fill_value)
             if mask.shape[-2] == seq_len:
-                mask = F.pad(mask, (0, 0, 0, pad_len), value=0)
+                allowed: bool | float = True if mask.dtype == torch.bool else 0.0
+                mask = F.pad(mask, (0, 0, 0, pad_len), value=allowed)
+            # Pad keys last so even the added query rows cannot attend to
+            # compiler-added keys (False for bool masks, -inf for additive).
+            mask = F.pad(mask, (0, pad_len), value=fill_value)
         if mask is not None:
             mask = mask.to(DEVICE)
         hidden = hidden.clone()
@@ -231,13 +232,11 @@ def prepare_for_spyre(model: SiglipModel) -> None:
     model.vision_model.encoder._spyre_compiled_blocks = (
         model.vision_model._spyre_compiled_blocks
     )
-    setattr(
-        model.text_model.encoder,
-        "_spyre_compiled_blocks",
-        hf_siglip_vision._prepare_encoder(
-            model.text_model.encoder, cast(SiglipTextConfig, model.config.text_config)
-        ),
+    text_blocks, text_head_dim = hf_siglip_vision._prepare_encoder(
+        model.text_model.encoder, cast(SiglipTextConfig, model.config.text_config)
     )
+    model.text_model.encoder._spyre_compiled_blocks = text_blocks
+    model.text_model.encoder._spyre_head_dim = text_head_dim
     _patch_encoder(model.text_model.encoder)
     _patch_encoder(model.vision_model.encoder)
     _patch_text_forward(model.text_model)
