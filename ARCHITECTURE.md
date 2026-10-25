@@ -86,6 +86,35 @@ its packed sub-stick rows produce an unsupported `floor(row/top_k)` stick
 coordinate. The batch-1 path is unchanged, and the remaining block work (dense
 FFN, attention, TP reduction) stays batched.
 
+**Gemma 4 26B-A4B tree speculative decoding (batch 1, opt-in).**
+`gemma4_spec_decode.TreeSpeculativeDecoder` pairs the MoE target with the
+XPress drafter:
+- The drafter (`_xpress_tree`, on `hf_xpress_qwen3`'s weights and folded
+  refiner) keeps a per-layer KV cache of every context row and proposes a
+  16-node token tree from one 5-layer forward. Its head is reduced on the
+  device to 64-column chunk winners, and the tree is grown on the host with
+  the refiner run exactly for each node's own path.
+- The target (`_gemma4_tree.TreeVerifier`) scores the tree in one forward:
+  explicit ancestor masks over the full-length global caches and the
+  anchored sliding rings, SDPA on both layer types, and the decode MoE FFN.
+  It then commits the accepted path with a gather and a scatter.
+- The drafter's target hidden states are copied out inside the verify graphs
+  (tapped layers).
+
+Greedy acceptance reproduces greedy decoding up to floating-point
+differences. Two opt-in, lossy knobs speed up the verify:
+`SPYRE_MOE_UNION_CAP` and `SPYRE_GEMMA4_FP8`.
+
+- `SPYRE_MOE_UNION_CAP=C` serves 2..C-token MoE steps with a union region:
+  - it reads each of at most C distinct experts once, instead of `T * top_k`
+    slabs;
+  - each token's top-1 expert always gets a slot;
+  - weight on a dropped expert is renormalized away.
+- `SPYRE_GEMMA4_FP8=attn,dense,lm_head` replaces those weights with W8A8 fp8:
+  - per-token activation scales;
+  - `spyre::scaled_mm` with N, K multiples of 128 (dense 2112 padded to 2176);
+  - RMSNorm-consumed outputs skip the rescale.
+
 **OLMoE 1B-7B:** 64 experts, top-8 routing with the checkpoint's
 unnormalized selected probabilities. Prefill evaluates all experts persistently;
 decode gathers only the selected experts. The BF16 path compiles and runs
@@ -249,7 +278,7 @@ pattern, norms, and weight layout.
 | hf\_lfm2.py | lfm2 | 1 | LFM2 700M/1.2B and dense LFM2 fine-tunes with hybrid convolution/attention layers |
 | hf\_gemma4.py | gemma4\_unified / gemma4 (dense + PLE/KV-share) | 4 | Gemma 4 31B (dense). Not 26B-A4B (MoE). |
 | hf\_gemma4\_mm.py | gemma4\_unified / gemma4 (multimodal) | 4 | Encoder-free dense unified VLMs plus full-vision PLE/KV-share and MoE variants. Combined MoE+PLE/KV-share remains unsupported. |
-| hf\_gemma4\_moe.py | gemma4 (MoE, `enable_moe_block`) | 1 | Gemma 4 26B-A4B (128 experts, top-8 routing). Persistent prefill + shared-storage four-chunk gathered decode. |
+| hf\_gemma4\_moe.py | gemma4 (MoE, `enable_moe_block`) | 1 | Gemma 4 26B-A4B (128 experts, top-8 routing). Persistent prefill + shared-storage four-chunk gathered decode. Opt-in union-capped multi-token MoE (`SPYRE_MOE_UNION_CAP`), W8A8 fp8 non-expert linears + LM head (`SPYRE_GEMMA4_FP8`), and token-tree verify (`_gemma4_tree`) for XPress tree speculative decoding (`gemma4_spec_decode`). |
 | hf\_xpress\_qwen3.py | qwen3 (`Qwen3XPressModel` drafter) | 1 | XPress speculative-decoding drafter: DFlash block backbone (Qwen3-style layers, mixed sliding/full) + causal refiner, block 16, K=6 Jacobi passes, top-C=512. Vocab weights from the target. UIUC-SSAIL/gemma4-26b-a4b-XPress-b16 (Gemma 4 26B-A4B target); same adapter should load UIUC-SSAIL/Qwen3-8B-XPress-b16. Block-propose API (`propose_block`). Spyre (bf16) vs fp32 speculators-math oracle: block-hidden cos 0.9998, base-logit cos 0.9999; ~50 ms per 15-token proposal at top-C=512. |
 | hf\_diffusion\_gemma.py | diffusion\_gemma | 1 | google/diffusiongemma-26B-A4B-it. MoE runs on CPU; attention + dense MLP compiled on Spyre. Block-diffusion generate loop. Gated. |
 | hf\_gemma3.py | gemma3\_text / gemma3 (dense) | 2 | Gemma 3 4B/12B/27B (text decoder of the multimodal checkpoints); EmbeddingGemma (bidirectional embedder). Not Gemma 3n (PLE). |
