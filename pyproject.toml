@@ -7,11 +7,11 @@ license = { file = "LICENSE.txt" }
 requires-python = ">=3.11,<3.15"
 dependencies = [
     "torch>=2.0",
-    "transformers==5.15.0",
+    "transformers==5.19.0",
     "mistral-common==1.11.7",
     "sentencepiece",
     "accelerate",
-    "sentence_transformers",
+    "sentence_transformers==6.1.0",
 ]
 
 [build-system]
@@ -86,6 +86,12 @@ follow_imports = "skip"
 # be present in the installed version used by the mypy job.
 [[tool.mypy.overrides]]
 module = "transformers.models.granite_swa.*"
+ignore_missing_imports = true
+
+# transformers.models.embedding_gemma2 is new in transformers 5.19; its config
+# submodule is not covered by the shipped type stubs, so mypy cannot resolve it.
+[[tool.mypy.overrides]]
+module = "transformers.models.embedding_gemma2.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

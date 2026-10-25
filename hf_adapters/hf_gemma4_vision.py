@@ -16,6 +16,7 @@
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -491,7 +492,7 @@ def _build_attention_mask(valid, padded_len, dtype):
     return mask.masked_fill(~key_mask[:, None, None, :], -torch.inf)
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model: Any) -> None:
     tower = model.model.vision_tower
     config = tower.config
     layers = tower.encoder.layers
@@ -500,9 +501,9 @@ def prepare_for_spyre(model):
             "Gemma 4 vision GQA is not supported on Spyre; num_key_value_heads "
             "must equal num_attention_heads."
         )
-    if config.rope_parameters.get("rope_type", "default") != "default":
+    if config.rope_parameters.get("rope_type", "default") not in ("default", "axial"):
         raise SpyreUnsupportedFeatureError(
-            "Gemma 4 vision supports only default, unscaled RoPE on Spyre."
+            "Gemma 4 vision supports only default or axial, unscaled RoPE on Spyre."
         )
     orig_head_dim = config.head_dim
     padded_head_dim = math.ceil(orig_head_dim / (2 * BLOCK_SIZE)) * (2 * BLOCK_SIZE)

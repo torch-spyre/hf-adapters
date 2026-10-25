@@ -445,7 +445,7 @@ CAUSAL_LM_MODELS = {
     },
 }
 
-EMBEDDING_MODELS = {
+TEXT_EMBEDDING_MODELS = {
     # hf_gemma3.py
     "embeddinggemma": {
         "name": "EmbeddingGemma 300M",
@@ -563,6 +563,34 @@ EMBEDDING_MODELS = {
         "adapter": "hf_mpnet.py",
         "size": "0.1b",
     },
+}
+
+
+# Multimodal embedding models — embedders that accept image (and interleaved
+# image+text) inputs in addition to text, exercised by
+# ``tests/spyre/test_e2e_multimodal_embed_compare_spyre.py``. Kept separate from
+# ``TEXT_EMBEDDING_MODELS`` so membership alone identifies a multimodal embedder
+# — no per-entry modality flag is needed.
+MULTIMODAL_EMBEDDING_MODELS = {
+    # hf_embeddinggemma2.py
+    "embeddinggemma2": {
+        "name": "EmbeddingGemma 2",
+        "path": "google/embeddinggemma-2",
+        "adapter": "hf_embeddinggemma2.py",
+        "is_gated": False,
+        "size": "0.7b",
+        "supports_interleaved_media": True,
+        "interleaved_media_placeholder": "<|image|>",
+    },
+}
+
+
+# All embedding models, used by generic text, load, and backend test harnesses.
+# Multimodal embedders also accept text, so they participate in these suites in
+# addition to the media-specific multimodal embedding harness.
+EMBEDDING_MODELS = {
+    **TEXT_EMBEDDING_MODELS,
+    **MULTIMODAL_EMBEDDING_MODELS,
 }
 
 
@@ -888,6 +916,11 @@ XPRESS_PATHS: list[str] = _exclude(
 )
 EMBED_PATHS: list[str] = _exclude(
     _select_representative_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)
+)
+MULTIMODAL_EMBED_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        MULTIMODAL_EMBEDDING_MODELS, include_gated=_include_gated_flag
+    )
 )
 MASKED_LM_PATHS: list[str] = _exclude(
     _select_representative_paths(MASKED_LM_MODELS, include_gated=_include_gated_flag)

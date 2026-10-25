@@ -12,30 +12,51 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Spyre placement policies for Hugging Face tensor-parallel loading.
+"""Transformers 5.19 TP loading with ordinary rank-local Spyre execution.
 
-Transformers' TP loader owns checkpoint slicing and module hooks.  These
-styles keep those responsibilities in Transformers while replacing the final
-CPU-to-device copy with torch-spyre's layout-aware DMA helpers.
+HF owns checkpoint conversion and shard-on-read through CPU DTensor placeholders.
+After loading, finalize_spyre_tp removes those wrappers before adapter preparation
+and the usual module-aware Spyre DMA. No full checkpoint is loaded on every rank.
+Runtime styles use local tensors and functional collectives, including when an
+adapter compiles a whole block. The narrowly scoped loading patches are restored
+even if from_pretrained fails.
 """
 
-import math
-from collections.abc import Iterable, Mapping
+from __future__ import annotations
+
+import os
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
+from datetime import timedelta
+from threading import RLock
+from types import MethodType
+from typing import Any, cast
+from unittest.mock import patch
+from weakref import WeakKeyDictionary
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
-from torch.distributed.tensor.placement_types import Shard
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor, distribute_tensor
+from torch.distributed.tensor.placement_types import (
+    Placement,
+    Replicate,
+    Shard,
+    _StridedShard,
+)
 from transformers.core_model_loading import build_glob_alternation
-from transformers.integrations.tensor_parallel import (
+from transformers.distributed import DistributedConfig
+from transformers.distributed.sharding_utils import DtensorShardOperation
+from transformers.distributed.tensor_parallel import (
     ALL_PARALLEL_STYLES,
-    ColwiseParallel,
-    EmbeddingParallel,
-    PackedColwiseParallel,
-    ReplicatedWithGradAllReduce,
-    RowwiseParallel,
     TensorParallelLayer,
     replace_layer_number_by_wildcard,
 )
+from transformers.distributed.utils import TransformersDeviceMesh
+
+from hf_adapters.hf_common import spyre_compiled_all_reduce
 
 SPYRE_COLWISE = "spyre_colwise"
 SPYRE_COLWISE_GATHER_OUTPUT = "spyre_colwise_gather_output"
@@ -50,354 +71,430 @@ SPYRE_GROUPED_COLWISE_PREFIX = "spyre_grouped_colwise"
 SPYRE_CPU_PACKED_COLWISE = "spyre_cpu_packed_colwise"
 SPYRE_CPU_ROWWISE = "spyre_cpu_rowwise"
 SPYRE_CPU_REPLICATED = "spyre_cpu_replicated"
+SPYRE_MOE_EXPERTS = "spyre_moe_experts"
+
+_LOADING_LOCK = RLock()
+_CPU_MESHES: WeakKeyDictionary[DeviceMesh, dict[int, DeviceMesh]] = WeakKeyDictionary()
 
 
-def _copy_default(shard, *, device, dtype):
+def _copy_default(
+    shard: torch.Tensor, *, device: str | torch.device, dtype: torch.dtype | None
+) -> torch.Tensor:
     from torch_spyre.model_utils import _dma_to_spyre_default
 
-    return _dma_to_spyre_default(shard, target_dtype=dtype, device=device)
+    return cast(
+        torch.Tensor, _dma_to_spyre_default(shard, target_dtype=dtype, device=device)
+    )
 
 
-def _copy_linear(shard, *, device, dtype):
+def _copy_linear(
+    shard: torch.Tensor, *, device: str | torch.device, dtype: torch.dtype | None
+) -> torch.Tensor:
     from torch_spyre.model_utils import _dma_to_spyre_dim_order_swapped
 
     if shard.ndim == 2:
-        return _dma_to_spyre_dim_order_swapped(shard, target_dtype=dtype, device=device)
+        return cast(
+            torch.Tensor,
+            _dma_to_spyre_dim_order_swapped(shard, target_dtype=dtype, device=device),
+        )
     return _copy_default(shard, device=device, dtype=dtype)
 
 
-def _copy_embedding(shard, *, device, dtype):
-    from torch_spyre.model_utils import (
-        _dma_to_spyre_default,
-        _dma_to_spyre_indirect_access,
-    )
-
-    if shard.ndim == 2:
-        moved = _dma_to_spyre_indirect_access(shard, target_dtype=dtype, device=device)
-        if moved is not None:
-            return moved
-    return _dma_to_spyre_default(shard, target_dtype=dtype, device=device)
-
-
-class SpyreColwiseParallel(ColwiseParallel):
-    """Colwise checkpoint slicing followed by a Linear-aware Spyre DMA."""
-
-    def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
-        # Weight converters for modules with auxiliary scalar state (for
-        # example Gemma 4 clipped linears) reuse the projection's distributed
-        # operation for every source tensor. Scalars have no shardable axis and
-        # must be replicated even though the associated matrix is colwise.
-        ndim = (
-            param.dim() if isinstance(param, torch.Tensor) else len(param.get_shape())
+def _loading_mesh(mesh: DeviceMesh, num_shards: int | None = None) -> DeviceMesh:
+    """CPU placeholders share runtime ranks, but never move shards to Spyre."""
+    num_shards = mesh.size() if num_shards is None else num_shards
+    if mesh.size() % num_shards:
+        raise ValueError(
+            f"TP size {mesh.size()} is not divisible by {num_shards} KV shards"
         )
-        if ndim == 0:
-            return _copy_default(param[...], device=device, dtype=dtype)
-        shard = super().shard_tensor(
-            param, tensor_idx=tensor_idx, device="cpu", dtype=dtype
-        )
-        return _copy_linear(shard, device=device, dtype=dtype)
+    meshes = _CPU_MESHES.setdefault(mesh, {})
+    if num_shards not in meshes:
+        if num_shards == mesh.size():
+            meshes[num_shards] = DeviceMesh.from_group(
+                mesh.get_group(), "cpu", mesh_dim_names=("tp",)
+            )
+        else:
+            # Contiguous rank groups share one KV shard: TP=4, KV=2 gives
+            # shard ownership [0, 0, 1, 1], not [0, 1, 0, 1].
+            meshes[num_shards] = DeviceMesh(
+                "cpu",
+                mesh.mesh.reshape(num_shards, mesh.size() // num_shards),
+                mesh_dim_names=("kv_shard", "kv_replica"),
+            )
+    return meshes[num_shards]
 
-    def get_expected_sharded_shape(self, full_shape):
-        if len(full_shape) == 0:
-            return tuple(full_shape)
-        return super().get_expected_sharded_shape(full_shape)
+
+class _SpyreParallel(TensorParallelLayer):
+    """Inference-only styles; the mesh and parameters belong to each module."""
+
+    name = SPYRE_REPLICATED
+
+    def placement(self, module: nn.Module, param: str) -> Placement:
+        return Replicate()
+
+    def validate_param(
+        self,
+        module: nn.Module,
+        param: str,
+        mesh: DeviceMesh,
+        parameter_name: str | None = None,
+    ) -> None:
+        weight = module._parameters.get(param)
+        if weight is None:
+            return
+        placement = self.placement(module, param)
+        if isinstance(placement, Shard):
+            shards = getattr(self, "num_shards", mesh.size())
+            last_size, _ = Shard.local_shard_size_and_offset(
+                weight.shape[placement.dim], shards, shards - 1
+            )
+            if last_size == 0:
+                raise ValueError(
+                    f"{parameter_name or param}: Spyre TP does not support empty shards"
+                )
+
+    def shard_param(self, module: nn.Module, param: str, mesh: DeviceMesh) -> None:
+        weight = module._parameters.get(param)
+        if weight is None:
+            return
+        placement = self.placement(module, param)
+        if isinstance(placement, Replicate):
+            return
+        cpu_mesh = _loading_mesh(mesh)
+        module._parameters[param] = nn.Parameter(
+            distribute_tensor(weight, cpu_mesh, [placement], src_data_rank=None),
+            requires_grad=False,
+        )
+
+    def install_forward(self, module: nn.Module, mesh: DeviceMesh) -> nn.Module:
+        # Keep the existing adapter consumers working without depending on
+        # private metadata that Transformers no longer supplies.
+        setattr(module, "_hf_tp_plan", self.name)
+        setattr(module, "_hf_device_mesh", mesh)
+        return module
+
+
+class SpyreColwiseParallel(_SpyreParallel):
+    name = SPYRE_COLWISE
+
+    def placement(self, module: nn.Module, param: str) -> Placement:
+        weight = module._parameters[param]
+        assert weight is not None
+        if weight.ndim == 0:
+            return Replicate()
+        dim = 1 if isinstance(module, nn.Embedding) else max(0, weight.ndim - 2)
+        return Shard(dim)
 
 
 class SpyreColwiseGatherOutputParallel(SpyreColwiseParallel):
-    """State-preserving variant for HF's ``colwise_gather_output`` style."""
+    name = SPYRE_COLWISE_GATHER_OUTPUT
 
-    def __init__(self, **kwargs):
-        super().__init__(gather_output=True, **kwargs)
+    def validate_param(
+        self,
+        module: nn.Module,
+        param: str,
+        mesh: DeviceMesh,
+        parameter_name: str | None = None,
+    ) -> None:
+        super().validate_param(module, param, mesh, parameter_name)
+        weight = module._parameters.get(param)
+        if weight is not None and weight.ndim > 0:
+            placement = self.placement(module, param)
+            assert isinstance(placement, Shard)
+            if weight.shape[placement.dim] % mesh.size():
+                raise ValueError(
+                    f"{parameter_name or param}: gathered output must divide TP size"
+                )
+
+    def install_forward(self, module: nn.Module, mesh: DeviceMesh) -> nn.Module:
+        super().install_forward(module, mesh)
+        original_forward = module.forward
+        group_size, group_name = mesh.size(), mesh.get_group().group_name
+
+        def gathered_forward(*args: Any, **kwargs: Any) -> torch.Tensor:
+            output = original_forward(*args, **kwargs)
+            return spyre_compiled_all_gather_last_dim(output, group_size, group_name)
+
+        module.forward = gathered_forward
+        return module
 
 
-class SpyreRowwiseParallel(RowwiseParallel):
-    """Rowwise checkpoint slicing followed by a Linear-aware Spyre DMA."""
+class SpyreRowwiseParallel(_SpyreParallel):
+    name = SPYRE_ROWWISE
+    split_input = False
 
-    def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
-        # See SpyreColwiseParallel: scalar metadata belonging to a sharded
-        # projection is replicated, not indexed along a nonexistent axis.
-        ndim = (
-            param.dim() if isinstance(param, torch.Tensor) else len(param.get_shape())
-        )
-        if ndim == 0:
-            return _copy_default(param[...], device=device, dtype=dtype)
-        shard = super().shard_tensor(
-            param, tensor_idx=tensor_idx, device="cpu", dtype=dtype
-        )
-        return _copy_linear(shard, device=device, dtype=dtype)
+    def placement(self, module: nn.Module, param: str) -> Placement:
+        weight = module._parameters[param]
+        assert weight is not None
+        return Shard(-1) if weight.ndim > 1 else Replicate()
 
-    def get_expected_sharded_shape(self, full_shape):
-        if len(full_shape) == 0:
-            return tuple(full_shape)
-        return super().get_expected_sharded_shape(full_shape)
+    def install_forward(self, module: nn.Module, mesh: DeviceMesh) -> nn.Module:
+        super().install_forward(module, mesh)
+        original_forward = module.forward
+        group_name = mesh.get_group().group_name
+        rank, size = mesh.get_local_rank(), mesh.size()
+        split_input = self.split_input
+
+        def rowwise_forward(
+            inputs: torch.Tensor, *args: Any, **kwargs: Any
+        ) -> torch.Tensor:
+            if split_input:
+                local_size, offset = Shard.local_shard_size_and_offset(
+                    inputs.shape[-1], size, rank
+                )
+                inputs = inputs.narrow(-1, offset, local_size)
+            # Preserve custom forwards, but add the replicated bias only once.
+            # Restore it even on failure, and keep .bias available to adapters
+            # that bypass this wrapper and call F.linear directly.
+            bias = module._parameters.get("bias")
+            if bias is not None:
+                module._parameters["bias"] = None
+            try:
+                output = original_forward(inputs, *args, **kwargs)
+            finally:
+                if bias is not None:
+                    module._parameters["bias"] = bias
+            output = spyre_compiled_all_reduce(output, group_name)
+            return output if bias is None else output + bias
+
+        module.forward = rowwise_forward
+        return module
 
 
 class SpyreRowwiseSplitInputParallel(SpyreRowwiseParallel):
-    """State-preserving variant for HF's ``rowwise_split_input`` style."""
-
-    def __init__(self, **kwargs):
-        super().__init__(split_input=True, **kwargs)
+    name = SPYRE_ROWWISE_SPLIT_INPUT
+    split_input = True
 
 
-class _SpyreEmbeddingParallel(EmbeddingParallel):
-    def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
-        shard = super().shard_tensor(
-            param, tensor_idx=tensor_idx, device="cpu", dtype=dtype
-        )
-        return _copy_embedding(shard, device=device, dtype=dtype)
+class SpyreEmbeddingRowwiseParallel(_SpyreParallel):
+    """Vocab sharding with host ID masking and a compiled lookup/reduction."""
 
+    name = SPYRE_EMBEDDING_ROWWISE
 
-class SpyreEmbeddingRowwiseParallel(_SpyreEmbeddingParallel):
-    """Vocab-sharded embedding with host-side ID masking for Spyre."""
+    def placement(self, module: nn.Module, param: str) -> Placement:
+        return Shard(0)
 
-    def __init__(self, **kwargs):
-        super().__init__(embedding_dim_sharding=0, **kwargs)
-
-    def _prepare_input_fn(self, mod, inputs, *, vocab_start, vocab_end):
-        input_tensor = inputs[0] if inputs else inputs
-        host_input = input_tensor.cpu()
-        invalid = (host_input < vocab_start) | (host_input >= vocab_end)
-
-        masked_input = host_input.clone() - vocab_start
-        masked_input[invalid] = 0
-        # Spyre does not yet support comparisons producing bool from int32, so
-        # construct the small ownership mask on the host.  Transfer it once and
-        # keep both masking the embedding result and the collective on-device.
-        valid = (~invalid).to(mod.weight.dtype).unsqueeze(-1).to(input_tensor.device)
-        return masked_input.to(input_tensor.device), valid
-
-    def prepare_module_tp(self, module, device_mesh, **kwargs):
-        # Keep the small integer ownership test in the eager CPU pre-hook, but
-        # compile everything after its two H2D transfers as one graph.  In
-        # particular, this prevents both the embedding lookup and its
-        # all-reduce from becoming eager graph boundaries.
-        group_name = device_mesh.get_group().group_name
-        rank = device_mesh.get_local_rank()
-        # TP hooks are installed before checkpoint loading, while the module
-        # still exposes its full-sized meta weight. Capture that global size
-        # now; by the first forward, ``module.weight`` has been replaced by the
-        # rank-local shard.
-        global_vocab_size = module.weight.shape[0]
+    def install_forward(self, module: nn.Module, mesh: DeviceMesh) -> nn.Module:
+        super().install_forward(module, mesh)
+        group_name = mesh.get_group().group_name
+        weight = module.get_parameter("weight")
         local_size, vocab_start = Shard.local_shard_size_and_offset(
-            global_vocab_size, device_mesh.size(), rank
+            weight.shape[0], mesh.size(), mesh.get_local_rank()
         )
+        if local_size == 0:
+            raise ValueError("Spyre vocab TP does not support empty embedding shards")
         vocab_end = vocab_start + local_size
         original_forward = module.forward
 
-        def prepare_inputs(mod, inputs):
-            assert local_size == mod.weight.shape[0], (
-                "vocabulary shard size does not match the loaded embedding weight: "
-                f"expected {local_size}, got {mod.weight.shape[0]}"
-            )
-            return self._prepare_input_fn(
-                mod,
-                inputs,
-                vocab_start=vocab_start,
-                vocab_end=vocab_end,
-            )
+        def prepare_inputs(
+            mod: nn.Module, inputs: tuple[torch.Tensor, ...]
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            weight = cast(torch.Tensor, mod.weight)
+            assert local_size == weight.shape[0], "incorrect local vocabulary size"
+            input_tensor = inputs[0]
+            host_input = input_tensor.cpu()
+            invalid = (host_input < vocab_start) | (host_input >= vocab_end)
+            masked_input = host_input.clone() - vocab_start
+            masked_input[invalid] = 0
+            valid = (~invalid).to(weight.dtype).unsqueeze(-1).to(input_tensor.device)
+            return masked_input.to(input_tensor.device), valid
 
-        def embedding_forward(masked_input, valid):
-            outputs = original_forward(masked_input)
-            return spyre_compiled_all_reduce(outputs * valid, group_name)
+        def embedding_forward(
+            masked_input: torch.Tensor, valid: torch.Tensor
+        ) -> torch.Tensor:
+            return spyre_compiled_all_reduce(
+                original_forward(masked_input) * valid, group_name
+            )
 
         module.forward = torch.compile(embedding_forward, dynamic=False, fullgraph=True)
         module.register_forward_pre_hook(prepare_inputs)
         return module
 
 
-class SpyreEmbeddingColwiseParallel(_SpyreEmbeddingParallel):
-    """Hidden-dimension-sharded embedding with a fixed dim-1 policy."""
-
-    def __init__(self, **kwargs):
-        super().__init__(embedding_dim_sharding=1, **kwargs)
+class SpyreReplicatedInferenceParallel(_SpyreParallel):
+    """Replicate without training-only gradient hooks."""
 
 
-class SpyreReplicatedInferenceParallel(ReplicatedWithGradAllReduce):
-    """Replicated inference parameter without HF's training-only hook."""
-
-    def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
-        shard = super().shard_tensor(
-            param, tensor_idx=tensor_idx, device="cpu", dtype=dtype
-        )
-        return _copy_default(shard, device=device, dtype=dtype)
-
-    def prepare_module_tp(self, module, device_mesh, **kwargs):
-        return None
+class SpyreReplicatedLinearParallel(_SpyreParallel):
+    name = SPYRE_REPLICATED_LINEAR
 
 
-class SpyreReplicatedLinearParallel(TensorParallelLayer):
-    """Replicate a Linear parameter while selecting its device layout at DMA."""
-
-    def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
-        shard = param[...].to(device="cpu", dtype=dtype)
-        return _copy_linear(shard, device=device, dtype=dtype)
-
-    def prepare_module_tp(self, module, device_mesh, **kwargs):
-        return None
+class SpyreReplicatedEmbeddingParallel(_SpyreParallel):
+    name = SPYRE_REPLICATED_EMBEDDING
 
 
-class SpyreReplicatedEmbeddingParallel(TensorParallelLayer):
-    """Replicate an Embedding while selecting indirect-access layout at DMA."""
-
-    def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
-        shard = param[...].to(device="cpu", dtype=dtype)
-        return _copy_embedding(shard, device=device, dtype=dtype)
-
-    def prepare_module_tp(self, module, device_mesh, **kwargs):
-        return None
-
-
-class SpyreGroupedColwiseParallel(TensorParallelLayer):
-    """Shard output features across rank groups and replicate within a group."""
-
+class SpyreGroupedColwiseParallel(SpyreColwiseParallel):
     num_shards = 1
 
-    def _shard_rank(self):
-        world_size = self.device_mesh.size()
-        if world_size % self.num_shards != 0:
-            raise ValueError(
-                f"TP size {world_size} is not divisible by {self.num_shards} "
-                "grouped-colwise shards"
-            )
-        return self.rank // (world_size // self.num_shards)
-
-    def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
-        shape = list(param.shape) if hasattr(param, "shape") else param.get_shape()
-        dim = 0 if len(shape) == 1 else len(shape) - 2
-        shard_size = math.ceil(shape[dim] / self.num_shards)
-        start = self._shard_rank() * shard_size
-        end = min(start + shard_size, shape[dim])
-        indices = [slice(None)] * len(shape)
-        indices[dim] = slice(start, end)
-        shard = param[tuple(indices)].to(device="cpu", dtype=dtype)
-        return _copy_linear(shard, device=device, dtype=dtype)
-
-    def get_expected_sharded_shape(self, full_shape):
-        shape = list(full_shape)
-        dim = 0 if len(shape) == 1 else len(shape) - 2
-        shape[dim] = math.ceil(shape[dim] / self.num_shards)
-        return tuple(shape)
-
-    def update_module_attributes(self, module):
-        if hasattr(module, "out_features"):
-            module.out_features = self.get_expected_sharded_shape(
-                (module.out_features,)
-            )[0]
-
-    def prepare_module_tp(self, module, device_mesh, **kwargs):
-        return None
-
-
-class SpyreCpuPackedColwiseParallel(PackedColwiseParallel):
-    """Shard a packed parameter but leave it on CPU for adapter preparation."""
-
-    def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
-        return super().shard_tensor(
-            param, tensor_idx=tensor_idx, device="cpu", dtype=dtype
+    def shard_param(self, module: nn.Module, param: str, mesh: DeviceMesh) -> None:
+        weight = module._parameters.get(param)
+        if weight is None:
+            return
+        placement = self.placement(module, param)
+        if isinstance(placement, Replicate):
+            return
+        cpu_mesh = _loading_mesh(mesh, self.num_shards)
+        placements = [placement] if cpu_mesh.ndim == 1 else [placement, Replicate()]
+        module._parameters[param] = nn.Parameter(
+            distribute_tensor(weight, cpu_mesh, placements, src_data_rank=None),
+            requires_grad=False,
         )
 
 
-class SpyreCpuRowwiseParallel(RowwiseParallel):
-    """Create a rowwise shard on CPU for a later adapter-specific DMA."""
+class SpyreCpuPackedColwiseParallel(SpyreColwiseParallel):
+    name = SPYRE_CPU_PACKED_COLWISE
 
-    def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
-        return super().shard_tensor(
-            param, tensor_idx=tensor_idx, device="cpu", dtype=dtype
+    def placement(self, module: nn.Module, param: str) -> Placement:
+        weight = module._parameters[param]
+        assert weight is not None
+        if weight.ndim < 2:
+            return super().placement(module, param)
+        return _StridedShard(weight.ndim - 2, split_factor=2)
+
+
+class SpyreCpuRowwiseParallel(SpyreRowwiseParallel):
+    name = SPYRE_CPU_ROWWISE
+
+
+class SpyreCpuReplicatedParallel(_SpyreParallel):
+    name = SPYRE_CPU_REPLICATED
+
+
+class SpyreMoeExpertsParallel(_SpyreParallel):
+    name = SPYRE_MOE_EXPERTS
+
+    def install_forward(self, module: nn.Module, mesh: DeviceMesh) -> nn.Module:
+        super().install_forward(module, mesh)
+        sharded = any(
+            isinstance(param, DTensor)
+            and any(not p.is_replicate() for p in param.placements)
+            for param in module.parameters()
         )
+        if sharded:
+            original_forward = module.forward
+            group_name = mesh.get_group().group_name
+
+            def experts_forward(*args: Any, **kwargs: Any) -> torch.Tensor:
+                return spyre_compiled_all_reduce(
+                    original_forward(*args, **kwargs), group_name
+                )
+
+            module.forward = experts_forward
+        return module
 
 
-class SpyreCpuReplicatedParallel(TensorParallelLayer):
-    """Keep an unsharded parameter on CPU for adapter-side preparation."""
-
-    def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
-        return param[...].to(device="cpu", dtype=dtype)
-
-    def prepare_module_tp(self, module, device_mesh, **kwargs):
-        return None
-
-
-_STYLE_INSTANCES = {
-    SPYRE_COLWISE: SpyreColwiseParallel(),
-    SPYRE_COLWISE_GATHER_OUTPUT: SpyreColwiseGatherOutputParallel(),
-    SPYRE_ROWWISE: SpyreRowwiseParallel(),
-    SPYRE_ROWWISE_SPLIT_INPUT: SpyreRowwiseSplitInputParallel(),
-    SPYRE_EMBEDDING_ROWWISE: SpyreEmbeddingRowwiseParallel(),
-    SPYRE_EMBEDDING_COLWISE: SpyreEmbeddingColwiseParallel(),
-    SPYRE_REPLICATED: SpyreReplicatedInferenceParallel(),
-    SPYRE_REPLICATED_LINEAR: SpyreReplicatedLinearParallel(),
-    SPYRE_REPLICATED_EMBEDDING: SpyreReplicatedEmbeddingParallel(),
-    SPYRE_CPU_PACKED_COLWISE: SpyreCpuPackedColwiseParallel(),
-    SPYRE_CPU_ROWWISE: SpyreCpuRowwiseParallel(),
-    SPYRE_CPU_REPLICATED: SpyreCpuReplicatedParallel(),
+_STYLE_INSTANCES: dict[str, _SpyreParallel] = {
+    style.name: style
+    for style in (
+        SpyreColwiseParallel(),
+        SpyreColwiseGatherOutputParallel(),
+        SpyreRowwiseParallel(),
+        SpyreRowwiseSplitInputParallel(),
+        SpyreEmbeddingRowwiseParallel(),
+        SpyreReplicatedInferenceParallel(),
+        SpyreReplicatedLinearParallel(),
+        SpyreReplicatedEmbeddingParallel(),
+        SpyreCpuPackedColwiseParallel(),
+        SpyreCpuRowwiseParallel(),
+        SpyreCpuReplicatedParallel(),
+        SpyreMoeExpertsParallel(),
+    )
 }
-
-_STYLE_DIMS = {
-    SPYRE_COLWISE: (-2, -1),
-    SPYRE_COLWISE_GATHER_OUTPUT: (-2, -1),
-    SPYRE_ROWWISE: (-1, None),
-    SPYRE_ROWWISE_SPLIT_INPUT: (-1, None),
-    SPYRE_EMBEDDING_ROWWISE: (0, None),
-    SPYRE_EMBEDDING_COLWISE: (1, None),
-    SPYRE_REPLICATED: (None, None),
-    SPYRE_REPLICATED_LINEAR: (None, None),
-    SPYRE_REPLICATED_EMBEDDING: (None, None),
-    SPYRE_CPU_PACKED_COLWISE: (-2, -1),
-    SPYRE_CPU_ROWWISE: (-1, None),
-    SPYRE_CPU_REPLICATED: (None, None),
-}
-
 _STYLE_REWRITES = {
     "colwise": SPYRE_COLWISE,
     "colwise_gather_output": SPYRE_COLWISE_GATHER_OUTPUT,
+    "colwise_rep": SPYRE_COLWISE_GATHER_OUTPUT,
     "rowwise": SPYRE_ROWWISE,
     "rowwise_split_input": SPYRE_ROWWISE_SPLIT_INPUT,
+    "rowwise_rep": SPYRE_ROWWISE_SPLIT_INPUT,
     "embedding_rowwise": SPYRE_EMBEDDING_ROWWISE,
-    "embedding_colwise": SPYRE_EMBEDDING_COLWISE,
     "replicated_with_grad_allreduce": SPYRE_REPLICATED,
+    "packed_colwise": SPYRE_CPU_PACKED_COLWISE,
+    "moe_tp_experts": SPYRE_MOE_EXPERTS,
 }
-
 _CPU_STYLE_REWRITES = {
     "packed_colwise": SPYRE_CPU_PACKED_COLWISE,
     "rowwise": SPYRE_CPU_ROWWISE,
 }
-
-_GROUPED_COLWISE_STYLES: dict[str, TensorParallelLayer] = {}
+_GROUPED_COLWISE_STYLES: dict[str, SpyreGroupedColwiseParallel] = {}
 
 
 def _register_grouped_colwise_style(num_shards: int) -> str:
-    """Register a reconstructable grouped-colwise class for ``num_shards``."""
     if num_shards < 1:
         raise ValueError(f"num_shards must be positive, got {num_shards}")
     name = f"{SPYRE_GROUPED_COLWISE_PREFIX}_{num_shards}"
     if name not in _GROUPED_COLWISE_STYLES:
-        cls = type(
-            f"SpyreGroupedColwise{num_shards}Parallel",
-            (SpyreGroupedColwiseParallel,),
-            {"num_shards": num_shards},
-        )
-        style = cls()
+        style = SpyreGroupedColwiseParallel()
+        style.name, style.num_shards = name, num_shards
         _GROUPED_COLWISE_STYLES[name] = style
+        # HF's generic registry annotates Callable, but its TP registry stores styles.
         ALL_PARALLEL_STYLES.register(name, style)  # type: ignore[arg-type]
-        ALL_PARALLEL_STYLES.register_plan_to_weight_dim(name, -2)
-        ALL_PARALLEL_STYLES.register_plan_to_bias_dim(name, -1)
     return name
 
 
 def register_spyre_tp_styles() -> None:
-    """Register the Spyre TP styles with Transformers (idempotently)."""
     for name, style in _STYLE_INSTANCES.items():
         ALL_PARALLEL_STYLES.register(name, style)  # type: ignore[arg-type]
-        weight_dim, bias_dim = _STYLE_DIMS[name]
-        ALL_PARALLEL_STYLES.register_plan_to_weight_dim(name, weight_dim)
-        ALL_PARALLEL_STYLES.register_plan_to_bias_dim(name, bias_dim)
 
 
 def _matches_plan(parameter_name: str, plan: Mapping[str, str]) -> bool:
     if not plan:
         return False
-
     alternation, _, _ = build_glob_alternation(list(plan))
     return alternation.search(parameter_name) is not None
+
+
+# Embedding styles that keep every rank's lookup full-width: vocabulary
+# sharding all-reduces complete rows, and the replicated styles do not shard.
+_EMBEDDING_SAFE_STYLES = frozenset(
+    {
+        SPYRE_EMBEDDING_ROWWISE,
+        SPYRE_REPLICATED,
+        SPYRE_REPLICATED_LINEAR,
+        SPYRE_REPLICATED_EMBEDDING,
+        SPYRE_CPU_REPLICATED,
+    }
+)
+
+
+def _embedding_weight_style(module_name: str, plan: Mapping[str, str]) -> str | None:
+    """Resolve an embedding weight's style the way loading looks it up.
+
+    Exact parameter and module entries win (``_prefer_exact_tp_plan_entries``),
+    then HF's layer-index-generic names.
+    """
+    generic_name = replace_layer_number_by_wildcard(module_name)
+    for key in (
+        f"{module_name}.weight",
+        module_name,
+        f"{generic_name}.weight",
+        generic_name,
+    ):
+        if key in plan:
+            return plan[key]
+    return None
+
+
+def _reject_hidden_sharded_embeddings(
+    named_modules: Mapping[str, nn.Module], plan: Mapping[str, str]
+) -> None:
+    """Reject plans that would shard an embedding's hidden dimension.
+
+    A Linear style such as ``colwise`` (``Shard(1)`` for an embedding) or
+    ``rowwise`` (``Shard(-1)``) on an embedding is ``embedding_colwise`` under
+    another name: each rank would return a partial-width lookup.
+    """
+    for name, module in named_modules.items():
+        if not isinstance(module, nn.Embedding):
+            continue
+        style = _embedding_weight_style(name, plan)
+        if style is not None and style not in _EMBEDDING_SAFE_STYLES:
+            raise ValueError(
+                f"Spyre TP cannot apply {style!r} to embedding {name!r}: it would "
+                "shard the hidden dimension, which requires a verified full-width "
+                "output gather. Use replicated embeddings or 'embedding_rowwise' "
+                "instead."
+            )
 
 
 def prepare_spyre_tp_plan(
@@ -410,13 +507,14 @@ def prepare_spyre_tp_plan(
     replicated_embedding_modules: Iterable[str] = (),
     grouped_colwise_modules: Mapping[str, int] | None = None,
 ) -> dict[str, str]:
-    """Translate an HF TP plan and cover otherwise-unplanned weight modules.
-
-    Unplanned Linear and Embedding parameters would otherwise be copied with a
-    generic ``Tensor.to(spyre)`` before ``nn.Module.to`` can see their module
-    type.  Explicit replicated placement entries make those copies layout
-    aware without changing their tensor-parallel semantics.
-    """
+    """Translate the complete plan, preserving caller and adapter overrides."""
+    if {"embedding_colwise", SPYRE_EMBEDDING_COLWISE}.intersection(plan.values()):
+        raise ValueError(
+            "Spyre TP does not support 'embedding_colwise' (or "
+            "'spyre_embedding_colwise'): hidden-dimension sharding requires a "
+            "verified full-width output gather. Use replicated embeddings or "
+            "'embedding_rowwise' instead."
+        )
     register_spyre_tp_styles()
     staged = set(cpu_staged_modules)
     cpu_replicated_modules = set(cpu_replicated_modules)
@@ -424,30 +522,26 @@ def prepare_spyre_tp_plan(
     replicated_embedding_modules = set(replicated_embedding_modules)
     grouped_colwise_modules = dict(grouped_colwise_modules or {})
     named_modules = dict(model.named_modules())
-    rewritten = {}
+    rewritten: dict[str, str] = {}
     for module_name, style in plan.items():
         if module_name in staged:
             try:
                 rewritten[module_name] = _CPU_STYLE_REWRITES[style]
             except KeyError as error:
                 raise ValueError(
-                    f"CPU-staged TP module {module_name!r} uses unsupported "
-                    f"style {style!r}"
+                    f"CPU-staged TP module {module_name!r} uses unsupported style {style!r}"
                 ) from error
         else:
             rewritten[module_name] = _STYLE_REWRITES.get(style, style)
 
-    # Some adapters intentionally turn off sharding for selected modules. Keep
-    # explicit placement entries so those weights still take a semantic DMA.
-    for module_name in replicated_linear_modules:
-        if module_name in named_modules:
-            rewritten[module_name] = SPYRE_REPLICATED_LINEAR
-    for module_name in replicated_embedding_modules:
-        if module_name in named_modules:
-            rewritten[module_name] = SPYRE_REPLICATED_EMBEDDING
-    for module_name in cpu_replicated_modules:
-        if module_name in named_modules:
-            rewritten[module_name] = SPYRE_CPU_REPLICATED
+    for modules, style in (
+        (replicated_linear_modules, SPYRE_REPLICATED_LINEAR),
+        (replicated_embedding_modules, SPYRE_REPLICATED_EMBEDDING),
+        (cpu_replicated_modules, SPYRE_CPU_REPLICATED),
+    ):
+        for module_name in modules:
+            if module_name in named_modules:
+                rewritten[module_name] = style
     for module_name, num_shards in grouped_colwise_modules.items():
         if module_name in named_modules:
             rewritten[module_name] = _register_grouped_colwise_style(num_shards)
@@ -455,8 +549,7 @@ def prepare_spyre_tp_plan(
     for name, module in named_modules.items():
         if not name or getattr(module, "weight", None) is None:
             continue
-        parameter_name = f"{name}.weight"
-        if _matches_plan(parameter_name, rewritten):
+        if _matches_plan(f"{name}.weight", rewritten):
             continue
         generic_name = replace_layer_number_by_wildcard(name)
         if isinstance(module, nn.Embedding):
@@ -464,9 +557,17 @@ def prepare_spyre_tp_plan(
         elif isinstance(module, nn.Linear):
             rewritten.setdefault(generic_name, SPYRE_REPLICATED_LINEAR)
 
-    # Transformers' current core loader resolves TP globs by the first regex
-    # match. Put exact adapter overrides before generic ``layers.*`` entries so
-    # the checkpoint materializer uses the same style as the module hook path.
+    # Checked after the adapter overrides, which may replicate an embedding the
+    # caller planned; any remaining non-vocabulary style is hidden sharding.
+    _reject_hidden_sharded_embeddings(named_modules, rewritten)
+
+    unsupported = (
+        set(rewritten.values())
+        - _STYLE_INSTANCES.keys()
+        - _GROUPED_COLWISE_STYLES.keys()
+    )
+    if unsupported:
+        raise ValueError(f"Unsupported Spyre TP styles: {sorted(unsupported)}")
     exact_overrides = {
         name: rewritten.pop(name)
         for name in (
@@ -480,27 +581,164 @@ def prepare_spyre_tp_plan(
     return {**exact_overrides, **rewritten}
 
 
-def spyre_compiled_all_reduce(tensor, group_name):
-    """All-reduce *tensor* through Spyre's graph-lowered collective path.
+class _ScalarSafeShardOperation(DtensorShardOperation):
+    """Converter scalars belong to a matrix but have no shardable dimension."""
 
-    Unlike Transformers' ``all_reduce_forward`` autograd wrapper, the
-    functional collective is visible to Dynamo/Inductor.  Torch-Spyre lowers
-    it to a cached ``allreduce_plan`` and an in-graph ``allreduce_run``.  The
-    lowering plans against the realized device allocation, so a separate
-    PyTorch flatten/copy is neither necessary nor desirable here.
+    def shard_tensor(
+        self,
+        source: Any,
+        tensor_idx: int | None = None,
+        device: str | torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor | None:
+        shape = source.shape if isinstance(source, torch.Tensor) else source.get_shape()
+        if len(shape) == 0:
+            return cast(torch.Tensor, source[...].to(device=device, dtype=dtype))
+        return super().shard_tensor(
+            source, tensor_idx=tensor_idx, device=device, dtype=dtype
+        )
 
-    This helper is intended to be called from inside a ``torch.compile``
-    region.  Eager module hooks should continue using the layout-aware helpers
-    above and below.
-    """
-    reduced = torch.ops._c10d_functional.all_reduce(tensor, "sum", group_name)
-    return torch.ops._c10d_functional.wait_tensor(reduced)
+
+def _initialize_tp_mesh(
+    config: DistributedConfig, target_device: str
+) -> tuple[torch.device, TransformersDeviceMesh]:
+    if config.ep_size != 1 or config.fsdp_size != 1 or config.pp_size != 1:
+        raise ValueError("Spyre loading supports tensor parallelism only")
+    device_type = torch.device(target_device).type
+    if device_type == "spyre":
+        import torch_spyre  # noqa: F401
+
+        getattr(torch, "spyre").set_device(int(os.environ.get("LOCAL_RANK", "0")))
+    if not dist.is_initialized():
+        dist.init_process_group(
+            backend="cpu:gloo,spyre:spyreccl" if device_type == "spyre" else "gloo",
+            timeout=timedelta(hours=2),
+        )
+    if dist.get_world_size() != config.tp_size:
+        raise ValueError("TP size must match the initialized process-group size")
+    if device_type == "spyre":
+        backends = dist.get_backend_config()
+        if "cpu:gloo" not in backends or "spyre:spyreccl" not in backends:
+            raise ValueError(
+                "Spyre TP requires a process group initialized with "
+                "backend='cpu:gloo,spyre:spyreccl'; the existing group is "
+                f"{backends!r}. It will not be reinitialized automatically."
+            )
+    dense = dist.init_device_mesh(
+        device_type, (1, 1, config.tp_size), mesh_dim_names=("pp", "fsdp", "tp")
+    )
+    expert = dist.init_device_mesh(
+        device_type, (1, config.tp_size, 1), mesh_dim_names=("pp", "efsdp", "ep")
+    )
+    return torch.device("cpu"), TransformersDeviceMesh(dense, expert)
+
+
+@contextmanager
+def spyre_tp_loading(
+    config: DistributedConfig, *, target_device: str
+) -> Iterator[None]:
+    """Adapt only this load to CPU materialization and full-plan semantics."""
+    from transformers import core_model_loading
+    from transformers.distributed import mixin
+
+    original_initialize = mixin.initialize_distributed_mesh
+    original_resolve = mixin.resolve_parallel_plans
+
+    def initialize(current: DistributedConfig) -> Any:
+        if current is not config:
+            return original_initialize(current)
+        return _initialize_tp_mesh(current, target_device)
+
+    def resolve(model: nn.Module, current: DistributedConfig) -> Any:
+        if current is not config:
+            return original_resolve(model, current)
+        plan = dict(cast(dict[str, str], config.tp_plan))
+        # Unlike HF 5.19's merge, our resolved plan is authoritative. HF's
+        # original plan may name optional modules absent from this config (e.g.
+        # Gemma 4 experts). Accept those known rules without merging the defaults
+        # back in, but still reject unknown rules that match no actual name.
+        default_plan: dict[str, str] = getattr(model, "tp_plan", None) or {}
+        names = {name for name, _ in model.named_modules()}
+        names.update(name for name, _ in model.named_parameters())
+        for rule in plan:
+            if rule in names or rule in default_plan:
+                continue
+            pattern, _, _ = build_glob_alternation([rule])
+            if not any(pattern.search(name) for name in names):
+                raise ValueError(f"TP rule {rule!r} matches no module or parameter")
+        setattr(model, "_tp_plan", plan)
+        return plan, {}
+
+    with _LOADING_LOCK, ExitStack() as stack:
+        stack.enter_context(
+            patch.object(mixin, "initialize_distributed_mesh", initialize)
+        )
+        stack.enter_context(patch.object(mixin, "resolve_parallel_plans", resolve))
+        stack.enter_context(
+            patch.object(
+                core_model_loading, "DtensorShardOperation", _ScalarSafeShardOperation
+            )
+        )
+        yield
+
+
+@dataclass(frozen=True)
+class _ParameterShard:
+    shape: torch.Size
+    placements: tuple[Placement, ...]
+    mesh: DeviceMesh
+
+
+def _reject_local_tp_save(model: nn.Module, *args: Any, **kwargs: Any) -> None:
+    raise NotImplementedError(
+        "save_pretrained is not supported for prepared Spyre TP models: parameters "
+        "are local shards and adapters may pad or repack them. Save the original "
+        "unsharded HF model instead."
+    )
+
+
+def finalize_spyre_tp(model: nn.Module) -> None:
+    """Remove DTensors before adapter preparation, preserving aliases and shapes."""
+    aliases: dict[int, nn.Parameter] = {}
+    shard_specs: dict[str, _ParameterShard] = {}
+    for name, module in model.named_modules():
+        for param_name, param in list(
+            module.named_parameters(recurse=False, remove_duplicate=False)
+        ):
+            if not isinstance(param, DTensor):
+                continue
+            full_name = f"{name}.{param_name}" if name else param_name
+            shard_specs[full_name] = _ParameterShard(
+                param.shape, tuple(param.placements), param.device_mesh
+            )
+            if id(param) not in aliases:
+                aliases[id(param)] = nn.Parameter(
+                    param.to_local().detach(), requires_grad=False
+                )
+            module._parameters[param_name] = aliases[id(param)]
+        weight = getattr(module, "weight", None)
+        if isinstance(weight, torch.Tensor) and weight.ndim == 2:
+            if hasattr(module, "in_features"):
+                module.in_features = weight.shape[1]
+            if (
+                hasattr(module, "out_features")
+                and getattr(module, "_hf_tp_plan", None) != SPYRE_COLWISE_GATHER_OUTPUT
+            ):
+                module.out_features = weight.shape[0]
+            if isinstance(module, nn.Embedding):
+                module.num_embeddings, module.embedding_dim = weight.shape
+    setattr(model, "_spyre_tp_parameters", shard_specs)
+    # HF 5.19 only gathers DTensors on save. After this deliberate local-tensor
+    # boundary it would silently write incomplete checkpoints.
+    setattr(model, "save_pretrained", MethodType(_reject_local_tp_save, model))
 
 
 def _reassemble_all_gather_last_dim(
-    gathered, input_shape, group_size, shard_sizes=None
-):
-    """Move rank-major dim-0 gather chunks onto the input's last dimension."""
+    gathered: torch.Tensor,
+    input_shape: Sequence[int],
+    group_size: int,
+    shard_sizes: Sequence[int] | None = None,
+) -> torch.Tensor:
     rank_major = gathered.reshape(group_size, *input_shape)
     if shard_sizes is not None:
         assert len(shard_sizes) == group_size
@@ -515,25 +753,16 @@ def _reassemble_all_gather_last_dim(
 
 
 def spyre_compiled_all_gather_last_dim(
-    tensor, group_size, group_name, shard_sizes=None
-):
-    """All-gather last-dimension shards through Spyre's compiled path.
-
-    ``_c10d_functional.all_gather_into_tensor`` concatenates rank inputs along
-    dimension 0, while tensor-parallel linear layers shard their output along
-    the last dimension.  Reinterpret the gathered rank-major result and move
-    the rank dimension next to the local shard before flattening the two into
-    the reconstructed output dimension.
-
-    This helper is intended for a ``torch.compile`` region.  Torch-Spyre then
-    emits a cached ``allgather_plan`` and an in-graph ``allgather_run`` instead
-    of Transformers' eager list-based ``dist.all_gather`` plus ``torch.cat``.
-    """
-    input_shape = tensor.shape
+    tensor: torch.Tensor,
+    group_size: int,
+    group_name: str,
+    shard_sizes: Sequence[int] | None = None,
+) -> torch.Tensor:
+    """Gather equal padded shards, then restore last-axis order and trim padding."""
     gathered = torch.ops._c10d_functional.all_gather_into_tensor(
         tensor, group_size, group_name
     )
     gathered = torch.ops._c10d_functional.wait_tensor(gathered)
     return _reassemble_all_gather_last_dim(
-        gathered, input_shape, group_size, shard_sizes=shard_sizes
+        gathered, tensor.shape, group_size, shard_sizes=shard_sizes
     )

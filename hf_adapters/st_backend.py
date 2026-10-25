@@ -48,6 +48,8 @@ All downstream ST modules (``Pooling``, ``Normalize``, ``model.encode()``,
 """
 
 import types
+from collections.abc import Callable
+from typing import Any
 
 import torch
 from transformers.modeling_outputs import BaseModelOutput
@@ -62,16 +64,17 @@ def _to_cpu(t):
 
 
 def _spyre_load_model(
-    self,
-    model_name_or_path,
-    transformer_task,
-    config,
-    backend,
-    is_peft_model,
-    **model_kwargs,
-):
+    self: Any,
+    model_name_or_path: str,
+    transformer_task: str,
+    config: Any,
+    backend: str,
+    is_peft_model: bool,
+    **model_kwargs: Any,
+) -> Any:
     """Replacement for ``Transformer._load_model`` that handles ``backend="spyre"``."""
     if backend != "spyre":
+        assert _original_load_model is not None
         return _original_load_model(
             self,
             model_name_or_path,
@@ -104,34 +107,55 @@ def _spyre_load_model(
     # Route to the right prefill driver. Encoder-only adapters set
     # _is_encoder_only = True; decoder adapters leave it absent.
     is_encoder_only = getattr(adapter_module, "_is_encoder_only", False)
+    _provides_embedding_forward: bool = getattr(
+        adapter_module, "_preserve_native_forward", False
+    )
 
-    if is_encoder_only:
+    # The generic ST integration replaces the model's top-level forward with a
+    # text-only prefill wrapper. Multimodal adapters keep their native top-level
+    # forward so it can merge media features, while their prepared inner
+    # backbones still run on Spyre.
+    if not _provides_embedding_forward:
+        if is_encoder_only:
 
-        def _spyre_forward(self, input_ids=None, attention_mask=None, **kwargs):
-            token_type_ids = kwargs.get("token_type_ids", None)
-            # ST places features on ``model.device`` (Spyre); the prefill drivers
-            # build their CPU-side auxiliary tensors from these inputs (e.g.
-            # ``attention_mask.sum`` for lengths) before moving to device, so the
-            # inputs must be on CPU.
-            h = prefill_encoder(
-                run_backbone_forward,
-                self,
-                _to_cpu(input_ids),
-                _to_cpu(attention_mask),
-                token_type_ids=_to_cpu(token_type_ids),
-            )
-            return BaseModelOutput(last_hidden_state=h)
+            def _spyre_forward(
+                self: Any,
+                input_ids: torch.Tensor | None = None,
+                attention_mask: torch.Tensor | None = None,
+                **kwargs: Any,
+            ) -> BaseModelOutput:
+                token_type_ids = kwargs.get("token_type_ids", None)
+                # ST places features on ``model.device`` (Spyre); the prefill drivers
+                # build their CPU-side auxiliary tensors from these inputs (e.g.
+                # ``attention_mask.sum`` for lengths) before moving to device, so the
+                # inputs must be on CPU.
+                h = prefill_encoder(
+                    run_backbone_forward,
+                    self,
+                    _to_cpu(input_ids),
+                    _to_cpu(attention_mask),
+                    token_type_ids=_to_cpu(token_type_ids),
+                )
+                return BaseModelOutput(last_hidden_state=h)
 
-    else:
+        else:
 
-        def _spyre_forward(self, input_ids=None, attention_mask=None, **kwargs):
-            # See the encoder branch: prefill drivers require CPU inputs.
-            h = prefill_embed(
-                run_backbone_forward, self, _to_cpu(input_ids), _to_cpu(attention_mask)
-            )
-            return BaseModelOutput(last_hidden_state=h)
+            def _spyre_forward(
+                self: Any,
+                input_ids: torch.Tensor | None = None,
+                attention_mask: torch.Tensor | None = None,
+                **kwargs: Any,
+            ) -> BaseModelOutput:
+                # See the encoder branch: prefill drivers require CPU inputs.
+                h = prefill_embed(
+                    run_backbone_forward,
+                    self,
+                    _to_cpu(input_ids),
+                    _to_cpu(attention_mask),
+                )
+                return BaseModelOutput(last_hidden_state=h)
 
-    model.forward = types.MethodType(_spyre_forward, model)
+        model.forward = types.MethodType(_spyre_forward, model)
 
     # Run ST's Pooling and Normalize (both dynamic-shaped pointwise ops that do
     # not compile on Spyre) on the host. ``self`` is the ST ``Transformer``
@@ -142,7 +166,9 @@ def _spyre_load_model(
     # the host before pooling reads them.
     _original_transformer_forward = self.forward
 
-    def _cpu_pooling_forward(features, **kwargs):
+    def _cpu_pooling_forward(features: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        if _provides_embedding_forward:
+            features = {key: _to_cpu(value) for key, value in features.items()}
         features = _original_transformer_forward(features, **kwargs)
         for key, value in features.items():
             if isinstance(value, torch.Tensor):
@@ -154,7 +180,7 @@ def _spyre_load_model(
     return model
 
 
-def _spyre_init(self, *args, **kwargs):
+def _spyre_init(self: Any, *args: Any, **kwargs: Any) -> None:
     """``SentenceTransformer.__init__`` wrapper that defaults the device to Spyre.
 
     ``BaseModel.__init__`` resolves an unset ``device`` via ``get_device_name()``
@@ -165,7 +191,8 @@ def _spyre_init(self, *args, **kwargs):
     self._spyre_backend = kwargs.get("backend") == "spyre"
     if self._spyre_backend and kwargs.get("device") is None:
         kwargs["device"] = "spyre"
-    return _original_init(self, *args, **kwargs)
+    assert _original_init is not None
+    _original_init(self, *args, **kwargs)
 
 
 def _restore_cpu_submodule(submod):
@@ -190,7 +217,7 @@ def _restore_cpu_submodule(submod):
                 submod.register_buffer(name, buf.to(torch.long))
 
 
-def _spyre_forward(self, input, **kwargs):
+def _spyre_forward(self: Any, input: Any, **kwargs: Any) -> Any:
     """Some models have extra post-backbone heads with weights, for instance a
     ``Dense`` projection. ``self.to("spyre")`` moves *every* module to Spyre, but
     those heads operate on outputs that ``_cpu_pooling_forward`` moves to CPU.
@@ -226,6 +253,7 @@ def _spyre_forward(self, input, **kwargs):
                         _restore_cpu_submodule(hf_model.get_submodule(submod_name))
                     except AttributeError:
                         pass
+    assert _original_forward is not None
     return _original_forward(self, input, **kwargs)
 
 
@@ -257,7 +285,7 @@ def register():
 
 
 # Register immediately on import.
-_original_load_model = None
-_original_init = None
-_original_forward = None
+_original_load_model: Callable[..., Any] | None = None
+_original_init: Callable[..., None] | None = None
+_original_forward: Callable[..., Any] | None = None
 register()
