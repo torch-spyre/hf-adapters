@@ -31,9 +31,10 @@ from transformers import (
 
 from tests import _multimodal_embedding_helpers as helpers
 from tests.model_registry import (
+    ALL_CLIP_PATHS,
+    ALL_MULTIMODAL_EMBED_PATHS,
     CLIP_PATHS,
     MULTIMODAL_EMBED_PATHS,
-    _merge_multimodal_models,
 )
 
 
@@ -147,13 +148,6 @@ def test_logits_are_compared_to_reference_values() -> None:
         helpers._assert_embeddings(actual, reference, helpers.EmbeddingTestSettings())
 
 
-def test_registry_merge_rejects_key_collision() -> None:
-    with pytest.raises(AssertionError, match="collisions"):
-        _merge_multimodal_models(
-            {"same": {"path": "first"}}, {"same": {"path": "second", "kind": "clip"}}
-        )
-
-
 def test_remote_code_registry_fallback_and_explicit_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -238,18 +232,15 @@ def test_vision_cosine_xfail_does_not_cover_invalid_outputs(
     assert not isinstance(failure.value, helpers.CosineAccuracyError)
 
 
-def test_registry_settings_scope_expected_failures_and_select_both_apis() -> None:
-    assert set(CLIP_PATHS) <= set(MULTIMODAL_EMBED_PATHS)
-    clip = helpers.settings_for_model("sentence-transformers/clip-ViT-B-32")
+def test_registry_settings_scope_expected_failures_and_keep_clip_separate() -> None:
+    assert set(CLIP_PATHS).isdisjoint(MULTIMODAL_EMBED_PATHS)
+    assert set(ALL_CLIP_PATHS).isdisjoint(ALL_MULTIMODAL_EMBED_PATHS)
     siglip = helpers.settings_for_model("google/siglip2-giant-opt-patch16-384")
     other = helpers.settings_for_model("new-org/new-dual-encoder")
-    assert clip.backend == "sentence_transformers"
-    assert clip.embedding_cosine == 0.97
-    assert clip.score_atol is None
-    assert not clip.xfail_cases and not other.xfail_cases
+    assert not other.xfail_cases
     assert siglip.xfail_cases.keys() == {"uniform"}
     assert siglip.hidden_state_xfails.keys() == {"image"}
-    assert not clip.hidden_state_xfails and not other.hidden_state_xfails
+    assert not other.hidden_state_xfails
     assert siglip.require_hidden_states
     assert siglip.embedding_cosine == 0.99 and siglip.score_atol == 0.005
     assert other.backend == "huggingface"

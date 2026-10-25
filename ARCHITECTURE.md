@@ -147,9 +147,11 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 
 `tests/spyre/test_e2e_multimodal_embed_compare_spyre.py` runs shared text-only,
 image-only (scalar/list), batched retrieval, and three-caption ranking scenarios
-over `MULTIMODAL_EMBED_PATHS`. That selection includes the multimodal embedding
-registry and the existing CLIP entries in the vision registry. Model-specific
-behavior belongs in each checkpoint's `multimodal_test` settings:
+over `MULTIMODAL_EMBED_PATHS`, selected from `MULTIMODAL_EMBEDDING_MODELS`
+(currently SigLIP). CLIP entries in the vision registry are tested separately
+by `tests/spyre/test_e2e_clip_compare_spyre.py`, parametrized by `CLIP_PATHS`.
+Model-specific generic-suite behavior belongs in each checkpoint's
+`multimodal_test` settings:
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
@@ -172,15 +174,18 @@ the processor, and HF loading uses the shared Spyre dtype policy. Both CPU APIs
 use fp32. A module-scoped fixture loads each CPU and Spyre model once, computes
 all references before Spyre preparation, and caches outputs across embedding
 and hidden-state tests. CPU thread limits are restored after the model fixture.
-CLIP retains its 0.97 embedding threshold. Close distractors may exchange ranks;
+In the generic suite, close distractors may exchange ranks;
 the correct image/caption must still win in both retrieval directions.
-The `multimodal_embed_compare` CI suite replaces the CLIP-only suite, with matrix
-entries for both APIs, retry/failure gating, and regression/trunk/unit tags.
-Run it with `make multimodal-embed-compare-tests`; `MODEL_PATH` selects a checkpoint.
-The Transformers 5.15.0 hardware run completed with **15 passed, 9 skipped,
-6 xfailed**. CLIP passed all six scenarios; its nine hidden-state checks skip
-because `SentenceTransformer.encode` does not expose tower states. SigLIP passed
-nine checks, with five vision hidden-state xfails and one uniform-image xfail.
+The dedicated CLIP suite retains its original text, image, and cross-modal
+ranking tests through SentenceTransformer's Spyre backend, with a 0.97 embedding
+threshold and full caption-ranking equality.
+The `clip` and `multimodal_embed_compare` CI suites have separate model matrices,
+retry/failure gating, and regression/trunk/unit tags. Run them with
+`make clip-tests` and `make multimodal-embed-compare-tests`; `MODEL_PATH` selects
+a checkpoint in either target.
+On Transformers 5.15.0, the restored CLIP suite passed all **3 tests**. The
+generic SigLIP suite finished with **9 passed and 6 xfailed**: five known vision
+hidden-state failures and the uniform-image accuracy case.
 
 `hf_siglip.py` supports `google/siglip2-giant-opt-patch16-384` on Transformers
 5.15.0. This fixed-resolution checkpoint uses `model_type=siglip`, rather
@@ -208,8 +213,7 @@ directions, cosine scores against HF with `atol=0.005`, pooled embeddings, and
 both towers' `last_hidden_state` (per-token/patch cosine ≥0.99). It also covers
 three text prompts, image-only inference from a scalar PIL image
 or a one-image list, and three-caption retrieval for a cat image.
-These cases use SigLIP's native HF API; the same scenarios exercise CLIP through
-SentenceTransformer's Spyre backend. The test reports the imported Transformers
+These cases use SigLIP's native HF API. The test reports the imported Transformers
 version without asserting a duplicate version pin.
 
 **Vision accuracy remains unresolved.** Against an fp32 CPU reference, the

@@ -736,12 +736,6 @@ VISION_MODELS = {
         "adapter": "hf_clip.py",
         "kind": "clip",  # dual-encoder: image or text -> embedding
         "size": "0.15b",
-        "multimodal_test": {
-            "backend": "sentence_transformers",
-            "embedding_cosine": 0.97,
-            # CLIP compares retrieval and separated rankings, not score error.
-            "score_atol": None,
-        },
     },
 }
 
@@ -769,23 +763,6 @@ MULTIMODAL_EMBEDDING_MODELS: dict[str, dict[str, Any]] = {
         },
     },
 }
-
-
-def _merge_multimodal_models(
-    embedding_models: dict[str, dict[str, Any]],
-    vision_models: dict[str, dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    clip_models = {
-        key: info for key, info in vision_models.items() if info.get("kind") == "clip"
-    }
-    collisions = embedding_models.keys() & clip_models.keys()
-    assert not collisions, f"Multimodal registry key collisions: {sorted(collisions)}"
-    return {**embedding_models, **clip_models}
-
-
-_MULTIMODAL_TEST_MODELS = _merge_multimodal_models(
-    MULTIMODAL_EMBEDDING_MODELS, VISION_MODELS
-)
 
 
 def _get_adapter_module_name(adapter_module: types.ModuleType) -> str:
@@ -940,7 +917,7 @@ EMBED_PATHS: list[str] = _exclude(
 )
 MULTIMODAL_EMBED_PATHS: list[str] = _exclude(
     _select_representative_paths(
-        _MULTIMODAL_TEST_MODELS,
+        MULTIMODAL_EMBEDDING_MODELS,
         include_gated=_include_gated_flag,
     )
 )
@@ -1030,7 +1007,7 @@ ALL_CAUSAL_PATHS: list[str] = _exclude(
     )
 )
 ALL_MULTIMODAL_EMBED_PATHS: list[str] = _exclude(
-    _all_paths(_MULTIMODAL_TEST_MODELS, include_gated=_include_gated_flag)
+    _all_paths(MULTIMODAL_EMBEDDING_MODELS, include_gated=_include_gated_flag)
 )
 ALL_EMBED_PATHS: list[str] = _exclude(
     _all_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)

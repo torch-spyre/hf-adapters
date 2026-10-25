@@ -62,6 +62,7 @@ import re
 #                       config's test_suite_config.labels (tests/configs/module_tests).
 #   model_support    -- explicitly selected by suite key; no tier includes the Hub scan.
 SUITE_TIERS: dict[str, tuple[str, ...]] = {
+    "clip": ("regression", "trunk", "unit"),
     "multimodal_embed_compare": ("regression", "trunk", "unit"),
     "embed_compare": ("regression", "trunk", "unit"),
     "load": ("regression", "trunk", "unit"),
