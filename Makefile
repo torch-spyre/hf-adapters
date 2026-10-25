@@ -235,7 +235,7 @@ model-support-tests: ## Scan the top MODEL_SUPPORT_TOP_K Hub models per mode on 
 	day="$$(date -u +%Y-%m-%d)"; \
 	rc=0; \
 	for mode in generative embedding; do \
-	  uv run --active --no-sync python tests/spyre/weekly_generation/weekly_test.py \
+	  uv run --active --no-sync python -m tests.spyre.weekly_generation.weekly_test \
 	    --mode "$$mode" --fetch --top-k $(MODEL_SUPPORT_TOP_K) \
 	    --max-params $(MODEL_SUPPORT_MAX_PARAMS) --snapshot-date "$$day" \
 	    --write-to-csv "$$out/model-support.csv" || rc=1; \
