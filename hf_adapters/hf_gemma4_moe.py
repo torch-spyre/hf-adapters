@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from hf_adapters import hf_common
+from hf_adapters import _gemma4_fp8, hf_common
 from hf_adapters.hf_common import (
     moe_decode_selected_experts,
     moe_prefill_all_experts,
@@ -566,6 +566,17 @@ def prepare_text_decoder_for_spyre(model):
         blocks.append(block)
 
     model._spyre_compiled_blocks = blocks
+
+    parts = _gemma4_fp8.fp8_parts()
+    if parts:
+        cap = cfg.final_logit_softcapping
+
+        def process_logits(logits):
+            if cap is not None:
+                logits = torch.tanh(logits / cap) * cap
+            return logits
+
+        _gemma4_fp8.convert(model, blocks, parts, hf_common.DEVICE, process_logits)
 
 
 def prepare_for_spyre(model):
