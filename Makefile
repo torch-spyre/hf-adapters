@@ -314,7 +314,6 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	                      done ;; \
 	    model_support)    $(MAKE) model-support-tests RESULTS_DIR="$(RESULTS_DIR)" || rc=1 ;; \
 	    edge_cases)       mkdir -p "$(RESULTS_DIR)/junit-edge-cases" && $(MAKE) edge-cases-tests        JUNIT_XML="$(RESULTS_DIR)/junit-edge-cases/junit-edge-cases.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" EDGE_CASE_FILE="$(EDGE_CASE_FILE)" || rc=1 ;; \
-
 	    perf)             $(MAKE) perf-tests RESULTS_DIR="$(RESULTS_DIR)" MODEL_PATH="$$model_path" PERF_REPORT=combined || rc=1 ;; \
 	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare model_components embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare structured_decision_compare model_module model_support edge_cases perf"; rc=1 ;; \
 	  esac; \
