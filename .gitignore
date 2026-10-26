@@ -238,7 +238,6 @@ uv.lock
 *~
 
 # Local configuration
-/AGENTS.md
 .env.local
 .env.*.local
 config.local.*
