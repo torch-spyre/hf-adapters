@@ -18,8 +18,9 @@ E2E token-level comparison: HF stock forward (CPU) vs adapter forward (Spyre).
 For each model, runs prefill + 4 greedy decode steps on both CPU (stock HF)
 and Spyre (adapter), comparing logits and greedy tokens at each step. Spyre
 decode is teacher-forced with HF's tokens so every step compares the same
-context, and a top-1 flip between near-tied candidates is tolerated (see
-``tests/_token_compare_helpers.py``).
+context. Each step must keep the full logit vector within calibrated cosine /
+max-diff / mean-diff bounds, and top-1 must agree, except for a flip between
+near-tied candidates (see ``tests/_token_compare_helpers.py``).
 
 Usage (on Spyre pod)::
 
@@ -40,7 +41,13 @@ from hf_adapters.hf_common import (
     get_model_dtype,
     move_model_to_spyre,
 )
-from tests._token_compare_helpers import TOP1_TIE_MARGIN, compare_step
+from tests._token_compare_helpers import (
+    MAX_LOGIT_DIFF,
+    MAX_MEAN_DIFF,
+    MIN_COSINE,
+    TOP1_TIE_MARGIN,
+    compare_step,
+)
 from tests.conftest import (
     encode_generation_inputs,
     load_ref_model,
@@ -259,21 +266,27 @@ def _print_table(rows: list[dict[str, Any]]) -> None:
     print("\n## E2E Token Comparison: HF (CPU) vs Adapter (Spyre)\n")
     print(
         "| Model | Step | HF Token | Spyre Token | Match | HF Margin "
-        "| Max Diff | Mean Diff | HF NaN | Spyre NaN |"
+        "| Spyre Margin | Max Diff | Mean Diff | Cosine | HF NaN | Spyre NaN |"
     )
     print(
         "|-------|------|----------|-------------|-------|-----------"
-        "|----------|-----------|--------|-----------|"
+        "|--------------|----------|-----------|--------|--------|-----------|"
     )
     for r in rows:
-        match = "OK" if r["top1_match"] else "TIE" if r["top1_ok"] else "FAIL"
+        if not r["top1_ok"]:
+            match = "FAIL"
+        elif not r["logits_ok"]:
+            match = "DRIFT"
+        else:
+            match = "OK" if r["top1_match"] else "TIE"
         hf_col = f"{r['hf_token']:>5} {r['hf_str']!r}"
         sp_col = f"{r['spyre_token']:>5} {r['spyre_str']!r}"
         hn = "Yes" if r["hf_nan"] else "No"
         sn = "Yes" if r["spyre_nan"] else "No"
         print(
             f"| {r['model']} | {r['step']} | {hf_col} | {sp_col} "
-            f"| {match} | {r['hf_margin']:.4f} | {r['max_diff']:.4f} | {r['mean_diff']:.6f} "
+            f"| {match} | {r['hf_margin']:.4f} | {r['spyre_margin']:.4f} "
+            f"| {r['max_diff']:.4f} | {r['mean_diff']:.6f} | {r['cosine']:.6f} "
             f"| {hn} | {sn} |"
         )
 
@@ -336,7 +349,7 @@ def token_compare_spyre(
     trust_remote_code: bool | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rows = _run_model_test(model_path, trust_remote_code=trust_remote_code)
-    mismatches = [r for r in rows if not r["top1_ok"]]
+    mismatches = [r for r in rows if not r["step_ok"]]
     return mismatches, rows
 
 
@@ -354,6 +367,8 @@ def test_e2e_token_compare_spyre(
     n_tie = sum(1 for r in rows if r["near_tie"])
     print(
         f"\nTop-1 agreement: {n_match}/{len(rows)} steps "
-        f"(+{n_tie} near-tie within {TOP1_TIE_MARGIN} logits)"
+        f"(+{n_tie} near-tie within {TOP1_TIE_MARGIN} logits); "
+        f"bounds: cosine >= {MIN_COSINE}, max diff <= {MAX_LOGIT_DIFF}, "
+        f"mean diff <= {MAX_MEAN_DIFF}"
     )
     assert not mismatches, mismatches
