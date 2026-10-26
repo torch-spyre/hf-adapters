@@ -3890,6 +3890,10 @@ def make_vision_encoder_block(
 
         residual = hidden_states
         h = layer_norm1(hidden_states)
+        # ``.contiguous()`` after the transpose is REQUIRED on Spyre: the fused
+        # lowering of ``transpose(1, 2) -> scaled_dot_product_attention`` reads
+        # the non-contiguous (transposed) q/k/v with the wrong stick layout and
+        # returns garbage (per-token cosine ~0 vs CPU). No-op on CPU.
         q = (
             q_proj(h)
             .view(bsz, seq_len, num_heads, head_dim)
