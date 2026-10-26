@@ -80,7 +80,7 @@ endif
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-24s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
-	@echo "Variables: TEST_TYPE=unit|integration|regression|trunk|perf|<space-separated suite keys, e.g. smoke multimodal_embed_compare edge_cases model_support> (default regression),"
+	@echo "Variables: TEST_TYPE=unit|integration|regression|trunk|perf|<space-separated suite keys, e.g. smoke clip multimodal_embed_compare edge_cases model_support> (default regression),"
 	@echo "  MODEL_KEY (pytest -k filter, default all), MODEL_PATH (exact model path via --model-path, overrides registry parametrization),"
 	@echo "  PERF_SCHEDULE=nightly|weekly (TEST_TYPE=perf: which perf.yaml section to run, default nightly), PERF_REPORT=split|combined (default '$(PERF_REPORT)'),"
 	@echo "  EDGE_CASE_FILE=<file>.py (edge_cases: one file), MODULE_CONFIG=<file>.yaml (model_module: one config), MODULE_TEST_FILTER (model_module: pytest -k),"
