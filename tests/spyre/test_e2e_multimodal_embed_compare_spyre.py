@@ -16,8 +16,8 @@
 
 from __future__ import annotations
 
+import gc
 from collections.abc import Iterator
-from typing import cast
 
 import pytest
 import transformers
@@ -25,6 +25,7 @@ import transformers
 from tests._multimodal_embedding_helpers import (
     TEXT_PROMPTS,
     CosineAccuracyError,
+    EmbeddingTestSettings,
     PreparedEmbeddingModel,
     _assert_embeddings,
     _assert_hidden_states,
@@ -40,37 +41,81 @@ from tests.model_registry import MULTIMODAL_EMBED_PATHS
 pytestmark = pytest.mark.model_harness("multimodal_embedding")
 
 
-@pytest.fixture(scope="module")
-def model_path(request: pytest.FixtureRequest) -> str:
-    # Indirect parametrization keeps one model index across all scenario axes.
-    # Direct parameters in pytest 9 are reindexed per test's Cartesian product.
-    return cast(str, request.param)
+class _ModelRunCache:
+    """Hold at most one checkpoint, and remember a failed load.
+
+    Tests are grouped by ``model_path`` at collection (see
+    ``tests/spyre/conftest.py``), so each checkpoint loads once and is
+    released before the next one loads. A failed load is replayed as a
+    failure for that checkpoint's remaining tests instead of being retried.
+    """
+
+    def __init__(self) -> None:
+        self.model_path: str | None = None
+        self.run: PreparedEmbeddingModel | None = None
+        self.error: str | None = None
+
+    def get(
+        self, model_path: str, trust_remote_code: bool | None
+    ) -> PreparedEmbeddingModel:
+        if model_path != self.model_path:
+            self.release()
+            self.model_path = model_path
+            try:
+                self.run = self._load(model_path, trust_remote_code)
+            except Exception as exc:
+                self.error = f"{type(exc).__name__}: {exc}"
+                raise
+        if self.error is not None:
+            pytest.fail(
+                f"Model load failed earlier for {model_path}: {self.error}",
+                pytrace=False,
+            )
+        assert self.run is not None
+        return self.run
+
+    def release(self) -> None:
+        self.model_path, self.run, self.error = None, None, None
+        gc.collect()
+
+    @staticmethod
+    def _load(
+        model_path: str, trust_remote_code: bool | None
+    ) -> PreparedEmbeddingModel:
+        print(f"Transformers: {transformers.__version__} ({transformers.__file__})")
+        settings: EmbeddingTestSettings = settings_for_model(model_path)
+        print(f"Embedding API: {settings.backend}; CPU reference: float32")
+        with bounded_cpu_threads():
+            return prepare_model_cases(
+                model_path,
+                settings,
+                embedding_cases(),
+                trust_remote_code=trust_remote_code,
+            )
 
 
-@pytest.fixture(scope="module")
-def model_run(
-    model_path: str, request: pytest.FixtureRequest
-) -> Iterator[PreparedEmbeddingModel]:
-    print(f"Transformers: {transformers.__version__} ({transformers.__file__})")
-    settings = settings_for_model(model_path)
-    print(f"Embedding API: {settings.backend}; CPU reference: float32")
-    trust_remote_code = (
-        True if request.config.getoption("--trust-remote-code") else None
-    )
-    with bounded_cpu_threads():
-        yield prepare_model_cases(
-            model_path, settings, embedding_cases(), trust_remote_code=trust_remote_code
-        )
+_MODEL_RUNS: _ModelRunCache = _ModelRunCache()
 
 
-@pytest.mark.parametrize(
-    "model_path",
-    MULTIMODAL_EMBED_PATHS,
-    ids=MULTIMODAL_EMBED_PATHS,
-    scope="module",
-    indirect=True,
-)
-def test_multimodal_text_compare_spyre(model_run: PreparedEmbeddingModel) -> None:
+@pytest.fixture(scope="module", autouse=True)
+def _release_model_runs() -> Iterator[None]:
+    # Free the last CPU reference and Spyre model when the module finishes.
+    yield
+    _MODEL_RUNS.release()
+
+
+def _model_run(
+    model_path: str, trust_remote_code: bool | None
+) -> PreparedEmbeddingModel:
+    """Load the CPU reference and Spyre model once per checkpoint; reuse across tests."""
+    return _MODEL_RUNS.get(model_path, trust_remote_code)
+
+
+@pytest.mark.parametrize("model_path", MULTIMODAL_EMBED_PATHS)
+def test_multimodal_text_compare_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    model_run: PreparedEmbeddingModel = _model_run(model_path, trust_remote_code)
     actual, reference = model_run.compare("text")
     assert actual.embeddings["text"].ndim == 2
     assert actual.embeddings["text"].shape[0] == len(TEXT_PROMPTS)
@@ -78,31 +123,24 @@ def test_multimodal_text_compare_spyre(model_run: PreparedEmbeddingModel) -> Non
 
 
 @pytest.mark.parametrize("case_name", ["scalar_image", "image_list"])
-@pytest.mark.parametrize(
-    "model_path",
-    MULTIMODAL_EMBED_PATHS,
-    ids=MULTIMODAL_EMBED_PATHS,
-    scope="module",
-    indirect=True,
-)
+@pytest.mark.parametrize("model_path", MULTIMODAL_EMBED_PATHS)
 def test_multimodal_image_compare_spyre(
-    model_run: PreparedEmbeddingModel, case_name: str
+    model_path: str, case_name: str, trust_remote_code: bool | None
 ) -> None:
+    model_run: PreparedEmbeddingModel = _model_run(model_path, trust_remote_code)
     actual, reference = model_run.compare(case_name)
     _assert_embeddings(actual, reference, model_run.settings)
 
 
 @pytest.mark.parametrize("image_case", ["cat_dog", "three_captions", "uniform"])
-@pytest.mark.parametrize(
-    "model_path",
-    MULTIMODAL_EMBED_PATHS,
-    ids=MULTIMODAL_EMBED_PATHS,
-    scope="module",
-    indirect=True,
-)
+@pytest.mark.parametrize("model_path", MULTIMODAL_EMBED_PATHS)
 def test_multimodal_embeddings_compare_spyre(
-    model_run: PreparedEmbeddingModel, image_case: str, request: pytest.FixtureRequest
+    model_path: str,
+    image_case: str,
+    trust_remote_code: bool | None,
+    request: pytest.FixtureRequest,
 ) -> None:
+    model_run: PreparedEmbeddingModel = _model_run(model_path, trust_remote_code)
     settings = model_run.settings
     if image_case in settings.xfail_cases:
         request.node.add_marker(
@@ -145,19 +183,15 @@ def test_multimodal_embeddings_compare_spyre(
         ("uniform", "image"),
     ],
 )
-@pytest.mark.parametrize(
-    "model_path",
-    MULTIMODAL_EMBED_PATHS,
-    ids=MULTIMODAL_EMBED_PATHS,
-    scope="module",
-    indirect=True,
-)
+@pytest.mark.parametrize("model_path", MULTIMODAL_EMBED_PATHS)
 def test_multimodal_hidden_states_compare_spyre(
-    model_run: PreparedEmbeddingModel,
+    model_path: str,
     case_name: str,
     modality: str,
+    trust_remote_code: bool | None,
     request: pytest.FixtureRequest,
 ) -> None:
+    model_run: PreparedEmbeddingModel = _model_run(model_path, trust_remote_code)
     reference = model_run.reference[case_name]
     if modality not in reference.hidden_states:
         pytest.skip(

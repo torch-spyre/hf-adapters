@@ -24,6 +24,44 @@ Mirrors the same pattern used by ``tests/spyre/edge_cases/conftest.py``.
 import os
 import sys
 
+import pytest
+from _pytest.nodes import Item
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
+
+
+# Modules whose tests share one loaded checkpoint at a time and therefore must
+# run grouped by ``model_path`` (see ``_ModelRunCache`` in the module).
+_GROUP_BY_MODEL_PATH_MODULES: frozenset[str] = frozenset(
+    {"test_e2e_multimodal_embed_compare_spyre.py"}
+)
+
+
+def _model_path_of(item: Item) -> str | None:
+    callspec = getattr(item, "callspec", None)
+    return callspec.params.get("model_path") if callspec is not None else None
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[Item]) -> None:
+    """Group the listed modules' tests by ``model_path``, keeping test order.
+
+    pytest orders parametrized items test by test, which would interleave
+    checkpoints and force a reload on every switch. Only those modules' slots
+    in ``items`` are reordered; every other item keeps its position.
+    """
+    slots: list[int] = [
+        index
+        for index, item in enumerate(items)
+        if item.path.name in _GROUP_BY_MODEL_PATH_MODULES
+        and _model_path_of(item) is not None
+    ]
+    grouped: list[Item] = [items[index] for index in slots]
+    first_seen: dict[str | None, int] = {}
+    for item in grouped:
+        first_seen.setdefault(_model_path_of(item), len(first_seen))
+    grouped.sort(key=lambda item: first_seen[_model_path_of(item)])
+    for index, item in zip(slots, grouped):
+        items[index] = item
