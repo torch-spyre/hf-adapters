@@ -17,8 +17,8 @@ E2E CLIP accuracy: stock SentenceTransformers (CPU) vs ``backend="spyre"``.
 
 Covers both towers of each registered CLIP checkpoint:
 
-- **Text tower**: encode a list of strings and assert a sentence-embedding
-  cosine threshold between CPU and Spyre outputs.
+- **Text tower**: encode a list of strings and compare per-token cosine similarity
+  between CPU and Spyre outputs, then assert a sentence-embedding cosine threshold.
 - **Vision tower**: encode a PIL image downloaded from the Hugging Face Hub and
   compare the resulting image embeddings between CPU and Spyre.
 - **Cross-modal**: verify the cosine-similarity ranking between one image embedding
@@ -29,9 +29,7 @@ Usage (on Spyre pod)::
     pytest -s -vvv tests/spyre/test_e2e_clip_compare_spyre.py
 """
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pytest
 import torch
@@ -41,9 +39,6 @@ import torch.nn.functional as F
 import hf_adapters.st_backend  # noqa: F401
 from tests._vision_helpers import _load_sample_image
 from tests.model_registry import CLIP_PATHS
-
-if TYPE_CHECKING:
-    from sentence_transformers import SentenceTransformer
 
 pytestmark = pytest.mark.model_harness("embedding")
 
@@ -63,7 +58,7 @@ COSINE_THRESHOLD = 0.97
 # ---------------------------------------------------------------------------
 
 
-def _load_models(model_path: str) -> tuple[SentenceTransformer, SentenceTransformer]:
+def _load_models(model_path: str):
     """Load both the CPU and Spyre CLIP SentenceTransformer instances for *model_path*."""
     from sentence_transformers import SentenceTransformer
 
