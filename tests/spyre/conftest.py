@@ -32,8 +32,12 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 
-# Modules whose tests share one loaded checkpoint at a time and therefore must
-# run grouped by ``model_path`` (see ``_ModelRunCache`` in the module).
+# The generic multimodal suite keeps only one checkpoint (or its load error) in
+# _ModelRunCache to bound host and Spyre memory. Pytest's default test-by-test
+# order interleaves model paths; switching models evicts that cache entry, so
+# returning to a model repeats preparation and retries any failed load. Group
+# its cases by checkpoint to load once and retain failures for all of its tests.
+# Restrict this grouping to that suite so CLIP and VLM test order stays unchanged.
 _GROUP_BY_MODEL_PATH_MODULES: frozenset[str] = frozenset(
     {"test_e2e_multimodal_embed_compare_spyre.py"}
 )
@@ -46,7 +50,7 @@ def _model_path_of(item: Item) -> str | None:
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items: list[Item]) -> None:
-    """Group the listed modules' tests by ``model_path``, keeping test order.
+    """Group the listed modules by ``model_path``, keeping per-model test order.
 
     pytest orders parametrized items test by test, which would interleave
     checkpoints and force a reload on every switch. Only those modules' slots
