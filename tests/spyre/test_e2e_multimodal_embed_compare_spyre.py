@@ -21,20 +21,21 @@ from collections.abc import Iterator
 
 import pytest
 import transformers
+from _pytest.mark.structures import ParameterSet
 
 from tests._multimodal_embedding_helpers import (
     TEXT_PROMPTS,
     CosineAccuracyError,
-    EmbeddingTestSettings,
     PreparedEmbeddingModel,
+    RetrievalAccuracyError,
     _assert_embeddings,
     _assert_hidden_states,
+    _assert_logits,
     _assert_retrieval,
     _cosine_scores,
     bounded_cpu_threads,
     embedding_cases,
     prepare_model_cases,
-    settings_for_model,
 )
 from tests.model_registry import MULTIMODAL_EMBED_PATHS
 
@@ -83,12 +84,10 @@ class _ModelRunCache:
         model_path: str, trust_remote_code: bool | None
     ) -> PreparedEmbeddingModel:
         print(f"Transformers: {transformers.__version__} ({transformers.__file__})")
-        settings: EmbeddingTestSettings = settings_for_model(model_path)
-        print(f"Embedding API: {settings.backend}; CPU reference: float32")
+        print("Embedding API: Hugging Face dual encoder; CPU reference: float32")
         with bounded_cpu_threads():
             return prepare_model_cases(
                 model_path,
-                settings,
                 embedding_cases(),
                 trust_remote_code=trust_remote_code,
             )
@@ -111,96 +110,122 @@ def _model_run(
     return _MODEL_RUNS.get(model_path, trust_remote_code)
 
 
+# Keep temporary accuracy exceptions beside the checks they affect. These
+# parameters mark only this checkpoint; new/off-registry models remain blocking.
+_SIGLIP_PATH = "google/siglip2-giant-opt-patch16-384"
+_VISION_REASON = (
+    "SigLIP fp16 vision drift vs fp32 CPU: minimum cat/dog patch cosine "
+    "0.104/0.558 after 40 blocks; full-fp32 Spyre compilation is unsupported. "
+    "See ARCHITECTURE.md, Multimodal Embedding."
+)
+_UNIFORM_REASON = (
+    "SigLIP uniform-color vision outputs can exceed accuracy tolerances on Spyre"
+)
+
+
+def _accuracy_params(reason: str, raises: type[AssertionError]) -> list[ParameterSet]:
+    return [
+        pytest.param(
+            path,
+            marks=(
+                pytest.mark.xfail(reason=reason, strict=False, raises=raises)
+                if path == _SIGLIP_PATH
+                else ()
+            ),
+        )
+        for path in MULTIMODAL_EMBED_PATHS
+    ]
+
+
 @pytest.mark.parametrize("model_path", MULTIMODAL_EMBED_PATHS)
 def test_multimodal_text_compare_spyre(
     model_path: str, trust_remote_code: bool | None
 ) -> None:
-    model_run: PreparedEmbeddingModel = _model_run(model_path, trust_remote_code)
+    model_run = _model_run(model_path, trust_remote_code)
     actual, reference = model_run.compare("text")
     assert actual.embeddings["text"].ndim == 2
     assert actual.embeddings["text"].shape[0] == len(TEXT_PROMPTS)
-    _assert_embeddings(actual, reference, model_run.settings)
-
-
-@pytest.mark.parametrize("case_name", ["scalar_image", "image_list"])
-@pytest.mark.parametrize("model_path", MULTIMODAL_EMBED_PATHS)
-def test_multimodal_image_compare_spyre(
-    model_path: str, case_name: str, trust_remote_code: bool | None
-) -> None:
-    model_run: PreparedEmbeddingModel = _model_run(model_path, trust_remote_code)
-    actual, reference = model_run.compare(case_name)
-    _assert_embeddings(actual, reference, model_run.settings)
-
-
-@pytest.mark.parametrize("image_case", ["cat_dog", "three_captions", "uniform"])
-@pytest.mark.parametrize("model_path", MULTIMODAL_EMBED_PATHS)
-def test_multimodal_embeddings_compare_spyre(
-    model_path: str,
-    image_case: str,
-    trust_remote_code: bool | None,
-    request: pytest.FixtureRequest,
-) -> None:
-    model_run: PreparedEmbeddingModel = _model_run(model_path, trust_remote_code)
-    settings = model_run.settings
-    if image_case in settings.xfail_cases:
-        request.node.add_marker(
-            pytest.mark.xfail(
-                reason=settings.xfail_cases[image_case],
-                strict=False,
-                raises=AssertionError,
-            )
-        )
-    actual, reference = model_run.compare(image_case)
-    _assert_embeddings(actual, reference, settings)
-    for prefix in ("", "joint_"):
-        text_key, image_key = f"{prefix}text", f"{prefix}image"
-        if text_key in reference.embeddings and image_key in reference.embeddings:
-            print(f"Retrieval using {prefix or 'standalone_'}features")
-            _assert_retrieval(
-                _cosine_scores(
-                    actual.embeddings[text_key], actual.embeddings[image_key]
-                ),
-                _cosine_scores(
-                    reference.embeddings[text_key], reference.embeddings[image_key]
-                ),
-                image_case=image_case,
-                score_atol=settings.score_atol,
-                ranking_atol=settings.ranking_atol,
-            )
+    _assert_embeddings(actual, reference)
 
 
 @pytest.mark.parametrize(
-    "case_name,modality",
-    [
-        ("text", "text"),
-        ("scalar_image", "image"),
-        ("image_list", "image"),
-        ("cat_dog", "text"),
-        ("cat_dog", "image"),
-        ("three_captions", "text"),
-        ("three_captions", "image"),
-        ("uniform", "text"),
-        ("uniform", "image"),
-    ],
+    "case_name", ["scalar_image", "image_list", "cat_dog", "three_captions"]
 )
 @pytest.mark.parametrize("model_path", MULTIMODAL_EMBED_PATHS)
-def test_multimodal_hidden_states_compare_spyre(
-    model_path: str,
-    case_name: str,
-    modality: str,
-    trust_remote_code: bool | None,
-    request: pytest.FixtureRequest,
+def test_multimodal_embeddings_compare_spyre(
+    model_path: str, case_name: str, trust_remote_code: bool | None
 ) -> None:
-    model_run: PreparedEmbeddingModel = _model_run(model_path, trust_remote_code)
-    reference = model_run.reference[case_name]
-    if modality not in reference.hidden_states:
-        pytest.skip(
-            "The public embedding API does not expose this tower's hidden states"
-        )
-    reason = model_run.settings.hidden_state_xfails.get(modality)
-    if reason is not None:
-        request.node.add_marker(
-            pytest.mark.xfail(reason=reason, strict=False, raises=CosineAccuracyError)
-        )
+    actual, reference = _model_run(model_path, trust_remote_code).compare(case_name)
+    _assert_embeddings(actual, reference)
+
+
+@pytest.mark.parametrize(
+    "model_path", _accuracy_params(_UNIFORM_REASON, CosineAccuracyError)
+)
+def test_multimodal_uniform_embeddings_compare_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    actual, reference = _model_run(model_path, trust_remote_code).compare("uniform")
+    _assert_embeddings(actual, reference)
+
+
+def _compare_retrieval(model_run: PreparedEmbeddingModel, case_name: str) -> None:
     actual, reference = model_run.compare(case_name)
-    _assert_hidden_states(actual, reference, model_run.settings, modality=modality)
+    for prefix in ("", "joint_"):
+        text_key, image_key = f"{prefix}text", f"{prefix}image"
+        print(f"Retrieval using {prefix or 'standalone_'}features")
+        _assert_retrieval(
+            _cosine_scores(actual.embeddings[text_key], actual.embeddings[image_key]),
+            _cosine_scores(
+                reference.embeddings[text_key], reference.embeddings[image_key]
+            ),
+            image_case=case_name,
+        )
+
+
+@pytest.mark.parametrize("case_name", ["cat_dog", "three_captions"])
+@pytest.mark.parametrize("model_path", MULTIMODAL_EMBED_PATHS)
+def test_multimodal_retrieval_compare_spyre(
+    model_path: str, case_name: str, trust_remote_code: bool | None
+) -> None:
+    _compare_retrieval(_model_run(model_path, trust_remote_code), case_name)
+
+
+@pytest.mark.parametrize(
+    "model_path", _accuracy_params(_UNIFORM_REASON, RetrievalAccuracyError)
+)
+def test_multimodal_uniform_retrieval_compare_spyre(
+    model_path: str, trust_remote_code: bool | None
+) -> None:
+    _compare_retrieval(_model_run(model_path, trust_remote_code), "uniform")
+
+
+@pytest.mark.parametrize("case_name", ["cat_dog", "three_captions", "uniform"])
+@pytest.mark.parametrize("model_path", MULTIMODAL_EMBED_PATHS)
+def test_multimodal_logits_compare_spyre(
+    model_path: str, case_name: str, trust_remote_code: bool | None
+) -> None:
+    actual, reference = _model_run(model_path, trust_remote_code).compare(case_name)
+    _assert_logits(actual, reference)
+
+
+@pytest.mark.parametrize("case_name", ["text", "cat_dog", "three_captions", "uniform"])
+@pytest.mark.parametrize("model_path", MULTIMODAL_EMBED_PATHS)
+def test_multimodal_text_hidden_states_compare_spyre(
+    model_path: str, case_name: str, trust_remote_code: bool | None
+) -> None:
+    actual, reference = _model_run(model_path, trust_remote_code).compare(case_name)
+    _assert_hidden_states(actual, reference, modality="text")
+
+
+@pytest.mark.parametrize(
+    "case_name", ["scalar_image", "image_list", "cat_dog", "three_captions", "uniform"]
+)
+@pytest.mark.parametrize(
+    "model_path", _accuracy_params(_VISION_REASON, CosineAccuracyError)
+)
+def test_multimodal_image_hidden_states_compare_spyre(
+    model_path: str, case_name: str, trust_remote_code: bool | None
+) -> None:
+    actual, reference = _model_run(model_path, trust_remote_code).compare(case_name)
+    _assert_hidden_states(actual, reference, modality="image")

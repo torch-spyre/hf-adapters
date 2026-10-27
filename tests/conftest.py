@@ -51,6 +51,7 @@ from typing import Any, Union
 import pytest
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
+from _pytest.mark.structures import Mark, MarkDecorator, ParameterSet
 from _pytest.nodes import Item
 from _pytest.python import Metafunc
 from transformers import AutoModelForCausalLM, PretrainedConfig
@@ -273,12 +274,18 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
 
     # Drop the decorator's own parametrize markers for ``model_path`` so pytest
     # doesn't raise "duplicate parametrization" when we call metafunc.parametrize
-    # below. Other parameter names on the same @parametrize marker are preserved.
-    kept: list = []
+    # below. Independent scenario parametrizations are preserved, along with
+    # marks on matching model_path parameters (e.g. a specific accuracy xfail).
+    kept: list[Mark] = []
+    original_marks: dict[str, list[Mark | MarkDecorator]] = {}
     for marker in metafunc.definition.iter_markers("parametrize"):
         argnames = marker.args[0] if marker.args else ""
         names = [n.strip() for n in argnames.replace(",", " ").split()]
         if "model_path" in names:
+            if names == ["model_path"]:
+                for parameter in marker.args[1]:
+                    if isinstance(parameter, ParameterSet):
+                        original_marks[str(parameter.values[0])] = list(parameter.marks)
             continue
         kept.append(marker)
     metafunc.definition.own_markers = [
@@ -308,16 +315,12 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
     except (KeyError, TypeError):
         raise pytest.UsageError(f"unknown model harness: {harness!r}") from None
 
-    params = [
-        (
-            pytest.param(
-                path, marks=pytest.mark.xfail(reason=non_blocking[path], strict=False)
-            )
-            if path in non_blocking
-            else path
-        )
-        for path in overrides
-    ]
+    params: list[ParameterSet] = []
+    for path in overrides:
+        marks = original_marks.get(path, []).copy()
+        if path in non_blocking and not any(mark.name == "xfail" for mark in marks):
+            marks.append(pytest.mark.xfail(reason=non_blocking[path], strict=False))
+        params.append(pytest.param(path, marks=marks))
     metafunc.parametrize("model_path", params, ids=overrides)
 
 

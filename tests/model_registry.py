@@ -747,20 +747,6 @@ MULTIMODAL_EMBEDDING_MODELS: dict[str, dict[str, Any]] = {
         "adapter": "hf_siglip.py",
         "kind": "multimodal_embedding",
         "size": "1.8b",
-        "multimodal_test": {
-            "text_processor_kwargs": {"padding": "max_length", "truncation": True},
-            "require_hidden_states": True,
-            "hidden_state_xfails": {
-                "image": (
-                    "SigLIP fp16 vision drift vs fp32 CPU: minimum cat/dog patch "
-                    "cosine 0.104/0.558 after 40 blocks; full-fp32 Spyre compilation "
-                    "is unsupported. See docs/siglip_vision_accuracy.md."
-                ),
-            },
-            "xfail_cases": {
-                "uniform": "Uniform-color vision outputs can exceed cosine tolerances on Spyre",
-            },
-        },
     },
 }
 
