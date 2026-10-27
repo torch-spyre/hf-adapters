@@ -2564,6 +2564,47 @@ def _prefer_exact_tp_plan_entries():
         modeling_utils._get_parameter_tp_plan = original_modeling_lookup
 
 
+@contextmanager
+def _maybe_direct_placement(adapter_module, dtype, requested):
+    """Enable direct-to-device placement when the adapter has opted in.
+
+    A request for an adapter that has not opted in warns and loads the ordinary
+    CPU-staged way rather than failing: the opt-in tracks whether that
+    adapter's ``prepare_for_spyre`` has been verified against weights that are
+    already on the device, so silently honoring it would trade a slower load
+    for wrong results.
+    """
+    from hf_adapters.spyre_direct_load import (
+        _host_module_prefixes,
+        spyre_direct_placement,
+        supports_direct_load,
+    )
+
+    if not requested:
+        yield
+        return
+    if not supports_direct_load(adapter_module):
+        warnings.warn(
+            f"direct_to_device=True ignored: {adapter_module.__name__} has not "
+            "set SPYRE_SUPPORTS_DIRECT_LOAD. Loading via the host instead.",
+            stacklevel=3,
+        )
+        yield
+        return
+
+    with (
+        # Harmless on the CPU device map, but keeps the direct path safe if the
+        # warmup ever learns to size itself from the eventual placement.
+        _without_spyre_allocator_warmup(),
+        spyre_direct_placement(
+            device=DEVICE,
+            dtype=dtype,
+            host_modules=_host_module_prefixes(adapter_module),
+        ),
+    ):
+        yield
+
+
 def load_model_common(
     model_path,
     module,
@@ -2571,6 +2612,7 @@ def load_model_common(
     auto_model_cls=None,
     tp_plan=None,
     trust_remote_code=None,
+    direct_to_device=False,
 ):
     """Load an HF model.
 
@@ -2588,7 +2630,23 @@ def load_model_common(
         trust_remote_code: Passed through to the adapter's ``load_hf_model`` (or
             to HF's ``from_pretrained``) so checkpoints shipping custom modeling
             code load only when the caller explicitly opts in.
+        direct_to_device: Transfer each weight to Spyre as it is materialized
+            instead of staging the whole model on the host first, which caps
+            peak host RSS at one parameter (see ``spyre_direct_load``). Opt-in,
+            and only honored by adapters that set
+            ``SPYRE_SUPPORTS_DIRECT_LOAD``. Not available with ``tp_plan``: the
+            TP styles already load shard-by-shard onto the device.
+
+    Raises:
+        ValueError: If ``direct_to_device`` is combined with ``tp_plan``.
     """
+    if direct_to_device and tp_plan is not None:
+        raise ValueError(
+            "direct_to_device is not supported with tp_plan: the Spyre TP "
+            "styles already slice checkpoints straight onto the device, so "
+            "placing whole tensors first would cost device memory and a "
+            "lossy fp16 round trip"
+        )
     if auto_model_cls is None:
         from transformers import AutoModel
 
@@ -2629,12 +2687,19 @@ def load_model_common(
                 trust_remote_code=trust_remote_code,
             )
     else:
-        model = auto_model_cls.from_pretrained(
-            model_path,
-            dtype=dtype,
-            device_map="cpu",
-            trust_remote_code=trust_remote_code,
-        )
+        with _maybe_direct_placement(module, dtype, direct_to_device):
+            # device_map stays "cpu": Transformers keeps the checkpoint slices
+            # lazy on the host and the direct-placement wrapper transfers each
+            # parameter at its final name. Asking HF for device_map="spyre"
+            # instead would pick layouts from pre-conversion checkpoint keys,
+            # turn itself off for adapters with host-resident submodules, and
+            # run caching_allocator_warmup for the whole rank at once.
+            model = auto_model_cls.from_pretrained(
+                model_path,
+                dtype=dtype,
+                device_map="cpu",
+                trust_remote_code=trust_remote_code,
+            )
 
     model.eval()
     model.requires_grad_(False)

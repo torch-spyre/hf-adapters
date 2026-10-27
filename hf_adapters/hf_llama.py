@@ -38,6 +38,28 @@ from hf_adapters.hf_common import (
 _run_forward = standard_gqa_forward
 _run_backbone_forward = standard_gqa_backbone_forward
 
+#: Opt in to ``load_model_common(direct_to_device=True)``. ``prepare_for_spyre``
+#: here only rewrites blocks and reads parameter shapes, and the RoPE cache is
+#: built from the non-persistent ``inv_freq`` buffer, which never travels
+#: through the checkpoint loader and so is still on the host when
+#: ``prebuild_rope_cache`` runs. Covered by
+#: ``tests/spyre/test_direct_load_compare_spyre.py``.
+SPYRE_SUPPORTS_DIRECT_LOAD = True
+
+#: ``pad_lm_head`` rebuilds the head weight with ``F.pad`` during
+#: ``prepare_for_spyre``. On an already-transferred weight that pad would run as
+#: an eager device op and the padded result would no longer carry the
+#: ``dim_order=[1, 0]`` layout chosen for it, so the head is padded on the host
+#: and transferred afterwards by ``model.to(device)``.
+#:
+#: On a checkpoint with ``tie_word_embeddings=True`` this also holds back
+#: ``model.embed_tokens.weight``, because it *is* the head weight -- see
+#: ``spyre_direct_load._tied_to_host``. Without that, untying would read the
+#: head back off the device, which fp16 does not survive intact. The embedding
+#: table is usually among the largest tensors in the model, so measure the
+#: saving on a tied checkpoint rather than assuming it matches an untied one.
+SPYRE_DIRECT_HOST_MODULES = ("lm_head",)
+
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to Llama model in-place."""

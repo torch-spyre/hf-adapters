@@ -398,6 +398,7 @@ class AutoSpyreModel:
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
         trust_remote_code: bool | None = None,
+        direct_to_device: bool = False,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
             model_name_or_path=model_name_or_path,
@@ -418,6 +419,7 @@ class AutoSpyreModel:
             auto_model_cls=cls._auto_model_cls,
             tp_plan=tp_plan,
             trust_remote_code=trust_remote_code,
+            direct_to_device=direct_to_device,
         )
         move_model_to_spyre(model, module, dtype)
         return model
@@ -439,6 +441,7 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
         trust_remote_code: bool | None = None,
+        direct_to_device: bool = False,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
             model_name_or_path, trust_remote_code=trust_remote_code
@@ -453,6 +456,7 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
             dtype=dtype,
             tp_plan=tp_plan,
             trust_remote_code=trust_remote_code,
+            direct_to_device=direct_to_device,
         )
 
         def model_generate(
@@ -536,6 +540,7 @@ class AutoSpyreModelForMaskedLM(AutoSpyreModel):
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
         trust_remote_code: bool | None = None,
+        direct_to_device: bool = False,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
             model_name_or_path,
@@ -547,6 +552,7 @@ class AutoSpyreModelForMaskedLM(AutoSpyreModel):
             dtype=dtype,
             tp_plan=tp_plan,
             trust_remote_code=trust_remote_code,
+            direct_to_device=direct_to_device,
         )
 
         def model_forward(
@@ -616,6 +622,7 @@ class AutoSpyreModelForQuestionAnswering(AutoSpyreModel):
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
         trust_remote_code: bool | None = None,
+        direct_to_device: bool = False,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
             model_name_or_path, trust_remote_code=trust_remote_code
@@ -625,6 +632,7 @@ class AutoSpyreModelForQuestionAnswering(AutoSpyreModel):
             dtype=dtype,
             tp_plan=tp_plan,
             trust_remote_code=trust_remote_code,
+            direct_to_device=direct_to_device,
         )
         if model.config.num_labels != 2:
             raise SpyreUnsupportedModelError(
@@ -705,6 +713,7 @@ class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
         trust_remote_code: bool | None = None,
+        direct_to_device: bool = False,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
             model_name_or_path,
@@ -716,6 +725,7 @@ class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
             dtype=dtype,
             tp_plan=tp_plan,
             trust_remote_code=trust_remote_code,
+            direct_to_device=direct_to_device,
         )
 
         def model_forward(
@@ -803,6 +813,7 @@ class AutoSpyreModelForTokenClassification(AutoSpyreModel):
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
         trust_remote_code: bool | None = None,
+        direct_to_device: bool = False,
     ) -> PreTrainedModel:
         module: ModuleType = resolve_adapter_module(
             model_name_or_path,
@@ -814,6 +825,7 @@ class AutoSpyreModelForTokenClassification(AutoSpyreModel):
             dtype=dtype,
             tp_plan=tp_plan,
             trust_remote_code=trust_remote_code,
+            direct_to_device=direct_to_device,
         )
 
         def model_forward(
@@ -957,6 +969,7 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
         trust_remote_code: bool | None = None,
+        direct_to_device: bool = False,
     ):
         module: ModuleType = resolve_adapter_module(
             model_name_or_path,
@@ -968,6 +981,7 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
             dtype=dtype,
             tp_plan=tp_plan,
             trust_remote_code=trust_remote_code,
+            direct_to_device=direct_to_device,
         )
 
         def model_generate(
