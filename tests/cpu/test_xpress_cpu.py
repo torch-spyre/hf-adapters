@@ -593,3 +593,97 @@ def test_resolver_routes_xpress_checkpoint(module, tmp_path):
 
     _write_checkpoint(tmp_path, module)
     assert resolve_adapter_module(str(tmp_path)) is module
+
+
+# ---------------------------------------------------------------------------
+# Context window through the public mover (hf_common.move_model_to_spyre)
+# ---------------------------------------------------------------------------
+
+WIDE_CTX = 96  # kv_pad 128 with BLOCK 8; the default 48 gives kv_pad 64
+
+
+def _moved_drafter(module, tmp_path, dtype=torch.bfloat16, **load_kwargs):
+    from hf_adapters.hf_common import move_model_to_spyre
+
+    _write_checkpoint(tmp_path, module)
+    model = module.load_model(
+        str(tmp_path),
+        target_embed_weight=_target_embedding(),
+        dtype=dtype,
+        **load_kwargs,
+    )
+    return model, lambda: move_model_to_spyre(model, module, dtype)
+
+
+def _propose_eagerly(module, model):
+    """propose_block with the compiled callables run eagerly, keeping the RoPE
+    dtype the mover set."""
+
+    def orig(fn):
+        return getattr(fn, "_orig_mod", getattr(fn, "_torchdynamo_orig_callable", fn))
+
+    model._spyre_compiled_blocks = [orig(b) for b in model._spyre_compiled_blocks]
+    model._spyre_xpress_fns = {k: orig(f) for k, f in model._spyre_xpress_fns.items()}
+    feats, positions = _context()
+    return module.propose_block(model, feats, positions, 7, num_passes=1)
+
+
+@torch.no_grad()
+def test_load_model_ctx_pad_survives_the_mover(module, tmp_path):
+    model, move = _moved_drafter(module, tmp_path, ctx_pad=WIDE_CTX)
+    move()
+    assert model._spyre_xpress == {"ctx_pad": WIDE_CTX, "kv_pad": 128}
+    assert _propose_eagerly(module, model).shape == (BLOCK - 1,)
+
+
+@torch.no_grad()
+def test_prepare_then_mover_keeps_ctx_pad(module, tmp_path):
+    model, move = _moved_drafter(module, tmp_path)
+    module.prepare_for_spyre(model, ctx_pad=WIDE_CTX)
+    rope = model._spyre_rope
+    move()
+    assert model._spyre_xpress == {"ctx_pad": WIDE_CTX, "kv_pad": 128}
+    assert model._spyre_rope is rope  # the mover's prepare rebuilt nothing
+    assert _propose_eagerly(module, model).shape == (BLOCK - 1,)
+
+
+def test_mover_default_ctx_pad(module, tmp_path):
+    model, move = _moved_drafter(module, tmp_path)
+    move()
+    assert model.ctx_pad == module.CTX_PAD
+    assert model._spyre_xpress == {
+        "ctx_pad": module.CTX_PAD,
+        "kv_pad": module.kv_pad_for(module.CTX_PAD, BLOCK),
+    }
+
+
+@torch.no_grad()
+def test_prepare_after_the_move_is_a_noop(module, tmp_path):
+    """Re-preparing a moved model used to rebuild the RoPE wrapper (fp16) and
+    the readout (from the CPU weight), breaking the next bf16 forward."""
+    model, move = _moved_drafter(module, tmp_path, ctx_pad=WIDE_CTX)
+    move()
+    rope, readout = model._spyre_rope, model.xpress_readout
+    module.prepare_for_spyre(model)
+    module.prepare_for_spyre(model, ctx_pad=WIDE_CTX)
+    assert model._spyre_rope is rope and model.xpress_readout is readout
+    assert _propose_eagerly(module, model).shape == (BLOCK - 1,)
+
+
+def test_prepare_rejects_a_different_ctx_pad_once_prepared(module, tmp_path):
+    model, move = _moved_drafter(module, tmp_path)
+    move()
+    with pytest.raises(ValueError, match="already prepared with ctx_pad=48"):
+        module.prepare_for_spyre(model, ctx_pad=WIDE_CTX)
+    assert model._spyre_xpress["ctx_pad"] == module.CTX_PAD
+
+
+@pytest.mark.parametrize("ctx_pad", [0, -1])
+def test_rejects_non_positive_ctx_pad(module, tmp_path, ctx_pad):
+    _write_checkpoint(tmp_path, module)
+    with pytest.raises(ValueError, match="ctx_pad must be positive"):
+        module.load_model(
+            str(tmp_path), target_embed_weight=_target_embedding(), ctx_pad=ctx_pad
+        )
+    with pytest.raises(ValueError, match="ctx_pad must be positive"):
+        module.prepare_for_spyre(_loaded_drafter(module), ctx_pad=ctx_pad)

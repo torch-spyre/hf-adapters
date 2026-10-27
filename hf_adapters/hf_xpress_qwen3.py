@@ -51,7 +51,7 @@ positions, re-projected every block (no draft-side KV cache yet), so shapes are
 static and every block compiles once. This is narrower than training: there the
 full-attention layer sees the whole context and the sliding layers see
 ``sliding_window`` (2048) positions. Longer contexts are truncated with a
-warning; pass a larger ``ctx_pad`` to ``prepare_for_spyre`` to keep more.
+warning; pass a larger ``ctx_pad`` to ``load_model`` to keep more.
 
 Usage::
 
@@ -111,6 +111,12 @@ CTX_PAD = 48
 SLIDING = "sliding_attention"
 FULL = "full_attention"
 _SHARED_WITH_TARGET = ("embed_tokens.", "lm_head.")
+
+
+def _check_ctx_pad(ctx_pad: int) -> int:
+    if ctx_pad < 1:
+        raise ValueError(f"ctx_pad must be positive, got {ctx_pad}")
+    return ctx_pad
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +183,8 @@ class XPressDrafter(nn.Module):
         self.layer_types = list(config.layer_types or [FULL] * config.num_hidden_layers)
         self.num_passes = int(getattr(config, "xpress_num_passes", 6))
         self.topc = int(getattr(config, "xpress_topc", 512))
+        # Context window prepare_for_spyre compiles for (see load_model).
+        self.ctx_pad = CTX_PAD
 
         self.embed_tokens = nn.Embedding(config.vocab_size, hidden)
         self.layers = nn.ModuleList(
@@ -352,8 +360,10 @@ def build_model(
     target_embed_weight: torch.Tensor,
     dtype: torch.dtype = torch.bfloat16,
     target_lm_head_weight: torch.Tensor | None = None,
+    ctx_pad: int = CTX_PAD,
 ) -> XPressDrafter:
     """A ready (eval, frozen) drafter from already-read checkpoint tensors."""
+    _check_ctx_pad(ctx_pad)
     with torch.device("meta"):
         model = build_drafter(config)
     load_drafter_weights(model, weights, target_embed_weight, target_lm_head_weight)
@@ -366,6 +376,7 @@ def build_model(
     # inv_freq skews the relative RoPE angles by ~1e-3 rad per position of key
     # span: negligible at kv_pad 64, radians at the 2048-token training window.
     model.rotary_emb = Qwen3RotaryEmbedding(model.config)
+    model.ctx_pad = ctx_pad
     return model
 
 
@@ -377,12 +388,14 @@ def load_model(
     target_path: str | None = None,
     dtype: torch.dtype = torch.bfloat16,
     revision: str | None = None,
+    ctx_pad: int = CTX_PAD,
 ) -> XPressDrafter:
     """Load an XPress drafter; vocab weights come from the target model.
 
     With ``target_path`` both the embedding and (for an untied target) the
     ``lm_head`` are read from the target checkpoint; with explicit tensors,
-    pass ``target_lm_head_weight`` for an untied target.
+    pass ``target_lm_head_weight`` for an untied target. ``ctx_pad`` is the
+    context window ``move_model_to_spyre`` compiles the drafter for.
     """
     if target_embed_weight is None:
         if target_path is None:
@@ -391,7 +404,7 @@ def load_model(
         target_lm_head_weight = load_target_lm_head(target_path)
     config, weights = read_checkpoint(model_path, revision)
     return build_model(
-        config, weights, target_embed_weight, dtype, target_lm_head_weight
+        config, weights, target_embed_weight, dtype, target_lm_head_weight, ctx_pad
     )
 
 
@@ -420,15 +433,30 @@ def _padded_readout(readout: torch.Tensor) -> nn.Linear:
     return linear
 
 
-def prepare_for_spyre(model: XPressDrafter, ctx_pad: int = CTX_PAD) -> None:
+def prepare_for_spyre(model: XPressDrafter, ctx_pad: int | None = None) -> None:
     """Compile the backbone + refiner and mark the CPU-resident modules.
 
     Called by ``hf_common.move_model_to_spyre`` before the device move; the
     modules in ``_spyre_cpu_submodules`` stay on CPU: the gather-only weights,
     and ``fc``/``hidden_norm``, which only run from their CPU snapshot.
+
+    ``ctx_pad`` defaults to ``model.ctx_pad`` (set by ``load_model``), so the
+    mover's argument-free call keeps the requested window. Preparing is done
+    once: a repeat call with the same window is a no-op (rebuilding after the
+    device move would leave a CPU readout and an fp16 RoPE cache behind), and
+    a different window is rejected.
     """
-    if ctx_pad < 1:
-        raise ValueError(f"ctx_pad must be positive, got {ctx_pad}")
+    ctx_pad = _check_ctx_pad(model.ctx_pad if ctx_pad is None else ctx_pad)
+    prepared = getattr(model, "_spyre_xpress", None)
+    if prepared is not None:
+        if prepared["ctx_pad"] != ctx_pad:
+            raise ValueError(
+                f"XPress drafter already prepared with ctx_pad={prepared['ctx_pad']}; "
+                f"choose the window before preparing, e.g. "
+                f"load_model(..., ctx_pad={ctx_pad})"
+            )
+        return
+    model.ctx_pad = ctx_pad
     pad_lm_head(model)
     snapshot_cpu_embeddings(model)
     snapshot_cpu_fc(model)
@@ -533,7 +561,7 @@ def _window(ctx_features, ctx_positions, ctx_pad):
         warnings.warn(
             f"XPress context of {ctx_positions.shape[0]} positions truncated to "
             f"the {ctx_pad} most recent (ctx_pad); training attends to more. "
-            "Pass a larger ctx_pad to prepare_for_spyre to keep more.",
+            "Pass a larger ctx_pad to load_model to keep more.",
             stacklevel=3,
         )
     feats = ctx_features[:, -ctx_pad:].to("cpu", torch.float32)
