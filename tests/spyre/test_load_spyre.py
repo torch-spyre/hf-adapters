@@ -22,9 +22,9 @@ Per-class checks:
   - causal-LM          : model is not None + ``generate`` is attached
   - embedding          : model is not None
   - masked-LM          : model is not None + ``forward`` is callable
-  - question-answering : model is not None + ``forward`` callable + QA head on CPU
-  - seq-classification : model is not None + ``forward`` callable + classifier on CPU
-  - token-classification: model is not None + ``forward`` callable + classifier on CPU
+  - question-answering : model is not None + ``forward`` callable + QA head on Spyre
+  - seq-classification : model is not None + ``forward`` callable + classifier on Spyre
+  - token-classification: model is not None + ``forward`` callable + classifier on Spyre
 
 Usage (on Spyre pod)::
 
@@ -177,8 +177,8 @@ def load_question_answering(
         model_path, dtype=dtype, trust_remote_code=trust_remote_code
     )
     load_s = time.time() - t0
-    head_on_cpu = next(model.qa_outputs.parameters()).device.type == "cpu"
-    return model is not None, callable(model.forward) and head_on_cpu, load_s
+    head_on_spyre = next(model.qa_outputs.parameters()).device.type == "spyre"
+    return model is not None, callable(model.forward) and head_on_spyre, load_s
 
 
 @pytest.mark.model_harness("question_answering")
@@ -193,7 +193,7 @@ def test_load_question_answering(
     )
     print(f"  [{model_path}] question-answering load time: {load_s:.1f}s")
     assert model_is_not_none, f"{model_path}: from_pretrained returned None"
-    assert ready, f"{model_path}: native forward or CPU QA head is not ready"
+    assert ready, f"{model_path}: native forward or on-device QA head is not ready"
 
 
 def load_seq_classification(
@@ -208,8 +208,8 @@ def load_seq_classification(
         model_path, trust_remote_code=trust_remote_code
     )
     load_s = time.time() - t0
-    head_on_cpu = next(model.classifier.parameters()).device.type == "cpu"
-    return model is not None, callable(model.forward) and head_on_cpu, load_s
+    head_on_spyre = next(model.classifier.parameters()).device.type == "spyre"
+    return model is not None, callable(model.forward) and head_on_spyre, load_s
 
 
 @pytest.mark.model_harness("seq_classification")
@@ -228,7 +228,9 @@ def test_load_seq_classification(
     print("|------|------|--------|----------|")
     print(f"| {model_path} | seq-classification | PASS | {load_s:.1f} |")
     assert model_is_not_none, f"{model_path}: from_pretrained returned None"
-    assert ready, f"{model_path}: native forward or CPU classifier head is not ready"
+    assert (
+        ready
+    ), f"{model_path}: native forward or on-device classifier head is not ready"
 
 
 def load_token_classification(
@@ -243,8 +245,8 @@ def load_token_classification(
         model_path, trust_remote_code=trust_remote_code
     )
     load_s = time.time() - t0
-    head_on_cpu = next(model.classifier.parameters()).device.type == "cpu"
-    return model is not None, callable(model.forward) and head_on_cpu, load_s
+    head_on_spyre = next(model.classifier.parameters()).device.type == "spyre"
+    return model is not None, callable(model.forward) and head_on_spyre, load_s
 
 
 @pytest.mark.model_harness("token_classification")
@@ -263,4 +265,6 @@ def test_load_token_classification(
     print("|------|------|--------|----------|")
     print(f"| {model_path} | token-classification | PASS | {load_s:.1f} |")
     assert model_is_not_none, f"{model_path}: from_pretrained returned None"
-    assert ready, f"{model_path}: native forward or CPU classifier head is not ready"
+    assert (
+        ready
+    ), f"{model_path}: native forward or on-device classifier head is not ready"

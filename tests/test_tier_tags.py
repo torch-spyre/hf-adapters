@@ -25,14 +25,18 @@ Two invariants matter here:
 
 from __future__ import annotations
 
+import importlib.util
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
+import tests._tier_tags as tier_tags_module
 from tests._tier_tags import (
     SUITE_TIERS,
     model_tag,
+    platform_tag,
     result_tags,
     tier_tags,
 )
@@ -40,6 +44,10 @@ from tests._tier_tags import (
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "_test_matrix.yaml"
 _MAKEFILE = _REPO_ROOT / "Makefile"
+_MODULE_CONFIGS = _REPO_ROOT / "tests" / "configs" / "module_tests"
+_MODULE_CONFIG_GENERATOR = (
+    _REPO_ROOT / "utils" / "module_discovery" / "auto_generate_module_config.py"
+)
 
 _TIERS = ("smoke", "unit", "integration", "regression", "trunk")
 
@@ -103,6 +111,38 @@ def test_every_tiered_table_entry_is_a_real_workflow_suite():
 
 def test_untiered_suites_are_absent_from_the_table():
     assert not (_UNTIERED & set(SUITE_TIERS))
+
+
+# ── model_module is tagged by the oot_framework, from each config's labels ─────
+
+
+def test_module_configs_declare_the_workflow_tiers():
+    """Unlabelled configs emit no testtype__ tag, so their cases drop out of every tier."""
+    want = sorted(_workflow_gates()["model_module"])
+    configs = sorted(_MODULE_CONFIGS.glob("*.yaml"))
+    assert configs, f"no module configs under {_MODULE_CONFIGS}"
+    labels = {
+        p.name: sorted(
+            yaml.safe_load(p.read_text())["test_suite_config"].get("labels") or []
+        )
+        for p in configs
+    }
+    wrong = {name: got for name, got in labels.items() if got != want}
+    assert not wrong, f"module configs whose labels differ from {want}: {wrong}"
+
+
+def test_module_config_generator_emits_the_workflow_tiers():
+    """Regenerating a config must not drop the labels the checked-in ones carry."""
+    pytest.importorskip("transformers")
+    spec = importlib.util.spec_from_file_location(
+        "auto_generate_module_config", _MODULE_CONFIG_GENERATOR
+    )
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    doc = yaml.safe_load(gen.generate_unified_yaml_config([], "some-model"))
+    assert sorted(doc["test_suite_config"]["labels"]) == sorted(
+        _workflow_gates()["model_module"]
+    )
 
 
 # ── the Makefile carries a SECOND, already-drifted copy ─────────────────────────
@@ -252,6 +292,7 @@ def test_result_tags_emits_model_then_tiers():
     pairs = result_tags("token_compare", {"model_path": "ibm/granite"})
     assert [n for n, _ in pairs] == ["tag"] * len(pairs)
     assert [v for _, v in pairs] == [
+        platform_tag(),
         "model__ibm/granite",
         "testtype__integration",
         "testtype__regression",
@@ -260,8 +301,21 @@ def test_result_tags_emits_model_then_tiers():
     ]
 
 
-def test_result_tags_is_empty_when_there_is_nothing_to_say():
-    assert result_tags("", {}) == []
+def test_result_tags_carries_only_the_platform_when_there_is_nothing_else():
+    assert result_tags("", {}) == [("tag", platform_tag())]
+
+
+@pytest.mark.parametrize(
+    "machine, expected",
+    [
+        ("x86_64", "platform__x86_64"),
+        ("ppc64le", "platform__ppc64le"),
+        ("", "platform__unknown"),
+    ],
+)
+def test_platform_tag_matches_torch_spyre_normalization(monkeypatch, machine, expected):
+    monkeypatch.setattr(tier_tags_module.platform, "machine", lambda: machine)
+    assert platform_tag() == expected
 
 
 def test_tag_values_match_the_ingest_namespace_form():

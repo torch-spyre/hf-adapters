@@ -10,6 +10,9 @@ which models are supported on Spyre.
 | Model | model\_type | head\_dim | D/2 | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
 |-------|-----------|---------|-----|--------------|-------------|---------------|-----------|
 | Qwen3 0.6B | qwen3 | 128 | 64 | Yes | Yes | Yes | Yes |
+| Qwen3.5 2B | qwen3\_5 | 256 (64 rotary) | 32 rotary | Yes | Yes | Yes | Yes |
+| Qwen3.8 27B | qwen3\_5 | 256 (64 rotary) | 32 rotary | Yes | Yes | Yes | Yes |
+| Qwen3.6 35B-A3B | qwen3\_5\_moe | 256 (64 rotary) | 32 rotary | Yes | Yes | Yes | Yes (single card and 2-card TP) |
 | LFM2 350M | lfm2 | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | Granite 3.3 8B | granite | 128 | 64 | Yes | Yes | Yes | Yes |
 | Granite 3.3 2B | granite | 64→128 | 64 | Yes (padded) | Yes | Yes | Yes |
@@ -50,17 +53,52 @@ which models are supported on Spyre.
 **Spyre Compiles** = `torch.compile(block_forward)` succeeds on Spyre.
 **Spyre Runs** = block produces output (no crash/NaN).
 
+### Diffusion LM (block-diffusion)
+
+| Model | model\_type | head\_dim | D/2 | Stick Aligned | Spyre Compiles | Spyre Runs |
+|-------|-----------|---------|-----|--------------|---------------|-----------|
+| DiffusionGemma 26B-A4B-it (bf16, TP=2) | diffusion\_gemma | 256 / 512 | 128 / 256 | Yes | Yes | Yes |
+
+**Spyre Compiles** = `torch.compile(encoder_block)` and `torch.compile(decoder_block)` succeed on Spyre.
+**Spyre Runs** = block-diffusion generate loop produces coherent text (verified: "Why is the sky blue?" → multi-paragraph Rayleigh scattering answer, bf16, TP=2).
+
+CPU Accurate does not apply: DiffusionGemma has no greedy AR token sequence to compare — correctness is assessed by output coherence on Spyre directly. MoE router + experts run on CPU at every layer by design (nonzero + Python loop over alive experts, not compilable).
+
 **Gemma 4 26B-A4B (MoE):** 128 experts, top-8 routing. Prefill uses a persistent
 expert loop (all experts evaluated, routed via `keep_by_index` + coarse-tile
-carried sum). Decode uses per-token expert gather with BMM. Both paths compile
-and run end-to-end; the decode path is a single compiled graph (attention +
-layernorms + FFN/MoE fused). Token-compare: 5/5 top-1 agreement with proper
-chat-template tokenization (PR#385).
+carried sum). Decode gathers hidden/output chunks per selected expert through
+expert-major views that alias the prefill pools: gate/up keep their gather
+layout (down stored in matmul-weight order), so no second weight stack exists.
+The chunk count is derived once at load — the fewest stick-legal chunks that
+spread the `top_k * chunks` gathered entries over the most cores (4 for Gemma 4
+on 32 cores); `SPYRE_MOE_CHUNKS` overrides it. Entry construction broadcasts
+the widened expert index against load-time device constants (one kernel, no
+per-call constants), gate/up partial sums reduce a contiguous chunk axis
+before the activation, and the down parts reshape in place. A derived count of
+1 keeps the whole-expert `for_each_tile` path instead. Decode still runs
+attention, layernorms, FFN and MoE on Spyre. The smoke and token-compare tests
+cover full-model generation.
+
+For decode batches, the routed MoE region slices the stick-aligned hidden rows
+into single-token inputs and concatenates their outputs inside the compiled
+block. Spyre cannot lower a flattened multi-token `[tokens, top_k]` gather:
+its packed sub-stick rows produce an unsupported `floor(row/top_k)` stick
+coordinate. The batch-1 path is unchanged, and the remaining block work (dense
+FFN, attention, TP reduction) stays batched.
 
 **OLMoE 1B-7B:** 64 experts, top-8 routing with the checkpoint's
 unnormalized selected probabilities. Prefill evaluates all experts persistently;
 decode gathers only the selected experts. The BF16 path compiles and runs
 end-to-end with 5/5 top-1 agreement against the CPU reference.
+
+### Speculative-decoding drafter (block-propose)
+
+| Model | model\_type | Target | head\_dim | D/2 | Stick Aligned | Oracle Accurate | Spyre Compiles | Spyre Runs |
+|-------|-----------|--------|---------|-----|--------------|----------------|---------------|-----------|
+| XPress Gemma 4 26B-A4B b16 (`UIUC-SSAIL/gemma4-26b-a4b-XPress-b16`) | qwen3 (`Qwen3XPressModel`) | Gemma 4 26B-A4B | 128 | 64 | Yes | Yes | Yes | Yes |
+
+**Oracle Accurate** = `propose_block` matches a plain-PyTorch transcription of the speculators training code on CPU (`tests/cpu/test_xpress_cpu.py`; a drafter has no stock-HF `generate` to compare against).
+**Spyre Runs** = `tests/spyre/test_xpress_draft_spyre.py` holds block-hidden and base-logit cosine ≥ 0.99 against the fp32 oracle on the real checkpoint (bf16: 0.9998 / 0.9999).
 
 ### Vision-Language (image→text)
 
@@ -108,10 +146,11 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 ### Sequence Classification
 
 Encoder models fine-tuned for sequence-level label prediction (sentiment
-analysis, topic classification, NLI). The encoder backbone runs on Spyre;
-the two-stage classification head (`pre_classifier` + `classifier`) runs on
-CPU (pinned via `_spyre_cpu_submodules`). Use `AutoSpyreModelForSequenceClassification`;
-returns a standard `SequenceClassifierOutput` with `logits [B, num_labels]` on CPU.
+analysis, topic classification, NLI). The encoder backbone and the
+classification head both run on Spyre, so only the `[B, num_labels]` logits are
+copied back rather than the full `[B, L, H]` hidden state. Use
+`AutoSpyreModelForSequenceClassification`; returns a standard
+`SequenceClassifierOutput` with `logits [B, num_labels]` on CPU.
 
 | Model | model\_type | head\_dim | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
 |-------|-----------|---------|--------------|-------------|---------------|-----------|
@@ -127,8 +166,8 @@ RoBERTa large MNLI uses `hf_xlm_roberta.py` (shared with the XLM-RoBERTa and rer
 ### Token Classification (NER)
 
 Encoder models fine-tuned for token-level label prediction (NER, POS, chunking).
-The encoder backbone runs on Spyre via the existing adapter; the linear
-`classifier` head runs on CPU (pinned via `_spyre_cpu_submodules`).
+The encoder backbone runs on Spyre via the existing adapter, as does the linear
+`classifier` head, so only `[B, L, num_labels]` logits leave the device.
 Use `AutoSpyreModelForTokenClassification`; returns a standard
 `TokenClassifierOutput` with per-token `logits [B, L, num_labels]` on CPU.
 
@@ -171,12 +210,13 @@ all pass that check.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 37 adapters · 58 verified checkpoints · 10K+ compatible models.
-The 59 verified rows are 36 generative + 13 embedding + 2 seq-classification +
-2 token-classification + 6 vision-language (see the Verified Checkpoints tables
-above). `hf_siglip_vision` and `hf_pixtral_vision` are bare vision-tower components
+**Coverage:** 40 adapters · 63 verified checkpoints · 10K+ compatible models.
+The 63 verified rows are 39 generative + 13 embedding + 2 seq-classification +
+2 token-classification + 6 vision-language + 1 speculative-decoding drafter (see
+the Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are bare vision-tower components
 used by VLM adapters and are not included in the adapter count. The three DSpark
-speculative-decoding drafter adapters are included in the adapter count.
+speculative-decoding drafter adapters and the XPress drafter adapter are included
+in the adapter count.
 Granite Vision 4.1 is verified both as a text backbone (generative) and as a full VLM.
 `hf_mistral3_vision_mm` covers both the ``mistral`` text-backbone variant
 (Mistral-Small-3.1/3.2) and the ``ministral3`` variant (Ministral-3-14B-Instruct-2512,
@@ -197,6 +237,8 @@ pattern, norms, and weight layout.
 | hf\_qwen2.py | qwen2 | 3 | Qwen2 0.5B/1.5B/7B, Qwen2.5 0.5B/3B, Qwen2.5-Coder 0.5B–7B, Qwen2.5-Math 1.5B/7B |
 | hf\_granite.py | granite | 3 | Granite 3.3 8B/2B Base, Granite 3.2 8B, Granite 3.1 8B/2B, Granite 3.0 8B, Granite Code 8B/3B |
 | hf\_qwen3.py | qwen3 | 2 | Qwen3 1.7B, Qwen3 4B, Qwen3 8B |
+| hf\_qwen3\_5.py | qwen3\_5 / qwen3\_5\_text | 2 | Qwen3.5/3.6/3.8 dense checkpoints with hybrid Gated DeltaNet/full-attention layers; stateful recurrence is CPU-staged between compiled Spyre regions |
+| hf\_qwen3\_5\_moe.py | qwen3\_5\_moe / qwen3\_5\_moe\_text | 1 | Qwen3.5/3.6 35B-A3B routed/shared-expert variants |
 | hf\_mistral.py | mistral | 2 | Mistral 7B v0.1/v0.2, Mistral 7B Instruct v0.1–v0.3, Zephyr 7B |
 | hf\_mistral3.py | mistral3 | 2 | Mistral-Small-3.2 24B, Ministral-3 14B (multimodal text decoder) |
 | hf\_ministral.py | ministral | 1 | Ministral-8B Instruct fine-tunes |
@@ -207,7 +249,9 @@ pattern, norms, and weight layout.
 | hf\_lfm2.py | lfm2 | 1 | LFM2 700M/1.2B and dense LFM2 fine-tunes with hybrid convolution/attention layers |
 | hf\_gemma4.py | gemma4\_unified / gemma4 (dense + PLE/KV-share) | 4 | Gemma 4 31B (dense). Not 26B-A4B (MoE). |
 | hf\_gemma4\_mm.py | gemma4\_unified / gemma4 (multimodal) | 4 | Encoder-free dense unified VLMs plus full-vision PLE/KV-share and MoE variants. Combined MoE+PLE/KV-share remains unsupported. |
-| hf\_gemma4\_moe.py | gemma4 (MoE, `enable_moe_block`) | 1 | Gemma 4 26B-A4B (128 experts, top-8 routing). Persistent prefill + gathered decode, 5/5 token match. |
+| hf\_gemma4\_moe.py | gemma4 (MoE, `enable_moe_block`) | 1 | Gemma 4 26B-A4B (128 experts, top-8 routing). Persistent prefill + shared-storage four-chunk gathered decode. |
+| hf\_xpress\_qwen3.py | qwen3 (`Qwen3XPressModel` drafter) | 1 | XPress speculative-decoding drafter: DFlash block backbone (Qwen3-style layers, mixed sliding/full) + causal refiner, block 16, K=6 Jacobi passes, top-C=512. Vocab weights from the target. UIUC-SSAIL/gemma4-26b-a4b-XPress-b16 (Gemma 4 26B-A4B target); same adapter should load UIUC-SSAIL/Qwen3-8B-XPress-b16. Block-propose API (`propose_block`). Spyre (bf16) vs fp32 speculators-math oracle: block-hidden cos 0.9998, base-logit cos 0.9999; ~50 ms per 15-token proposal at top-C=512. |
+| hf\_diffusion\_gemma.py | diffusion\_gemma | 1 | google/diffusiongemma-26B-A4B-it. MoE runs on CPU; attention + dense MLP compiled on Spyre. Block-diffusion generate loop. Gated. |
 | hf\_gemma3.py | gemma3\_text / gemma3 (dense) | 2 | Gemma 3 4B/12B/27B (text decoder of the multimodal checkpoints); EmbeddingGemma (bidirectional embedder). Not Gemma 3n (PLE). |
 | hf\_gemma2.py | gemma2 | 1 | Gemma 2 2B and Gemma 2 fine-tunes. |
 | hf\_olmo.py | olmo | 1 | OLMo 7B |
@@ -259,14 +303,17 @@ outputs = tokenizer.batch_decode(
 `AutoSpyreModelForMaskedLM` loads encoder models through `AutoModelForMaskedLM`.
 Calling `model(**inputs)` returns a standard `MaskedLMOutput`. The
 bidirectional encoder runs on Spyre and the complete
-model-specific MLM head runs on CPU.
+model-specific MLM head runs on CPU (pinned via `_spyre_cpu_submodules`). Unlike
+the other encoder task heads, its `[B, L, vocab]` logits are larger than the
+`[B, L, H]` hidden state, so running it on device would grow the device-to-host
+copy rather than shrink it.
 
 ### Sequence-Classification Auto API
 
 `AutoSpyreModelForSequenceClassification` loads encoder models through
 `AutoModelForSequenceClassification`. Calling `model(**inputs)` returns a
 standard `SequenceClassifierOutput` with CPU `logits [B, num_labels]`. The
-bidirectional encoder runs on Spyre; the task head runs on CPU. For DistilBERT
+bidirectional encoder and the task head both run on Spyre. For DistilBERT
 the two-stage head (`pre_classifier` Linear + ReLU, then `classifier` Linear with
 CLS extraction) is wrapped into a single `_DistilBertClassifierHead` so the
 `prefill_sequence_classification` call-site is uniform across all adapters.
@@ -278,7 +325,7 @@ only (no training/loss, no custom embeddings, attentions, or hidden-state collec
 `AutoSpyreModelForQuestionAnswering` loads through
 `AutoModelForQuestionAnswering`. Calling `model(**inputs)` returns a standard
 `QuestionAnsweringModelOutput` with CPU `start_logits` and `end_logits`; the
-encoder runs on Spyre and `qa_outputs` runs on CPU. Both encoder task APIs are
+encoder and `qa_outputs` both run on Spyre. Both encoder task APIs are
 right-padded, `input_ids`-based inference only and do not currently support
 training/loss, custom embeddings, attentions, or hidden-state collection.
 

@@ -600,7 +600,6 @@ wheels = [
 
 [[package]]
 name = "hf-adapters-spyre"
-version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
@@ -1435,7 +1434,7 @@ wheels = [
 [[package]]
 name = "oot-framework"
 version = "0.1.0"
-source = { git = "https://github.com/torch-spyre/torch-spyre?subdirectory=tests%2Foot_framework&rev=main#7841b983e11338656953912b7c3662beb12f83ec" }
+source = { git = "https://github.com/torch-spyre/torch-spyre?subdirectory=tests%2Foot_framework&rev=main#601e155f1db2a8a9e240cd66bf9d03e4da88a53d" }
 dependencies = [
     { name = "expecttest" },
     { name = "pydantic" },
@@ -2752,8 +2751,8 @@ wheels = [
 
 [[package]]
 name = "torch-spyre"
-version = "0.0.1"
-source = { git = "https://github.com/torch-spyre/torch-spyre?rev=main#7841b983e11338656953912b7c3662beb12f83ec" }
+version = "0.6.0.dev138+main.g601e155f"
+source = { git = "https://github.com/torch-spyre/torch-spyre?rev=main#601e155f1db2a8a9e240cd66bf9d03e4da88a53d" }
 dependencies = [
     { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },

@@ -11,10 +11,12 @@ SHELL := /bin/bash
 #   regression  — everything
 #   trunk       — same coverage as regression; push-to-main CI label (see
 #                 resolve_test_type.sh)
-#   perf        — SCAFFOLD ONLY: no benchmark harness yet, writes a placeholder
-#                 empty JUnit XML (no .benchmark classname, so ingest reads it
-#                 as 0 rows). A real producer (like torch-spyre's
-#                 spyre-perf-suite) is a follow-up.
+#   perf        — spyre-perf-suite's MODEL benchmarks (--hf-only), one run per model in tests/model_lists/perf.yaml (perf-tests).
+#                 The op/kernel half of that suite is measured in torch-spyre instead
+#                 (--ops-only there), so each image measures the layer it owns
+#                 and the op suite is not run twice. Models live here because
+#                 they need hf-adapters' exact transformers pin, which only this
+#                 image carries. -dev only: -minimal has no perf wheel.
 # Also accepts a space-separated list of individual suite keys (matches
 # _test_matrix.yaml's `test_type` semantics), e.g. TEST_TYPE="smoke load".
 # Empty / unset defaults to "regression" (every suite).
@@ -48,6 +50,9 @@ PYTEST_ARGS ?= -s -vvv
 # so any resolve fails there even though the venv already has a local torch build.
 PYTEST ?= uv run --active --no-sync pytest
 
+# Benchmark invocation for perf-tests; same --active --no-sync reasoning as PYTEST above.
+PERF_SUITE ?= uv run --active --no-sync spyre-perf-suite
+
 # When set, write JUnit XML here. Unset = no JUnit file (plain local run).
 JUNIT_XML ?=
 
@@ -67,22 +72,25 @@ else
 MODEL_PATH_ARGS :=
 endif
 
-.PHONY: help test tests adapter-coverage-tests smoke-tests load-tests \
+.PHONY: help test tests model-support-tests adapter-coverage-tests smoke-tests load-tests \
         token-compare-tests embed-compare-tests vlm-tests reranker-tests model-module-tests \
         masked-lm-compare-tests question-answering-compare-tests seq-classification-compare-tests \
-        token-classification-compare-tests model-components-tests edge-cases-tests
+        token-classification-compare-tests model-components-tests edge-cases-tests perf-tests
 
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-24s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
-	@echo "Variables: TEST_TYPE=unit|integration|regression|trunk|<space-separated suite keys, e.g. smoke> (default regression),"
+	@echo "Variables: TEST_TYPE=unit|integration|regression|trunk|perf|<space-separated suite keys, e.g. smoke clip edge_cases model_support> (default regression),"
 	@echo "  MODEL_KEY (pytest -k filter, default all), MODEL_PATH (exact model path via --model-path, overrides registry parametrization),"
+	@echo "  PERF_SCHEDULE=nightly|weekly (TEST_TYPE=perf: which perf.yaml section to run, default nightly), PERF_REPORT=split|combined (default '$(PERF_REPORT)'),"
+	@echo "  EDGE_CASE_FILE=<file>.py (edge_cases: one file), MODULE_CONFIG=<file>.yaml (model_module: one config), MODULE_TEST_FILTER (model_module: pytest -k),"
+	@echo "  MODEL_SUPPORT_TOP_K (default $(MODEL_SUPPORT_TOP_K)), MODEL_SUPPORT_MAX_PARAMS (default $(MODEL_SUPPORT_MAX_PARAMS)),"
 	@echo "  PYTEST_ARGS (default '$(PYTEST_ARGS)'), JUNIT_XML (single-suite targets only), RESULTS_DIR (default '$(RESULTS_DIR)')"
 
 # Suite keys, one target each -- same vocabulary and test_types membership as
 # _test_matrix.yaml. Each is independently runnable with its own JUNIT_XML.
 adapter-coverage-tests: ## Run adapter registry coverage check (suite key: adapter_coverage)
-	$(PYTEST) -v --noconftest tests/test_adapter_coverage.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) -v --noconftest tests/test_adapter_coverage.py tests/test_perf_coverage.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 smoke-tests: ## Run e2e smoke tests (suite key: smoke)
 	$(PYTEST) $(PYTEST_ARGS) --suite smoke tests/spyre/test_e2e_smoke_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
@@ -103,7 +111,7 @@ token-compare-tests: ## Run token-compare tests (suite key: token_compare)
 	$(PYTEST) $(PYTEST_ARGS) --suite token_compare tests/spyre/test_e2e_token_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 model-components-tests: ## Run model component tests (suite key: model_components)
-	$(PYTEST) $(PYTEST_ARGS) --suite model_components tests/spyre/test_model_components_spyre.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	$(PYTEST) $(PYTEST_ARGS) --suite model_components tests/spyre/test_model_components_spyre.py tests/spyre/test_swa_layer_ab_spyre.py tests/spyre/test_moe_prefill_work_division_spyre.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 embed-compare-tests: ## Run embed-compare tests (suite key: embed_compare)
 	$(PYTEST) $(PYTEST_ARGS) --suite embed_compare tests/spyre/test_e2e_embed_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
@@ -136,9 +144,47 @@ EDGE_CASE_FILE ?=
 edge-cases-tests: ## Run edge-case tests (suite key: edge_cases; EDGE_CASE_FILE=<file>.py narrows to one)
 	$(PYTEST) $(PYTEST_ARGS) --suite edge_cases --run-slow $(if $(EDGE_CASE_FILE),tests/spyre/edge_cases/$(EDGE_CASE_FILE),tests/spyre/edge_cases/) $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
+# PERF_SCHEDULE selects which section of tests/model_lists/perf.yaml the `tests`
+# target reads models from when TEST_TYPE=perf: `nightly` (the small hand-picked
+# large-model set) or `weekly` (the registry entries marked `weekly_perf`,
+# exposed through WEEKLY_PERF_PATHS). Only consulted for the perf tier -- other
+# tiers' lists are flat (no sections). An explicit MODEL_PATH still overrides it.
+PERF_SCHEDULE ?= nightly
+
+# split: per-model file names, so parallel GHA legs never collide in ingest's workflow/run_id/<basename> dedup key.
+# combined: one shared perf dir, so the last run's report.xml covers every model (Jenkins product-test's require_results_file).
+PERF_REPORT ?= split
+perf-tests: ## Run spyre-perf-suite once per MODEL_PATH model into RESULTS_DIR (suite key: perf; PERF_REPORT=split|combined)
+	@if [[ -z "$(strip $(MODEL_PATH))" ]]; then echo "ERROR: perf-tests needs MODEL_PATH (see tests/model_lists/perf.yaml)" >&2; exit 1; fi
+	@if [[ "$(PERF_REPORT)" != split && "$(PERF_REPORT)" != combined ]]; then echo "ERROR: PERF_REPORT must be split or combined" >&2; exit 1; fi
+	@$(PERF_SUITE) --help >/dev/null 2>&1 || { echo "ERROR: spyre-perf-suite is not installed in this image. The perf suite ships as a wheel into hf-adapters-dev; a -minimal image has no perf harness." >&2; exit 1; }
+	@# Expose only this checkout's hf_adapters: the repo root's top-level utils/ would shadow spyre-perf-suite's utils package.
+	@results="$$(mkdir -p "$(RESULTS_DIR)" && cd "$(RESULTS_DIR)" && pwd)"; \
+	shim="$$results/.hf-adapters-path"; mkdir -p "$$shim" && ln -sfn "$$PWD/hf_adapters" "$$shim/hf_adapters"; \
+	rc=0; \
+	for model in $(MODEL_PATH); do \
+	  slug="$${model//\//_}"; \
+	  tag=""; [[ "$(PERF_REPORT)" == split ]] && tag="-$$slug"; \
+	  echo "=== perf: $$model ==="; \
+	  SENPERFORMANCE="$${SENPERFORMANCE:-2}" \
+	  TORCHINDUCTOR_CACHE_DIR="$$results/inductor-logs-$$slug" \
+	  PYTHONPATH="$$shim$${PYTHONPATH:+:$$PYTHONPATH}" \
+	  $(PERF_SUITE) --hf-only --hf-model "$$model" --no-experimental --stacks torch-spyre \
+	    --perf-dir "$$results/perf$$tag" \
+	    --report "$$results/report$$tag.txt" \
+	    --spyre_kernel_report "$$results/spyre_kernel_report$$tag.txt" \
+	    --cpu_kernel_report "$$results/cpu_kernel_report$$tag.txt" \
+	    --sdsc_report "$$results/sdsc_report$$tag.txt" || rc=1; \
+	  if [[ ! -s "$$results/report$$tag.xml" ]]; then echo "ERROR: spyre-perf-suite wrote no report XML for $$model" >&2; rc=1; fi; \
+	done; \
+	exit $$rc
+
 # MODULE_CONFIG narrows model-module-tests to one YAML config (matrix-style
 # per-config CI jobs pass this); empty = run every config in tests/configs/module_tests.
 MODULE_CONFIG ?=
+# MODULE_TEST_FILTER partitions one config with pytest's -k expression. CI uses
+# this for the measured slow configs; empty keeps local and aggregate runs whole.
+MODULE_TEST_FILTER ?=
 # --junit-xml is resolved to an absolute path: run_test.sh cd's into each
 # test file's own directory before invoking pytest, so a relative path
 # would land under that directory instead of RESULTS_DIR.
@@ -166,9 +212,35 @@ model-module-tests: ## Run oot_framework module tests (suite key: model_module; 
 	  if [[ -n "$(JUNIT_XML)" ]]; then \
 	    junit_arg="--junit-xml=$$(cd "$(RESULTS_DIR)" && pwd)/model-module-$${cfg}.xml"; \
 	  fi; \
-	  TORCH_DEVICE_ROOT="$$PWD" bash "$$_run_test" \
-	    "tests/configs/module_tests/$${cfg}" $(PYTEST_ARGS) $${junit_arg} || rc=1; \
+	  TORCH_DEVICE_ROOT="$$PWD" PYTHONPATH="$$PWD$${PYTHONPATH:+:$$PYTHONPATH}" \
+	  bash "$$_run_test" "tests/configs/module_tests/$${cfg}" \
+	    -p tests.module_capability_plugin $(PYTEST_ARGS) \
+	    $(if $(MODULE_TEST_FILTER),-k "$(MODULE_TEST_FILTER)") $${junit_arg} || rc=1; \
 	done; \
+	exit $$rc
+
+# MODEL_SUPPORT_TOP_K bounds the per-build model-support scan (suite key: model_support) to
+# the top-K Hub models per mode; the weekly push-to-clickhouse scan owns the full catalog.
+MODEL_SUPPORT_TOP_K ?= 25
+MODEL_SUPPORT_MAX_PARAMS ?= 7000000000
+model-support-tests: ## Scan the top MODEL_SUPPORT_TOP_K Hub models per mode on this build; capability JUnit in RESULTS_DIR
+	set +e; \
+	source "$$HOME/.bashrc"; \
+	source /etc/profile.d/ibm-aiu-setup.sh; \
+	set -e; \
+	out="$$(mkdir -p "$(RESULTS_DIR)" && cd "$(RESULTS_DIR)" && pwd)"; \
+	day="$$(date -u +%Y-%m-%d)"; \
+	rc=0; \
+	for mode in generative embedding; do \
+	  uv run --active --no-sync python -m tests.spyre.weekly_generation.weekly_test \
+	    --mode "$$mode" --fetch --top-k $(MODEL_SUPPORT_TOP_K) \
+	    --max-params $(MODEL_SUPPORT_MAX_PARAMS) --snapshot-date "$$day" \
+	    --write-to-csv "$$out/model-support.csv" || rc=1; \
+	done; \
+	mkdir -p "$$out/junit-model-support"; \
+	uv run --active --no-sync python -m tests.spyre.weekly_generation.capability_junit \
+	  --out "$$out/junit-model-support/junit-model-support.xml" \
+	  "$$out/model-support-generative.csv" "$$out/model-support-embedding.csv" || rc=1; \
 	exit $$rc
 
 # Aggregate target: every suite named in TEST_TYPE (unit|integration|
@@ -183,10 +255,26 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	@# matches what CI runs for the "unit" tier via GHA.
 	@# An explicit MODEL_PATH always wins; otherwise tests/model_lists/<tier>.yaml (if present) supplies it, so no caller needs to know or pass model names itself.
 	@# Parsed as a flat YAML list (`- path` under a `models:` key) via grep/sed -- no real YAML parser needed for a format this simple.
+	@# The perf tier is the exception: perf.yaml is nested (nightly:/weekly:), so an
+	@# awk pass tracks the top-level section and emits only PERF_SCHEDULE's models;
+	@# it relies on the block-list format emitted by tests/generate_perf_yaml.py.
 	resolved="$$(scripts/resolve_test_type.sh $(TEST_TYPE))"; \
 	model_path="$(MODEL_PATH)"; \
 	if [ -z "$$model_path" ] && [ -f "tests/model_lists/$${resolved}.yaml" ]; then \
-	  model_path="$$(grep -E '^[[:space:]]*-[[:space:]]' "tests/model_lists/$${resolved}.yaml" | sed -E 's/^[[:space:]]*-[[:space:]]*//' | tr '\n' ' ')"; \
+	  if [ "$$resolved" = perf ]; then \
+	    case "$(PERF_SCHEDULE)" in \
+	      nightly|weekly) : ;; \
+	      *) echo "ERROR: PERF_SCHEDULE must be nightly or weekly (got '$(PERF_SCHEDULE)')" >&2; exit 1 ;; \
+	    esac; \
+	    model_path="$$(awk -v want="$(PERF_SCHEDULE)" ' \
+	      /^[A-Za-z0-9_]+:/ { sect = substr($$1, 1, length($$1) - 1); next } \
+	      sect == want && $$1 == "-" { print $$2 } \
+	    ' "tests/model_lists/$${resolved}.yaml" | tr '\n' ' ')"; \
+	    if [ -z "$$(echo $$model_path)" ]; then echo "ERROR: no models parsed from tests/model_lists/$${resolved}.yaml for PERF_SCHEDULE=$(PERF_SCHEDULE) -- check the file's section/list format" >&2; exit 1; fi; \
+	  else \
+	    model_path="$$(grep -E '^[[:space:]]*-[[:space:]]' "tests/model_lists/$${resolved}.yaml" | sed -E 's/^[[:space:]]*-[[:space:]]*//' | tr '\n' ' ')"; \
+	    if [ -z "$$(echo $$model_path)" ]; then echo "ERROR: no models parsed from tests/model_lists/$${resolved}.yaml -- expected a flat '- path' list" >&2; exit 1; fi; \
+	  fi; \
 	fi; \
 	case " $$resolved " in \
 	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare model_components embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module" ;; \
@@ -220,14 +308,10 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	                        mkdir -p "$(RESULTS_DIR)/$$base"; \
 	                        mv "$$f" "$(RESULTS_DIR)/$$base/$$base.xml"; \
 	                      done ;; \
+	    model_support)    $(MAKE) model-support-tests RESULTS_DIR="$(RESULTS_DIR)" || rc=1 ;; \
 	    edge_cases)       mkdir -p "$(RESULTS_DIR)/junit-edge-cases" && $(MAKE) edge-cases-tests        JUNIT_XML="$(RESULTS_DIR)/junit-edge-cases/junit-edge-cases.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" EDGE_CASE_FILE="$(EDGE_CASE_FILE)" || rc=1 ;; \
-	    perf)             printf '%s\n' \
-	                        '<?xml version="1.0" encoding="utf-8"?>' \
-	                        '<testsuites name="hf-adapters-perf">' \
-	                        '  <testsuite name="hf-adapters-perf" tests="0" skipped="0" failures="0" errors="0"/>' \
-	                        '</testsuites>' > "$(RESULTS_DIR)/report.xml"; \
-	                      echo "hf-adapters has no perf harness yet (scaffold stub): wrote placeholder $(RESULTS_DIR)/report.xml" ;; \
-	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare model_components embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module edge_cases perf"; rc=1 ;; \
+	    perf)             $(MAKE) perf-tests RESULTS_DIR="$(RESULTS_DIR)" MODEL_PATH="$$model_path" PERF_REPORT=combined || rc=1 ;; \
+	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare model_components embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module model_support edge_cases perf"; rc=1 ;; \
 	  esac; \
 	done; \
 	exit $$rc

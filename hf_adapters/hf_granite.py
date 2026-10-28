@@ -31,6 +31,7 @@ import torch
 
 from hf_adapters.hf_common import (
     _SDPA_MAX_SEQUENCE_TILE_SIZE,
+    embed_text_tokens,
     get_backbone,
     prepare_lm_head_for_spyre,
     prepare_rope_and_heads,
@@ -50,9 +51,7 @@ def _run_backbone_forward(
     cache_index,
 ):
     """Granite 3.3 backbone: embedding * multiplier, blocks, norm."""
-    backbone = get_backbone(model)
-    h = backbone.embed_tokens(input_ids)
-    h = h * backbone.embedding_multiplier
+    h = embed_text_tokens(model, input_ids)
 
     selected_freqs = model._spyre_rope(h, position_ids)
 

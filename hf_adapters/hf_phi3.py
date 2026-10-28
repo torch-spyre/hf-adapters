@@ -44,6 +44,7 @@ from hf_adapters.hf_common import (
     _pad_proj_input_simple,
     _pad_proj_output_simple,
     apply_rope_matmul,
+    embed_text_tokens,
     get_backbone,
     kv_cache_update,
     pad_qk_proj_for_rope,
@@ -165,8 +166,7 @@ def _run_backbone_forward(
     cache_index,
 ):
     """Phi-3 backbone: embedding, blocks, norm."""
-    backbone = get_backbone(model)
-    h = backbone.embed_tokens(input_ids)
+    h = embed_text_tokens(model, input_ids)
     selected_freqs = model._spyre_rope(h, position_ids)
 
     for i, compiled_block in enumerate(model._spyre_compiled_blocks):

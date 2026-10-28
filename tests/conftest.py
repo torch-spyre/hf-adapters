@@ -150,7 +150,12 @@ def encode_generation_inputs(tokenizer: Any, prompts: list[str]):
     """Tokenize canonically, using right padding to exercise input normalization."""
     from hf_adapters.hf_common import encode_prompts
 
-    return encode_prompts(tokenizer, prompts, padding_side="right")
+    return encode_prompts(
+        tokenizer,
+        prompts,
+        padding_side="right",
+        chat_template_kwargs={"enable_thinking": False},
+    )
 
 
 def pytest_configure(config: Config) -> None:

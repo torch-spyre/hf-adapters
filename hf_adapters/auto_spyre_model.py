@@ -85,6 +85,10 @@ from transformers import (
     Phi3Config,
     PreTrainedModel,
     Qwen2Config,
+    Qwen3_5Config,
+    Qwen3_5MoeConfig,
+    Qwen3_5MoeTextConfig,
+    Qwen3_5TextConfig,
     Qwen3Config,
     RobertaConfig,
     SmolLM3Config,
@@ -97,6 +101,9 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutput,
     TokenClassifierOutput,
 )
+from transformers.models.diffusion_gemma.configuration_diffusion_gemma import (
+    DiffusionGemmaConfig,
+)
 from transformers.models.ministral.configuration_ministral import MinistralConfig
 from transformers.models.mistral3.configuration_mistral3 import Mistral3Config
 
@@ -105,6 +112,7 @@ from hf_adapters import (
     hf_bert,
     hf_bharatgen,
     hf_clip,
+    hf_diffusion_gemma,
     hf_distilbert,
     hf_dspark_gemma4,
     hf_dspark_granite,
@@ -138,8 +146,11 @@ from hf_adapters import (
     hf_phi3,
     hf_qwen2,
     hf_qwen3,
+    hf_qwen3_5,
+    hf_qwen3_5_moe,
     hf_smollm3,
     hf_xlm_roberta,
+    hf_xpress_qwen3,
 )
 from hf_adapters.hf_common import (
     SpyreNoAdapterError,
@@ -153,6 +164,7 @@ from hf_adapters.hf_common import (
 CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     BertConfig: hf_bert,
     CLIPConfig: hf_clip,
+    DiffusionGemmaConfig: hf_diffusion_gemma,
     DistilBertConfig: hf_distilbert,
     Gemma2Config: hf_gemma2,
     Gemma3Config: hf_gemma3,
@@ -182,6 +194,10 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     Phi3Config: hf_phi3,
     Qwen2Config: hf_qwen2,
     Qwen3Config: hf_qwen3,
+    Qwen3_5Config: hf_qwen3_5,
+    Qwen3_5TextConfig: hf_qwen3_5,
+    Qwen3_5MoeConfig: hf_qwen3_5_moe,
+    Qwen3_5MoeTextConfig: hf_qwen3_5_moe,
     RobertaConfig: hf_xlm_roberta,
     SmolLM3Config: hf_smollm3,
     XLMRobertaConfig: hf_xlm_roberta,
@@ -198,6 +214,8 @@ ARCH_TO_ADAPTER_MODULE_MAPPING: dict[str, ModuleType] = {
     "Qwen3DSparkModel": hf_dspark_qwen3,
     "Gemma4DSparkModel": hf_dspark_gemma4,
     "GraniteDSparkModel": hf_dspark_granite,
+    # XPress drafters (DFlash backbone + causal refiner) ship a plain Qwen3Config.
+    "Qwen3XPressModel": hf_xpress_qwen3,
     "ParamBharatGenForCausalLM": hf_bharatgen,
 }
 
@@ -312,8 +330,11 @@ def dtype_for_model_path(
         config = _autoconfig_with_subfolder_fallback(
             model_name_or_path, trust_remote_code=trust_remote_code
         )
+        text_config = getattr(config, "text_config", None)
         dtype = (
-            getattr(config, "dtype", None) or torch.float16 if config else torch.float16
+            getattr(text_config, "dtype", None)
+            or getattr(config, "dtype", None)
+            or torch.float16
         )
 
     if dtype == torch.float32 and device_str == "spyre":
@@ -443,6 +464,9 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
             attention_mask: torch.Tensor | None = None,
             **kwargs: Any,
         ):
+            if hasattr(module, "generate"):
+                return module.generate(self, input_ids, attention_mask, **kwargs)
+
             from hf_adapters.hf_common import generate
 
             return generate(
@@ -450,6 +474,7 @@ class AutoSpyreModelForCausalLM(AutoSpyreModel):
                 self,
                 input_ids,
                 attention_mask=attention_mask,
+                prefill_backbone_fn=module._run_backbone_forward,
                 **kwargs,
             )
 
@@ -583,7 +608,7 @@ class AutoSpyreModelForMaskedLM(AutoSpyreModel):
 
 
 class AutoSpyreModelForQuestionAnswering(AutoSpyreModel):
-    """Load an extractive-QA model with its encoder on Spyre and head on CPU."""
+    """Load an extractive-QA model with its encoder and head on Spyre."""
 
     _auto_model_cls = AutoModelForQuestionAnswering  # type: ignore[assignment]
 
@@ -664,7 +689,7 @@ class AutoSpyreModelForQuestionAnswering(AutoSpyreModel):
 
 
 class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
-    """Load a sequence-classification model with its encoder on Spyre and head on CPU.
+    """Load a sequence-classification model with its encoder and head on Spyre.
 
     Loads via ``AutoModelForSequenceClassification`` and attaches a native
     ``forward`` that accepts standard Hugging Face sequence-classification inputs
@@ -746,16 +771,16 @@ class AutoSpyreModelForSequenceClassification(AutoSpyreModel):
 
 
 class AutoSpyreModelForTokenClassification(AutoSpyreModel):
-    """Load a token-classification model with its encoder on Spyre and head on CPU.
+    """Load a token-classification model with its encoder and head on Spyre.
 
     Loads via ``AutoModelForTokenClassification``, compiles the encoder
     backbone on Spyre, and attaches a native ``forward`` that takes
     right-padded ``input_ids`` / ``attention_mask`` and returns a standard
     ``TokenClassifierOutput`` with per-token ``logits`` on CPU.
 
-    The ``classifier`` linear head is automatically pinned to CPU by
-    ``prepare_for_spyre`` (via ``_spyre_cpu_submodules``), so Dropout and
-    any non-stick-aligned head dimensions never enter the Spyre graph.
+    The ``classifier`` linear head runs on Spyre too, so only the
+    ``[B, L, num_labels]`` logits are copied back rather than the full hidden
+    state.
 
     Example::
 
@@ -904,7 +929,9 @@ def _generate_image_text_to_text(
     }
 
     # Only prefill is multimodal; subsequent decode steps are ordinary text.
-    prefill_fn = partial(module._prefill_forward, **pass_through_inputs)
+    prefill_fn = partial(
+        module._prefill_forward, logits_to_keep=1, **pass_through_inputs
+    )
     run_forward_fn = partial(_run_vlm_text_forward, module)
 
     return hf_common.generate(

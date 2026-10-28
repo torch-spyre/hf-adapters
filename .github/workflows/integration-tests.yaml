@@ -92,6 +92,8 @@ on:
           the REST API dispatch too, not just the web UI dropdown, so every
           value a real caller sends (like the "unit"/"trunk" tiers above)
           must be listed explicitly below.
+          "perf" runs spyre-perf-suite once per model in the perf_schedule
+          section of tests/model_lists/perf.yaml, one matrix leg each.
         required: false
         type: choice
         default: integration
@@ -100,6 +102,30 @@ on:
           - integration
           - regression
           - trunk
+          - perf
+      perf_schedule:
+        description: >-
+          Only used when test_type=perf: which section of
+          tests/model_lists/perf.yaml to benchmark. "nightly" is the small
+          hand-picked large-model set; "weekly" contains the registry entries
+          marked weekly_perf (exposed through WEEKLY_PERF_PATHS). Ignored for
+          every other test_type.
+          Mirrors the Makefile's PERF_SCHEDULE variable.
+        required: false
+        type: choice
+        default: nightly
+        options:
+          - nightly
+          - weekly
+      run_id:
+        description: >-
+          UUID for this TEST RUN, minted by the dispatching orchestrator above the CI split.
+          Threaded so artifact_results (Jenkins-written) and test_case_runs (ingest-written)
+          share ONE identity instead of each hashing its own run coordinate. Empty on a
+          GHA-initiated run, which derives its own.
+        required: false
+        type: string
+        default: ''
       models:
         description: >-
           Space-separated list of model paths to restrict every matrix job
@@ -108,9 +134,9 @@ on:
           paths exactly as they appear in tests/model_registry.py -- any
           registered path works, not just the smallest-per-adapter default
           used when this input is left empty. Leave empty (default) to fall
-          back to the model list in tests/model_lists/integration.yaml when
-          test_type is "integration" (the default), or to every registered
-          model per suite for any other test_type -- see run-tests below.
+          back to tests/model_lists/<test_type>.yaml when one exists
+          (integration.yaml, perf.yaml), or to every registered model per
+          suite for any other test_type -- see resolve-models below.
           An explicit models value applies to every test_type, including
           "integration".
         required: false
@@ -130,8 +156,9 @@ concurrency:
   # cancel-in-progress, silently killing a run mid-job with no test failure and
   # no error -- see the run/job-level symptoms this fixes. Disambiguating by
   # test_type stops different suites from colliding at all.
+  # perf also keys on perf_schedule, so a weekly perf dispatch never queues behind (and times out waiting on) a nightly one.
   group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.pull_request.html_url) || (github.event_name == 'workflow_dispatch'
-    && inputs.pr_url_hash != '' && inputs.pr_url_hash) || format('{0}-{1}', github.ref, inputs.test_type) }}
+    && inputs.pr_url_hash != '' && inputs.pr_url_hash) || format('{0}-{1}{2}', github.ref, inputs.test_type, inputs.test_type == 'perf' && format('-{0}', inputs.perf_schedule) || '') }}
   # Only cancel for a PR-context run (re-running the same PR should supersede
   # its own stale run). A non-PR dispatch is never "the same PR re-triggered" --
   # cancelling it destroys a run that has nothing superseding it, so a same
@@ -165,14 +192,38 @@ jobs:
             echo "| hf-adapters ref | ${{ inputs.ref || github.sha }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # ---------------------------------------------------------------------------
-  # Read tests/model_lists/integration.yaml and emit a space-separated model
-  # list as a step output. Only runs when test_type is "integration" (the
-  # default); for all other tiers the output is left empty so _test_matrix.yaml
-  # runs its full registry.
-  # ---------------------------------------------------------------------------
+      # push-test-results-to-clickhouse.yaml ALREADY looks for this artifact (see its
+      # "Recover threaded run_id" step) -- nothing was uploading it, so that step always
+      # recovered empty and the ingest derived its own id. Measured: 0 of 227 hf-adapters
+      # runs in spyre_v2 join artifact_results, against 60 of 233 for torch-spyre.
+      #
+      # An artifact is the channel because that workflow runs on workflow_run, AFTER this
+      # one, so it cannot receive a dispatch input; it is also the channel it already
+      # enumerates to find the junit XML, so the uuid rides an existing transport.
+      #
+      # Uploaded from `provenance` because it is the first job and needs no runner of its
+      # own: the id is a workflow INPUT, known before any test starts, so a later job would
+      # only narrow the window in which the ingest could find it.
+      #
+      # Skipped when empty, so a GHA-initiated run uploads nothing and the ingest derives
+      # its own id, exactly as before.
+      - name: Record threaded run_id for the ingest
+        if: ${{ inputs.run_id != '' }}
+        env:
+          THREADED_RUN_ID: ${{ inputs.run_id }}
+        run: printf '%s' "${THREADED_RUN_ID}" > run-id.txt
+
+      - name: Upload threaded run_id
+        if: ${{ inputs.run_id != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: run-id
+          path: run-id.txt
+          retention-days: 14
+
+  # Emit tests/model_lists/<test_type>.yaml as a space-separated list; '' (full registry) when the tier has no file.
   resolve-models:
-    name: Resolve integration model list
+    name: Resolve tier model list
     needs: provenance
     runs-on: ubuntu-latest
     outputs:
@@ -182,23 +233,41 @@ jobs:
         with:
           ref: ${{ inputs.ref || '' }}
           repository: ${{ inputs.repository != '' && inputs.repository || github.repository }}
-          sparse-checkout: tests/model_lists/integration.yaml
+          sparse-checkout: tests/model_lists
           sparse-checkout-cone-mode: false
-      - name: Read integration model list
+      - name: Read tier model list
         id: read-models
+        env:
+          TEST_TYPE: ${{ inputs.test_type || 'integration' }}
+          PERF_SCHEDULE: ${{ inputs.perf_schedule || 'nightly' }}
         run: |
           set -euo pipefail
-          if [[ "${{ inputs.test_type || 'integration' }}" != "integration" ]]; then
-            # Non-integration tiers get '' -> _test_matrix.yaml runs full registry.
+          list="tests/model_lists/${TEST_TYPE}.yaml"
+          # exclude.yaml is the standing exclusion list, not a tier list.
+          if [[ ! "${TEST_TYPE}" =~ ^[a-z_]+$ || "${TEST_TYPE}" == "exclude" || ! -f "${list}" ]]; then
+            echo "No ${list}: running the full registry for test_type=${TEST_TYPE}"
             echo "models=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # The perf tier's list is nested (nightly:/weekly:); every other tier is
+          # a flat top-level `models:` list. Pick the matching yq query -- this
+          # mirrors the Makefile's PERF_SCHEDULE section selection.
           # yq (mikefarah/yq) is preinstalled on ubuntu-latest runners.
-          models=$(yq '.models | join(" ")' tests/model_lists/integration.yaml)
+          if [[ "${TEST_TYPE}" == "perf" ]]; then
+            if [[ "${PERF_SCHEDULE}" != "nightly" && "${PERF_SCHEDULE}" != "weekly" ]]; then
+              echo "perf_schedule must be nightly or weekly (got '${PERF_SCHEDULE}')" >&2
+              exit 1
+            fi
+            query=".${PERF_SCHEDULE}.models | join(\" \")"
+          else
+            query='.models | join(" ")'
+          fi
+          models=$(yq "${query}" "${list}")
           if [[ -z "${models}" || "${models}" == "null" ]]; then
-            echo "tests/model_lists/integration.yaml has no models" >&2
+            echo "${list} has no models for query '${query}'" >&2
             exit 1
           fi
+          echo "Models from ${list} (${query}): ${models}"
           echo "models=${models}" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------
@@ -219,7 +288,10 @@ jobs:
   run-tests:
     needs: [provenance, resolve-models]
     uses: ./.github/workflows/_test_matrix.yaml
+    # Reusable workflows get no secrets unless passed; without this HF_TOKEN resolves to "" in every test job.
+    secrets: inherit
     with:
+      run_id: ${{ inputs.run_id }}
       image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
       extra_test_flags: -vvv -s
       extra_test_flags_multi_spyre: -vvv -s

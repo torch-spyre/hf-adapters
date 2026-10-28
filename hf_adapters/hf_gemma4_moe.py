@@ -23,6 +23,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from hf_adapters import hf_common
 from hf_adapters.hf_common import (
     moe_decode_selected_experts,
     moe_prefill_all_experts,
@@ -42,6 +43,7 @@ from hf_adapters.hf_gemma4 import (
     spyre_tp_grouped_colwise_modules,
 )
 from hf_adapters.spyre_tensor_parallel import spyre_compiled_all_reduce
+from hf_adapters.swa_attention import allocate_swa_caches
 
 # The HF checkpoint conversion first merges each expert's 2D gate/up tensors
 # into these 3D parameters.  Keep the local TP shards on CPU until
@@ -59,8 +61,6 @@ __all__ = [
     "_run_backbone_forward",
     "spyre_tp_grouped_colwise_modules",
 ]
-
-_MOE_TILE = 32  # Decode gather requires tiles with at least two rows.
 
 
 def _router_probs(x, weight, scale, root_size, eps):
@@ -82,29 +82,51 @@ def _compiled_moe_loop_region(
     tile,
     stick_size,
     eps,
+    decode_chunks=1,
+    chunk_scale=None,
+    chunk_offsets=None,
 ):
-    """Run the routed decode FFN and combine its expert outputs on device."""
-    probs = _router_probs(
-        x_router,
-        router_proj_w,
-        router_scale,
-        router_scalar_root_size,
-        eps,
-    )
-    weights, expert_indices = moe_topk(probs, top_k)
-    weights = weights / weights.sum(-1, keepdim=True)
-    return moe_decode_selected_experts(
-        x_expert,
-        weights,
-        expert_indices,
-        gate_dev,
-        up_dev,
-        down_dev,
-        top_k,
-        tile,
-        stick_size,
-        "gelu_tanh",
-        per_expert_scale_stick=per_expert_scale_stick,
+    """Run routed decode on single-token slices; gather cannot lower packed top-k rows."""
+
+    def decode_token(router_input, expert_input):
+        probs = _router_probs(
+            router_input,
+            router_proj_w,
+            router_scale,
+            router_scalar_root_size,
+            eps,
+        )
+        weights, expert_indices = moe_topk(probs, top_k)
+        weights = weights / weights.sum(-1, keepdim=True)
+        return moe_decode_selected_experts(
+            expert_input,
+            weights,
+            expert_indices,
+            gate_dev,
+            up_dev,
+            down_dev,
+            top_k,
+            tile,
+            stick_size,
+            "gelu_tanh",
+            per_expert_scale_stick=per_expert_scale_stick,
+            decode_chunks=decode_chunks,
+            chunk_scale=chunk_scale,
+            chunk_offsets=chunk_offsets,
+        )
+
+    if x_router.shape[0] == 1:
+        return decode_token(x_router, x_expert)
+    # Top-k produces [tokens, top_k] with sub-stick rows. Flattening and
+    # widening them together creates floor(row/top_k) stick coordinates that
+    # Spyre cannot lower. Slice the stick-aligned hidden rows first, then let
+    # each token's routed gather compile as a single-token region.
+    return torch.cat(
+        [
+            decode_token(x_router[token : token + 1], x_expert[token : token + 1])
+            for token in range(x_router.shape[0])
+        ],
+        dim=0,
     )
 
 
@@ -149,6 +171,10 @@ class Gemma4MoEBlock(nn.Module):
         is_kv_eq_v,
         moe_k,
         stick_size,
+        is_sliding=False,
+        window_size=None,
+        swa_mode=None,
+        is_causal=True,
     ):
         super().__init__()
         self.self_attn = Gemma4Attention(
@@ -157,6 +183,10 @@ class Gemma4MoEBlock(nn.Module):
             num_kv_heads,
             head_dim,
             is_kv_eq_v,
+            is_sliding=is_sliding,
+            window_size=window_size,
+            swa_mode=swa_mode,
+            is_causal=is_causal,
         )
         self.mlp = layer.mlp
         self.input_layernorm = layer.input_layernorm
@@ -313,13 +343,16 @@ class Gemma4MoEBlock(nn.Module):
             router.scale,
             router.scalar_root_size,
             router.per_expert_scale_stick,
-            experts.gate_proj,
-            experts.up_proj,
-            experts.down_proj,
+            experts.decode_gate_proj,
+            experts.decode_up_proj,
+            experts.decode_down_proj,
             self._moe_k,
-            _MOE_TILE,
+            32,
             self._stick_size,
             self._moe_rms_eps,
+            self._decode_chunks,
+            experts.decode_chunk_scale,
+            experts.decode_chunk_offsets,
         )
         moe_out = moe_out.to(expert_input.dtype)
         return dense_out, moe_out
@@ -441,6 +474,12 @@ def prepare_text_decoder_for_spyre(model):
     num_q_heads, kv_shapes, kv_equals_v = _setup_gemma4_text_decoder(
         model, allow_moe=True
     )
+    if not hasattr(model, "_spyre_swa_mode"):
+        model._spyre_swa_mode = "anchored"
+    if not hasattr(model, "_spyre_swa_is_causal"):
+        model._spyre_swa_is_causal = True
+    if model._spyre_swa_mode == "anchored":
+        model._spyre_cache_allocator = allocate_swa_caches
 
     blocks = []
     for i, layer in enumerate(list(backbone.layers)):
@@ -452,17 +491,33 @@ def prepare_text_decoder_for_spyre(model):
             kv_equals_v[i],
             moe_k,
             stick_size,
+            is_sliding=cfg.layer_types[i] == "sliding_attention",
+            window_size=cfg.sliding_window,
+            swa_mode=model._spyre_swa_mode,
+            is_causal=model._spyre_swa_is_causal,
         )
         # Under TP this parameter was loaded directly on Spyre.  Widening the
         # per-expert scalar to one stick is intentionally a host operation.
         expert_scale = block.router.per_expert_scale.detach().cpu()
         block.router.route_identity = torch.eye(
             stick_size, dtype=expert_scale.dtype
-        ).to("spyre")
-        block.router.per_expert_scale_stick = dma_moe_per_expert_scale_to_spyre(
-            expert_scale
+        ).to(hf_common.DEVICE)
+        if str(hf_common.DEVICE).startswith("spyre"):
+            block.router.per_expert_scale_stick = dma_moe_per_expert_scale_to_spyre(
+                expert_scale
+            )
+        else:
+            block.router.per_expert_scale_stick = (
+                expert_scale[:, None].expand(-1, stick_size).contiguous()
+            )
+        hidden_size = block.experts.gate_up_proj.shape[-1]
+        # Derived from core count (SPYRE_MOE_CHUNKS overrides); 1 keeps the
+        # whole-expert for_each_tile path instead of chunked gather.
+        decode_chunks = hf_common.derive_moe_chunks(hidden_size, moe_k, stick_size)
+        prepare_moe_expert_weights(
+            block.experts, pad_to_multiple=stick_size, decode_chunks=decode_chunks
         )
-        prepare_moe_expert_weights(block.experts, pad_to_multiple=stick_size)
+        block._decode_chunks = decode_chunks
         backbone.layers[i] = block
         blocks.append(block)
 

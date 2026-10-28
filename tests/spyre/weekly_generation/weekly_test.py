@@ -398,6 +398,7 @@ def main(
     sink: ResultSink = create_sink(
         model_type=model_type,
         write_to_csv=write_to_csv,
+        model_list_file=model_list_file,
     )
 
     # All six are read by the finally block, so they are bound before the try

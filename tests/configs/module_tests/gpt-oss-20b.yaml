@@ -3,6 +3,10 @@
 # Format compatible with PyTorch's test_modules.py (using edits.modules.include)
 
 test_suite_config:
+  labels:
+    - regression
+    - trunk
+    - unit
   files:
     - path: ${TORCH_ROOT}/test/test_modules.py
       unlisted_test_mode: skip
@@ -148,7 +152,7 @@ test_suite_config:
                             shape: [1, 1, 128, 128]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.int64
+                            dtype: torch.bool
                             device: spyre
                             init: randint
                             init_args:
@@ -203,7 +207,7 @@ test_suite_config:
                             shape: [1, 1, 1, 128]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.int64
+                            dtype: torch.bool
                             device: spyre
                             init: randint
                             init_args:
@@ -326,7 +330,7 @@ test_suite_config:
                             shape: [1, 1, 128, 128]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.int64
+                            dtype: torch.bool
                             device: spyre
                             init: randint
                             init_args:
@@ -382,7 +386,7 @@ test_suite_config:
                             shape: [1, 1, 1, 128]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.int64
+                            dtype: torch.bool
                             device: spyre
                             init: randint
                             init_args:
@@ -722,7 +726,7 @@ test_suite_config:
                             shape: [1, 1, 128, 2048]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.int64
+                            dtype: torch.bool
                             device: spyre
                             init: randint
                             init_args:
@@ -777,7 +781,7 @@ test_suite_config:
                             shape: [1, 1, 1, 2048]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.int64
+                            dtype: torch.bool
                             device: spyre
                             init: randint
                             init_args:
@@ -900,7 +904,7 @@ test_suite_config:
                             shape: [1, 1, 128, 2048]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.int64
+                            dtype: torch.bool
                             device: spyre
                             init: randint
                             init_args:
@@ -956,7 +960,7 @@ test_suite_config:
                             shape: [1, 1, 1, 2048]
                             stride: null
                             storage_offset: 0
-                            dtype: torch.int64
+                            dtype: torch.bool
                             device: spyre
                             init: randint
                             init_args:

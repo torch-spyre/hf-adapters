@@ -1,10 +1,2 @@
-models:
-  - Qwen/Qwen3-0.6B                                             # qwen3
-  - ibm-granite/granite-3.3-8b-instruct                         # granite
-  - ibm-granite/granite-3.3-2b-instruct                         # granite2b
-  - ibm-granite/granite-4.0-1b-base                             # granite4
-  - ibm-granite/granite-4.0-1b                                  # granite4_instruct
-  - ibm-research/granite-4.1-20b                                # granite41_20b
-  # Embedding models
-  - BAAI/bge-base-en-v1.5                                       # bge_base (embed-compare)
-  - BAAI/bge-m3                                                 # bge_m3 (load)
+# manage_cache.py caches every model in tests/model_registry.py automatically; list only repos to cache in addition to that.
+models: []

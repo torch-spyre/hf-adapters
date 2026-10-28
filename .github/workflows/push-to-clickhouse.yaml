@@ -112,6 +112,20 @@ env:
   CLICKHOUSE_USER: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_USER_DEV || secrets.CLICKHOUSE_USER }}
   CLICKHOUSE_PASS: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_PASS_DEV || secrets.CLICKHOUSE_PASS }}
   CLICKHOUSE_DB: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_DB_DEV || secrets.CLICKHOUSE_DB }}
+  # The schema-v2 database, which the scan dual-writes capability rows to alongside every v1
+  # insert. Unset is a no-op, not a failure: v1 is what this scan exists to produce, so a
+  # deployment without v2 tables writes v1 exactly as before. v1 and v2 never share a database.
+  CLICKHOUSE_DB_V2: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_DB_V2_DEV || secrets.CLICKHOUSE_DB_V2 }}
+
+  # The shared schema-v2 write path, installed per job rather than declared in pyproject.toml:
+  # build-hf-adapters runs `uv sync --frozen`, which would both require a lock entry and pin the
+  # library to a locked commit, so a fix there would need an hf-adapters re-lock to take effect.
+  # Installed from git so the identity helpers stay ONE implementation -- run_id and
+  # capability_id are content hashes that independent writers must agree on byte-for-byte.
+  CH_INGEST_LIB: "git+https://github.com/torch-spyre/torch-spyre@main#subdirectory=extensions/clickhouse-ingest"
+
+  # Without this, `uv run`'s implicit sync strips the unlocked CH_INGEST_LIB back out before weekly_test.py can import it, so v2 capability rows silently never got written.
+  UV_NO_SYNC: "1"
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -175,11 +189,12 @@ jobs:
           source .venv/bin/activate
           echo "VIRTUAL_ENV $VIRTUAL_ENV"
 
+      # From uv.lock, so the prefilter loads configs with the same transformers the scans run.
       - name: Install Python dependencies
         run: |
           source .venv/bin/activate
-          uv pip install huggingface_hub tqdm transformers clickhouse-connect python-dotenv
-          uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+          uv sync --frozen --no-install-project --no-default-groups --group models-ops
+          uv pip install "${CH_INGEST_LIB}"
 
       # TEMPORARY debug step: confirms HF_TOKEN actually reaches this job as a
       # working credential, and re-runs the real keep()-filter checks against
@@ -425,6 +440,14 @@ jobs:
           fi
           echo "| ${{ matrix.mode }} shard ${{ matrix.shard_index }} | ${ACTUAL} |" >> "$GITHUB_STEP_SUMMARY"
 
+      # Must come AFTER build-hf-adapters: its `uv sync --frozen` prunes anything not in the
+      # lock, so installing before it would have this removed again. --python: the job's
+      # VIRTUAL_ENV is the image's prebaked venv, not the project .venv that `uv run` uses.
+      - name: Install the shared ClickHouse ingest library
+        run: |
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv pip install --python .venv/bin/python "${CH_INGEST_LIB}"
+
       - name: Download shard
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -484,6 +507,13 @@ jobs:
             --model-list-file shards/${{ matrix.shard_file }} \
             --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }}
           echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
+
+      - name: Link this shard's verdicts to its image
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/link-scan-artifact
+        with:
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          scan_date: ${{ needs.generate-matrix.outputs.snapshot_date }}
 
   weekly-model-scan-x2:
     name: Weekly model scan x2 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
@@ -531,6 +561,14 @@ jobs:
           fi
           echo "| ${{ matrix.mode }} shard ${{ matrix.shard_index }} | ${ACTUAL} |" >> "$GITHUB_STEP_SUMMARY"
 
+      # Must come AFTER build-hf-adapters: its `uv sync --frozen` prunes anything not in the
+      # lock, so installing before it would have this removed again. --python: the job's
+      # VIRTUAL_ENV is the image's prebaked venv, not the project .venv that `uv run` uses.
+      - name: Install the shared ClickHouse ingest library
+        run: |
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv pip install --python .venv/bin/python "${CH_INGEST_LIB}"
+
       - name: Download shard
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -590,6 +628,13 @@ jobs:
             --model-list-file shards/${{ matrix.shard_file }} \
             --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }}
           echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
+
+      - name: Link this shard's verdicts to its image
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/link-scan-artifact
+        with:
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          scan_date: ${{ needs.generate-matrix.outputs.snapshot_date }}
 
   weekly-model-scan-x4:
     name: Weekly model scan x4 (${{ matrix.mode }} shard ${{ matrix.shard_index }})
@@ -637,6 +682,14 @@ jobs:
           fi
           echo "| ${{ matrix.mode }} shard ${{ matrix.shard_index }} | ${ACTUAL} |" >> "$GITHUB_STEP_SUMMARY"
 
+      # Must come AFTER build-hf-adapters: its `uv sync --frozen` prunes anything not in the
+      # lock, so installing before it would have this removed again. --python: the job's
+      # VIRTUAL_ENV is the image's prebaked venv, not the project .venv that `uv run` uses.
+      - name: Install the shared ClickHouse ingest library
+        run: |
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv pip install --python .venv/bin/python "${CH_INGEST_LIB}"
+
       - name: Download shard
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -696,3 +749,69 @@ jobs:
             --model-list-file shards/${{ matrix.shard_file }} \
             --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }}
           echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
+
+      - name: Link this shard's verdicts to its image
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/link-scan-artifact
+        with:
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          scan_date: ${{ needs.generate-matrix.outputs.snapshot_date }}
+
+  # The scan's leg when no shard wrote one (an 'error' leg for a scan that recorded nothing);
+  # each shard links from its own pod. Needs the image (the base artifact_id lives in its
+  # filesystem) but no card. Never fails the scan.
+  link-artifact:
+    name: Link verdicts to the scanned image
+    needs: [generate-matrix, resolve-torch-spyre, weekly-model-scan-x1, weekly-model-scan-x2, weekly-model-scan-x4]
+    if: ${{ !cancelled() && needs.resolve-torch-spyre.result == 'success' }}
+    continue-on-error: true
+    runs-on: [x86_64, spyre_pf_x0, linux, image_torch_spyre]
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # At torch-spyre main, the same ref CH_INGEST_LIB installs, so both use one id formula.
+      - name: Checkout the identity library
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: torch-spyre/torch-spyre
+          ref: main
+          path: .torch-spyre-identity
+          sparse-checkout: |
+            .github/scripts/derive_artifact_id.py
+            extensions/clickhouse-ingest
+          sparse-checkout-cone-mode: false
+
+      # Same tokens as _test_matrix's artifact-identity, so a scan and a test run of one
+      # commit pair resolve to one artifact.
+      - name: Describe what the scan installed on top of the image
+        id: delta
+        env:
+          TORCH_SPYRE_SHA: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+        run: echo "installed=hf-adapters@${GITHUB_SHA:0:12} torch-spyre@${TORCH_SPYRE_SHA:0:12}" >> "$GITHUB_OUTPUT"
+
+      - name: Derive the artifact identity
+        id: derive
+        uses: torch-spyre/torch-spyre/.github/actions/derive-gha-artifact-id@main
+        with:
+          component: hf-adapters
+          arch: x86_64
+          installed: ${{ steps.delta.outputs.installed }}
+          library-dir: ${{ github.workspace }}/.torch-spyre-identity
+
+      - name: Install uv
+        if: steps.derive.outputs.artifact_id != ''
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: Write the artifact leg
+        if: steps.derive.outputs.artifact_id != ''
+        env:
+          SCAN_DATE: ${{ needs.generate-matrix.outputs.snapshot_date }}
+        run: |
+          REC="$(tr -d '[:space:]' < artifact-id.txt)"
+          uv run --no-project --with "${CH_INGEST_LIB}" \
+            python -m tests.spyre.weekly_generation.sink.artifact_link --artifact-id "${REC}"

@@ -70,7 +70,8 @@ on:
           token_classification_compare, model_module);
           "integration" runs token_compare and model_components;
           "regression"/"trunk" (default: regression) run the
-          standard Spyre suite set. The tests/spyre/edge_cases/ suite is opted
+          standard Spyre suite set. "perf" runs only spyre-perf-tests, over the `models` list.
+          The tests/spyre/edge_cases/ suite is opted
           into separately via the edge_cases_only boolean input below -- it
           is deliberately outside this shared test_type contract so callers
           in sister repos stay compatible. The resolve-test-type job below
@@ -117,6 +118,15 @@ on:
         required: false
         type: boolean
         default: false
+      run_id:
+        description: >
+          UUID identifying this TEST RUN, threaded from the dispatching orchestrator. Uploaded
+          as the `run-id` artifact below so push-test-results-to-clickhouse.yaml -- which runs
+          on workflow_run AFTER this workflow and therefore cannot receive a dispatch input --
+          can recover it and stamp test_case_runs with the same id artifact_results carries.
+        required: false
+        type: string
+        default: ''
       prebaked_image:
         description: >-
           When true, run every suite on the torch-spyre that is ALREADY baked
@@ -164,6 +174,17 @@ env:
   CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
   STORAGE_1_DIR: /storage-1/hf-adapters
   HF_HOME: /storage-1/hf-adapters/.cache/huggingface
+  # Registry models are pre-warmed in the HF_HOME PVC; offline mode skips the Hub revision-check request that from_pretrained() otherwise makes even on a cache hit.
+  HF_HUB_OFFLINE: "1"
+  # Stock VLM logits/captions are independent of hf-adapters and expensive to
+  # regenerate on CPU. The test keys these compact references by model commit,
+  # stack versions, generation settings, dtype, prompt, and input tensor bytes.
+  HF_ADAPTERS_VLM_REF_CACHE: /storage-1/hf-adapters/.cache/vlm-references
+  # Line-buffered test output, so the step log timestamps each phase print
+  # instead of receiving the whole test's stdout in one block at exit.
+  # (Thread-pool sizes come from the build-hf-adapters action: a workflow-level
+  # env cannot read the runner pod's CPU limit.)
+  PYTHONUNBUFFERED: "1"
   # Single source of truth for the set of models exercised by the CPU
   # test matrix's `-k` filter. PR is the fast smoke — qwen3 (causal LM) and
   # bge_base (embedding) on CPU; the same bge_base runs on the Spyre
@@ -202,6 +223,25 @@ jobs:
         run: |
           RESOLVED="$(scripts/resolve_test_type.sh ${RAW_TEST_TYPE})"
           echo "test_type=${RESOLVED}" >> "${GITHUB_OUTPUT}"
+
+      # The threaded run_id has to reach push-test-results-to-clickhouse.yaml, which runs on
+      # workflow_run AFTER this workflow and so cannot take a dispatch input. An artifact is
+      # the channel that ingest ALREADY reads (it enumerates this run's artifacts to find the
+      # junit XML), so the uuid rides it rather than needing a new transport or a uuid stuffed
+      # into the user-facing run-name. Skipped when empty so a GHA-initiated run uploads
+      # nothing and the ingest derives its own id, exactly as before.
+      - name: Record threaded run_id for the ingest
+        if: ${{ inputs.run_id != '' }}
+        env:
+          THREADED_RUN_ID: ${{ inputs.run_id }}
+        run: printf '%s' "${THREADED_RUN_ID}" > run-id.txt
+      - name: Upload threaded run_id
+        if: ${{ inputs.run_id != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: run-id
+          path: run-id.txt
+          retention-days: 14
 
   # ---------------------------------------------------------------------------
   # Resolve the torch-spyre revision ONCE per run and pin it (issue #449).
@@ -258,6 +298,30 @@ jobs:
           echo "Resolved torch-spyre origin/main -> ${SHA}"
           echo "torch_spyre_sha=${SHA}" >> "$GITHUB_OUTPUT"
 
+      # Prime the run's torch-spyre wheel cache (see
+      # .github/actions/build-hf-adapters/torch_spyre_wheel_cache.sh): run the
+      # same install every Spyre job runs, at the SHA just resolved, and publish
+      # the wheel uv built to /storage-1. Every job of this run (and its retries
+      # and re-runs) then installs that wheel instead of compiling torch-spyre
+      # (~80 s each). Best effort: a failure here only means jobs build as before.
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - name: Prime the torch-spyre wheel cache
+        uses: ./.github/actions/build-hf-adapters
+        continue-on-error: true
+        timeout-minutes: 12
+        env:
+          TS_WHEEL_CACHE_ROLE: prime
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          torch_spyre_sha: ${{ steps.resolve.outputs.torch_spyre_sha }}
+
       - name: Record pinned SHA in the run summary
         run: |
           {
@@ -273,6 +337,61 @@ jobs:
             echo "|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # One `artifact-id` record per run for push-test-results-to-clickhouse's v2 ingest. Must run
+  # on the image under test: the base artifact_id lives in its filesystem. Never gates the run.
+  artifact-identity:
+    name: Derive artifact identity
+    needs: [resolve-torch-spyre]
+    if: ${{ !cancelled() && !inputs.skip_tests && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') }}
+    continue-on-error: true
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 10
+    # Same artifact-id record the uploaded artifact carries, for spyre-perf-tests' inline ingest (it never uploads artifacts).
+    outputs:
+      record: >-
+        ${{ steps.derive.outputs.artifact_id != '' && format('{0}|{1}|{2}',
+        steps.derive.outputs.artifact_id, steps.derive.outputs.base_artifact_id,
+        steps.delta.outputs.installed) || '' }}
+    steps:
+      # At torch-spyre main, the same ref the v2 ingest action runs, so both use one id formula.
+      - name: Checkout the identity library
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: torch-spyre/torch-spyre
+          ref: main
+          path: .torch-spyre-identity
+          sparse-checkout: |
+            .github/scripts/derive_artifact_id.py
+            extensions/clickhouse-ingest
+          sparse-checkout-cone-mode: false
+
+      # hf-adapters always runs from a fresh clone; torch-spyre is on top only when pinned.
+      - name: Describe what this run installs on top of the image
+        id: delta
+        env:
+          HEAD_SHA: ${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}
+          TORCH_SPYRE_SHA: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+        run: |
+          TOKENS="hf-adapters@${HEAD_SHA:0:12}"
+          if [[ -n "${TORCH_SPYRE_SHA}" ]]; then
+            TOKENS="${TOKENS} torch-spyre@${TORCH_SPYRE_SHA:0:12}"
+          fi
+          echo "installed on top: ${TOKENS}"
+          echo "installed=${TOKENS}" >> "$GITHUB_OUTPUT"
+
+      - name: Derive and upload the artifact identity
+        id: derive
+        uses: torch-spyre/torch-spyre/.github/actions/derive-gha-artifact-id@main
+        with:
+          component: hf-adapters
+          arch: x86_64
+          installed: ${{ steps.delta.outputs.installed }}
+          library-dir: ${{ github.workspace }}/.torch-spyre-identity
+
   pre-commit:
     name: pre-commit
     runs-on: ubuntu-latest
@@ -282,6 +401,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        # Without this, a dispatched run (per-PR image, Test-With) checks out github.sha (the dispatch-level ref, usually main) instead of the PR's own code.
+        with:
+          ref: ${{ inputs.ref || '' }}
+          repository: ${{ inputs.repository != '' && inputs.repository || github.repository }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -322,12 +445,17 @@ jobs:
       reranker_matrix: ${{ steps.generate.outputs.reranker_matrix }}
       seq_classification_matrix: ${{ steps.generate.outputs.seq_classification_matrix }}
       token_classification_matrix: ${{ steps.generate.outputs.token_classification_matrix }}
+      perf_matrix: ${{ steps.generate.outputs.perf_matrix }}
     defaults:
       run:
         working-directory: .
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        # Without this, a dispatched run (per-PR image, Test-With) generates the matrix from main's model_registry.py instead of the PR's own.
+        with:
+          ref: ${{ inputs.ref || '' }}
+          repository: ${{ inputs.repository != '' && inputs.repository || github.repository }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -345,6 +473,10 @@ jobs:
           # Piped through env (not interpolated directly into the script) since
           # this is caller-supplied workflow_call input.
           ONLY_MODELS: ${{ inputs.models }}
+          # resolve_test_type.sh only defaults an empty value, so "perf" reaches us
+          # verbatim; matched here rather than via needs: resolve-test-type so matrix
+          # generation does not serialize behind it.
+          RAW_TEST_TYPE: ${{ inputs.test_type }}
         run: |
           # Standing exclusions live in tests/model_lists/exclude.yaml -- --exclude below is for one-off, dispatch-time excludes only.
           # Example: python .github/scripts/generate_test_matrix.py --exclude ibm-granite/granite-vision-4.1-4b
@@ -353,12 +485,20 @@ jobs:
             read -r -a ONLY_ARGS <<< "$ONLY_MODELS"
             ONLY_ARGS=(--only "${ONLY_ARGS[@]}")
           fi
-          python .github/scripts/generate_test_matrix.py "${ONLY_ARGS[@]}"
+          # Only perf gets --strict-perf: other tiers legitimately pass encoder and
+          # embedding paths, which perf cannot measure.
+          STRICT_ARGS=()
+          if [[ "$RAW_TEST_TYPE" == perf ]]; then
+            STRICT_ARGS=(--strict-perf)
+          fi
+          python .github/scripts/generate_test_matrix.py "${ONLY_ARGS[@]}" "${STRICT_ARGS[@]}"
 
   # ===========================================================================
   # Generates spyre-model-module-tests' matrix from the tests/configs/module_tests/
   # directory of the SAME ref+repository that build-hf-adapters is about to check
   # out (inputs.ref/inputs.repository), instead of a filename list hardcoded here.
+  # Configs measured above 10 minutes are expanded into method-level shards by
+  # generate_module_test_matrix.py; all other configs remain one matrix entry.
   #
   # Why this exists: this reusable workflow file is resolved at whichever ref
   # GitHub's workflow_dispatch call targets (dispatch_ref), while the source tree
@@ -387,6 +527,12 @@ jobs:
       run:
         working-directory: .
     steps:
+      - name: Checkout module-test matrix generator
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/scripts/generate_module_test_matrix.py
+          sparse-checkout-cone-mode: false
+
       - name: List tests/configs/module_tests at the ref under test
         id: generate
         env:
@@ -405,11 +551,8 @@ jobs:
           git clone --filter=blob:none --no-checkout "$CLONE_URL" repo
           cd repo
           git checkout --force "$TARGET_REF"
-          cd tests/configs/module_tests
           # *vllm* configs self-skip (vllm package not importable here), same as Jenkins -- keep them so counts match.
-          configs=$(ls *.yaml | jq -R -s -c 'split("\n")[:-1]')
-          echo "Configs found at ${TARGET_REF}: ${configs}"
-          echo "module_config_matrix=${configs}" >> "$GITHUB_OUTPUT"
+          python3 ../.github/scripts/generate_module_test_matrix.py tests/configs/module_tests
 
   adapter-coverage:
     name: adapter coverage
@@ -421,6 +564,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        # Without this, a dispatched run (per-PR image, Test-With) checks adapter coverage against main instead of the PR's own model_registry.py.
+        with:
+          ref: ${{ inputs.ref || '' }}
+          repository: ${{ inputs.repository != '' && inputs.repository || github.repository }}
+
+      # inputs.ref may predate #545, so this job's own checkout can lack the
+      # helper. Take it from the workflow ref into a path that checkout does
+      # not own, and source it from there.
+      - name: Checkout pod-stdout helper from the workflow ref
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: .pod-stdout
+          sparse-checkout: .github/scripts/run-with-pod-stdout.sh
+          sparse-checkout-cone-mode: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -430,8 +587,14 @@ jobs:
       - name: Run adapter coverage test
         run: |
           echo "Checking that all adapter files are registered in model_registry.py..."
-          python -m pip install --quiet pytest
-          make adapter-coverage-tests PYTEST="python -m pytest" JUNIT_XML=junit-adapter-coverage.xml
+          # PyYAML is needed by tests/test_perf_coverage.py (run via adapter-coverage-tests), which reads perf.yaml.
+          python -m pip install --quiet pytest PyYAML
+          # Sourced from the workflow ref's copy, checked out above, because
+          # this job's own checkout is of inputs.ref and may predate #545.
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "$GITHUB_WORKSPACE/.pod-stdout/.github/scripts/run-with-pod-stdout.sh"
+
+          run_teed make adapter-coverage-tests PYTEST="python -m pytest" JUNIT_XML=junit-adapter-coverage.xml
           echo "Adapter coverage check passed."
 
       - name: Upload JUnit results
@@ -459,6 +622,10 @@ jobs:
         working-directory: .
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        # Without this, a dispatched run (per-PR image, Test-With) checks main's uv.lock instead of the PR's own.
+        with:
+          ref: ${{ inputs.ref || '' }}
+          repository: ${{ inputs.repository != '' && inputs.repository || github.repository }}
 
       - name: Set up Python 3.12
         uses: astral-sh/setup-uv@v5
@@ -493,6 +660,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        # Without this, a dispatched run (per-PR image, Test-With) type-checks main instead of the PR's own code.
+        with:
+          ref: ${{ inputs.ref || '' }}
+          repository: ${{ inputs.repository != '' && inputs.repository || github.repository }}
 
       - name: Set up Python and uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -567,7 +738,7 @@ jobs:
     # The resolve-torch-spyre guard lets this job run when the pin succeeded
     # (pinned mode) OR was skipped (prebaked_image mode) but NOT when it failed
     # -- a failed pin must skip the matrix, not silently run on baked-in
-    # torch-spyre (issue #449). `!cancelled() &&` is required: without a literal status-check function GitHub auto-prepends success(), which is false when resolve-torch-spyre is skipped, silently skipping this job under prebaked_image.
+    # torch-spyre (issue #449). `!cancelled() &&` is required: without a literal status-check function GitHub auto-prepends success(), which is false when resolve-torch-spyre is skipped, silently skipping this job under prebaked_image. Not always(): that also makes the job ignore run cancellation, so a superseding run waits for it.
     if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' load ')) }}
     # Don't let one failed model leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry (spyre-load-tests-retry) gets a shot on a fresh pod.
     continue-on-error: true
@@ -588,7 +759,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -623,8 +798,10 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_load_spyre.py for ${{ matrix.model_key }}..."
-          make load-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-load-${{ matrix.model_key }}.xml
+          run_teed make load-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-load-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -672,7 +849,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -707,8 +888,10 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }}..."
-          make smoke-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-smoke-${{ matrix.model_key }}.xml
+          run_teed make smoke-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-smoke-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -752,7 +935,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -784,13 +971,19 @@ jobs:
           MODEL_PATH: ${{ matrix.model_key }}
           MODEL_DTYPE: float16
           SPYRE_DEVICES: "0,1"
+          # spyre-comms 173 made Offload_AllGatherSum the default below 8 MiB,
+          # but it corrupts Granite's rank-local residual reductions. Keep this
+          # TP=2 correctness test on the previously stable algorithm.
+          COLL_ALLREDUCE_ALGO: "PairwisePow2"
           HF_DEACTIVATE_ASYNC_LOAD: "1"
           PYTHONUNBUFFERED: "1"
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          uv run --active --no-sync torchrun \
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
+          run_teed uv run --active --no-sync torchrun \
             --standalone \
             --nnodes=1 \
             --nproc-per-node=2 \
@@ -832,7 +1025,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -867,8 +1064,10 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_e2e_token_compare_spyre.py for ${{ matrix.model_key }}..."
-          make token-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-compare-${{ matrix.model_key }}.xml
+          run_teed make token-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -906,7 +1105,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -932,12 +1135,14 @@ jobs:
           pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
           hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
-      - name: Run test_model_components_spyre.py
+      - name: Run model component tests
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          make model-components-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' JUNIT_XML=junit-model-components.xml
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
+          run_teed make model-components-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' JUNIT_XML=junit-model-components.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -981,7 +1186,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -1016,8 +1225,10 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }}..."
-          make embed-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-embed-compare-${{ matrix.model_key }}.xml
+          run_teed make embed-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-embed-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1062,7 +1273,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -1092,13 +1307,17 @@ jobs:
       - name: Run test_vlm_e2e_spyre.py for ${{ matrix.model_key }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Unbuffered so print() progress survives a timeout/OOM kill instead of vanishing from the log.
+          PYTHONUNBUFFERED: "1"
         run: |
           echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_vlm_e2e_spyre.py for ${{ matrix.model_key }}..."
-          make vlm-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-vlm-${{ matrix.model_key }}.xml
+          run_teed make vlm-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-vlm-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1140,7 +1359,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -1174,8 +1397,10 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }}..."
-          make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
+          run_teed make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1281,7 +1506,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -1314,8 +1543,10 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_e2e_reranker_compare_spyre.py for ${{ matrix.model_key }}..."
-          make reranker-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-reranker-compare-${{ matrix.model_key }}.xml
+          run_teed make reranker-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-reranker-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1358,7 +1589,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -1391,8 +1626,10 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_e2e_masked_lm_compare_spyre.py for ${{ matrix.model_key }}..."
-          make masked-lm-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-masked-lm-compare-${{ matrix.model_key }}.xml
+          run_teed make masked-lm-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-masked-lm-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1435,7 +1672,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -1468,8 +1709,10 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_e2e_question_answering_compare_spyre.py for ${{ matrix.model_key }}..."
-          make question-answering-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-question-answering-compare-${{ matrix.model_key }}.xml
+          run_teed make question-answering-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-question-answering-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1512,7 +1755,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -1545,8 +1792,10 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_e2e_seq_classification_compare_spyre.py for ${{ matrix.model_key }}..."
-          make seq-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-seq-classification-compare-${{ matrix.model_key }}.xml
+          run_teed make seq-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-seq-classification-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1589,7 +1838,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -1622,8 +1875,10 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_e2e_token_classification_compare_spyre.py for ${{ matrix.model_key }}..."
-          make token-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-classification-compare-${{ matrix.model_key }}.xml
+          run_teed make token-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-classification-compare-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -1687,7 +1942,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -1723,8 +1982,10 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running ${{ matrix.test_file }} for ${{ matrix.model_key }}..."
-          make edge-cases-tests \
+          run_teed make edge-cases-tests \
             PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             EDGE_CASE_FILE='${{ matrix.test_file }}' \
             MODEL_PATH='${{ matrix.model_key }}' \
@@ -1746,8 +2007,100 @@ jobs:
           job_key: edge_cases
           payload: '{"model_key": ${{ toJSON(matrix.model_key) }}, "test_file": ${{ toJSON(matrix.test_file) }}}'
 
+  # test_type=perf only: one spyre-perf-suite leg per tests/model_lists/perf.yaml model, ingested inline (never uploaded).
+  spyre-perf-tests:
+    name: Spyre perf (${{ matrix.model_key }})
+    needs: [generate-matrix, resolve-test-type, resolve-torch-spyre, artifact-identity]
+    # Plain equality, not the contains(' <key> ') suite-key form: tests/test_tier_tags.py requires that form to name a tier.
+    if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && needs.resolve-test-type.outputs.test_type == 'perf' && needs.generate-matrix.outputs.perf_matrix != '[]' }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.perf_matrix) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        id: build
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          prebaked_image: ${{ inputs.prebaked_image }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
+
+      - name: Run spyre-perf-suite for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          # A non-prebaked `uv sync` prunes image-only packages, so reinstall the suite from the image's baked source.
+          if [[ ! -x "$UV_PROJECT_ENVIRONMENT/bin/spyre-perf-suite" ]]; then
+            uv pip install --python "$UV_PROJECT_ENVIRONMENT/bin/python" --no-deps /home/senuser/spyre-perf-suite
+          fi
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
+          run_teed make perf-tests MODEL_PATH="${{ matrix.model_key }}" RESULTS_DIR="$CLONED_HF_ADAPTERS_DIR/perf-results"
+
+      # The shared ingest action runs `uv venv` in the workspace and fails if a .venv is already there.
+      - name: Clear workspace venv before ingest
+        if: ${{ !cancelled() }}
+        run: rm -rf "$GITHUB_WORKSPACE/.venv"
+
+      - name: Ingest perf report into ClickHouse (inline, no artifact)
+        if: ${{ !cancelled() }}
+        uses: torch-spyre/torch-spyre/.github/actions/ingest-xml-to-clickhouse@main
+        # Keeps the action's `uv venv` off the baked venv that the workflow-level UV_PROJECT_ENVIRONMENT points at.
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
+        with:
+          xml-dir: ${{ github.workspace }}/perf-results
+          workflow: ${{ github.workflow }}
+          branch: ${{ inputs.ref || github.ref_name }}
+          sha: ${{ steps.build.outputs.target_sha }}
+          run-id: ${{ inputs.run_id }}
+          gha-run-id: ${{ github.run_id }}
+          # v2 artifacts/artifact_results rows, as the other modes get via push-test-results-to-clickhouse; empty writes benchmarks only.
+          artifact-id: ${{ needs.artifact-identity.outputs.record }}
+          repository: ${{ github.repository }}
+          trigger-type: perf
+          component: hf-adapters
+          platform: x86_64
+          schema: both
+          clickhouse-host: ${{ secrets.CLICKHOUSE_HOST }}
+          clickhouse-port: ${{ secrets.CLICKHOUSE_PORT }}
+          clickhouse-user: ${{ secrets.CLICKHOUSE_USER }}
+          clickhouse-pass: ${{ secrets.CLICKHOUSE_PASS }}
+          clickhouse-db: ${{ secrets.CLICKHOUSE_DB }}
+          clickhouse-db-v2: ${{ secrets.CLICKHOUSE_DB_V2 }}
+
   spyre-model-module-tests:
-    name: Spyre model-module tests (${{ matrix.config }})
+    name: Spyre model-module tests (${{ matrix.config }}, ${{ matrix.shard }})
     needs: [resolve-test-type, generate-module-config-matrix, resolve-torch-spyre]
     # Suite key: "model_module". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
@@ -1763,17 +2116,19 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      matrix:
-        # Dynamic matrix: every tests/configs/module_tests/*.yaml file at the ref
-        # under test (see generate-module-config-matrix above) -- not a filename
-        # list hardcoded here, which can silently drift from the actual tree.
-        config: ${{ fromJSON(needs.generate-module-config-matrix.outputs.module_config_matrix) }}
+      # Dynamic include matrix: every tests/configs/module_tests/*.yaml file at
+      # the ref under test, with measured slow configs expanded into shards.
+      matrix: ${{ fromJSON(needs.generate-module-config-matrix.outputs.module_config_matrix) }}
 
     steps:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -1800,21 +2155,25 @@ jobs:
           pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
           hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
-      - name: Run module tests for ${{ matrix.config }}
+      - name: Run module tests for ${{ matrix.config }} (${{ matrix.shard }})
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cd "$CLONED_HF_ADAPTERS_DIR"
-          make model-module-tests MODULE_CONFIG=${{ matrix.config }} PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
+          run_teed make model-module-tests MODULE_CONFIG=${{ matrix.config }} \
+            MODULE_TEST_FILTER='${{ matrix.pytest_filter }}' PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             JUNIT_XML=1 RESULTS_DIR=.
-          mv "model-module-${{ matrix.config }}.xml" "junit-model-module-${{ matrix.config }}.xml"
+          mv "model-module-${{ matrix.config }}.xml" \
+            "junit-model-module-${{ matrix.config }}-${{ matrix.shard }}.xml"
 
       - name: Upload JUnit results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-model-module-${{ matrix.config }}
-          path: ${{ env.CLONED_HF_ADAPTERS_DIR }}/junit-model-module-${{ matrix.config }}.xml
+          name: junit-model-module-${{ matrix.config }}-${{ matrix.shard }}
+          path: ${{ env.CLONED_HF_ADAPTERS_DIR }}/junit-model-module-${{ matrix.config }}-${{ matrix.shard }}.xml
           retention-days: 14
 
       - name: Save suite descriptor for pod-level retry
@@ -1822,7 +2181,66 @@ jobs:
         uses: ./.github/actions/save-failed-suite-descriptor
         with:
           job_key: model_module
-          payload: '{"config": ${{ toJSON(matrix.config) }}}'
+          payload: '{"config": ${{ toJSON(matrix.config) }}, "shard": ${{ toJSON(matrix.shard) }}, "pytest_filter": ${{ toJSON(matrix.pytest_filter) }}}'
+
+  spyre-model-support-tests:
+    name: Spyre model-support scan
+    needs: [resolve-test-type, resolve-torch-spyre]
+    # Suite key "model_support" only (no tier includes it): a bounded Hub scan of the build
+    # under test, which the orchestrator's nightly/weekly dispatches. No pod-level retry: a
+    # survey's failing models are its verdicts, not flakes.
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' model_support ') }}
+    continue-on-error: true
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 480
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        id: build
+        with:
+          uv_groups: "dev spyre test models-ops"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          prebaked_image: ${{ inputs.prebaked_image }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
+
+      - name: Run the model-support scan
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
+          run_teed make model-support-tests RESULTS_DIR=model-support-results
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-model-support
+          path: ${{ env.CLONED_HF_ADAPTERS_DIR }}/model-support-results/junit-model-support/junit-model-support.xml
+          retention-days: 14
 
   # Pod-level retry (mirrors torch-spyre's _test_matrix.yaml): every spyre-*-tests job above is continue-on-error and uploads a "failed-suite-<key>-<attempt>-<idx>" descriptor artifact on a failed leg; this job downloads those descriptors and rebuilds one retry matrix per suite type for the *-retry jobs below to re-run on brand-new pods.
   collect-failed-suites:
@@ -1977,7 +2395,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -2011,11 +2433,20 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_load_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make load-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-load-${{ matrix.model_key }}.xml
+          run_teed make load-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-load-${{ matrix.model_key }}.xml
           echo "tests done"
 
-      # overwrite: true replaces the failed first attempt's report (same name) so downstream consumers see only the corrected result.
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-load-${{ env.SAFE_MODEL_KEY }}
+          report: junit-load-${{ matrix.model_key }}.xml
+
+      # overwrite: true replaces the first attempt's report (same name); its failures survive as result.prior_* marks.
       - name: Upload JUnit results
         if: always()
         uses: actions/upload-artifact@v4
@@ -2043,7 +2474,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -2077,9 +2512,18 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_e2e_smoke_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make smoke-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-smoke-${{ matrix.model_key }}.xml
+          run_teed make smoke-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-smoke-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-smoke-${{ env.SAFE_MODEL_KEY }}
+          report: junit-smoke-${{ matrix.model_key }}.xml
 
       - name: Upload JUnit results
         if: always()
@@ -2111,7 +2555,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -2143,13 +2591,17 @@ jobs:
           MODEL_PATH: ${{ matrix.model_key }}
           MODEL_DTYPE: float16
           SPYRE_DEVICES: "0,1"
+          # Match the primary TP job's stable all-reduce selection.
+          COLL_ALLREDUCE_ALGO: "PairwisePow2"
           HF_DEACTIVATE_ASYNC_LOAD: "1"
           PYTHONUNBUFFERED: "1"
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          uv run --active --no-sync torchrun \
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
+          run_teed uv run --active --no-sync torchrun \
             --standalone \
             --nnodes=1 \
             --nproc-per-node=2 \
@@ -2176,7 +2628,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -2210,9 +2666,18 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_e2e_token_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make token-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-compare-${{ matrix.model_key }}.xml
+          run_teed make token-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-compare-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-token-compare-${{ env.SAFE_MODEL_KEY }}
+          report: junit-token-compare-${{ matrix.model_key }}.xml
 
       - name: Upload JUnit results
         if: always()
@@ -2230,21 +2695,23 @@ jobs:
     # failed, every primary suite skipped, so nothing ran, so has_failed_model_components
     # is false and this retry never fires. See spyre-load-tests-retry for the full note.
     if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_model_components == 'true' }}
+    # No strategy.matrix: this singleton suite's matrix is {"include": [{}]}, which GitHub expands to zero jobs and silently skips.
     runs-on:
       - x86_64
       - spyre_pf_x1
       - linux
       - ${{ inputs.image_label }}
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.collect-failed-suites.outputs.matrix_model_components) }}
 
     steps:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -2270,13 +2737,22 @@ jobs:
           pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
           hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
-      - name: Run test_model_components_spyre.py (pod-level retry)
+      - name: Run model component tests (pod-level retry)
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          make model-components-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' JUNIT_XML=junit-model-components.xml
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
+          run_teed make model-components-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' JUNIT_XML=junit-model-components.xml
           echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-model-components
+          report: junit-model-components.xml
 
       - name: Upload JUnit results
         if: always()
@@ -2305,7 +2781,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -2339,9 +2819,18 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_e2e_embed_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make embed-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-embed-compare-${{ matrix.model_key }}.xml
+          run_teed make embed-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-embed-compare-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-embed-compare-${{ env.SAFE_MODEL_KEY }}
+          report: junit-embed-compare-${{ matrix.model_key }}.xml
 
       - name: Upload JUnit results
         if: always()
@@ -2370,7 +2859,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -2399,14 +2892,25 @@ jobs:
       - name: Run test_vlm_e2e_spyre.py for ${{ matrix.model_key }} (pod-level retry)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Unbuffered so print() progress survives a timeout/OOM kill instead of vanishing from the log.
+          PYTHONUNBUFFERED: "1"
         run: |
           echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_vlm_e2e_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make vlm-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-vlm-${{ matrix.model_key }}.xml
+          run_teed make vlm-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-vlm-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-vlm-${{ env.SAFE_MODEL_KEY }}
+          report: junit-vlm-${{ matrix.model_key }}.xml
 
       - name: Upload JUnit results
         if: always()
@@ -2438,7 +2942,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -2472,9 +2980,18 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
+          run_teed make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-clip-${{ env.SAFE_MODEL_KEY }}
+          report: junit-clip-${{ matrix.model_key }}.xml
 
       - name: Upload JUnit results
         if: always()
@@ -2503,7 +3020,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -2536,9 +3057,18 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_e2e_reranker_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make reranker-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-reranker-compare-${{ matrix.model_key }}.xml
+          run_teed make reranker-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-reranker-compare-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-reranker-compare-${{ env.SAFE_MODEL_KEY }}
+          report: junit-reranker-compare-${{ matrix.model_key }}.xml
 
       - name: Upload JUnit results
         if: always()
@@ -2567,7 +3097,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -2600,9 +3134,18 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_e2e_masked_lm_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make masked-lm-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-masked-lm-compare-${{ matrix.model_key }}.xml
+          run_teed make masked-lm-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-masked-lm-compare-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-masked-lm-compare-${{ env.SAFE_MODEL_KEY }}
+          report: junit-masked-lm-compare-${{ matrix.model_key }}.xml
 
       - name: Upload JUnit results
         if: always()
@@ -2631,7 +3174,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -2664,9 +3211,18 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_e2e_question_answering_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make question-answering-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-question-answering-compare-${{ matrix.model_key }}.xml
+          run_teed make question-answering-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-question-answering-compare-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-question-answering-compare-${{ env.SAFE_MODEL_KEY }}
+          report: junit-question-answering-compare-${{ matrix.model_key }}.xml
 
       - name: Upload JUnit results
         if: always()
@@ -2695,7 +3251,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -2728,9 +3288,18 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_e2e_seq_classification_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make seq-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-seq-classification-compare-${{ matrix.model_key }}.xml
+          run_teed make seq-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-seq-classification-compare-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-seq-classification-compare-${{ env.SAFE_MODEL_KEY }}
+          report: junit-seq-classification-compare-${{ matrix.model_key }}.xml
 
       - name: Upload JUnit results
         if: always()
@@ -2759,7 +3328,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -2792,9 +3365,18 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_e2e_token_classification_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          make token-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-classification-compare-${{ matrix.model_key }}.xml
+          run_teed make token-classification-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-token-classification-compare-${{ matrix.model_key }}.xml
           echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-token-classification-compare-${{ env.SAFE_MODEL_KEY }}
+          report: junit-token-classification-compare-${{ matrix.model_key }}.xml
 
       - name: Upload JUnit results
         if: always()
@@ -2823,7 +3405,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -2859,13 +3445,22 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running ${{ matrix.test_file }} for ${{ matrix.model_key }} (pod-level retry)..."
-          make edge-cases-tests \
+          run_teed make edge-cases-tests \
             PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             EDGE_CASE_FILE='${{ matrix.test_file }}' \
             MODEL_PATH='${{ matrix.model_key }}' \
             JUNIT_XML="junit-edge-cases-${SAFE_TEST_FILE}-${SAFE_MODEL_KEY}.xml"
           echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-edge-cases-${{ env.SAFE_TEST_FILE }}-${{ env.SAFE_MODEL_KEY }}
+          report: junit-edge-cases-${{ env.SAFE_TEST_FILE }}-${{ env.SAFE_MODEL_KEY }}.xml
 
       - name: Upload JUnit results
         if: always()
@@ -2877,7 +3472,7 @@ jobs:
           overwrite: true
 
   spyre-model-module-tests-retry:
-    name: Spyre model-module tests (${{ matrix.config }}) (pod-level retry)
+    name: Spyre model-module tests (${{ matrix.config }}, ${{ matrix.shard }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
     if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_model_module == 'true' }}
     runs-on:
@@ -2894,7 +3489,11 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/build-hf-adapters
@@ -2920,21 +3519,32 @@ jobs:
           pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
           hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
-      - name: Run module tests for ${{ matrix.config }} (pod-level retry)
+      - name: Run module tests for ${{ matrix.config }} (${{ matrix.shard }}) (pod-level retry)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           cd "$CLONED_HF_ADAPTERS_DIR"
-          make model-module-tests MODULE_CONFIG=${{ matrix.config }} PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
+          run_teed make model-module-tests MODULE_CONFIG=${{ matrix.config }} \
+            MODULE_TEST_FILTER='${{ matrix.pytest_filter }}' PYTEST_ARGS='${{ inputs.extra_test_flags }}' \
             JUNIT_XML=1 RESULTS_DIR=.
-          mv "model-module-${{ matrix.config }}.xml" "junit-model-module-${{ matrix.config }}.xml"
+          mv "model-module-${{ matrix.config }}.xml" \
+            "junit-model-module-${{ matrix.config }}-${{ matrix.shard }}.xml"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-model-module-${{ matrix.config }}-${{ matrix.shard }}
+          report: ${{ env.CLONED_HF_ADAPTERS_DIR }}/junit-model-module-${{ matrix.config }}-${{ matrix.shard }}.xml
 
       - name: Upload JUnit results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-model-module-${{ matrix.config }}
-          path: ${{ env.CLONED_HF_ADAPTERS_DIR }}/junit-model-module-${{ matrix.config }}.xml
+          name: junit-model-module-${{ matrix.config }}-${{ matrix.shard }}
+          path: ${{ env.CLONED_HF_ADAPTERS_DIR }}/junit-model-module-${{ matrix.config }}-${{ matrix.shard }}.xml
           retention-days: 14
           overwrite: true
 
@@ -3025,6 +3635,8 @@ jobs:
       - resolve-torch-spyre
       # Depends on the aggregator, not the individual spyre-*-tests jobs, since those are continue-on-error and always report "success"; spyre-tests-result still transitively waits for the whole matrix via collect-failed-suites and the *-retry jobs.
       - spyre-tests-result
+      # No pod-level retry for perf (a retried benchmark is a different measurement), so gate on the legs directly.
+      - spyre-perf-tests
     if: always()
     steps:
       - name: Check all suites passed
@@ -3041,7 +3653,8 @@ jobs:
                  contains(needs.adapter-coverage.result, 'failure') || contains(needs.adapter-coverage.result, 'cancelled') ||
                  contains(needs.check-uv-lock.result, 'failure') || contains(needs.check-uv-lock.result, 'cancelled') ||
                  contains(needs.resolve-torch-spyre.result, 'failure') || contains(needs.resolve-torch-spyre.result, 'cancelled') ||
-                 contains(needs.spyre-tests-result.result, 'failure') || contains(needs.spyre-tests-result.result, 'cancelled') }}; then
+                 contains(needs.spyre-tests-result.result, 'failure') || contains(needs.spyre-tests-result.result, 'cancelled') ||
+                 contains(needs.spyre-perf-tests.result, 'failure') || contains(needs.spyre-perf-tests.result, 'cancelled') }}; then
             echo "One or more test suites failed."
             exit 1
           fi

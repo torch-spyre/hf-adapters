@@ -17,6 +17,7 @@
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     SpyreUnsupportedModelError,
+    embed_text_tokens,
     get_backbone,
     make_decoder_block,
     pad_attention_heads_linear,
@@ -56,7 +57,7 @@ def _run_backbone_forward(
     cache_index,
 ):
     decoder = get_backbone(model).decoder
-    h = decoder.embed_tokens(input_ids)
+    h = embed_text_tokens(model, input_ids, backbone=decoder)
     if decoder.project_in is not None:
         h = decoder.project_in(h)
     h = h + decoder.embed_positions(None, position_ids=position_ids).to(h.device)

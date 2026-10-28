@@ -13,6 +13,17 @@
 # limitations under the License.
 
 
+try:
+    from hf_adapters._version import __version__
+except ImportError:
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
+
+    try:
+        __version__ = _pkg_version("hf-adapters-spyre")
+    except PackageNotFoundError:
+        __version__ = "0.0.0"
+
 from hf_adapters.auto_spyre_model import (
     AutoSpyreModel,
     AutoSpyreModelForCausalLM,
@@ -25,6 +36,7 @@ from hf_adapters.auto_spyre_model import (
 from hf_adapters.hf_common import encode_prompts
 
 __all__ = [
+    "__version__",
     "AutoSpyreModel",
     "AutoSpyreModelForCausalLM",
     "AutoSpyreModelForImageTextToText",
