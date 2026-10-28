@@ -1,6 +1,6 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-40-blue)
+![adapters](https://img.shields.io/badge/adapters-41-blue)
 ![compatible](https://img.shields.io/badge/compatible_models-10K%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -13,7 +13,7 @@ from `transformers`.
 
 ## Supported Models
 
-**40 adapters · 10K+ compatible models**
+**41 adapters · 10K+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
 **sequence classification** (sentiment / text categorisation),
@@ -22,7 +22,7 @@ Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers)
 Llama / Qwen / Granite / Mistral / Phi / Gemma / OLMo / GPT decoders to BERT /
 XLM-RoBERTa / MPNet / ModernBERT encoders, the Granite Vision 4.1 (SigLIP tower +
 Granite text), Mistral3 Vision (Pixtral tower + Mistral text), and Gemma 4
-(encoder-free and full-vision) multimodal VLMs, plus the DSpark block-propose drafters for
+(encoder-free and full-vision) and Muse Glimmer multimodal VLMs, plus the DSpark block-propose drafters for
 Qwen 3 / Granite / Gemma 4 and the XPress block-propose drafter (Gemma 4 26B-A4B).
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
