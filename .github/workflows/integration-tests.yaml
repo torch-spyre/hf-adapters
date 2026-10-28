@@ -92,7 +92,8 @@ on:
           the REST API dispatch too, not just the web UI dropdown, so every
           value a real caller sends (like the "unit"/"trunk" tiers above)
           must be listed explicitly below.
-          "perf" runs spyre-perf-suite once per model in tests/model_lists/perf.yaml, one matrix leg each.
+          "perf" runs spyre-perf-suite once per model in the perf_schedule
+          section of tests/model_lists/perf.yaml, one matrix leg each.
         required: false
         type: choice
         default: integration
@@ -102,6 +103,20 @@ on:
           - regression
           - trunk
           - perf
+      perf_schedule:
+        description: >-
+          Only used when test_type=perf: which section of
+          tests/model_lists/perf.yaml to benchmark. "nightly" is the small
+          hand-picked large-model set; "weekly" contains the registry entries
+          marked weekly_perf (exposed through WEEKLY_PERF_PATHS). Ignored for
+          every other test_type.
+          Mirrors the Makefile's PERF_SCHEDULE variable.
+        required: false
+        type: choice
+        default: nightly
+        options:
+          - nightly
+          - weekly
       run_id:
         description: >-
           UUID for this TEST RUN, minted by the dispatching orchestrator above the CI split.
@@ -141,8 +156,9 @@ concurrency:
   # cancel-in-progress, silently killing a run mid-job with no test failure and
   # no error -- see the run/job-level symptoms this fixes. Disambiguating by
   # test_type stops different suites from colliding at all.
+  # perf also keys on perf_schedule, so a weekly perf dispatch never queues behind (and times out waiting on) a nightly one.
   group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.pull_request.html_url) || (github.event_name == 'workflow_dispatch'
-    && inputs.pr_url_hash != '' && inputs.pr_url_hash) || format('{0}-{1}', github.ref, inputs.test_type) }}
+    && inputs.pr_url_hash != '' && inputs.pr_url_hash) || format('{0}-{1}{2}', github.ref, inputs.test_type, inputs.test_type == 'perf' && format('-{0}', inputs.perf_schedule) || '') }}
   # Only cancel for a PR-context run (re-running the same PR should supersede
   # its own stale run). A non-PR dispatch is never "the same PR re-triggered" --
   # cancelling it destroys a run that has nothing superseding it, so a same
@@ -223,6 +239,7 @@ jobs:
         id: read-models
         env:
           TEST_TYPE: ${{ inputs.test_type || 'integration' }}
+          PERF_SCHEDULE: ${{ inputs.perf_schedule || 'nightly' }}
         run: |
           set -euo pipefail
           list="tests/model_lists/${TEST_TYPE}.yaml"
@@ -232,13 +249,25 @@ jobs:
             echo "models=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # The perf tier's list is nested (nightly:/weekly:); every other tier is
+          # a flat top-level `models:` list. Pick the matching yq query -- this
+          # mirrors the Makefile's PERF_SCHEDULE section selection.
           # yq (mikefarah/yq) is preinstalled on ubuntu-latest runners.
-          models=$(yq '.models | join(" ")' "${list}")
+          if [[ "${TEST_TYPE}" == "perf" ]]; then
+            if [[ "${PERF_SCHEDULE}" != "nightly" && "${PERF_SCHEDULE}" != "weekly" ]]; then
+              echo "perf_schedule must be nightly or weekly (got '${PERF_SCHEDULE}')" >&2
+              exit 1
+            fi
+            query=".${PERF_SCHEDULE}.models | join(\" \")"
+          else
+            query='.models | join(" ")'
+          fi
+          models=$(yq "${query}" "${list}")
           if [[ -z "${models}" || "${models}" == "null" ]]; then
-            echo "${list} has no models" >&2
+            echo "${list} has no models for query '${query}'" >&2
             exit 1
           fi
-          echo "Models from ${list}: ${models}"
+          echo "Models from ${list} (${query}): ${models}"
           echo "models=${models}" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ from transformers import (
     LlamaConfig,
     OPTConfig,
 )
+from transformers.generation.streamers import BaseStreamer
 
 from hf_adapters import auto_spyre_model, hf_common
 from tests.model_registry import CAUSAL_LM_MODELS, DRAFTER_KINDS
@@ -230,3 +231,29 @@ def test_registered_decoders_use_prefill_backbone(monkeypatch, adapter_name):
         "registry-model"
     )
     assert loaded.generate(torch.tensor([[1]])) is expected
+
+
+@torch.no_grad()
+def test_streamer_receives_prompt_then_each_token(prepared_model):
+    model, _ = prepared_model
+    seen = []
+
+    class Recorder(BaseStreamer):
+        def put(self, value):
+            seen.append(value.clone())
+
+        def end(self):
+            seen.append(None)
+
+    ids = torch.randint(1, 129, (1, 9))
+    sequences = model.generate(
+        input_ids=ids,
+        attention_mask=torch.ones_like(ids),
+        max_new_tokens=3,
+        do_sample=False,
+        eos_token_id=None,
+        streamer=Recorder(),
+    )
+    assert torch.equal(seen[0], ids)
+    assert torch.equal(torch.cat(seen[1:-1]), sequences[0, 9:])
+    assert seen[-1] is None

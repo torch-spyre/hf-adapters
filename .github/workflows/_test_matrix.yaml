@@ -587,7 +587,8 @@ jobs:
       - name: Run adapter coverage test
         run: |
           echo "Checking that all adapter files are registered in model_registry.py..."
-          python -m pip install --quiet pytest
+          # PyYAML is needed by tests/test_perf_coverage.py (run via adapter-coverage-tests), which reads perf.yaml.
+          python -m pip install --quiet pytest PyYAML
           # Sourced from the workflow ref's copy, checked out above, because
           # this job's own checkout is of inputs.ref and may predate #545.
           # shellcheck source=.github/scripts/run-with-pod-stdout.sh
