@@ -22,24 +22,35 @@ path; image inputs require a separate multimodal adapter.
 """
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, cast
+from functools import partial
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from transformers import (
     AutoModelForImageTextToText,
+    GenerationConfig,
     MuseGlimmerTextConfig,
     PreTrainedModel,
 )
+from transformers.generation.utils import GenerateDecoderOnlyOutput
 
 from hf_adapters import hf_gemma3
 from hf_adapters.hf_common import (
+    NormalizedGenerationInputs,
     PrecomputedRotaryEmbedding,
     SpyreUnsupportedModelError,
     _projection_head_count,
+    allocate_kv_cache_tensor,
     get_backbone,
+    kv_cache_shapes,
     load_model_common,
+    normalize_generation_inputs,
     prepare_lm_head_for_spyre,
     text_config,
+    untie_embedding_and_lm_head,
+)
+from hf_adapters.hf_common import (
+    generate as generate_common,
 )
 from hf_adapters.swa_attention import allocate_swa_caches
 
@@ -51,6 +62,82 @@ if TYPE_CHECKING:
 
 _run_backbone_forward = hf_gemma3._run_backbone_forward
 _run_forward = hf_gemma3._run_forward
+
+_PREFILL_CHUNK_SIZE = 512
+
+
+def generate(
+    model: PreTrainedModel,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor | None = None,
+    *,
+    generation_config: GenerationConfig | None = None,
+    **kwargs: Any,
+) -> torch.Tensor | GenerateDecoderOnlyOutput:
+    """Bound long-prompt compilation while preserving short-prompt shapes.
+
+    Explicit chunk kwargs (including None) take precedence over generation
+    config and this default. Use normalized prompt length so caller padding
+    cannot turn a short request into a 512-token prefill.
+    """
+    cfg: GenerationConfig = (
+        generation_config if generation_config is not None else model.generation_config
+    )
+    if (
+        "prefill_chunk_size" not in kwargs
+        and getattr(cfg, "prefill_chunk_size", None) is None
+    ):
+        normalized: NormalizedGenerationInputs = normalize_generation_inputs(
+            input_ids, attention_mask
+        )
+        if normalized.padded_len > _PREFILL_CHUNK_SIZE:
+            kwargs["prefill_chunk_size"] = _PREFILL_CHUNK_SIZE
+    return cast(
+        torch.Tensor | GenerateDecoderOnlyOutput,
+        generate_common(
+            _run_forward,
+            model,
+            input_ids,
+            attention_mask=attention_mask,
+            generation_config=generation_config,
+            prefill_backbone_fn=_run_backbone_forward,
+            **kwargs,
+        ),
+    )
+
+
+def _allocate_caches(
+    model: PreTrainedModel,
+    batch_size: int,
+    max_cache_len: int,
+    dtype: torch.dtype,
+    device: torch.device | str,
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """Select the decoder and cache together for each generation request."""
+    cfg: MuseGlimmerTextConfig = text_config(model.config)
+    assert cfg.sliding_window is not None
+    if max_cache_len > cfg.sliding_window:
+        setattr(model, "_spyre_swa_mode", "anchored")
+        setattr(model, "_spyre_compiled_blocks", model._spyre_muse_swa_blocks)
+        return cast(
+            tuple[list[torch.Tensor], list[torch.Tensor]],
+            allocate_swa_caches(model, batch_size, max_cache_len, dtype, device),
+        )
+
+    # The complete generation fits in the window. Plain SDPA avoids the SWA
+    # gate's layout conversion and does not allocate a full window for each layer.
+    setattr(model, "_spyre_swa_mode", None)
+    setattr(model, "_spyre_compiled_blocks", model._spyre_muse_full_blocks)
+    shapes: list[tuple[int, int, int]] = kv_cache_shapes(model)
+    keys: list[torch.Tensor] = [
+        allocate_kv_cache_tensor(batch_size, heads, max_cache_len, dim, dtype, device)
+        for heads, dim, _ in shapes
+    ]
+    values: list[torch.Tensor] = [
+        allocate_kv_cache_tensor(batch_size, heads, max_cache_len, dim, dtype, device)
+        for heads, _, dim in shapes
+    ]
+    return keys, values
 
 
 def load_hf_model(
@@ -87,10 +174,19 @@ def prepare_for_spyre(model: PreTrainedModel) -> None:
             "of at least 128 for Spyre RoPE."
         )
 
-    # Muse's centered norm is the same (1 + weight) RMSNorm as Gemma 3.
-    hf_gemma3._patch_gemma_rmsnorm(
-        type(backbone.layers[0].get_submodule("input_layernorm"))
-    )
+    # Keep stock Muse norms: their fp32 accumulation and (1 + weight) scaling
+    # are lowered inside compiled blocks without a class-wide Gemma patch.
+
+    # The stock multimodal wrapper embeds image/video placeholder IDs as token
+    # zero even without pixels. Copy those input rows once rather than remapping
+    # IDs across host/device on every decode. Keep the output head unchanged.
+    if backbone.embed_tokens.weight.data_ptr() == model.lm_head.weight.data_ptr():
+        untie_embedding_and_lm_head(model)
+    with torch.no_grad():
+        for token_id in (model.config.image_token_id, model.config.video_token_id):
+            backbone.embed_tokens.weight[token_id].copy_(
+                backbone.embed_tokens.weight[0]
+            )
 
     # HF uses a single rotary embedding and switches it off for NoPE layers.
     # Both attention types share that table; each block decides whether to use it.
@@ -119,10 +215,13 @@ def prepare_for_spyre(model: PreTrainedModel) -> None:
     swa_mode: str | None = getattr(model, "_spyre_swa_mode", "anchored")
     setattr(model, "_spyre_swa_mode", swa_mode)
     if swa_mode == "anchored":
-        setattr(model, "_spyre_cache_allocator", allocate_swa_caches)
+        setattr(model, "_spyre_cache_allocator", _allocate_caches)
 
     kv_shapes: list[tuple[int, int, int]] = []
     blocks: list[Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = []
+    full_blocks: list[
+        Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+    ] = []
     for i, layer in enumerate(backbone.layers):
         attn = cast("MuseGlimmerTextAttention", layer.get_submodule("self_attn"))
         num_q_heads: int = _projection_head_count(
@@ -132,21 +231,30 @@ def prepare_for_spyre(model: PreTrainedModel) -> None:
             attn.k_proj, cfg.num_key_value_heads, head_dim
         )
         kv_shapes.append((num_kv_heads, head_dim, head_dim))
+        make_block = partial(
+            hf_gemma3._make_compiled_block,
+            layer,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            is_sliding=cfg.layer_types[i] == "sliding_attention",
+            window_size=cfg.sliding_window,
+            query_norm=attn.qk_norm,
+            key_norm=attn.qk_norm,
+            query_scale=attn.qk_scale_factor,
+            output_gate=attn.gate_proj,
+            use_rope=bool(cfg.layer_rope_theta[i]),
+        )
+        full_block: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = (
+            make_block(swa_mode=None)
+        )
+        full_blocks.append(full_block)
         blocks.append(
-            hf_gemma3._make_compiled_block(
-                layer,
-                num_q_heads,
-                num_kv_heads,
-                head_dim,
-                is_sliding=cfg.layer_types[i] == "sliding_attention",
-                window_size=cfg.sliding_window,
-                swa_mode=swa_mode,
-                query_norm=attn.qk_norm,
-                key_norm=attn.qk_norm,
-                query_scale=attn.qk_scale_factor,
-                output_gate=attn.gate_proj,
-                use_rope=bool(cfg.layer_rope_theta[i]),
-            )
+            make_block(swa_mode=swa_mode)
+            if swa_mode is not None and cfg.layer_types[i] == "sliding_attention"
+            else full_block
         )
     setattr(model, "_spyre_kv_shapes", kv_shapes)
     setattr(model, "_spyre_compiled_blocks", blocks)
+    setattr(model, "_spyre_muse_swa_blocks", blocks)
+    setattr(model, "_spyre_muse_full_blocks", full_blocks)

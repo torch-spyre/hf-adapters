@@ -183,6 +183,7 @@ def _make_compiled_block(
     pre_ff_ln = layer.get_submodule("pre_feedforward_layernorm")
     post_ff_ln = layer.get_submodule("post_feedforward_layernorm")
     mlp = layer.get_submodule("mlp")
+    uses_swa = is_sliding and swa_mode is not None
 
     def block_forward(
         hidden_states: torch.Tensor,
@@ -222,7 +223,7 @@ def _make_compiled_block(
             cache_index,
         )
 
-        if is_sliding and swa_mode is not None:
+        if uses_swa:
             # The mask carries the window, cache position, and padding as tensor
             # data. Scale is Gemma 3's own query_pre_attn_scalar ** -0.5, not
             # head_dim ** -0.5.
@@ -236,6 +237,10 @@ def _make_compiled_block(
                 scale=scaling,
             )
         else:
+            if output_gate is not None:
+                # Keep plain SDPA's output in a head layout that can be gated
+                # inside this graph (including Muse's NoPE global layers).
+                q = q.contiguous()
             attn_out = F.scaled_dot_product_attention(
                 q,
                 key_cache,
@@ -245,8 +250,13 @@ def _make_compiled_block(
                 scale=scaling,
                 enable_gqa=True,
             )
+            if output_gate is not None:
+                gate = torch.sigmoid(output_gate(h)).view(
+                    bsz, seq_len, num_q_heads, head_dim
+                )
+                attn_out = attn_out * gate.transpose(1, 2)
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
-        if output_gate is not None:
+        if output_gate is not None and uses_swa:
             # SWA lowers GQA to rank 5 internally. Materialize the flattened
             # result in the default device layout between compiled regions so
             # the gate's rank-3 multiply never inherits that grouped layout.

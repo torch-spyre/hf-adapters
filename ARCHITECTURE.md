@@ -629,10 +629,18 @@ KV-cache, and LM-head utilities. The repeating pattern is three local layers
 128-wide heads need no padding. Muse Glimmer adds weightless embedding and Q/K
 normalization, a query multiplier, and a sigmoid gate before the attention output
 projection. Logits are multiplied by `output_multiplier` before the tanh softcap.
-The attention output is materialized in the default device layout between
-compiled regions so the gate does not inherit Spyre's internal grouped GQA
-layout; attention, gating, and the MLP all execute on Spyre. This adapter covers
-text generation; image/video inputs are not supported by this causal-LM path.
+Requests whose full generation cache fits within the sliding window use ordinary
+SDPA with the gate fused in head layout. Larger requests use compact anchored
+SWA; only that operator's gated output needs a layout conversion between compiled
+regions. Prompts longer than 512 real tokens default to 512-token prefill chunks
+to bound compilation, while short prompts retain 64-token alignment. Explicit
+`prefill_chunk_size` kwargs or generation configuration take precedence. Stock
+Muse norms preserve fp32 accumulation; no class-wide Gemma norm patch is applied.
+Image/video placeholder input embeddings are mapped to token zero, as in the
+stock conditional model, without changing their output logits. Attention, gating,
+and the MLP execute on Spyre. This adapter covers text generation; image/video
+inputs are not supported by this causal-LM path. See
+[Muse Glimmer generation](docs/muse_glimmer.md) for the prefill options.
 
 **Dual head_dim + proportional RoPE** (Gemma 4): `hf_gemma4.py` is Gemma 3
 plus its hardest features, targeting the dense decoders (12B / 31B) and the
