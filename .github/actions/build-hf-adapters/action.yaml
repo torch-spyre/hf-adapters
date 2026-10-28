@@ -45,10 +45,10 @@ inputs:
       venv ($VIRTUAL_ENV) -- e.g. the exact torch-spyre of the PR that triggered
       this run -- and the suites run against that venv via
       `uv run --active --no-sync` (see the Makefile). So this action must NOT
-      install, checkout, or re-resolve torch-spyre at all: doing so would either
-      overwrite the image's torch-spyre with a different version (the review's
-      concern) or fail outright, since the lockfile pins a +cpu torch with no
-      ppc64le wheel and any on-device resolve errors. 'false' (default) keeps the
+      install, checkout, or re-resolve torch-spyre at all. Other dependencies
+      are synced from the frozen lockfile into the active venv, preserving the
+      image's torch and torch-spyre installations and any extra packages.
+      'false' (default) keeps the
       pin/unpinned install paths below that DO install torch-spyre from the baked
       /home/senuser/torch-spyre source.
     required: false
@@ -239,36 +239,24 @@ runs:
 
         if [[ "$PREBAKED_IMAGE" == "true" ]]; then
           # -----------------------------------------------------------------
-          # Prebaked-image mode (integration-tests; issue #449 review).
+          # Prebaked-image mode
           #
           # FULLY SKIP torch-spyre install. The runner pod image was purpose-
           # built with the exact torch-spyre under test already installed in the
-          # project venv ($VIRTUAL_ENV), and the suites run against that venv via
-          # `uv run --active --no-sync` (see the Makefile). We therefore do NOT
-          # `git checkout` /home/senuser/torch-spyre and do NOT `uv add` /
-          # `uv lock` / `uv sync` it here -- either would defeat the purpose:
-          #   * `uv add torch-spyre /home/senuser/torch-spyre` would rebuild from
-          #     the baked SOURCE checkout, whose HEAD is NOT guaranteed to equal
-          #     the torch-spyre already installed in the image venv -- exactly the
-          #     "overrides it with a different torch-spyre version" breakage the
-          #     review flagged; and
-          #   * any `uv sync` re-resolves the lockfile, which pins a +cpu torch
-          #     with no ppc64le wheel, so the resolve errors out on device (the
-          #     same reason the Makefile runs tests with --no-sync).
-          #
-          # ASSUMPTION (documented deliberately): the prebaked image's venv
-          # already contains torch-spyre AND every hf-adapters dependency this
-          # run needs. This action does not install hf-adapters' own dep groups
-          # here on the prebaked path; if a future image stops pre-installing a
-          # required group, add an install that targets the active venv WITHOUT
-          # re-resolving or reinstalling torch-spyre (e.g.
-          # `uv sync --active --inexact --no-install-package torch-spyre ...`),
-          # never a plain `uv add torch-spyre <path>` / `uv sync`.
+          # project venv ($VIRTUAL_ENV).
+          # Install project dependencies and the requested groups in the same
+          # active venv used by `uv run --active --no-sync`. --frozen avoids
+          # re-resolution; --inexact preserves image-only packages. Exclude
+          # torch-spyre to keep the exact build under test, and torch to keep
+          # its matching image build (the locked +cpu wheel lacks ppc64le).
           echo "Prebaked image: using the torch-spyre already installed in the image venv; skipping all torch-spyre install/checkout."
           if [[ -n "$TORCH_SPYRE_SHA" ]]; then
             echo "::warning::prebaked_image=true ignores torch_spyre_sha=${TORCH_SPYRE_SHA}; a caller should not set both."
           fi
           git -C /home/senuser/torch-spyre log -1 --oneline || true
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv sync --active --frozen --inexact --verbose $GROUP_FLAGS \
+            --no-install-package torch --no-install-package torch-spyre
         elif [[ -n "$TORCH_SPYRE_SHA" ]]; then
           # Pinned mode (issue #449): install the exact torch-spyre commit the
           # resolve-torch-spyre job picked, NOT whatever HEAD this pod's image
@@ -321,10 +309,9 @@ runs:
           uv lock --upgrade-package torch-spyre
           uv sync --frozen --verbose --refresh $GROUP_FLAGS
         fi
-        # Post-install diagnostics. On the prebaked path there is no project
-        # .venv (we ran no sync) -- the relevant environment is the image's
-        # active venv, so target it with --active there. Non-fatal (|| true): a
-        # failed probe must never fail the build.
+        # Post-install diagnostics. On the prebaked path the relevant
+        # environment is the image's active venv. Non-fatal (|| true): a failed
+        # probe must never fail the build.
         if [[ "$PREBAKED_IMAGE" == "true" ]]; then
           uv pip show torch || true
           uv pip freeze || true
