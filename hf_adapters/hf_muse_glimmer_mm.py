@@ -47,6 +47,7 @@ from hf_adapters.hf_common import (
     _pad_proj_input_simple,
     _pad_proj_output_simple,
     apply_rope_matmul,
+    embed_text_tokens,
     get_backbone,
     get_model_dtype,
     kv_cache_update,
@@ -646,16 +647,21 @@ def _vision_features(model, pixel_values, image_grid_thw):
     return model._spyre_compiled_vision_projector(h)
 
 
-def _embed_and_scatter(model, input_ids, image_features=None):
+def _embed_and_scatter(
+    model: MuseGlimmerForConditionalGeneration,
+    input_ids: torch.Tensor,
+    image_features: torch.Tensor | None = None,
+) -> torch.Tensor:
     """Normalize token embeddings and inject image features via a CPU additive."""
-    backbone = get_backbone(model)
     ids = input_ids.clone()
     image_mask = ids == model.config.image_token_id
     video_mask = ids == model.config.video_token_id
     if bool(video_mask.any()):
         raise NotImplementedError("Muse Glimmer video inputs are not supported")
     ids[image_mask] = 0
-    h = backbone.embed_tokens(ids.to(backbone.embed_tokens.weight.device))
+    # The embedding norm can leave a staggered layout. The CPU-built image
+    # additive uses the default layout, so normalize before the pointwise scatter.
+    h: torch.Tensor = embed_text_tokens(model, ids)
     if image_features is None:
         return h
     n_tokens = int(image_mask.sum())
