@@ -12,6 +12,7 @@ dependencies = [
     "sentencepiece",
     "accelerate",
     "sentence_transformers",
+    "huggingface_hub>=1.31.0",
 ]
 
 [project.optional-dependencies]
@@ -136,8 +137,6 @@ dev = [
     "clickhouse-driver"
 ]
 models-ops = [
-    "huggingface_hub",
-    "mistral_common",
     "python-dotenv",
     "PyYAML",
     "regex",
@@ -147,4 +146,5 @@ test = [
     "laya>=0.3.28,<0.4",
     "Pillow",
     "torchvision~=0.28.0",
+    "PyYAML",
 ]

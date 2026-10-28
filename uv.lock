@@ -603,6 +603,7 @@ name = "hf-adapters-spyre"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
+    { name = "huggingface-hub" },
     { name = "mistral-common" },
     { name = "sentence-transformers" },
     { name = "sentencepiece" },
@@ -628,8 +629,6 @@ dev = [
     { name = "typing-extensions" },
 ]
 models-ops = [
-    { name = "huggingface-hub" },
-    { name = "mistral-common" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "regex" },
@@ -644,6 +643,7 @@ test = [
     { name = "laya" },
     { name = "pillow" },
     { name = "pytest" },
+    { name = "pyyaml" },
     { name = "torchvision", version = "0.28.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
     { name = "torchvision", version = "0.28.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
 ]
@@ -651,6 +651,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate" },
+    { name = "huggingface-hub", specifier = ">=1.31.0" },
     { name = "laya", marker = "extra == 'laya'", specifier = ">=0.3.28,<0.4" },
     { name = "mistral-common", specifier = "==1.11.7" },
     { name = "sentence-transformers" },
@@ -672,8 +673,6 @@ dev = [
     { name = "typing-extensions" },
 ]
 models-ops = [
-    { name = "huggingface-hub" },
-    { name = "mistral-common" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "regex" },
@@ -684,6 +683,7 @@ test = [
     { name = "laya", specifier = ">=0.3.28,<0.4" },
     { name = "pillow" },
     { name = "pytest", specifier = ">=9.0,<9.1" },
+    { name = "pyyaml" },
     { name = "torchvision", specifier = "~=0.28.0", index = "https://download.pytorch.org/whl/cpu" },
 ]
 
@@ -741,7 +741,7 @@ wheels = [
 
 [[package]]
 name = "huggingface-hub"
-version = "1.30.0"
+version = "1.33.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -754,9 +754,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/35/97/2eb4abaa5b969ed385066a0496a3823b3ff467fc1082e2202955f1867d60/huggingface_hub-1.30.0.tar.gz", hash = "sha256:e6a6120bc8c8e2723d03648434ee247088cceb55ba7067e7d34d692cad5fdb57", size = 964291, upload-time = "2026-09-03T10:05:14.053Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/25/2a/484d112c0d8fc5f665d7b65137ac9cdb2953c982391598c3597968a12ee7/huggingface_hub-1.33.0.tar.gz", hash = "sha256:367be21a201db9523eddf8aeac7048f2602c1b308691c97640d5e72ed188007e", size = 1043548, upload-time = "2026-09-24T09:49:29.971Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c3/0e/3e45bbe0dd48f4e56b1d46649d342de853cd1c7e815323472ab62687f153/huggingface_hub-1.30.0-py3-none-any.whl", hash = "sha256:96ae0a8e99a234374a6fe43e989ebd21c04640b91ab2927e7e5773ba1131ca59", size = 796795, upload-time = "2026-09-03T10:05:12.21Z" },
+    { url = "https://files.pythonhosted.org/packages/fc/16/963096d224b80909432dc16561a615fd33d2d13beef3ce4c63fa25e40867/huggingface_hub-1.33.0-py3-none-any.whl", hash = "sha256:04e434b06e100eddbce9a6e817d72693a7884b10a79bd67ab48080d5c07eb899", size = 846435, upload-time = "2026-09-24T09:49:28.059Z" },
 ]
 
 [[package]]
