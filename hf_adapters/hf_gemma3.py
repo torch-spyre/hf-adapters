@@ -64,6 +64,8 @@ Usage::
     outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
+from collections.abc import Callable
+
 import torch
 import torch.nn.functional as F
 
@@ -78,6 +80,7 @@ from hf_adapters.hf_common import (
     prepare_lm_head_for_spyre,
     run_lm_head,
     text_config,
+    to_default_device_layout,
 )
 from hf_adapters.swa_attention import (
     SlidingWindowCache,
@@ -90,6 +93,10 @@ from hf_adapters.swa_attention import (
     roll_sliding_buffers,
     sliding_window_attention,
     valid_start_for,
+)
+
+_materialize_attention_output: Callable[[torch.Tensor], torch.Tensor] = (
+    torch.compiler.disable(to_default_device_layout)
 )
 
 
@@ -125,15 +132,24 @@ def _patch_gemma_rmsnorm(rmsnorm_cls):
 
 
 def _make_compiled_block(
-    layer,
-    num_q_heads,
-    num_kv_heads,
-    head_dim,
-    is_sliding=False,
-    window_size=None,
-    swa_mode=None,
-):
-    """Compile one Gemma 3 dense decoder layer.
+    layer: torch.nn.Module,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    is_sliding: bool = False,
+    window_size: int | None = None,
+    swa_mode: str | None = None,
+    *,
+    query_norm: torch.nn.Module | None = None,
+    key_norm: torch.nn.Module | None = None,
+    query_scale: float | None = None,
+    output_gate: torch.nn.Module | None = None,
+    use_rope: bool = True,
+) -> Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Compile a sandwich-norm decoder layer (Gemma 3 or Muse Glimmer).
+
+    Muse Glimmer supplies its shared weightless Q/K norm, query multiplier,
+    output gate, and per-layer RoPE switch. Defaults preserve Gemma 3.
 
     Block signature carries the per-layer mask and RoPE freqs (which differ
     between sliding and global layers), so the caller selects them:
@@ -153,29 +169,29 @@ def _make_compiled_block(
     (see ``swa_attention``). Global layers, and every layer when ``swa_mode is
     None``, stay on band-masked SDPA.
     """
-    attn = layer.self_attn
-    q_proj = attn.q_proj
-    k_proj = attn.k_proj
-    v_proj = attn.v_proj
-    o_proj = attn.o_proj
-    q_norm = attn.q_norm
-    k_norm = attn.k_norm
-    scaling = attn.scaling  # query_pre_attn_scalar ** -0.5
+    attn = layer.get_submodule("self_attn")
+    q_proj = attn.get_submodule("q_proj")
+    k_proj = attn.get_submodule("k_proj")
+    v_proj = attn.get_submodule("v_proj")
+    o_proj = attn.get_submodule("o_proj")
+    q_norm = query_norm if query_norm is not None else attn.get_submodule("q_norm")
+    k_norm = key_norm if key_norm is not None else attn.get_submodule("k_norm")
+    scaling: float = getattr(attn, "scaling")
 
-    input_ln = layer.input_layernorm
-    post_attn_ln = layer.post_attention_layernorm
-    pre_ff_ln = layer.pre_feedforward_layernorm
-    post_ff_ln = layer.post_feedforward_layernorm
-    mlp = layer.mlp
+    input_ln = layer.get_submodule("input_layernorm")
+    post_attn_ln = layer.get_submodule("post_attention_layernorm")
+    pre_ff_ln = layer.get_submodule("pre_feedforward_layernorm")
+    post_ff_ln = layer.get_submodule("post_feedforward_layernorm")
+    mlp = layer.get_submodule("mlp")
 
     def block_forward(
-        hidden_states,
-        selected_freqs,
-        attn_mask,
-        key_cache,
-        value_cache,
-        cache_index,
-    ):
+        hidden_states: torch.Tensor,
+        selected_freqs: torch.Tensor,
+        attn_mask: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        cache_index: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         residual = hidden_states
         h = input_ln(hidden_states)
 
@@ -191,9 +207,12 @@ def _make_compiled_block(
 
         q = q_norm(q)
         k = k_norm(k)
+        if query_scale is not None:
+            q = q * query_scale
 
-        q = apply_rope_matmul(q, selected_freqs)
-        k = apply_rope_matmul(k, selected_freqs)
+        if use_rope:
+            q = apply_rope_matmul(q, selected_freqs)
+            k = apply_rope_matmul(k, selected_freqs)
 
         key_cache, value_cache = kv_cache_update(
             k,
@@ -227,6 +246,12 @@ def _make_compiled_block(
                 enable_gqa=True,
             )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
+        if output_gate is not None:
+            # SWA lowers GQA to rank 5 internally. Materialize the flattened
+            # result in the default device layout between compiled regions so
+            # the gate's rank-3 multiply never inherits that grouped layout.
+            attn_out = _materialize_attention_output(attn_out)
+            attn_out = attn_out * torch.sigmoid(output_gate(h))
         attn_out = o_proj(attn_out)
         # Sandwich: norm the attention output BEFORE adding the residual.
         attn_out = post_attn_ln(attn_out)

@@ -40,6 +40,7 @@ which models are supported on Spyre.
 | Gemma 4 31B | gemma4 | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 4 31B Instruct | gemma4 | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 3 1B | gemma3\_text | 256 | 128 | Yes | Yes | Yes | Yes |
+| Muse Glimmer 30B (text backbone) | muse\_glimmer | 128 | 64 | Yes | Yes | Yes | Yes (bf16) |
 | Gemma 2 9B | gemma2 | 256 | 128 | Yes | Yes | Yes | Yes |
 | GPT-2 124M | gpt2 | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
 | GPT-Neo 125M | gpt_neo | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
@@ -210,8 +211,8 @@ all pass that check.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 40 adapters · 63 verified checkpoints · 10K+ compatible models.
-The 63 verified rows are 39 generative + 13 embedding + 2 seq-classification +
+**Coverage:** 41 adapters · 64 verified checkpoints · 10K+ compatible models.
+The 64 verified rows are 40 generative + 13 embedding + 2 seq-classification +
 2 token-classification + 6 vision-language + 1 speculative-decoding drafter (see
 the Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are bare vision-tower components
 used by VLM adapters and are not included in the adapter count. The three DSpark
@@ -253,6 +254,7 @@ pattern, norms, and weight layout.
 | hf\_xpress\_qwen3.py | qwen3 (`Qwen3XPressModel` drafter) | 1 | XPress speculative-decoding drafter: DFlash block backbone (Qwen3-style layers, mixed sliding/full) + causal refiner, block 16, K=6 Jacobi passes, top-C=512. Vocab weights from the target. UIUC-SSAIL/gemma4-26b-a4b-XPress-b16 (Gemma 4 26B-A4B target); same adapter should load UIUC-SSAIL/Qwen3-8B-XPress-b16. Block-propose API (`propose_block`). Spyre (bf16) vs fp32 speculators-math oracle: block-hidden cos 0.9998, base-logit cos 0.9999; ~50 ms per 15-token proposal at top-C=512. |
 | hf\_diffusion\_gemma.py | diffusion\_gemma | 1 | google/diffusiongemma-26B-A4B-it. MoE runs on CPU; attention + dense MLP compiled on Spyre. Block-diffusion generate loop. Gated. |
 | hf\_gemma3.py | gemma3\_text / gemma3 (dense) | 2 | Gemma 3 4B/12B/27B (text decoder of the multimodal checkpoints); EmbeddingGemma (bidirectional embedder). Not Gemma 3n (PLE). |
+| hf\_muse\_glimmer.py | muse\_glimmer (text) | 1 | Muse Glimmer text-decoder fine-tunes with the same gated, sliding/global architecture. Image/video inputs are not supported. |
 | hf\_gemma2.py | gemma2 | 1 | Gemma 2 2B and Gemma 2 fine-tunes. |
 | hf\_olmo.py | olmo | 1 | OLMo 7B |
 | hf\_olmo2.py | olmo2 | 1 | OLMo 2 7B |
@@ -617,6 +619,20 @@ in `prefill_embed`) and the sliding layers use a symmetric `±window` band
 bf16-native — fp16 overflows the residual stream (stock HF NaNs in fp16 too) —
 so its RoPE freq cache is matched to bf16 via the explicit `set_rope_dtype`
 propagation, which handles Gemma's per-layer-type dict of RoPE modules.
+
+**Muse Glimmer text decoder:** `hf_muse_glimmer.py` loads the stock
+`MuseGlimmerForConditionalGeneration` and drops the vision-only modules for
+`AutoSpyreModelForCausalLM`. Its 52-layer decoder reuses Gemma 3's sandwich-norm
+blocks and sliding/global cache driver, plus the shared generation, RoPE,
+KV-cache, and LM-head utilities. The repeating pattern is three local layers
+(window 2048, RoPE theta 500000), then one global layer without RoPE. The native
+128-wide heads need no padding. Muse Glimmer adds weightless embedding and Q/K
+normalization, a query multiplier, and a sigmoid gate before the attention output
+projection. Logits are multiplied by `output_multiplier` before the tanh softcap.
+The attention output is materialized in the default device layout between
+compiled regions so the gate does not inherit Spyre's internal grouped GQA
+layout; attention, gating, and the MLP all execute on Spyre. This adapter covers
+text generation; image/video inputs are not supported by this causal-LM path.
 
 **Dual head_dim + proportional RoPE** (Gemma 4): `hf_gemma4.py` is Gemma 3
 plus its hardest features, targeting the dense decoders (12B / 31B) and the

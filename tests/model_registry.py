@@ -336,6 +336,14 @@ CAUSAL_LM_MODELS = {
         "is_gated": True,
         "size": "1b",
     },
+    # hf_muse_glimmer.py (text backbone)
+    "muse_glimmer_30b": {
+        "name": "Muse Glimmer 30B (text)",
+        "path": "meta-models/Muse-Glimmer-30B",
+        "adapter": "hf_muse_glimmer.py",
+        "size": "30b",
+        "dtype": "bfloat16",
+    },
     # hf_gemma4
     "gemma4_base": {
         "name": "Gemma 4 12B Base",
