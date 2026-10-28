@@ -26,6 +26,8 @@ from pathlib import Path
 
 import yaml
 
+from evals.lm_eval.dashboard import dashboard_results, metric_iterations, sample_outputs
+
 ROOT = Path(__file__).resolve().parents[2]
 # Validation rules, not defaults: values come only from the YAML/JSON config.
 BENCHMARK_SETTINGS = {
@@ -224,6 +226,8 @@ def summarize_result(raw, spec, versions):
                     "task": task,
                     "metric": metric,
                     "value": value,
+                    "iterations": metric_iterations(raw, task, metric),
+                    "num_fewshot": raw.get("n-shot", {}).get(task, spec["num_fewshot"]),
                     "higher_is_better": raw.get("higher_is_better", {})
                     .get(task, {})
                     .get(metric.split(",")[0]),
@@ -344,6 +348,7 @@ def run_worker(args, spec):
         write_json(
             output / "results.json", {k: v for k, v in raw.items() if k != "samples"}
         )
+        write_json(output / "samples.json", sample_outputs(raw))
         versions = {
             p: importlib.metadata.version(p) for p in (*PROTOCOL_PACKAGES, "torch")
         }
@@ -574,17 +579,20 @@ def run_suite(args, suite, models):
     if output.exists() and any(output.iterdir()):
         raise ValueError(f"Output directory must be empty: {output}")
     output.mkdir(parents=True, exist_ok=True)
+    attachments = output / "attachments"
+    attachments.mkdir()
     # Freeze resolved settings once; edits to the input file during a long run
     # must not change later workers' workloads.
-    write_json(output / "suite.json", suite)
+    write_json(attachments / "suite.json", suite)
     args = copy.copy(args)
-    args.config = str(output / "suite.json")
+    args.config = str(attachments / "suite.json")
     revision = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True
     )
     report = {
         "schema_version": RESULT_SCHEMA_VERSION,
         "backend": args.backend,
+        "device": args.device if args.backend == "hf" else "spyre",
         "suite": suite,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "source_revision": (
@@ -594,7 +602,7 @@ def run_suite(args, suite, models):
     }
     failed = False
     for model in models:
-        model_dir = output / model_key(model)
+        model_dir = attachments / model_key(model)
         model_dir.mkdir()
         benchmarks = report["models"][model] = {}
         for spec in suite["benchmarks"]:
@@ -604,8 +612,9 @@ def run_suite(args, suite, models):
             if not args.write_references:
                 result = compare(result, references.get(model, {}).get(spec["id"]))
             benchmarks[spec["id"]] = result
-            write_json(output / "report.json", report)
-            (output / "summary.md").write_text(markdown_report(report))
+            write_json(attachments / "report.json", report)
+            write_json(output / "benchmarks.json", dashboard_results(report))
+            (attachments / "summary.md").write_text(markdown_report(report))
             print_benchmark_result(result)
         successful = {
             name: r for name, r in benchmarks.items() if r["status"] == "completed"
@@ -616,7 +625,7 @@ def run_suite(args, suite, models):
                 reference_dir / f"{model_key(model)}.json",
                 {**report, "models": {model: successful}},
             )
-    print(f"Results: {output / 'summary.md'}", flush=True)
+    print(f"Results: {attachments / 'summary.md'}", flush=True)
     return int(failed)
 
 

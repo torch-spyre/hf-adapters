@@ -115,8 +115,8 @@ jobs:
         if: always()
         shell: bash
         run: |
-          if [[ -f "$EVAL_RESULTS/summary.md" ]]; then
-            cat "$EVAL_RESULTS/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f "$EVAL_RESULTS/attachments/summary.md" ]]; then
+            cat "$EVAL_RESULTS/attachments/summary.md" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No benchmark summary was produced; check setup and run logs." >> "$GITHUB_STEP_SUMMARY"
           fi
