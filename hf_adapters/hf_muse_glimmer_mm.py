@@ -26,7 +26,11 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+from transformers.models.muse_glimmer.configuration_muse_glimmer import (
+    MuseGlimmerTextConfig,
+)
 from transformers.models.muse_glimmer.modeling_muse_glimmer import (
+    MuseGlimmerForConditionalGeneration,
     get_vision_bilinear_indices_and_weights,
 )
 from transformers.vision_utils import (
@@ -352,16 +356,20 @@ def _run_text(
 
 
 def _logits_from_embeds(
-    model,
-    inputs_embeds,
-    position_ids,
-    attn_mask,
-    key_caches,
-    value_caches,
-    cache_index,
-):
-    cfg = text_config(model.config)
-    h = _run_text(
+    model: MuseGlimmerForConditionalGeneration,
+    inputs_embeds: torch.Tensor,
+    position_ids: torch.Tensor,
+    attn_mask: torch.Tensor,
+    key_caches: list[torch.Tensor],
+    value_caches: list[torch.Tensor],
+    cache_index: torch.Tensor,
+    input_ids: torch.Tensor | None = None,
+    *,
+    logits_to_keep: int = 0,
+) -> torch.Tensor:
+    """Run the decoder and project the requested final rows to vocabulary logits."""
+    cfg: MuseGlimmerTextConfig = text_config(model.config)
+    h: torch.Tensor = _run_text(
         model,
         inputs_embeds,
         position_ids,
@@ -370,10 +378,11 @@ def _logits_from_embeds(
         value_caches,
         cache_index,
     )
-    h = h[:, -1:, :]
-    logits = model.lm_head(h)[..., : model._spyre_original_vocab_size]
+    if logits_to_keep > 0:
+        h = h[:, -logits_to_keep:, :]
+    logits: torch.Tensor = model.lm_head(h)[..., : model._spyre_original_vocab_size]
     logits = logits * cfg.output_multiplier
-    cap = cfg.final_logit_softcapping
+    cap: float | None = cfg.final_logit_softcapping
     if cap is not None:
         logits = torch.tanh(logits / cap) * cap
     return logits
@@ -761,24 +770,26 @@ def prepare_for_spyre(model):
 
 def _prefill_forward(
     *,
-    model,
-    input_ids,
-    position_ids,
-    attention_mask,
-    key_caches,
-    value_caches,
-    cache_index,
-    pixel_values=None,
-    image_grid_thw=None,
-):
+    model: MuseGlimmerForConditionalGeneration,
+    input_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    key_caches: list[torch.Tensor],
+    value_caches: list[torch.Tensor],
+    cache_index: torch.Tensor,
+    pixel_values: torch.Tensor | None = None,
+    image_grid_thw: torch.Tensor | None = None,
+    logits_to_keep: int = 0,
+) -> torch.Tensor:
+    """Prefill optional images and text, retaining all KV entries for decode."""
     has_pixels = pixel_values is not None
     has_grid = image_grid_thw is not None
     if has_pixels != has_grid:
         raise ValueError("pixel_values and image_grid_thw must be supplied together")
-    features = (
+    features: torch.Tensor | None = (
         _vision_features(model, pixel_values, image_grid_thw) if has_pixels else None
     )
-    embeds = _embed_and_scatter(model, input_ids, features)
+    embeds: torch.Tensor = _embed_and_scatter(model, input_ids, features)
     return _logits_from_embeds(
         model,
         embeds.to(DEVICE),
@@ -787,4 +798,5 @@ def _prefill_forward(
         key_caches,
         value_caches,
         cache_index,
+        logits_to_keep=logits_to_keep,
     )
