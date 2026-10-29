@@ -630,9 +630,14 @@ KV-cache, and LM-head utilities. The repeating pattern is three local layers
 normalization, a query multiplier, and a sigmoid gate before the attention output
 projection. Logits are multiplied by `output_multiplier` before the tanh softcap.
 Requests whose full generation cache fits within the sliding window use ordinary
-SDPA with the gate fused in head layout. Larger requests use compact anchored
-SWA; only that operator's gated output needs a layout conversion between compiled
-regions. Prompts longer than 512 real tokens default to 512-token prefill chunks
+SDPA; larger requests use compact anchored caches with native SWA for prefill.
+Single-token decode uses grouped matmuls and fp32 softmax over the compact cache,
+with the runtime mask enforcing the sliding window and padding. All paths make Q
+contiguous and apply the gate in head layout inside one compiled decoder graph.
+Embeddings use the decoder's linear-output device layout, allowing Dynamo to
+reuse the same compiled graph for the first and subsequent structurally identical
+layers.
+Prompts longer than 512 real tokens default to 512-token prefill chunks
 to bound compilation, while short prompts retain 64-token alignment. Explicit
 `prefill_chunk_size` kwargs or generation configuration take precedence;
 explicitly passing `prefill_chunk_size=None` requests one-shot prefill. Stock Muse

@@ -66,6 +66,31 @@ _run_forward = hf_gemma3._run_forward
 _PREFILL_CHUNK_SIZE = 512
 
 
+def _embed_tokens(model: torch.nn.Module, input_ids: torch.Tensor) -> torch.Tensor:
+    """Match layer zero's input layout to the decoder's linear output layout.
+
+    Muse's fp32 norm arithmetic leaves decoder outputs in [batch, hidden-stick,
+    sequence, stick] order. The generic embedding layout uses a different order
+    and would compile a separate first-layer graph for every prefill shape.
+    """
+    backbone: MuseGlimmerTextModel = get_backbone(model)
+    hidden_states: torch.Tensor = backbone.embed_tokens(
+        input_ids.to(backbone.embed_tokens.weight.device)
+    )
+    if hidden_states.device.type != "spyre":
+        return hidden_states
+    from torch_spyre._C import SpyreTensorLayout
+
+    target = SpyreTensorLayout(
+        list(hidden_states.shape),
+        list(hidden_states.stride()),
+        hidden_states.dtype,
+        [1, 0, 2],
+    )
+    result: torch.Tensor = hidden_states.to(device_layout=target)  # type: ignore[call-overload]
+    return result
+
+
 def generate(
     model: PreTrainedModel,
     input_ids: torch.Tensor,
@@ -124,8 +149,8 @@ def _allocate_caches(
             allocate_swa_caches(model, batch_size, max_cache_len, dtype, device),
         )
 
-    # The complete generation fits in the window. Plain SDPA avoids the SWA
-    # gate's layout conversion and does not allocate a full window for each layer.
+    # The complete generation fits in the window. Plain SDPA avoids allocating
+    # a full sliding window for each layer.
     setattr(model, "_spyre_swa_mode", None)
     setattr(model, "_spyre_compiled_blocks", model._spyre_muse_full_blocks)
     shapes: list[tuple[int, int, int]] = kv_cache_shapes(model)
@@ -202,6 +227,7 @@ def prepare_for_spyre(model: PreTrainedModel) -> None:
     )
     setattr(backbone, "norm", torch.compile(backbone.norm, dynamic=False))
     setattr(model, "_spyre_compiled_norm", backbone.norm)
+    setattr(model, "_spyre_embed_tokens", _embed_tokens)
 
     output_multiplier: float = cfg.output_multiplier
     cap: float = cfg.final_logit_softcapping
