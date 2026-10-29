@@ -97,8 +97,32 @@ end-to-end with 5/5 top-1 agreement against the CPU reference.
 | Model | model\_type | Target | head\_dim | D/2 | Stick Aligned | Oracle Accurate | Spyre Compiles | Spyre Runs |
 |-------|-----------|--------|---------|-----|--------------|----------------|---------------|-----------|
 | XPress Gemma 4 26B-A4B b16 (`UIUC-SSAIL/gemma4-26b-a4b-XPress-b16`) | qwen3 (`Qwen3XPressModel`) | Gemma 4 26B-A4B | 128 | 64 | Yes | Yes | Yes | Yes |
+| Muse Glimmer 30B assistant (`meta-models/Muse-Glimmer-30B-assistant`) | muse\_glimmer\_assistant (DFlash) | Muse Glimmer 30B | 128 | 64 | Yes | Yes | Yes | Yes |
 
 **Oracle Accurate** = `propose_block` matches a plain-PyTorch transcription of the speculators training code on CPU (`tests/cpu/test_xpress_cpu.py`; a drafter has no stock-HF `generate` to compare against).
+The Muse Glimmer assistant is not an `hf_*` adapter: `hf_adapters/_muse_dflash.py` drives transformers' own `MuseGlimmerAssistantModel` for `muse_spec_decode` (below). **Oracle Accurate** = its draft blocks equal transformers' `DFlashTokenCandidateGenerator` loop over `DFlashCache` on CPU (`tests/cpu/test_muse_dflash_cpu.py`; also on the real assistant weights, rel 9e-6). **Spyre Runs** = `tests/spyre/test_muse_spec_decode_spyre.py`.
+
+#### Muse Glimmer 30B tree speculative decoding
+
+`hf_adapters.muse_spec_decode.TreeSpeculativeDecoder` (batch 1, greedy) pairs
+the DFlash assistant (`_muse_dflash`) with token-tree verify (`_muse_tree`)
+over `hf_muse_glimmer`'s plain-SDPA decoder layers: each step the assistant
+drafts a 16-token block, a best-first search keeps the 16 most likely tree
+nodes, one target forward scores them all, and the longest path matching the
+target's greedy argmax is accepted plus one bonus token. The verifier keeps its
+own full-length KV cache under host-built full and sliding masks; commit is
+host bookkeeping (masks hide rejected rows). Plain `generate` keeps its
+per-request SDPA / anchored-SWA choice. Under `torchrun` both models run
+tensor-parallel (`_muse_tp`: host-side sharding before the layers compile,
+in-graph all-reduce / all-gather).
+
+| Knob | Default | Effect |
+|------|---------|--------|
+| `SPYRE_MUSE_FP8=attn,mlp,lm_head` | unset | W8A8 `spyre::scaled_mm` for the target's text linears (any subset); 16-bit weights replaced. Lossy. With fp8 layers, plain `generate` uses band-masked SDPA for every request. |
+| `SPYRE_MUSE_DRAFT_FP8=1` | unset | The same for the assistant's linears. Changes proposals (acceptance) only. |
+| `SPYRE_MUSE_DRAFT_TP=0` | sharded under TP | Replicate the assistant instead of sharding it with the target. |
+| `SPYRE_MUSE_FP8_ACT_MAX` / `SPYRE_MUSE_FP8_W_MAX` | 8 / 32 | fp8 code ranges (raw fp8 sums must stay below fp16's 65504). |
+
 **Spyre Runs** = `tests/spyre/test_xpress_draft_spyre.py` holds block-hidden and base-logit cosine ≥ 0.99 against the fp32 oracle on the real checkpoint (bf16: 0.9998 / 0.9999).
 
 ### Vision-Language (image→text)
@@ -219,13 +243,14 @@ all pass that check.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 42 adapters · 65 verified checkpoints · 10K+ compatible models.
-The 65 verified rows are 40 generative + 13 embedding + 2 seq-classification +
-2 token-classification + 7 vision-language + 1 speculative-decoding drafter (see
+**Coverage:** 42 adapters · 66 verified checkpoints · 10K+ compatible models.
+The 66 verified rows are 40 generative + 13 embedding + 2 seq-classification +
+2 token-classification + 7 vision-language + 2 speculative-decoding drafters (see
 the Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are bare vision-tower components
 used by VLM adapters and are not included in the adapter count. The three DSpark
 speculative-decoding drafter adapters and the XPress drafter adapter are included
-in the adapter count.
+in the adapter count; the Muse Glimmer DFlash assistant runs on transformers'
+own model class (no `hf_*` adapter), so it is not.
 Granite Vision 4.1 is verified both as a text backbone (generative) and as a full VLM.
 `hf_mistral3_vision_mm` covers both the ``mistral`` text-backbone variant
 (Mistral-Small-3.1/3.2) and the ``ministral3`` variant (Ministral-3-14B-Instruct-2512,
