@@ -260,6 +260,44 @@ default. The combined adapter accepts the processor's
 `pixel_values` and `image_grid_thw` alongside the text inputs and also supports
 text-only prompts through the same API.
 
+### Speculative decoding (Muse Glimmer 30B + DFlash assistant)
+
+```python
+import torch
+from transformers import AutoTokenizer, MuseGlimmerAssistantModel
+from hf_adapters import AutoSpyreModelForCausalLM
+from hf_adapters.hf_common import encode_prompts
+from hf_adapters.muse_spec_decode import TreeSpeculativeDecoder
+
+target = AutoSpyreModelForCausalLM.from_pretrained(
+    "meta-models/Muse-Glimmer-30B", dtype=torch.float16)
+assistant = MuseGlimmerAssistantModel.from_pretrained(
+    "meta-models/Muse-Glimmer-30B-assistant", dtype=torch.float32).eval()
+tok = AutoTokenizer.from_pretrained("meta-models/Muse-Glimmer-30B")
+ids = encode_prompts(tok, ["Explain sliding-window attention."])["input_ids"]
+decoder = TreeSpeculativeDecoder(target, assistant, width=16)
+out = decoder.generate(ids, max_new_tokens=256,
+                       eos_token_id=target.generation_config.eos_token_id)
+```
+
+Batch 1, greedy: the output is the target's greedy continuation. Under
+`torchrun` the target and the assistant run tensor-parallel over two or four
+cards; call `torch.distributed.init_process_group("cpu:gloo,spyre:spyreccl")`
+before loading the target, as `scripts/bench_muse_spec_decode_spyre.py` does:
+
+```bash
+# TP 2
+SPYRE_DEVICES=0,1 python -m torch.distributed.run --standalone --nproc-per-node=2 \
+    scripts/bench_muse_spec_decode_spyre.py --prompt-file prompt.txt
+# TP 4
+SPYRE_DEVICES=0,1,2,3 python -m torch.distributed.run --standalone --nproc-per-node=4 \
+    scripts/bench_muse_spec_decode_spyre.py --prompt-file prompt.txt
+```
+
+The opt-in, lossy `SPYRE_MUSE_FP8=attn,mlp,lm_head` and
+`SPYRE_MUSE_DRAFT_FP8=1` knobs are described in
+[ARCHITECTURE.md](ARCHITECTURE.md#muse-glimmer-30b-tree-speculative-decoding).
+
 ## Repo Structure
 
 ```
