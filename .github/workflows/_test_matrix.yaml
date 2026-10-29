@@ -173,6 +173,9 @@ env:
   CI: ""
   CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
   STORAGE_1_DIR: /storage-1/hf-adapters
+  UV_NFS_CACHE_ROOT: /storage-1/hf-adapters/.cache/uv
+  # Every group a Spyre job installs: resolve-torch-spyre primes the uv cache with all of them.
+  UV_GROUPS_ALL: "dev spyre test oot models-ops"
   HF_HOME: /storage-1/hf-adapters/.cache/huggingface
   # Registry models are pre-warmed in the HF_HOME PVC; offline mode skips the Hub revision-check request that from_pretrained() otherwise makes even on a cache hit.
   HF_HUB_OFFLINE: "1"
@@ -281,6 +284,8 @@ jobs:
     timeout-minutes: 15
     outputs:
       torch_spyre_sha: ${{ steps.resolve.outputs.torch_spyre_sha }}
+      # Shared by every Spyre job's uv cache restore.
+      uv_cache_salt: ${{ steps.uv-key.outputs.salt }}
     steps:
       - name: Resolve origin/main to a pinned SHA
         id: resolve
@@ -297,6 +302,11 @@ jobs:
           fi
           echo "Resolved torch-spyre origin/main -> ${SHA}"
           echo "torch_spyre_sha=${SHA}" >> "$GITHUB_OUTPUT"
+          # uv cache key salt: torch-spyre's dependency declarations at the pinned SHA,
+          # which `uv add` resolves outside hf-adapters' uv.lock.
+          SALT="$(git show "${SHA}:pyproject.toml" "${SHA}:tests/oot_framework/pyproject.toml" \
+            | sha256sum | cut -c1-16)"
+          echo "ts_deps=${SALT}" >> "$GITHUB_OUTPUT"
 
       # Prime the run's torch-spyre wheel cache (see
       # .github/actions/build-hf-adapters/torch_spyre_wheel_cache.sh): run the
@@ -307,20 +317,55 @@ jobs:
       - name: Checkout composite actions
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github/actions
+          sparse-checkout: |
+            .github/actions
+            uv.lock
           sparse-checkout-cone-mode: false
 
+      # This job is the only writer of the uv cache on /storage-1: it installs every group
+      # the Spyre jobs use, and the matrix jobs (which start after it) only read.
+      - name: uv cache key
+        id: uv-key
+        working-directory: ${{ github.workspace }}
+        run: |
+          echo "salt=$(cat uv.lock - <<< "${{ steps.resolve.outputs.ts_deps }} ${UV_GROUPS_ALL}" \
+            | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore uv cache (NFS)
+        id: uv-cache
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ steps.uv-key.outputs.salt }}
+          merge-into-default: 'true'
+
       - name: Prime the torch-spyre wheel cache
+        id: prime
         uses: ./.github/actions/build-hf-adapters
         continue-on-error: true
         timeout-minutes: 12
         env:
           TS_WHEEL_CACHE_ROLE: prime
         with:
-          uv_groups: "dev spyre test"
+          uv_groups: ${{ env.UV_GROUPS_ALL }}
           ref: ${{ inputs.ref }}
           repository: ${{ inputs.repository }}
           torch_spyre_sha: ${{ steps.resolve.outputs.torch_spyre_sha }}
+
+      # Gated on the install itself: the step above is continue-on-error.
+      - name: Save uv cache (NFS)
+        if: steps.prime.outcome == 'success'
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/save@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key: ${{ steps.uv-cache.outputs.cache-key }}
+          cache-dir: ${{ steps.uv-cache.outputs.cache-dir }}
+          # Builds of local checkouts are keyed by path, not commit, so they must not be shared.
+          exclude: |
+            ./sdists-v*/path
+            ./sdists-v*/editable
+            ./wheels-v*/path
+            ./builds-v*
 
       - name: Record pinned SHA in the run summary
         run: |
@@ -766,6 +811,14 @@ jobs:
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
+
       - uses: ./.github/actions/build-hf-adapters
         id: build
         with:
@@ -856,6 +909,14 @@ jobs:
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
+
       - uses: ./.github/actions/build-hf-adapters
         id: build
         with:
@@ -941,6 +1002,14 @@ jobs:
             .github/actions
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
+
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
 
       - uses: ./.github/actions/build-hf-adapters
         id: build
@@ -1032,6 +1101,14 @@ jobs:
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
+
       - uses: ./.github/actions/build-hf-adapters
         id: build
         with:
@@ -1111,6 +1188,14 @@ jobs:
             .github/actions
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
+
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
 
       - uses: ./.github/actions/build-hf-adapters
         id: build
@@ -1192,6 +1277,14 @@ jobs:
             .github/actions
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
+
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
 
       - uses: ./.github/actions/build-hf-adapters
         id: build
@@ -1280,6 +1373,14 @@ jobs:
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
+
       - uses: ./.github/actions/build-hf-adapters
         id: build
         with:
@@ -1365,6 +1466,14 @@ jobs:
             .github/actions
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
+
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
 
       - uses: ./.github/actions/build-hf-adapters
         id: build
@@ -1513,6 +1622,14 @@ jobs:
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
+
       - uses: ./.github/actions/build-hf-adapters
         id: build
         with:
@@ -1595,6 +1712,14 @@ jobs:
             .github/actions
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
+
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
 
       - uses: ./.github/actions/build-hf-adapters
         id: build
@@ -1679,6 +1804,14 @@ jobs:
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
+
       - uses: ./.github/actions/build-hf-adapters
         id: build
         with:
@@ -1762,6 +1895,14 @@ jobs:
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
+
       - uses: ./.github/actions/build-hf-adapters
         id: build
         with:
@@ -1844,6 +1985,14 @@ jobs:
             .github/actions
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
+
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
 
       - uses: ./.github/actions/build-hf-adapters
         id: build
@@ -1949,6 +2098,14 @@ jobs:
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
+
       - uses: ./.github/actions/build-hf-adapters
         id: build
         with:
@@ -2034,6 +2191,14 @@ jobs:
             .github/actions
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
+
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
 
       - uses: ./.github/actions/build-hf-adapters
         id: build
@@ -2131,6 +2296,14 @@ jobs:
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
+
       - uses: ./.github/actions/build-hf-adapters
         id: build
         with:
@@ -2207,6 +2380,14 @@ jobs:
             .github/actions
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
+
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
 
       - uses: ./.github/actions/build-hf-adapters
         id: build
@@ -2402,6 +2583,14 @@ jobs:
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
+
       - uses: ./.github/actions/build-hf-adapters
         id: build
         with:
@@ -2480,6 +2669,14 @@ jobs:
             .github/actions
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
+
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
 
       - uses: ./.github/actions/build-hf-adapters
         id: build
@@ -2562,6 +2759,14 @@ jobs:
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
+
       - uses: ./.github/actions/build-hf-adapters
         id: build
         with:
@@ -2634,6 +2839,14 @@ jobs:
             .github/actions
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
+
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
 
       - uses: ./.github/actions/build-hf-adapters
         id: build
@@ -2714,6 +2927,14 @@ jobs:
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
+
       - uses: ./.github/actions/build-hf-adapters
         id: build
         with:
@@ -2787,6 +3008,14 @@ jobs:
             .github/actions
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
+
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
 
       - uses: ./.github/actions/build-hf-adapters
         id: build
@@ -2865,6 +3094,14 @@ jobs:
             .github/actions
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
+
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
 
       - uses: ./.github/actions/build-hf-adapters
         id: build
@@ -2949,6 +3186,14 @@ jobs:
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
+
       - uses: ./.github/actions/build-hf-adapters
         id: build
         with:
@@ -3027,6 +3272,14 @@ jobs:
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
+
       - uses: ./.github/actions/build-hf-adapters
         id: build
         with:
@@ -3103,6 +3356,14 @@ jobs:
             .github/actions
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
+
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
 
       - uses: ./.github/actions/build-hf-adapters
         id: build
@@ -3181,6 +3442,14 @@ jobs:
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
+
       - uses: ./.github/actions/build-hf-adapters
         id: build
         with:
@@ -3257,6 +3526,14 @@ jobs:
             .github/actions
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
+
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
 
       - uses: ./.github/actions/build-hf-adapters
         id: build
@@ -3335,6 +3612,14 @@ jobs:
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
 
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
+
       - uses: ./.github/actions/build-hf-adapters
         id: build
         with:
@@ -3411,6 +3696,14 @@ jobs:
             .github/actions
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
+
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
 
       - uses: ./.github/actions/build-hf-adapters
         id: build
@@ -3495,6 +3788,14 @@ jobs:
             .github/actions
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
+
+      - name: Restore uv cache (NFS)
+        if: ${{ !inputs.prebaked_image }}
+        uses: torch-spyre/spyre-inference/.github/actions/uv-nfs-cache/restore@4e1ea45877f9a675f5cf87a6b5a5f4713723593e
+        with:
+          storage-root: ${{ env.UV_NFS_CACHE_ROOT }}
+          key-salt: ${{ needs.resolve-torch-spyre.outputs.uv_cache_salt }}
+          merge-into-default: 'true'
 
       - uses: ./.github/actions/build-hf-adapters
         id: build
