@@ -13,10 +13,14 @@ dependencies = [
     "accelerate",
     "sentence_transformers",
     "huggingface_hub>=1.31.0",
+    # serve.py imports numpy directly; declare it rather than rely on transitive installs.
+    "numpy",
 ]
 
 [project.optional-dependencies]
 laya = ["laya>=0.3.28,<0.4"]
+# YOLO.detect() (serve.py) imports ultralytics lazily.
+yolo = ["ultralytics"]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs", "setuptools_scm>=10"]
@@ -147,4 +151,15 @@ test = [
     "Pillow",
     "torchvision~=0.28.0",
     "PyYAML",
+    # tests/spyre/weekly_generation/snapshot_model_counts.py. <3.1.0 on s390x: its sdist
+    # does not build there (xtensor-stack/xsimd#954).
+    "pandas<3.1.0; platform_machine == 's390x'",
+    "pandas; platform_machine != 's390x'",
+]
+# evals/{gsm8k,mmlu} import `datasets`. Kept in its own group rather than
+# [project].dependencies: declaring it there pulls pyarrow into the resolution for every
+# install, and the latest pyarrow publishes no ppc64le or s390x wheel (the image installs a
+# from-source pin on Z and caps <23 on Power, whose devpi 23.0.x link the numpy 1.x ABI).
+evals = [
+    "datasets",
 ]
