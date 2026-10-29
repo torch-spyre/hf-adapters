@@ -348,6 +348,30 @@ def _run_backbone_forward(
     value_caches: list[torch.Tensor],
     cache_index: torch.Tensor,
 ) -> torch.Tensor:
+    """Embed token IDs and run the shared sandwich-norm decoder."""
+    embed: Callable[[torch.nn.Module, torch.Tensor], torch.Tensor] = getattr(
+        model, "_spyre_embed_tokens", embed_text_tokens
+    )
+    return _run_backbone_from_embeds(
+        model,
+        embed(model, input_ids),
+        position_ids,
+        attn_mask,
+        key_caches,
+        value_caches,
+        cache_index,
+    )
+
+
+def _run_backbone_from_embeds(
+    model: torch.nn.Module,
+    hidden_states: torch.Tensor,
+    position_ids: torch.Tensor,
+    attn_mask: torch.Tensor,
+    key_caches: list[torch.Tensor],
+    value_caches: list[torch.Tensor],
+    cache_index: torch.Tensor,
+) -> torch.Tensor:
     """Gemma 3 backbone: scaled embedding, per-type RoPE + masks, blocks, norm.
 
     The base ``attn_mask`` is whatever mask the caller built (column index =
@@ -362,10 +386,7 @@ def _run_backbone_forward(
     backbone: Any = get_backbone(model)
     cfg: Any = text_config(model.config)
 
-    embed: Callable[[torch.nn.Module, torch.Tensor], torch.Tensor] = getattr(
-        model, "_spyre_embed_tokens", embed_text_tokens
-    )
-    h: torch.Tensor = embed(model, input_ids)
+    h: torch.Tensor = hidden_states
 
     # Per-layer-type RoPE freqs (sliding theta vs global theta).
     ropes: dict[str, PrecomputedRotaryEmbedding] = getattr(model, "_spyre_rope")
@@ -380,7 +401,7 @@ def _run_backbone_forward(
     # needed to build the runtime sliding mask outside the compiled blocks.
     # Gemma 3/4 are the only adapters that read a scalar out of cache_index at all.
     swa_mode: str | None = getattr(model, "_spyre_swa_mode", None)
-    bsz, seq_len = input_ids.shape[0], input_ids.shape[1]
+    bsz, seq_len = h.shape[:2]
     block_base = int(cache_index[0])
 
     prefill_step: SlidingPrefillStep | None = None

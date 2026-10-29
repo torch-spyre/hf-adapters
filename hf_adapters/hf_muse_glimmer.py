@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Text-generation adapter for Muse Glimmer's multimodal checkpoints.
+"""Shared Muse Glimmer text decoder for causal and image-to-text generation.
 
 Reuses Gemma 3's sandwich-norm blocks and sliding/global cache driver. Muse
 Glimmer normalizes embeddings and Q/K without learned scales, multiplies Q,
 gates attention before the output projection, and disables RoPE on NoPE
-layers. The stock vision encoder and projector are dropped for this causal-LM
-path; image inputs require a separate multimodal adapter.
+layers. ``hf_muse_glimmer_mm`` composes this decoder with Muse's vision tower
+and projector for image-to-text generation.
 """
 
 from collections.abc import Callable
@@ -77,6 +77,11 @@ def _embed_tokens(model: torch.nn.Module, input_ids: torch.Tensor) -> torch.Tens
     hidden_states: torch.Tensor = backbone.embed_tokens(
         input_ids.to(backbone.embed_tokens.weight.device)
     )
+    return _to_decoder_layout(hidden_states)
+
+
+def _to_decoder_layout(hidden_states: torch.Tensor) -> torch.Tensor:
+    """Give token and image embeddings the shared decoder's input layout."""
     if hidden_states.device.type != "spyre":
         return hidden_states
     from torch_spyre._C import SpyreTensorLayout

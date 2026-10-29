@@ -736,6 +736,15 @@ VISION_MODELS = {
         "size": "26b",
         "always_test": True,
     },
+    # hf_muse_glimmer_mm.py — Muse vision tower + shared Muse text decoder
+    "muse_glimmer_mm": {
+        "name": "Muse Glimmer 30B (both towers)",
+        "path": "meta-models/Muse-Glimmer-30B",
+        "adapter": "hf_muse_glimmer_mm.py",
+        "kind": "vlm",
+        "dtype": "bfloat16",
+        "size": "30b",
+    },
     # hf_clip.py — CLIP dual-encoder (image + text -> embeddings via ST backend)
     "clip_vit_b_32": {
         "name": "clip-ViT-B-32",
