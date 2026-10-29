@@ -108,3 +108,7 @@ def test_weekly_models_match_weekly_perf_paths() -> None:
             f"WEEKLY_PERF_PATHS in tests/model_registry.py ({'; '.join(details)}). "
             + REGEN_HINT
         )
+
+
+def test_dummy_regression_failure():
+    raise AssertionError("intentional failure to trial spyre-frameworks#2466; do not merge")
