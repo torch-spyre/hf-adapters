@@ -29,6 +29,8 @@ Every emitted token is the target's argmax, so the output is the target's
 greedy continuation up to the floating-point differences of a tree forward.
 Under ``torchrun`` the target and the assistant run tensor-parallel
 (``_muse_tp``); rank 0's tree is broadcast so every rank verifies the same one.
+``SPYRE_MUSE_FP8`` (target) and ``SPYRE_MUSE_DRAFT_FP8`` (assistant), both off
+by default, switch linears to W8A8 fp8 (``_muse_fp8``).
 
 Usage::
 

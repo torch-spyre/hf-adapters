@@ -18,7 +18,9 @@ Two and four CPU ranks each shard the tiny model on the host; a prefill,
 a tree verify, the full speculative decoder and the adapter's own
 ``generate`` (plain SDPA and the anchored sliding-window cache) must equal
 the unsharded stock model (four ranks exercise KV heads replicated across
-rank pairs).
+rank pairs). fp8 under TP needs no shared activation scale (every fp8 output
+is rescaled before its all-reduce); with lossless codes it must equal the
+reference exactly.
 """
 
 import os
@@ -70,7 +72,13 @@ class _Patch:
 
 
 def _run_case(case, rank, world):
-    from hf_adapters import _muse_dflash, _muse_tree, hf_common, hf_muse_glimmer
+    from hf_adapters import (
+        _muse_dflash,
+        _muse_fp8,
+        _muse_tree,
+        hf_common,
+        hf_muse_glimmer,
+    )
     from hf_adapters._muse_tree import MuseTreeVerifier
     from hf_adapters._spec_tree import tree_ancestors
     from hf_adapters.muse_spec_decode import TreeSpeculativeDecoder
@@ -83,13 +91,19 @@ def _run_case(case, rank, world):
 
     patch = _Patch()
     tol = dict(rtol=1e-4, atol=1e-4)
+    parts = "attn,mlp,lm_head" if case.startswith("fp8") else ""
+    if case == "fp8_exact":
+        patch.setattr(_muse_fp8, "FP8", torch.float32)
     # TP 4 needs 4 query-head groups; 2 KV heads are then replicated in pairs.
     heads, kv_heads = (8, 2) if world == 4 else (2, 1)
-    inter = 384
+    # fp8 needs 128-aligned shards: 512 / 2 (the real 19968 / 2 = 78 x 128).
+    inter = 512 if parts else 384
     reference, adapted = prepared_pair(
         patch,
         _muse_tree,
         _muse_dflash,
+        _muse_fp8,
+        parts=parts,
         heads=heads,
         kv_heads=kv_heads,
         intermediate=inter,
@@ -98,11 +112,12 @@ def _run_case(case, rank, world):
     assert adapted._spyre_tp.world == world
     cfg = hf_common.text_config(adapted.config)
     layer0 = hf_common.get_backbone(adapted).layers[0]
-    assert (
-        layer0.self_attn.q_proj.weight.shape[0]
-        == cfg.num_attention_heads * 128 // world
-    )
-    assert layer0.mlp.down_proj.weight.shape[1] == cfg.intermediate_size // world
+    if not parts:
+        assert (
+            layer0.self_attn.q_proj.weight.shape[0]
+            == cfg.num_attention_heads * 128 // world
+        )
+        assert layer0.mlp.down_proj.weight.shape[1] == cfg.intermediate_size // world
     g = torch.Generator().manual_seed(7)
     if case == "generate":
         # Plain generate through the shared Gemma 3 blocks, whose o / down are
@@ -120,6 +135,28 @@ def _run_case(case, rank, world):
         return
     prompt = torch.randint(2, VOCAB - 2, (1, 70), generator=g)
     ids = prompt[0].tolist()
+
+    if case in ("fp8", "fp8_exact"):
+        # fp8_exact: fp32 "codes" make W8A8 lossless, so the sharded fp8
+        # graphs (fused splits, per-row scales, all-reduce of rescaled o / down
+        # partial sums, the gathered head) must equal stock HF, through the
+        # tree verifier and plain generate. With real e4m3 codes each rank
+        # quantizes its own K slice of o / down (a finer granularity than
+        # TP 1), so TP 2 fp8 is its own lossy model: check it is finite.
+        got = MuseTreeVerifier(adapted, 8, prefill_chunk=64, capacity_multiple=512)
+        got = got.prefill(prompt, 16)[0, -1, :VOCAB]
+        want = stock_forward(reference, ids).logits[0, -1]
+        if case == "fp8_exact":
+            torch.testing.assert_close(got, want, **tol)
+            with torch.no_grad():
+                greedy = reference.generate(
+                    prompt, max_new_tokens=12, min_new_tokens=12, do_sample=False
+                )
+            out = hf_muse_glimmer.generate(adapted, prompt, max_new_tokens=12)
+            assert out.tolist() == greedy.tolist()
+        else:
+            assert torch.isfinite(got).all() and got.shape == want.shape
+        return
 
     verifier = MuseTreeVerifier(
         adapted,
@@ -220,3 +257,11 @@ def test_tp2_speculative_decoding_equals_greedy():
 
 def test_tp2_sharded_drafter_equals_the_whole_drafter_and_greedy():
     _spawn(2, "decode_sharded_draft")
+
+
+def test_tp2_fp8_with_lossless_codes_equals_the_reference():
+    _spawn(2, "fp8_exact")
+
+
+def test_tp2_fp8_runs_finite():
+    _spawn(2, "fp8")

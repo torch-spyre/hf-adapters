@@ -34,7 +34,7 @@ from transformers import (
 )
 from transformers.generation.utils import GenerateDecoderOnlyOutput
 
-from hf_adapters import _muse_tp, hf_gemma3
+from hf_adapters import _muse_fp8, _muse_tp, hf_gemma3
 from hf_adapters.hf_common import (
     NormalizedGenerationInputs,
     PrecomputedRotaryEmbedding,
@@ -297,3 +297,5 @@ def prepare_for_spyre(model: PreTrainedModel) -> None:
     setattr(model, "_spyre_compiled_blocks", blocks)
     setattr(model, "_spyre_muse_swa_blocks", blocks)
     setattr(model, "_spyre_muse_full_blocks", full_blocks)
+    # Opt-in W8A8 linears (SPYRE_MUSE_FP8); a no-op when unset.
+    _muse_fp8.maybe_convert(model)

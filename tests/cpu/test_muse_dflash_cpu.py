@@ -41,9 +41,17 @@ from tests._muse_helpers import (
 TOL = dict(rtol=2e-4, atol=2e-4)
 
 
+_TARGETS = {}
+
+
+def setup_target(reference):
+    return _TARGETS[id(reference)]
+
+
 @pytest.fixture
 def setup(monkeypatch):
     reference, adapted = prepared_pair(monkeypatch, _muse_dflash)
+    _TARGETS[id(reference)] = adapted
     assistant = tiny_assistant()
     drafter = MuseDFlashDrafter(
         assistant, adapted, dtype=torch.float32, device="cpu", compile=False
@@ -149,3 +157,48 @@ def test_fp16_safe_norm_is_the_plain_rmsnorm():
     w = torch.rand(64)
     plain = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-5) * w
     torch.testing.assert_close(_muse_dflash._rms(x, w, 1e-5), plain)
+
+
+def test_fp8_drafter_with_lossless_codes_equals_the_hf_loop(monkeypatch, setup):
+    """fp32 codes make W8A8 exact: the fused fp8 drafter graphs (fc blocks,
+    q|k|v, o, gate|up, down) must reproduce the stock assistant."""
+    from hf_adapters import _muse_fp8
+
+    reference, assistant, _ = setup
+    monkeypatch.setattr(_muse_fp8, "FP8", torch.float32)
+    # The tiny assistant's widths are 128-aligned except the 384 intermediate.
+    drafter = MuseDFlashDrafter(
+        assistant,
+        setup_target(reference),
+        dtype=torch.float32,
+        device="cpu",
+        compile=False,
+        fp8=True,
+    )
+    hf = _HFDrafter(assistant, reference)
+    drafter.reset(max_rows=64)
+    prompt = _rows(20, 5)
+    drafter.append(prompt)
+    torch.testing.assert_close(drafter.draft(3), hf.draft(3, prompt), **TOL)
+    new = _rows(4, 6)
+    torch.testing.assert_close(drafter.draft(8, new), hf.draft(8, new), **TOL)
+    assert isinstance(drafter.layers[0]["qkv"], tuple)
+
+
+def test_fp8_drafter_with_real_codes_tracks_the_16_bit_drafter(setup):
+    reference, assistant, drafter16 = setup
+    drafter8 = MuseDFlashDrafter(
+        assistant,
+        setup_target(reference),
+        dtype=torch.float32,
+        device="cpu",
+        compile=False,
+        fp8=True,
+    )
+    for d in (drafter16, drafter8):
+        d.reset(max_rows=64)
+        d.append(_rows(20, 7))
+    a, b = drafter16.draft(3), drafter8.draft(3)
+    assert torch.isfinite(b).all()
+    cos = torch.nn.functional.cosine_similarity(a, b, dim=-1)
+    assert cos.min() > 0.95, cos
