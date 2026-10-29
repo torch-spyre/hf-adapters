@@ -26,6 +26,7 @@ automatically cover them by selecting one representative model per adapter.
 from __future__ import annotations
 
 import os
+import platform
 import types
 
 import pytest
@@ -804,28 +805,55 @@ def _select_representative_paths(
     return paths
 
 
-def _load_excluded_paths() -> frozenset[str]:
-    """Load excluded model paths from tests/model_lists/exclude.yaml."""
+def _load_excluded_paths(arch_specific: bool = True) -> frozenset[str]:
+    """Load excluded model paths from tests/model_lists/exclude.yaml.
+
+    Always loads the ``models:`` section.  On ppc64le also loads the
+    ``ppc64le_models:`` section so Qwen (and any future ppc64le-only exclusions)
+    are never downloaded or run on that architecture.  Pass
+    ``arch_specific=False`` to load only the architecture-independent list.
+    """
+    import yaml
+
     exclude_file = os.path.join(
         os.path.dirname(__file__), "model_lists", "exclude.yaml"
     )
     if not os.path.isfile(exclude_file):
         return frozenset()
-    excluded: set[str] = set()
-    with open(exclude_file) as f:
-        for line in f:
-            stripped = line.split("#", 1)[0].strip()
-            if stripped.startswith("- "):
-                excluded.add(stripped[2:].strip())
+
+    with open(exclude_file, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"{exclude_file} did not parse to a mapping")
+
+    allowed_sections = {"models", "ppc64le_models"}
+    unexpected = set(data.keys()) - allowed_sections
+    if unexpected:
+        raise ValueError(
+            f"{exclude_file} contains unexpected section(s): {sorted(unexpected)}; "
+            f"allowed: {sorted(allowed_sections)}"
+        )
+
+    for key, val in data.items():
+        if not (isinstance(val, list) and all(isinstance(x, str) for x in val)):
+            raise ValueError(
+                f"{exclude_file} '{key}' section must be a list of strings (got {type(val).__name__})"
+            )
+
+    excluded: set[str] = set(data.get("models") or [])
+    if arch_specific and platform.machine() == "ppc64le":
+        excluded |= set(data.get("ppc64le_models") or [])
     return frozenset(excluded)
 
 
 _EXCLUDED_PATHS = _load_excluded_paths()
+_GLOBAL_EXCLUDED_PATHS = _load_excluded_paths(arch_specific=False)
 
 
-def _exclude(paths: list[str]) -> list[str]:
+def _exclude(paths: list[str], arch_specific: bool = True) -> list[str]:
     """Drop any path listed in tests/model_lists/exclude.yaml."""
-    return [p for p in paths if p not in _EXCLUDED_PATHS]
+    excluded = _EXCLUDED_PATHS if arch_specific else _GLOBAL_EXCLUDED_PATHS
+    return [p for p in paths if p not in excluded]
 
 
 # At least one representative model per adapter module (smallest by size), plus
@@ -853,12 +881,15 @@ CAUSAL_PATHS: list[str] = _exclude(
     )
 )
 
+# Perf runs in CI on x86 and perf.yaml is generated from this list, so only the
+# architecture-independent exclusions apply (keeps perf.yaml identical on ppc64le).
 WEEKLY_PERF_PATHS: list[str] = _exclude(
     [
         info["path"]
         for info in CAUSAL_LM_MODELS.values()
         if info.get("weekly_perf", False)
-    ]
+    ],
+    arch_specific=False,
 )
 
 MULTICARD_SMOKE_PATHS: list[str] = _exclude(
@@ -972,6 +1003,14 @@ ALL_CAUSAL_PATHS: list[str] = _exclude(
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") not in (*DRAFTER_KINDS, "diffusion"),
     )
+)
+GLOBAL_ALL_CAUSAL_PATHS: list[str] = _exclude(
+    _all_paths(
+        CAUSAL_LM_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") not in (*DRAFTER_KINDS, "diffusion"),
+    ),
+    arch_specific=False,
 )
 ALL_EMBED_PATHS: list[str] = _exclude(
     _all_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)
@@ -1134,3 +1173,37 @@ SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
 ALL_SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
     _all_paths(SEQ_CLASSIFICATION_MODELS, include_gated=_include_gated_flag)
 )
+
+
+def get_load_test_paths() -> frozenset[str]:
+    """Return all valid registered model paths exercised by load tests."""
+    return frozenset(
+        CAUSAL_PATHS
+        + EMBED_PATHS
+        + MASKED_LM_PATHS
+        + QUESTION_ANSWERING_PATHS
+        + SEQ_CLASSIFICATION_PATHS
+        + TOKEN_CLASSIFICATION_PATHS
+    )
+
+
+def resolve_load_test_models(
+    raw_models: list[str],
+) -> tuple[list[str], list[str]]:
+    """Partition requested model paths into (valid_models_to_run, invalid_models).
+
+    Models excluded on the current architecture are filtered out as intentional skips.
+    Any remaining model not present in registered load test paths is returned as invalid.
+    """
+    excluded = _load_excluded_paths()
+    valid_load_paths = get_load_test_paths()
+    to_run: list[str] = []
+    invalid: list[str] = []
+    for model in raw_models:
+        if model in excluded:
+            continue
+        if model in valid_load_paths:
+            to_run.append(model)
+        else:
+            invalid.append(model)
+    return to_run, invalid

@@ -105,7 +105,26 @@ load-tests: ## Run load tests (suite key: load)
 	# selects the one matching parametrization, same as every other suite target
 	# gets from --model-path (safe here because MODEL_PATH is always one exact
 	# registry path, never an attacker-controlled or ambiguous substring).
-	$(PYTEST) $(PYTEST_ARGS) --suite load tests/spyre/test_load_spyre.py $(if $(MODEL_PATH),-k "$(MODEL_PATH)",$(K_ARGS)) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+	@if [ -n "$(strip $(MODEL_PATH))" ]; then \
+	  models="$$(python3 -c "import sys; sys.path.insert(0, 'tests'); import model_registry as mr; print(' '.join(mr.resolve_load_test_models(sys.argv[1:])[0]))" $(MODEL_PATH))"; \
+	  invalid="$$(python3 -c "import sys; sys.path.insert(0, 'tests'); import model_registry as mr; print(' '.join(mr.resolve_load_test_models(sys.argv[1:])[1]))" $(MODEL_PATH))"; \
+	  if [ -n "$$invalid" ]; then \
+	    echo "ERROR: Invalid model path(s) for load tests: $$invalid" >&2; \
+	    exit 1; \
+	  fi; \
+	  if [ -z "$$models" ]; then \
+	    echo "All requested models in MODEL_PATH are excluded on $$(uname -m) (see tests/model_lists/exclude.yaml); skipping load-tests."; \
+	    if [ -n "$(JUNIT_XML)" ]; then \
+	      mkdir -p "$$(dirname "$(JUNIT_XML)")" && \
+	      echo '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="load" errors="0" failures="0" skipped="1" tests="1"><testcase classname="tests.spyre.test_load_spyre" name="skipped_excluded_models"><skipped message="Excluded on this architecture"/></testcase></testsuite></testsuites>' > "$(JUNIT_XML)"; \
+	    fi; \
+	    exit 0; \
+	  fi; \
+	  k_expr="$$(echo "$$models" | sed -E 's/[[:space:]]+/ or /g')"; \
+	  $(PYTEST) $(PYTEST_ARGS) --suite load tests/spyre/test_load_spyre.py -k "$$k_expr" $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML)); \
+	else \
+	  $(PYTEST) $(PYTEST_ARGS) --suite load tests/spyre/test_load_spyre.py $(K_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML)); \
+	fi
 
 token-compare-tests: ## Run token-compare tests (suite key: token_compare)
 	$(PYTEST) $(PYTEST_ARGS) --suite token_compare tests/spyre/test_e2e_token_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
@@ -154,15 +173,23 @@ PERF_SCHEDULE ?= nightly
 # split: per-model file names, so parallel GHA legs never collide in ingest's workflow/run_id/<basename> dedup key.
 # combined: one shared perf dir, so the last run's report.xml covers every model (Jenkins product-test's require_results_file).
 PERF_REPORT ?= split
+# Expose only this checkout's hf_adapters: the repo root's top-level utils/ would shadow spyre-perf-suite's utils package.
 perf-tests: ## Run spyre-perf-suite once per MODEL_PATH model into RESULTS_DIR (suite key: perf; PERF_REPORT=split|combined)
-	@if [[ -z "$(strip $(MODEL_PATH))" ]]; then echo "ERROR: perf-tests needs MODEL_PATH (see tests/model_lists/perf.yaml)" >&2; exit 1; fi
-	@if [[ "$(PERF_REPORT)" != split && "$(PERF_REPORT)" != combined ]]; then echo "ERROR: PERF_REPORT must be split or combined" >&2; exit 1; fi
-	@$(PERF_SUITE) --help >/dev/null 2>&1 || { echo "ERROR: spyre-perf-suite is not installed in this image. The perf suite ships as a wheel into hf-adapters-dev; a -minimal image has no perf harness." >&2; exit 1; }
-	@# Expose only this checkout's hf_adapters: the repo root's top-level utils/ would shadow spyre-perf-suite's utils package.
-	@results="$$(mkdir -p "$(RESULTS_DIR)" && cd "$(RESULTS_DIR)" && pwd)"; \
+	@if [[ -z "$(strip $(MODEL_PATH))" ]]; then echo "ERROR: perf-tests needs MODEL_PATH (see tests/model_lists/perf.yaml)" >&2; exit 1; fi; \
+	if [[ "$(PERF_REPORT)" != split && "$(PERF_REPORT)" != combined ]]; then echo "ERROR: PERF_REPORT must be split or combined" >&2; exit 1; fi; \
+	results="$$(mkdir -p "$(RESULTS_DIR)" && cd "$(RESULTS_DIR)" && pwd)"; \
 	shim="$$results/.hf-adapters-path"; mkdir -p "$$shim" && ln -sfn "$$PWD/hf_adapters" "$$shim/hf_adapters"; \
+	models="$$(python3 -c "import sys; sys.path.insert(0, 'tests'); import model_registry as mr; print(' '.join(mr._exclude(sys.argv[1:])))" $(MODEL_PATH))"; \
+	if [[ -z "$$models" ]]; then \
+	  echo "All requested models in MODEL_PATH are excluded on $$(uname -m) (see tests/model_lists/exclude.yaml); skipping perf-tests."; \
+	  if [[ "$(PERF_REPORT)" == combined ]]; then \
+	    echo '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="perf" errors="0" failures="0" skipped="1" tests="1"><testcase classname="perf" name="skipped_excluded_models"><skipped message="Excluded on this architecture"/></testcase></testsuite></testsuites>' > "$$results/report.xml"; \
+	  fi; \
+	  exit 0; \
+	fi; \
+	$(PERF_SUITE) --help >/dev/null 2>&1 || { echo "ERROR: spyre-perf-suite is not installed in this image. The perf suite ships as a wheel into hf-adapters-dev; a -minimal image has no perf harness." >&2; exit 1; }; \
 	rc=0; \
-	for model in $(MODEL_PATH); do \
+	for model in $$models; do \
 	  slug="$${model//\//_}"; \
 	  tag=""; [[ "$(PERF_REPORT)" == split ]] && tag="-$$slug"; \
 	  echo "=== perf: $$model ==="; \
