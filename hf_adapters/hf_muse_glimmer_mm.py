@@ -26,11 +26,12 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import torch.nn.functional as F
-from transformers import PreTrainedModel
+from transformers import GenerationConfig, PreTrainedModel
+from transformers.generation.utils import GenerateDecoderOnlyOutput
 from transformers.models.muse_glimmer.modeling_muse_glimmer import (
     get_vision_bilinear_indices_and_weights,
 )
@@ -69,6 +70,66 @@ _VisionState = tuple[torch.Tensor, ...]
 _VisionBlock = Callable[
     [_VisionState, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor
 ]
+
+
+def generate_image_text_to_text(
+    model: PreTrainedModel,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor | None = None,
+    *,
+    pixel_values: torch.Tensor | None = None,
+    image_grid_thw: torch.Tensor | None = None,
+    generation_config: GenerationConfig | None = None,
+    **kwargs: Any,
+) -> torch.Tensor | GenerateDecoderOnlyOutput:
+    """Use Muse's text prefill policy, encoding images once before chunking."""
+    if (pixel_values is None) != (image_grid_thw is None):
+        raise ValueError("pixel_values and image_grid_thw must be supplied together")
+    if pixel_values is None:
+        return hf_muse_glimmer.generate(
+            model,
+            input_ids,
+            attention_mask,
+            generation_config=generation_config,
+            **kwargs,
+        )
+    assert image_grid_thw is not None
+
+    def prepare_inputs(
+        prepared_model: PreTrainedModel, normalized_ids: torch.Tensor
+    ) -> torch.Tensor:
+        features = _vision_features(prepared_model, pixel_values, image_grid_thw)
+        return _embed_and_scatter(prepared_model, normalized_ids, features)
+
+    return hf_muse_glimmer.generate(
+        model,
+        input_ids,
+        attention_mask,
+        generation_config=generation_config,
+        prefill_inputs_fn=prepare_inputs,
+        prefill_backbone_fn=_run_backbone_from_embeds,
+        **kwargs,
+    )
+
+
+def _run_backbone_from_embeds(
+    model: PreTrainedModel,
+    inputs_embeds: torch.Tensor,
+    position_ids: torch.Tensor,
+    attn_mask: torch.Tensor,
+    key_caches: list[torch.Tensor],
+    value_caches: list[torch.Tensor],
+    cache_index: torch.Tensor,
+) -> torch.Tensor:
+    return hf_gemma3._run_backbone_from_embeds(
+        model,
+        hf_muse_glimmer._to_decoder_layout(inputs_embeds),
+        position_ids,
+        attn_mask,
+        key_caches,
+        value_caches,
+        cache_index,
+    )
 
 
 def _segment_mask(
@@ -447,9 +508,9 @@ def _logits_from_embeds(
     *,
     logits_to_keep: int = 0,
 ) -> torch.Tensor:
-    h = hf_gemma3._run_backbone_from_embeds(
+    h = _run_backbone_from_embeds(
         model,
-        hf_muse_glimmer._to_decoder_layout(inputs_embeds),
+        inputs_embeds,
         position_ids,
         attn_mask,
         key_caches,

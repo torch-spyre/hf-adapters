@@ -914,6 +914,14 @@ def _generate_image_text_to_text(
     adapter_inputs: dict[str, Any] = {
         name: kwargs.pop(name, None) for name in adapter_input_names
     }
+    if hasattr(module, "generate_image_text_to_text"):
+        return module.generate_image_text_to_text(
+            model,
+            input_ids,
+            attention_mask=attention_mask,
+            **adapter_inputs,
+            **kwargs,
+        )
 
     # Inputs keyed by token position need the same compaction/padding as input_ids.
     # The mapping value is the padding value for each tensor.

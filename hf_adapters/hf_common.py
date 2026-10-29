@@ -28,14 +28,18 @@ import time
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Optional, cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sympy import factorint
-from transformers import GenerationConfig
+from transformers import GenerationConfig, PreTrainedModel
 from transformers.generation import GenerateDecoderOnlyOutput
+from transformers.generation.streamers import BaseStreamer
+
+if TYPE_CHECKING:
+    from transformers.generation.utils import GenerativePreTrainedModel
 
 # Rank-aware device for multi-Spyre (tensor-parallel) runs. torchrun sets
 # LOCAL_RANK before this module is imported, so each process binds to its local
@@ -2975,28 +2979,31 @@ def select_next_token(
 
 
 def generate(
-    run_forward_fn: Optional[Callable],
-    model,
-    input_ids,
-    max_new_tokens=None,
+    run_forward_fn: Callable[..., torch.Tensor] | None,
+    model: PreTrainedModel,
+    input_ids: torch.Tensor,
+    max_new_tokens: int | None = None,
     *,
-    attention_mask=None,
-    generation_config=None,
-    max_length=None,
-    min_new_tokens=None,
-    do_sample=None,
-    temperature=None,
-    top_k=None,
-    top_p=None,
-    eos_token_id=_UNSET,
-    timing=False,
-    prefill_backbone_fn: Optional[Callable] = None,
-    prefill_fn: Optional[Callable] = None,
-    decode_fn: Optional[Callable] = None,
-    token_aligned_inputs: Optional[dict[str, tuple[torch.Tensor, Any]]] = None,
-    streamer=None,
-    **kwargs,
-):
+    attention_mask: torch.Tensor | None = None,
+    generation_config: GenerationConfig | None = None,
+    max_length: int | None = None,
+    min_new_tokens: int | None = None,
+    do_sample: bool | None = None,
+    temperature: float | None = None,
+    top_k: int | None = None,
+    top_p: float | None = None,
+    eos_token_id: int | list[int] | None | object = _UNSET,
+    timing: bool = False,
+    prefill_backbone_fn: Callable[..., torch.Tensor] | None = None,
+    prefill_inputs_fn: (
+        Callable[[PreTrainedModel, torch.Tensor], torch.Tensor] | None
+    ) = None,
+    prefill_fn: Callable[..., torch.Tensor] | None = None,
+    decode_fn: Callable[..., torch.Tensor] | None = None,
+    token_aligned_inputs: dict[str, tuple[torch.Tensor, Any]] | None = None,
+    streamer: BaseStreamer | None = None,
+    **kwargs: Any,
+) -> torch.Tensor | GenerateDecoderOnlyOutput:
     """Model-agnostic generation: optional chunked prefill, then token decode.
 
     When attached to a model via ``auto_spyre_model.py`` (which binds
@@ -3053,12 +3060,24 @@ def generate(
             as ``run_forward_fn``, returning hidden states. Text prefill runs
             this for every chunk, then applies the prepared LM head only to
             the last token. Custom ``prefill_fn`` hooks take precedence.
+        prefill_inputs_fn: Optional preparation of the complete normalized
+            prompt, called once before the first prefill chunk. Its output
+            replaces token IDs as the input to ``prefill_backbone_fn`` and
+            must preserve the batch and sequence dimensions. This lets VLMs
+            encode images once and chunk the resulting embeddings. Requires
+            ``prefill_backbone_fn`` and cannot be combined with ``prefill_fn``.
         prefill_chunk_size (via generation_config or kwargs): Query length for
             each prefill chunk when the adapter does not configure one. An
             adapter-configured chunk size takes precedence; an explicit caller
             value is ignored with a warning. Without either, prefill is one-shot.
     """
-    overrides = {
+    if prefill_inputs_fn is not None and (
+        prefill_backbone_fn is None or prefill_fn is not None
+    ):
+        raise ValueError(
+            "prefill_inputs_fn requires prefill_backbone_fn without prefill_fn"
+        )
+    overrides: dict[str, Any] = {
         "max_new_tokens": max_new_tokens,
         "max_length": max_length,
         "min_new_tokens": min_new_tokens,
@@ -3137,7 +3156,8 @@ def generate(
     }
 
     input_length = orig_input_ids.shape[1]
-    cfg = model._prepare_generated_length(
+    generation_model = cast("GenerativePreTrainedModel", model)
+    cfg = generation_model._prepare_generated_length(
         generation_config=cfg,
         has_default_max_length=has_default_max_length,
         has_default_min_length=has_default_min_length,
@@ -3145,7 +3165,7 @@ def generate(
         input_ids_length=input_length,
         inputs_tensor=orig_input_ids,
     )
-    model._validate_generated_length(
+    generation_model._validate_generated_length(
         cfg,
         input_ids_length=input_length,
         has_default_max_length=has_default_max_length,
@@ -3185,8 +3205,10 @@ def generate(
     # Specialized cache allocators can use the active chunk geometry to keep
     # local-attention caches bounded during prefill. Store None for one-shot
     # prefill so an earlier generate call cannot leave stale chunk metadata.
-    model._spyre_active_prefill_chunk_size = (
-        query_chunk_size if chunked_prefill else None
+    setattr(
+        model,
+        "_spyre_active_prefill_chunk_size",
+        query_chunk_size if chunked_prefill else None,
     )
 
     # Initialize empty KV caches. Per-layer shapes come from the model
@@ -3251,6 +3273,15 @@ def generate(
                     **normalized_token_inputs,
                 )
             else:
+                prefill_inputs: torch.Tensor = (
+                    input_ids
+                    if prefill_inputs_fn is None
+                    else prefill_inputs_fn(model, input_ids)
+                )
+                if prefill_inputs.shape[:2] != input_ids.shape:
+                    raise ValueError(
+                        "Prepared prefill inputs must preserve the batch and sequence dimensions"
+                    )
                 # Keep Lk fixed at the complete prefill extent while advancing
                 # Lq. Future cache slots are zero and masked, and fixed shapes
                 # avoid compiling one attention graph for every prefix length.
@@ -3268,7 +3299,7 @@ def generate(
                     prefill_mask = prefill_mask_builder.build(chunk_start)
                     prefill_output = text_prefill_fn(  # type: ignore[misc]
                         model,
-                        input_ids[:, chunk_start:chunk_end].to(DEVICE),
+                        prefill_inputs[:, chunk_start:chunk_end].to(DEVICE),
                         position_ids[:, chunk_start:chunk_end].to(DEVICE),
                         prefill_mask,
                         prefill_key_caches,
@@ -3284,6 +3315,7 @@ def generate(
                     if prefill_backbone_fn is not None
                     else prefill_output
                 )
+                del prefill_inputs
             # Only the last chunk's final-token logits matter for next-token
             # selection. Slice on Spyre so the D2H copy transfers [B, V]
             # instead of the full [B, S, V] prefill output.
@@ -3409,7 +3441,7 @@ def generate(
     return GenerateDecoderOnlyOutput(
         sequences=sequences,  # type: ignore[arg-type]
         scores=tuple(generation_scores) if generation_scores else None,
-        logits=tuple(generation_logits) if generation_logits else None,
+        logits=tuple(generation_logits) if generation_logits else None,  # type: ignore[arg-type]
         past_key_values=None,
     )
 

@@ -647,7 +647,7 @@ contiguous and apply the gate in head layout inside one compiled decoder graph.
 Embeddings use the decoder's linear-output device layout, allowing Dynamo to
 reuse the same compiled graph for the first and subsequent structurally identical
 layers.
-For causal-LM generation, prompts longer than 512 real tokens default to
+For causal-LM and Muse VLM generation, prompts longer than 512 real tokens default to
 512-token prefill chunks to bound compilation, while short prompts retain
 64-token alignment. Explicit
 `prefill_chunk_size` kwargs or generation configuration take precedence;
@@ -733,8 +733,12 @@ perception projector, scatters image features into normalized text embeddings,
 then uses the shared Muse/Gemma 3 decoder and generation/cache machinery.
 The image encoder runs once during prefill; subsequent steps decode text.
 The VLM API accepts `pixel_values` and `image_grid_thw` together, or text inputs
-alone. Multimodal prefill uses the shared VLM loop's one-shot, 512-token-aligned
-input path.
+alone. Text-only calls use the causal adapter's optimized prefill path. Image
+calls encode and scatter image features once into the normalized prompt, then
+run decoder prefill in 512-token chunks when the prompt exceeds 512 real tokens.
+Short prompts retain 64-token alignment. Explicit `prefill_chunk_size` overrides
+are supported, including `None` for one-shot prefill; only the last prefill token
+is projected through the LM head.
 
 Vision blocks use window or per-image full attention, spatial RoPE with Muse's
 `[width, height, width, height]` ordering and +1 position offset, and GELU MLPs.

@@ -102,6 +102,10 @@ def generate(
     attention_mask: torch.Tensor | None = None,
     *,
     generation_config: GenerationConfig | None = None,
+    prefill_backbone_fn: Callable[..., torch.Tensor] = _run_backbone_forward,
+    prefill_inputs_fn: (
+        Callable[[PreTrainedModel, torch.Tensor], torch.Tensor] | None
+    ) = None,
     **kwargs: Any,
 ) -> torch.Tensor | GenerateDecoderOnlyOutput:
     """Bound long-prompt compilation while preserving short-prompt shapes.
@@ -130,7 +134,8 @@ def generate(
             input_ids,
             attention_mask=attention_mask,
             generation_config=generation_config,
-            prefill_backbone_fn=_run_backbone_forward,
+            prefill_backbone_fn=prefill_backbone_fn,
+            prefill_inputs_fn=prefill_inputs_fn,
             **kwargs,
         ),
     )
