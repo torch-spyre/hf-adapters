@@ -27,6 +27,8 @@ Batch 1, greedy. Each step:
 
 Every emitted token is the target's argmax, so the output is the target's
 greedy continuation up to the floating-point differences of a tree forward.
+Under ``torchrun`` the target and the assistant run tensor-parallel
+(``_muse_tp``); rank 0's tree is broadcast so every rank verifies the same one.
 
 Usage::
 
@@ -48,6 +50,7 @@ from dataclasses import dataclass, field
 import torch
 
 from hf_adapters._muse_dflash import MuseDFlashDrafter
+from hf_adapters._muse_tp import broadcast
 from hf_adapters._muse_tree import MuseTreeVerifier
 from hf_adapters._spec_tree import accept_greedy, pad_tree
 from hf_adapters.hf_common import text_config
@@ -108,6 +111,7 @@ class TreeSpeculativeDecoder:
             assistant, target, top_k=top_k, depth=depth, **(drafter_kwargs or {})
         )
         self.vocab_size = int(text_config(target.config).vocab_size)
+        self.tp = getattr(target, "_spyre_tp", None)
         self.draft_capacity = None  # rows; set for one compile across prompts
         self.stats = None
 
@@ -134,7 +138,8 @@ class TreeSpeculativeDecoder:
         v, d = self.verifier, self.drafter
         t0 = time.perf_counter()
         logits = v.prefill(input_ids, max_new_tokens)
-        # Copy whole, crop on the host (the head's vocabulary is padded).
+        # Copy whole, crop on the host: the head's vocabulary is padded, and a
+        # device slice of TP-gathered logits corrupts columns past rank 0's.
         first = int(self._host(logits)[0, -1, : self.vocab_size].argmax())
         prompt_rows = v.tap_features()
         need = prompt_rows.shape[0] + max_new_tokens + self.width
@@ -149,6 +154,9 @@ class TreeSpeculativeDecoder:
             t0 = time.perf_counter()
             tokens, parents = d.propose(out[-1], self.width, new_rows)
             tokens, parents = pad_tree(tokens, parents, self.width)
+            if self.tp is not None:
+                # Every rank must verify the same tree (rank 0's).
+                tokens, parents = broadcast((tokens, parents))
             t1 = time.perf_counter()
             logits = v.verify(tokens, parents)
             predictions = (
