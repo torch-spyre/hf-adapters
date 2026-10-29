@@ -343,6 +343,9 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_muse_glimmer.py",
         "size": "30b",
         "dtype": "bfloat16",
+        # DFlash assistant for tree speculative decoding (muse_spec_decode),
+        # exercised by tests/spyre/test_muse_spec_decode_spyre.py.
+        "assistant": "meta-models/Muse-Glimmer-30B-assistant",
     },
     # hf_gemma4
     "gemma4_base": {
@@ -754,6 +757,14 @@ VISION_MODELS = {
         "size": "0.15b",
     },
 }
+
+
+# Muse Glimmer targets with a DFlash assistant: ``(target, assistant)`` paths.
+MUSE_SPEC_PAIRS: list[tuple[str, str]] = [
+    (info["path"], info["assistant"])
+    for info in CAUSAL_LM_MODELS.values()
+    if info.get("assistant")
+]
 
 
 def _get_adapter_module_name(adapter_module: types.ModuleType) -> str:
