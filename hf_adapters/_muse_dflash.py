@@ -34,7 +34,9 @@ This module runs it on Spyre with the layout of ``_xpress_tree``:
   cache. Block rows sit in fixed rows after the context capacity, so one
   graph per layer serves every step; masks are host-built.
 - **The target's head**, called inside the last layer's graph (under TP,
-  after it: the target's vocabulary-sharded head and gather graphs).
+  after it: the target's vocabulary-sharded head and gather graphs, which an
+  fp8 ``lm_head`` also needs).
+- **Opt-in W8A8 linears** (``SPYRE_MUSE_DRAFT_FP8=1``, ``_muse_fp8``).
 - **fp16-safe norms.** Hidden-size RMSNorms run on ``x / 256`` with
   ``eps / 256**2``: the same normalization without squaring large values.
 - **A best-first tree on the host** (``_spec_tree.best_first_tree``): DFlash
@@ -48,7 +50,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from hf_adapters import hf_common
+from hf_adapters import _muse_fp8, hf_common
 from hf_adapters._spec_tree import best_first_tree
 from hf_adapters.hf_common import (
     allocate_kv_cache_tensor,
@@ -86,6 +88,7 @@ class MuseDFlashDrafter:
         dtype=torch.float16,
         device=None,
         compile=True,
+        fp8=None,
         shard=None,
     ):
         self.device = device or hf_common.DEVICE
@@ -123,6 +126,12 @@ class MuseDFlashDrafter:
             raise ValueError(f"depth must be in [1, {self.block - 1}]")
 
         dev, dt = self.device, dtype
+        # Opt-in W8A8 drafter linears (``SPYRE_MUSE_DRAFT_FP8=1``): fc, q|k|v,
+        # o, gate|up and down replace their 16-bit weights (lossy: it changes
+        # proposals, so acceptance, never the target's output).
+        if fp8 is None:
+            fp8 = os.getenv("SPYRE_MUSE_DRAFT_FP8", "") not in ("", "0")
+        self.fp8 = bool(fp8)
 
         def put(t):
             return t.detach().to(dev, dt).contiguous()
@@ -130,17 +139,49 @@ class MuseDFlashDrafter:
         def kn(linear):
             return put(linear.weight.t())
 
+        def q8(*linears):
+            return _muse_fp8._fuse(linears, dev, dt)
+
         hidden = cfg.hidden_size
         fc = assistant.encoder.fc.weight.detach().t()  # [taps * H, H]
-        self.fc = [
-            put(fc[j * hidden : (j + 1) * hidden])
-            for j in range(len(self.target_layer_ids))
-        ]
+        if self.fp8:
+            # One fp8 weight per tap block, each [H, H] (K = 6656 per block).
+            taps = len(self.target_layer_ids)
+            blocks = []
+            for j in range(taps):
+                lin = nn.Linear(hidden, hidden, bias=False)
+                lin.weight = nn.Parameter(
+                    assistant.encoder.fc.weight.detach()[
+                        :, j * hidden : (j + 1) * hidden
+                    ],
+                    requires_grad=False,
+                )
+                blocks.append(q8(lin))
+            self.fc = blocks
+        else:
+            self.fc = [
+                put(fc[j * hidden : (j + 1) * hidden])
+                for j in range(len(self.target_layer_ids))
+            ]
         self.norm_enc = put(assistant.encoder.output_norm_enc.weight)
         self.norm = put(assistant.norm.weight)
         self.layers = []
         for layer in assistant.layers:
             a, m = layer.self_attn, layer.mlp
+            if self.fp8:
+                self.layers.append(
+                    dict(
+                        ln_in=put(layer.input_layernorm.weight),
+                        ln_post=put(layer.post_attention_layernorm.weight),
+                        q_norm=put(a.q_norm.weight),
+                        k_norm=put(a.k_norm.weight),
+                        qkv=q8(a.q_proj, a.k_proj, a.v_proj),
+                        o=q8(a.o_proj),
+                        gate_up=q8(m.gate_proj, m.up_proj),
+                        down=q8(m.down_proj),
+                    )
+                )
+                continue
             self.layers.append(
                 dict(
                     ln_in=put(layer.input_layernorm.weight),
@@ -162,7 +203,7 @@ class MuseDFlashDrafter:
         self.embed = backbone.embed_tokens  # raw lookup, no embed_norm
         head = target.lm_head
         # Under TP the head is a vocabulary shard plus a gather that must run
-        # in its own graph(s) (``_muse_tp``): the last drafter
+        # in its own graph(s) (``_muse_tp`` / ``_muse_fp8``): the last drafter
         # layer then returns hidden rows and the head runs after it.
         self.tp_head = getattr(target, "_spyre_tp_raw_head", None)
         self.head = head
@@ -181,11 +222,17 @@ class MuseDFlashDrafter:
         return rot[None].to(self.device, self.dtype)  # [1, L, 2, 2, D/2]
 
     def _mm(self, x, w):
-        """``x @ w`` for a ``[K, N]`` device weight."""
+        """``x @ w`` for a 16-bit ``[K, N]`` weight or an fp8 ``(codes, scale)``."""
+        if isinstance(w, tuple):
+            return _muse_fp8.fp8_matmul(x, *w)
         return x @ w
 
     def _qkv(self, x, weights, q=True):
         """``(q, k, v)`` rows of ``x`` (``q`` is ``None`` when not needed)."""
+        nq, nkv = self.n_heads * self.head_dim, self.n_kv * self.head_dim
+        if "qkv" in weights:
+            qq, k, v = _muse_fp8.fp8_matmul(x, *weights["qkv"], (nq, nkv, nkv))
+            return (qq if q else None), k, v
         return (x @ weights["q"] if q else None), x @ weights["k"], x @ weights["v"]
 
     def _project(self, feats):
@@ -235,7 +282,11 @@ class MuseDFlashDrafter:
         o = self._mm(o.transpose(1, 2).reshape(1, B, -1), L["o"])
         h = h + self._reduce(o)
         y = _rms(h, L["ln_post"], self.eps)
-        g, u = y @ L["gate"], y @ L["up"]
+        if "gate_up" in L:
+            inter = L["gate_up"][0].shape[1] // 2
+            g, u = _muse_fp8.fp8_matmul(y, *L["gate_up"], (inter, inter))
+        else:
+            g, u = y @ L["gate"], y @ L["up"]
         return h + self._reduce(self._mm(F.silu(g) * u, L["down"]))
 
     def _reduce(self, partial):
