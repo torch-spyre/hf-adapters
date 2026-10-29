@@ -32,7 +32,6 @@ import types
 import torch
 
 from hf_adapters.fp8_linear import swap_linears_to_fp8
-
 from hf_adapters.hf_common import (
     _SDPA_MAX_SEQUENCE_TILE_SIZE,
     embed_text_tokens,

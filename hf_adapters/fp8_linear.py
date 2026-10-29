@@ -19,12 +19,16 @@ Per-output-channel weight scale, per-token dynamic activation scale, no bias.
 
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 import torch.nn as nn
 
 FP8_DTYPE = torch.float8_e4m3fn
 FP8_MAX = 448.0  # torch.finfo(torch.float8_e4m3fn).max
-SCALE_EPS = 1e-4  # CPU path: keeps reciprocal(x_scale) finite for all-zero rows
+# Floor on the per-token activation scale; matches torch-spyre's
+# QUANTSCALEPERTOKENFP8_CLIP_MIN so the CPU path agrees with the device op.
+SCALE_CLIP_MIN = 2.0**-23
 
 # TODO: o_proj and down_proj fail torch-spyre FP8 codegen (DtException on
 # o_proj, ReStickifyOpHBM on SEN143_FP8 for down_proj); kept fp16 until fixed.
@@ -37,6 +41,9 @@ class FP8Linear(nn.Module):
     ``weight`` is stored ``[in_features, out_features]``: transposing an E4M3
     tensor on device needs a restickify Spyre cannot emit for FP8.
     """
+
+    weight: torch.Tensor
+    weight_scale: torch.Tensor
 
     def __init__(
         self,
@@ -69,7 +76,7 @@ class FP8Linear(nn.Module):
             # rescale in layout propagation.
             # x_scale = (
             #     (x.abs().amax(dim=-1, keepdim=True) * (1.0 / FP8_MAX))
-            #     .clamp(min=SCALE_EPS)
+            #     .clamp(min=SCALE_CLIP_MIN)
             #     .clone()
             # )
             wq = (
@@ -80,22 +87,24 @@ class FP8Linear(nn.Module):
                 )
             )
             xq = torch.ops.spyre.quantize_fp8_with_scale(x, x_scale)
-            y = torch.ops.spyre.scaled_mm(
+            y: torch.Tensor = torch.ops.spyre.scaled_mm(
                 xq.reshape(-1, xq.shape[-1]), wq, out_dtype=self.compute_dtype
             )
             y = y.reshape(out_shape) * x_scale * self.weight_scale
             return y.to(x.dtype)
 
-        # CPU reference path; fp32 accumulation avoids fp16 overflow.
-        x_scale = (x.abs().amax(dim=-1, keepdim=True) * (1.0 / FP8_MAX)).clamp(
-            min=SCALE_EPS
+        # CPU reference path, in fp32: 1 / SCALE_CLIP_MIN overflows fp16, and
+        # fp32 accumulation avoids fp16 overflow.
+        xf = x.to(torch.float32)
+        x_scale = (xf.abs().amax(dim=-1, keepdim=True) / FP8_MAX).clamp(
+            min=SCALE_CLIP_MIN
         )
         wq = (
             (self.weight * torch.reciprocal(self.weight_scale))
             .clamp(-FP8_MAX, FP8_MAX)
             .to(FP8_DTYPE)
         )
-        xq = (x * torch.reciprocal(x_scale)).clamp(-FP8_MAX, FP8_MAX).to(FP8_DTYPE)
+        xq = (xf / x_scale).clamp(-FP8_MAX, FP8_MAX).to(FP8_DTYPE)
         acc = xq.reshape(-1, xq.shape[-1]).to(torch.float32) @ wq.to(torch.float32)
         return (acc.reshape(out_shape) * x_scale * self.weight_scale).to(x.dtype)
 
@@ -106,9 +115,9 @@ class FP8Linear(nn.Module):
         )
 
 
-def _dequantize_checkpoint_weight(linear: nn.Module) -> torch.Tensor:
+def _dequantize_checkpoint_weight(linear: nn.Linear) -> torch.Tensor:
     """E4M3 ``[out, in]`` * ``weight_scale [out, 1]`` -> fp16 ``[out, in]``."""
-    scale = linear.weight_scale.to(torch.float32)
+    scale = cast(torch.Tensor, linear.weight_scale).to(torch.float32)
     return (linear.weight.to(torch.float32) * scale).to(torch.float16)
 
 
