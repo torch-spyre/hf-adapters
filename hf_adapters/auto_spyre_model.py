@@ -77,6 +77,7 @@ from transformers import (
     MistralConfig,
     ModernBertConfig,
     MPNetConfig,
+    MuseGlimmerConfig,
     Olmo2Config,
     OlmoConfig,
     OlmoeConfig,
@@ -137,6 +138,8 @@ from hf_adapters import (
     hf_mistral3_vision_mm,
     hf_modernbert,
     hf_mpnet,
+    hf_muse_glimmer,
+    hf_muse_glimmer_mm,
     hf_olmo,
     hf_olmo2,
     hf_olmoe,
@@ -185,6 +188,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     Mistral3Config: hf_mistral3,
     ModernBertConfig: hf_modernbert,
     MPNetConfig: hf_mpnet,
+    MuseGlimmerConfig: hf_muse_glimmer,
     OlmoConfig: hf_olmo,
     Olmo2Config: hf_olmo2,
     OlmoeConfig: hf_olmoe,
@@ -229,6 +233,7 @@ IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     Gemma4UnifiedConfig: hf_gemma4_mm,
     Granite4VisionConfig: hf_granite_vision_mm,
     Mistral3Config: hf_mistral3_vision_mm,
+    MuseGlimmerConfig: hf_muse_glimmer_mm,
 }
 
 # Sequence-classification mapping — used by
@@ -894,16 +899,29 @@ def _generate_image_text_to_text(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor | None = None,
     **kwargs: Any,
-):
+) -> Any:
     """Run multimodal prefill and text decode through the shared generation loop."""
     # Processor outputs consumed by this adapter rather than by generation config.
     adapter_input_names = module._GENERATION_INPUT_NAMES
-    missing = set(adapter_input_names) - set(kwargs)
+    required_input_names: tuple[str, ...] = getattr(
+        module, "_GENERATION_REQUIRED_INPUT_NAMES", adapter_input_names
+    )
+    missing = set(required_input_names) - set(kwargs)
     if missing:
         raise TypeError(
             f"Missing processor inputs for {module.__name__}: {sorted(missing)}"
         )
-    adapter_inputs = {name: kwargs.pop(name) for name in adapter_input_names}
+    adapter_inputs: dict[str, Any] = {
+        name: kwargs.pop(name, None) for name in adapter_input_names
+    }
+    if hasattr(module, "generate_image_text_to_text"):
+        return module.generate_image_text_to_text(
+            model,
+            input_ids,
+            attention_mask=attention_mask,
+            **adapter_inputs,
+            **kwargs,
+        )
 
     # Inputs keyed by token position need the same compaction/padding as input_ids.
     # The mapping value is the padding value for each tensor.
