@@ -27,6 +27,7 @@ from tests.model_registry import (
     CAUSAL_PATHS,
     EMBEDDING_MODELS,
     MASKED_LM_MODELS,
+    MULTIMODAL_EMBEDDING_MODELS,
     NON_BLOCKING_CAUSAL_MODELS,
     QUESTION_ANSWERING_MODELS,
     RERANKER_MODELS,
@@ -70,14 +71,19 @@ def get_adapter_files():
     return adapter_files
 
 
-def get_registered_adapters():
+def get_registered_adapters() -> set[str]:
     """
     Extract all adapter filenames referenced in the model registries.
 
     Returns:
         set: Set of adapter filenames referenced in CAUSAL_LM_MODELS or EMBEDDING_MODELS
     """
-    registered_adapters = set()
+    registered_adapters: set[str] = set()
+
+    for model_info in MULTIMODAL_EMBEDDING_MODELS.values():
+        adapter = model_info.get("adapter")
+        if adapter:
+            registered_adapters.add(adapter)
 
     # Collect adapters from CAUSAL_LM_MODELS
     for model_info in CAUSAL_LM_MODELS.values():

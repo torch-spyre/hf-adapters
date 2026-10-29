@@ -60,6 +60,10 @@ def generate_matrices(
         "embed": (registry.EMBED_PATHS, registry.ALL_EMBED_PATHS),
         "vision": (registry.VISION_PATHS, registry.ALL_VISION_PATHS),
         "clip": (registry.CLIP_PATHS, registry.ALL_CLIP_PATHS),
+        "multimodal_embed_compare": (
+            registry.MULTIMODAL_EMBED_PATHS,
+            registry.ALL_MULTIMODAL_EMBED_PATHS,
+        ),
         "masked_lm": (registry.MASKED_LM_PATHS, registry.ALL_MASKED_LM_PATHS),
         "question_answering": (
             registry.QUESTION_ANSWERING_PATHS,
@@ -130,6 +134,7 @@ def generate_matrices(
         "embed": paths["embed"],
         "vision": paths["vision"],
         "clip": paths["clip"],
+        "multimodal_embed_compare": paths["multimodal_embed_compare"],
         "masked_lm": paths["masked_lm"],
         "question_answering": paths["question_answering"],
         "combined": combined_paths,
@@ -141,7 +146,7 @@ def generate_matrices(
     }
 
 
-def format_for_github_actions(matrices):
+def format_for_github_actions(matrices: dict[str, list[str]]) -> dict[str, str]:
     """
     Format matrices as GitHub Actions JSON output.
 
@@ -157,6 +162,9 @@ def format_for_github_actions(matrices):
         "embed_matrix": json.dumps(matrices["embed"]),
         "vision_matrix": json.dumps(matrices["vision"]),
         "clip_matrix": json.dumps(matrices["clip"]),
+        "multimodal_embed_compare_matrix": json.dumps(
+            matrices["multimodal_embed_compare"]
+        ),
         "masked_lm_matrix": json.dumps(matrices["masked_lm"]),
         "question_answering_matrix": json.dumps(matrices["question_answering"]),
         "combined_matrix": json.dumps(matrices["combined"]),
@@ -190,7 +198,7 @@ def write_github_output(outputs):
             f.write(f"{key}={value}\n")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate dynamic test matrices for GitHub Actions"
     )
@@ -238,6 +246,9 @@ def main():
     )
     print(
         f"  Vision models ({len(matrices['vision'])}): {', '.join(matrices['vision'])}"
+    )
+    print(
+        f"  Multimodal embedding models ({len(matrices['multimodal_embed_compare'])}): {', '.join(matrices['multimodal_embed_compare'])}"
     )
     print(f"  CLIP models ({len(matrices['clip'])}): {', '.join(matrices['clip'])}")
     print(

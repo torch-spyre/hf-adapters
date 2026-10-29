@@ -143,6 +143,111 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 **CPU Accurate** = adapter hidden-states have cosine similarity ≥ 0.999 vs stock HF on CPU (the bound accommodates the bf16-native EmbeddingGemma; fp16 models clear it with wide margin).
 **Spyre Compiles / Spyre Runs** = via `test_e2e_embed_compare_spyre.py`. GTE-Qwen2 compiles and executes end-to-end on Spyre but its pooled embeddings drift from the CPU reference; the Qwen3/Mistral/BERT/XLM-RoBERTa/MPNet/ModernBERT encoder paths match within fp16 noise. EmbeddingGemma runs in **bf16** (fp16 overflows its residual stream) and matches the bf16 CPU reference within bf16 noise (per-token cosine ≥ 0.999; pooled ≥ 0.99).
 
+### Multimodal Embedding (text/image→vectors)
+
+`tests/spyre/test_e2e_multimodal_embed_compare_spyre.py` runs shared text-only,
+image-only (scalar/list), batched retrieval, and three-caption ranking scenarios
+over `MULTIMODAL_EMBED_PATHS`, selected from `MULTIMODAL_EMBEDDING_MODELS`
+(currently SigLIP). CLIP entries in the vision registry are tested separately
+by `tests/spyre/test_e2e_clip_compare_spyre.py`, parametrized by `CLIP_PATHS`.
+The multimodal registry stores only checkpoint identity and adapter metadata.
+The HF dual-encoder suite derives text padding and truncation length from
+`model.config.text_config.max_position_embeddings`. Each scenario is processed
+once; CPU and Spyre forwards receive copies of the same prepared input tensors.
+Image sizes come from the processor and embedding widths from the reference.
+Both standalone feature calls and joint forwards must return each tower's
+`last_hidden_state` and `pooler_output`; joint forwards must also return the
+projected embeddings and both similarity-logit matrices. Missing outputs fail.
+
+Shared tolerances live in `tests/_multimodal_embedding_helpers.py`:
+
+| Check | Threshold |
+|-------|-----------|
+| Pooled embeddings / token and patch hidden states | minimum cosine 0.99 |
+| Image/text cosine scores | absolute tolerance 0.005 |
+| Pairwise retrieval ordering | required when the reference score gap exceeds 0.01; correct top matches always required |
+| Joint logits against the CPU reference | absolute tolerance 1.0, relative tolerance 0.05 |
+
+The reference uses `AutoModel` in fp32; the Spyre model uses
+`AutoSpyreModel.from_pretrained` with its default dtype policy. Tests are grouped
+by checkpoint and share a cache holding one model at a time. Each CPU reference
+is evaluated and released before Spyre loading; forward outputs are reused
+across embeddings, retrieval, logits, and separate text/image hidden-state tests.
+CPU thread limits are restored after reference preparation. Known accuracy
+exceptions use non-strict `pytest.param` xfail marks beside the affected tests,
+scoped to the checkpoint, scenario, and check. Structural errors (missing,
+malformed, or non-finite outputs) remain blocking, including in those cases.
+The same marks apply when selecting the checkpoint through `--model-path`.
+
+The dedicated CLIP suite retains its original text, image, and cross-modal
+ranking tests through SentenceTransformer's Spyre backend, with a 0.97 embedding
+threshold and full caption-ranking equality.
+The `clip` and `multimodal_embed_compare` CI suites have separate model matrices,
+retry/failure gating, and regression/trunk/unit tags. Run them with
+`make clip-tests` and `make multimodal-embed-compare-tests`; `MODEL_PATH` selects
+a checkpoint in either target.
+On Transformers 5.15.0, the restored CLIP suite passed all **3 tests**. Before
+the check separation above, the generic SigLIP suite finished with **9 passed
+and 6 xfailed**: five known vision hidden-state failures and the combined
+uniform-image accuracy case.
+
+On the current one-card image (`torch 2.13.0+cpu`,
+`torch-spyre 0.6.0.dev323+head.g1a7b884e`, Transformers 5.15.0), the refactored
+21-check suite produced **2 passed and 19 failed**. Every image-dependent check
+stopped at vision LayerNorm compilation with `no mechanism to resolve stick
+incompatibility`. The committed scalar-image test at `038be8d` reproduced the
+same error in the same environment, so it predates this test refactor.
+Compiler errors remain blocking; this run did not reach the vision accuracy
+comparisons or remeasure the historical patch cosines below.
+
+`hf_siglip.py` supports `google/siglip2-giant-opt-patch16-384` on Transformers
+5.15.0. This fixed-resolution checkpoint uses `model_type=siglip`, rather
+than the separate Siglip2 NaFlex architecture. Load it with `AutoSpyreModel`
+and `AutoProcessor`; tokenize with `padding="max_length"` (64 tokens).
+Stock `get_text_features` and `get_image_features` return unnormalized
+`pooler_output` vectors. The joint forward returns normalized 1536-dimensional
+text/image embeddings and similarity logits, including the learned scale/bias.
+
+| Model | model\_type | Text / vision head\_dim | CPU Accurate | Spyre Compiles | Spyre Runs |
+|-------|-----------|------------------------|--------------|----------------|------------|
+| google/siglip2-giant-opt-patch16-384 | siglip | 72→128 / 96→128 | Small random models verified | Previously (fp16); vision blocked on current image | Earlier runs failed full vision hidden-state comparison |
+
+Both towers reuse the compiled pre-LN blocks and head/MLP padding from
+`hf_siglip_vision.py` and `hf_common.py`. The text MLP width is padded from
+4304 to 4352. Token/patch embeddings, final norms, text projection and vision
+attention pooling run on CPU; encoder blocks run on Spyre. Compiler-added
+tokens are masked and cropped before pooling. Intermediate hidden states
+and attention weights are not returned by the adapted dual encoder.
+Encoder LayerNorm uses the shared fp32-reduction patch on Spyre. The checkpoint
+comparison in `tests/spyre/test_e2e_multimodal_embed_compare_spyre.py` loads the
+Spyre model through `AutoSpyreModel.from_pretrained`, including default fp16
+selection. It uses a real cat/dog image batch and checks retrieval in both
+directions, cosine scores against HF with `atol=0.005`, pooled embeddings, and
+both towers' `last_hidden_state` (per-token/patch cosine ≥0.99). It also covers
+three text prompts, image-only inference from a scalar PIL image
+or a one-image list, and three-caption retrieval for a cat image.
+These cases use SigLIP's native HF API. The test reports the imported Transformers
+version without asserting a duplicate version pin.
+
+**Vision accuracy remains unresolved.** Against an fp32 CPU reference, the
+fp16 Spyre cat/dog minimum patch cosines are 0.104/0.558. The fp16 CPU model
+also drifts (0.285/0.731), so using an fp16 reference obscured part of the error.
+A trace of all 40 vision blocks shows accumulated divergence: Spyre first falls
+below 0.99 at blocks 12/20, versus CPU fp16 at blocks 20/31. Full-fp32 Spyre
+execution fails compilation with an unsupported reduction layout; fp32 residuals
+and LayerNorm on CPU did not resolve fp16 attention/MLP drift.
+The test parameters mark SigLIP vision hidden-state cosine failures as expected,
+retaining the 0.99 threshold. Text hidden states, pooled embeddings, retrieval
+and reference logits are separate checks. Uniform-color images have a separate
+non-strict expected failure for pooled/retrieval accuracy.
+The earlier 0.00504 score discrepancy was from **SigLIP's three-caption scenario**
+against an fp16 CPU reference, for the dog distractor caption; it was not a CLIP
+score failure. Current comparisons use fp32 references.
+
+The shared block changes were also checked with Granite Vision 4.1 4B on
+Transformers 5.15.0: `test_vlm_e2e_spyre.py` passed, with 5/5 matching next tokens
+and logit cosine 0.999828–0.999981.
+
 ### Sequence Classification
 
 Encoder models fine-tuned for sequence-level label prediction (sentiment
@@ -210,7 +315,7 @@ all pass that check.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 40 adapters · 63 verified checkpoints · 10K+ compatible models.
+**Coverage:** 41 adapters · 63 verified checkpoints · 10K+ compatible models.
 The 63 verified rows are 39 generative + 13 embedding + 2 seq-classification +
 2 token-classification + 6 vision-language + 1 speculative-decoding drafter (see
 the Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are bare vision-tower components
@@ -264,6 +369,7 @@ pattern, norms, and weight layout.
 | hf\_granite\_vision.py | granite (text) | 1 | — |
 | hf\_granite\_vision\_mm.py | granite4\_vision (multimodal) | 1 | — |
 | hf\_siglip\_vision.py | SigLIP vision tower | 1 | SigLIP towers of other VLMs (extracted as a bare `SiglipVisionModel`) |
+| hf\_siglip.py | siglip (text/image embeddings) | 0 | google/siglip2-giant-opt-patch16-384 (fp16; pooled retrieval passes, full vision hidden-state accuracy fails as described above). |
 | hf\_mistral3\_vision\_mm.py | mistral3 (multimodal) | 2 | Mistral-Small-3.1/3.2 Vision; Ministral-3-14B-Instruct-2512 (ministral3 text backbone, bf16) |
 | hf\_pixtral\_vision.py | Pixtral vision tower | 1 | Pixtral towers of Mistral3 Vision checkpoints |
 | hf\_bert.py | bert | 3 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants, BERT NER/POS/chunking fine-tunes |

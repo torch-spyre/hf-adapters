@@ -3847,19 +3847,19 @@ def make_encoder_block(
 
 def make_vision_encoder_block(
     *,
-    q_proj,
-    k_proj,
-    v_proj,
-    o_proj,
-    layer_norm1,
-    layer_norm2,
-    ffn_in,
-    act,
-    ffn_out,
-    num_heads,
-    head_dim,
-    scale,
-):
+    q_proj: torch.nn.Module,
+    k_proj: torch.nn.Module,
+    v_proj: torch.nn.Module,
+    o_proj: torch.nn.Module,
+    layer_norm1: torch.nn.Module,
+    layer_norm2: torch.nn.Module,
+    ffn_in: torch.nn.Module,
+    act: Callable[[torch.Tensor], torch.Tensor],
+    ffn_out: torch.nn.Module,
+    num_heads: int,
+    head_dim: int,
+    scale: float,
+) -> Callable[..., torch.Tensor]:
     """Compile a **pre-LN** bidirectional vision-transformer block (SigLIP/CLIP).
 
     Counterpart of ``make_encoder_block`` (which is post-LN, BERT-style). A
@@ -3869,8 +3869,8 @@ def make_vision_encoder_block(
         h = h + o_proj(SDPA(qkv(layer_norm1(h))))
         h = h + ffn_out(act(ffn_in(layer_norm2(h))))
 
-    There is no attention mask and no KV cache — every patch attends to every
-    patch (full bidirectional attention over a fixed-length patch sequence).
+    There is no KV cache. By default every patch attends to every patch;
+    callers can pass an attention mask for text tokens or padded sequences.
 
     Args:
         q_proj/k_proj/v_proj/o_proj: per-head attention projections
@@ -3883,25 +3883,46 @@ def make_vision_encoder_block(
             softmax temperature).
     """
 
-    def block_forward(hidden_states):
+    def block_forward(
+        hidden_states: torch.Tensor, attn_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         bsz, seq_len, _ = hidden_states.shape
 
         residual = hidden_states
         h = layer_norm1(hidden_states)
-        q = q_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
-        k = k_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
-        v = v_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+        # ``.contiguous()`` after the transpose is REQUIRED on Spyre: the fused
+        # lowering of ``transpose(1, 2) -> scaled_dot_product_attention`` reads
+        # the non-contiguous (transposed) q/k/v with the wrong stick layout and
+        # returns garbage (per-token cosine ~0 vs CPU). No-op on CPU.
+        q = (
+            q_proj(h)
+            .view(bsz, seq_len, num_heads, head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
+        k = (
+            k_proj(h)
+            .view(bsz, seq_len, num_heads, head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
+        v = (
+            v_proj(h)
+            .view(bsz, seq_len, num_heads, head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
 
         attn_out = F.scaled_dot_product_attention(
             q,
             k,
             v,
-            attn_mask=None,
+            attn_mask=attn_mask,
             dropout_p=0.0,
             is_causal=False,
             scale=scale,
         )
-        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
+        attn_out = attn_out.transpose(1, 2).contiguous().reshape(bsz, seq_len, -1)
         attn_out = o_proj(attn_out)
         hidden_states = residual + attn_out
 

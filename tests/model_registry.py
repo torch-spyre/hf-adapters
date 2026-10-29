@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import types
+from typing import Any
 
 import pytest
 
@@ -739,6 +740,17 @@ VISION_MODELS = {
 }
 
 
+MULTIMODAL_EMBEDDING_MODELS: dict[str, dict[str, Any]] = {
+    "siglip2_giant_opt_patch16_384": {
+        "name": "SigLIP2 giant-opt patch16 384",
+        "path": "google/siglip2-giant-opt-patch16-384",
+        "adapter": "hf_siglip.py",
+        "kind": "multimodal_embedding",
+        "size": "1.8b",
+    },
+}
+
+
 def _get_adapter_module_name(adapter_module: types.ModuleType) -> str:
     """Extract module name from adapter module object (e.g., hf_qwen3)."""
     return adapter_module.__name__.split(".")[-1]
@@ -889,6 +901,12 @@ XPRESS_PATHS: list[str] = _exclude(
 EMBED_PATHS: list[str] = _exclude(
     _select_representative_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)
 )
+MULTIMODAL_EMBED_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        MULTIMODAL_EMBEDDING_MODELS,
+        include_gated=_include_gated_flag,
+    )
+)
 MASKED_LM_PATHS: list[str] = _exclude(
     _select_representative_paths(MASKED_LM_MODELS, include_gated=_include_gated_flag)
 )
@@ -956,6 +974,7 @@ REMOTE_CODE_PATHS: frozenset[str] = frozenset(
         QUESTION_ANSWERING_MODELS,
         TOKEN_CLASSIFICATION_MODELS,
         VISION_MODELS,
+        MULTIMODAL_EMBEDDING_MODELS,
     )
     for info in models.values()
     if info.get("trust_remote_code", False)
@@ -972,6 +991,9 @@ ALL_CAUSAL_PATHS: list[str] = _exclude(
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") not in (*DRAFTER_KINDS, "diffusion"),
     )
+)
+ALL_MULTIMODAL_EMBED_PATHS: list[str] = _exclude(
+    _all_paths(MULTIMODAL_EMBEDDING_MODELS, include_gated=_include_gated_flag)
 )
 ALL_EMBED_PATHS: list[str] = _exclude(
     _all_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)

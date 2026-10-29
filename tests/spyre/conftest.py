@@ -24,6 +24,48 @@ Mirrors the same pattern used by ``tests/spyre/edge_cases/conftest.py``.
 import os
 import sys
 
+import pytest
+from _pytest.nodes import Item
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
+
+
+# The generic multimodal suite keeps only one checkpoint (or its load error) in
+# _ModelRunCache to bound host and Spyre memory. Pytest's default test-by-test
+# order interleaves model paths; switching models evicts that cache entry, so
+# returning to a model repeats preparation and retries any failed load. Group
+# its cases by checkpoint to load once and retain failures for all of its tests.
+# Restrict this grouping to that suite so CLIP and VLM test order stays unchanged.
+_GROUP_BY_MODEL_PATH_MODULES: frozenset[str] = frozenset(
+    {"test_e2e_multimodal_embed_compare_spyre.py"}
+)
+
+
+def _model_path_of(item: Item) -> str | None:
+    callspec = getattr(item, "callspec", None)
+    return callspec.params.get("model_path") if callspec is not None else None
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[Item]) -> None:
+    """Group the listed modules by ``model_path``, keeping per-model test order.
+
+    pytest orders parametrized items test by test, which would interleave
+    checkpoints and force a reload on every switch. Only those modules' slots
+    in ``items`` are reordered; every other item keeps its position.
+    """
+    slots: list[int] = [
+        index
+        for index, item in enumerate(items)
+        if item.path.name in _GROUP_BY_MODEL_PATH_MODULES
+        and _model_path_of(item) is not None
+    ]
+    grouped: list[Item] = [items[index] for index in slots]
+    first_seen: dict[str | None, int] = {}
+    for item in grouped:
+        first_seen.setdefault(_model_path_of(item), len(first_seen))
+    grouped.sort(key=lambda item: first_seen[_model_path_of(item)])
+    for index, item in zip(slots, grouped):
+        items[index] = item
