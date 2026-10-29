@@ -670,8 +670,8 @@ models-ops = [
     { name = "pyyaml" },
     { name = "regex" },
 ]
-oot = [{ name = "oot-framework", git = "https://github.com/torch-spyre/torch-spyre?subdirectory=tests%2Foot_framework&tag=v0.5.0-rc.7" }]
-spyre = [{ name = "torch-spyre", git = "https://github.com/torch-spyre/torch-spyre?tag=v0.5.0-rc.7" }]
+oot = [{ name = "oot-framework", git = "https://github.com/torch-spyre/torch-spyre?subdirectory=tests%2Foot_framework&tag=v0.5.0-rc.8" }]
+spyre = [{ name = "torch-spyre", git = "https://github.com/torch-spyre/torch-spyre?tag=v0.5.0-rc.8" }]
 test = [
     { name = "pillow" },
     { name = "pytest", specifier = ">=9.0,<9.1" },
@@ -1434,7 +1434,7 @@ wheels = [
 [[package]]
 name = "oot-framework"
 version = "0.1.0"
-source = { git = "https://github.com/torch-spyre/torch-spyre?subdirectory=tests%2Foot_framework&tag=v0.5.0-rc.7#0f25655f26ac1e5c27fc5569b653a1d82028ce4f" }
+source = { git = "https://github.com/torch-spyre/torch-spyre?subdirectory=tests%2Foot_framework&tag=v0.5.0-rc.8#78be65542c1dc27923c9813e798c92461056edbe" }
 dependencies = [
     { name = "expecttest" },
     { name = "pydantic" },
@@ -2752,8 +2752,8 @@ wheels = [
 
 [[package]]
 name = "torch-spyre"
-version = "0.5.0rc7"
-source = { git = "https://github.com/torch-spyre/torch-spyre?tag=v0.5.0-rc.7#0f25655f26ac1e5c27fc5569b653a1d82028ce4f" }
+version = "0.5.0rc8"
+source = { git = "https://github.com/torch-spyre/torch-spyre?tag=v0.5.0-rc.8#78be65542c1dc27923c9813e798c92461056edbe" }
 dependencies = [
     { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
