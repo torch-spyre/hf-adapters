@@ -41,16 +41,19 @@ from hf_adapters.spyre_tensor_parallel import (
     SPYRE_REPLICATED_EMBEDDING,
     SPYRE_REPLICATED_LINEAR,
     SPYRE_ROWWISE,
+    SPYRE_ROWWISE_DEFERRED_REDUCE,
     SpyreColwiseGatherOutputParallel,
     SpyreColwiseParallel,
     SpyreEmbeddingColwiseParallel,
     SpyreEmbeddingRowwiseParallel,
+    SpyreRowwiseDeferredReduceParallel,
     SpyreRowwiseParallel,
     SpyreRowwiseSplitInputParallel,
     _matches_plan,
     _reassemble_all_gather_last_dim,
     prepare_spyre_tp_plan,
     register_spyre_tp_styles,
+    spyre_compiled_all_reduce,
 )
 
 
@@ -71,9 +74,10 @@ class _ToyModel(nn.Module):
 
 
 class _FakeMesh:
-    def __init__(self, size, rank):
+    def __init__(self, size, rank, group_name="test_group"):
         self._size = size
         self._rank = rank
+        self._group_name = group_name
 
     def size(self):
         return self._size
@@ -81,9 +85,8 @@ class _FakeMesh:
     def get_local_rank(self):
         return self._rank
 
-    @staticmethod
-    def get_group():
-        return SimpleNamespace(group_name="test_group")
+    def get_group(self):
+        return SimpleNamespace(group_name=self._group_name)
 
 
 def test_reassemble_dim0_all_gather_on_last_dimension():
@@ -115,6 +118,30 @@ def test_reassemble_dim0_all_gather_removes_per_rank_padding():
     )
 
     assert torch.equal(result, torch.tensor([[[10, 11, 12, 20, 21]]]))
+
+
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+def test_compiled_all_reduce_promotes_only_bfloat16(monkeypatch, dtype):
+    calls = []
+
+    def fake_all_reduce(tensor, op, group_name):
+        calls.append((tensor.dtype, op, group_name))
+        return tensor + 1
+
+    monkeypatch.setattr(torch.ops._c10d_functional, "all_reduce", fake_all_reduce)
+    monkeypatch.setattr(
+        torch.ops._c10d_functional, "wait_tensor", lambda tensor: tensor
+    )
+    tensor = torch.ones(2, dtype=dtype)
+
+    output = spyre_compiled_all_reduce(tensor, "test_group")
+
+    expected_collective_dtype = (
+        torch.float32 if dtype == torch.bfloat16 else torch.float16
+    )
+    assert calls == [(expected_collective_dtype, "sum", "test_group")]
+    assert output.dtype == dtype
+    assert torch.equal(output, torch.full_like(output, 2))
 
 
 def test_plan_matching_uses_transformers_glob_semantics():
@@ -328,6 +355,45 @@ def test_prepare_spyre_tp_plan_translates_and_covers_placement():
     assert result["lm_head"] == SPYRE_REPLICATED_LINEAR
 
 
+@pytest.mark.parametrize(
+    "module_name",
+    ["model.layers.*.o_proj", "model.layers.0.o_proj"],
+)
+def test_prepare_spyre_tp_plan_defers_selected_rowwise_reduction(module_name):
+    result = prepare_spyre_tp_plan(
+        _ToyModel(),
+        {module_name: "rowwise"},
+        deferred_rowwise_modules={"model.layers.*.o_proj"},
+    )
+
+    assert result[module_name] == SPYRE_ROWWISE_DEFERRED_REDUCE
+
+
+def test_prepare_spyre_tp_plan_rejects_incompatible_deferred_style():
+    with pytest.raises(ValueError, match="deferred-reduction.*colwise"):
+        prepare_spyre_tp_plan(
+            _ToyModel(),
+            {"model.layers.0.o_proj": "colwise"},
+            deferred_rowwise_modules={"model.layers.*.o_proj"},
+        )
+
+
+def test_deferred_rowwise_output_keeps_local_partial_and_bias():
+    style = SpyreRowwiseDeferredReduceParallel()
+    module = nn.Linear(2, 2, bias=True)
+    bias = module.bias
+    inputs = (torch.ones(1, 2),)
+    partial = torch.tensor([[3.0, 4.0]])
+
+    prepared = style._prepare_input_fn(module, inputs, _FakeMesh(2, 0))
+    output = style._prepare_output_fn(module, partial, _FakeMesh(2, 0))
+
+    assert torch.equal(prepared, inputs[0])
+    assert module.bias is None
+    assert module._bias is bias
+    assert output is partial
+
+
 def test_embedding_styles_reconstruct_with_their_registered_dimension():
     prepare_spyre_tp_plan(_ToyModel(), {})
 
@@ -387,6 +453,7 @@ def test_cpu_staged_styles_return_local_cpu_shards():
         SpyreColwiseParallel,
         SpyreColwiseGatherOutputParallel,
         SpyreRowwiseParallel,
+        SpyreRowwiseDeferredReduceParallel,
         SpyreRowwiseSplitInputParallel,
     ),
 )
@@ -476,6 +543,175 @@ def test_gemma4_tp4_groups_kv_only_when_a_shard_would_split_a_head():
     assert result[f"{prefix}.*.self_attn.o_proj"] == SPYRE_ROWWISE
     assert f"{prefix}.1.self_attn.k_proj" not in result
     assert f"{prefix}.1.self_attn.v_proj" not in result
+
+
+def _gemma4_moe_tp_layer(group_names=None):
+    layer = SimpleNamespace(
+        self_attn=SimpleNamespace(o_proj=nn.Linear(2, 2)),
+        mlp=SimpleNamespace(down_proj=nn.Linear(2, 2)),
+        experts=nn.Module(),
+    )
+    if group_names is not None:
+        modules = (layer.self_attn.o_proj, layer.mlp.down_proj, layer.experts)
+        plans = (
+            SPYRE_ROWWISE_DEFERRED_REDUCE,
+            SPYRE_ROWWISE_DEFERRED_REDUCE,
+            "moe_tp_experts",
+        )
+        for module, plan, group_name in zip(modules, plans, group_names, strict=True):
+            module._hf_device_mesh = _FakeMesh(2, 0, group_name)
+            module._hf_tp_plan = plan
+    return layer
+
+
+def test_gemma4_moe_tp_accepts_no_tp_or_standard_placement():
+    assert hf_gemma4_moe._gemma4_moe_tp_group_name(_gemma4_moe_tp_layer()) is None
+    assert (
+        hf_gemma4_moe._gemma4_moe_tp_group_name(
+            _gemma4_moe_tp_layer(("test_group",) * 3)
+        )
+        == "test_group"
+    )
+
+
+def test_gemma4_moe_tp_rejects_partial_placement():
+    layer = _gemma4_moe_tp_layer(("test_group",) * 3)
+    del layer.mlp.down_proj._hf_device_mesh
+
+    with pytest.raises(
+        ValueError, match="requires o_proj, dense down_proj, and experts"
+    ):
+        hf_gemma4_moe._gemma4_moe_tp_group_name(layer)
+
+
+@pytest.mark.parametrize(
+    ("module_path", "plan", "message"),
+    [
+        ("self_attn.o_proj", SPYRE_ROWWISE, "deferred-rowwise"),
+        ("mlp.down_proj", SPYRE_ROWWISE, "deferred-rowwise"),
+        ("experts", SPYRE_ROWWISE, "moe_tp_experts"),
+    ],
+)
+def test_gemma4_moe_tp_rejects_incompatible_styles(module_path, plan, message):
+    layer = _gemma4_moe_tp_layer(("test_group",) * 3)
+    module = layer
+    for name in module_path.split("."):
+        module = getattr(module, name)
+    module._hf_tp_plan = plan
+
+    with pytest.raises(ValueError, match=message):
+        hf_gemma4_moe._gemma4_moe_tp_group_name(layer)
+
+
+def test_gemma4_moe_tp_rejects_mismatched_groups():
+    layer = _gemma4_moe_tp_layer(("test_group", "other_group", "test_group"))
+
+    with pytest.raises(ValueError, match="same TP group"):
+        hf_gemma4_moe._gemma4_moe_tp_group_name(layer)
+
+
+def test_gemma4_attention_explicitly_reduces_deferred_output(monkeypatch):
+    attention = hf_gemma4.Gemma4Attention.__new__(hf_gemma4.Gemma4Attention)
+    nn.Module.__init__(attention)
+    attention.o_proj = nn.Linear(2, 2, bias=False)
+    attention.o_proj.weight.data.copy_(torch.eye(2))
+    attention.o_proj._bias = torch.tensor([3.0, 4.0])
+    attention.tp_group_name = "test_group"
+    attention.num_q_heads = 1
+    attention.num_kv_heads = 1
+    attention.head_dim = 2
+    attention.is_kv_eq_v = False
+    attention.q_proj = nn.Identity()
+    attention.k_proj = nn.Identity()
+    attention.v_proj = nn.Identity()
+    attention.q_norm = SimpleNamespace(weight=None, eps=1e-6)
+    attention.k_norm = SimpleNamespace(weight=None, eps=1e-6)
+    attention.v_norm = SimpleNamespace(weight=None, eps=1e-6)
+    attention.is_sliding = False
+    attention.scaling = 1.0
+
+    reduced = []
+    monkeypatch.setattr(hf_gemma4, "_gemma4_rms_norm", lambda value, *_args: value)
+    monkeypatch.setattr(hf_gemma4, "apply_rope_matmul", lambda value, _freqs: value)
+    monkeypatch.setattr(
+        hf_gemma4,
+        "kv_cache_update",
+        lambda k, v, key_cache, value_cache, _index: (k, v),
+    )
+    monkeypatch.setattr(
+        torch.nn.functional,
+        "scaled_dot_product_attention",
+        lambda q, _k, _v, **_kwargs: q,
+    )
+
+    def fake_all_reduce(tensor, group_name):
+        reduced.append((tensor.clone(), group_name))
+        return tensor
+
+    monkeypatch.setattr(hf_gemma4, "spyre_compiled_all_reduce", fake_all_reduce)
+    hidden = torch.tensor([[[1.0, 2.0]]])
+
+    output, _, _ = attention(
+        hidden,
+        selected_freqs=None,
+        attn_mask=None,
+        key_cache=None,
+        value_cache=None,
+        cache_index=None,
+    )
+
+    assert len(reduced) == 1
+    assert reduced[0][1] == "test_group"
+    assert torch.equal(reduced[0][0], hidden)
+    assert torch.equal(output, torch.tensor([[[4.0, 6.0]]]))
+
+
+def test_gemma4_moe_fuses_ffn_partials_before_branch_norms(monkeypatch):
+    block = hf_gemma4_moe.Gemma4MoEBlock.__new__(hf_gemma4_moe.Gemma4MoEBlock)
+    nn.Module.__init__(block)
+    block._tp_group_name = "test_group"
+    block.mlp = nn.Module()
+    block.mlp.down_proj = nn.Linear(2, 2, bias=False)
+    block.mlp.down_proj._bias = torch.tensor([5.0, 6.0])
+    for name in (
+        "post_feedforward_layernorm_1",
+        "post_feedforward_layernorm_2",
+        "post_feedforward_layernorm",
+    ):
+        setattr(
+            block,
+            name,
+            SimpleNamespace(weight=torch.ones(2), eps=1e-6),
+        )
+
+    events = []
+
+    def fake_all_reduce(tensor, group_name):
+        events.append(("reduce", tensor.clone(), group_name))
+        return tensor
+
+    def fake_rms_norm(tensor, _weight, _eps):
+        events.append(("norm", tensor.clone(), None))
+        return tensor
+
+    monkeypatch.setattr(hf_gemma4_moe, "spyre_compiled_all_reduce", fake_all_reduce)
+    monkeypatch.setattr(hf_gemma4_moe, "_gemma4_rms_norm", fake_rms_norm)
+
+    dense_partial = torch.tensor([[[1.0, 2.0]]])
+    moe_partial = torch.tensor([[3.0, 4.0]])
+    dense_out, moe_out = block._tp_reduce_ffn(dense_partial, moe_partial)
+    block._finish_ffn(
+        torch.zeros_like(dense_partial),
+        dense_out,
+        moe_out,
+        torch.tensor(1.0),
+    )
+
+    assert events[0][0::2] == ("reduce", "test_group")
+    assert torch.equal(events[0][1], torch.tensor([[[1.0, 2.0, 3.0, 4.0]]]))
+    assert [event[0] for event in events] == ["reduce", "norm", "norm", "norm"]
+    assert torch.equal(events[1][1], torch.tensor([[[6.0, 8.0]]]))
+    assert torch.equal(events[2][1], torch.tensor([[[3.0, 4.0]]]))
 
 
 def _run_gemma4_finish_block(tp_group_name, has_ple):

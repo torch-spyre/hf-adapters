@@ -40,6 +40,7 @@ from transformers.integrations.tensor_parallel import (
 SPYRE_COLWISE = "spyre_colwise"
 SPYRE_COLWISE_GATHER_OUTPUT = "spyre_colwise_gather_output"
 SPYRE_ROWWISE = "spyre_rowwise"
+SPYRE_ROWWISE_DEFERRED_REDUCE = "spyre_rowwise_deferred_reduce"
 SPYRE_ROWWISE_SPLIT_INPUT = "spyre_rowwise_split_input"
 SPYRE_EMBEDDING_ROWWISE = "spyre_embedding_rowwise"
 SPYRE_EMBEDDING_COLWISE = "spyre_embedding_colwise"
@@ -130,6 +131,13 @@ class SpyreRowwiseParallel(RowwiseParallel):
         if len(full_shape) == 0:
             return tuple(full_shape)
         return super().get_expected_sharded_shape(full_shape)
+
+
+class SpyreRowwiseDeferredReduceParallel(SpyreRowwiseParallel):
+    """Return a local rowwise partial for an adapter-managed reduction."""
+
+    def _prepare_output_fn(self, mod, outputs, device_mesh):
+        return outputs
 
 
 class SpyreRowwiseSplitInputParallel(SpyreRowwiseParallel):
@@ -320,6 +328,7 @@ _STYLE_INSTANCES = {
     SPYRE_COLWISE: SpyreColwiseParallel(),
     SPYRE_COLWISE_GATHER_OUTPUT: SpyreColwiseGatherOutputParallel(),
     SPYRE_ROWWISE: SpyreRowwiseParallel(),
+    SPYRE_ROWWISE_DEFERRED_REDUCE: SpyreRowwiseDeferredReduceParallel(),
     SPYRE_ROWWISE_SPLIT_INPUT: SpyreRowwiseSplitInputParallel(),
     SPYRE_EMBEDDING_ROWWISE: SpyreEmbeddingRowwiseParallel(),
     SPYRE_EMBEDDING_COLWISE: SpyreEmbeddingColwiseParallel(),
@@ -335,6 +344,7 @@ _STYLE_DIMS = {
     SPYRE_COLWISE: (-2, -1),
     SPYRE_COLWISE_GATHER_OUTPUT: (-2, -1),
     SPYRE_ROWWISE: (-1, None),
+    SPYRE_ROWWISE_DEFERRED_REDUCE: (-1, None),
     SPYRE_ROWWISE_SPLIT_INPUT: (-1, None),
     SPYRE_EMBEDDING_ROWWISE: (0, None),
     SPYRE_EMBEDDING_COLWISE: (1, None),
@@ -406,6 +416,7 @@ def prepare_spyre_tp_plan(
     *,
     cpu_staged_modules: Iterable[str] = (),
     cpu_replicated_modules: Iterable[str] = (),
+    deferred_rowwise_modules: Iterable[str] = (),
     replicated_linear_modules: Iterable[str] = (),
     replicated_embedding_modules: Iterable[str] = (),
     grouped_colwise_modules: Mapping[str, int] | None = None,
@@ -419,6 +430,7 @@ def prepare_spyre_tp_plan(
     """
     register_spyre_tp_styles()
     staged = set(cpu_staged_modules)
+    deferred_rowwise_plan = dict.fromkeys(deferred_rowwise_modules, "")
     cpu_replicated_modules = set(cpu_replicated_modules)
     replicated_linear_modules = set(replicated_linear_modules)
     replicated_embedding_modules = set(replicated_embedding_modules)
@@ -434,6 +446,13 @@ def prepare_spyre_tp_plan(
                     f"CPU-staged TP module {module_name!r} uses unsupported "
                     f"style {style!r}"
                 ) from error
+        elif _matches_plan(f"{module_name}.weight", deferred_rowwise_plan):
+            if style != "rowwise":
+                raise ValueError(
+                    f"deferred-reduction TP module {module_name!r} uses "
+                    f"unsupported style {style!r}"
+                )
+            rewritten[module_name] = SPYRE_ROWWISE_DEFERRED_REDUCE
         else:
             rewritten[module_name] = _STYLE_REWRITES.get(style, style)
 
@@ -489,12 +508,20 @@ def spyre_compiled_all_reduce(tensor, group_name):
     lowering plans against the realized device allocation, so a separate
     PyTorch flatten/copy is neither necessary nor desirable here.
 
+    Spyre's collective implementation accumulates with an ``add`` operation,
+    which is not supported for bfloat16. Promote those inputs to float32 for
+    the reduction and restore their original dtype afterward.
+
     This helper is intended to be called from inside a ``torch.compile``
     region.  Eager module hooks should continue using the layout-aware helpers
     above and below.
     """
+    input_dtype = tensor.dtype
+    if input_dtype == torch.bfloat16:
+        tensor = tensor.float()
     reduced = torch.ops._c10d_functional.all_reduce(tensor, "sum", group_name)
-    return torch.ops._c10d_functional.wait_tensor(reduced)
+    reduced = torch.ops._c10d_functional.wait_tensor(reduced)
+    return reduced.to(input_dtype)
 
 
 def _reassemble_all_gather_last_dim(

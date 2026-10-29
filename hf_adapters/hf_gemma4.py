@@ -349,6 +349,7 @@ class Gemma4Attention(nn.Module):
         self.window_size = window_size
         self.swa_mode = swa_mode
         self.is_causal = is_causal
+        self.tp_group_name = None
 
     def forward(
         self,
@@ -403,7 +404,13 @@ class Gemma4Attention(nn.Module):
                 enable_gqa=True,
             )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
-        return self.o_proj(attn_out), key_cache, value_cache
+        attn_out = self.o_proj(attn_out)
+        if self.tp_group_name is not None:
+            attn_out = spyre_compiled_all_reduce(attn_out, self.tp_group_name)
+            o_bias = getattr(self.o_proj, "_bias", None)
+            if o_bias is not None:
+                attn_out = attn_out + o_bias
+        return attn_out, key_cache, value_cache
 
 
 class Gemma4Block(nn.Module):

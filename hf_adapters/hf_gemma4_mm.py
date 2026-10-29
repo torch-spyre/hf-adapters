@@ -83,6 +83,7 @@ from hf_adapters.hf_common import (
 # text adapter.  Forward the text decoder's TP loading policies so MoE weights
 # are staged and low-count KV heads are grouped exactly as in text-only loads.
 SPYRE_TP_CPU_STAGED_MODULES = hf_gemma4_moe.SPYRE_TP_CPU_STAGED_MODULES
+SPYRE_TP_DEFERRED_ROWWISE_MODULES = hf_gemma4_moe.SPYRE_TP_DEFERRED_ROWWISE_MODULES
 spyre_tp_grouped_colwise_modules = hf_gemma4.spyre_tp_grouped_colwise_modules
 
 
