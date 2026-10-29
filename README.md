@@ -1,6 +1,6 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-40-blue)
+![adapters](https://img.shields.io/badge/adapters-42-blue)
 ![compatible](https://img.shields.io/badge/compatible_models-10K%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -13,7 +13,7 @@ from `transformers`.
 
 ## Supported Models
 
-**40 adapters · 10K+ compatible models**
+**42 adapters · 10K+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
 **sequence classification** (sentiment / text categorisation),
@@ -21,9 +21,10 @@ Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers)
 **speculative-decoding drafter** models — from
 Llama / Qwen / Granite / Mistral / Phi / Gemma / OLMo / GPT decoders to BERT /
 XLM-RoBERTa / MPNet / ModernBERT encoders, the Granite Vision 4.1 (SigLIP tower +
-Granite text), Mistral3 Vision (Pixtral tower + Mistral text), and Gemma 4
-(encoder-free and full-vision) multimodal VLMs, plus the DSpark block-propose drafters for
-Qwen 3 / Granite / Gemma 4 and the XPress block-propose drafter (Gemma 4 26B-A4B).
+Granite text), Mistral3 Vision (Pixtral tower + Mistral text), Gemma 4
+(encoder-free and full-vision), and Muse Glimmer multimodal VLMs, plus the DSpark
+block-propose drafters for Qwen 3 / Granite / Gemma 4 and the XPress block-propose
+drafter (Gemma 4 26B-A4B).
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. The **canonical, per-adapter model lists** — verified
@@ -248,9 +249,41 @@ A multimodal checkpoint's config is registered under both auto classes:
 `AutoSpyreModelForCausalLM` selects the text-only adapter (vision tower
 discarded), while `AutoSpyreModelForImageTextToText` selects the combined
 multimodal adapter. This works for Granite Vision (`Granite4VisionConfig`),
-Mistral3 Vision (`Mistral3Config`), and Gemma 4 (`Gemma4UnifiedConfig` for the
-encoder-free variant, or `Gemma4Config` for the full vision-tower variants; see
+Mistral3 Vision (`Mistral3Config`), Gemma 4 (`Gemma4UnifiedConfig` for the
+encoder-free variant, or `Gemma4Config` for the full vision-tower variants),
+as well as Muse Glimmer (`MuseGlimmerConfig`; see
 [ARCHITECTURE.md](ARCHITECTURE.md#multimodal-vlm-path-vision-tower--text-decoder)).
+
+For Muse Glimmer image generation, use `meta-models/Muse-Glimmer-30B` as the
+model and processor path in the example above; the model loads in bf16 by
+default. The combined adapter accepts the processor's
+`pixel_values` and `image_grid_thw` alongside the text inputs and also supports
+text-only prompts through the same API.
+
+### Speculative decoding (Muse Glimmer 30B + DFlash assistant)
+
+```python
+import torch
+from transformers import AutoTokenizer, MuseGlimmerAssistantModel
+from hf_adapters import AutoSpyreModelForCausalLM
+from hf_adapters.hf_common import encode_prompts
+from hf_adapters.muse_spec_decode import TreeSpeculativeDecoder
+
+target = AutoSpyreModelForCausalLM.from_pretrained(
+    "meta-models/Muse-Glimmer-30B", dtype=torch.float16)
+assistant = MuseGlimmerAssistantModel.from_pretrained(
+    "meta-models/Muse-Glimmer-30B-assistant", dtype=torch.float32).eval()
+tok = AutoTokenizer.from_pretrained("meta-models/Muse-Glimmer-30B")
+ids = encode_prompts(tok, ["Explain sliding-window attention."])["input_ids"]
+decoder = TreeSpeculativeDecoder(target, assistant, width=16)
+out = decoder.generate(ids, max_new_tokens=256,
+                       eos_token_id=target.generation_config.eos_token_id)
+```
+
+Batch 1, greedy: the output is the target's greedy continuation. Launch under
+`torchrun --nproc-per-node=2` for two-card tensor parallelism. The opt-in,
+lossy `SPYRE_MUSE_FP8=attn,mlp,lm_head` and `SPYRE_MUSE_DRAFT_FP8=1` knobs are
+described in [ARCHITECTURE.md](ARCHITECTURE.md#muse-glimmer-30b-tree-speculative-decoding).
 
 ## Repo Structure
 

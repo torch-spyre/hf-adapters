@@ -336,6 +336,17 @@ CAUSAL_LM_MODELS = {
         "is_gated": True,
         "size": "1b",
     },
+    # hf_muse_glimmer.py (text backbone)
+    "muse_glimmer_30b": {
+        "name": "Muse Glimmer 30B (text)",
+        "path": "meta-models/Muse-Glimmer-30B",
+        "adapter": "hf_muse_glimmer.py",
+        "size": "30b",
+        "dtype": "bfloat16",
+        # DFlash assistant for tree speculative decoding (muse_spec_decode),
+        # exercised by tests/spyre/test_muse_spec_decode_spyre.py.
+        "assistant": "meta-models/Muse-Glimmer-30B-assistant",
+    },
     # hf_gemma4
     "gemma4_base": {
         "name": "Gemma 4 12B Base",
@@ -728,6 +739,15 @@ VISION_MODELS = {
         "size": "26b",
         "always_test": True,
     },
+    # hf_muse_glimmer_mm.py — Muse vision tower + shared Muse text decoder
+    "muse_glimmer_mm": {
+        "name": "Muse Glimmer 30B (both towers)",
+        "path": "meta-models/Muse-Glimmer-30B",
+        "adapter": "hf_muse_glimmer_mm.py",
+        "kind": "vlm",
+        "dtype": "bfloat16",
+        "size": "30b",
+    },
     # hf_clip.py — CLIP dual-encoder (image + text -> embeddings via ST backend)
     "clip_vit_b_32": {
         "name": "clip-ViT-B-32",
@@ -737,6 +757,14 @@ VISION_MODELS = {
         "size": "0.15b",
     },
 }
+
+
+# Muse Glimmer targets with a DFlash assistant: ``(target, assistant)`` paths.
+MUSE_SPEC_PAIRS: list[tuple[str, str]] = [
+    (info["path"], info["assistant"])
+    for info in CAUSAL_LM_MODELS.values()
+    if info.get("assistant")
+]
 
 
 def _get_adapter_module_name(adapter_module: types.ModuleType) -> str:
