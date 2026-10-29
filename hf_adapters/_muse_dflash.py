@@ -33,14 +33,16 @@ This module runs it on Spyre with the layout of ``_xpress_tree``:
   fp16 sum is formed), and its keys / values are written to each layer's
   cache. Block rows sit in fixed rows after the context capacity, so one
   graph per layer serves every step; masks are host-built.
-- **The target's head**, called inside the last layer's graph, so an fp8
-  ``lm_head`` (``_muse_fp8``) runs in a compiled region too.
+- **The target's head**, called inside the last layer's graph (under TP,
+  after it: the target's vocabulary-sharded head and gather graphs).
 - **fp16-safe norms.** Hidden-size RMSNorms run on ``x / 256`` with
   ``eps / 256**2``: the same normalization without squaring large values.
 - **A best-first tree on the host** (``_spec_tree.best_first_tree``): DFlash
   slots are independent of the path, so a node's score is the sum of its
   slots' log-probs and the tree keeps the ``budget`` best nodes.
 """
+
+import os
 
 import torch
 import torch.nn as nn
@@ -84,6 +86,7 @@ class MuseDFlashDrafter:
         dtype=torch.float16,
         device=None,
         compile=True,
+        shard=None,
     ):
         self.device = device or hf_common.DEVICE
         self.dtype = dtype
@@ -99,6 +102,21 @@ class MuseDFlashDrafter:
         self.n_heads = int(cfg.num_attention_heads)
         self.n_kv = int(cfg.num_key_value_heads)
         self.scaling = float(assistant.layers[0].self_attn.scaling)
+        # Shard the layers with the target's TP group (``SPYRE_MUSE_DRAFT_TP``,
+        # on by default under TP): heads and MLP split as in ``_muse_tp``, with
+        # o / down all-reduced in each layer graph. ``assistant`` is sliced in
+        # place on the host; fc, norms and the head stay replicated.
+        tp = getattr(target, "_spyre_tp", None)
+        if shard is None:
+            shard = tp is not None and os.getenv("SPYRE_MUSE_DRAFT_TP", "1") != "0"
+        self.tp_group = None
+        if shard:
+            if tp is None:
+                raise ValueError("a sharded drafter needs a tensor-parallel target")
+            from hf_adapters._muse_tp import shard_assistant
+
+            self.n_heads, self.n_kv = shard_assistant(assistant, tp)
+            self.tp_group = tp.group_name
         self.top_k = int(top_k)
         self.depth = self.block - 1 if depth is None else int(depth)
         if not 1 <= self.depth < self.block:
@@ -142,7 +160,12 @@ class MuseDFlashDrafter:
         if backbone.embed_tokens.weight.shape[1] != hidden:
             raise ValueError("assistant and target hidden sizes differ")
         self.embed = backbone.embed_tokens  # raw lookup, no embed_norm
-        self.head = target.lm_head
+        head = target.lm_head
+        # Under TP the head is a vocabulary shard plus a gather that must run
+        # in its own graph(s) (``_muse_tp``): the last drafter
+        # layer then returns hidden rows and the head runs after it.
+        self.tp_head = getattr(target, "_spyre_tp_raw_head", None)
+        self.head = head
         self.vocab = int(hf_common.text_config(target.config).vocab_size)
         self._inv_freq = assistant.rotary_emb.inv_freq.detach().to("cpu").double()
         self._compile = compile
@@ -157,18 +180,27 @@ class MuseDFlashDrafter:
         rot = torch.stack([torch.stack([c, -s], 1), torch.stack([s, c], 1)], 1)
         return rot[None].to(self.device, self.dtype)  # [1, L, 2, 2, D/2]
 
+    def _mm(self, x, w):
+        """``x @ w`` for a ``[K, N]`` device weight."""
+        return x @ w
+
+    def _qkv(self, x, weights, q=True):
+        """``(q, k, v)`` rows of ``x`` (``q`` is ``None`` when not needed)."""
+        return (x @ weights["q"] if q else None), x @ weights["k"], x @ weights["v"]
+
     def _project(self, feats):
         """``output_norm_enc(fc(cat(feats)))`` as a sum of per-tap blocks."""
-        y = feats[0] @ self.fc[0]
+        y = self._mm(feats[0], self.fc[0])
         for j in range(1, len(feats)):
-            y = y + feats[j] @ self.fc[j]
+            y = y + self._mm(feats[j], self.fc[j])
         return _rms(y, self.norm_enc, self.eps)
 
     def _context_kv(self, ctx, weights, rope):
         m = ctx.shape[1]
-        k = (ctx @ weights["k"]).view(1, m, self.n_kv, self.head_dim)
+        _, k, v = self._qkv(ctx, weights, q=False)
+        k = k.view(1, m, self.n_kv, self.head_dim)
         k = _rms(k, weights["k_norm"], self.eps, 1.0).transpose(1, 2)
-        v = (ctx @ weights["v"]).view(1, m, self.n_kv, self.head_dim).transpose(1, 2)
+        v = v.view(1, m, self.n_kv, self.head_dim).transpose(1, 2)
         return apply_rope_matmul(k, rope), v
 
     def _layer_body(
@@ -176,15 +208,16 @@ class MuseDFlashDrafter:
     ):
         L, B = self.layers[i], self.block
         x = _rms(h, L["ln_in"], self.eps)
-        q = (x @ L["q"]).view(1, B, self.n_heads, self.head_dim)
+        q, kb, vb = self._qkv(x, L)
+        q = q.view(1, B, self.n_heads, self.head_dim)
         q = apply_rope_matmul(
             _rms(q, L["q_norm"], self.eps, 1.0).transpose(1, 2), rope_blk
         )
-        kb = (x @ L["k"]).view(1, B, self.n_kv, self.head_dim)
+        kb = kb.view(1, B, self.n_kv, self.head_dim)
         kb = apply_rope_matmul(
             _rms(kb, L["k_norm"], self.eps, 1.0).transpose(1, 2), rope_blk
         )
-        vb = (x @ L["v"]).view(1, B, self.n_kv, self.head_dim).transpose(1, 2)
+        vb = vb.view(1, B, self.n_kv, self.head_dim).transpose(1, 2)
         kc, vc = self._context_kv(ctx, L, rope_ctx)
         keys.index_copy_(2, c_idx, kc)
         values.index_copy_(2, c_idx, vc)
@@ -199,9 +232,19 @@ class MuseDFlashDrafter:
             scale=self.scaling,
             enable_gqa=True,
         )
-        h = h + o.transpose(1, 2).reshape(1, B, -1) @ L["o"]
+        o = self._mm(o.transpose(1, 2).reshape(1, B, -1), L["o"])
+        h = h + self._reduce(o)
         y = _rms(h, L["ln_post"], self.eps)
-        return h + (F.silu(y @ L["gate"]) * (y @ L["up"])) @ L["down"]
+        g, u = y @ L["gate"], y @ L["up"]
+        return h + self._reduce(self._mm(F.silu(g) * u, L["down"]))
+
+    def _reduce(self, partial):
+        """Sum a sharded layer's rowwise partial output over the TP group."""
+        if self.tp_group is None:
+            return partial
+        from hf_adapters._muse_tp import all_reduce
+
+        return all_reduce(partial, self.tp_group)
 
     def _fn(self, kind, i):
         key = (kind, i, self.capacity)
@@ -220,7 +263,8 @@ class MuseDFlashDrafter:
                     i, h, ctx, rope_ctx, rope_blk, mask, keys, values, c_idx, b_idx
                 )
                 if last:
-                    return self.head(_rms(h, self.norm, self.eps)), ctx
+                    h = _rms(h, self.norm, self.eps)
+                    return (h if self.tp_head is not None else self.head(h)), ctx
                 return h, ctx
 
         else:
@@ -369,8 +413,8 @@ class MuseDFlashDrafter:
                 ctx,
             )
         self.rows = n
-        # Copy in the device dtype, cast on the host (a materialized fp16 ->
-        # fp32 cast on Spyre permutes lanes).
+        if self.tp_head is not None:
+            h = self.tp_head(to_default_device_layout(h))
         # Copy whole in the device dtype, then crop and cast on the host (a
         # device slice or fp16 -> fp32 cast of the logits is not exact).
         return h.to("cpu")[0, :, : self.vocab].float()

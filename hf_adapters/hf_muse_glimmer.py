@@ -34,7 +34,7 @@ from transformers import (
 )
 from transformers.generation.utils import GenerateDecoderOnlyOutput
 
-from hf_adapters import hf_gemma3
+from hf_adapters import _muse_tp, hf_gemma3
 from hf_adapters.hf_common import (
     NormalizedGenerationInputs,
     PrecomputedRotaryEmbedding,
@@ -247,6 +247,9 @@ def prepare_for_spyre(model: PreTrainedModel) -> None:
         return torch.tanh(logits / cap) * cap
 
     prepare_lm_head_for_spyre(model, logits_processor=process_logits)
+    # Opt-in tensor parallelism under torchrun (no-op on one device): shard on
+    # the host before the decoder layers are compiled.
+    _muse_tp.maybe_shard(model)
 
     swa_mode: str | None = getattr(model, "_spyre_swa_mode", "anchored")
     setattr(model, "_spyre_swa_mode", swa_mode)

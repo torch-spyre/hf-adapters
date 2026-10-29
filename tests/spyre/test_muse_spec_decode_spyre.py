@@ -21,12 +21,16 @@ agreeing prefix and reports where the two first differ.
 Usage::
 
     pytest -s -vvv tests/spyre/test_muse_spec_decode_spyre.py
+    # TP 2 (target and assistant sharded over two cards):
+    SPYRE_DEVICES=2,3 python -m torch.distributed.run --standalone \\
+        --nproc-per-node=2 -m pytest -s tests/spyre/test_muse_spec_decode_spyre.py
 """
 
 import os
 
 import pytest
 import torch
+import torch.distributed as dist
 import torch_spyre  # noqa: F401
 from transformers import AutoTokenizer, MuseGlimmerAssistantModel
 
@@ -46,9 +50,14 @@ PROMPT = "Explain, step by step, how a sliding-window KV cache works in a decode
 )
 @pytest.mark.parametrize("target_path, assistant_path", MUSE_SPEC_PAIRS)
 def test_tree_speculative_decoding_agrees_with_greedy(target_path, assistant_path):
+    world = int(os.environ.get("WORLD_SIZE", "1"))
+    if world > 1 and not dist.is_initialized():
+        dist.init_process_group("cpu:gloo,spyre:spyreccl")
     tok = AutoTokenizer.from_pretrained(target_path)
     ids = encode_prompts(tok, [PROMPT])["input_ids"]
     target = AutoSpyreModelForCausalLM.from_pretrained(target_path, dtype=torch.float16)
+    tp = getattr(target, "_spyre_tp", None)
+    assert (tp.world if tp is not None else 1) == world
     greedy = target.generate(ids, max_new_tokens=48, do_sample=False)
     greedy = greedy[0, ids.shape[1] :].tolist()
     assistant = MuseGlimmerAssistantModel.from_pretrained(
