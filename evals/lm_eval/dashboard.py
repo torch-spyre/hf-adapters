@@ -57,12 +57,18 @@ def dashboard_results(report):
             if result["status"] != "completed":
                 continue
             grouped = {}
+            denominators = {}
             for row in result["metrics"]:
                 count = row["iterations"]
                 if count is None:
                     continue
                 task = row["task"]
                 metric, filter_name = row["metric"].rsplit(",", 1)
+                sample_unit = (
+                    "instruction"
+                    if metric.startswith("inst_level_")
+                    else "prompt" if metric.startswith("prompt_level_") else None
+                )
                 # Match on the leaf's workload, not unrelated tasks in its group
                 # or backend-specific runtime versions, device ordinals, or dates.
                 protocol = result["protocol"]
@@ -85,7 +91,9 @@ def dashboard_results(report):
                 fingerprint = hashlib.sha256(
                     json.dumps(identity, sort_keys=True).encode()
                 ).hexdigest()
-                key = (task, filter_name, count)
+                population = (task, filter_name, sample_unit)
+                denominators.setdefault(population, set()).add(count)
+                key = (*population, count)
                 if key not in grouped:
                     grouped[key] = {
                         "name": name,
@@ -95,11 +103,17 @@ def dashboard_results(report):
                             "num_fewshot": row["num_fewshot"],
                             "filter": filter_name,
                             "protocol": fingerprint,
+                            **({"sample_unit": sample_unit} if sample_unit else {}),
                         },
                         "backend": backend,
                         "measurements": {},
                         "iterations": count,
                     }
                 grouped[key]["measurements"][metric] = row["value"]
+            for (*population, count), entry in grouped.items():
+                # The ingest writer merges equal identities and sums iterations.
+                # Distinct denominators must differ in props, not just iterations.
+                if len(denominators[tuple(population)]) > 1:
+                    entry["props"]["observation_count"] = count
             entries.extend(grouped.values())
     return {"benchmarks": entries}

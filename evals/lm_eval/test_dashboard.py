@@ -150,7 +150,8 @@ def test_iterations_count_selected_metric_and_filter_without_duplicates():
         metric_iterations(raw, "task", "missing,none")
 
 
-def test_ifeval_prompt_and_instruction_denominators(report):
+@pytest.mark.parametrize("same_count", [False, True])
+def test_ifeval_prompt_and_instruction_denominators(report, same_count):
     raw = {
         "samples": {
             "ifeval": [
@@ -172,6 +173,8 @@ def test_ifeval_prompt_and_instruction_denominators(report):
     prompt_count = metric_iterations(raw, "ifeval", "prompt_level_strict_acc,none")
     instruction_count = metric_iterations(raw, "ifeval", "inst_level_strict_acc,none")
     assert (prompt_count, instruction_count) == (2, 5)
+    if same_count:
+        instruction_count = prompt_count
     result = copy.deepcopy(report["models"]["ibm-granite/granite-4.1-8b"]["gsm8k"])
     for key in ("task_versions", "samples"):
         result["protocol"][key] = {"ifeval": result["protocol"][key]["gsm8k"]}
@@ -193,10 +196,35 @@ def test_ifeval_prompt_and_instruction_denominators(report):
     ]
     report["models"] = {"model": {"ifeval": result}}
     prompt, instruction = dashboard_results(report)["benchmarks"]
-    assert prompt["props"] == instruction["props"]
-    assert prompt["iterations"] == 2 and instruction["iterations"] == 5
+    assert prompt["props"]["sample_unit"] == "prompt"
+    assert instruction["props"]["sample_unit"] == "instruction"
+    assert prompt["iterations"] == 2
+    assert instruction["iterations"] == instruction_count
     assert prompt["measurements"] == {"prompt_level_strict_acc": 0.5}
     assert instruction["measurements"] == {"inst_level_strict_acc": 0.6}
+    # Changing backend keeps each observation unit comparable across runs.
+    report.update(backend="hf", device="cuda")
+    native = dashboard_results(report)["benchmarks"]
+    assert [row["props"] for row in native] == [prompt["props"], instruction["props"]]
+
+
+def test_different_metric_observation_counts_have_distinct_identities(report):
+    result = report["models"]["ibm-granite/granite-4.1-8b"]["gsm8k"]
+    result["metrics"].append(
+        {
+            **result["metrics"][0],
+            "metric": "acc_norm,strict-match",
+            "iterations": 1,
+        }
+    )
+    strict = [
+        row
+        for row in dashboard_results(report)["benchmarks"]
+        if row["props"]["filter"] == "strict-match"
+    ]
+    assert len(strict) == 2
+    assert {row["props"]["observation_count"] for row in strict} == {1, 2}
+    assert strict[0]["props"] != strict[1]["props"]
 
 
 def test_sample_attachments_exclude_dataset_text():

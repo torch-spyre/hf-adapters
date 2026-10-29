@@ -576,6 +576,7 @@ def test_supervisor_continues_and_exports_partial_native_reference(
     assert set(reference["models"]["org/model"]) == {"toy", "after_failure"}
     assert "compile failed" in (output / "attachments" / "summary.md").read_text()
     report = json.loads((output / "attachments" / "report.json").read_text())
+    assert report["created_at"] <= report["updated_at"]
     payload = json.loads((output / "benchmarks.json").read_text())
     assert {entry["name"] for entry in payload["benchmarks"]} == {
         "toy",

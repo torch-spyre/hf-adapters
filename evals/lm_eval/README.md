@@ -104,7 +104,7 @@ command/job fail. A missing
 reference does not fail the job, and quality changes are reported without an
 automatic regression threshold.
 
-Each run writes an ingestion-ready `benchmarks.json`. Diagnostics live under
+Each run writes a measurement payload, `benchmarks.json`. Diagnostics live under
 `attachments/`: the frozen `suite.json`, compact `report.json`, rendered
 `summary.md`, and per-benchmark output. Per-benchmark `results.json` contains
 the detailed harness output, and `run.log` captures execution logs. Worker stdout
@@ -122,11 +122,38 @@ are saved in `samples.json` attachments. Dataset documents, input prompts, and
 targets are omitted to avoid publishing gated source text.
 Output directories must be empty; omitting `--output-dir` creates a dated run.
 
+Each CI evaluation job also derives its tested software artifact ID on that
+job's runner, using the shared torch-spyre identity script and library from
+`main`. The base image is read from `/home/senuser/spyre_artifact.json`, falling
+back to `/home/senuser/spyre_artifact_id.txt`. The installed change is
+`hf-adapters@<checked-out-sha12>`; torch-spyre stays from the image.
+
+The job summary and capture-step outputs expose `artifact_id` and
+`base_artifact_id`. The downloaded `lm-eval-<model-key>` artifact includes
+`attachments/artifact-id.txt`, containing the full record:
+
+```text
+<artifact_id>|<base_artifact_id>|hf-adapters@<sha12>
+```
+
+The attachments also retain `hf-adapters-sha.txt`, `identity-library-sha.txt`,
+and any image stamp files available on the runner. Capture is staged outside
+the evaluation output and preserved after evaluation, including failures.
+Each matrix job retains its own record. An unstamped image produces a warning
+and no invented ID; identity capture errors do not prevent evaluation.
+
+Use the first field of the record as the bundle's `--artifact id:<UUID>`.
+Keep the full record for database registration: a derived UUID is not proof
+that the artifact is already registered. This workflow captures identities
+and publishes GitHub result archives; it does not register artifacts or
+upload measurements to ClickHouse/Artifactory.
+
 ## Dashboard bundle
 
-The output directory is ready to submit as **kind `benchmarks`, tier `quality`**.
-Those are ingestion settings, not additional fields in the measurement JSON.
-Database upload is not wired yet; CI stores the bundle as a GitHub artifact.
+The runner produces measurements for **kind `benchmarks`, tier `quality`**.
+Its output directory is a run archive; use the sealing command below to create
+the `bundle.json` and `results/` layout expected by the ingestion CLI.
+CI retains the run archive as a GitHub artifact. Database upload is not wired.
 
 ```text
 output/
@@ -149,20 +176,90 @@ output/
   task/scoring versions, preprocessing, and sampled document/prompt/target hashes.
   This keeps different workloads distinct without including the backend, device
   ordinal, runtime versions, or run timestamp in the benchmark identity.
+  IFEval also has `sample_unit: prompt` or `sample_unit: instruction`.
+  Metrics for the same task/filter/unit with different observation counts get
+  `observation_count` to distinguish their identities.
 - `backend`: `spyre`, or the native device type (`cuda`, `cpu`, `mps`, etc.).
 - `measurements`: raw scores using metric names such as `exact_match` and
   `acc_norm`; the lm-eval filter suffix is represented by `props.filter` instead.
 - `iterations`: actual observations behind those scores, not the configured limit.
 
-Entries with the same task, filter, and observation count share a measurements
-mapping. Different denominators get separate entries with disjoint metrics:
-IFEval prompt scores count prompts, while instruction scores count instructions.
+Entries with the same task, filter, observation unit, and count share a
+measurements mapping. Different denominators get separate identities with
+disjoint metrics: IFEval prompt scores count prompts, while instruction scores
+count instructions, even when both counts happen to be equal. This distinction
+is required because the ingestion writer merges equal benchmark identities and
+sums their iterations; splitting only the JSON rows would lose the denominators.
 Failed benchmarks and group-level aggregates are retained in the diagnostic
 report but not exported as leaf-task measurements. Reference scores and percentage
 changes remain in the diagnostic report; they are not ingested as quality scores.
 The payload is updated after every benchmark, retaining successful results when
 another benchmark fails. Everything under `attachments/` is kept with the bundle
 but must not be ingested as measurements.
+
+### Seal a run for upload
+
+On the machine preparing the bundle, install the optional ingestion dependency:
+
+```bash
+python -m pip install -r evals/lm_eval/requirements-ingest.txt
+```
+
+After the evaluation finishes, name the software artifact that was actually
+tested and its architecture:
+
+```bash
+python -m evals.lm_eval.bundle \
+  --run-dir evals/lm_eval/runs/spyre-check \
+  --out evals/lm_eval/runs/spyre-check.tgz \
+  --artifact 'id:<tested-artifact-uuid>' --arch x86_64
+
+python -m spyre_clickhouse_ingest results \
+  --from-bundle evals/lm_eval/runs/spyre-check.tgz --validate-only
+```
+
+Find the UUID on the tested artifact's dashboard page under **Add results →
+Identity**. Numeric GitHub result-archive IDs are not software artifact UUIDs.
+Alternatively, pass `--artifact 'image:<repository>@sha256:<digest>'` for a
+recorded image. Architecture is required and describes where evaluation ran,
+not the machine packaging the results. Local validation cannot establish that
+an artifact exists in the database or matches the actual tested environment.
+
+`--component` defaults to `hf-adapters`; it identifies the suite's owner and
+participates in benchmark identity. `--run-url` can preserve the original CI
+run link. `--out` accepts a new directory, `.tgz`, or `.tar.gz` outside the input
+run. Existing destinations are protected.
+
+The sealed output contains:
+
+```text
+bundle.json             # kind=benchmarks, test_type=quality, artifact, arch, hashes
+results/benchmarks.json
+attachments/...         # all diagnostic files copied from the run
+```
+
+The command uses the official ingestion validator and an in-memory writer
+preview, rejecting empty results, invalid metadata, and identities that would
+merge measurement rows. It copies every attachment and lists its SHA-256 in
+the manifest before sealing. This avoids the upstream `--benchmarks-dir`
+packaging path's omission of attachments. The source run is unchanged.
+
+The manifest uses the bundle schema version (currently **1**); the database is
+schema **v2**. Execution timestamps come from `report.json`'s `created_at` and
+`updated_at`; packaging time is recorded separately as `sealed_at`. Historical
+runs without execution timestamps are left undated.
+
+For an older run that the writer preview rejects because of colliding
+identities, regenerate `benchmarks.json` from its compatible `attachments/report.json`
+using `dashboard_results(report)` before sealing. The existing recorded scores
+and counts are sufficient; rerunning inference is unnecessary. Old reports
+missing actual observation counts or device information need those facts
+recovered first, as in the historical combined reference bundle.
+
+Once validation passes, the standard ingestion CLI can upload the sealed
+bundle with `results --upload <bundle.tgz> --wait`, using the configured
+Artifactory relay settings and token. Sealing and `--validate-only` perform no
+network requests, uploads, or database writes.
 
 ## Comparing with a reference
 
@@ -200,10 +297,14 @@ reports restricted to one model's successful benchmarks.
 ```bash
 python -m pytest -q evals/lm_eval/test_benchmarks.py
 python -m pytest -q evals/lm_eval/test_dashboard.py
+python -m pytest -q evals/lm_eval/test_workflow_identity.py
+python -m pytest -q evals/lm_eval/test_bundle.py  # requires requirements-ingest.txt
 python -m pytest -q evals/lm_eval/test_gpqa.py
 python -m unittest evals.lm_eval.test_spyre_lm_eval_backend
 ```
 
 The suite tests include offline native HFLM scoring and generation with a tiny
 local model, reference compatibility, percentage calculations, model selection,
-and continuation after failures.
+and continuation after failures. The optional bundle tests use the official
+ingestion validator and writer to check archive layout, attachment hashes,
+metadata rejection, and preservation of IFEval observation counts.

@@ -88,11 +88,71 @@ jobs:
             .github/scripts/run-with-pod-stdout.sh
           sparse-checkout-cone-mode: false
       - uses: ./.github/actions/build-hf-adapters
+        id: build
         with:
           uv_groups: "dev spyre test"
           ref: ${{ needs.plan.outputs.source_sha }}
           # Exercise the torch-spyre supplied by the runner image.
           prebaked_image: "true"
+      # Run after build-hf-adapters: that action deletes/re-clones the workspace.
+      # Read the stamp on EACH evaluation pod, since runner images can differ.
+      - name: Checkout artifact identity library
+        id: identity-library
+        continue-on-error: true
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: torch-spyre/torch-spyre
+          ref: main
+          path: .torch-spyre-identity
+          persist-credentials: false
+          sparse-checkout: |
+            .github/scripts/derive_artifact_id.py
+            extensions/clickhouse-ingest
+          sparse-checkout-cone-mode: false
+      - name: Capture tested artifact identity
+        id: artifact-identity
+        continue-on-error: true
+        shell: bash
+        env:
+          EVAL_IDENTITY_DIR: ${{ runner.temp }}/lm-eval-identity-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.key }}
+          IDENTITY_ROOT: ${{ github.workspace }}/.torch-spyre-identity
+          HF_ADAPTERS_SHA: ${{ steps.build.outputs.target_sha }}
+        run: |
+          # Stage outside EVAL_RESULTS: the evaluation requires an empty output
+          # directory. The finalizer below copies these files into attachments.
+          mkdir -p "$EVAL_IDENTITY_DIR"
+          printf '%s\n' "$HF_ADAPTERS_SHA" > "$EVAL_IDENTITY_DIR/hf-adapters-sha.txt"
+          git -C "$IDENTITY_ROOT" rev-parse HEAD > "$EVAL_IDENTITY_DIR/identity-library-sha.txt"
+          for stamp in /home/senuser/spyre_artifact.json /home/senuser/spyre_artifact_id.txt; do
+            if [[ -f "$stamp" ]]; then
+              cp "$stamp" "$EVAL_IDENTITY_DIR/$(basename "$stamp")"
+            fi
+          done
+          # hf-adapters runs from the freshly checked-out source. torch-spyre
+          # stays from the image, so it is not part of the installed delta.
+          [[ "$HF_ADAPTERS_SHA" =~ ^[[:xdigit:]]{40}$ ]]
+          python3 "$IDENTITY_ROOT/.github/scripts/derive_artifact_id.py" \
+            --component hf-adapters --arch x86_64 \
+            --installed "hf-adapters@${HF_ADAPTERS_SHA:0:12}" \
+            --library-dir "$IDENTITY_ROOT/extensions/clickhouse-ingest" \
+            --output-file "$EVAL_IDENTITY_DIR/artifact-id.txt"
+          # Call the script directly: the composite action uploads a fixed-name
+          # artifact-id artifact, which concurrent matrix jobs can overwrite.
+          if [[ -s "$EVAL_IDENTITY_DIR/artifact-id.txt" ]]; then
+            record=$(cat "$EVAL_IDENTITY_DIR/artifact-id.txt")
+            IFS='|' read -r artifact_id base_artifact_id installed <<< "$record"
+            {
+              echo '### Tested artifact identity'
+              echo "- Artifact ID: \`$artifact_id\`"
+              echo "- Base image ID: \`$base_artifact_id\`"
+              echo "- Installed: \`$installed\`"
+              echo '- Architecture: `x86_64`; component: `hf-adapters`'
+              echo '- Saved in `attachments/artifact-id.txt`; database registration is separate.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '::warning::No artifact ID could be derived; check the identity log and runner image stamp.'
+            echo '### Tested artifact identity: unavailable (see capture step log)' >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Install pinned eval dependencies
         shell: bash
         run: |
@@ -111,6 +171,16 @@ jobs:
           "$UV_PROJECT_ENVIRONMENT/bin/python" -u -m evals.lm_eval.run_benchmarks \
             --backend spyre --model "$EVAL_MODEL" --config "$EVAL_CONFIG" \
             --reference-dir evals/lm_eval/references --output-dir "$EVAL_RESULTS"
+      - name: Preserve artifact identity with results
+        if: always()
+        shell: bash
+        env:
+          EVAL_IDENTITY_DIR: ${{ runner.temp }}/lm-eval-identity-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.key }}
+        run: |
+          if [[ -d "$EVAL_IDENTITY_DIR" ]]; then
+            mkdir -p "$EVAL_RESULTS/attachments"
+            cp -R "$EVAL_IDENTITY_DIR/." "$EVAL_RESULTS/attachments/"
+          fi
       - name: Publish metric summary
         if: always()
         shell: bash

@@ -612,6 +612,7 @@ def run_suite(args, suite, models):
             if not args.write_references:
                 result = compare(result, references.get(model, {}).get(spec["id"]))
             benchmarks[spec["id"]] = result
+            report["updated_at"] = datetime.now(timezone.utc).isoformat()
             write_json(attachments / "report.json", report)
             write_json(output / "benchmarks.json", dashboard_results(report))
             (attachments / "summary.md").write_text(markdown_report(report))
