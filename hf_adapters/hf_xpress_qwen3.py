@@ -232,8 +232,16 @@ def load_drafter_weights(
     XPress checkpoints omit ``embed_tokens``/``lm_head``: both are the
     target's. ``target_lm_head_weight`` is the target's own ``lm_head`` when it
     is untied (e.g. Qwen3-8B); ``None`` means tied, so the embedding serves as
-    the head. Works on a ``meta``-built model (``assign=True``).
+    the head. The drafter config's ``tie_word_embeddings`` records which, so an
+    untied drafter without a head is rejected. Works on a ``meta``-built model
+    (``assign=True``).
     """
+    if target_lm_head_weight is None and not model.config.tie_word_embeddings:
+        raise ValueError(
+            "Drafter config has tie_word_embeddings=False: pass the target's "
+            "lm_head (target_lm_head_weight=load_target_lm_head(target)) or "
+            "load with target_path"
+        )
     head_prefixes = (PUBLISHED_PREFIX, TRAINING_PREFIX)
     expected = {
         n
@@ -249,9 +257,9 @@ def load_drafter_weights(
         )
     shape = (model.config.vocab_size, model.config.hidden_size)
     lm_head = (
-        target_embed_weight
-        if target_lm_head_weight is None
-        else (target_lm_head_weight)
+        target_lm_head_weight
+        if target_lm_head_weight is not None
+        else target_embed_weight
     )
     for name, tensor in (("embedding", target_embed_weight), ("lm_head", lm_head)):
         if tuple(tensor.shape) != shape:
@@ -397,11 +405,13 @@ def load_model(
     pass ``target_lm_head_weight`` for an untied target. ``ctx_pad`` is the
     context window ``move_model_to_spyre`` compiles the drafter for.
     """
-    if target_embed_weight is None:
-        if target_path is None:
-            raise ValueError("Pass target_embed_weight or target_path")
+    if target_path is not None:
+        if target_embed_weight is not None or target_lm_head_weight is not None:
+            raise ValueError("Pass target tensors or target_path, not both")
         target_embed_weight = load_target_embedding(target_path)
         target_lm_head_weight = load_target_lm_head(target_path)
+    elif target_embed_weight is None:
+        raise ValueError("Pass target_embed_weight or target_path")
     config, weights = read_checkpoint(model_path, revision)
     return build_model(
         config, weights, target_embed_weight, dtype, target_lm_head_weight, ctx_pad
@@ -471,7 +481,6 @@ def prepare_for_spyre(model: XPressDrafter, ctx_pad: int | None = None) -> None:
     model.xpress_readout = _padded_readout(model.xpress_head.readout.weight)
 
     kv_pad = kv_pad_for(ctx_pad, model.block_size)
-    model._spyre_xpress = {"ctx_pad": ctx_pad, "kv_pad": kv_pad}
     model._spyre_compiled_blocks = compile_dspark_blocks(
         model, ctx_pad=ctx_pad, kv_pad=kv_pad, use_qk_norm=True
     )
@@ -483,6 +492,8 @@ def prepare_for_spyre(model: XPressDrafter, ctx_pad: int | None = None) -> None:
         "latent": _compile(head.latent),
         "readout": _compile(model.xpress_readout),
     }
+    # Last: the prepare-once guard keys on it, so a failure above stays retryable.
+    model._spyre_xpress = {"ctx_pad": ctx_pad, "kv_pad": kv_pad}
 
 
 # ---------------------------------------------------------------------------
