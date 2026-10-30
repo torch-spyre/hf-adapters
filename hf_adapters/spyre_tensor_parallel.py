@@ -48,6 +48,7 @@ SPYRE_REPLICATED_LINEAR = "spyre_replicated_linear"
 SPYRE_REPLICATED_EMBEDDING = "spyre_replicated_embedding"
 SPYRE_GROUPED_COLWISE_PREFIX = "spyre_grouped_colwise"
 SPYRE_CPU_PACKED_COLWISE = "spyre_cpu_packed_colwise"
+SPYRE_CPU_COLWISE = "spyre_cpu_colwise"
 SPYRE_CPU_ROWWISE = "spyre_cpu_rowwise"
 SPYRE_CPU_REPLICATED = "spyre_cpu_replicated"
 
@@ -82,6 +83,14 @@ def _copy_embedding(shard, *, device, dtype):
 class SpyreColwiseParallel(ColwiseParallel):
     """Colwise checkpoint slicing followed by a Linear-aware Spyre DMA."""
 
+    def prepare_module_tp(self, module, device_mesh, **kwargs):
+        super().prepare_module_tp(module, device_mesh, **kwargs)
+        module._spyre_tp_state = (
+            self,
+            tuple(module._forward_pre_hooks.items()),
+            tuple(module._forward_hooks.items()),
+        )
+
     def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
         # Weight converters for modules with auxiliary scalar state (for
         # example Gemma 4 clipped linears) reuse the projection's distributed
@@ -112,6 +121,14 @@ class SpyreColwiseGatherOutputParallel(SpyreColwiseParallel):
 
 class SpyreRowwiseParallel(RowwiseParallel):
     """Rowwise checkpoint slicing followed by a Linear-aware Spyre DMA."""
+
+    def prepare_module_tp(self, module, device_mesh, **kwargs):
+        super().prepare_module_tp(module, device_mesh, **kwargs)
+        module._spyre_tp_state = (
+            self,
+            tuple(module._forward_pre_hooks.items()),
+            tuple(module._forward_hooks.items()),
+        )
 
     def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
         # See SpyreColwiseParallel: scalar metadata belonging to a sharded
@@ -288,6 +305,15 @@ class SpyreGroupedColwiseParallel(TensorParallelLayer):
         return None
 
 
+class SpyreCpuColwiseParallel(SpyreColwiseParallel):
+    """Keep a colwise shard on CPU and preserve the Spyre TP hook state."""
+
+    def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
+        return ColwiseParallel.shard_tensor(
+            self, param, tensor_idx=tensor_idx, device="cpu", dtype=dtype
+        )
+
+
 class SpyreCpuPackedColwiseParallel(PackedColwiseParallel):
     """Shard a packed parameter but leave it on CPU for adapter preparation."""
 
@@ -327,6 +353,7 @@ _STYLE_INSTANCES = {
     SPYRE_REPLICATED_LINEAR: SpyreReplicatedLinearParallel(),
     SPYRE_REPLICATED_EMBEDDING: SpyreReplicatedEmbeddingParallel(),
     SPYRE_CPU_PACKED_COLWISE: SpyreCpuPackedColwiseParallel(),
+    SPYRE_CPU_COLWISE: SpyreCpuColwiseParallel(),
     SPYRE_CPU_ROWWISE: SpyreCpuRowwiseParallel(),
     SPYRE_CPU_REPLICATED: SpyreCpuReplicatedParallel(),
 }
@@ -342,6 +369,7 @@ _STYLE_DIMS = {
     SPYRE_REPLICATED_LINEAR: (None, None),
     SPYRE_REPLICATED_EMBEDDING: (None, None),
     SPYRE_CPU_PACKED_COLWISE: (-2, -1),
+    SPYRE_CPU_COLWISE: (-2, -1),
     SPYRE_CPU_ROWWISE: (-1, None),
     SPYRE_CPU_REPLICATED: (None, None),
 }
@@ -357,6 +385,7 @@ _STYLE_REWRITES = {
 }
 
 _CPU_STYLE_REWRITES = {
+    "colwise": SPYRE_CPU_COLWISE,
     "packed_colwise": SPYRE_CPU_PACKED_COLWISE,
     "rowwise": SPYRE_CPU_ROWWISE,
 }
