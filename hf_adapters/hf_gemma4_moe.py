@@ -19,15 +19,23 @@ evaluating every expert; single-token decode gathers only the selected experts.
 Both paths share one device-resident expert-weight set.
 """
 
+import types
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from hf_adapters import hf_common
+from hf_adapters import _gemma4_fp8, hf_common
 from hf_adapters.hf_common import (
+    apply_rope_matmul,
+    kv_cache_update,
     moe_decode_selected_experts,
     moe_prefill_all_experts,
     moe_topk,
+    moe_union_cap,
+    moe_union_experts,
+    moe_union_pack,
+    moe_union_selected_experts,
     named_moe_prefill_inputs,
     optional_spyre_config_patch,
     prepare_moe_expert_weights,
@@ -61,6 +69,17 @@ __all__ = [
     "_run_backbone_forward",
     "spyre_tp_grouped_colwise_modules",
 ]
+
+
+def _unique_function(method, tag):
+    """A copy of ``method``'s function with its own code object, bound again."""
+    fn = method.__func__
+    code = fn.__code__.replace(co_name=f"{fn.__code__.co_name}_{tag}")
+    clone = types.FunctionType(
+        code, fn.__globals__, code.co_name, fn.__defaults__, fn.__closure__
+    )
+    clone.__kwdefaults__ = fn.__kwdefaults__
+    return types.MethodType(clone, method.__self__)
 
 
 def _router_probs(x, weight, scale, root_size, eps):
@@ -211,6 +230,8 @@ class Gemma4MoEBlock(nn.Module):
         )
         self._moe_k = moe_k
         self._stick_size = stick_size
+        # Set by prepare_text_decoder_for_spyre from SPYRE_MOE_UNION_CAP.
+        self._moe_union_cap = None
         self._moe_rms_eps = self.router.eps
         decode_forward = (
             self._full_tp_decode_forward
@@ -336,6 +357,35 @@ class Gemma4MoEBlock(nn.Module):
         )
         experts = self.experts
         router = self.router
+        tokens = router_input.shape[0]
+        cap = self._moe_union_cap
+        if cap is not None and 1 < tokens <= cap:
+            probs = _router_probs(
+                router_input,
+                router.proj.weight,
+                router.scale,
+                router.scalar_root_size,
+                self._moe_rms_eps,
+            )
+            moe_out = moe_union_selected_experts(
+                expert_input,
+                probs,
+                experts.decode_gate_proj,
+                experts.decode_up_proj,
+                experts.decode_down_proj,
+                self._moe_k,
+                cap,
+                32,
+                self._stick_size,
+                "gelu_tanh",
+                expert_ids=router.expert_ids,
+                slot_identity=router.slot_identity,
+                per_expert_scale_stick=router.per_expert_scale_stick,
+                decode_chunks=self._decode_chunks,
+                chunk_scale=experts.decode_chunk_scale,
+                chunk_offsets=experts.decode_chunk_offsets,
+            )
+            return dense_out, moe_out.to(expert_input.dtype)
         moe_out = _compiled_moe_loop_region(
             router_input,
             expert_input,
@@ -410,6 +460,240 @@ class Gemma4MoEBlock(nn.Module):
         )
         moe_out = moe_out.to(residual.dtype)
         return dense_out, moe_out
+
+    def _tree_attn_forward(
+        self,
+        hidden_states,
+        selected_freqs,
+        attn_mask,
+        key_cache,
+        value_cache,
+        cache_index,
+    ):
+        """``_attn_forward`` with SDPA under the caller's explicit mask.
+
+        A token tree is not causal in physical row order, so the sliding
+        layers cannot use the sliding-window op's causal promise.
+        """
+        attn = self.self_attn
+        residual = hidden_states
+        hidden_states = _gemma4_rms_norm(
+            hidden_states,
+            self.input_layernorm.weight,
+            self.input_layernorm.eps,
+        )
+        bsz, seq_len, _ = hidden_states.shape
+        q = attn.q_proj(hidden_states).view(
+            bsz, seq_len, attn.num_q_heads, attn.head_dim
+        )
+        k_lin = attn.k_proj(hidden_states).view(
+            bsz, seq_len, attn.num_kv_heads, attn.head_dim
+        )
+        if attn.is_kv_eq_v:
+            v = _gemma4_rms_norm(k_lin, None, attn.v_norm.eps).transpose(1, 2)
+        else:
+            v = attn.v_proj(hidden_states).view(
+                bsz, seq_len, attn.num_kv_heads, attn.head_dim
+            )
+            v = _gemma4_rms_norm(v, None, attn.v_norm.eps).transpose(1, 2)
+        q = _gemma4_rms_norm(q, attn.q_norm.weight, attn.q_norm.eps).transpose(1, 2)
+        k = _gemma4_rms_norm(k_lin, attn.k_norm.weight, attn.k_norm.eps).transpose(1, 2)
+        q = apply_rope_matmul(q, selected_freqs).contiguous()
+        k = apply_rope_matmul(k, selected_freqs).contiguous()
+        key_cache, value_cache = kv_cache_update(
+            k, v, key_cache, value_cache, cache_index
+        )
+        attn_out = F.scaled_dot_product_attention(
+            q,
+            key_cache,
+            value_cache,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            scale=attn.scaling,
+            enable_gqa=True,
+        )
+        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
+        hidden_states = residual + _gemma4_rms_norm(
+            attn.o_proj(attn_out),
+            self.post_attention_layernorm.weight,
+            self.post_attention_layernorm.eps,
+        )
+        return hidden_states, key_cache, value_cache
+
+    def _tree_part_a(
+        self,
+        hidden_states,
+        selected_freqs,
+        attn_mask,
+        key_cache,
+        value_cache,
+        cache_index,
+    ):
+        """Tree region A: attention, router probabilities, expert input, dense FFN."""
+        residual, key_cache, value_cache = self._tree_attn_forward(
+            hidden_states,
+            selected_freqs,
+            attn_mask,
+            key_cache,
+            value_cache,
+            cache_index,
+        )
+        router_input = residual.reshape(-1, residual.shape[-1])
+        expert_input = _gemma4_rms_norm(
+            router_input,
+            self.pre_feedforward_layernorm_2.weight,
+            self.pre_feedforward_layernorm_2.eps,
+        )
+        router = self.router
+        probs = _router_probs(
+            router_input,
+            router.proj.weight,
+            router.scale,
+            router.scalar_root_size,
+            self._moe_rms_eps,
+        )
+        dense_out = self._dense_forward(residual)
+        return residual, key_cache, value_cache, expert_input, probs, dense_out
+
+    def _tree_part_p(self, probs):
+        """Tree region P: the union slot choice (``moe_union_pack``)."""
+        return moe_union_pack(
+            probs,
+            self._moe_k,
+            self._moe_union_cap,
+            self.router.expert_ids,
+            self._stick_size,
+        )
+
+    def _tree_part_b(
+        self, expert_input, slot_sticks, routes, residual, dense_out, layer_scalar, tap
+    ):
+        """Tree region B: the union experts and the FFN finish (+ tap copy)."""
+        experts, router = self.experts, self.router
+        moe_out = moe_union_experts(
+            expert_input,
+            slot_sticks,
+            routes,
+            experts.decode_gate_proj,
+            experts.decode_up_proj,
+            experts.decode_down_proj,
+            32,
+            self._stick_size,
+            "gelu_tanh",
+            slot_identity=router.slot_identity,
+            per_expert_scale_stick=router.per_expert_scale_stick,
+            decode_chunks=self._decode_chunks,
+            chunk_scale=experts.decode_chunk_scale,
+            chunk_offsets=experts.decode_chunk_offsets,
+        )
+        out = self._finish_ffn(
+            residual, dense_out, moe_out.to(expert_input.dtype), layer_scalar
+        )
+        if tap is not None:
+            # A mutated graph input, like the in-place KV update: no extra
+            # launch and a stable address for the reader.
+            tap.copy_(out)
+        return out
+
+    def _tree_dense_moe(
+        self,
+        hidden_states,
+        selected_freqs,
+        attn_mask,
+        key_cache,
+        value_cache,
+        cache_index,
+        layer_scalar,
+        tap=None,
+    ):
+        """Tree layer without a union cap: the per-token decode FFN."""
+        hidden_states, key_cache, value_cache = self._tree_attn_forward(
+            hidden_states,
+            selected_freqs,
+            attn_mask,
+            key_cache,
+            value_cache,
+            cache_index,
+        )
+        hidden_states = self._decode_ffn(hidden_states, layer_scalar)
+        if tap is not None:
+            tap.copy_(hidden_states)
+        return hidden_states, key_cache, value_cache
+
+    def enable_tree_verify(self, tap=False):
+        """Compile this layer's tree-verify graphs (``_gemma4_tree``).
+
+        With ``SPYRE_MOE_UNION_CAP`` set the layer runs three regions, A
+        (attention, router, dense FFN), P (slot choice) and B (experts,
+        finish), so only plain tensors cross between them; otherwise one
+        region with the per-token decode FFN. Each layer gets its own code
+        objects: compiled entries are cached per code object, and thirty
+        layers sharing one would scan each other's guards on every call.
+        """
+        if self._tp_device_mesh is not None:
+            raise ValueError("tree verify supports TP=1 only")
+        self._tree_tap_enabled = bool(tap)
+        self.tree_tap = None
+        if getattr(self, "_tree_regions", None) is not None:
+            return
+        tag = f"layer{id(self):x}"
+
+        def compile_(method):
+            return torch.compile(
+                _unique_function(method, tag), dynamic=False, fullgraph=True
+            )
+
+        if self._moe_union_cap is None:
+            self._tree_regions = (compile_(self._tree_dense_moe),)
+        else:
+            self._tree_regions = (
+                compile_(self._tree_part_a),
+                compile_(self._tree_part_p),
+                compile_(self._tree_part_b),
+            )
+
+    def tree_forward(
+        self,
+        hidden_states,
+        selected_freqs,
+        attn_mask,
+        key_cache,
+        value_cache,
+        cache_index,
+        layer_scalar,
+    ):
+        """One tree-verify layer: explicit-mask attention + MoE FFN (+ tap)."""
+        tap = None
+        if self._tree_tap_enabled:
+            if self.tree_tap is None or self.tree_tap.shape != hidden_states.shape:
+                self.tree_tap = torch.empty_like(hidden_states)
+            tap = self.tree_tap
+        regions = self._tree_regions
+        if len(regions) == 1:
+            return regions[0](
+                hidden_states,
+                selected_freqs,
+                attn_mask,
+                key_cache,
+                value_cache,
+                cache_index,
+                layer_scalar,
+                tap,
+            )
+        part_a, part_p, part_b = regions
+        residual, key_cache, value_cache, expert_input, probs, dense_out = part_a(
+            hidden_states,
+            selected_freqs,
+            attn_mask,
+            key_cache,
+            value_cache,
+            cache_index,
+        )
+        slot_sticks, routes = part_p(probs)
+        out = part_b(
+            expert_input, slot_sticks, routes, residual, dense_out, layer_scalar, tap
+        )
+        return out, key_cache, value_cache
 
     def forward(
         self,
@@ -502,6 +786,17 @@ def prepare_text_decoder_for_spyre(model):
         block.router.route_identity = torch.eye(
             stick_size, dtype=expert_scale.dtype
         ).to(hf_common.DEVICE)
+        num_experts = expert_scale.shape[0]
+        block._moe_union_cap = moe_union_cap(moe_k, num_experts)
+        slots = block._moe_union_cap or 1
+        block.router.slot_identity = torch.eye(slots, dtype=expert_scale.dtype).to(
+            hf_common.DEVICE
+        )
+        block.router.expert_ids = (
+            torch.arange(num_experts, dtype=expert_scale.dtype)[:, None]
+            .contiguous()
+            .to(hf_common.DEVICE)
+        )
         if str(hf_common.DEVICE).startswith("spyre"):
             block.router.per_expert_scale_stick = dma_moe_per_expert_scale_to_spyre(
                 expert_scale
@@ -522,6 +817,17 @@ def prepare_text_decoder_for_spyre(model):
         blocks.append(block)
 
     model._spyre_compiled_blocks = blocks
+
+    parts = _gemma4_fp8.fp8_parts()
+    if parts:
+        cap = cfg.final_logit_softcapping
+
+        def process_logits(logits):
+            if cap is not None:
+                logits = torch.tanh(logits / cap) * cap
+            return logits
+
+        _gemma4_fp8.convert(model, blocks, parts, hf_common.DEVICE, process_logits)
 
 
 def prepare_for_spyre(model):

@@ -522,6 +522,226 @@ def moe_decode_selected_experts(
     return expert_out.sum(dim=1)
 
 
+def moe_union_cap(top_k, num_experts, raw=None):
+    """Return the opt-in ``SPYRE_MOE_UNION_CAP`` slot count, or ``None`` when unset.
+
+    The union form (``moe_union_selected_experts``) serves a batch of 2 to
+    ``cap`` tokens with one region that reads each of at most ``cap`` distinct
+    experts once. A cap below the batch's expert union drops experts, which
+    makes it lossy. Gemma 4 26B-A4B on 16-token speculative verifies stayed
+    quality-neutral at 16; 12 produced non-finite logits on one prompt.
+    """
+    if raw is None:
+        raw = os.getenv("SPYRE_MOE_UNION_CAP")
+    if raw is None or raw == "":
+        return None
+    cap = int(raw)
+    if cap < top_k:
+        raise ValueError(f"SPYRE_MOE_UNION_CAP={cap} must be at least top_k={top_k}")
+    return min(cap, num_experts)
+
+
+def moe_keep_top_k(probabilities, top_k):
+    """``[T, E]`` probabilities with all but each row's top-k entries zeroed.
+
+    On Spyre this is ``spyre::keep_by_index``, the op the prefill router
+    already uses, so the expert dim stays on the stick throughout.
+    """
+    _, selected = moe_topk(probabilities, top_k)
+    if probabilities.device.type == "spyre":
+        return torch.ops.spyre.keep_by_index(probabilities, selected, -1, 0.0)
+    return torch.zeros_like(probabilities).scatter(
+        -1, selected, probabilities.gather(-1, selected)
+    )
+
+
+def moe_union_pack(probabilities, top_k, cap, expert_ids, stick_size):
+    """Slot choice of the union form: ``(slot_sticks [cap, stick], routes [T, cap])``.
+
+    ``probabilities`` is the router softmax ``[T, E]``. Each token's top-1
+    expert gets a slot first, then the experts with the most route weight.
+    ``routes`` holds each token's renormalized weight on each slot; a row
+    whose every routed expert was dropped gets zeros, not ``0 / 0``.
+    ``slot_sticks`` repeats each slot's expert id across a stick (exact small
+    integers in the router dtype).
+
+    On Spyre this runs as its own compiled region: only plain 2-D tensors
+    cross into the experts region, whose layouts it then chooses itself. Fused
+    with the router and the experts, the ``[T, E]`` reductions here meet two
+    consumers that need different sticks, which Spyre cannot reconcile.
+    """
+    T, experts = probabilities.shape
+    slots_total = min(cap, experts)
+    kept = moe_keep_top_k(probabilities, top_k)
+    dense = kept / kept.sum(dim=-1, keepdim=True)
+    top1 = (probabilities >= probabilities.amax(dim=-1, keepdim=True)).to(dense.dtype)
+    mass = dense.sum(dim=0, keepdim=True)
+    # Top-1 experts score 1 + mass / (T + 1) in [1, 2), the others
+    # mass / (T + 1) in [0, 1): a column's mass is at most T.
+    score = top1.amax(dim=0, keepdim=True) + mass * (1.0 / (T + 1))
+    _, slots = moe_topk(score, slots_total)
+    slots = slots.to(dense.dtype)
+    onehot = (expert_ids == slots).to(dense.dtype)  # [E, slots]
+    routes = dense @ onehot
+    routes = routes / routes.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+    slot_sticks = slots[..., None].expand(1, slots_total, stick_size)
+    return slot_sticks.contiguous().reshape(slots_total, stick_size), routes
+
+
+def moe_union_experts(
+    x,
+    slot_sticks,
+    routes,
+    gate,
+    up,
+    down,
+    tile,
+    stick_size,
+    activation,
+    *,
+    slot_identity,
+    per_expert_scale_stick=None,
+    decode_chunks=1,
+    chunk_scale=None,
+    chunk_offsets=None,
+):
+    """Experts of the union form: each slot's chunks read once for every token.
+
+    ``slot_sticks`` / ``routes`` come from ``moe_union_pack``; ``slot_identity``
+    is an identity ``[cap, cap]`` constant. ``gate``/``up``/``down`` are the
+    decode chunk views of ``prepare_moe_expert_weights``: entry
+    ``e * chunks + c`` is chunk ``c`` of expert ``e``. Slots are processed in
+    groups of ``tile // decode_chunks``, the single-token decode's geometry.
+    """
+    if activation not in ("silu", "gelu_tanh"):
+        raise ValueError(f"unsupported MoE activation: {activation!r}")
+    T, H = x.shape
+    slots_total = slot_sticks.shape[0]
+    if H % decode_chunks or H // decode_chunks % stick_size:
+        raise ValueError("MoE decode hidden chunks must span whole sticks")
+    slice_rows = H // decode_chunks
+    intermediate = gate.shape[-1]
+    # [T, slots] -> [slots, T, 1] keeping the stick: an identity
+    # multiply-and-reduce, then an outer-dim permute.
+    slot_routes = (routes[:, None, :] * slot_identity[None]).sum(dim=-1, keepdim=True)
+    slot_routes = slot_routes.permute(1, 0, 2).contiguous()
+    slot_fp32 = slot_sticks.to(torch.float32)
+    if chunk_scale is None or chunk_offsets is None:
+        chunk_scale = torch.full((1, 1, 1), float(decode_chunks))
+        chunk_offsets = torch.arange(decode_chunks, dtype=torch.float32).reshape(
+            1, decode_chunks, 1
+        )
+    xq = x.reshape(T, decode_chunks, slice_rows).permute(1, 0, 2).contiguous()
+    group = max(1, tile // decode_chunks)
+    total = None
+    for start in range(0, slots_total, group):
+        n = min(group, slots_total - start)
+        rows = n * decode_chunks
+        entries = (
+            slot_fp32[start : start + n, None, :] * chunk_scale + chunk_offsets
+        ).reshape(rows, stick_size)
+        slice_index = entries.amax(-1).to(torch.int32)
+        inputs = (
+            xq[None]
+            .expand(n, decode_chunks, T, slice_rows)
+            .contiguous()
+            .reshape(rows, T, slice_rows)
+        )
+        gate_out = torch.bmm(inputs, gate[slice_index])
+        up_out = torch.bmm(inputs, up[slice_index])
+        gate_out = gate_out.reshape(n, decode_chunks, T, intermediate).sum(dim=1)
+        up_out = up_out.reshape(n, decode_chunks, T, intermediate).sum(dim=1)
+        if activation == "silu":
+            activated = F.silu(gate_out) * up_out
+        else:
+            activated = F.gelu(gate_out, approximate="tanh") * up_out
+        act_rep = (
+            activated[:, None]
+            .expand(n, decode_chunks, T, intermediate)
+            .contiguous()
+            .reshape(rows, T, intermediate)
+        )
+        parts = torch.bmm(act_rep, down[slice_index])
+        expert_out = (
+            parts.reshape(n, decode_chunks, T, slice_rows)
+            .permute(0, 2, 1, 3)
+            .contiguous()
+            .reshape(n, T, H)
+        )
+        expert_out = expert_out * slot_routes[start : start + n]
+        if per_expert_scale_stick is not None:
+            expert_index = slot_fp32[start : start + n].amax(-1).to(torch.int32)
+            scale = per_expert_scale_stick[expert_index][:, :1].reshape(n, 1, 1)
+            expert_out = expert_out * scale
+        part = expert_out.sum(dim=0)
+        total = part if total is None else total + part
+    return total
+
+
+def moe_union_selected_experts(
+    x,
+    probabilities,
+    gate,
+    up,
+    down,
+    top_k,
+    cap,
+    tile,
+    stick_size,
+    activation,
+    *,
+    expert_ids,
+    slot_identity=None,
+    per_expert_scale_stick=None,
+    decode_chunks=1,
+    chunk_scale=None,
+    chunk_offsets=None,
+    allow_dropped_rows=False,
+):
+    """Route a small batch through each distinct selected expert once.
+
+    ``moe_union_pack`` then ``moe_union_experts`` (on Spyre, run them as
+    separate compiled regions; see ``moe_union_pack``). ``x`` is ``[T, H]``
+    and ``probabilities`` the router softmax ``[T, E]``. The per-token decode
+    reads ``T * top_k`` expert slabs; this form chooses ``cap`` slot experts
+    for the batch and reads each once. Each token's top-1 expert gets a slot
+    first, then the experts with the most route weight; a token's weight on an
+    expert outside the slots is dropped and its row renormalized. Requires
+    ``T <= cap``, so every top-1 fits (``allow_dropped_rows`` lifts that; a row
+    left with no slot expert then gets a zero output). When the cap covers the
+    batch's union (always when ``T * top_k <= cap``) this equals the per-token
+    form up to floating-point summation order.
+
+    ``expert_ids`` is ``[E, 1]`` holding ``0..E-1``; ``slot_identity`` is an
+    identity ``[cap, cap]`` (built here when omitted, off device).
+    """
+    T = x.shape[0]
+    slots_total = min(cap, probabilities.shape[-1])
+    if T > slots_total and not allow_dropped_rows:
+        raise ValueError(f"union form needs tokens ({T}) <= cap ({slots_total})")
+    slot_sticks, routes = moe_union_pack(
+        probabilities, top_k, cap, expert_ids, stick_size
+    )
+    if slot_identity is None:
+        slot_identity = torch.eye(slots_total, dtype=routes.dtype, device=routes.device)
+    return moe_union_experts(
+        x,
+        slot_sticks,
+        routes,
+        gate,
+        up,
+        down,
+        tile,
+        stick_size,
+        activation,
+        slot_identity=slot_identity,
+        per_expert_scale_stick=per_expert_scale_stick,
+        decode_chunks=decode_chunks,
+        chunk_scale=chunk_scale,
+        chunk_offsets=chunk_offsets,
+    )
+
+
 @contextmanager
 def named_moe_prefill_inputs(x, gate, up, down):
     """Keep the prefill token work division attached to its eager inputs.

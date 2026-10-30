@@ -286,6 +286,39 @@ Mistral3 Vision (`Mistral3Config`), and Gemma 4 (`Gemma4UnifiedConfig` for the
 encoder-free variant, or `Gemma4Config` for the full vision-tower variants; see
 [ARCHITECTURE.md](ARCHITECTURE.md#multimodal-vlm-path-vision-tower--text-decoder)).
 
+## Speculative Decoding (Gemma 4 26B-A4B + XPress)
+
+`gemma4_spec_decode.TreeSpeculativeDecoder` runs batch-1 greedy tree
+speculative decoding for `google/gemma-4-26B-A4B-it`, with the XPress drafter
+proposing a token tree that the target verifies in one forward. Every emitted
+token is the target's greedy argmax:
+
+```python
+import torch
+from hf_adapters import AutoSpyreModelForCausalLM, encode_prompts, hf_xpress_qwen3
+from hf_adapters.gemma4_spec_decode import TreeSpeculativeDecoder
+from transformers import AutoTokenizer
+
+target_path = "google/gemma-4-26B-A4B-it"
+tokenizer = AutoTokenizer.from_pretrained(target_path)
+target = AutoSpyreModelForCausalLM.from_pretrained(target_path, dtype=torch.float16)
+drafter = hf_xpress_qwen3.load_model(
+    "UIUC-SSAIL/gemma4-26b-a4b-XPress-b16", target_path=target_path, dtype=torch.float32
+)
+decoder = TreeSpeculativeDecoder(target, drafter, width=16)
+
+input_ids = encode_prompts(tokenizer, ["What is 2+2?"])["input_ids"]
+tokens = decoder.generate(input_ids, max_new_tokens=64)
+print(tokenizer.decode(tokens[0], skip_special_tokens=True))
+```
+
+Two opt-in environment variables, read when the target is prepared, make the
+verify faster at the cost of exact greedy numerics: `SPYRE_MOE_UNION_CAP=16`
+(caps the distinct experts a multi-token MoE step reads) and
+`SPYRE_GEMMA4_FP8=attn,dense,lm_head` (W8A8 fp8 for the non-expert linears and
+the LM head). Both are unset by default; see
+[ARCHITECTURE.md](ARCHITECTURE.md) for details.
+
 ## Repo Structure
 
 ```
