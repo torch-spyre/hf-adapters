@@ -2642,6 +2642,8 @@ def load_model_common(
 
 
 def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
+    from hf_adapters.fp8_linear import prequantize_fp8_weights
+
     untie_embedding_and_lm_head(model)
     module.prepare_for_spyre(model)
     cpu_submodules = getattr(model, "_spyre_cpu_submodules", [])
@@ -2659,6 +2661,8 @@ def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
         # model on device before move_model_to_spyre runs, the saved submodule
         # is on-device too; the restore would leave it on device rather than CPU.
         setattr(parent, attr, submod.to(device="cpu", dtype=dtype))
+    # No-op without FP8Linear. Last, so device placement is final.
+    prequantize_fp8_weights(model)
     print("Model on Spyre ready.")
 
 
