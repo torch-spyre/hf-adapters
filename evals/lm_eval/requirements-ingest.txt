@@ -1,0 +1,3 @@
+# Optional: bundle sealing and its validator/writer integration tests.
+# Use the shared definition of the database schema and identities from upstream.
+spyre-clickhouse-ingest @ git+https://github.com/torch-spyre/torch-spyre@main#subdirectory=extensions/clickhouse-ingest

@@ -1,0 +1,200 @@
+name: LM evaluation
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/lm-eval.yaml"
+      - "evals/lm_eval/**"
+      - "tests/model_lists/perf.yaml"
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      config:
+        description: Benchmark YAML/JSON path in this checkout
+        type: string
+        default: evals/lm_eval/benchmarks.yaml
+      models:
+        description: Space-separated model paths; empty uses perf.yaml nightly.models
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lm-eval-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      source_sha: ${{ steps.plan.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install PyYAML==6.0.3
+      - name: Validate config and select models
+        id: plan
+        env:
+          EVAL_CONFIG: ${{ inputs.config || 'evals/lm_eval/benchmarks.yaml' }}
+          EVAL_MODELS: ${{ inputs.models || '' }}
+        shell: bash
+        run: |
+          args=()
+          if [[ -n "$EVAL_MODELS" ]]; then
+            read -r -a models <<< "$EVAL_MODELS"
+            for model in "${models[@]}"; do
+              args+=(--model "$model")
+            done
+          fi
+          matrix=$(python -m evals.lm_eval.run_benchmarks \
+            --config "$EVAL_CONFIG" --print-matrix "${args[@]}")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  evaluate:
+    name: LM eval (${{ matrix.model }})
+    needs: plan
+    runs-on: [x86_64, spyre_pf_x1, linux, image_torch_spyre]
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      UV_NO_SYNC: "1"
+      UV_PROJECT_ENVIRONMENT: /home/senuser/.venv
+      CI: ""
+      CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
+      HF_HOME: /storage-1/hf-adapters/.cache/huggingface
+      # Datasets need network access even when model weights are cached.
+      HF_HUB_OFFLINE: "0"
+      HF_DATASETS_OFFLINE: "0"
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      EVAL_MODEL: ${{ matrix.model }}
+      EVAL_CONFIG: ${{ inputs.config || 'evals/lm_eval/benchmarks.yaml' }}
+      EVAL_RESULTS: ${{ github.workspace }}/evals/lm_eval/runs/ci-${{ matrix.key }}
+    steps:
+      - name: Checkout CI helpers
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
+          sparse-checkout-cone-mode: false
+      - uses: ./.github/actions/build-hf-adapters
+        id: build
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ needs.plan.outputs.source_sha }}
+          # Exercise the torch-spyre supplied by the runner image.
+          prebaked_image: "true"
+      # Run after build-hf-adapters: that action deletes/re-clones the workspace.
+      # Read the stamp on EACH evaluation pod, since runner images can differ.
+      - name: Checkout artifact identity library
+        id: identity-library
+        continue-on-error: true
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: torch-spyre/torch-spyre
+          ref: main
+          path: .torch-spyre-identity
+          persist-credentials: false
+          sparse-checkout: |
+            .github/scripts/derive_artifact_id.py
+            extensions/clickhouse-ingest
+          sparse-checkout-cone-mode: false
+      - name: Capture tested artifact identity
+        id: artifact-identity
+        continue-on-error: true
+        shell: bash
+        env:
+          EVAL_IDENTITY_DIR: ${{ runner.temp }}/lm-eval-identity-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.key }}
+          IDENTITY_ROOT: ${{ github.workspace }}/.torch-spyre-identity
+          HF_ADAPTERS_SHA: ${{ steps.build.outputs.target_sha }}
+        run: |
+          # Stage outside EVAL_RESULTS: the evaluation requires an empty output
+          # directory. The finalizer below copies these files into attachments.
+          mkdir -p "$EVAL_IDENTITY_DIR"
+          printf '%s\n' "$HF_ADAPTERS_SHA" > "$EVAL_IDENTITY_DIR/hf-adapters-sha.txt"
+          git -C "$IDENTITY_ROOT" rev-parse HEAD > "$EVAL_IDENTITY_DIR/identity-library-sha.txt"
+          for stamp in /home/senuser/spyre_artifact.json /home/senuser/spyre_artifact_id.txt; do
+            if [[ -f "$stamp" ]]; then
+              cp "$stamp" "$EVAL_IDENTITY_DIR/$(basename "$stamp")"
+            fi
+          done
+          # hf-adapters runs from the freshly checked-out source. torch-spyre
+          # stays from the image, so it is not part of the installed delta.
+          [[ "$HF_ADAPTERS_SHA" =~ ^[[:xdigit:]]{40}$ ]]
+          python3 "$IDENTITY_ROOT/.github/scripts/derive_artifact_id.py" \
+            --component hf-adapters --arch x86_64 \
+            --installed "hf-adapters@${HF_ADAPTERS_SHA:0:12}" \
+            --library-dir "$IDENTITY_ROOT/extensions/clickhouse-ingest" \
+            --output-file "$EVAL_IDENTITY_DIR/artifact-id.txt"
+          # Call the script directly: the composite action uploads a fixed-name
+          # artifact-id artifact, which concurrent matrix jobs can overwrite.
+          if [[ -s "$EVAL_IDENTITY_DIR/artifact-id.txt" ]]; then
+            record=$(cat "$EVAL_IDENTITY_DIR/artifact-id.txt")
+            IFS='|' read -r artifact_id base_artifact_id installed <<< "$record"
+            {
+              echo '### Tested artifact identity'
+              echo "- Artifact ID: \`$artifact_id\`"
+              echo "- Base image ID: \`$base_artifact_id\`"
+              echo "- Installed: \`$installed\`"
+              echo '- Architecture: `x86_64`; component: `hf-adapters`'
+              echo '- Saved in `attachments/artifact-id.txt`; database registration is separate.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '::warning::No artifact ID could be derived; check the identity log and runner image stamp.'
+            echo '### Tested artifact identity: unavailable (see capture step log)' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Install pinned eval dependencies
+        shell: bash
+        run: |
+          source /etc/bashrc
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          uv pip install --python "$UV_PROJECT_ENVIRONMENT/bin/python" \
+            -r evals/lm_eval/requirements.txt
+      - name: Run benchmark suite and compare references
+        shell: bash
+        run: |
+          source /etc/bashrc
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          export PYTHONPATH="$CLONED_HF_ADAPTERS_DIR${PYTHONPATH:+:$PYTHONPATH}"
+          "$UV_PROJECT_ENVIRONMENT/bin/python" -u -m evals.lm_eval.run_benchmarks \
+            --backend spyre --model "$EVAL_MODEL" --config "$EVAL_CONFIG" \
+            --reference-dir evals/lm_eval/references --output-dir "$EVAL_RESULTS"
+      - name: Preserve artifact identity with results
+        if: always()
+        shell: bash
+        env:
+          EVAL_IDENTITY_DIR: ${{ runner.temp }}/lm-eval-identity-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.key }}
+        run: |
+          if [[ -d "$EVAL_IDENTITY_DIR" ]]; then
+            mkdir -p "$EVAL_RESULTS/attachments"
+            cp -R "$EVAL_IDENTITY_DIR/." "$EVAL_RESULTS/attachments/"
+          fi
+      - name: Publish metric summary
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "$EVAL_RESULTS/attachments/summary.md" ]]; then
+            cat "$EVAL_RESULTS/attachments/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No benchmark summary was produced; check setup and run logs." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload results and per-benchmark logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lm-eval-${{ matrix.key }}
+          path: ${{ env.EVAL_RESULTS }}
+          if-no-files-found: warn
+          retention-days: 30
