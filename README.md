@@ -426,3 +426,18 @@ pre-commit run --all-files
 ## License
 
 Apache 2.0
+
+### Experimental Granite TP4 MLP work splits
+
+This hint candidate is parked. Current merged main already selects the requested
+8-by-4 divisions for the tested padded block.
+Padding stays off by default. Set `SPYRE_GRANITE_TP4_MLP_PADDING=1` before
+loading to opt in. Eligible padded Granite 3.3 8B TP4 prefill calls then request
+an eight-row-group, four-column-group split. Other calls retain the normal path.
+
+The current-main one-card, 40-layer comparison found no clear extra gain from
+these hints. Device layer time was 51.654 ms with padding alone and 51.655 ms
+with hints. Both emitted the same captured program summaries, including the
+requested MLP divisions. All-kernel and wall times were also at parity.
+This test does not qualify distributed TP4 or serving performance. See the
+[work-split notes](docs/granite_tp4_prefill_mlp.md) for guards and test scope.

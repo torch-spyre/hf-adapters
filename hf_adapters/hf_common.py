@@ -1647,7 +1647,14 @@ def run_lm_head(model, hidden_states, *, logits_to_keep: int = 0):
     if lm_head_forward is None:
         raise RuntimeError("the model has not had an LM head prepared for Spyre")
     if logits_to_keep:
-        hidden_states = hidden_states[:, -logits_to_keep:, :].contiguous()
+        selected = hidden_states[:, -logits_to_keep:, :]
+        if logits_to_keep == 1 and hidden_states.shape[-2] > 1:
+            # A last-row view can be logically contiguous while retaining the
+            # full prefill buffer's device layout. Materialize a compact row
+            # so the head can use the same vector plan as decode.
+            hidden_states = selected.clone(memory_format=torch.contiguous_format)
+        else:
+            hidden_states = selected.contiguous()
     return lm_head_forward(hidden_states)
 
 
@@ -2478,10 +2485,14 @@ def _resolve_tp_plan(
         if auto_plan and grouped_colwise_policy is not None
         else {}
     )
+    cpu_staged_modules = set(getattr(adapter_module, "SPYRE_TP_CPU_STAGED_MODULES", ()))
+    cpu_staging_policy = getattr(adapter_module, "spyre_tp_cpu_staged_modules", None)
+    if cpu_staging_policy is not None:
+        cpu_staged_modules.update(cpu_staging_policy(probe, _resolve_tp_size(), plan))
     plan = prepare_spyre_tp_plan(
         probe,
         plan,
-        cpu_staged_modules=getattr(adapter_module, "SPYRE_TP_CPU_STAGED_MODULES", ()),
+        cpu_staged_modules=cpu_staged_modules,
         cpu_replicated_modules=cpu_replicated_modules,
         # hf-adapters pads/prepares the output projection after loading, and
         # historically keeps the common top-level text embedding replicated.
@@ -3564,6 +3575,64 @@ class StandardGQABlock(nn.Module):
 def make_standard_gqa_block(layer, is_res_mul: bool | None = None):
     """Build and compile one complete standard GQA block."""
     return torch.compile(StandardGQABlock(layer, is_res_mul), dynamic=False)
+
+
+class PaddedGatedMLP(nn.Module):
+    """An explicit wider pointwise chain with the original down-projection K.
+
+    Construct after checkpoint loading and TP sharding. Keep the projection
+    modules themselves so their TP hooks and the down projection stay intact.
+    The discarded channels never participate in a reduction, even if they
+    contain NaNs. Parameter names and external activation shapes are unchanged.
+    Gate/up parameter shapes change. Save and reload after preparation are not
+    supported. Load the original checkpoint before preparation.
+    """
+
+    def __init__(self, mlp, multiple: int):
+        super().__init__()
+        self.gate_proj = mlp.gate_proj
+        self.up_proj = mlp.up_proj
+        self.down_proj = mlp.down_proj
+        self.act_fn = mlp.act_fn
+        self.logical_width = int(self.down_proj.weight.shape[1])
+        width = math.ceil(self.logical_width / multiple) * multiple
+        for proj in (self.gate_proj, self.up_proj):
+            if proj.weight.shape[0] != self.logical_width:
+                raise ValueError("Gated MLP projections must share the local TP width")
+            device, dtype = proj.weight.device, proj.weight.dtype
+            # CPU preparation also handles already placed TP shards. Reuse the
+            # normal Linear DMA once; no padding or copies enter the forward.
+            weight = proj.weight.detach().cpu()
+            padded = weight.new_zeros((width, weight.shape[1]))
+            padded[: self.logical_width].copy_(weight)
+            if device.type == "spyre":
+                from hf_adapters.spyre_tensor_parallel import (
+                    _copy_default,
+                    _copy_linear,
+                )
+
+                padded = _copy_linear(padded, device=device, dtype=dtype)
+            else:
+                padded = padded.to(device)
+            proj.weight = nn.Parameter(padded, requires_grad=proj.weight.requires_grad)
+            if proj.bias is not None:
+                bias = proj.bias.detach().cpu()
+                padded_bias = bias.new_zeros(width)
+                padded_bias[: self.logical_width].copy_(bias)
+                padded_bias = (
+                    _copy_default(padded_bias, device=device, dtype=dtype)
+                    if device.type == "spyre"
+                    else padded_bias.to(device)
+                )
+                proj.bias = nn.Parameter(
+                    padded_bias, requires_grad=proj.bias.requires_grad
+                )
+            proj.out_features = width
+        self.train(mlp.training)
+
+    def forward(self, x):
+        product = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+        return self.down_proj(product[..., : self.logical_width])
 
 
 def prepare_standard_gqa_blocks(layers, is_res_mul: bool | None = None):
