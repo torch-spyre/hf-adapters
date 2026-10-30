@@ -52,7 +52,7 @@ CTX_PAD = 16
 MASK_ID = 4
 
 
-def _config() -> Qwen3Config:
+def _config(tied: bool = True) -> Qwen3Config:
     return Qwen3Config(
         architectures=["Qwen3XPressModel"],
         vocab_size=VOCAB,
@@ -68,7 +68,7 @@ def _config() -> Qwen3Config:
         max_window_layers=3,
         rms_norm_eps=1e-6,
         rope_theta=1_000_000,
-        tie_word_embeddings=True,
+        tie_word_embeddings=tied,
         block_size=BLOCK,
         dflash_config={"mask_token_id": MASK_ID, "target_layer_ids": [1, 2]},
         xpress_rank=RANK,
@@ -415,13 +415,13 @@ def test_predecessor_defaults_to_anchor(module):
 # ---------------------------------------------------------------------------
 
 
-def _write_checkpoint(tmp_path, module) -> None:
-    model = module.build_drafter(_config())
+def _write_checkpoint(tmp_path, module, tied: bool = True) -> None:
+    model = module.build_drafter(_config(tied))
     weights = _backbone_weights(model) | _published(_training_head_weights())
     save_file(
         {k: v.contiguous() for k, v in weights.items()}, tmp_path / "model.safetensors"
     )
-    (tmp_path / "config.json").write_text(json.dumps(_config().to_dict()))
+    (tmp_path / "config.json").write_text(json.dumps(_config(tied).to_dict()))
 
 
 @torch.no_grad()
@@ -501,7 +501,7 @@ def _target_lm_head(seed: int = 4) -> torch.Tensor:
 def test_untied_target_keeps_its_own_lm_head(module, tmp_path, dtype):
     """Qwen3-8B-style targets (tie_word_embeddings=False) store a separate
     lm_head: the drafter's base logits must use it, not the input embedding."""
-    _write_checkpoint(tmp_path, module)
+    _write_checkpoint(tmp_path, module, tied=False)
     embed, head = _target_embedding(), _target_lm_head()
     model = module.load_model(
         str(tmp_path),
@@ -563,6 +563,52 @@ def test_load_target_lm_head(module, tmp_path, sharded):
     tied.mkdir()
     save_file({"model.embed_tokens.weight": embed}, tied / "model.safetensors")
     assert module.load_target_lm_head(str(tied)) is None
+
+
+def test_untied_drafter_requires_target_lm_head(module):
+    """An untied drafter config with no target lm_head must fail loudly, not
+    silently use the embedding as the head (#677)."""
+    model = module.build_drafter(_config(tied=False))
+    weights = _backbone_weights(model) | _published(_training_head_weights())
+    with pytest.raises(ValueError, match="tie_word_embeddings=False"):
+        module.load_drafter_weights(model, weights, _target_embedding())
+
+
+def _write_target(path, tied: bool) -> tuple[torch.Tensor, torch.Tensor]:
+    """A minimal target checkpoint: embedding, plus its own lm_head if untied."""
+    embed, head = _target_embedding(), _target_lm_head()
+    tensors = {"model.embed_tokens.weight": embed}
+    if not tied:
+        tensors["lm_head.weight"] = head
+    path.mkdir()
+    save_file(tensors, path / "model.safetensors")
+    return embed, head
+
+
+@pytest.mark.parametrize("tied", [True, False])
+@torch.no_grad()
+def test_load_model_from_target_path(module, tmp_path, tied):
+    """target_path alone fills both vocab matrices: the target's own lm_head
+    when it is untied, the embedding when it is tied."""
+    drafter = tmp_path / "drafter"
+    drafter.mkdir()
+    _write_checkpoint(drafter, module, tied=tied)
+    embed, head = _write_target(tmp_path / "target", tied)
+    model = module.load_model(
+        str(drafter), target_path=str(tmp_path / "target"), dtype=torch.float32
+    )
+    torch.testing.assert_close(model.embed_tokens.weight, embed)
+    torch.testing.assert_close(model.lm_head.weight, embed if tied else head)
+
+
+def test_load_model_rejects_tensors_and_target_path(module, tmp_path):
+    _write_checkpoint(tmp_path, module)
+    with pytest.raises(ValueError, match="not both"):
+        module.load_model(
+            str(tmp_path),
+            target_embed_weight=_target_embedding(),
+            target_path=str(tmp_path),
+        )
 
 
 def test_load_rejects_incomplete_backbone(module, tmp_path):
@@ -687,3 +733,17 @@ def test_rejects_non_positive_ctx_pad(module, tmp_path, ctx_pad):
         )
     with pytest.raises(ValueError, match="ctx_pad must be positive"):
         module.prepare_for_spyre(_loaded_drafter(module), ctx_pad=ctx_pad)
+
+
+def test_failed_prepare_is_retried(module, monkeypatch):
+    """A prepare that raises midway must not mark the model prepared, or every
+    later prepare_for_spyre call would no-op on a half-built model."""
+    model = _loaded_drafter(module)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("compile failed")
+
+    monkeypatch.setattr(module, "compile_dspark_blocks", boom)
+    with pytest.raises(RuntimeError, match="compile failed"):
+        module.prepare_for_spyre(model, ctx_pad=CTX_PAD)
+    assert not hasattr(model, "_spyre_xpress")
