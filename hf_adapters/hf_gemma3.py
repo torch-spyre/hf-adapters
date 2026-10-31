@@ -270,8 +270,9 @@ def _add_bidirectional_sliding_window_band(mask, query_cache_coords, sliding_win
 
     Returns a new mask with the base padding preserved plus -inf on every key
     whose absolute distance from the query is ``>= sliding_window``. Same
-    device/dtype as ``mask``. Built on CPU (int compare + bool) — Spyre's
-    Inductor backend rejects int64 compare-to-constant and bool intermediates.
+    device/dtype as ``mask``. Integer comparisons lower through fp32 on Spyre,
+    but their predicates cannot yet be combined with the fp16/bf16 base mask
+    because of the conversion's element arrangement (torch-spyre#2252).
     """
     lk = mask.shape[-1]
     k_col = torch.arange(lk)[None, None, :]  # [1, 1, Lk] on CPU
