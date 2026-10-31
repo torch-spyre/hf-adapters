@@ -203,6 +203,24 @@ def prepare_for_spyre(model):
         if hasattr(model, name)
     ]
     if cpu_submodules:
+        # vocab_projector.weight is tied to word_embeddings.weight in
+        # DistilBertForMaskedLM.  untie_embedding_and_lm_head (called earlier in
+        # move_model_to_spyre) should have already broken that tie, but we
+        # defensively re-clone here so the save/restore cycle in
+        # move_model_to_spyre cannot accidentally pull word_embeddings back to CPU
+        # via PyTorch's in-place param.data replacement.
+        if hasattr(model, "vocab_projector") and hasattr(model, "get_input_embeddings"):
+            embed = model.get_input_embeddings()
+            proj = model.vocab_projector
+            if (
+                embed is not None
+                and hasattr(proj, "weight")
+                and hasattr(embed, "weight")
+            ):
+                if proj.weight.data_ptr() == embed.weight.data_ptr():
+                    proj.weight = nn.Parameter(
+                        proj.weight.detach().clone(), requires_grad=False
+                    )
         model._spyre_cpu_submodules = cpu_submodules
 
     model._spyre_compiled_blocks = [
