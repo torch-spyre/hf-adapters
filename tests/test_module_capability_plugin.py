@@ -16,6 +16,7 @@
 
 import xml.etree.ElementTree as ET
 
+from tests._tier_tags import platform_tag
 from tests.module_capability_plugin import (
     capability_properties,
     fallback_op,
@@ -175,3 +176,29 @@ def test_fallback_seen_per_test_despite_once_filter(pytester, tmp_path, monkeypa
         "test_with_cpu_B_spyre_bfloat16": "cpu",
         "test_with_cpu_C_spyre_bfloat16": "spyre",
     }
+
+
+def test_junit_tags_the_platform_for_capability_cases_only(
+    pytester, tmp_path, monkeypatch
+):
+    cfg = tmp_path / "granite.yaml"
+    cfg.write_text("tags: [model__granite]\n")
+    monkeypatch.setenv("PYTORCH_TEST_CONFIG", str(cfg))
+    pytester.makepyfile(test_modules_custom="""
+        import unittest
+        class TestModuleCustom(unittest.TestCase):
+            def test_with_cpu_GraniteMLP_spyre_bfloat16(self):
+                pass
+            def test_unrelated(self):
+                pass
+        """)
+    xml = tmp_path / "out.xml"
+    pytester.runpytest("-p", "tests.module_capability_plugin", f"--junitxml={xml}")
+    tags = {
+        tc.get("name"): [
+            p.get("value") for p in tc.iter("property") if p.get("name") == "tag"
+        ]
+        for tc in ET.parse(xml).iter("testcase")
+    }
+    assert tags["test_with_cpu_GraniteMLP_spyre_bfloat16"] == [platform_tag()]
+    assert tags["test_unrelated"] == []
