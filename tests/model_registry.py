@@ -342,7 +342,6 @@ CAUSAL_LM_MODELS = {
         "path": "google/gemma-4-12b",
         "adapter": "hf_gemma4.py",
         "size": "12b",
-        "dtype": "bfloat16",
     },
     "gemma4_google": {
         "name": "Gemma 4 12B",
@@ -357,7 +356,6 @@ CAUSAL_LM_MODELS = {
         "path": "google/gemma-4-31b",
         "adapter": "hf_gemma4.py",
         "size": "31b",
-        "dtype": "bfloat16",
         "is_gated": True,
     },
     "gemma4_31b_it": {
@@ -707,7 +705,6 @@ VISION_MODELS = {
         "path": "mistralai/Ministral-3-14B-Instruct-2512",
         "adapter": "hf_mistral3_vision_mm.py",
         "kind": "vlm",  # multimodal: image + text -> generated text
-        "dtype": "bfloat16",  # blocked-FP8 checkpoint, dequantized to bf16
         "size": "14b",
     },
     # hf_mistral3_vision_mm.py — Ministral-3 3B (smallest ministral3 vision variant)
@@ -716,7 +713,6 @@ VISION_MODELS = {
         "path": "mistralai/Ministral-3-3B-Instruct-2512",
         "adapter": "hf_mistral3_vision_mm.py",
         "kind": "vlm",  # multimodal: image + text -> generated text
-        "dtype": "bfloat16",  # blocked-FP8 checkpoint, dequantized to bf16
         "size": "3b",
     },
     # hf_gemma4_vision.py — Vision tower of encoder-based Gemma4 models
@@ -758,6 +754,14 @@ VISION_MODELS = {
         "adapter": "hf_clip.py",
         "kind": "clip",  # dual-encoder: image or text -> embedding
         "size": "0.15b",
+    },
+    # hf_muse_glimmer_mm.py — Muse Glimmer perception + text towers
+    "muse_glimmer_mm": {
+        "name": "Muse Glimmer 30B (both towers)",
+        "path": "meta-models/Muse-Glimmer-30B",
+        "adapter": "hf_muse_glimmer_mm.py",
+        "kind": "vlm",
+        "size": "30b",
     },
 }
 

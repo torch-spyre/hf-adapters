@@ -116,8 +116,15 @@ CPU where integer/control-flow-heavy frontend or pooling operations do not lower
 | Gemma 4 12B IT | gemma4\_unified | Encoder-free vision embedder + Gemma 4 text | Yes | Yes | Yes | Yes |
 | Gemma 4 E2B | gemma4 | Gemma 4 vision tower + PLE/KV-sharing text | Yes | Yes | Yes | Yes |
 | Gemma 4 26B-A4B | gemma4 | Gemma 4 vision tower + MoE text | Yes | Not run | Yes | Yes |
+| Muse Glimmer 30B | muse\_glimmer | DINO-like vision + Muse text | Yes (vision padded) | Yes | Yes | Yes |
 
 **CPU Accurate** = adapter `generate` matches stock `model.generate` token-for-token on CPU (`test_vlm_e2e_cpu.py`).
+Muse Glimmer 30B matches stock CPU generation and passes the Spyre VLM test over
+prefill plus four decode steps with 5/5 top-1 agreement and logit cosine ≈ 1.0
+([validation run](https://github.com/torch-spyre/hf-adapters/actions/runs/40658081005/job/122715238795),
+torch-spyre `ff58755c`). Image inputs and text-only generation are supported;
+video inputs are not supported.
+
 **Spyre Runs** = `test_vlm_e2e_spyre.py` drives the adapter teacher-forced on stock's tokens and asserts per-step logit cosine ≥ 0.99 vs the CPU reference over prefill + decode steps (top-1 agreement is reported, not asserted — an open-ended caption hits near-ties where the bf16-substrate winner is numerically arbitrary; see Multimodal VLM Path). granite-vision-4.1 holds cosine ≥ 0.99991 at every step and produces a correct, coherent caption. Gemma 4 12B IT runs in **bf16** (like the rest of the Gemma family, it overflows its residual stream in fp16) and holds cosine ≥ 0.99939 at every step with 5/5 top-1 agreement. Gemma 4 E2B holds cosine ≥ 0.99502 with 4/5 top-1 agreement after preserving stock PLE and mask semantics and running its 16-layer vision transformer on Spyre. Gemma 4 26B-A4B holds cosine ≥ 0.99956 with 4/5 top-1 agreement while running its 27-layer vision transformer on Spyre.
 
 ### Embedding
@@ -287,6 +294,7 @@ pattern, norms, and weight layout.
 | hf\_granite\_vision\_mm.py | granite4\_vision (multimodal) | 1 | — |
 | hf\_siglip\_vision.py | SigLIP vision tower | 1 | SigLIP towers of other VLMs (extracted as a bare `SiglipVisionModel`) |
 | hf\_mistral3\_vision\_mm.py | mistral3 (multimodal) | 2 | Mistral-Small-3.1/3.2 Vision; Ministral-3-14B-Instruct-2512 (ministral3 text backbone, bf16) |
+| hf\_muse\_glimmer\_mm.py | muse\_glimmer (multimodal) | 1 | Muse-Glimmer-30B. Image/text generation with mixed RoPE/NoPE text layers and a padded vision tower; video unsupported. |
 | hf\_pixtral\_vision.py | Pixtral vision tower | 1 | Pixtral towers of Mistral3 Vision checkpoints |
 | hf\_bert.py | bert | 3 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants, BERT NER/POS/chunking fine-tunes |
 | hf\_distilbert.py | distilbert | 2 | DistilBERT-base fine-tunes (QA, NER, sentiment, other classifier heads) |

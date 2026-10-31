@@ -23,7 +23,7 @@ decisions** (variable options plus action selection), **token classification**
 Llama / Qwen / Granite / Mistral / Phi / Gemma / OLMo / GPT decoders to BERT /
 XLM-RoBERTa / MPNet / ModernBERT encoders, the Granite Vision 4.1 (SigLIP tower +
 Granite text), Mistral3 Vision (Pixtral tower + Mistral text), and Gemma 4
-(encoder-free and full-vision) multimodal VLMs, plus the DSpark block-propose drafters for
+(encoder-free and full-vision) and Muse Glimmer multimodal VLMs, plus the DSpark block-propose drafters for
 Qwen 3 / Granite / Gemma 4 and the XPress block-propose drafter (Gemma 4 26B-A4B).
 Laya support uses its optional upstream package to construct the stock decision
 model; hf-adapters patches its encoder, decision transformer, and marker selection.
