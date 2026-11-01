@@ -301,6 +301,7 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
         "reranker": {},
         "seq_classification": model_registry.NON_BLOCKING_SEQUENCE_CLASSIFICATION_MODELS,
         "token_classification": {},
+        "structured_decision": {},
     }
     try:
         non_blocking = non_blocking_tables[harness]

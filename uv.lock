@@ -1154,6 +1154,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+laya = [
+    { name = "laya" },
+]
 yolo = [
     { name = "ultralytics" },
 ]
@@ -1184,6 +1187,7 @@ spyre = [
     { name = "torch-spyre" },
 ]
 test = [
+    { name = "laya" },
     { name = "pandas" },
     { name = "pillow" },
     { name = "pytest" },
@@ -1196,6 +1200,7 @@ test = [
 requires-dist = [
     { name = "accelerate" },
     { name = "huggingface-hub", specifier = ">=1.31.0" },
+    { name = "laya", marker = "extra == 'laya'", specifier = ">=0.3.28,<0.4" },
     { name = "mistral-common", specifier = "==1.11.7" },
     { name = "numpy" },
     { name = "sentence-transformers" },
@@ -1204,7 +1209,7 @@ requires-dist = [
     { name = "transformers", specifier = "==5.15.0" },
     { name = "ultralytics", marker = "extra == 'yolo'" },
 ]
-provides-extras = ["yolo"]
+provides-extras = ["laya", "yolo"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1226,6 +1231,7 @@ models-ops = [
 oot = [{ name = "oot-framework", git = "https://github.com/torch-spyre/torch-spyre?subdirectory=tests%2Foot_framework&rev=main" }]
 spyre = [{ name = "torch-spyre", git = "https://github.com/torch-spyre/torch-spyre?rev=main" }]
 test = [
+    { name = "laya", specifier = ">=0.3.28,<0.4" },
     { name = "pandas", marker = "platform_machine != 's390x'" },
     { name = "pandas", marker = "platform_machine == 's390x'", specifier = "<3.1.0" },
     { name = "pillow" },
@@ -1488,6 +1494,24 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/f4/ce/a7dc71353dd06a4cbe02222773f52d4a28c81e5a452a75797f8ed113dc99/kiwisolver-1.5.1-pp311-pypy311_pp73-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:5daa1f19e097050b9c4d9a78fcc9263cb96c9dfae08037ddc1b7c4ad1889f2a2", size = 79891, upload-time = "2026-08-28T10:28:22.936Z" },
     { url = "https://files.pythonhosted.org/packages/10/b1/d61c61a84ff85d1a36a99df2c152b59ffedb1d356c598902aba44abcdb60/kiwisolver-1.5.1-pp311-pypy311_pp73-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:cdaeeb6c350106df6bf9d873395973e5f066a9713200b72cd64f55d0a3eafab6", size = 77605, upload-time = "2026-08-28T10:28:24.322Z" },
     { url = "https://files.pythonhosted.org/packages/d3/52/5aef56f21a460a6e43ab3cdfc7697d59d7b87deb0ec97a0f7b91aa4a521b/kiwisolver-1.5.1-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:17851e5dad4484be0cbccbde3b15331deae036de9aebd45eed964487802b172f", size = 98465, upload-time = "2026-08-28T10:28:25.696Z" },
+]
+
+[[package]]
+name = "laya"
+version = "0.3.28"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
+    { name = "safetensors" },
+    { name = "torch", version = "2.13.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "platform_machine != 's390x' and sys_platform == 'darwin'" },
+    { name = "torch", version = "2.13.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "platform_machine == 's390x' or sys_platform != 'darwin'" },
+    { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ed/52/108b9fda4e5bcd56d64db83e2c173981b64793c1f20b7e97f6cfc7542d5e/laya-0.3.28.tar.gz", hash = "sha256:8122301a5021e9fa56d8a6dba11d3bc7ae262d4f2f25dd9504344ebed9b26cbd", size = 995350, upload-time = "2026-10-05T18:05:14.58Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f1/73/c2beaece06283911d53823f1735c7a033e07a1e690735ea02d8d57706d69/laya-0.3.28-py3-none-any.whl", hash = "sha256:a1493cff474c0a5d84861db55c0c5c9b17f1db8561e458764da9a322dc542a88", size = 360039, upload-time = "2026-10-05T18:05:12.64Z" },
 ]
 
 [[package]]
