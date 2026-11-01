@@ -70,6 +70,7 @@ import torch.nn.functional as F
 from hf_adapters.hf_common import (
     InvFreqShim,
     PrecomputedRotaryEmbedding,
+    _projection_head_count,
     add_causal_sliding_window_band,
     apply_rope_matmul,
     embed_text_tokens,
@@ -79,6 +80,7 @@ from hf_adapters.hf_common import (
     run_lm_head,
     text_config,
 )
+from hf_adapters.spyre_tensor_parallel import grouped_kv_projection_modules
 from hf_adapters.swa_attention import (
     SlidingWindowCache,
     allocate_swa_caches,
@@ -91,6 +93,23 @@ from hf_adapters.swa_attention import (
     sliding_window_attention,
     valid_start_for,
 )
+
+
+def spyre_tp_grouped_colwise_modules(model, tp_size):
+    """Keep complete KV heads when there are fewer KV heads than TP ranks.
+
+    Gemma 3 1B has four Q heads and one KV head. At TP=4 each rank gets one
+    Q head, but all four ranks need the same complete K/V projections. The
+    grouped-colwise style shards whole KV heads and replicates each within
+    its corresponding group of Q ranks.
+    """
+    backbone = get_backbone(model)
+    head_dim = text_config(model.config).head_dim
+    return grouped_kv_projection_modules(
+        model,
+        ((layer.self_attn, head_dim) for layer in backbone.layers),
+        tp_size,
+    )
 
 
 def _patch_gemma_rmsnorm(rmsnorm_cls):
@@ -476,7 +495,7 @@ def prepare_for_spyre(model):
     1. Patch ``Gemma3RMSNorm`` for the fp16 Spyre path.
     2. Build one ``PrecomputedRotaryEmbedding`` per layer type from the model's
        per-type ``inv_freq`` buffers (no head padding — D/2 >= 64 already).
-    3. Record per-layer KV-cache shapes (single head_dim for all layers).
+    3. Derive local head counts and KV-cache shapes from the loaded projections.
     4. Prepare the padded LM head (no-op for the bare embedder
        backbone, which has no ``lm_head``).
     5. Compile each decoder layer's block.
@@ -490,13 +509,32 @@ def prepare_for_spyre(model):
     _patch_gemma_rmsnorm(rmsnorm_cls)
 
     head_dim = cfg.head_dim
-    num_q_heads = cfg.num_attention_heads
-    num_kv_heads = cfg.num_key_value_heads
 
     assert head_dim % 2 == 0 and head_dim // 2 >= 64, (
         f"Gemma 3 head_dim={head_dim}: head_dim/2 must be >= 64 (one Spyre "
         "stick). A padded variant is not implemented for this adapter."
     )
+
+    # HF updates projection metadata when loading TP shards; config counts
+    # remain global. Use the local geometry for both views and cache allocation.
+    num_q_heads_per_layer = []
+    kv_shapes = []
+    for i, layer in enumerate(backbone.layers):
+        attn = layer.self_attn
+        num_q_heads = _projection_head_count(
+            attn.q_proj, cfg.num_attention_heads, head_dim
+        )
+        num_kv_heads = _projection_head_count(
+            attn.k_proj, cfg.num_key_value_heads, head_dim
+        )
+        num_v_heads = _projection_head_count(
+            attn.v_proj, cfg.num_key_value_heads, head_dim
+        )
+        if num_v_heads != num_kv_heads or num_q_heads % num_kv_heads != 0:
+            raise ValueError(f"Gemma 3 layer {i} has incompatible local Q/K/V heads")
+        num_q_heads_per_layer.append(num_q_heads)
+        kv_shapes.append((num_kv_heads, head_dim, head_dim))
+    model._spyre_kv_shapes = kv_shapes
 
     # One PrecomputedRotaryEmbedding per layer type, reading the model's per-type
     # inv_freq + attention_scaling buffers via a shim.
@@ -508,13 +546,6 @@ def prepare_for_spyre(model):
         model._spyre_rope[layer_type] = PrecomputedRotaryEmbedding(
             InvFreqShim(inv_freq, scaling)
         )
-
-    # Per-layer KV-cache shapes. Unlike Gemma 4, all layers share one head_dim
-    # and num_key_value_heads, so every entry is identical — but we keep the
-    # per-layer list so the shared allocator / KV machinery sees the same shape.
-    model._spyre_kv_shapes = [
-        (num_kv_heads, head_dim, head_dim) for _ in cfg.layer_types
-    ]
 
     # final_logit_softcapping is None on published Gemma 3 (dropped from Gemma
     # 2); apply it defensively if a checkpoint sets it.
@@ -545,8 +576,8 @@ def prepare_for_spyre(model):
     model._spyre_compiled_blocks = [
         _make_compiled_block(
             layer,
-            num_q_heads,
-            num_kv_heads,
+            num_q_heads_per_layer[i],
+            kv_shapes[i][0],
             head_dim,
             is_sliding=(cfg.layer_types[i] == "sliding_attention"),
             window_size=cfg.sliding_window,
