@@ -28,7 +28,7 @@ import time
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Iterator, Optional, cast
+from typing import Any, Callable, Iterator, Optional
 
 import torch
 import torch.nn as nn
@@ -37,9 +37,6 @@ from sympy import factorint
 from transformers import GenerationConfig, PreTrainedModel
 from transformers.generation import GenerateDecoderOnlyOutput
 from transformers.generation.streamers import BaseStreamer
-
-if TYPE_CHECKING:
-    from transformers.generation.utils import GenerativePreTrainedModel
 
 # Rank-aware device for multi-Spyre (tensor-parallel) runs. torchrun sets
 # LOCAL_RANK before this module is imported, so each process binds to its local
@@ -2995,9 +2992,7 @@ def generate(
     eos_token_id: int | list[int] | None | object = _UNSET,
     timing: bool = False,
     prefill_backbone_fn: Callable[..., torch.Tensor] | None = None,
-    prefill_inputs_fn: (
-        Callable[[PreTrainedModel, torch.Tensor], torch.Tensor] | None
-    ) = None,
+    prefill_inputs_fn: Callable[..., torch.Tensor] | None = None,
     prefill_fn: Callable[..., torch.Tensor] | None = None,
     decode_fn: Callable[..., torch.Tensor] | None = None,
     token_aligned_inputs: dict[str, tuple[torch.Tensor, Any]] | None = None,
@@ -3063,13 +3058,17 @@ def generate(
         prefill_inputs_fn: Optional preparation of the complete normalized
             prompt, called once before the first prefill chunk. Its output
             replaces token IDs as the input to ``prefill_backbone_fn`` and
-            must preserve the batch and sequence dimensions. This lets VLMs
+            must preserve the batch and sequence dimensions. Normalized
+            ``token_aligned_inputs`` are supplied as keyword arguments. This lets VLMs
             encode images once and chunk the resulting embeddings. Requires
             ``prefill_backbone_fn`` and cannot be combined with ``prefill_fn``.
         prefill_chunk_size (via generation_config or kwargs): Query length for
             each prefill chunk when the adapter does not configure one. An
             adapter-configured chunk size takes precedence; an explicit caller
-            value is ignored with a warning. Without either, prefill is one-shot.
+            value is ignored with a warning. Otherwise, adapters may set
+            ``_spyre_default_prefill_chunk_size`` for prompts longer than that
+            size. Caller kwargs (including None) and generation config override
+            this default. Without a chunk size, prefill is one-shot.
     """
     if prefill_inputs_fn is not None and (
         prefill_backbone_fn is None or prefill_fn is not None
@@ -3122,6 +3121,22 @@ def generate(
         if configured_prefill_chunk_size is not None
         else requested_prefill_chunk_size
     )
+    default_prefill_chunk_size: int | None = getattr(
+        model, "_spyre_default_prefill_chunk_size", None
+    )
+    if (
+        prefill_fn is None
+        and prefill_chunk_size is None
+        and "prefill_chunk_size" not in kwargs
+        and default_prefill_chunk_size is not None
+    ):
+        # Count real tokens so caller padding cannot turn a short prompt into
+        # a large prefill. This default is resolved afresh for each request.
+        prompt: NormalizedGenerationInputs = normalize_generation_inputs(
+            input_ids, attention_mask
+        )
+        if prompt.padded_len > default_prefill_chunk_size:
+            prefill_chunk_size = default_prefill_chunk_size
     if prefill_chunk_size is not None and (
         isinstance(prefill_chunk_size, bool)
         or not isinstance(prefill_chunk_size, int)
@@ -3156,8 +3171,10 @@ def generate(
     }
 
     input_length = orig_input_ids.shape[1]
-    generation_model = cast("GenerativePreTrainedModel", model)
-    cfg = generation_model._prepare_generated_length(
+    # These methods come from HF's generation mixin, not PreTrainedModel.
+    assert callable(model._prepare_generated_length)
+    assert callable(model._validate_generated_length)
+    cfg = model._prepare_generated_length(
         generation_config=cfg,
         has_default_max_length=has_default_max_length,
         has_default_min_length=has_default_min_length,
@@ -3165,7 +3182,7 @@ def generate(
         input_ids_length=input_length,
         inputs_tensor=orig_input_ids,
     )
-    generation_model._validate_generated_length(
+    model._validate_generated_length(
         cfg,
         input_ids_length=input_length,
         has_default_max_length=has_default_max_length,
@@ -3276,7 +3293,7 @@ def generate(
                 prefill_inputs: torch.Tensor = (
                     input_ids
                     if prefill_inputs_fn is None
-                    else prefill_inputs_fn(model, input_ids)
+                    else prefill_inputs_fn(model, input_ids, **normalized_token_inputs)
                 )
                 if prefill_inputs.shape[:2] != input_ids.shape:
                     raise ValueError(

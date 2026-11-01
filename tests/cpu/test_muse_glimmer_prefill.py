@@ -1,7 +1,7 @@
 # Copyright 2026 The Torch-Spyre Authors.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Muse's public VLM API chunks embeddings without rerunning the vision tower."""
+"""Muse's public APIs share generation and encode images once before chunking."""
 
 from collections.abc import Callable
 from pathlib import Path
@@ -17,10 +17,14 @@ from transformers import (
 )
 from transformers.generation.utils import GenerateDecoderOnlyOutput
 
-from hf_adapters import hf_gemma3, hf_muse_glimmer_mm
-from hf_adapters.auto_spyre_model import AutoSpyreModelForImageTextToText
+from hf_adapters import hf_common, hf_gemma3, hf_muse_glimmer_mm
+from hf_adapters.auto_spyre_model import (
+    AutoSpyreModelForCausalLM,
+    AutoSpyreModelForImageTextToText,
+)
 
 _Callable = TypeVar("_Callable", bound=Callable[..., Any])
+_GENERATION_CASES = [("causal", False), ("vlm", False), ("vlm", True)]
 
 
 def _without_compile(function: _Callable, **kwargs: Any) -> _Callable:
@@ -29,7 +33,7 @@ def _without_compile(function: _Callable, **kwargs: Any) -> _Callable:
 
 @pytest.fixture
 def muse_models(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, request: pytest.FixtureRequest
 ) -> tuple[PreTrainedModel, PreTrainedModel]:
     torch.random.default_generator.manual_seed(729)
     monkeypatch.setattr(torch, "compile", _without_compile)
@@ -69,9 +73,12 @@ def muse_models(
     )
     stock = MuseGlimmerForConditionalGeneration(config).eval()
     stock.save_pretrained(tmp_path)
-    model = AutoSpyreModelForImageTextToText.from_pretrained(
-        tmp_path, dtype=torch.float32
+    auto_class = (
+        AutoSpyreModelForCausalLM
+        if getattr(request, "param", "vlm") == "causal"
+        else AutoSpyreModelForImageTextToText
     )
+    model = auto_class.from_pretrained(tmp_path, dtype=torch.float32)
     return stock, model
 
 
@@ -123,7 +130,9 @@ def _stock_generate(
     return result
 
 
-@pytest.mark.parametrize("with_images", [False, True])
+@pytest.mark.parametrize(
+    ("muse_models", "with_images"), _GENERATION_CASES, indirect=["muse_models"]
+)
 @pytest.mark.parametrize(
     ("chunk_options", "expected_chunks"),
     [
@@ -133,7 +142,7 @@ def _stock_generate(
     ],
 )
 @torch.no_grad()
-def test_public_vlm_chunking_matches_stock(
+def test_public_generation_chunking_matches_stock(
     muse_models: tuple[PreTrainedModel, PreTrainedModel],
     monkeypatch: pytest.MonkeyPatch,
     with_images: bool,
@@ -152,9 +161,11 @@ def test_public_vlm_chunking_matches_stock(
     expected = _stock_generate(stock, batch, options)
     chunks: list[int] = []
     image_calls: list[int] = []
+    default_layout_shapes: list[tuple[int, ...]] = []
     head_rows: list[int] = []
     backbone = hf_gemma3._run_backbone_from_embeds
     vision = hf_muse_glimmer_mm._vision_features
+    default_layout = hf_common.to_default_device_layout
 
     def record_backbone(
         prepared: torch.nn.Module, hidden: torch.Tensor, *args: Any, **kwargs: Any
@@ -172,8 +183,13 @@ def test_public_vlm_chunking_matches_stock(
     def record_head(module: torch.nn.Module, inputs: tuple[torch.Tensor, ...]) -> None:
         head_rows.append(inputs[0].shape[1])
 
+    def record_default_layout(hidden: torch.Tensor) -> torch.Tensor:
+        default_layout_shapes.append(tuple(hidden.shape))
+        return default_layout(hidden)
+
     monkeypatch.setattr(hf_gemma3, "_run_backbone_from_embeds", record_backbone)
     monkeypatch.setattr(hf_muse_glimmer_mm, "_vision_features", record_vision)
+    monkeypatch.setattr(hf_common, "to_default_device_layout", record_default_layout)
     handle = model.lm_head.register_forward_pre_hook(record_head)
     try:
         actual = model.generate(**batch, **options, **chunk_options)
@@ -183,9 +199,16 @@ def test_public_vlm_chunking_matches_stock(
     assert chunks == expected_chunks
     assert image_calls == ([48] if with_images else [])
     assert head_rows == [1] * 4
+    # Text prefill and decode use Muse's decoder layout directly. Only image
+    # scatter still starts with the generic embedding layout for the whole prompt.
+    assert default_layout_shapes == (
+        [(2, sum(expected_chunks), 256)] if with_images else []
+    )
 
 
-@pytest.mark.parametrize("with_images", [False, True])
+@pytest.mark.parametrize(
+    ("muse_models", "with_images"), _GENERATION_CASES, indirect=["muse_models"]
+)
 @torch.no_grad()
 def test_prefill_policy_resets_between_requests(
     muse_models: tuple[PreTrainedModel, PreTrainedModel], with_images: bool
@@ -212,12 +235,16 @@ def test_prefill_policy_resets_between_requests(
         assert model._spyre_swa_mode == ("anchored" if active_chunk else None)
 
 
+@pytest.mark.parametrize(
+    ("muse_models", "with_images"), _GENERATION_CASES, indirect=["muse_models"]
+)
 @torch.no_grad()
 def test_explicit_one_shot_overrides_generation_config(
     muse_models: tuple[PreTrainedModel, PreTrainedModel],
+    with_images: bool,
 ) -> None:
     stock, model = muse_models
-    batch = _batch(648, True)
+    batch = _batch(648, with_images)
     config: GenerationConfig = GenerationConfig.from_dict(
         {**model.generation_config.to_dict(), "prefill_chunk_size": 64}
     )
@@ -235,6 +262,116 @@ def test_explicit_one_shot_overrides_generation_config(
         )
         _assert_outputs(actual, expected)
         assert model._spyre_active_prefill_chunk_size == active_chunk
+
+
+@pytest.mark.parametrize(
+    ("muse_models", "with_images"), _GENERATION_CASES, indirect=["muse_models"]
+)
+@torch.no_grad()
+def test_caller_padding_does_not_enable_chunking(
+    muse_models: tuple[PreTrainedModel, PreTrainedModel], with_images: bool
+) -> None:
+    stock, model = muse_models
+    batch = _batch(80, with_images)
+    for name in ("input_ids", "attention_mask"):
+        batch[name] = torch.nn.functional.pad(batch[name], (0, 600))
+    options: dict[str, Any] = {
+        "max_new_tokens": 3,
+        "do_sample": False,
+        "return_dict_in_generate": True,
+        "output_logits": True,
+        "output_scores": True,
+    }
+    expected = _stock_generate(stock, batch, options)
+    actual = model.generate(**batch, **options)
+    _assert_outputs(actual, expected)
+    assert model._spyre_padded_prompt_len == 128
+    assert model._spyre_active_prefill_chunk_size is None
+
+
+@torch.no_grad()
+@pytest.mark.parametrize("muse_models", ["causal", "vlm"], indirect=True)
+def test_text_only_placeholder_tokens_match_stock(
+    muse_models: tuple[PreTrainedModel, PreTrainedModel],
+) -> None:
+    stock, model = muse_models
+    batch = _batch(80, False)
+    batch["input_ids"][0, 1:3] = torch.tensor(
+        [stock.config.image_token_id, stock.config.video_token_id]
+    )
+    options: dict[str, Any] = {
+        "max_new_tokens": 3,
+        "do_sample": False,
+        "return_dict_in_generate": True,
+        "output_logits": True,
+        "output_scores": True,
+    }
+    expected = _stock_generate(stock, batch, options)
+    actual = model.generate(**batch, **options)
+    _assert_outputs(actual, expected)
+
+
+@torch.no_grad()
+def test_preparation_hook_receives_normalized_token_inputs_once(
+    muse_models: tuple[PreTrainedModel, PreTrainedModel],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stock, model = muse_models
+    batch = _batch(648, True)
+    options: dict[str, Any] = {
+        "max_new_tokens": 3,
+        "do_sample": False,
+        "return_dict_in_generate": True,
+        "output_logits": True,
+        "output_scores": True,
+    }
+    expected = _stock_generate(stock, batch, options)
+    prepare = hf_muse_glimmer_mm._prepare_prefill_inputs
+    calls: list[int] = []
+
+    def record_inputs(
+        prepared_model: PreTrainedModel,
+        normalized_ids: torch.Tensor,
+        *,
+        token_labels: torch.Tensor,
+        pixel_values: torch.Tensor,
+        image_grid_thw: torch.Tensor,
+    ) -> torch.Tensor:
+        # Use a synthetic token-aligned input to exercise the shared hook contract.
+        # Non-padding labels identify their original token even after compaction.
+        calls.append(normalized_ids.shape[1])
+        assert token_labels.shape == normalized_ids.shape
+        real_tokens = normalized_ids != 0
+        torch.testing.assert_close(
+            token_labels[real_tokens], normalized_ids[real_tokens] + 1000
+        )
+        assert torch.all(token_labels[~real_tokens] == -1)
+        assert pixel_values is batch["pixel_values"]
+        assert image_grid_thw is batch["image_grid_thw"]
+        return prepare(
+            prepared_model,
+            normalized_ids,
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
+        )
+
+    monkeypatch.setattr(
+        hf_muse_glimmer_mm,
+        "_GENERATION_INPUT_NAMES",
+        (*hf_muse_glimmer_mm._GENERATION_INPUT_NAMES, "token_labels"),
+    )
+    monkeypatch.setattr(
+        hf_muse_glimmer_mm, "_GENERATION_TOKEN_ALIGNED_INPUTS", {"token_labels": -1}
+    )
+    monkeypatch.setattr(hf_muse_glimmer_mm, "_prepare_prefill_inputs", record_inputs)
+    actual = model.generate(
+        **batch,
+        token_labels=batch["input_ids"] + 1000,
+        prefill_chunk_size=64,
+        **options,
+    )
+    _assert_outputs(actual, expected)
+    assert calls == [704]
 
 
 @torch.no_grad()

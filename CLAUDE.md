@@ -4,6 +4,10 @@
 
 HF Adapters for Spyre — runtime monkey-patches that make stock HuggingFace Transformers models run on IBM Spyre accelerators. No forks, no custom model classes.
 
+## Coding Style
+
+- Avoid `typing.cast()` (including imported `cast()`) in generated or modified Python code. Prefer accurate type annotations and type narrowing; fix type mismatches at their source instead of silencing the type checker.
+
 ## Build & Test
 
 ```bash

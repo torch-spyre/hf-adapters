@@ -23,20 +23,17 @@ and projector for image-to-text generation.
 
 from collections.abc import Callable
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 from transformers import (
     AutoModelForImageTextToText,
-    GenerationConfig,
     MuseGlimmerTextConfig,
     PreTrainedModel,
 )
-from transformers.generation.utils import GenerateDecoderOnlyOutput
 
 from hf_adapters import hf_gemma3
 from hf_adapters.hf_common import (
-    NormalizedGenerationInputs,
     PrecomputedRotaryEmbedding,
     SpyreUnsupportedModelError,
     _projection_head_count,
@@ -44,13 +41,9 @@ from hf_adapters.hf_common import (
     get_backbone,
     kv_cache_shapes,
     load_model_common,
-    normalize_generation_inputs,
     prepare_lm_head_for_spyre,
     text_config,
     untie_embedding_and_lm_head,
-)
-from hf_adapters.hf_common import (
-    generate as generate_common,
 )
 from hf_adapters.swa_attention import allocate_swa_caches
 
@@ -62,8 +55,6 @@ if TYPE_CHECKING:
 
 _run_backbone_forward = hf_gemma3._run_backbone_forward
 _run_forward = hf_gemma3._run_forward
-
-_PREFILL_CHUNK_SIZE = 512
 
 
 def _embed_tokens(model: torch.nn.Module, input_ids: torch.Tensor) -> torch.Tensor:
@@ -94,51 +85,6 @@ def _to_decoder_layout(hidden_states: torch.Tensor) -> torch.Tensor:
     )
     result: torch.Tensor = hidden_states.to(device_layout=target)  # type: ignore[call-overload]
     return result
-
-
-def generate(
-    model: PreTrainedModel,
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor | None = None,
-    *,
-    generation_config: GenerationConfig | None = None,
-    prefill_backbone_fn: Callable[..., torch.Tensor] = _run_backbone_forward,
-    prefill_inputs_fn: (
-        Callable[[PreTrainedModel, torch.Tensor], torch.Tensor] | None
-    ) = None,
-    **kwargs: Any,
-) -> torch.Tensor | GenerateDecoderOnlyOutput:
-    """Bound long-prompt compilation while preserving short-prompt shapes.
-
-    Explicit chunk kwargs (including None) take precedence over generation
-    config and this default. Use normalized prompt length so caller padding
-    cannot turn a short request into a 512-token prefill.
-    """
-    cfg: GenerationConfig = (
-        generation_config if generation_config is not None else model.generation_config
-    )
-    if (
-        "prefill_chunk_size" not in kwargs
-        and getattr(cfg, "prefill_chunk_size", None) is None
-    ):
-        normalized: NormalizedGenerationInputs = normalize_generation_inputs(
-            input_ids, attention_mask
-        )
-        if normalized.padded_len > _PREFILL_CHUNK_SIZE:
-            kwargs["prefill_chunk_size"] = _PREFILL_CHUNK_SIZE
-    return cast(
-        torch.Tensor | GenerateDecoderOnlyOutput,
-        generate_common(
-            _run_forward,
-            model,
-            input_ids,
-            attention_mask=attention_mask,
-            generation_config=generation_config,
-            prefill_backbone_fn=prefill_backbone_fn,
-            prefill_inputs_fn=prefill_inputs_fn,
-            **kwargs,
-        ),
-    )
 
 
 def _allocate_caches(
@@ -238,6 +184,9 @@ def prepare_for_spyre(model: PreTrainedModel) -> None:
     setattr(backbone, "norm", torch.compile(backbone.norm, dynamic=False))
     setattr(model, "_spyre_compiled_norm", backbone.norm)
     setattr(model, "_spyre_embed_tokens", _embed_tokens)
+    # The shared generation loop uses this default only for longer prompts;
+    # explicit kwargs (including None) and generation config take precedence.
+    setattr(model, "_spyre_default_prefill_chunk_size", 512)
 
     output_multiplier: float = cfg.output_multiplier
     cap: float = cfg.final_logit_softcapping

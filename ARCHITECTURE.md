@@ -672,7 +672,8 @@ reuse the same compiled graph for the first and subsequent structurally identica
 layers.
 For causal-LM and Muse VLM generation, prompts longer than 512 real tokens default to
 512-token prefill chunks to bound compilation, while short prompts retain
-64-token alignment. Explicit
+64-token alignment. The adapter sets `_spyre_default_prefill_chunk_size`; the common
+`generate()` method resolves the policy for each request. Explicit
 `prefill_chunk_size` kwargs or generation configuration take precedence;
 explicitly passing `prefill_chunk_size=None` requests one-shot prefill. Stock Muse
 norms preserve fp32 accumulation; no class-wide Gemma norm patch is applied.
@@ -755,6 +756,9 @@ shared generation machinery.
 perception projector, scatters image features into normalized text embeddings,
 then uses the shared Muse/Gemma 3 decoder and generation/cache machinery.
 The image encoder runs once during prefill; subsequent steps decode text.
+The shared `_generate_image_text_to_text()` entry point binds the adapter's
+`_prepare_prefill_inputs()` hook, which embeds text and encodes/scatters images
+before the common generation loop chunks the prepared embeddings.
 The VLM API accepts `pixel_values` and `image_grid_thw` together, or text inputs
 alone. Text-only calls use the causal adapter's optimized prefill path. Image
 calls encode and scatter image features once into the normalized prompt, then

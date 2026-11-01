@@ -26,12 +26,11 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn.functional as F
-from transformers import GenerationConfig, PreTrainedModel
-from transformers.generation.utils import GenerateDecoderOnlyOutput
+from transformers import PreTrainedModel
 from transformers.models.muse_glimmer.modeling_muse_glimmer import (
     get_vision_bilinear_indices_and_weights,
 )
@@ -72,44 +71,22 @@ _VisionBlock = Callable[
 ]
 
 
-def generate_image_text_to_text(
+def _prepare_prefill_inputs(
     model: PreTrainedModel,
     input_ids: torch.Tensor,
-    attention_mask: torch.Tensor | None = None,
     *,
     pixel_values: torch.Tensor | None = None,
     image_grid_thw: torch.Tensor | None = None,
-    generation_config: GenerationConfig | None = None,
-    **kwargs: Any,
-) -> torch.Tensor | GenerateDecoderOnlyOutput:
-    """Use Muse's text prefill policy, encoding images once before chunking."""
+) -> torch.Tensor:
+    """Embed the normalized prompt and encode/scatter images once before chunking."""
     if (pixel_values is None) != (image_grid_thw is None):
         raise ValueError("pixel_values and image_grid_thw must be supplied together")
     if pixel_values is None:
-        return hf_muse_glimmer.generate(
-            model,
-            input_ids,
-            attention_mask,
-            generation_config=generation_config,
-            **kwargs,
-        )
+        # Without media, preserve stock placeholder embeddings and skip video validation.
+        return hf_muse_glimmer._embed_tokens(model, input_ids)
     assert image_grid_thw is not None
-
-    def prepare_inputs(
-        prepared_model: PreTrainedModel, normalized_ids: torch.Tensor
-    ) -> torch.Tensor:
-        features = _vision_features(prepared_model, pixel_values, image_grid_thw)
-        return _embed_and_scatter(prepared_model, normalized_ids, features)
-
-    return hf_muse_glimmer.generate(
-        model,
-        input_ids,
-        attention_mask,
-        generation_config=generation_config,
-        prefill_inputs_fn=prepare_inputs,
-        prefill_backbone_fn=_run_backbone_from_embeds,
-        **kwargs,
-    )
+    features = _vision_features(model, pixel_values, image_grid_thw)
+    return _embed_and_scatter(model, input_ids, features)
 
 
 def _run_backbone_from_embeds(
@@ -534,14 +511,11 @@ def _prefill_forward(
     image_grid_thw: torch.Tensor | None = None,
     logits_to_keep: int = 0,
 ) -> torch.Tensor:
-    if (pixel_values is None) != (image_grid_thw is None):
-        raise ValueError("pixel_values and image_grid_thw must be supplied together")
-    features: torch.Tensor | None = None
-    if pixel_values is not None and image_grid_thw is not None:
-        features = _vision_features(model, pixel_values, image_grid_thw)
     return _logits_from_embeds(
         model,
-        _embed_and_scatter(model, input_ids, features).to(DEVICE),
+        _prepare_prefill_inputs(
+            model, input_ids, pixel_values=pixel_values, image_grid_thw=image_grid_thw
+        ).to(DEVICE),
         position_ids.to(DEVICE),
         attention_mask.to(DEVICE),
         key_caches,

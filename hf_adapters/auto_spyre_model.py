@@ -40,6 +40,7 @@ prefill + single-token decode generation loop.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from types import MethodType, ModuleType
@@ -95,6 +96,7 @@ from transformers import (
     XLMRobertaConfig,
 )
 from transformers.configuration_utils import PretrainedConfig
+from transformers.generation import GenerateDecoderOnlyOutput
 from transformers.modeling_outputs import (
     MaskedLMOutput,
     QuestionAnsweringModelOutput,
@@ -877,14 +879,17 @@ def _run_vlm_text_forward(
     input_ids: torch.Tensor,
     position_ids: torch.Tensor,
     attention_mask: torch.Tensor,
-    key_caches,
-    value_caches,
+    key_caches: list[torch.Tensor],
+    value_caches: list[torch.Tensor],
     cache_index: torch.Tensor,
-):
+) -> torch.Tensor:
     """Run one text-only VLM decoder step through the adapter's shared backbone."""
-    return module._logits_from_embeds(
+    embed: Callable[[torch.nn.Module, torch.Tensor], torch.Tensor] = getattr(
+        model, "_spyre_embed_tokens", hf_common.embed_text_tokens
+    )
+    logits: torch.Tensor = module._logits_from_embeds(
         model,
-        hf_common.embed_text_tokens(model, input_ids),
+        embed(model, input_ids),
         position_ids,
         attention_mask,
         key_caches,
@@ -892,6 +897,7 @@ def _run_vlm_text_forward(
         cache_index,
         input_ids=input_ids,
     )
+    return logits
 
 
 def _generate_image_text_to_text(
@@ -900,10 +906,10 @@ def _generate_image_text_to_text(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor | None = None,
     **kwargs: Any,
-) -> Any:
+) -> torch.Tensor | GenerateDecoderOnlyOutput:
     """Run multimodal prefill and text decode through the shared generation loop."""
     # Processor outputs consumed by this adapter rather than by generation config.
-    adapter_input_names = module._GENERATION_INPUT_NAMES
+    adapter_input_names: tuple[str, ...] = module._GENERATION_INPUT_NAMES
     required_input_names: tuple[str, ...] = getattr(
         module, "_GENERATION_REQUIRED_INPUT_NAMES", adapter_input_names
     )
@@ -915,34 +921,39 @@ def _generate_image_text_to_text(
     adapter_inputs: dict[str, Any] = {
         name: kwargs.pop(name, None) for name in adapter_input_names
     }
-    if hasattr(module, "generate_image_text_to_text"):
-        return module.generate_image_text_to_text(
-            model,
-            input_ids,
-            attention_mask=attention_mask,
-            **adapter_inputs,
-            **kwargs,
-        )
-
     # Inputs keyed by token position need the same compaction/padding as input_ids.
     # The mapping value is the padding value for each tensor.
-    aligned_specs = module._GENERATION_TOKEN_ALIGNED_INPUTS
-    token_aligned_inputs = {
+    aligned_specs: dict[str, Any] = module._GENERATION_TOKEN_ALIGNED_INPUTS
+    token_aligned_inputs: dict[str, tuple[torch.Tensor, Any]] = {
         name: (adapter_inputs[name], pad_value)
         for name, pad_value in aligned_specs.items()
     }
     # Image tensors and metadata are passed to prefill unchanged.
-    pass_through_inputs = {
+    pass_through_inputs: dict[str, Any] = {
         name: value
         for name, value in adapter_inputs.items()
         if name not in aligned_specs
     }
 
     # Only prefill is multimodal; subsequent decode steps are ordinary text.
+    run_forward_fn = partial(_run_vlm_text_forward, module)
+    if hasattr(module, "_prepare_prefill_inputs"):
+        return hf_common.generate(
+            run_forward_fn,
+            model,
+            input_ids,
+            attention_mask=attention_mask,
+            prefill_backbone_fn=module._run_backbone_from_embeds,
+            prefill_inputs_fn=partial(
+                module._prepare_prefill_inputs, **pass_through_inputs
+            ),
+            token_aligned_inputs=token_aligned_inputs,
+            **kwargs,
+        )
+
     prefill_fn = partial(
         module._prefill_forward, logits_to_keep=1, **pass_through_inputs
     )
-    run_forward_fn = partial(_run_vlm_text_forward, module)
 
     return hf_common.generate(
         run_forward_fn,
