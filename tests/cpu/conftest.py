@@ -170,3 +170,19 @@ def set_rope_dtype():
 def _gc_after_test():
     yield
     gc.collect()
+
+
+@pytest.fixture
+def gemma4_moe_models(monkeypatch):
+    """A tiny random Gemma 4 MoE: ``(stock HF model, adapter-prepared copy)``."""
+    from tests._gemma4_tree_helpers import tiny_gemma4_moe
+
+    return tiny_gemma4_moe(monkeypatch)
+
+
+@pytest.fixture
+def eager_tree_graphs(monkeypatch):
+    """Run the tree-verify graphs eagerly (``torch.compile`` as the identity)."""
+    from tests._gemma4_tree_helpers import run_eagerly
+
+    run_eagerly(monkeypatch)
