@@ -237,7 +237,7 @@ jobs:
         run: printf '%s' "${THREADED_RUN_ID}" > run-id.txt
       - name: Upload threaded run_id
         if: ${{ inputs.run_id != '' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: run-id
           path: run-id.txt
@@ -601,7 +601,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-adapter-coverage
           path: junit-adapter-coverage.xml
@@ -808,7 +808,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-load-${{ env.SAFE_MODEL_KEY }}
           path: junit-load-${{ matrix.model_key }}.xml
@@ -898,7 +898,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-smoke-${{ env.SAFE_MODEL_KEY }}
           path: junit-smoke-${{ matrix.model_key }}.xml
@@ -1074,7 +1074,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-token-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-token-compare-${{ matrix.model_key }}.xml
@@ -1149,7 +1149,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-model-components
           path: junit-model-components.xml
@@ -1235,7 +1235,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-embed-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-embed-compare-${{ matrix.model_key }}.xml
@@ -1324,7 +1324,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-vlm-${{ env.SAFE_MODEL_KEY }}
           path: junit-vlm-${{ matrix.model_key }}.xml
@@ -1407,7 +1407,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-clip-${{ env.SAFE_MODEL_KEY }}
           path: junit-clip-${{ matrix.model_key }}.xml
@@ -1490,7 +1490,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-multimodal-embed-${{ env.SAFE_MODEL_KEY }}
           path: junit-multimodal-embed-${{ matrix.model_key }}.xml
@@ -1636,7 +1636,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-reranker-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-reranker-compare-${{ matrix.model_key }}.xml
@@ -1719,7 +1719,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-masked-lm-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-masked-lm-compare-${{ matrix.model_key }}.xml
@@ -1802,7 +1802,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-question-answering-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-question-answering-compare-${{ matrix.model_key }}.xml
@@ -1885,7 +1885,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-seq-classification-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-seq-classification-compare-${{ matrix.model_key }}.xml
@@ -1968,7 +1968,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-token-classification-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-token-classification-compare-${{ matrix.model_key }}.xml
@@ -2033,7 +2033,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-structured-decision-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-structured-decision-compare-${{ matrix.model_key }}.xml
@@ -2144,7 +2144,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-edge-cases-${{ env.SAFE_TEST_FILE }}-${{ env.SAFE_MODEL_KEY }}
           path: junit-edge-cases-${{ env.SAFE_TEST_FILE }}-${{ env.SAFE_MODEL_KEY }}.xml
@@ -2320,7 +2320,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-model-module-${{ matrix.config }}-${{ matrix.shard }}
           path: ${{ env.CLONED_HF_ADAPTERS_DIR }}/junit-model-module-${{ matrix.config }}-${{ matrix.shard }}.xml
@@ -2386,7 +2386,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-model-support
           path: ${{ env.CLONED_HF_ADAPTERS_DIR }}/model-support-results/junit-model-support/junit-model-support.xml
@@ -2606,7 +2606,7 @@ jobs:
       # overwrite: true replaces the first attempt's report (same name); its failures survive as result.prior_* marks.
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-load-${{ env.SAFE_MODEL_KEY }}
           path: junit-load-${{ matrix.model_key }}.xml
@@ -2684,7 +2684,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-smoke-${{ env.SAFE_MODEL_KEY }}
           path: junit-smoke-${{ matrix.model_key }}.xml
@@ -2838,7 +2838,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-token-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-token-compare-${{ matrix.model_key }}.xml
@@ -2913,7 +2913,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-model-components
           path: junit-model-components.xml
@@ -2991,7 +2991,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-embed-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-embed-compare-${{ matrix.model_key }}.xml
@@ -3071,7 +3071,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-vlm-${{ env.SAFE_MODEL_KEY }}
           path: junit-vlm-${{ matrix.model_key }}.xml
@@ -3152,7 +3152,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-clip-${{ env.SAFE_MODEL_KEY }}
           path: junit-clip-${{ matrix.model_key }}.xml
@@ -3233,7 +3233,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-multimodal-embed-${{ env.SAFE_MODEL_KEY }}
           path: junit-multimodal-embed-${{ matrix.model_key }}.xml
@@ -3310,7 +3310,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-reranker-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-reranker-compare-${{ matrix.model_key }}.xml
@@ -3387,7 +3387,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-masked-lm-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-masked-lm-compare-${{ matrix.model_key }}.xml
@@ -3464,7 +3464,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-question-answering-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-question-answering-compare-${{ matrix.model_key }}.xml
@@ -3541,7 +3541,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-seq-classification-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-seq-classification-compare-${{ matrix.model_key }}.xml
@@ -3618,7 +3618,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-token-classification-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-token-classification-compare-${{ matrix.model_key }}.xml
@@ -3681,7 +3681,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-structured-decision-compare-${{ env.SAFE_MODEL_KEY }}
           path: junit-structured-decision-compare-${{ matrix.model_key }}.xml
@@ -3765,7 +3765,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-edge-cases-${{ env.SAFE_TEST_FILE }}-${{ env.SAFE_MODEL_KEY }}
           path: junit-edge-cases-${{ env.SAFE_TEST_FILE }}-${{ env.SAFE_MODEL_KEY }}.xml
@@ -3842,7 +3842,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-model-module-${{ matrix.config }}-${{ matrix.shard }}
           path: ${{ env.CLONED_HF_ADAPTERS_DIR }}/junit-model-module-${{ matrix.config }}-${{ matrix.shard }}.xml

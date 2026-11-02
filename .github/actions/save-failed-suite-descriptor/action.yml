@@ -40,7 +40,7 @@ runs:
     # attempt-scoped, so without it a later attempt would retry a suite that
     # already passed.
     - name: Upload descriptor artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: failed-suite-${{ github.run_attempt }}-${{ inputs.job_key }}-${{ strategy.job-index }}
         path: ${{ runner.temp }}/failed_suite/suite.json
