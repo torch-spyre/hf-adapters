@@ -73,8 +73,12 @@ def fake_hub(tmp_path, monkeypatch):
     return type(
         "FakeHub",
         (),
-        {"hub": hub, "shared_blob": staticmethod(shared_blob),
-         "add_repo": staticmethod(add_repo), "write_refs": staticmethod(write_refs)},
+        {
+            "hub": hub,
+            "shared_blob": staticmethod(shared_blob),
+            "add_repo": staticmethod(add_repo),
+            "write_refs": staticmethod(write_refs),
+        },
     )()
 
 
@@ -82,17 +86,23 @@ def test_shared_blob_survives_while_another_repo_references_it(fake_hub):
     """Deleting the mirror must not break the CI model sharing its blob."""
     sha = "aa" * 32
     ci = fake_hub.add_repo("Qwen/Qwen3-0.6B", {"model.safetensors": (sha, 100)})
-    mirror = fake_hub.add_repo("PrimeIntellect/Qwen3-0.6B", {"model.safetensors": (sha, 100)})
+    mirror = fake_hub.add_repo(
+        "PrimeIntellect/Qwen3-0.6B", {"model.safetensors": (sha, 100)}
+    )
     fake_hub.write_refs(
         sha,
-        ["models--Qwen--Qwen3-0.6B/blobs/etag-model.safetensors",
-         "models--PrimeIntellect--Qwen3-0.6B/blobs/etag-model.safetensors"],
+        [
+            "models--Qwen--Qwen3-0.6B/blobs/etag-model.safetensors",
+            "models--PrimeIntellect--Qwen3-0.6B/blobs/etag-model.safetensors",
+        ],
     )
 
     freed = _delete_repo_weights(["PrimeIntellect/Qwen3-0.6B"])
 
     target = fake_hub.hub / "blobs" / "aa" / sha
-    assert target.is_file(), "shared blob was unlinked while the CI repo still references it"
+    assert (
+        target.is_file()
+    ), "shared blob was unlinked while the CI repo still references it"
     assert (ci / "snapshots" / "deadbeef" / "model.safetensors").exists()
     assert not mirror.exists() or not any(mirror.rglob("*.safetensors"))
     assert freed == 0, "no bytes should be freed while the blob stays"
@@ -104,8 +114,10 @@ def test_shared_blob_removed_once_no_repo_references_it(fake_hub):
     fake_hub.add_repo("a/also-gone", {"model.safetensors": (sha, 512)})
     fake_hub.write_refs(
         sha,
-        ["models--a--gone/blobs/etag-model.safetensors",
-         "models--a--also-gone/blobs/etag-model.safetensors"],
+        [
+            "models--a--gone/blobs/etag-model.safetensors",
+            "models--a--also-gone/blobs/etag-model.safetensors",
+        ],
     )
 
     _delete_repo_weights(["a/gone"])

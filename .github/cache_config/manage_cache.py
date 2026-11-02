@@ -74,7 +74,9 @@ def rebuild_shared_blob_refs(hub_cache: Path | None = None) -> int:
     references: dict[Path, list[str]] = {}
     for repo_dir in hub.iterdir():
         blobs_dir = repo_dir / "blobs"
-        if not (repo_dir.name.startswith(("models--", "datasets--")) and blobs_dir.is_dir()):
+        if not (
+            repo_dir.name.startswith(("models--", "datasets--")) and blobs_dir.is_dir()
+        ):
             continue
         for entry in blobs_dir.iterdir():
             if not entry.is_symlink():
