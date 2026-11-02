@@ -1192,6 +1192,10 @@ def pad_attention_heads(
     V and O use simple end-padding per head (they don't pass through
     RoPE, so layout within a head doesn't matter).
 
+    Head counts come from the local projections after TP sharding. Projection
+    modules are preserved so their TP hooks (especially O's all-reduce) survive
+    padding. Padded weights stay on CPU until the final model-to-Spyre move.
+
     Note: only Q/K *need* padding for RoPE stick alignment.  V and O
     could use the original head_dim (PyTorch SDPA supports E != Ev),
     which would shrink the KV cache. This is blocked by the Spyre
@@ -1205,8 +1209,8 @@ def pad_attention_heads(
         layers: Iterable of decoder layers (each must have ``self_attn``).
         orig_head_dim: Original head dimension.
         padded_head_dim: Target head dimension (must be > orig_head_dim).
-        num_heads: Number of query heads.
-        num_kv_heads: Number of key/value heads.
+        num_heads: Config query-head count, used only as a fallback.
+        num_kv_heads: Config KV-head count, used only as a fallback.
     """
     assert orig_head_dim % 2 == 0, f"head_dim must be even, got {orig_head_dim}"
     assert (
@@ -1221,51 +1225,27 @@ def pad_attention_heads(
         f"BLOCK_SIZE ({BLOCK_SIZE})"
     )
 
-    orig_half = orig_head_dim // 2
-    padded_half = padded_head_dim // 2
-
-    def _pad_qk_rope(proj, n_heads):
-        """Interleaved padding for Q/K: pad within each [2, D/2] group."""
-        w = proj.weight
-        hidden = w.shape[1]
-        new_w = torch.zeros(n_heads * padded_head_dim, hidden, dtype=w.dtype)
-        for h in range(n_heads):
-            s = h * orig_head_dim
-            d = h * padded_head_dim
-            new_w[d : d + orig_half, :] = w[s : s + orig_half, :]
-            new_w[d + padded_half : d + padded_half + orig_half, :] = w[
-                s + orig_half : s + orig_head_dim, :
-            ]
-        new_proj = nn.Linear(
-            hidden, n_heads * padded_head_dim, bias=proj.bias is not None
-        )
-        new_proj.weight = nn.Parameter(new_w, requires_grad=False)
-        if proj.bias is not None:
-            new_b = torch.zeros(n_heads * padded_head_dim, dtype=proj.bias.dtype)
-            for h in range(n_heads):
-                s = h * orig_head_dim
-                d = h * padded_head_dim
-                new_b[d : d + orig_half] = proj.bias[s : s + orig_half]
-                new_b[d + padded_half : d + padded_half + orig_half] = proj.bias[
-                    s + orig_half : s + orig_head_dim
-                ]
-            new_proj.bias = nn.Parameter(new_b, requires_grad=False)
-        return new_proj
+    def _pad_in_place(proj, pad_fn, n_heads):
+        # HF's TP loader may already have placed this shard on Spyre. Copy it
+        # once before slicing; the final model move supplies the Linear layout.
+        proj.to("cpu")
+        padded = pad_fn(proj, n_heads, orig_head_dim, padded_head_dim)
+        proj.weight = padded.weight
+        proj.bias = padded.bias
+        proj.in_features = padded.in_features
+        proj.out_features = padded.out_features
 
     for layer in layers:
         attn = layer.self_attn
-        orig_scaling = attn.scaling
-        attn.q_proj = _pad_qk_rope(attn.q_proj, num_heads)
-        attn.k_proj = _pad_qk_rope(attn.k_proj, num_kv_heads)
+        local_q_heads = _projection_head_count(attn.q_proj, num_heads, orig_head_dim)
+        local_k_heads = _projection_head_count(attn.k_proj, num_kv_heads, orig_head_dim)
+        local_v_heads = _projection_head_count(attn.v_proj, num_kv_heads, orig_head_dim)
+        _pad_in_place(attn.q_proj, pad_qk_proj_for_rope, local_q_heads)
+        _pad_in_place(attn.k_proj, pad_qk_proj_for_rope, local_k_heads)
         # V/O padding: needed until torch-spyre/torch-spyre#1739 is resolved.
-        attn.v_proj = _pad_proj_output_simple(
-            attn.v_proj, num_kv_heads, orig_head_dim, padded_head_dim
-        )
-        attn.o_proj = _pad_proj_input_simple(
-            attn.o_proj, num_heads, orig_head_dim, padded_head_dim
-        )
+        _pad_in_place(attn.v_proj, _pad_proj_output_simple, local_v_heads)
+        _pad_in_place(attn.o_proj, _pad_proj_input_simple, local_q_heads)
         attn.head_dim = padded_head_dim
-        attn.scaling = orig_scaling
 
     model._spyre_head_dim = padded_head_dim
 

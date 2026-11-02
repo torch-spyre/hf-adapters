@@ -18,6 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+laya = ["laya>=0.3.28,<0.4"]
 # YOLO.detect() (serve.py) imports ultralytics lazily.
 yolo = ["ultralytics"]
 
@@ -74,6 +75,11 @@ ignore_missing_imports = true
 # it is not installed in the standard dev environment.
 [[tool.mypy.overrides]]
 module = "deepspec.*"
+ignore_missing_imports = true
+
+# laya is optional and does not ship a py.typed marker.
+[[tool.mypy.overrides]]
+module = "laya.*"
 ignore_missing_imports = true
 
 # torch-spyre is available on device but not installed in the mypy CI job.
@@ -141,6 +147,7 @@ models-ops = [
 ]
 test = [
     "pytest>=9.0,<9.1",
+    "laya>=0.3.28,<0.4",
     "Pillow",
     "torchvision~=0.28.0",
     "PyYAML",
