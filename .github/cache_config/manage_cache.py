@@ -55,6 +55,41 @@ def cache_warmed_model_paths(config_file=DEFAULT_CACHE_CONFIG_PATH) -> list[str]
     return sorted(set(_registry_model_paths()) | set(extra_models))
 
 
+def rebuild_shared_blob_refs(hub_cache: Path | None = None) -> int:
+    """Rewrite the ``.refs`` refcount file of every shared blob under HF_HUB_CACHE.
+
+    The shared-blob store deduplicates byte-identical files across repos, and
+    its ``<sha>.refs`` files are what makes weight cleanup safe to run (#738).
+    They are only maintained for blobs downloaded after the layout migration,
+    so entries cached earlier are missing and a refs-based delete would drop a
+    blob another repo still uses. One full walk rebuilds them; run nightly.
+    Returns the number of refcount files written.
+    """
+    from huggingface_hub import constants
+
+    hub = Path(hub_cache or constants.HF_HUB_CACHE)
+    shared_root = hub / "blobs"
+    if not shared_root.is_dir():
+        return 0
+    references: dict[Path, list[str]] = {}
+    for repo_dir in hub.iterdir():
+        blobs_dir = repo_dir / "blobs"
+        if not (repo_dir.name.startswith(("models--", "datasets--")) and blobs_dir.is_dir()):
+            continue
+        for entry in blobs_dir.iterdir():
+            if not entry.is_symlink():
+                continue
+            target = entry.resolve(strict=False)
+            if shared_root in target.parents:
+                references.setdefault(target, []).append(
+                    f"{repo_dir.name}/blobs/{entry.name}"
+                )
+    for target, refs in references.items():
+        (target.with_name(target.name + ".refs")).write_text("\n".join(refs) + "\n")
+    print(f"🔁 Rebuilt {len(references)} shared-blob refcount file(s).")
+    return len(references)
+
+
 def main():
     token = os.getenv("HF_TOKEN")
     force = os.getenv("FORCE_DOWNLOAD") == "true"
@@ -93,6 +128,7 @@ def main():
     if failed_models:
         print(f"\n❌ Pipeline completed with errors. Failed models: {failed_models}")
         sys.exit(1)
+    rebuild_shared_blob_refs()
     print("\n🎉 All models successfully processed and cached!")
 
 
