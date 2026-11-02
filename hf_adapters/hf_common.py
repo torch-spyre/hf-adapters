@@ -34,8 +34,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sympy import factorint
-from transformers import GenerationConfig
+from transformers import GenerationConfig, PreTrainedModel
 from transformers.generation import GenerateDecoderOnlyOutput
+from transformers.generation.streamers import BaseStreamer
 
 # Rank-aware device for multi-Spyre (tensor-parallel) runs. torchrun sets
 # LOCAL_RANK before this module is imported, so each process binds to its local
@@ -55,6 +56,20 @@ class SpyreUnsupportedFeatureError(ValueError):
 
 class SpyreNoAdapterError(ValueError):
     """No Spyre adapter is registered for this model's architecture."""
+
+
+@dataclass(frozen=True)
+class PrefillContext:
+    """Explicit chunk execution parameters for a complete-prompt prefill hook.
+
+    ``attention_mask`` passed to the hook covers the first ``chunk_size`` rows.
+    Call ``build_attention_mask(start)`` for each subsequent chunk, in order.
+    The callback returns a device mask in the full prefill-cache coordinates;
+    its implementation and any mask optimizations stay inside the shared runtime.
+    """
+
+    chunk_size: int
+    build_attention_mask: Callable[[int], torch.Tensor]
 
 
 @contextmanager
@@ -2955,28 +2970,28 @@ def select_next_token(
 
 
 def generate(
-    run_forward_fn: Optional[Callable],
-    model,
-    input_ids,
-    max_new_tokens=None,
+    run_forward_fn: Callable[..., torch.Tensor] | None,
+    model: PreTrainedModel,
+    input_ids: torch.Tensor,
+    max_new_tokens: int | None = None,
     *,
-    attention_mask=None,
-    generation_config=None,
-    max_length=None,
-    min_new_tokens=None,
-    do_sample=None,
-    temperature=None,
-    top_k=None,
-    top_p=None,
-    eos_token_id=_UNSET,
-    timing=False,
-    prefill_backbone_fn: Optional[Callable] = None,
-    prefill_fn: Optional[Callable] = None,
-    decode_fn: Optional[Callable] = None,
-    token_aligned_inputs: Optional[dict[str, tuple[torch.Tensor, Any]]] = None,
-    streamer=None,
-    **kwargs,
-):
+    attention_mask: torch.Tensor | None = None,
+    generation_config: GenerationConfig | None = None,
+    max_length: int | None = None,
+    min_new_tokens: int | None = None,
+    do_sample: bool | None = None,
+    temperature: float | None = None,
+    top_k: int | None = None,
+    top_p: float | None = None,
+    eos_token_id: int | list[int] | None | object = _UNSET,
+    timing: bool = False,
+    prefill_backbone_fn: Callable[..., torch.Tensor] | None = None,
+    prefill_fn: Callable[..., torch.Tensor] | None = None,
+    decode_fn: Callable[..., torch.Tensor] | None = None,
+    token_aligned_inputs: dict[str, tuple[torch.Tensor, Any]] | None = None,
+    streamer: BaseStreamer | None = None,
+    **kwargs: Any,
+) -> torch.Tensor | GenerateDecoderOnlyOutput:
     """Model-agnostic generation: optional chunked prefill, then token decode.
 
     When attached to a model via ``auto_spyre_model.py`` (which binds
@@ -3033,12 +3048,26 @@ def generate(
             as ``run_forward_fn``, returning hidden states. Text prefill runs
             this for every chunk, then applies the prepared LM head only to
             the last token. Custom ``prefill_fn`` hooks take precedence.
+        prefill_fn: Optional complete-prompt hook, called once with normalized
+            token IDs, positions, token-aligned inputs, caches and an attention
+            mask. Returns logits. Models setting
+            ``_spyre_default_prefill_chunk_size`` opt this hook into chunking:
+            the mask covers the first query chunk and the explicit
+            ``prefill_context: PrefillContext | None`` keyword supplies its
+            size and a callback for subsequent masks. All hooks must accept
+            this keyword; hooks that do not opt in receive ``None``. The hook
+            owns embedding preparation,
+            backbone execution for all chunks, and the final LM-head projection.
+            Without this opt-in, custom hooks receive a full one-shot mask.
         prefill_chunk_size (via generation_config or kwargs): Query length for
             each prefill chunk when the adapter does not configure one. An
             adapter-configured chunk size takes precedence; an explicit caller
-            value is ignored with a warning. Without either, prefill is one-shot.
+            value is ignored with a warning. Otherwise, adapters may set
+            ``_spyre_default_prefill_chunk_size`` for prompts longer than that
+            size. Caller kwargs (including None) and generation config override
+            this default. Without a chunk size, prefill is one-shot.
     """
-    overrides = {
+    overrides: dict[str, Any] = {
         "max_new_tokens": max_new_tokens,
         "max_length": max_length,
         "min_new_tokens": min_new_tokens,
@@ -3083,6 +3112,25 @@ def generate(
         if configured_prefill_chunk_size is not None
         else requested_prefill_chunk_size
     )
+    default_prefill_chunk_size: int | None = getattr(
+        model, "_spyre_default_prefill_chunk_size", None
+    )
+    supports_chunked_prefill = (
+        prefill_fn is None or default_prefill_chunk_size is not None
+    )
+    if (
+        supports_chunked_prefill
+        and prefill_chunk_size is None
+        and "prefill_chunk_size" not in kwargs
+        and default_prefill_chunk_size is not None
+    ):
+        # Count real tokens so caller padding cannot turn a short prompt into
+        # a large prefill. This default is resolved afresh for each request.
+        prompt: NormalizedGenerationInputs = normalize_generation_inputs(
+            input_ids, attention_mask
+        )
+        if prompt.padded_len > default_prefill_chunk_size:
+            prefill_chunk_size = default_prefill_chunk_size
     if prefill_chunk_size is not None and (
         isinstance(prefill_chunk_size, bool)
         or not isinstance(prefill_chunk_size, int)
@@ -3094,14 +3142,12 @@ def generate(
             f"got {prefill_chunk_size!r}"
         )
 
-    # Multimodal prefill hooks consume the complete prompt and token-aligned
-    # processor inputs together, so keep them one-shot and use the SDPA tile
-    # extent. Ordinary text models may opt into chunked prefill.
-    chunked_prefill = prefill_fn is None and prefill_chunk_size is not None
+    # Custom hooks remain one-shot unless their model opts into chunking.
+    chunked_prefill = supports_chunked_prefill and prefill_chunk_size is not None
     pad_to_multiple = (
-        _SDPA_MAX_SEQUENCE_TILE_SIZE
-        if prefill_fn is not None
-        else prefill_chunk_size or BLOCK_SIZE
+        prefill_chunk_size or BLOCK_SIZE
+        if supports_chunked_prefill
+        else _SDPA_MAX_SEQUENCE_TILE_SIZE
     )
     normalized = normalize_generation_inputs(
         input_ids, attention_mask, pad_to_multiple=pad_to_multiple
@@ -3117,6 +3163,9 @@ def generate(
     }
 
     input_length = orig_input_ids.shape[1]
+    # These methods come from HF's generation mixin, not PreTrainedModel.
+    assert callable(model._prepare_generated_length)
+    assert callable(model._validate_generated_length)
     cfg = model._prepare_generated_length(
         generation_config=cfg,
         has_default_max_length=has_default_max_length,
@@ -3165,8 +3214,10 @@ def generate(
     # Specialized cache allocators can use the active chunk geometry to keep
     # local-attention caches bounded during prefill. Store None for one-shot
     # prefill so an earlier generate call cannot leave stale chunk metadata.
-    model._spyre_active_prefill_chunk_size = (
-        query_chunk_size if chunked_prefill else None
+    setattr(
+        model,
+        "_spyre_active_prefill_chunk_size",
+        query_chunk_size if chunked_prefill else None,
     )
 
     # Initialize empty KV caches. Per-layer shapes come from the model
@@ -3213,13 +3264,29 @@ def generate(
                 value_caches, prefill_kv_len, chunked_prefill
             )
             if prefill_fn is not None:
-                prefill_mask = build_prefill_mask(
-                    batch_size,
-                    padded_len,
-                    prefill_kv_len,
-                    prompt_offsets,
-                    dtype=model_d_type,
-                )
+                prefill_context: PrefillContext | None = None
+                if supports_chunked_prefill:
+                    prefill_mask_builder = _ChunkedPrefillMaskBuilder(
+                        batch_size,
+                        query_chunk_size,
+                        prefill_kv_len,
+                        prompt_offsets,
+                        dtype=model_d_type,
+                        device=DEVICE,
+                    )
+                    prefill_mask = prefill_mask_builder.build(0)
+                    prefill_context = PrefillContext(
+                        chunk_size=query_chunk_size,
+                        build_attention_mask=prefill_mask_builder.build,
+                    )
+                else:
+                    prefill_mask = build_prefill_mask(
+                        batch_size,
+                        padded_len,
+                        prefill_kv_len,
+                        prompt_offsets,
+                        dtype=model_d_type,
+                    )
                 logits = prefill_fn(
                     model=model,
                     input_ids=input_ids,
@@ -3228,6 +3295,7 @@ def generate(
                     key_caches=prefill_key_caches,
                     value_caches=prefill_value_caches,
                     cache_index=make_cache_index(0, padded_len, DEVICE),
+                    prefill_context=prefill_context,
                     **normalized_token_inputs,
                 )
             else:
@@ -3389,7 +3457,7 @@ def generate(
     return GenerateDecoderOnlyOutput(
         sequences=sequences,  # type: ignore[arg-type]
         scores=tuple(generation_scores) if generation_scores else None,
-        logits=tuple(generation_logits) if generation_logits else None,
+        logits=tuple(generation_logits) if generation_logits else None,  # type: ignore[arg-type]
         past_key_values=None,
     )
 

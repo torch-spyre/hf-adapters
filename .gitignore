@@ -251,10 +251,7 @@ torch_compile_debug/
 
 # hatch-vcs generated version file
 hf_adapters/_version.py
-<<<<<<< Updated upstream
-=======
 
 # Agents
 /.agents/
 AGENTS.md
->>>>>>> Stashed changes
