@@ -152,17 +152,29 @@ def test_prefill_head_matches_full_logits(prepared_model, chunk_size, batch_size
     assert len(set(prefill_shapes)) == 1  # No per-prefix attention specialization.
 
 
+@pytest.mark.parametrize("chunk_size", [None, 64, 512])
 @torch.no_grad()
-def test_custom_prefill_hook_takes_precedence(prepared_model):
+def test_custom_prefill_hook_takes_precedence(prepared_model, monkeypatch, chunk_size):
     model, adapter = prepared_model
+    model._spyre_prefill_chunk_size = chunk_size
     ids = torch.tensor([[11, 12, 13]])
     calls = []
+    allocated = []
+    original_allocator = hf_common.allocate_kv_caches
+
+    def allocate(*args, **kwargs):
+        caches = original_allocator(*args, **kwargs)
+        allocated.append(caches)
+        return caches
 
     def unused_backbone(*args, **kwargs):
         pytest.fail("custom prefill must not call the text backbone hook")
 
     def prefill(**kwargs):
         calls.append("prefill")
+        assert model._spyre_active_prefill_chunk_size is None
+        assert kwargs["key_caches"] is allocated[0][0]
+        assert kwargs["value_caches"] is allocated[0][1]
         return adapter._run_forward(
             kwargs["model"],
             kwargs["input_ids"],
@@ -173,11 +185,20 @@ def test_custom_prefill_hook_takes_precedence(prepared_model):
             kwargs["cache_index"],
         )
 
+    def decode(model, ids, positions, mask, keys, values, cache_index):
+        calls.append("decode")
+        assert keys is allocated[0][0]
+        assert values is allocated[0][1]
+        return adapter._run_forward(
+            model, ids, positions, mask, keys, values, cache_index
+        )
+
     expected = hf_common.generate(
         adapter._run_forward, model, ids, max_new_tokens=2, do_sample=False
     )
+    monkeypatch.setattr(hf_common, "allocate_kv_caches", allocate)
     actual = hf_common.generate(
-        adapter._run_forward,
+        decode,
         model,
         ids,
         max_new_tokens=2,
@@ -185,7 +206,8 @@ def test_custom_prefill_hook_takes_precedence(prepared_model):
         prefill_backbone_fn=unused_backbone,
         prefill_fn=prefill,
     )
-    assert calls == ["prefill"]
+    assert len(allocated) == 1
+    assert calls == ["prefill", "decode"]
     torch.testing.assert_close(actual, expected)
 
 

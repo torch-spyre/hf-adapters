@@ -1,0 +1,47 @@
+schema_version: 1
+name: lm-quality-tests
+# Fixed-size regression samples, not full benchmark scores. Uniform sampling
+# without replacement PER task ID; the fixed seed selects the same subset on
+# every model/backend/run. Datasets smaller than the limit are evaluated in full.
+defaults:
+  limit: 50
+  num_fewshot: 0
+  max_length: 4096
+  batch_size: 1
+  dtype: auto
+  apply_chat_template: true
+  fewshot_as_multiturn: false
+  seed: 1234
+  timeout_seconds: 7200
+  generation: null  # Use the task's generation settings unless overridden below.
+benchmarks:
+  - id: gsm8k
+    tasks: [gsm8k]
+    generation:
+      max_gen_toks: 1024
+      do_sample: false
+  - id: mmlu
+    # Representative subset of a few tasks
+    tasks:
+      - mmlu_abstract_algebra
+      - mmlu_high_school_biology
+      - mmlu_high_school_computer_science
+      - mmlu_high_school_us_history
+      - mmlu_professional_law
+    max_length: 2048
+  - id: gpqa_diamond
+    tasks: [gpqa_diamond_zeroshot]
+    max_length: 2048
+    # Requires HF_TOKEN with access to Idavidrein/gpqa.
+  - id: aime24
+    tasks: [aime24]
+    limit: 30  # The complete AIME24 dataset contains 30 questions.
+    generation:
+      max_gen_toks: 2048
+      do_sample: false
+  - id: ifeval
+    tasks: [ifeval]
+    generation:
+      # Matches lm_eval 0.4.13's tasks/ifeval/ifeval.yaml default.
+      max_gen_toks: 1280
+      do_sample: false

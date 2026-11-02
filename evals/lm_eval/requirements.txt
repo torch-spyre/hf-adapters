@@ -1,0 +1,10 @@
+# Install into an environment with the appropriate torch build (CUDA or Spyre).
+# Both SpyreHFLM and NativeHFLM import the HF backend (including accelerate).
+lm_eval[hf,ifeval]==0.4.13
+datasets==5.0.1
+transformers==5.15.0
+PyYAML==6.0.3
+# Scoring dependencies also form part of the reference-comparison protocol.
+evaluate==0.4.6
+nltk==3.10.3
+langdetect==1.0.9
