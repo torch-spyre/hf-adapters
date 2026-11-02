@@ -24,15 +24,6 @@ except ImportError:
     except PackageNotFoundError:
         __version__ = "0.0.0"
 
-from hf_adapters.auto_spyre_model import (
-    AutoSpyreModel,
-    AutoSpyreModelForCausalLM,
-    AutoSpyreModelForImageTextToText,
-    AutoSpyreModelForMaskedLM,
-    AutoSpyreModelForQuestionAnswering,
-    AutoSpyreModelForSequenceClassification,
-    AutoSpyreModelForTokenClassification,
-)
 from hf_adapters.hf_common import encode_prompts
 
 __all__ = [
@@ -46,3 +37,19 @@ __all__ = [
     "AutoSpyreModelForTokenClassification",
     "encode_prompts",
 ]
+
+
+def __getattr__(name):
+    # auto_spyre_model is imported lazily, so that it is possible to import specific modules,
+    # e.g., hf_adapters.execution, without importing every model family's dependencies.
+    if name in __all__ and name.startswith("AutoSpyreModel"):
+        from hf_adapters import auto_spyre_model
+
+        value = getattr(auto_spyre_model, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals()) | set(__all__))

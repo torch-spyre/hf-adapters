@@ -28,8 +28,9 @@ Unlike GPT-2, GPT-Neo uses:
   - ``nn.Linear`` for all projections (not ``Conv1D``), so no weight transpose;
   - **separate** ``q_proj``/``k_proj``/``v_proj`` (no fused ``c_attn``);
   - **alternating** global/local attention per layer (``config.attention_layers``).
-    For Spyre we use full causal attention for every layer — the local window
-    constraint is enforced by HF's stock forward but does not apply here.
+    Standalone execution uses full causal attention for every layer. External
+    execution requires the local window to cover ``max_model_len``, so full
+    paged attention preserves the checkpoint's attention semantics.
 
 ``prepare_for_spyre`` patches the MLP activation, pads the LM head, and compiles
 one block per layer via ``make_decoder_block``.
@@ -74,7 +75,7 @@ from hf_adapters.hf_common import (
 )
 
 
-def _make_compiled_block(layer):
+def _make_compiled_block(layer, runtime=None):
     """Resolve GPT-Neo's module layout and hand off to ``make_decoder_block``.
 
     GPT-Neo uses separate ``q_proj``/``k_proj``/``v_proj`` (already ``nn.Linear``)
@@ -107,6 +108,8 @@ def _make_compiled_block(layer):
         head_dim=head_dim,
         scale=1.0,  # GPT-Neo omits the 1/sqrt(head_dim) scale — padding doesn't change this
         pre_ln=True,
+        attention=None if runtime is None else runtime.attention(attn, scale=1.0),
+        runtime=runtime,
     )
 
 
@@ -159,7 +162,7 @@ def _run_forward(
     return run_lm_head(model, h)
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model, *, runtime=None):
     """Apply Spyre adaptations to a GPT-Neo model in-place.
 
     Patches the MLP activation (``NewGELUActivation``) to avoid ``torch.pow``
@@ -175,7 +178,18 @@ def prepare_for_spyre(model):
     cfg = model.config
     bb = get_backbone(model)
 
-    patch_new_gelu(type(bb.h[0].mlp.act))
+    if runtime is not None:
+        if runtime.max_model_len > bb.wpe.num_embeddings:
+            raise ValueError("GPT-Neo max_model_len exceeds its learned position table")
+        if any(layer.attn.attention.attention_type == "local" for layer in bb.h):
+            if cfg.window_size < runtime.max_model_len:
+                raise ValueError(
+                    "GPT-Neo external execution requires window_size >= max_model_len "
+                    "for local attention layers"
+                )
+
+    if cfg.activation_function in ("gelu_new", "gelu_fast", "gelu_pytorch_tanh"):
+        patch_new_gelu(type(bb.h[0].mlp.act))
 
     # Pad attention heads to a stick boundary when head_dim < BLOCK_SIZE.
     # Real GPT-Neo checkpoints (125M/1.3B/2.7B) have head_dim=64 and skip this.
@@ -195,9 +209,10 @@ def prepare_for_spyre(model):
         padded_head_dim = orig_head_dim  # no-op; keep variable consistent below
 
     vocab_size = model.config.vocab_size
-    prepare_lm_head_for_spyre(
-        model, logits_processor=lambda logits: logits[..., :vocab_size]
-    )
+    if runtime is None:
+        prepare_lm_head_for_spyre(
+            model, logits_processor=lambda logits: logits[..., :vocab_size]
+        )
 
     # GPT-Neo config uses num_heads / hidden_size rather than the standard
     # num_key_value_heads / head_dim. Set explicit KV shapes (with the
@@ -206,4 +221,10 @@ def prepare_for_spyre(model):
         (num_heads, padded_head_dim, padded_head_dim) for _ in range(cfg.num_layers)
     ]
 
-    model._spyre_compiled_blocks = [_make_compiled_block(layer) for layer in bb.h]
+    if runtime is not None:
+        for layer in bb.h:
+            # HF names this layer_id; the runtime uses the shared layer_idx name.
+            layer.attn.attention.layer_idx = layer.attn.attention.layer_id
+    model._spyre_compiled_blocks = [
+        _make_compiled_block(layer, runtime) for layer in bb.h
+    ]
