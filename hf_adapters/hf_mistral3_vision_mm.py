@@ -65,10 +65,12 @@ for both ``mistral`` and ``ministral3`` text-backbone variants.
 """
 
 import torch
+from transformers import PreTrainedModel
 
 from hf_adapters import hf_pixtral_vision
 from hf_adapters.hf_common import (
     DEVICE,
+    PrefillContext,
     embed_text_tokens,
     get_backbone,
     get_model_dtype,
@@ -276,17 +278,18 @@ def _logits_from_embeds(
 
 def _prefill_forward(
     *,
-    model,
-    input_ids,
-    position_ids,
-    attention_mask,
-    key_caches,
-    value_caches,
-    cache_index,
-    pixel_values,
-    image_sizes,
-    logits_to_keep=0,
-):
+    model: PreTrainedModel,
+    input_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    key_caches: list[torch.Tensor],
+    value_caches: list[torch.Tensor],
+    cache_index: torch.Tensor,
+    pixel_values: torch.Tensor,
+    image_sizes: torch.Tensor,
+    logits_to_keep: int = 0,
+    prefill_context: PrefillContext | None = None,
+) -> torch.Tensor:
     """Shared multimodal prefill: padded ids + image → first-step logits.
 
     Builds scaled text embeddings, zeroes the ``<image>`` slots, runs the
@@ -295,19 +298,21 @@ def _prefill_forward(
     full-sequence logits ``[B, padded_len, padded_vocab]``; generation passes
     ``logits_to_keep=1`` to project only the final row.
     """
-    model_dtype = get_model_dtype(model)
+    if prefill_context is not None:
+        raise ValueError("Mistral3 Vision does not support chunked prefill")
+    model_dtype: torch.dtype = get_model_dtype(model)
 
-    inputs_embeds = embed_text_tokens(model, input_ids)
-    vision_mask = _vision_mask(model, input_ids)
+    inputs_embeds: torch.Tensor = embed_text_tokens(model, input_ids)
+    vision_mask: torch.Tensor = _vision_mask(model, input_ids)
     # Zero the <image> slots: multiply by a (0/1) keep factor built on CPU.
     # aten::masked_fill_ is not yet supported on Spyre (torch-spyre#1004);
     # once it lands this can be replaced with inputs_embeds.masked_fill_(…, 0).
     keep = (~vision_mask).to(model_dtype).unsqueeze(-1).to(inputs_embeds.device)
     inputs_embeds = inputs_embeds * keep
 
-    image_feats = _image_features(model, pixel_values, image_sizes)
+    image_feats: torch.Tensor = _image_features(model, pixel_values, image_sizes)
 
-    return _logits_from_embeds(
+    logits: torch.Tensor = _logits_from_embeds(
         model,
         inputs_embeds.to(DEVICE),
         position_ids.to(DEVICE),
@@ -319,3 +324,4 @@ def _prefill_forward(
         vision_mask=vision_mask,  # CPU bool; _inject_image_features moves to device
         logits_to_keep=logits_to_keep,
     )
+    return logits
