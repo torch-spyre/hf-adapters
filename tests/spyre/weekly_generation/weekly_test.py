@@ -58,6 +58,7 @@ Same-day duplicates are collapsed on merge by
 """
 
 import argparse
+import importlib.util
 import json
 import logging
 import multiprocessing
@@ -297,6 +298,18 @@ def _repo_cache_dir(repo_id: str) -> Path:
     return Path(constants.HF_HUB_CACHE) / folder_name
 
 
+_CACHE_MANAGER_PATH = _REPO_ROOT / ".github" / "cache_config" / "manage_cache.py"
+
+
+def _cache_warmed_repos() -> frozenset[str]:
+    """Repos CI reads offline from this shared HF_HOME, per manage_cache.py."""
+    spec = importlib.util.spec_from_file_location("manage_cache", _CACHE_MANAGER_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return frozenset(module.cache_warmed_model_paths())
+
+
 def _delete_repo_weights(repo_id_list: list[str]) -> int:
     """Delete cached weight files (and their blobs) for a list of repos. Keep configs.
 
@@ -334,13 +347,17 @@ def _cleanup_batch_weights(
     batch_paths: list[str],
     had_weights_map: dict[str, bool],
     total_freed: int,
+    protected_repos: frozenset[str],
 ) -> int:
     """Delete downloaded weights for paths that were not pre-cached at startup.
 
     Returns the updated total_freed byte count.
     """
     to_delete: list[str] = [
-        path for path in batch_paths if not had_weights_map.get(path, False)
+        path
+        for path in batch_paths
+        # Protected regardless of the startup scan, which races concurrent shards.
+        if not had_weights_map.get(path, False) and path not in protected_repos
     ]
     freed = _delete_repo_weights(to_delete)
     total_freed += freed
@@ -394,6 +411,9 @@ def main(
     }
 
     adapter_dates: dict[str, str | None] = _get_adapter_dates()
+
+    # Before the sink and try, so a bad registry fails fast, not from finally.
+    protected_repos: frozenset[str] = _cache_warmed_repos()
 
     sink: ResultSink = create_sink(
         model_type=model_type,
@@ -609,7 +629,7 @@ def main(
             # Cache cleanup: delete weights downloaded during this batch,
             # regardless of whether the worker processed each model.
             total_freed = _cleanup_batch_weights(
-                batch_paths, had_weights_map, total_freed
+                batch_paths, had_weights_map, total_freed, protected_repos
             )
 
             batch_elapsed = time.monotonic() - batch_start
@@ -649,7 +669,9 @@ def main(
         print(f"\n{ts()} Interrupted — results so far are saved; rerun to resume.")
     finally:
         # Clean up weights for the in-flight batch if interrupted mid-run.
-        _ = _cleanup_batch_weights(batch_paths, had_weights_map, total_freed)
+        _ = _cleanup_batch_weights(
+            batch_paths, had_weights_map, total_freed, protected_repos
+        )
 
         sink.close()
         if write_to_csv:
