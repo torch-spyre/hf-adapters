@@ -163,6 +163,28 @@ logit cosine ≥ 0.999 vs stock HF on CPU (`test_seq_classification_cpu_accuracy
 per-sequence logit cosine ≥ 0.99 and exact label match vs CPU reference.
 RoBERTa large MNLI uses `hf_xlm_roberta.py` (shared with the XLM-RoBERTa and reranker adapters); `RobertaConfig` is already registered in `SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING`.
 
+### Structured Decisions
+
+Laya combines a ModernBERT encoder with a custom two-layer decision transformer,
+variable option scorer, and action head. `hf_adapters.laya_backend.load()` returns the
+upstream Laya Agent with its ModernBERT encoder and decision transformer on Spyre. Question-type
+embedding, option scoring, action scoring, and Agent orchestration remain on CPU. Install the
+optional runtime with `pip install 'hf-adapters-spyre[laya]'`.
+
+| Model | model\_type | head\_dim | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
+|-------|-----------|---------|--------------|-------------|---------------|-----------|
+| Laya (`convaiinnovations/laya`) | laya (ModernBERT-large encoder) | 64→128 | Yes (padded) | Yes | Yes | Yes |
+| Laya Typed Decisions (`typed-decisions`) | laya (ModernBERT-large encoder) | 64→128 | Yes (padded) | Yes | Yes | Yes |
+| Laya Multilingual (`multilingual`) | laya (mmBERT, 768 hidden / 22 layers) | 64→128 | Yes (padded) | Yes | Yes | Yes |
+
+The table's `64→128` dimension applies to the RoPE encoder attention. The non-RoPE
+decision-transformer attention runs at its native stick-aligned head dimension of 64.
+
+**CPU Accurate** = option/action argmax matches the upstream Laya forward and
+valid-option logit cosine is ≥ 0.998. **Spyre Runs** = the structured-decision comparison
+requires valid-option logit cosine ≥ 0.98 plus exact option/action argmax, and
+covers sequential inputs and parallel option masks with repeated-call stability.
+
 ### Token Classification (NER)
 
 Encoder models fine-tuned for token-level label prediction (NER, POS, chunking).
@@ -210,9 +232,9 @@ all pass that check.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 40 adapters · 63 verified checkpoints · 10K+ compatible models.
-The 63 verified rows are 39 generative + 13 embedding + 2 seq-classification +
-2 token-classification + 6 vision-language + 1 speculative-decoding drafter (see
+**Coverage:** 41 adapters · 66 verified checkpoints · 10K+ compatible models.
+The 66 verified rows are 39 generative + 13 embedding + 2 seq-classification +
+2 token-classification + 3 structured-decision + 6 vision-language + 1 speculative-decoding drafter (see
 the Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are bare vision-tower components
 used by VLM adapters and are not included in the adapter count. The three DSpark
 speculative-decoding drafter adapters and the XPress drafter adapter are included
@@ -271,6 +293,7 @@ pattern, norms, and weight layout.
 | hf\_xlm\_roberta.py | xlm-roberta / roberta | 3 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes, RoBERTa NER/QA/classifier fine-tunes |
 | hf\_mpnet.py | mpnet | 1 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base, all-mpnet-base-v1 |
 | hf\_modernbert.py | modernbert | 3 | answerdotai/ModernBERT-base, answerdotai/ModernBERT-large, other ModernBERT embed/classifier fine-tunes |
+| laya\_backend.py | laya (ModernBERT / mmBERT encoder) | 3 | Root English, bundled typed-decisions, and multilingual checkpoints |
 
 **Verified** = checkpoints tested in CI (appear in the matrix above).
 **Also Compatible** = same `model_type` in HuggingFace config; expected

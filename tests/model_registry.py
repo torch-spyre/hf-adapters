@@ -645,6 +645,29 @@ MASKED_LM_MODELS = {
 }
 
 
+# Structured-decision models emit variable option logits and separate action logits.
+STRUCTURED_DECISION_MODELS = {
+    "laya": {
+        "name": "Laya",
+        "path": "convaiinnovations/laya",
+        "adapter": "laya_backend.py",
+        "size": "0.4b",
+    },
+    "laya_typed_decisions": {
+        "name": "Laya Typed Decisions",
+        "path": "convaiinnovations/laya-typed-decisions",
+        "adapter": "laya_backend.py",
+        "size": "0.4b",
+    },
+    "laya_multilingual": {
+        "name": "Laya Multilingual",
+        "path": "convaiinnovations/laya-multilingual",
+        "adapter": "laya_backend.py",
+        "size": "0.3b",
+    },
+}
+
+
 # Vision models. ``kind="tower"`` adapters are encoder-only; ``kind="vlm"`` adapters
 # are full multimodal models with a causal text decoder, RoPE, KV caches, and ``generate``.
 VISION_MODELS = {
@@ -902,6 +925,11 @@ TOKEN_CLASSIFICATION_PATHS: list[str] = _exclude(
         TOKEN_CLASSIFICATION_MODELS, include_gated=_include_gated_flag
     )
 )
+STRUCTURED_DECISION_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        STRUCTURED_DECISION_MODELS, include_gated=_include_gated_flag
+    )
+)
 VISION_PATHS: list[str] = _exclude(
     _select_representative_paths(
         VISION_MODELS,
@@ -955,6 +983,7 @@ REMOTE_CODE_PATHS: frozenset[str] = frozenset(
         MASKED_LM_MODELS,
         QUESTION_ANSWERING_MODELS,
         TOKEN_CLASSIFICATION_MODELS,
+        STRUCTURED_DECISION_MODELS,
         VISION_MODELS,
     )
     for info in models.values()
@@ -984,6 +1013,9 @@ ALL_QUESTION_ANSWERING_PATHS: list[str] = _exclude(
 )
 ALL_TOKEN_CLASSIFICATION_PATHS: list[str] = _exclude(
     _all_paths(TOKEN_CLASSIFICATION_MODELS, include_gated=_include_gated_flag)
+)
+ALL_STRUCTURED_DECISION_PATHS: list[str] = _exclude(
+    _all_paths(STRUCTURED_DECISION_MODELS, include_gated=_include_gated_flag)
 )
 ALL_VISION_PATHS: list[str] = _exclude(
     _all_paths(

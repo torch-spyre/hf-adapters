@@ -47,7 +47,8 @@ jobs:
       - x86_64
       - linux
       - image_ingest
-    timeout-minutes: 15
+    # PyPI/GitHub downloads from torch-cicd pods can be slow enough to blow a tighter budget.
+    timeout-minutes: 30
     # Skip if the triggering workflow was cancelled (but ingest failures are fine)
     if: |
       github.event_name == 'workflow_dispatch' ||
@@ -97,17 +98,21 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          # Picks the version from checksums bundled in this pin instead of fetching the full
+          # versions manifest, whose download times out from torch-cicd pods.
+          version: latest-known
 
       - name: setup venv
         run: |
-          uv venv
-          source .venv/bin/activate
+          uv venv .venv-v1
+          source .venv-v1/bin/activate
           echo "VIRTUAL_ENV $VIRTUAL_ENV"
 
       - name: Install Python dependencies
         run: |
-          source .venv/bin/activate
+          source .venv-v1/bin/activate
           uv pip install requests clickhouse-driver clickhouse-connect lxml regex \
             "git+https://github.com/torch-spyre/torch-spyre@main#subdirectory=extensions/clickhouse-ingest"
 
@@ -227,7 +232,7 @@ jobs:
           PR_NUMBER: ${{ steps.resolve-pr.outputs.pr_number }}
           TIER: ${{ steps.extract-tier.outputs.tier }}
         run: |
-          source .venv/bin/activate
+          source .venv-v1/bin/activate
           python3 .github/scripts/ingest_xml_hf_adapters.py \
             --xml-dir xml_artifacts \
             --workflow "${TRIGGERING_WORKFLOW}" \
@@ -240,9 +245,6 @@ jobs:
             --trigger-type "${TIER}" \
             --platform "${LEG_ARCH}"
 
-      - name: Remove local venv before shared ingest action
-        run: rm -rf .venv  # the shared action below creates its own .venv in this same workspace and fails if one already exists
-
       # The shared action's ingest_xml.py globs --xml-dir non-recursively, so the
       # per-artifact subdirectories are flattened first (see flatten_xml_artifacts.py).
       - name: Flatten XML artifacts for v2 ingest (non-recursive glob)
@@ -252,10 +254,12 @@ jobs:
           echo "Flattened XML files:"
           find xml_artifacts_flat -name "*.xml" 2>/dev/null || echo "(none)"
 
-      # Schema-v2: the same test_cases/test_case_runs tables torch-spyre writes, via its reusable action -- never installs the library locally.
+      # Schema-v2: the same test_cases/test_case_runs tables torch-spyre writes, via its reusable action.
       - name: Ingest XML into shared v2 ClickHouse tables
         uses: torch-spyre/torch-spyre/.github/actions/ingest-xml-to-clickhouse@main
         with:
+          # Already holds the ingest library, so the action skips a second install.
+          venv: .venv-v1
           xml-dir: xml_artifacts_flat
           workflow: ${{ env.TRIGGERING_WORKFLOW }}
           branch: ${{ env.TRIGGERING_BRANCH }}
@@ -311,7 +315,8 @@ jobs:
       - x86_64
       - linux
       - image_ingest
-    timeout-minutes: 20
+    # Same slow-download headroom as the ingest job above.
+    timeout-minutes: 30
     # Fire when integration-tests or test_daily completes (not on every
     # PR / test_pull_request run). For manual re-ingest, accept either name.
     if: |
@@ -344,7 +349,11 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          # Picks the version from checksums bundled in this pin instead of fetching the full
+          # versions manifest, whose download times out from torch-cicd pods.
+          version: latest-known
 
       - name: Set up venv and install dependencies
         run: |
