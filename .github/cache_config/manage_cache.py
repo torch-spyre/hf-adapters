@@ -30,6 +30,9 @@ from huggingface_hub import snapshot_download
 MODEL_REGISTRY_PATH = (
     Path(__file__).resolve().parents[2] / "tests" / "model_registry.py"
 )
+DEFAULT_CACHE_CONFIG_PATH = (
+    Path(__file__).resolve().parent / "hf_models_and_datasets.yaml"
+)
 # Matches every `"path": "org/repo"` entry across the registry's model dicts.
 _PATH_ENTRY_RE = re.compile(r'"path":\s*"([^"]+)"')
 
@@ -38,6 +41,18 @@ def _registry_model_paths() -> list[str]:
     """Every HF repo referenced by tests/model_registry.py, so the cache can't drift from what CI actually tests."""
     text = MODEL_REGISTRY_PATH.read_text(encoding="utf-8")
     return sorted(set(_PATH_ENTRY_RE.findall(text)))
+
+
+def _config_extra_models(config_file) -> list[str]:
+    with open(config_file, encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+    return config.get("models", []) or []
+
+
+def cache_warmed_model_paths(config_file=DEFAULT_CACHE_CONFIG_PATH) -> list[str]:
+    """Every repo this job keeps warm; weekly_test.py never deletes their weights."""
+    extra_models = _config_extra_models(config_file)
+    return sorted(set(_registry_model_paths()) | set(extra_models))
 
 
 def main():
@@ -51,14 +66,11 @@ def main():
     if not os.path.exists(config_file):
         print(f"❌ Error: Configuration file '{config_file}' not found.")
         sys.exit(1)
-    with open(config_file, encoding="utf-8") as f:
-        try:
-            config = yaml.safe_load(f) or {}
-            extra_models = config.get("models", []) or []
-        except Exception as e:
-            print(f"❌ Error parsing {config_file}: {e}")
-            sys.exit(1)
-    models = sorted(set(_registry_model_paths()) | set(extra_models))
+    try:
+        models = cache_warmed_model_paths(config_file)
+    except Exception as e:
+        print(f"❌ Error parsing {config_file}: {e}")
+        sys.exit(1)
     if not models:
         print(f"⚠️ Warning: No models found in the registry or {config_file}.")
         sys.exit(0)
