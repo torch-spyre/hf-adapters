@@ -153,7 +153,9 @@ def main() -> None:
         print(f"⚠️ Warning: No artifacts found in the registry or {config_file}.")
         sys.exit(0)
     print(f"📋 Found {len(models)} model(s) to cache:", models)
-    print(f"📋 Found {len(dataset_files)} dataset file(s) to cache.")
+    print(f"📋 Found {len(dataset_files)} dataset file(s) to cache:")
+    for repo_id, filename in dataset_files:
+        print(f"  - {repo_id}/{filename}")
     failed_artifacts = cache_dataset_files(
         dataset_files, token=token, force_download=force
     )
