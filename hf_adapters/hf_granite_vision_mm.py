@@ -54,10 +54,12 @@ logits cosine ≥ 0.999, argmax match) and stock ``model.generate`` (token-exact
 """
 
 import torch
+from transformers import PreTrainedModel
 
 from hf_adapters import hf_siglip_vision
 from hf_adapters.hf_common import (
     DEVICE,
+    PrefillContext,
     embed_text_tokens,
     get_backbone,
     get_model_dtype,
@@ -253,17 +255,18 @@ def _run_text_backbone(
 
 def _prefill_forward(
     *,
-    model,
-    input_ids,
-    position_ids,
-    attention_mask,
-    key_caches,
-    value_caches,
-    cache_index,
-    pixel_values,
-    image_sizes,
-    logits_to_keep=0,
-):
+    model: PreTrainedModel,
+    input_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    key_caches: list[torch.Tensor],
+    value_caches: list[torch.Tensor],
+    cache_index: torch.Tensor,
+    pixel_values: torch.Tensor,
+    image_sizes: torch.Tensor,
+    logits_to_keep: int = 0,
+    prefill_context: PrefillContext | None = None,
+) -> torch.Tensor:
     """The shared multimodal prefill: padded ids + image → first-step logits.
 
     Builds scaled text embeddings, zeroes the ``<image>`` slots, builds the
@@ -276,18 +279,22 @@ def _prefill_forward(
     KV caches are passed in so the generation loop can size them for the full
     prefill and decode sequence.
     """
-    model_d_type = get_model_dtype(model)
+    if prefill_context is not None:
+        raise ValueError("Granite Vision does not support chunked prefill")
+    model_d_type: torch.dtype = get_model_dtype(model)
     # embed_text_tokens returns embeds on the embedding table's device (Spyre
     # after the layout move). Zero the <image> slots by multiplying with a keep factor
     # (0 at image positions, 1 elsewhere): masked_fill_ does not lower on the
     # Spyre eager backend, but elementwise mul does. The keep factor is built on
     # CPU (the bool/not op also doesn't lower) then moved to the embeds' device.
-    inputs_embeds = embed_text_tokens(model, input_ids)
-    vision_mask = _vision_mask(model, input_ids)
+    inputs_embeds: torch.Tensor = embed_text_tokens(model, input_ids)
+    vision_mask: torch.Tensor = _vision_mask(model, input_ids)
     keep = (~vision_mask).to(model_d_type).to(inputs_embeds.device)
     inputs_embeds = inputs_embeds * keep
-    deepstack = _deepstack_features(model, pixel_values, image_sizes)
-    return _logits_from_embeds(
+    deepstack: dict[int, torch.Tensor] = _deepstack_features(
+        model, pixel_values, image_sizes
+    )
+    logits: torch.Tensor = _logits_from_embeds(
         model,
         inputs_embeds.to(DEVICE),
         position_ids.to(DEVICE),
@@ -299,6 +306,7 @@ def _prefill_forward(
         vision_mask=vision_mask,  # kept on CPU: _inject_deepstack scatters on CPU
         logits_to_keep=logits_to_keep,
     )
+    return logits
 
 
 def _logits_from_embeds(

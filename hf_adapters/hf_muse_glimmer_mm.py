@@ -44,12 +44,14 @@ from hf_adapters import hf_gemma3, hf_muse_glimmer
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
+    PrefillContext,
     _mask_fill_value,
     _pad_proj_input_simple,
     _pad_proj_output_simple,
     apply_rope_matmul,
     embed_text_tokens,
     get_model_dtype,
+    make_cache_index,
     pad_qk_proj_for_rope,
     patch_layernorm,
     run_lm_head,
@@ -510,16 +512,46 @@ def _prefill_forward(
     pixel_values: torch.Tensor | None = None,
     image_grid_thw: torch.Tensor | None = None,
     logits_to_keep: int = 0,
+    prefill_context: PrefillContext | None = None,
 ) -> torch.Tensor:
-    return _logits_from_embeds(
-        model,
-        _prepare_prefill_inputs(
-            model, input_ids, pixel_values=pixel_values, image_grid_thw=image_grid_thw
-        ).to(DEVICE),
-        position_ids.to(DEVICE),
-        attention_mask.to(DEVICE),
-        key_caches,
-        value_caches,
-        cache_index,
-        logits_to_keep=logits_to_keep,
+    """Encode images once, run every decoder chunk, and project requested rows.
+
+    Generation supplies the complete normalized prompt and, when chunking is
+    active, explicit chunk parameters in ``prefill_context``. Direct callers
+    without a context retain one-shot prefill using their full attention mask.
+    """
+    inputs_embeds: torch.Tensor = _prepare_prefill_inputs(
+        model, input_ids, pixel_values=pixel_values, image_grid_thw=image_grid_thw
     )
+    prompt_length = input_ids.shape[1]
+    chunk_size: int = (
+        prefill_context.chunk_size if prefill_context is not None else prompt_length
+    )
+    first_output_row = max(0, prompt_length - logits_to_keep) if logits_to_keep else 0
+    output_chunks: list[torch.Tensor] = []
+    for chunk_start in range(0, prompt_length, chunk_size):
+        chunk_end = chunk_start + chunk_size
+        if chunk_start:
+            assert prefill_context is not None
+            attention_mask = prefill_context.build_attention_mask(chunk_start)
+        chunk_cache_index: torch.Tensor = (
+            make_cache_index(chunk_start, chunk_size, DEVICE)
+            if prefill_context is not None
+            else cache_index
+        )
+        hidden: torch.Tensor = _run_backbone_from_embeds(
+            model,
+            inputs_embeds[:, chunk_start:chunk_end].to(DEVICE),
+            position_ids[:, chunk_start:chunk_end].to(DEVICE),
+            attention_mask.to(DEVICE),
+            key_caches,
+            value_caches,
+            chunk_cache_index,
+        )
+        if chunk_end > first_output_row:
+            output_chunks.append(hidden[:, max(0, first_output_row - chunk_start) :])
+    hidden = (
+        output_chunks[0] if len(output_chunks) == 1 else torch.cat(output_chunks, dim=1)
+    )
+    logits: torch.Tensor = run_lm_head(model, hidden, logits_to_keep=logits_to_keep)
+    return logits[..., : model.config.text_config.vocab_size]

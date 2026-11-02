@@ -58,6 +58,20 @@ class SpyreNoAdapterError(ValueError):
     """No Spyre adapter is registered for this model's architecture."""
 
 
+@dataclass(frozen=True)
+class PrefillContext:
+    """Explicit chunk execution parameters for a complete-prompt prefill hook.
+
+    ``attention_mask`` passed to the hook covers the first ``chunk_size`` rows.
+    Call ``build_attention_mask(start)`` for each subsequent chunk, in order.
+    The callback returns a device mask in the full prefill-cache coordinates;
+    its implementation and any mask optimizations stay inside the shared runtime.
+    """
+
+    chunk_size: int
+    build_attention_mask: Callable[[int], torch.Tensor]
+
+
 @contextmanager
 def optional_spyre_config_patch(options: dict[str, Any]) -> Iterator[None]:
     """Apply a torch-spyre config patch when torch-spyre is available."""
@@ -2992,7 +3006,6 @@ def generate(
     eos_token_id: int | list[int] | None | object = _UNSET,
     timing: bool = False,
     prefill_backbone_fn: Callable[..., torch.Tensor] | None = None,
-    prefill_inputs_fn: Callable[..., torch.Tensor] | None = None,
     prefill_fn: Callable[..., torch.Tensor] | None = None,
     decode_fn: Callable[..., torch.Tensor] | None = None,
     token_aligned_inputs: dict[str, tuple[torch.Tensor, Any]] | None = None,
@@ -3055,13 +3068,17 @@ def generate(
             as ``run_forward_fn``, returning hidden states. Text prefill runs
             this for every chunk, then applies the prepared LM head only to
             the last token. Custom ``prefill_fn`` hooks take precedence.
-        prefill_inputs_fn: Optional preparation of the complete normalized
-            prompt, called once before the first prefill chunk. Its output
-            replaces token IDs as the input to ``prefill_backbone_fn`` and
-            must preserve the batch and sequence dimensions. Normalized
-            ``token_aligned_inputs`` are supplied as keyword arguments. This lets VLMs
-            encode images once and chunk the resulting embeddings. Requires
-            ``prefill_backbone_fn`` and cannot be combined with ``prefill_fn``.
+        prefill_fn: Optional complete-prompt hook, called once with normalized
+            token IDs, positions, token-aligned inputs, caches and an attention
+            mask. Returns logits. Models setting
+            ``_spyre_default_prefill_chunk_size`` opt this hook into chunking:
+            the mask covers the first query chunk and the explicit
+            ``prefill_context: PrefillContext | None`` keyword supplies its
+            size and a callback for subsequent masks. All hooks must accept
+            this keyword; hooks that do not opt in receive ``None``. The hook
+            owns embedding preparation,
+            backbone execution for all chunks, and the final LM-head projection.
+            Without this opt-in, custom hooks receive a full one-shot mask.
         prefill_chunk_size (via generation_config or kwargs): Query length for
             each prefill chunk when the adapter does not configure one. An
             adapter-configured chunk size takes precedence; an explicit caller
@@ -3070,12 +3087,6 @@ def generate(
             size. Caller kwargs (including None) and generation config override
             this default. Without a chunk size, prefill is one-shot.
     """
-    if prefill_inputs_fn is not None and (
-        prefill_backbone_fn is None or prefill_fn is not None
-    ):
-        raise ValueError(
-            "prefill_inputs_fn requires prefill_backbone_fn without prefill_fn"
-        )
     overrides: dict[str, Any] = {
         "max_new_tokens": max_new_tokens,
         "max_length": max_length,
@@ -3124,8 +3135,11 @@ def generate(
     default_prefill_chunk_size: int | None = getattr(
         model, "_spyre_default_prefill_chunk_size", None
     )
+    supports_chunked_prefill = (
+        prefill_fn is None or default_prefill_chunk_size is not None
+    )
     if (
-        prefill_fn is None
+        supports_chunked_prefill
         and prefill_chunk_size is None
         and "prefill_chunk_size" not in kwargs
         and default_prefill_chunk_size is not None
@@ -3148,14 +3162,12 @@ def generate(
             f"got {prefill_chunk_size!r}"
         )
 
-    # Multimodal prefill hooks consume the complete prompt and token-aligned
-    # processor inputs together, so keep them one-shot and use the SDPA tile
-    # extent. Ordinary text models may opt into chunked prefill.
-    chunked_prefill = prefill_fn is None and prefill_chunk_size is not None
+    # Custom hooks remain one-shot unless their model opts into chunking.
+    chunked_prefill = supports_chunked_prefill and prefill_chunk_size is not None
     pad_to_multiple = (
-        _SDPA_MAX_SEQUENCE_TILE_SIZE
-        if prefill_fn is not None
-        else prefill_chunk_size or BLOCK_SIZE
+        prefill_chunk_size or BLOCK_SIZE
+        if supports_chunked_prefill
+        else _SDPA_MAX_SEQUENCE_TILE_SIZE
     )
     normalized = normalize_generation_inputs(
         input_ids, attention_mask, pad_to_multiple=pad_to_multiple
@@ -3272,13 +3284,29 @@ def generate(
                 value_caches, prefill_kv_len, chunked_prefill
             )
             if prefill_fn is not None:
-                prefill_mask = build_prefill_mask(
-                    batch_size,
-                    padded_len,
-                    prefill_kv_len,
-                    prompt_offsets,
-                    dtype=model_d_type,
-                )
+                prefill_context: PrefillContext | None = None
+                if supports_chunked_prefill:
+                    prefill_mask_builder = _ChunkedPrefillMaskBuilder(
+                        batch_size,
+                        query_chunk_size,
+                        prefill_kv_len,
+                        prompt_offsets,
+                        dtype=model_d_type,
+                        device=DEVICE,
+                    )
+                    prefill_mask = prefill_mask_builder.build(0)
+                    prefill_context = PrefillContext(
+                        chunk_size=query_chunk_size,
+                        build_attention_mask=prefill_mask_builder.build,
+                    )
+                else:
+                    prefill_mask = build_prefill_mask(
+                        batch_size,
+                        padded_len,
+                        prefill_kv_len,
+                        prompt_offsets,
+                        dtype=model_d_type,
+                    )
                 logits = prefill_fn(
                     model=model,
                     input_ids=input_ids,
@@ -3287,18 +3315,10 @@ def generate(
                     key_caches=prefill_key_caches,
                     value_caches=prefill_value_caches,
                     cache_index=make_cache_index(0, padded_len, DEVICE),
+                    prefill_context=prefill_context,
                     **normalized_token_inputs,
                 )
             else:
-                prefill_inputs: torch.Tensor = (
-                    input_ids
-                    if prefill_inputs_fn is None
-                    else prefill_inputs_fn(model, input_ids, **normalized_token_inputs)
-                )
-                if prefill_inputs.shape[:2] != input_ids.shape:
-                    raise ValueError(
-                        "Prepared prefill inputs must preserve the batch and sequence dimensions"
-                    )
                 # Keep Lk fixed at the complete prefill extent while advancing
                 # Lq. Future cache slots are zero and masked, and fixed shapes
                 # avoid compiling one attention graph for every prefix length.
@@ -3316,7 +3336,7 @@ def generate(
                     prefill_mask = prefill_mask_builder.build(chunk_start)
                     prefill_output = text_prefill_fn(  # type: ignore[misc]
                         model,
-                        prefill_inputs[:, chunk_start:chunk_end].to(DEVICE),
+                        input_ids[:, chunk_start:chunk_end].to(DEVICE),
                         position_ids[:, chunk_start:chunk_end].to(DEVICE),
                         prefill_mask,
                         prefill_key_caches,
@@ -3332,7 +3352,6 @@ def generate(
                     if prefill_backbone_fn is not None
                     else prefill_output
                 )
-                del prefill_inputs
             # Only the last chunk's final-token logits matter for next-token
             # selection. Slice on Spyre so the D2H copy transfers [B, V]
             # instead of the full [B, S, V] prefill output.

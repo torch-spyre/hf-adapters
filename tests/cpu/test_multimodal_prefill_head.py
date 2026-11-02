@@ -66,6 +66,7 @@ def test_multimodal_prefill_projects_only_requested_rows(
         key_caches=[],
         value_caches=[],
         cache_index=torch.arange(8),
+        prefill_context=None,
         pixel_values=None,
     )
     if adapter.__name__.endswith("hf_gemma4_mm"):
@@ -75,7 +76,7 @@ def test_multimodal_prefill_projects_only_requested_rows(
         )
         monkeypatch.setattr(adapter.hf_gemma4, "_run_blocks_over_embeds", backbone)
         kwargs.update(image_position_ids=None, mm_token_type_ids=torch.zeros_like(ids))
-    elif hasattr(adapter, "_prepare_prefill_inputs"):
+    elif adapter.__name__.endswith("hf_muse_glimmer_mm"):
         monkeypatch.setattr(
             adapter, "_prepare_prefill_inputs", Mock(return_value=hidden)
         )
@@ -132,16 +133,11 @@ def test_multimodal_generate_requests_last_token(
         forward: Any, actual_model: Any, ids: torch.Tensor, **kwargs: Any
     ) -> object:
         assert actual_model is model
-        if hasattr(adapter, "_prepare_prefill_inputs"):
-            prepare = kwargs["prefill_inputs_fn"]
-            assert prepare.func is adapter._prepare_prefill_inputs
-            assert prepare.keywords == processor_inputs
-            assert kwargs["prefill_backbone_fn"] is adapter._run_backbone_from_embeds
-            assert "prefill_fn" not in kwargs
-        else:
-            prefill = kwargs["prefill_fn"]
-            assert prefill.func is adapter._prefill_forward
-            assert prefill.keywords["logits_to_keep"] == 1
+        prefill: Any = kwargs["prefill_fn"]
+        assert prefill.func is adapter._prefill_forward
+        assert prefill.keywords["logits_to_keep"] == 1
+        assert "prefill_inputs_fn" not in kwargs
+        assert "prefill_backbone_fn" not in kwargs
         return expected
 
     monkeypatch.setattr(hf_common, "generate", generate)

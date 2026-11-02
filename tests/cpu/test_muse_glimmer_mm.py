@@ -144,12 +144,17 @@ def test_generate_matches_stock(
         torch.testing.assert_close(got, want, atol=1e-6, rtol=1e-4)
 
 
-@pytest.mark.parametrize("logits_to_keep", [0, 1, 3])
+@pytest.mark.parametrize("logits_to_keep", [0, 1, 3, 65])
+@pytest.mark.parametrize("chunk_size", [None, 64])
 @torch.no_grad()
 def test_prefill_returns_requested_logits(
-    muse_model: MuseGlimmerForConditionalGeneration, logits_to_keep: int
+    muse_model: MuseGlimmerForConditionalGeneration,
+    logits_to_keep: int,
+    chunk_size: int | None,
 ) -> None:
     ids, image_inputs = _inputs(with_image=True)
+    if chunk_size is not None:
+        ids = torch.cat((ids, torch.randint(3, 126, (1, 128 - ids.shape[1]))), dim=1)
     expected: torch.Tensor = muse_model(
         ids, use_cache=False, logits_to_keep=logits_to_keep, **image_inputs
     ).logits
@@ -160,9 +165,29 @@ def test_prefill_returns_requested_logits(
     values: list[torch.Tensor]
     keys, values = hf_common.allocate_kv_caches(muse_model, 1, cache_len, torch.float32)
     offsets = torch.tensor([0])
-    mask: torch.Tensor = hf_common.build_prefill_mask(
-        1, ids.shape[1], cache_len, offsets, dtype=torch.float32
-    )
+    mask: torch.Tensor
+    prefill_context: hf_common.PrefillContext | None = None
+    if chunk_size is None:
+        mask = hf_common.build_prefill_mask(
+            1, ids.shape[1], cache_len, offsets, dtype=torch.float32
+        )
+    else:
+
+        def build_attention_mask(start: int) -> torch.Tensor:
+            # Plain tensors carry no private chunking metadata. The explicit
+            # context alone controls Muse's chunk loop.
+            mask: torch.Tensor = hf_common.build_prefill_mask(
+                1,
+                chunk_size,
+                cache_len,
+                offsets,
+                dtype=torch.float32,
+                query_start=start,
+            )
+            return mask
+
+        prefill_context = hf_common.PrefillContext(chunk_size, build_attention_mask)
+        mask = build_attention_mask(0)
     # Omitting the option must preserve the full-logit default of the VLM protocol.
     options = {"logits_to_keep": logits_to_keep} if logits_to_keep else {}
     actual = hf_muse_glimmer_mm._prefill_forward(
@@ -173,6 +198,7 @@ def test_prefill_returns_requested_logits(
         key_caches=keys,
         value_caches=values,
         cache_index=hf_common.make_cache_index(0, ids.shape[1], "cpu"),
+        prefill_context=prefill_context,
         **image_inputs,
         **options,
     )

@@ -312,7 +312,7 @@ def test_text_only_placeholder_tokens_match_stock(
 
 
 @torch.no_grad()
-def test_preparation_hook_receives_normalized_token_inputs_once(
+def test_prefill_hook_receives_normalized_token_inputs_once(
     muse_models: tuple[PreTrainedModel, PreTrainedModel],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -326,33 +326,35 @@ def test_preparation_hook_receives_normalized_token_inputs_once(
         "output_scores": True,
     }
     expected = _stock_generate(stock, batch, options)
-    prepare = hf_muse_glimmer_mm._prepare_prefill_inputs
+    prefill: Callable[..., torch.Tensor] = hf_muse_glimmer_mm._prefill_forward
     calls: list[int] = []
 
     def record_inputs(
-        prepared_model: PreTrainedModel,
-        normalized_ids: torch.Tensor,
         *,
+        model: PreTrainedModel,
+        input_ids: torch.Tensor,
         token_labels: torch.Tensor,
         pixel_values: torch.Tensor,
         image_grid_thw: torch.Tensor,
+        **kwargs: Any,
     ) -> torch.Tensor:
         # Use a synthetic token-aligned input to exercise the shared hook contract.
         # Non-padding labels identify their original token even after compaction.
-        calls.append(normalized_ids.shape[1])
-        assert token_labels.shape == normalized_ids.shape
-        real_tokens = normalized_ids != 0
+        calls.append(input_ids.shape[1])
+        assert token_labels.shape == input_ids.shape
+        real_tokens = input_ids != 0
         torch.testing.assert_close(
-            token_labels[real_tokens], normalized_ids[real_tokens] + 1000
+            token_labels[real_tokens], input_ids[real_tokens] + 1000
         )
         assert torch.all(token_labels[~real_tokens] == -1)
         assert pixel_values is batch["pixel_values"]
         assert image_grid_thw is batch["image_grid_thw"]
-        return prepare(
-            prepared_model,
-            normalized_ids,
+        return prefill(
+            model=model,
+            input_ids=input_ids,
             pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,
+            **kwargs,
         )
 
     monkeypatch.setattr(
@@ -363,7 +365,7 @@ def test_preparation_hook_receives_normalized_token_inputs_once(
     monkeypatch.setattr(
         hf_muse_glimmer_mm, "_GENERATION_TOKEN_ALIGNED_INPUTS", {"token_labels": -1}
     )
-    monkeypatch.setattr(hf_muse_glimmer_mm, "_prepare_prefill_inputs", record_inputs)
+    monkeypatch.setattr(hf_muse_glimmer_mm, "_prefill_forward", record_inputs)
     actual = model.generate(
         **batch,
         token_labels=batch["input_ids"] + 1000,

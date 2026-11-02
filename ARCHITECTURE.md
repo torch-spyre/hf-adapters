@@ -756,11 +756,15 @@ shared generation machinery.
 perception projector, scatters image features into normalized text embeddings,
 then uses the shared Muse/Gemma 3 decoder and generation/cache machinery.
 The image encoder runs once during prefill; subsequent steps decode text.
-The shared `_generate_image_text_to_text()` entry point binds the adapter's
-`_prepare_prefill_inputs()` hook, which embeds text and encodes/scatters images
-before the common generation loop chunks the prepared embeddings.
+The shared `_generate_image_text_to_text()` entry point binds `_prefill_forward()`
+for every VLM adapter. Muse's hook embeds text and encodes/scatters images once,
+then calls its internal backbone for each chunk and projects the requested final
+rows. The generation wrapper does not call Muse's embedding or backbone helpers.
+The shared loop passes chunk size and mask construction explicitly through the
+typed `PrefillContext` argument. Muse does not infer chunking from tensor
+attributes or depend on the shared runtime's private mask-builder class.
 The VLM API accepts `pixel_values` and `image_grid_thw` together, or text inputs
-alone. Text-only calls use the causal adapter's optimized prefill path. Image
+alone. Text-only calls use the same optimized decoder and chunk policy. Image
 calls encode and scatter image features once into the normalized prompt, then
 run decoder prefill in 512-token chunks when the prompt exceeds 512 real tokens.
 Short prompts retain 64-token alignment. Explicit `prefill_chunk_size` overrides

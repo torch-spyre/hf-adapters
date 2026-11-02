@@ -936,22 +936,8 @@ def _generate_image_text_to_text(
     }
 
     # Only prefill is multimodal; subsequent decode steps are ordinary text.
-    run_forward_fn = partial(_run_vlm_text_forward, module)
-    if hasattr(module, "_prepare_prefill_inputs"):
-        return hf_common.generate(
-            run_forward_fn,
-            model,
-            input_ids,
-            attention_mask=attention_mask,
-            prefill_backbone_fn=module._run_backbone_from_embeds,
-            prefill_inputs_fn=partial(
-                module._prepare_prefill_inputs, **pass_through_inputs
-            ),
-            token_aligned_inputs=token_aligned_inputs,
-            **kwargs,
-        )
-
-    prefill_fn = partial(
+    run_forward_fn: Callable[..., torch.Tensor] = partial(_run_vlm_text_forward, module)
+    prefill_fn: Callable[..., torch.Tensor] = partial(
         module._prefill_forward, logits_to_keep=1, **pass_through_inputs
     )
 
