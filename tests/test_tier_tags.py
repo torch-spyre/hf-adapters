@@ -169,7 +169,7 @@ def _makefile_suites_by_tier() -> dict[str, set[str]]:
 
 
 def test_the_makefile_copy_is_known_to_disagree_with_the_workflow():
-    """Documents a PRE-EXISTING divergence rather than asserting the two agree.
+    """Documents known divergences rather than asserting the two agree.
 
     `make tests` and CI maintain the tier->suite mapping separately, and they have
     already drifted. This test pins the known set so a NEW divergence shows up as a
@@ -201,6 +201,8 @@ def test_the_makefile_copy_is_known_to_disagree_with_the_workflow():
             ["integration", "regression", "trunk", "unit"],
             ["regression", "trunk"],
         ),
+        # Quality is part of Makefile regression; CI uses a separate lm-eval workflow.
+        "quality": (None, ["regression", "trunk"]),
     }, f"the workflow/Makefile divergence changed: {diffs}"
 
 

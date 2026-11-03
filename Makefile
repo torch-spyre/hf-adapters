@@ -8,7 +8,7 @@ SHELL := /bin/bash
 #   integration — the token_compare and model_components suites. TEST_TYPE=token_compare
 #                 by itself is rejected (see the `tests` target below); suite keys remain
 #                 usable inside multi-suite combos (e.g. TEST_TYPE="token_compare load").
-#   regression  — everything
+#   regression  — all regression suites, including lm-eval quality benchmarks
 #   trunk       — same coverage as regression; push-to-main CI label (see
 #                 resolve_test_type.sh)
 #   perf        — spyre-perf-suite's MODEL benchmarks (--hf-only), one run per model in tests/model_lists/perf.yaml (perf-tests).
@@ -17,6 +17,7 @@ SHELL := /bin/bash
 #                 and the op suite is not run twice. Models live here because
 #                 they need hf-adapters' exact transformers pin, which only this
 #                 image carries. -dev only: -minimal has no perf wheel.
+#   quality     — lm-eval benchmarks only, using perf.yaml's nightly models unless MODEL_PATH is set.
 # Also accepts a space-separated list of individual suite keys (matches
 # _test_matrix.yaml's `test_type` semantics), e.g. TEST_TYPE="smoke load".
 # Empty / unset defaults to "regression" (every suite).
@@ -53,6 +54,11 @@ PYTEST ?= uv run --active --no-sync pytest
 # Benchmark invocation for perf-tests; same --active --no-sync reasoning as PYTEST above.
 PERF_SUITE ?= uv run --active --no-sync spyre-perf-suite
 
+# Quality runs require evals/lm_eval/requirements.txt in the active runtime.
+QUALITY_RUNNER ?= uv run --active --no-sync python -u -m evals.lm_eval.run_benchmarks
+QUALITY_CONFIG ?= evals/lm_eval/benchmarks.yaml
+QUALITY_ARGS ?=
+
 # When set, write JUnit XML here. Unset = no JUnit file (plain local run).
 JUNIT_XML ?=
 
@@ -80,9 +86,10 @@ endif
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-24s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
-	@echo "Variables: TEST_TYPE=unit|integration|regression|trunk|perf|<space-separated suite keys, e.g. smoke clip edge_cases model_support> (default regression),"
+	@echo "Variables: TEST_TYPE=unit|integration|regression|trunk|perf|quality|<space-separated suite keys, e.g. smoke clip edge_cases model_support> (default regression),"
 	@echo "  MODEL_KEY (pytest -k filter, default all), MODEL_PATH (exact model path via --model-path, overrides registry parametrization),"
 	@echo "  PERF_SCHEDULE=nightly|weekly (TEST_TYPE=perf: which perf.yaml section to run, default nightly), PERF_REPORT=split|combined (default '$(PERF_REPORT)'),"
+	@echo "  QUALITY_CONFIG (default '$(QUALITY_CONFIG)'), QUALITY_ARGS (e.g. --dry-run; applies only to quality),"
 	@echo "  EDGE_CASE_FILE=<file>.py (edge_cases: one file), MODULE_CONFIG=<file>.yaml (model_module: one config), MODULE_TEST_FILTER (model_module: pytest -k),"
 	@echo "  MODEL_SUPPORT_TOP_K (default $(MODEL_SUPPORT_TOP_K)), MODEL_SUPPORT_MAX_PARAMS (default $(MODEL_SUPPORT_MAX_PARAMS)),"
 	@echo "  PYTEST_ARGS (default '$(PYTEST_ARGS)'), JUNIT_XML (single-suite targets only), RESULTS_DIR (default '$(RESULTS_DIR)')"
@@ -248,7 +255,8 @@ model-support-tests: ## Scan the top MODEL_SUPPORT_TOP_K Hub models per mode on 
 # JUnit file into RESULTS_DIR so a caller can glob the whole directory in one
 # ClickHouse push. One failing suite doesn't skip the rest; the aggregate's
 # exit code still reflects any failure.
-tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite)
+# Quality writes benchmark JSON and diagnostics into RESULTS_DIR/quality.
+tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (quality JSON and per-suite JUnit)
 	@# Apply the shared default (empty -> regression) and pass literal tier
 	@# names / suite keys through unchanged -- same source of truth as
 	@# _test_matrix.yaml's resolve-test-type job, so `make tests TEST_TYPE=unit`
@@ -277,7 +285,7 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	  fi; \
 	fi; \
 	case " $$resolved " in \
-	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare model_components embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module" ;; \
+	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare model_components embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module quality" ;; \
 	  *" unit "*) suites="adapter_coverage load token_compare embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module" ;; \
 	  " integration ") suites="token_compare" ;; \
 	  " perf ") suites="perf" ;; \
@@ -311,7 +319,11 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	    model_support)    $(MAKE) model-support-tests RESULTS_DIR="$(RESULTS_DIR)" || rc=1 ;; \
 	    edge_cases)       mkdir -p "$(RESULTS_DIR)/junit-edge-cases" && $(MAKE) edge-cases-tests        JUNIT_XML="$(RESULTS_DIR)/junit-edge-cases/junit-edge-cases.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" EDGE_CASE_FILE="$(EDGE_CASE_FILE)" || rc=1 ;; \
 	    perf)             $(MAKE) perf-tests RESULTS_DIR="$(RESULTS_DIR)" MODEL_PATH="$$model_path" PERF_REPORT=combined || rc=1 ;; \
-	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare model_components embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module model_support edge_cases perf"; rc=1 ;; \
+	    quality)          quality_args=(); \
+	                      for model in $$model_path; do quality_args+=(--model "$$model"); done; \
+	                      $(QUALITY_RUNNER) --backend spyre --config "$(QUALITY_CONFIG)" \
+	                        "$${quality_args[@]}" --output-dir "$(RESULTS_DIR)/quality" $(QUALITY_ARGS) || rc=1 ;; \
+	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare model_components embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare model_module model_support edge_cases perf quality"; rc=1 ;; \
 	  esac; \
 	done; \
 	exit $$rc

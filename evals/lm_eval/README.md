@@ -83,6 +83,29 @@ file with the successful benchmarks from that run; it does not merge old data.
 
 ## Spyre runs and CI
 
+With the requirements above installed, the Makefile's `regression` suite (also
+the default for `make tests`) includes quality evaluation. `trunk` has the same
+coverage. Results and diagnostics are written under `RESULTS_DIR/quality`:
+
+```bash
+make tests TEST_TYPE=regression RESULTS_DIR=evals/lm_eval/runs/regression-check
+
+# Run only the quality portion, or inspect its plan without inference.
+make tests TEST_TYPE=quality RESULTS_DIR=evals/lm_eval/runs/quality-check
+make tests TEST_TYPE=quality QUALITY_ARGS=--dry-run
+```
+
+Quality uses the nightly model list unless `MODEL_PATH` supplies a
+space-separated list of models. `QUALITY_CONFIG` selects an alternate suite;
+`QUALITY_ARGS` passes additional runner options. `QUALITY_RUNNER` defaults to
+`uv run --active --no-sync python -u -m evals.lm_eval.run_benchmarks`.
+Choose a fresh results directory: quality output is protected against overwrite.
+An execution failure in quality makes the aggregate Make command fail.
+
+This Makefile selection is separate from GitHub Actions job selection:
+`integration-tests` defines its jobs through `_test_matrix.yaml`, while quality
+CI continues to use the dedicated `lm-eval.yaml` workflow.
+
 In the configured Spyre runtime environment:
 
 ```bash
