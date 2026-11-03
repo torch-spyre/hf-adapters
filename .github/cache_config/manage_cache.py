@@ -50,7 +50,7 @@ def _config_extra_models(config_file) -> list[str]:
 
 
 def cache_warmed_model_paths(config_file=DEFAULT_CACHE_CONFIG_PATH) -> list[str]:
-    """Every repo this job keeps warm; weekly_test.py never deletes their weights."""
+    """Every repo this job keeps warm: the registry plus the config's extra models."""
     extra_models = _config_extra_models(config_file)
     return sorted(set(_registry_model_paths()) | set(extra_models))
 
