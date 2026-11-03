@@ -1,0 +1,102 @@
+name: 'warm_top_models_cache'
+
+# One-off: fill the shared HF cache with the weekly scan's top generative and
+# embedding models, one model at a time with a pause between models. See
+# .github/cache_config/warm_top_models_cache.py. Already-cached models are skipped
+# without a network call, so dispatch again to carry on after a stop.
+#
+# Avoid the weekly scan window (Saturday 22:00 UTC to Monday 09:00 New York):
+# the scan reads this same cache and does its own downloads.
+on:
+  workflow_dispatch:
+    inputs:
+      top_k:
+        description: 'Top models to fetch per type (generative and embedding)'
+        required: true
+        type: number
+        default: 10000
+      sleep_seconds:
+        description: 'Pause between models, in seconds'
+        required: true
+        type: number
+        default: 15
+      min_free_gb:
+        description: 'Stop when free space on /storage-1 drops below this many GB'
+        required: true
+        type: number
+        default: 500
+      max_hours:
+        description: 'Stop cleanly after this many hours (job timeout is 72h)'
+        required: true
+        type: number
+        default: 70
+      dry_run:
+        description: 'Only list the models and their estimated size; download nothing'
+        required: true
+        type: boolean
+        default: true
+
+# Same group as add_or_remove_artifacts_from_cache, so the nightly cache job never
+# downloads at the same time as this one. While this runs, the nightly run waits.
+concurrency:
+  group: 'add_or_remove_model_from_cache'
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  warm_cache:
+    runs-on:
+      - x86_64
+      - spyre_pf_x0
+      - linux
+      - image_torch_spyre # set having 0 spyre cards and pvc mounted
+    timeout-minutes: 4320
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_HOME: /storage-1/hf-adapters/.cache/huggingface
+      # One plain HTTP stream per file instead of Xet's parallel chunk fetches.
+      HF_HUB_DISABLE_XET: '1'
+      HF_HUB_DOWNLOAD_TIMEOUT: '60'
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+      TOKENIZERS_PARALLELISM: 'false'
+      REPORT_FILE: ${{ github.workspace }}/warm_cache_report.jsonl
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: 'hf-adapters-repo'
+
+      # The fetchers import transformers (for AutoConfig), so install the locked
+      # project dependencies without torch-spyre.
+      - name: Install Python dependencies
+        working-directory: 'hf-adapters-repo'
+        run: |
+          uv venv
+          source .venv/bin/activate
+          uv sync --frozen --no-install-project --no-default-groups --group models-ops
+
+      - name: Warm the cache
+        working-directory: 'hf-adapters-repo'
+        run: |
+          source .venv/bin/activate
+          python .github/cache_config/warm_top_models_cache.py \
+            --top-k "${{ inputs.top_k }}" \
+            --sleep-seconds "${{ inputs.sleep_seconds }}" \
+            --min-free-gb "${{ inputs.min_free_gb }}" \
+            --max-hours "${{ inputs.max_hours }}" \
+            --report-file "$REPORT_FILE" \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
+
+      - name: Upload report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: warm-cache-report
+          path: ${{ env.REPORT_FILE }}
+          if-no-files-found: ignore
