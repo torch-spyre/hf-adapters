@@ -62,6 +62,7 @@ import importlib.util
 import json
 import logging
 import multiprocessing
+import os
 import subprocess
 import sys
 import time
@@ -310,17 +311,71 @@ def _cache_warmed_repos() -> frozenset[str]:
     return frozenset(module.cache_warmed_model_paths())
 
 
+def _hub_cache_dir() -> Path:
+    """The HF hub cache root (…/.cache/huggingface/hub) every repo dir sits in."""
+    from huggingface_hub import constants
+
+    return Path(constants.HF_HUB_CACHE)
+
+
+def _snapshot_blob_entry(snap: Path) -> Path | None:
+    """The repo-local blob entry a snapshot symlink points at, without following
+    a second hop. In the shared-blob layout that entry is itself a symlink into
+    ``<hub>/blobs/<xx>/<sha>``; in the old layout it is a real file.
+    """
+    if not snap.is_symlink():
+        return None
+    entry = Path(os.path.normpath(snap.parent / os.readlink(snap)))
+    return entry if entry.parent == (snap.parents[2] / "blobs") else None
+
+
+def _gc_unreferenced_shared_blobs(targets: set[Path]) -> int:
+    """Unlink shared blobs that no repo-local blob entry references anymore.
+
+    A blob is only removed when its ``.refs`` refcount file exists and every
+    listed entry is gone from disk (#738: refs must be rebuilt by
+    ``manage_cache.rebuild_shared_blob_refs`` to be trusted). With no ``.refs``
+    the blob is kept — an unreferenced blob wastes space, a wrong unlink breaks
+    offline CI.
+    """
+    if not targets:
+        return 0
+    hub = _hub_cache_dir()
+    shared_root = hub / "blobs"
+    freed = 0
+    for target in sorted(targets):
+        try:
+            if shared_root not in target.parents or not target.is_file():
+                continue
+            refs_file = target.with_name(target.name + ".refs")
+            if not refs_file.is_file():
+                continue
+            refs = [r for r in refs_file.read_text().split() if r]
+            if not refs or any((hub / r).exists() for r in refs):
+                continue
+            freed += target.stat().st_size
+            target.unlink()
+        except OSError as e:
+            print(f"    warn: could not gc {target}: {e}")
+    return freed
+
+
 def _delete_repo_weights(repo_id_list: list[str]) -> int:
     """Delete cached weight files (and their blobs) for a list of repos. Keep configs.
 
     Returns bytes freed. Navigates directly to each repo's cache folder using
     the known HF layout — avoids the expensive scan_cache_dir() call entirely.
-    Only touches files whose name ends in a weight suffix; resolves each
-    snapshot symlink to its blob and unlinks both.
+    Only touches files whose name ends in a weight suffix.
+
+    Never unlinks a shared blob outright: the snapshot symlink and the
+    repo-local blob entry are removed first, and the shared blob only goes if
+    its ``.refs`` say nothing else references it (#738 — the old resolve-and-
+    unlink destroyed blobs that mirror repos byte-share with CI models).
     """
     if not repo_id_list:
         return 0
     freed = 0
+    affected_shared: set[Path] = set()
     for repo_id in repo_id_list:
         repo_dir = _repo_cache_dir(repo_id)
         snapshots_dir = repo_dir / "snapshots"
@@ -330,17 +385,22 @@ def _delete_repo_weights(repo_id_list: list[str]) -> int:
             if not snap.name.endswith(_WEIGHT_SUFFIXES):
                 continue
             try:
-                blob = snap.resolve()
-                if blob.exists():
-                    freed += blob.stat().st_size
-                    blob.unlink()
+                entry = _snapshot_blob_entry(snap)
+                if entry is not None:
+                    if entry.is_symlink():
+                        # Shared-blob layout: drop this repo's claim only.
+                        affected_shared.add(entry.resolve(strict=False))
+                    elif entry.is_file():
+                        freed += entry.stat().st_size
+                    if entry.is_symlink() or entry.is_file():
+                        entry.unlink()
                 if snap.is_symlink() or snap.exists():
                     snap.unlink()
             except FileNotFoundError:
                 pass
             except OSError as e:
                 print(f"    warn: could not delete {snap}: {e}")
-    return freed
+    return freed + _gc_unreferenced_shared_blobs(affected_shared)
 
 
 def _cleanup_batch_weights(
