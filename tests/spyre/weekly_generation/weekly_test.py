@@ -48,8 +48,9 @@ Flags:
   already exist, and nothing is read back.
 * ``--deadline ISO8601``             Hard wall-clock stop (issue #745). No batch
   starts at or after it, and a batch still running when it passes is stopped
-  without recording rows for its models (they were not evaluated). Rows already
-  written are kept; the run exits 0 with a warning annotation.
+  without recording that batch. Workers return results only at batch boundaries,
+  so completed models inside an interrupted batch must be retried too. Rows from
+  earlier batches are kept; the run exits 0 with a warning and job summary.
 
 Result rows
 -----------
@@ -66,6 +67,7 @@ import importlib.util
 import json
 import logging
 import multiprocessing
+import os
 import subprocess
 import sys
 import time
@@ -132,6 +134,20 @@ def _parse_deadline(value: str) -> datetime:
 def _seconds_until(deadline: datetime) -> float:
     """Seconds from now until *deadline* (negative once it has passed)."""
     return (deadline - datetime.now(timezone.utc)).total_seconds()
+
+
+def _report_deadline_stop(error: DeadlineReachedError) -> None:
+    """Make an expected deadline stop visible in the scan's own job summary."""
+    print(f"::warning title=Weekly scan deadline::{error}")
+    print(f"{ts()} Stopped at deadline ({error}).")
+    summary_path: str | None = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        with Path(summary_path).open("a") as summary:
+            summary.write(
+                f"## Weekly scan stopped at its deadline\n\n{error}\n\n"
+                "Previously flushed batches are preserved. "
+                "The interrupted batch and remaining models have no new verdict.\n"
+            )
 
 
 def _stop_worker(proc: multiprocessing.process.BaseProcess) -> None:
@@ -459,6 +475,10 @@ def main(
     print(f"{ts()} Snapshot date: {snapshot_date}")
     if deadline is not None:
         print(f"{ts()} Deadline: {deadline.isoformat()}")
+        if _seconds_until(deadline) <= 0:
+            raise DeadlineReachedError(
+                f"deadline {deadline.isoformat()} reached before shard startup"
+            )
 
     total_freed: int = 0
 
@@ -568,8 +588,8 @@ def main(
             timeout = _WORKER_TIMEOUT_SECONDS_PER_MODEL * batch_size
 
             # Never wait past the deadline: if it arrives first, stop the
-            # worker and record nothing for this batch — its models were not
-            # evaluated, so a timeout/crash row would be a false verdict.
+            # worker and record nothing for this batch. Its complete results
+            # are unavailable; a timeout/crash row would be a false verdict.
             join_timeout: float = float(timeout)
             if deadline is not None:
                 join_timeout = min(join_timeout, max(0.0, _seconds_until(deadline)))
@@ -784,10 +804,8 @@ if __name__ == "__main__":
         )
     except DeadlineReachedError as e:
         # Expected for the weekly scan (issue #745): exit 0 so the shard is not
-        # reported as a failure; the annotation surfaces it in the run summary.
-        # main()'s `finally` has already flushed the sink and cleaned the cache.
-        print(f"::warning title=Weekly scan deadline::{e}")
-        print(f"{ts()} Stopped at deadline ({e}).")
+        # reported as a failure. Any sink opened by main() has been closed.
+        _report_deadline_stop(e)
     except HardwareExceptionAbortError as e:
         # Non-zero exit so CI / GHA scheduled runs can alert. main()'s
         # `finally` has already flushed the sink and cleaned the cache.
