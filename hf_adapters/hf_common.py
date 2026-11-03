@@ -698,15 +698,17 @@ def get_backbone(model):
 
     Task-specific auto classes (e.g., ``AutoModelForCausalLM``) return a wrapper
     containing a backbone and one or more task heads, while the generic AutoModel
-    class may return the backbone directly. Search the supported wrapper attributes
-    and return the first non-``None`` module. If none is present, treat ``model``
-    itself as the backbone.
+    class may return the backbone directly. Prefer HF's ``base_model`` property;
+    otherwise search the supported wrapper attributes and fall back to ``model``.
 
     Multimodal causal-LM wrappers (e.g. Gemma 4's
     ``Gemma4ForConditionalGeneration``) contain an additional nested
     ``language_model`` level beneath that first module. Descend into it when
     present.
     """
+    inner = getattr(model, "base_model", None)
+    if inner is not None:
+        return getattr(inner, "language_model", inner)
     inner = next(
         (
             backbone
@@ -915,17 +917,18 @@ def set_rope_dtype(model, dtype: torch.dtype) -> None:
     """Explicitly set the freq-cache dtype on a model's precomputed RoPE.
 
     ``model._spyre_rope`` is either a single ``PrecomputedRotaryEmbedding``
-    (most adapters) or a ``dict`` of them keyed by layer type (Gemma 3/4, which
-    use different RoPE per sliding/global layer). This applies ``set_dtype`` to
+    (most adapters) or a ``dict``/``nn.ModuleDict`` of them keyed by layer type
+    (for different RoPE per sliding/global layer). This applies ``set_dtype`` to
     whichever shape is present.
     """
     rope = getattr(model, "_spyre_rope", None)
     if rope is None:
         return
-    ropes = rope.values() if isinstance(rope, dict) else [rope]
+    ropes = rope.values() if isinstance(rope, (dict, nn.ModuleDict)) else [rope]
     for r in ropes:
-        if hasattr(r, "set_dtype"):
-            r.set_dtype(dtype)
+        set_dtype = getattr(r, "set_dtype", None)
+        if callable(set_dtype):
+            set_dtype(dtype)
 
 
 def _rope_cache_len(model) -> int:
@@ -3775,6 +3778,29 @@ def standard_gqa_forward(
 # ---------------------------------------------------------------------------
 
 
+def validate_external_encoder(model, runtime, *, absolute_positions=True):
+    """Check shared encoder constraints before external-runtime preparation."""
+    if runtime is None:
+        return
+    cfg = model.config
+    if getattr(cfg, "is_decoder", False) or getattr(cfg, "add_cross_attention", False):
+        raise ValueError("Encoder execution requires bidirectional self-attention")
+    if (
+        absolute_positions
+        and getattr(cfg, "position_embedding_type", "absolute") != "absolute"
+    ):
+        raise ValueError("Encoder execution requires absolute positions")
+    if not absolute_positions:
+        if runtime.max_model_len > cfg.max_position_embeddings:
+            raise ValueError("max_model_len exceeds the encoder context limit")
+        return
+    emb = get_backbone(model).embeddings
+    padding_idx = emb.position_embeddings.padding_idx
+    offset = padding_idx + 1 if padding_idx is not None else 0
+    if runtime.max_model_len + offset > emb.position_embeddings.num_embeddings:
+        raise ValueError("max_model_len exceeds the encoder position table")
+
+
 def fairseq_position_ids(input_ids: torch.Tensor, padding_idx: int) -> torch.Tensor:
     """fairseq-style positions: real tokens start at ``padding_idx + 1``.
 
@@ -3808,6 +3834,9 @@ def make_encoder_block(
     out_ln,
     num_heads,
     head_dim,
+    runtime=None,
+    layer_idx=None,
+    position_bias=None,
 ):
     """Compile a bidirectional encoder block (MHA + post-LN + FFN + post-LN).
 
@@ -3830,6 +3859,22 @@ def make_encoder_block(
     Dropout is skipped — these adapters are eval-only.
     """
     sdpa_scale = getattr(attn_module, "_spyre_orig_head_dim", head_dim) ** -0.5
+    from hf_adapters.execution import AttentionSpec, compile_block
+
+    attention = None
+    if runtime is not None:
+        attention = runtime.register_attention(
+            AttentionSpec(
+                layer_idx,
+                num_heads,
+                num_heads,
+                head_dim,
+                sdpa_scale,
+                is_causal=False,
+                uses_cache=False,
+                position_bias=position_bias,
+            )
+        )
 
     def block_forward(hidden_states, attn_mask):
         bsz, seq_len, _ = hidden_states.shape
@@ -3857,15 +3902,18 @@ def make_encoder_block(
             .contiguous()
         )
 
-        attn_out = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attn_mask,
-            dropout_p=0.0,
-            is_causal=False,
-            scale=sdpa_scale,
-        )
+        if attention is None:
+            attn_out = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=0.0,
+                is_causal=False,
+                scale=sdpa_scale,
+            )
+        else:
+            attn_out, _, _ = attention(q, k, v, attn_mask, None, None, None)
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
 
         attn_out = o_proj(attn_out)
@@ -3877,7 +3925,7 @@ def make_encoder_block(
 
         return hidden_states
 
-    return torch.compile(block_forward, dynamic=False)
+    return compile_block(block_forward, runtime)
 
 
 def make_vision_encoder_block(
@@ -3966,7 +4014,7 @@ def add_token_type_embedding(h, emb, token_type_ids):
     0.205), so it cannot simply be skipped.
     """
     table = emb.token_type_embeddings
-    if table.num_embeddings == 1:
+    if token_type_ids is None or table.num_embeddings == 1:
         return h + table.weight[0]
     return h + table(token_type_ids)
 

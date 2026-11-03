@@ -50,10 +50,11 @@ from hf_adapters.hf_common import (
     get_backbone,
     make_encoder_block,
     pad_attention_heads_simple,
+    validate_external_encoder,
 )
 
 
-def _make_compiled_encoder_block(layer):
+def _make_compiled_encoder_block(layer, runtime=None, layer_idx=None):
     """Resolve BERT's module layout and hand off to ``make_encoder_block``.
 
     BERT splits attention across ``attention.self`` (Q/K/V) and
@@ -74,6 +75,8 @@ def _make_compiled_encoder_block(layer):
         out_ln=layer.output.LayerNorm,
         num_heads=attn_self.num_attention_heads,
         head_dim=attn_self.attention_head_size,
+        runtime=runtime,
+        layer_idx=layer_idx,
     )
 
 
@@ -81,7 +84,7 @@ _run_backbone_forward = encoder_backbone_forward
 _is_encoder_only = True
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model, *, runtime=None):
     """Apply Spyre adaptations to a BERT-family encoder model in-place.
 
     Pads attention heads up to a Spyre stick boundary when ``head_dim`` is
@@ -89,6 +92,7 @@ def prepare_for_spyre(model):
     walks ``model.encoder.layer``, builds a compiled encoder block for each
     layer, and stores them on ``model._spyre_compiled_blocks``.
     """
+    validate_external_encoder(model, runtime)
     backbone = get_backbone(model)
     cfg = model.config
     orig_head_dim = (
@@ -112,5 +116,6 @@ def prepare_for_spyre(model):
         model._spyre_cpu_submodules = ["cls"]
 
     model._spyre_compiled_blocks = [
-        _make_compiled_encoder_block(layer) for layer in backbone.encoder.layer
+        _make_compiled_encoder_block(layer, runtime, index)
+        for index, layer in enumerate(backbone.encoder.layer)
     ]

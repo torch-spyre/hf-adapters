@@ -53,6 +53,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from hf_adapters.execution import AttentionSpec, compile_block
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     InvFreqShim,
@@ -60,6 +61,7 @@ from hf_adapters.hf_common import (
     add_sliding_window_band,
     apply_rope_matmul,
     get_backbone,
+    validate_external_encoder,
 )
 
 
@@ -152,7 +154,15 @@ def _split_and_pad_qkv(attn, hidden_size, num_heads, orig_head_dim, padded_head_
     attn.Wo = new_o
 
 
-def _make_compiled_block(layer, num_heads, head_dim, orig_head_dim):
+def _make_compiled_block(
+    layer,
+    num_heads,
+    head_dim,
+    orig_head_dim,
+    runtime=None,
+    layer_idx=None,
+    position_bias=None,
+):
     """Compile one ModernBERT encoder layer (pre-norm + RoPE + GeGLU).
 
     Block signature carries the per-layer mask and RoPE freqs (which differ
@@ -174,6 +184,20 @@ def _make_compiled_block(layer, num_heads, head_dim, orig_head_dim):
     act = layer.mlp.act
     wo = layer.mlp.Wo
     sdpa_scale = orig_head_dim**-0.5
+    attention = None
+    if runtime is not None:
+        attention = runtime.register_attention(
+            AttentionSpec(
+                layer_idx,
+                num_heads,
+                num_heads,
+                head_dim,
+                sdpa_scale,
+                is_causal=False,
+                uses_cache=False,
+                position_bias=position_bias,
+            )
+        )
 
     def block_forward(hidden_states, attn_mask, selected_freqs):
         bsz, seq_len, _ = hidden_states.shape
@@ -187,15 +211,18 @@ def _make_compiled_block(layer, num_heads, head_dim, orig_head_dim):
         q = apply_rope_matmul(q, selected_freqs)
         k = apply_rope_matmul(k, selected_freqs)
 
-        attn_out = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attn_mask,
-            dropout_p=0.0,
-            is_causal=False,
-            scale=sdpa_scale,
-        )
+        if attention is None:
+            attn_out = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=0.0,
+                is_causal=False,
+                scale=sdpa_scale,
+            )
+        else:
+            attn_out, _, _ = attention(q, k, v, attn_mask, None, None, None)
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
         attn_out = o_proj(attn_out)
         hidden_states = hidden_states + attn_out
@@ -205,10 +232,29 @@ def _make_compiled_block(layer, num_heads, head_dim, orig_head_dim):
 
         return hidden_states
 
-    return torch.compile(block_forward, dynamic=False)
+    return compile_block(block_forward, runtime)
 
 
 _is_encoder_only = True
+_supports_external_sliding_attention = True
+
+
+class _LocalAttentionBias(nn.Module):
+    """Request-relative inclusive window, shared by all local layers."""
+
+    def __init__(self, max_model_len, window, dtype):
+        super().__init__()
+        extent = ((max_model_len + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
+        positions = torch.arange(extent)
+        off_band = (positions[:, None] - positions[None, :]).abs() > window
+        bias = torch.zeros(1, 1, extent, extent, dtype=dtype)
+        # Serving adds a finite fp16 key-pad mask (finfo.min / 2). Leave
+        # headroom for their sum and the attention scores; avoid -inf arithmetic.
+        bias[0, 0, off_band] = torch.finfo(torch.float16).min / 4
+        self.register_buffer("bias", bias, persistent=False)
+
+    def forward(self):
+        return self.bias
 
 
 def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_ids):
@@ -228,6 +274,8 @@ def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_
     """
     backbone = get_backbone(model)
     emb = backbone.embeddings
+    if attn_mask is None and token_type_ids is not None:
+        raise ValueError("ModernBERT does not accept token_type_ids")
 
     h = emb.norm(emb.tok_embeddings(input_ids))
     h = h.clone() if h.device.type == "spyre" else h
@@ -238,7 +286,9 @@ def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_
         for layer_type, rope in model._spyre_rope.items()
     }
 
-    if isinstance(attn_mask, dict):
+    if attn_mask is None:
+        masks = dict.fromkeys(freqs)
+    elif isinstance(attn_mask, dict):
         masks = attn_mask
     else:
         # Local layers see the global mask intersected with the sliding-window band.
@@ -253,11 +303,11 @@ def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_
         if h.device.type == "spyre":
             h = h.clone()
 
-    h = backbone.final_norm(h)
+    h = getattr(model, "_spyre_compiled_norm", backbone.final_norm)(h)
     return h
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model, *, runtime=None):
     """Apply Spyre adaptations to a ModernBERT encoder model in-place.
 
     1. Pad attention heads 64→128 (head_dim/2 = 32 < BLOCK_SIZE): split the
@@ -267,8 +317,13 @@ def prepare_for_spyre(model):
        local thetas), padded to the new head_dim.
     3. Compile each encoder layer's block.
     """
+    validate_external_encoder(model, runtime, absolute_positions=False)
     backbone = get_backbone(model)
     cfg = model.config
+    if runtime is not None and (
+        type(cfg.sliding_window) is not int or cfg.sliding_window <= 0
+    ):
+        raise ValueError("ModernBERT requires a positive local attention window")
     num_heads = cfg.num_attention_heads
     orig_head_dim = cfg.hidden_size // num_heads
 
@@ -298,6 +353,15 @@ def prepare_for_spyre(model):
             InvFreqShim(inv_freq),
             padded_head_dim=padded_head_dim,
         )
+    if runtime is not None:
+        model._spyre_rope = nn.ModuleDict(model._spyre_rope)
+
+    position_bias = None
+    if runtime is not None and "sliding_attention" in cfg.layer_types:
+        position_bias = _LocalAttentionBias(
+            runtime.max_model_len, cfg.sliding_window, next(model.parameters()).dtype
+        )
+        model._spyre_position_bias = position_bias
 
     cpu_submodules = [
         name for name in ("head", "decoder", "qa_outputs") if hasattr(model, name)
@@ -307,6 +371,16 @@ def prepare_for_spyre(model):
 
     model._spyre_head_dim = head_dim
     model._spyre_compiled_blocks = [
-        _make_compiled_block(layer, num_heads, head_dim, orig_head_dim)
-        for layer in backbone.layers
+        _make_compiled_block(
+            layer,
+            num_heads,
+            head_dim,
+            orig_head_dim,
+            runtime,
+            index,
+            position_bias if layer.attention_type == "sliding_attention" else None,
+        )
+        for index, layer in enumerate(backbone.layers)
     ]
+    if runtime is not None:
+        model._spyre_compiled_norm = compile_block(backbone.final_norm, runtime)
