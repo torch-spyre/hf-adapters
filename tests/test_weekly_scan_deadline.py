@@ -218,7 +218,9 @@ def test_expired_shard_does_not_open_sink_or_start_worker(
 ) -> None:
     models, sink, context = scan
     monkeypatch.setattr(weekly_test, "_seconds_until", Mock(return_value=0))
-    with pytest.raises(weekly_test.DeadlineReachedError, match="before shard startup"):
+    with pytest.raises(
+        weekly_test.DeadlineBeforeStartupError, match="before shard startup"
+    ):
         _run_scan(models, dt.datetime.now(dt.timezone.utc))
     context.Process.assert_not_called()
     assert not sink.mock_calls
@@ -343,3 +345,33 @@ def test_naive_deadline_is_rejected() -> None:
         weekly_test.argparse.ArgumentTypeError, match="must include a timezone"
     ):
         weekly_test._parse_deadline("2026-11-09T14:00:00")
+
+
+@pytest.mark.parametrize(
+    ("error_type", "run_attempt", "expected"),
+    [
+        # A re-run that starts after the deadline scans nothing: fail it.
+        (weekly_test.DeadlineBeforeStartupError, "2", 1),
+        # The original attempt (or a local run with no GHA env) stays green.
+        (weekly_test.DeadlineBeforeStartupError, "1", 0),
+        (weekly_test.DeadlineBeforeStartupError, None, 0),
+        # A re-run stopped mid-scan did real work before the deadline.
+        (weekly_test.DeadlineReachedError, "2", 0),
+    ],
+)
+def test_rerun_after_deadline_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error_type: type[weekly_test.DeadlineReachedError],
+    run_attempt: str | None,
+    expected: int,
+) -> None:
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
+    if run_attempt is None:
+        monkeypatch.delenv("GITHUB_RUN_ATTEMPT", raising=False)
+    else:
+        monkeypatch.setenv("GITHUB_RUN_ATTEMPT", run_attempt)
+    assert weekly_test._deadline_stop_exit_code(error_type("stopped")) == expected
+    assert ("::error" in capsys.readouterr().out) == bool(expected)
+    assert "stopped" in (tmp_path / "summary").read_text()

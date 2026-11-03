@@ -51,6 +51,8 @@ Flags:
   without recording that batch. Workers return results only at batch boundaries,
   so completed models inside an interrupted batch must be retried too. Rows from
   earlier batches are kept; the run exits 0 with a warning and job summary.
+  Exception: a GitHub Actions re-run attempt (``GITHUB_RUN_ATTEMPT`` > 1) that
+  starts after the deadline scans nothing, so it exits 1 instead of going green.
 
 Result rows
 -----------
@@ -121,6 +123,14 @@ class DeadlineReachedError(RuntimeError):
     """
 
 
+class DeadlineBeforeStartupError(DeadlineReachedError):
+    """The ``--deadline`` had already passed when main() started: nothing ran.
+
+    Distinguished from a mid-scan stop so ``__main__`` can fail a re-run attempt
+    that would otherwise exit 0 having scanned zero models.
+    """
+
+
 def _parse_deadline(value: str) -> datetime:
     """Parse a timezone-aware ISO-8601 timestamp (a trailing ``Z`` is accepted)."""
     parsed: datetime = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -148,6 +158,26 @@ def _report_deadline_stop(error: DeadlineReachedError) -> None:
                 "Previously flushed batches are preserved. "
                 "The interrupted batch and remaining models have no new verdict.\n"
             )
+
+
+def _deadline_stop_exit_code(error: DeadlineReachedError) -> int:
+    """Exit status for a deadline stop; reports it either way.
+
+    A deadline stop during the scheduled run is expected and exits 0. A re-run
+    attempt (``GITHUB_RUN_ATTEMPT`` > 1, e.g. "Re-run failed jobs") reuses the
+    original run's deadline; if that had already passed, the shard scanned
+    nothing, and exiting 0 would turn the re-run green. Fail it instead.
+    """
+    _report_deadline_stop(error)
+    run_attempt: int = int(os.environ.get("GITHUB_RUN_ATTEMPT") or 1)
+    if isinstance(error, DeadlineBeforeStartupError) and run_attempt > 1:
+        print(
+            f"::error title=Weekly scan deadline::Re-run attempt {run_attempt} "
+            "started after the weekly deadline; nothing was scanned. Start a "
+            "workflow_dispatch run (no deadline) to fill in these models."
+        )
+        return 1
+    return 0
 
 
 def _stop_worker(proc: multiprocessing.process.BaseProcess) -> None:
@@ -476,7 +506,7 @@ def main(
     if deadline is not None:
         print(f"{ts()} Deadline: {deadline.isoformat()}")
         if _seconds_until(deadline) <= 0:
-            raise DeadlineReachedError(
+            raise DeadlineBeforeStartupError(
                 f"deadline {deadline.isoformat()} reached before shard startup"
             )
 
@@ -813,8 +843,12 @@ if __name__ == "__main__":
         )
     except DeadlineReachedError as e:
         # Expected for the weekly scan (issue #745): exit 0 so the shard is not
-        # reported as a failure. Any sink opened by main() has been closed.
-        _report_deadline_stop(e)
+        # reported as a failure — unless this is a re-run attempt that started
+        # after the deadline and scanned nothing. Any sink opened by main() has
+        # been closed.
+        exit_code: int = _deadline_stop_exit_code(e)
+        if exit_code:
+            sys.exit(exit_code)
     except HardwareExceptionAbortError as e:
         # Non-zero exit so CI / GHA scheduled runs can alert. main()'s
         # `finally` has already flushed the sink and cleaned the cache.
