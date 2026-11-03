@@ -165,17 +165,42 @@ jobs:
               and .displayTitle != "Weekly scan deadline" and .createdAt <= $created)
             | .databaseId' <<< "$RUNS")
           echo "## Weekly scan deadline: Monday 09:00 New York" >> "$GITHUB_STEP_SUMMARY"
+          # One failure must not stop the loop: every later run would keep
+          # holding cards. Retry briefly, carry on, and fail the job at the end.
+          FAILED=""
           for RUN_ID in $RUN_IDS; do
-            if ! gh run cancel "$RUN_ID"; then
+            RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN_ID"
+            RESULT=failed
+            for ATTEMPT in 1 2 3; do
+              if gh run cancel "$RUN_ID"; then
+                RESULT=requested
+                break
+              fi
               # A scan may finish between listing it and requesting cancellation.
-              [[ $(gh run view "$RUN_ID" --json status --jq .status) == "completed" ]] || exit 1
-              continue
-            fi
-            echo "::warning title=Weekly scan deadline::Requested cancellation of run $RUN_ID"
-            echo "- Requested cancellation: [$RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN_ID)" >> "$GITHUB_STEP_SUMMARY"
+              if [[ $(gh run view "$RUN_ID" --json status --jq .status || true) == "completed" ]]; then
+                RESULT=completed
+                break
+              fi
+              if (( ATTEMPT < 3 )); then sleep 10; fi
+            done
+            case "$RESULT" in
+              requested)
+                echo "::warning title=Weekly scan deadline::Requested cancellation of run $RUN_ID"
+                echo "- Requested cancellation: [$RUN_ID]($RUN_URL)" >> "$GITHUB_STEP_SUMMARY" ;;
+              completed)
+                echo "- Already finished: [$RUN_ID]($RUN_URL)" >> "$GITHUB_STEP_SUMMARY" ;;
+              *)
+                echo "::error title=Weekly scan deadline::Could not cancel run $RUN_ID"
+                echo "- **Could not cancel**: [$RUN_ID]($RUN_URL)" >> "$GITHUB_STEP_SUMMARY"
+                FAILED="$FAILED $RUN_ID" ;;
+            esac
           done
           if [[ -z "$RUN_IDS" ]]; then
             echo "No unfinished scheduled scans." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -n "$FAILED" ]]; then
+            echo "::error title=Weekly scan deadline::Runs still holding cards:$FAILED"
+            exit 1
           fi
 
   # ---------------------------------------------------------------------------

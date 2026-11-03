@@ -113,10 +113,19 @@ def test_manual_scan_has_no_deadline(
     assert (tmp_path / "output").read_text() == "deadline=\n"
 
 
-@pytest.mark.parametrize("list_fails", [False, True])
-def test_cancellation_selects_only_older_unfinished_scans(
-    tmp_path: Path, list_fails: bool
-) -> None:
+def _run_cancel_step(
+    tmp_path: Path,
+    *,
+    list_fails: bool = False,
+    cancel_failures: int = 0,
+    run_1_status: str = "in_progress",
+) -> subprocess.CompletedProcess[str]:
+    """Run the real cancellation step against a fake ``gh``.
+
+    *cancel_failures* is how many ``gh run cancel 1`` calls fail before one
+    succeeds; *run_1_status* is what ``gh run view 1`` reports meanwhile
+    (``unreachable`` makes that call fail too).
+    """
     runs: list[dict[str, object]] = [
         {
             "databaseId": run_id,
@@ -133,22 +142,32 @@ def test_cancellation_selects_only_older_unfinished_scans(
             (123, "in_progress", "Weekly scan deadline", "2026-11-09T13:55:00Z"),
         ]
     ]
-    # Fake only the network CLI. Execute the real shell and jq selection logic.
+    # Fake only the network CLI (and sleep). Execute the real shell and jq logic.
     fake_gh = """
+    sleep() { :; }
     gh() {
       case "$1 $2" in
-        'run view') echo '2026-11-09T13:55:00Z' ;;
+        'run view')
+          if [[ "$3" == "$GITHUB_RUN_ID" ]]; then echo '2026-11-09T13:55:00Z'
+          elif [[ "$3" == 1 && "$RUN_1_STATUS" == unreachable ]]; then return 1
+          elif [[ "$3" == 1 ]]; then echo "$RUN_1_STATUS"
+          else echo in_progress; fi ;;
         'run list')
           [[ "$*" == *'--event schedule'* ]] || return 2
           [[ "$LIST_FAILS" == 'false' ]] || return 1
           printf '%s' "$RUNS_JSON" ;;
-        'run cancel') echo "$3" >> "$CANCEL_LOG" ;;
+        'run cancel')
+          echo "$3" >> "$ATTEMPT_LOG"
+          if [[ "$3" == 1 ]] && (( $(grep -cx 1 "$ATTEMPT_LOG") <= CANCEL_FAILURES )); then
+            return 1
+          fi
+          echo "$3" >> "$CANCEL_LOG" ;;
         *) return 2 ;;
       esac
     }
     """
     script = _step_script("cancel-weekly-scan", "Cancel unfinished scheduled scans")
-    result = subprocess.run(
+    return subprocess.run(
         ["bash", "-euo", "pipefail", "-c", fake_gh + script],
         env={
             **os.environ,
@@ -158,18 +177,58 @@ def test_cancellation_selects_only_older_unfinished_scans(
             "GITHUB_REPOSITORY": "example/repo",
             "RUNS_JSON": json.dumps(runs),
             "CANCEL_LOG": str(tmp_path / "cancelled"),
+            "ATTEMPT_LOG": str(tmp_path / "attempts"),
             "LIST_FAILS": str(list_fails).lower(),
+            "CANCEL_FAILURES": str(cancel_failures),
+            "RUN_1_STATUS": run_1_status,
         },
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def _lines(path: Path) -> list[str]:
+    return path.read_text().splitlines() if path.exists() else []
+
+
+@pytest.mark.parametrize("list_fails", [False, True])
+def test_cancellation_selects_only_older_unfinished_scans(
+    tmp_path: Path, list_fails: bool
+) -> None:
+    result = _run_cancel_step(tmp_path, list_fails=list_fails)
     if list_fails:
         assert result.returncode != 0
         assert not (tmp_path / "cancelled").exists()
     else:
         assert result.returncode == 0, result.stderr
-        assert (tmp_path / "cancelled").read_text().splitlines() == ["1", "2"]
+        assert _lines(tmp_path / "cancelled") == ["1", "2"]
+
+
+@pytest.mark.parametrize("run_1_status", ["in_progress", "unreachable"])
+def test_failed_cancellation_does_not_skip_later_runs(
+    tmp_path: Path, run_1_status: str
+) -> None:
+    result = _run_cancel_step(tmp_path, cancel_failures=99, run_1_status=run_1_status)
+    assert result.returncode == 1
+    # Run 1 was retried three times, and run 2 was still cancelled after it.
+    assert _lines(tmp_path / "attempts") == ["1", "1", "1", "2"]
+    assert _lines(tmp_path / "cancelled") == ["2"]
+    assert "Could not cancel run 1" in result.stdout
+    assert "Could not cancel**: [1]" in (tmp_path / "summary").read_text()
+
+
+def test_transient_cancellation_failure_is_retried(tmp_path: Path) -> None:
+    result = _run_cancel_step(tmp_path, cancel_failures=1)
+    assert result.returncode == 0, result.stderr
+    assert _lines(tmp_path / "cancelled") == ["1", "2"]
+
+
+def test_run_finishing_before_cancellation_is_not_a_failure(tmp_path: Path) -> None:
+    result = _run_cancel_step(tmp_path, cancel_failures=99, run_1_status="completed")
+    assert result.returncode == 0, result.stderr
+    assert _lines(tmp_path / "attempts") == ["1", "2"]
+    assert "Already finished: [1]" in (tmp_path / "summary").read_text()
 
 
 @pytest.fixture
