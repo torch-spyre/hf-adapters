@@ -15,8 +15,9 @@
 """Targeted regression tests for ppc64le model exclusions.
 
 Tests:
-1. Schema validation for tests/model_lists/exclude.yaml in manage_cache.py.
-2. Cache download list under simulated ppc64le vs x86_64, including extra_models.
+1. Schema validation of the global 'models' section in manage_cache.py (x86-only
+   script; arch-specific sections such as 'ppc64le_models' are ignored there).
+2. Cache download list keeps ppc64le-only exclusions out of the x86 cache job.
 3. --model-path overrides (mixed, all-excluded, and positive x86 control) in conftest.
 """
 
@@ -50,19 +51,19 @@ def test_manage_cache_rejects_non_mapping_yaml(
         manage_cache._load_excluded_paths()
 
 
-def test_manage_cache_rejects_unexpected_sections(
+def test_manage_cache_ignores_arch_specific_sections(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """exclude.yaml must only contain allowed sections."""
-    bad_file = tmp_path / "exclude.yaml"
-    bad_file.write_text("s390x-models:\n  - model/foo\n")
-    monkeypatch.setattr(manage_cache, "EXCLUDE_FILE_PATH", bad_file)
+    """Only the global 'models' section is read; arch-specific sections are ignored."""
+    f = tmp_path / "exclude.yaml"
+    f.write_text("models:\n  - a/b\nppc64le_models:\n  - c/d\n")
+    monkeypatch.setattr(manage_cache, "EXCLUDE_FILE_PATH", f)
 
-    with pytest.raises(ValueError, match="contains unexpected section"):
-        manage_cache._load_excluded_paths()
+    with patch("platform.machine", return_value="ppc64le"):
+        assert manage_cache._load_excluded_paths() == frozenset({"a/b"})
 
 
-@pytest.mark.parametrize("key", ["models", "ppc64le_models"])
+@pytest.mark.parametrize("key", ["models"])
 @pytest.mark.parametrize(
     "invalid_val",
     [
@@ -85,24 +86,21 @@ def test_manage_cache_validates_section_schema(
         manage_cache._load_excluded_paths()
 
 
-def test_manage_cache_ppc64le_excludes_registry_and_extra_models() -> None:
-    """Under simulated ppc64le, Qwen models from registry and extra_models are excluded."""
-    extra = ["Qwen/Qwen3-0.6B", "custom-org/valid-extra-model"]
+def test_manage_cache_excludes_global_models_from_registry_and_extra_models() -> None:
+    """Globally excluded models are dropped from both the registry and extra_models."""
+    extra = ["tiiuae/Falcon3-1B-Base", "custom-org/valid-extra-model"]
 
-    with patch("platform.machine", return_value="ppc64le"):
-        models = manage_cache.build_download_list(extra_models=extra)
+    models = manage_cache.build_download_list(extra_models=extra)
 
-        assert not any("Qwen" in m or "qwen" in m for m in models)
-        assert "custom-org/valid-extra-model" in models
-        assert "Qwen/Qwen3-0.6B" not in models
+    assert "tiiuae/Falcon3-1B-Base" not in models
+    assert "custom-org/valid-extra-model" in models
 
 
-def test_manage_cache_x86_includes_qwen_models() -> None:
-    """Under simulated x86_64, Qwen models remain present."""
-    with patch("platform.machine", return_value="x86_64"):
-        models = manage_cache.build_download_list()
+def test_manage_cache_includes_qwen_models() -> None:
+    """ppc64le-only exclusions must not affect the x86 cache job."""
+    models = manage_cache.build_download_list()
 
-        assert any("Qwen" in m or "qwen" in m for m in models)
+    assert any("Qwen" in m or "qwen" in m for m in models)
 
 
 def test_pytest_generate_tests_mixed_overrides_ppc64le() -> None:
