@@ -46,6 +46,10 @@ Flags:
 * ``--write-to-csv F``               Record results in a new CSV instead of
   ClickHouse, for runs with no database access. Write-only: the file must not
   already exist, and nothing is read back.
+* ``--deadline ISO8601``             Hard wall-clock stop (issue #745). No batch
+  starts at or after it, and a batch still running when it passes is stopped
+  without recording rows for its models (they were not evaluated). Rows already
+  written are kept; the run exits 0 with a warning annotation.
 
 Result rows
 -----------
@@ -65,7 +69,7 @@ import multiprocessing
 import subprocess
 import sys
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from tests.spyre.weekly_generation.failure_categories import (
@@ -103,6 +107,44 @@ class HardwareExceptionAbortError(RuntimeError):
     ``ClickHouseResultSink.fetch_hw_failure_models`` is for, but nothing calls it
     yet — a recovery run has to be driven by hand until that is wired up.
     """
+
+
+class DeadlineReachedError(RuntimeError):
+    """Raised in main() when the ``--deadline`` passes (issue #745).
+
+    The weekly scan must not hold Spyre cards into the US workweek. Rows written
+    before the deadline are flushed by main()'s ``finally``; the models that were
+    not reached get no row, so a re-run with the same ``--snapshot-date`` picks
+    them up (rows already recorded for that date are skipped).
+    """
+
+
+def _parse_deadline(value: str) -> datetime:
+    """Parse a timezone-aware ISO-8601 timestamp (a trailing ``Z`` is accepted)."""
+    parsed: datetime = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise argparse.ArgumentTypeError(
+            f"deadline {value!r} must include a timezone (e.g. 2026-11-09T14:00:00Z)"
+        )
+    return parsed
+
+
+def _seconds_until(deadline: datetime) -> float:
+    """Seconds from now until *deadline* (negative once it has passed)."""
+    return (deadline - datetime.now(timezone.utc)).total_seconds()
+
+
+def _stop_worker(proc: multiprocessing.process.BaseProcess) -> None:
+    """Terminate a still-running batch worker, escalating to SIGKILL if needed."""
+    proc.terminate()
+    proc.join(timeout=30)
+    if proc.is_alive():
+        print(
+            f"{ts()}     batch: worker pid={proc.pid} did not "
+            f"exit after SIGTERM — sending SIGKILL"
+        )
+        proc.kill()
+        proc.join(timeout=30)
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -277,6 +319,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Use $(date -u +%Y-%m-%d) for today when invoking manually."
         ),
     )
+    parser.add_argument(
+        "--deadline",
+        type=_parse_deadline,
+        default=None,
+        metavar="ISO8601",
+        help=(
+            "Hard wall-clock stop, e.g. 2026-11-09T14:00:00Z. No batch starts "
+            "after it, and a batch still running when it passes is stopped "
+            "without recording its models. Default: no deadline."
+        ),
+    )
     args = parser.parse_args(argv)
     # Reject the silent no-op of passing a fetch tuning flag without --fetch.
     if not args.fetch:
@@ -381,6 +434,7 @@ def main(
     top_k: int,
     max_params: int,
     snapshot_date: date,
+    deadline: datetime | None = None,
 ) -> None:
     """Evaluate a model list on Spyre, one spawned worker per batch.
 
@@ -397,11 +451,14 @@ def main(
     Raises:
         HardwareExceptionAbortError: a batch reported ``hardware_exception``, so
             the accelerator is unreachable and the remaining batches are skipped.
+        DeadlineReachedError: *deadline* passed before every batch finished.
     """
     from tests.spyre.weekly_generation.sink.result_sink import ResultSink
 
     print(f"{ts()} Starting main.")
     print(f"{ts()} Snapshot date: {snapshot_date}")
+    if deadline is not None:
+        print(f"{ts()} Deadline: {deadline.isoformat()}")
 
     total_freed: int = 0
 
@@ -476,6 +533,12 @@ def main(
         ctx = multiprocessing.get_context("spawn")
 
         for batch_idx, batch in enumerate(batches, start=1):
+            if deadline is not None and _seconds_until(deadline) <= 0:
+                raise DeadlineReachedError(
+                    f"deadline {deadline.isoformat()} reached before batch "
+                    f"{batch_idx}/{total_batches}; skipped "
+                    f"{total_batches - batch_idx + 1} batch(es)"
+                )
             batch_start = time.monotonic()
             batch_paths = [str(r["model_id"]) for r in batch]
             batch_curated = [r["curated"] for r in batch]
@@ -504,7 +567,30 @@ def main(
             proc.start()
             timeout = _WORKER_TIMEOUT_SECONDS_PER_MODEL * batch_size
 
-            proc.join(timeout=timeout)
+            # Never wait past the deadline: if it arrives first, stop the
+            # worker and record nothing for this batch — its models were not
+            # evaluated, so a timeout/crash row would be a false verdict.
+            join_timeout: float = float(timeout)
+            if deadline is not None:
+                join_timeout = min(join_timeout, max(0.0, _seconds_until(deadline)))
+            proc.join(timeout=join_timeout)
+
+            if (
+                proc.is_alive()
+                and deadline is not None
+                and _seconds_until(deadline) <= 0
+            ):
+                print(
+                    f"{ts()}     batch: deadline {deadline.isoformat()} reached — "
+                    f"terminating pid={proc.pid}; no rows recorded for its "
+                    f"{len(batch)} model(s)"
+                )
+                _stop_worker(proc)
+                raise DeadlineReachedError(
+                    f"deadline {deadline.isoformat()} reached during batch "
+                    f"{batch_idx}/{total_batches}; skipped "
+                    f"{total_batches - batch_idx + 1} batch(es)"
+                )
 
             # Timeout guard: if the child is still alive after the deadline,
             # kill it, drop any partial results, and synthesise timeout rows
@@ -517,15 +603,7 @@ def main(
                     f"pid={proc.pid} and marking {len(batch)} model(s) as "
                     f"failed with {FAILURE_CATEGORY_WORKER_TIMEOUT}"
                 )
-                proc.terminate()
-                proc.join(timeout=30)
-                if proc.is_alive():
-                    print(
-                        f"{ts()}     batch: worker pid={proc.pid} did not "
-                        f"exit after SIGTERM — sending SIGKILL"
-                    )
-                    proc.kill()
-                    proc.join(timeout=30)
+                _stop_worker(proc)
 
             # Drain the queue. SimpleQueue.get() blocks if empty, so probe
             # first; the child has already exited so a non-empty queue
@@ -702,7 +780,14 @@ if __name__ == "__main__":
             top_k=args.top_k,
             max_params=args.max_params,
             snapshot_date=args.snapshot_date,
+            deadline=args.deadline,
         )
+    except DeadlineReachedError as e:
+        # Expected for the weekly scan (issue #745): exit 0 so the shard is not
+        # reported as a failure; the annotation surfaces it in the run summary.
+        # main()'s `finally` has already flushed the sink and cleaned the cache.
+        print(f"::warning title=Weekly scan deadline::{e}")
+        print(f"{ts()} Stopped at deadline ({e}).")
     except HardwareExceptionAbortError as e:
         # Non-zero exit so CI / GHA scheduled runs can alert. main()'s
         # `finally` has already flushed the sink and cleaned the cache.

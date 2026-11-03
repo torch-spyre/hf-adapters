@@ -30,6 +30,15 @@
 # (cancel-in-progress below makes that routine), the terminal verdict rows it
 # already wrote stay — they are terminal properties of the checkpoint, so a
 # re-run simply overwrites them with the same values.
+#
+# Hard stop (issue #745): the scheduled scan must be finished by Monday 09:00
+# America/New_York (14:00 UTC in winter, 13:00 UTC in summer), so it does not
+# hold the Spyre fleet into the US workweek. generate-matrix computes that
+# deadline once (.github/scripts/weekly_scan_deadline.py) and every shard passes
+# it to weekly_test.py --deadline, which starts no batch after it and stops an
+# in-flight batch when it passes, keeping every row already written. Shards
+# still QUEUED at the deadline never get to check it, so
+# weekly-scan-deadline-watchdog.yaml cancels whatever is left of the run.
 # =============================================================================
 name: push-to-clickhouse
 
@@ -69,6 +78,13 @@ on:
           - dev
           - prod
         default: dev
+      deadline:
+        description: >-
+          Optional hard stop (ISO-8601 UTC, e.g. 2026-11-09T14:00:00Z). Empty
+          means no deadline. Scheduled runs always stop at Monday 09:00 New York.
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   # Scoped per-ref: a new commit on a given branch cancels and supersedes
@@ -158,6 +174,7 @@ jobs:
       matrix_x2: ${{ steps.generate.outputs.matrix_x2 }}
       matrix_x4: ${{ steps.generate.outputs.matrix_x4 }}
       snapshot_date: ${{ steps.generate.outputs.snapshot_date }}
+      deadline: ${{ steps.deadline.outputs.deadline }}
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       # CLICKHOUSE_* are inherited from the workflow-level env block. This job
@@ -173,6 +190,31 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Issue #745. This is the first step of the first job, so "now" is the
+      # Saturday-evening start (plus any cron/runner delay, which is hours at
+      # most): the next Monday 09:00 New York is always the intended one.
+      # Manual runs have no deadline unless one is passed explicitly.
+      - name: Compute scan deadline
+        id: deadline
+        env:
+          MANUAL_DEADLINE: ${{ inputs.deadline || '' }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+            # Fallback if the image lacks tz data for zoneinfo: fixed Monday
+            # 14:00 UTC (09:00 New York in winter, 10:00 in summer).
+            DEADLINE=$(python3 .github/scripts/weekly_scan_deadline.py) \
+              || DEADLINE=$(date -u -d 'next monday 14:00' +%Y-%m-%dT%H:%M:%SZ)
+          else
+            DEADLINE="$MANUAL_DEADLINE"
+          fi
+          echo "deadline=$DEADLINE" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Weekly scan deadline"
+            echo ""
+            echo "${DEADLINE:-none (manual run without a deadline)}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Scan deadline: ${DEADLINE:-none}"
 
       - name: Check Python
         run: |
@@ -498,6 +540,9 @@ jobs:
           PY
 
       - name: Run weekly ${{ matrix.mode }} model scan (shard ${{ matrix.shard_index }})
+        env:
+          # Issue #745: weekly_test.py stops cleanly at this time (empty = none).
+          DEADLINE: ${{ needs.generate-matrix.outputs.deadline }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -505,7 +550,8 @@ jobs:
           uv run python tests/spyre/weekly_generation/weekly_test.py \
             --mode ${{ matrix.mode }} \
             --model-list-file shards/${{ matrix.shard_file }} \
-            --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }}
+            --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }} \
+            ${DEADLINE:+--deadline "$DEADLINE"}
           echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
 
       - name: Link this shard's verdicts to its image
@@ -619,6 +665,9 @@ jobs:
           PY
 
       - name: Run weekly ${{ matrix.mode }} model scan (shard ${{ matrix.shard_index }})
+        env:
+          # Issue #745: weekly_test.py stops cleanly at this time (empty = none).
+          DEADLINE: ${{ needs.generate-matrix.outputs.deadline }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -626,7 +675,8 @@ jobs:
           uv run python tests/spyre/weekly_generation/weekly_test.py \
             --mode ${{ matrix.mode }} \
             --model-list-file shards/${{ matrix.shard_file }} \
-            --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }}
+            --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }} \
+            ${DEADLINE:+--deadline "$DEADLINE"}
           echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
 
       - name: Link this shard's verdicts to its image
@@ -740,6 +790,9 @@ jobs:
           PY
 
       - name: Run weekly ${{ matrix.mode }} model scan (shard ${{ matrix.shard_index }})
+        env:
+          # Issue #745: weekly_test.py stops cleanly at this time (empty = none).
+          DEADLINE: ${{ needs.generate-matrix.outputs.deadline }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -747,7 +800,8 @@ jobs:
           uv run python tests/spyre/weekly_generation/weekly_test.py \
             --mode ${{ matrix.mode }} \
             --model-list-file shards/${{ matrix.shard_file }} \
-            --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }}
+            --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }} \
+            ${DEADLINE:+--deadline "$DEADLINE"}
           echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
 
       - name: Link this shard's verdicts to its image

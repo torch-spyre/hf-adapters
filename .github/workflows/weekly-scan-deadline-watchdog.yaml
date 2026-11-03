@@ -1,0 +1,73 @@
+# =============================================================================
+# Hard stop for the scheduled weekly scan (issue #745)
+#
+# push-to-clickhouse.yaml starts Saturday 22:00 UTC and must be finished by
+# Monday 09:00 America/New_York. Running shards stop themselves at that time
+# (weekly_test.py --deadline), but shards still QUEUED behind max-parallel never
+# get to check it, so this watchdog cancels whatever is left of any scheduled
+# push-to-clickhouse run.
+#
+# GitHub cron is UTC-only, so it fires at both 13:20 and 14:20 UTC on Monday and
+# acts only once it is past 09:00 in New York — 13:20 under EDT, 14:20 under EST.
+# The 20-minute margin lets shards that stopped at the deadline finish linking
+# their verdicts (a cancelled run skips its `!cancelled()` steps).
+#
+# Manual (workflow_dispatch) runs are left alone; they take an explicit
+# `deadline` input instead.
+# =============================================================================
+name: weekly-scan-deadline-watchdog
+
+on:
+  schedule:
+    - cron: "20 13 * * 1"
+    - cron: "20 14 * * 1"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Cancel scheduled push-to-clickhouse runs now, ignoring the New York time check.
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel-weekly-scan:
+    name: Cancel weekly scan past its deadline
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Cancel scheduled push-to-clickhouse runs still in progress
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          NY_DOW=$(TZ=America/New_York date +%u)   # 1 = Monday
+          NY_HOUR=$(TZ=America/New_York date +%-H)
+          echo "New York time: $(TZ=America/New_York date)"
+          if [[ "$FORCE" != "true" ]] && ! [[ "$NY_DOW" == "1" && "$NY_HOUR" -ge 9 ]]; then
+            echo "Before Monday 09:00 New York — nothing to do on this trigger."
+            exit 0
+          fi
+
+          CANCELLED=0
+          for STATUS in in_progress queued waiting pending requested; do
+            for RUN_ID in $(gh run list --workflow push-to-clickhouse.yaml \
+                --event schedule --status "$STATUS" --limit 50 \
+                --json databaseId -q '.[].databaseId'); do
+              echo "Cancelling push-to-clickhouse run $RUN_ID ($STATUS)"
+              gh run cancel "$RUN_ID"
+              echo "::warning title=Weekly scan deadline::cancelled push-to-clickhouse run $RUN_ID at the Monday 09:00 New York deadline"
+              CANCELLED=$((CANCELLED + 1))
+            done
+          done
+          {
+            echo "## Weekly scan deadline watchdog"
+            echo ""
+            echo "New York time: $(TZ=America/New_York date)"
+            echo ""
+            echo "Cancelled ${CANCELLED} scheduled push-to-clickhouse run(s)."
+          } >> "$GITHUB_STEP_SUMMARY"
