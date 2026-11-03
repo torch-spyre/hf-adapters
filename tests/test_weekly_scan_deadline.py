@@ -241,6 +241,45 @@ def test_mid_batch_deadline_terminates_worker_without_false_verdicts(
     sink.close.assert_called_once()
 
 
+def test_deadline_bounded_join_ignores_a_backwards_clock(
+    scan: tuple[Path, Mock, Mock], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clock stepped back after the join must not turn a deadline stop into
+    permanent worker_timeout rows."""
+    models, sink, context = scan
+    worker: Mock = context.Process.return_value
+    worker.is_alive.side_effect = [True, False]
+    # Startup, pre-batch, pre-join (deadline reached); then, were the clock read
+    # again after the join, it would report 5 s left.
+    monkeypatch.setattr(
+        weekly_test, "_seconds_until", Mock(side_effect=[100, 100, 0, 5])
+    )
+    with pytest.raises(weekly_test.DeadlineReachedError, match="during batch 1/2"):
+        _run_scan(models, dt.datetime.now(dt.timezone.utc))
+    assert worker.join.call_args_list[0].kwargs == {"timeout": 0.0}
+    worker.terminate.assert_called_once()
+    sink.add_entry.assert_not_called()
+
+
+def test_batch_timeout_before_deadline_still_records_worker_timeout(
+    scan: tuple[Path, Mock, Mock], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    models, sink, context = scan
+    worker: Mock = context.Process.return_value
+    # Per batch: alive after join, alive at the timeout guard, dead after SIGTERM.
+    worker.is_alive.side_effect = [True, True, False] * 2
+    monkeypatch.setattr(weekly_test, "_seconds_until", Mock(return_value=10**6))
+    _run_scan(models, dt.datetime.now(dt.timezone.utc))
+    worker.join.assert_any_call(
+        timeout=float(weekly_test._WORKER_TIMEOUT_SECONDS_PER_MODEL)
+    )
+    assert sink.add_entry.call_count == 2
+    assert all(
+        call.kwargs["failure_category"] == weekly_test.FAILURE_CATEGORY_WORKER_TIMEOUT
+        for call in sink.add_entry.call_args_list
+    )
+
+
 @pytest.mark.parametrize("has_deadline", [True, False])
 def test_completed_batches_are_flushed(
     scan: tuple[Path, Mock, Mock], monkeypatch: pytest.MonkeyPatch, has_deadline: bool

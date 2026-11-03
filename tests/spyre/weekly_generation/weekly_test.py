@@ -590,16 +590,25 @@ def main(
             # Never wait past the deadline: if it arrives first, stop the
             # worker and record nothing for this batch. Its complete results
             # are unavailable; a timeout/crash row would be a false verdict.
-            join_timeout: float = float(timeout)
-            if deadline is not None:
-                join_timeout = min(join_timeout, max(0.0, _seconds_until(deadline)))
+            # Decide which limit bounds the join *before* joining, and branch on
+            # that decision afterwards. Re-reading the wall clock after the join
+            # could disagree with it (e.g. an NTP step backwards) and misfile a
+            # deadline stop as worker_timeout — a permanent false verdict, since
+            # a re-run skips every model that already has a row for the date.
+            seconds_left: float | None = (
+                None if deadline is None else max(0.0, _seconds_until(deadline))
+            )
+            deadline_bounds_join: bool = (
+                seconds_left is not None and seconds_left <= timeout
+            )
+            join_timeout: float = (
+                seconds_left
+                if seconds_left is not None and deadline_bounds_join
+                else float(timeout)
+            )
             proc.join(timeout=join_timeout)
 
-            if (
-                proc.is_alive()
-                and deadline is not None
-                and _seconds_until(deadline) <= 0
-            ):
+            if proc.is_alive() and deadline is not None and deadline_bounds_join:
                 print(
                     f"{ts()}     batch: deadline {deadline.isoformat()} reached — "
                     f"terminating pid={proc.pid}; no rows recorded for its "
