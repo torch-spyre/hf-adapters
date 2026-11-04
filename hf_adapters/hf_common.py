@@ -34,7 +34,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sympy import factorint
-from transformers import GenerationConfig, PreTrainedModel
+from transformers import (
+    GenerationConfig,
+    PretrainedConfig,
+    PreTrainedModel,
+    SiglipConfig,
+    SiglipTextConfig,
+    SiglipVisionConfig,
+)
 from transformers.generation import GenerateDecoderOnlyOutput
 from transformers.generation.streamers import BaseStreamer
 
@@ -619,8 +626,8 @@ def moe_prefill_all_experts(x, routing_weight, gate, up, down, activation):
     return (down_out * route).sum(dim=0)
 
 
-def assert_spyre_dimensions(config, model_name):
-    """Reject configs whose hidden / intermediate dimensions are stick-misaligned.
+def assert_spyre_dimensions(config: PretrainedConfig, model_name: str) -> None:
+    """Reject stick-misaligned dimensions that the adapter does not pad.
 
     The Spyre compiler lays tensors out in ``BLOCK_SIZE``-element sticks.
     Matmuls over a dimension that is not a multiple of ``BLOCK_SIZE`` produce
@@ -630,16 +637,25 @@ def assert_spyre_dimensions(config, model_name):
     and misaligned ones (e.g. ``hidden_size=312``).
 
     ``head_dim`` is not checked — adapters auto-pad it to a stick boundary (see
-    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``); hidden and
-    intermediate dims can't be padded without changing the model's arithmetic.
-    Real models clear this bar; it fires on tiny test fixtures (e.g.
-    ``trl-internal-testing/tiny-*``, ``cointegrated/rubert-tiny2``).
+    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``). SigLIP text and
+    vision encoders also zero-pad their MLP intermediate dimensions during
+    preparation, so those dimensions are exempt. Hidden dimensions still
+    require alignment. Other models retain the intermediate-dimension check.
 
     Checks ``hidden_size`` (falling back to DistilBERT's ``dim``) and
     ``intermediate_size`` (falling back to DistilBERT's ``hidden_dim``).
+    SigLIP dual encoders validate both towers; other composite configs use
+    their text config.
     """
-    dim_config = text_config(config)
-    misaligned = [
+    if isinstance(config, SiglipConfig):
+        for tower_name in ("text", "vision"):
+            tower_config: PretrainedConfig = getattr(config, f"{tower_name}_config")
+            assert_spyre_dimensions(tower_config, f"{model_name} ({tower_name} tower)")
+        return
+
+    dim_config: PretrainedConfig = text_config(config)
+    pads_intermediate = isinstance(dim_config, (SiglipTextConfig, SiglipVisionConfig))
+    misaligned: list[tuple[str, int]] = [
         (label, v)
         for label, candidates in (
             ("hidden_size", ("hidden_size", "dim")),
@@ -657,15 +673,15 @@ def assert_spyre_dimensions(config, model_name):
         )
         is not None
         and v % BLOCK_SIZE != 0
+        and not (label == "intermediate_size" and pads_intermediate)
     ]
     if misaligned:
         details = ", ".join(f"{f}={v}" for f, v in misaligned)
         raise SpyreUnsupportedModelError(
             f"Model {model_name} has Spyre-incompatible dimensions: {details} "
             f"(not a multiple of one stick, {BLOCK_SIZE}). The Spyre compiler "
-            f"cannot lower matmuls over stick-misaligned dimensions. Use a model "
-            f"whose hidden_size and intermediate_size are both multiples of "
-            f"{BLOCK_SIZE}."
+            f"cannot lower matmuls over stick-misaligned dimensions. Each "
+            f"dimension that the adapter does not pad must be a multiple of {BLOCK_SIZE}."
         )
 
 

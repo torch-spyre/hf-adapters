@@ -384,10 +384,7 @@ def resolve_adapter_module(
         if getattr(text_cfg, "enable_moe_block", False):
             adapter_module = hf_gemma4_moe
 
-    validate_dimensions = getattr(
-        adapter_module, "validate_spyre_dimensions", assert_spyre_dimensions
-    )
-    validate_dimensions(model_config, model_name=str(model_name_or_path))
+    assert_spyre_dimensions(model_config, model_name=str(model_name_or_path))
     return adapter_module
 
 

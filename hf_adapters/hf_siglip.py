@@ -41,7 +41,6 @@ Usage::
 
 from __future__ import annotations
 
-import copy
 from collections.abc import Callable
 from types import MethodType
 from typing import Any, cast
@@ -49,11 +48,9 @@ from typing import Any, cast
 import torch
 import torch.nn.functional as F
 from transformers import (
-    SiglipConfig,
     SiglipModel,
     SiglipTextConfig,
     SiglipTextModel,
-    SiglipVisionConfig,
     SiglipVisionModel,
 )
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
@@ -66,24 +63,10 @@ from hf_adapters import hf_siglip_vision
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
-    assert_spyre_dimensions,
     patch_layernorm,
 )
 
 _is_encoder_only = True
-
-
-def validate_spyre_dimensions(config: SiglipConfig, model_name: str) -> None:
-    """Validate both towers while allowing the intermediate dim we zero-pad."""
-    for tower_name, tower_config in (
-        ("text", config.text_config),
-        ("vision", config.vision_config),
-    ):
-        cfg = copy.copy(cast(SiglipTextConfig | SiglipVisionConfig, tower_config))
-        cfg.intermediate_size = (
-            (cfg.intermediate_size + BLOCK_SIZE - 1) // BLOCK_SIZE
-        ) * BLOCK_SIZE
-        assert_spyre_dimensions(cfg, f"{model_name} ({tower_name} tower)")
 
 
 def _patch_encoder(encoder: SiglipEncoder) -> None:
