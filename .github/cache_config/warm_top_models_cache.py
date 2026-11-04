@@ -38,11 +38,12 @@ be stopped and dispatched again: it carries on where it stopped. A
 
 Usage::
 
-    # Preview the list and its estimated size; downloads nothing
-    python .github/cache_config/warm_top_models_cache.py --dry-run
+    # Estimate the download size first (see estimate_top_models_cache_size.py)
+    python .github/cache_config/estimate_top_models_cache_size.py
 
     python .github/cache_config/warm_top_models_cache.py \\
-        --top-k 10000 --sleep-seconds 15 --min-free-gb 500 --max-hours 70
+        --top-k-generative 10000 --top-k-embedding 10000 \\
+        --sleep-seconds 15 --min-free-gb 500 --max-hours 70
 """
 
 from __future__ import annotations
@@ -93,7 +94,7 @@ from utils.hf_model_catalog import (  # noqa: E402
     load_curated_embedding_models,
     load_curated_generative_models,
 )
-from utils.utilities import concat_and_dedup_dicts, human_bytes, ts  # noqa: E402
+from utils.utilities import concat_and_dedup_dicts, ts  # noqa: E402
 
 # Formats transformers / sentence-transformers never load on this path. Skipping
 # them avoids pulling the same weights two or three times from repos that ship
@@ -124,6 +125,8 @@ _WEIGHT_SUFFIXES: tuple[str, ...] = (".safetensors", ".bin")
 # and the dry-run total. Unsized models count as 0 bytes.
 _BYTES_PER_PARAM: int = 2
 
+_DEFAULT_TOP_K: int = 10_000
+
 _HTTP_TOO_MANY_REQUESTS: int = 429
 _HTTP_TRANSIENT_STATUSES: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
 
@@ -148,15 +151,28 @@ class AbortRunError(Exception):
     """Stop the whole run: the disk is full, or the Hub keeps failing."""
 
 
-def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser: argparse.ArgumentParser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+def human_bytes(n: float) -> str:
+    """Format a byte count for logs, e.g. 1536 -> '1.5KB' (binary units)."""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(n) < 1024 or unit == "TB":
+            return f"{n:.1f}{unit}"
+        n /= 1024
+    raise AssertionError("unreachable: the TB branch always returns")
+
+
+def add_model_list_args(parser: argparse.ArgumentParser) -> None:
+    """The flags that choose the model list, shared with the size estimator."""
+    parser.add_argument(
+        "--top-k-generative",
+        type=int,
+        default=_DEFAULT_TOP_K,
+        help=f"How many top generative models to fetch (default: {_DEFAULT_TOP_K}).",
     )
     parser.add_argument(
-        "--top-k",
+        "--top-k-embedding",
         type=int,
-        default=10_000,
-        help="How many top models to fetch per type (default: 10000).",
+        default=_DEFAULT_TOP_K,
+        help=f"How many top embedding models to fetch (default: {_DEFAULT_TOP_K}).",
     )
     parser.add_argument(
         "--max-params",
@@ -167,6 +183,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             f"tests them (default: {MAX_NUMBER_PARAMS:,})."
         ),
     )
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser: argparse.ArgumentParser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    add_model_list_args(parser)
     parser.add_argument(
         "--sleep-seconds",
         type=float,
@@ -213,28 +236,55 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 
-def _build_model_list(top_k: int, max_params: int) -> list[dict[str, object]]:
+def build_model_list(
+    top_k_generative: int, top_k_embedding: int, max_params: int
+) -> list[dict[str, object]]:
     """Curated models first, then the fetched top-K of both types by downloads.
 
-    The fetchers keep ``model_info`` on each row. Its ``siblings`` decide which
-    weight format to download (see ``_ignore_patterns_for``).
+    Each row gets a ``mode`` ("generative" or "embedding"). A model in both
+    lists keeps its first row. The fetchers leave ``model_info`` on each row;
+    its ``siblings`` decide which weight format to download (see
+    ``ignore_patterns_for``).
     """
-    curated: list[dict[str, object]] = []
-    loaders: list[
-        tuple[Callable[[], list[str]], Callable[..., list[dict[str, object]]]]
+    sources: list[
+        tuple[
+            str,
+            Callable[[], list[str]],
+            Callable[..., list[dict[str, object]]],
+            Callable[..., list[dict[str, object]]],
+            int,
+        ]
     ] = [
-        (load_curated_generative_models, fetch_curated_generative_models_metadata),
-        (load_curated_embedding_models, fetch_curated_embedding_models_metadata),
+        (
+            "generative",
+            load_curated_generative_models,
+            fetch_curated_generative_models_metadata,
+            fetch_top_generative_models,
+            top_k_generative,
+        ),
+        (
+            "embedding",
+            load_curated_embedding_models,
+            fetch_curated_embedding_models_metadata,
+            fetch_top_embedding_models,
+            top_k_embedding,
+        ),
     ]
-    for load_ids, fetch_metadata in loaders:
+    curated: list[dict[str, object]] = []
+    fetched: list[dict[str, object]] = []
+    for mode, load_ids, fetch_metadata, fetch_top, top_k in sources:
         model_ids: list[str] = load_ids()
-        if model_ids:
-            curated.extend(fetch_metadata(model_ids=model_ids))
-
-    fetched: list[dict[str, object]] = fetch_top_generative_models(
-        limit=top_k
-    ) + fetch_top_embedding_models(limit=top_k)
-    fetched.sort(key=lambda row: _as_int(row.get("downloads")) or 0, reverse=True)
+        mode_rows: list[dict[str, object]] = (
+            fetch_metadata(model_ids=model_ids) if model_ids else []
+        )
+        mode_rows = [{**row, "mode": mode, "curated": True} for row in mode_rows]
+        curated.extend(mode_rows)
+        if top_k > 0:
+            fetched.extend(
+                {**row, "mode": mode, "curated": False}
+                for row in fetch_top(limit=top_k)
+            )
+    fetched.sort(key=lambda row: as_int(row.get("downloads")) or 0, reverse=True)
 
     merged: list[dict[str, object]] = concat_and_dedup_dicts(
         first=curated, second=fetched
@@ -249,7 +299,7 @@ def _build_model_list(top_k: int, max_params: int) -> list[dict[str, object]]:
     return result.keep
 
 
-def _as_int(value: object) -> int | None:
+def as_int(value: object) -> int | None:
     if value in (None, ""):
         return None
     try:
@@ -258,7 +308,7 @@ def _as_int(value: object) -> int | None:
         return None
 
 
-def _ignore_patterns_for(model_info: ModelInfo | None) -> list[str]:
+def ignore_patterns_for(model_info: ModelInfo | None) -> list[str]:
     """Download safetensors when the repo has them, and ``.bin`` only when it doesn't.
 
     ``manage_cache.py`` always ignores ``*.bin``, which leaves older bin-only
@@ -469,7 +519,9 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
 
-    models: list[dict[str, object]] = _build_model_list(args.top_k, args.max_params)
+    models: list[dict[str, object]] = build_model_list(
+        args.top_k_generative, args.top_k_embedding, args.max_params
+    )
     counts: dict[str, int] = {}
     total_bytes: int = 0
     breaker: _Breaker = _Breaker()
@@ -489,15 +541,15 @@ def main(argv: list[str] | None = None) -> int:
             repo_id: str = str(row["model_id"])
             info: object = row.get("model_info")
             model_info: ModelInfo | None = info if isinstance(info, ModelInfo) else None
-            params: int | None = _as_int(row.get("parameters"))
+            params: int | None = as_int(row.get("parameters"))
             result: ModelResult = ModelResult(
                 index=index,
                 model_id=repo_id,
                 status="",
-                downloads=_as_int(row.get("downloads")),
+                downloads=as_int(row.get("downloads")),
                 parameters=params,
             )
-            ignore: list[str] = _ignore_patterns_for(model_info)
+            ignore: list[str] = ignore_patterns_for(model_info)
             prefix: str = f"{ts()} [{index:,}/{len(models):,}] {repo_id}"
 
             try:

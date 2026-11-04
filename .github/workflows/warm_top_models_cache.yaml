@@ -10,8 +10,13 @@ name: 'warm_top_models_cache'
 on:
   workflow_dispatch:
     inputs:
-      top_k:
-        description: 'Top models to fetch per type (generative and embedding)'
+      top_k_generative:
+        description: 'Top generative models to fetch'
+        required: true
+        type: number
+        default: 10000
+      top_k_embedding:
+        description: 'Top embedding models to fetch'
         required: true
         type: number
         default: 10000
@@ -31,10 +36,15 @@ on:
         type: number
         default: 70
       dry_run:
-        description: 'Only list the models and their estimated size; download nothing'
+        description: 'Only estimate the download size; download nothing'
         required: true
         type: boolean
         default: true
+      exact_sizes:
+        description: 'Estimate from real Hub file sizes (one extra request per model)'
+        required: true
+        type: boolean
+        default: false
 
 # Same group as add_or_remove_artifacts_from_cache, so the nightly cache job never
 # downloads at the same time as this one. While this runs, the nightly run waits.
@@ -65,6 +75,7 @@ jobs:
       HF_HUB_DISABLE_PROGRESS_BARS: '1'
       TOKENIZERS_PARALLELISM: 'false'
       REPORT_FILE: ${{ github.workspace }}/warm_cache_report.jsonl
+      SIZE_ESTIMATE_FILE: ${{ github.workspace }}/cache_size_estimate.csv
 
     steps:
       - name: Checkout Code
@@ -81,22 +92,37 @@ jobs:
           source .venv/bin/activate
           uv sync --frozen --no-install-project --no-default-groups --group models-ops
 
+      # Always runs first, so every dispatch shows the expected size before any
+      # download starts. Nothing is downloaded here.
+      - name: Estimate the download size
+        working-directory: 'hf-adapters-repo'
+        run: |
+          source .venv/bin/activate
+          python .github/cache_config/estimate_top_models_cache_size.py \
+            --top-k-generative "${{ inputs.top_k_generative }}" \
+            --top-k-embedding "${{ inputs.top_k_embedding }}" \
+            --output-csv "$SIZE_ESTIMATE_FILE" \
+            ${{ inputs.exact_sizes && '--exact' || '' }}
+
       - name: Warm the cache
+        if: ${{ !inputs.dry_run }}
         working-directory: 'hf-adapters-repo'
         run: |
           source .venv/bin/activate
           python .github/cache_config/warm_top_models_cache.py \
-            --top-k "${{ inputs.top_k }}" \
+            --top-k-generative "${{ inputs.top_k_generative }}" \
+            --top-k-embedding "${{ inputs.top_k_embedding }}" \
             --sleep-seconds "${{ inputs.sleep_seconds }}" \
             --min-free-gb "${{ inputs.min_free_gb }}" \
             --max-hours "${{ inputs.max_hours }}" \
-            --report-file "$REPORT_FILE" \
-            ${{ inputs.dry_run && '--dry-run' || '' }}
+            --report-file "$REPORT_FILE"
 
       - name: Upload report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: warm-cache-report
-          path: ${{ env.REPORT_FILE }}
+          path: |
+            ${{ env.REPORT_FILE }}
+            ${{ env.SIZE_ESTIMATE_FILE }}
           if-no-files-found: ignore
