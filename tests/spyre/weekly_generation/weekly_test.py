@@ -65,7 +65,6 @@ Same-day duplicates are collapsed on merge by
 """
 
 import argparse
-import importlib.util
 import json
 import logging
 import multiprocessing
@@ -86,7 +85,7 @@ from tests.spyre.weekly_generation.model_prefilter import fetch_and_filter
 from tests.spyre.weekly_generation.model_type import ModelType
 from tests.spyre.weekly_generation.sink.sink_factory import create_sink, csv_path_for
 from tests.spyre.weekly_generation.weekly_sub_process import _process_batch
-from utils.utilities import human_bytes, ts
+from utils.utilities import ts
 
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
@@ -201,59 +200,12 @@ for _p in (_SPYRE_TESTS_DIR, _TESTS_DIR, _UTILS_DIR, _REPO_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-# Weight-file suffixes. A repo with at least one of these cached "has weights";
-# a repo with only config/tokenizer files does not, so its later-downloaded
-# weights are eligible for deletion.
-_WEIGHT_SUFFIXES = (
-    ".safetensors",
-    ".bin",
-    ".pt",
-    ".pth",
-    ".ckpt",
-    ".gguf",
-    ".h5",
-    ".msgpack",
-)
-
 # How many models one spawned child processes before exiting. Higher values
 # amortize per-child spawn + import + kernel-teardown cost (~15 s currently)
 # across more work. Lower values reduce the blast radius when the Spyre
 # driver/state gets into a bad shape mid-batch.
 GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS: int = 10
 EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS: int = 90
-
-
-def _repos_with_weights(repo_ids: list[str]) -> set[str]:
-    """Subset of *repo_ids* that already have >=1 weight file cached at startup.
-
-    Navigates directly to each repo's cache folder using the known HF layout —
-    same trick as ``_delete_repo_weights`` — instead of calling
-    ``scan_cache_dir()``, which walks and stats every blob under HF_HOME. On the
-    Spyre pod that cache is a shared network mount holding the accumulated
-    weights of the whole scan, and up to 32 shard jobs call this concurrently at
-    startup, so the full walk cost hours of wall-clock per job.
-
-    Only models in the current shard are ever looked up (see ``had_weights_map``
-    in ``main``), so scoping the check to *repo_ids* loses nothing.
-    """
-    print(f"{ts()} Scanning the weight cache for {len(repo_ids)} model(s)…", flush=True)
-    started: float = time.monotonic()
-    have: set[str] = set()
-    for repo_id in repo_ids:
-        snapshots_dir = _repo_cache_dir(repo_id) / "snapshots"
-        if not snapshots_dir.is_dir():
-            continue
-        try:
-            if any(p.name.endswith(_WEIGHT_SUFFIXES) for p in snapshots_dir.rglob("*")):
-                have.add(repo_id)
-        except OSError as e:
-            print(f"    warn: could not scan {snapshots_dir}: {e}")
-    print(
-        f"{ts()} Weight-cache scan done in {time.monotonic() - started:.2f}s — "
-        f"{len(have)}/{len(repo_ids)} model(s) already cached.",
-        flush=True,
-    )
-    return have
 
 
 def _get_adapter_dates() -> dict[str, str | None]:
@@ -385,86 +337,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def _repo_cache_dir(repo_id: str) -> Path:
-    """Return the local cache folder for a model repo without scanning the cache.
-
-    HF layout: <HF_HUB_CACHE>/models--<org>--<name>
-    e.g. 'BAAI/bge-m3' -> '<cache>/models--BAAI--bge-m3'
-    """
-    from huggingface_hub import constants
-
-    folder_name = "models--" + repo_id.replace("/", "--")
-    return Path(constants.HF_HUB_CACHE) / folder_name
-
-
-_CACHE_MANAGER_PATH = _REPO_ROOT / ".github" / "cache_config" / "manage_cache.py"
-
-
-def _cache_warmed_repos() -> frozenset[str]:
-    """Repos CI reads offline from this shared HF_HOME, per manage_cache.py."""
-    spec = importlib.util.spec_from_file_location("manage_cache", _CACHE_MANAGER_PATH)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return frozenset(module.cache_warmed_model_paths())
-
-
-def _delete_repo_weights(repo_id_list: list[str]) -> int:
-    """Delete cached weight files (and their blobs) for a list of repos. Keep configs.
-
-    Returns bytes freed. Navigates directly to each repo's cache folder using
-    the known HF layout — avoids the expensive scan_cache_dir() call entirely.
-    Only touches files whose name ends in a weight suffix; resolves each
-    snapshot symlink to its blob and unlinks both.
-    """
-    if not repo_id_list:
-        return 0
-    freed = 0
-    for repo_id in repo_id_list:
-        repo_dir = _repo_cache_dir(repo_id)
-        snapshots_dir = repo_dir / "snapshots"
-        if not snapshots_dir.is_dir():
-            continue
-        for snap in snapshots_dir.rglob("*"):
-            if not snap.name.endswith(_WEIGHT_SUFFIXES):
-                continue
-            try:
-                blob = snap.resolve()
-                if blob.exists():
-                    freed += blob.stat().st_size
-                    blob.unlink()
-                if snap.is_symlink() or snap.exists():
-                    snap.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                print(f"    warn: could not delete {snap}: {e}")
-    return freed
-
-
-def _cleanup_batch_weights(
-    batch_paths: list[str],
-    had_weights_map: dict[str, bool],
-    total_freed: int,
-    protected_repos: frozenset[str],
-) -> int:
-    """Delete downloaded weights for paths that were not pre-cached at startup.
-
-    Returns the updated total_freed byte count.
-    """
-    to_delete: list[str] = [
-        path
-        for path in batch_paths
-        # Protected regardless of the startup scan, which races concurrent shards.
-        if not had_weights_map.get(path, False) and path not in protected_repos
-    ]
-    freed = _delete_repo_weights(to_delete)
-    total_freed += freed
-    if freed:
-        print(f"    freed {human_bytes(freed)} (total {human_bytes(total_freed)})")
-    return total_freed
-
-
 def _chunk_into_batches(rows: list[dict], batch_size: int) -> list[list[dict]]:
     """Split *rows* into consecutive sub-lists of length *batch_size* (the
     last batch may be shorter).
@@ -510,8 +382,6 @@ def main(
                 f"deadline {deadline.isoformat()} reached before shard startup"
             )
 
-    total_freed: int = 0
-
     models_per_process = {
         ModelType.GENERATIVE: GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS,
         ModelType.EMBEDDING: EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS,
@@ -519,24 +389,18 @@ def main(
 
     adapter_dates: dict[str, str | None] = _get_adapter_dates()
 
-    # Before the sink and try, so a bad registry fails fast, not from finally.
-    protected_repos: frozenset[str] = _cache_warmed_repos()
-
     sink: ResultSink = create_sink(
         model_type=model_type,
         write_to_csv=write_to_csv,
         model_list_file=model_list_file,
     )
 
-    # All six are read by the finally block, so they are bound before the try
+    # All three are read by the finally block, so they are bound before the try
     # opens — otherwise a failure while building the model list would raise
-    # UnboundLocalError from the cleanup path and mask the real error.
+    # UnboundLocalError from the summary and mask the real error.
     processed = 0
     total = 0
     overall_start = time.monotonic()
-    batch_paths: list[str] = []
-    had_weights_map: dict[str, bool] = {}
-    preexisting: set[str] = set()
 
     # The try opens before the model list is built so that a failure while
     # fetching (a Hub outage, say) still closes the sink — under --fetch the
@@ -569,10 +433,6 @@ def main(
         total = len(rows)
         print(f"{ts()} Will evaluate {total} model(s).")
 
-        # Must run after *rows* is resolved — the cache check is scoped to this
-        # run's models rather than walking the whole (network-mounted) cache.
-        preexisting = _repos_with_weights([str(row["model_id"]) for row in rows])
-
         batch_size = models_per_process[model_type]
         batches: list[list[dict]] = _chunk_into_batches(
             rows=rows,
@@ -598,10 +458,6 @@ def main(
             )
             for path, curated in zip(batch_paths, batch_curated):
                 print(f"{ts()} - {path}" + ("\t(curated)" if curated else ""))
-
-            # Track which weights existed BEFORE this batch ran, so we can
-            # decide per-model whether to delete after.
-            had_weights_map = {path: path in preexisting for path in batch_paths}
 
             result_queue = ctx.SimpleQueue()
             proc = ctx.Process(
@@ -763,12 +619,7 @@ def main(
                     f"curated={rec.get('curated')})"
                 )
 
-            # Cache cleanup: delete weights downloaded during this batch,
-            # regardless of whether the worker processed each model.
-            total_freed = _cleanup_batch_weights(
-                batch_paths, had_weights_map, total_freed, protected_repos
-            )
-
+            # Weights stay cached: the shared HF_HOME keeps every scanned model warm.
             batch_elapsed = time.monotonic() - batch_start
             print(
                 f"{ts()}     batch {batch_idx}/{total_batches} done: "
@@ -785,7 +636,7 @@ def main(
             # hardware exception — the Spyre accelerator is unreachable and
             # every subsequent batch would waste worker time hitting the
             # same wall. The `raise` unwinds through the `finally` clause
-            # below (cache cleanup, sink close, summary), then propagates
+            # below (sink close, summary), then propagates
             # out of main() so the script exits with a non-zero status.
             if any(
                 rec.get("failure_category") == FAILURE_CATEGORY_HARDWARE_EXCEPTION
@@ -805,11 +656,6 @@ def main(
     except KeyboardInterrupt:
         print(f"\n{ts()} Interrupted — results so far are saved; rerun to resume.")
     finally:
-        # Clean up weights for the in-flight batch if interrupted mid-run.
-        _ = _cleanup_batch_weights(
-            batch_paths, had_weights_map, total_freed, protected_repos
-        )
-
         sink.close()
         if write_to_csv:
             # Report the file actually written, not the bare --write-to-csv
