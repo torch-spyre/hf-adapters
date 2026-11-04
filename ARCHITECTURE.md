@@ -176,20 +176,6 @@ hidden states and attention weights are not exposed by the adapted encoders.
 Full-checkpoint Spyre vision accuracy remains unresolved, so this checkpoint
 is not counted as verified.
 
-`tests/spyre/test_e2e_multimodal_embed_compare_spyre.py` compares pooled
-embeddings, final tower states, retrieval rankings, and logits against an fp32
-CPU reference. It covers text-only, image-only, and batched retrieval inputs;
-check definitions and tolerances live in `tests/_multimodal_embedding_helpers.py`.
-Run it on Spyre with:
-
-```bash
-make multimodal-embed-compare-tests MODEL_PATH=google/siglip2-giant-opt-patch16-384
-```
-
-Offline CI requires the image fixtures to be cached first; see
-[shared cache setup](.github/cache_config/README.md#hugging-face-models-and-image-fixtures).
-CLIP checkpoints use the separate `make clip-tests` suite.
-
 ### Sequence Classification
 
 Encoder models fine-tuned for sequence-level label prediction (sentiment
