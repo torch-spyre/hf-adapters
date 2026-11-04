@@ -19,11 +19,6 @@ containing the updated script and configuration, and wait for success before
 rerunning offline CI. Merely adding an image to a test or fixture registry does
 not populate the shared cache. No Spyre card is needed for the cache job.
 
-Run the cache-manager tests in the project environment:
-
-    python3 -m unittest discover -s .github/cache_config \
-        -p 'test_manage_cache.py' -v
-
 ## VLM reference cache maintenance
 
 The Prune VLM reference cache workflow runs weekly on a runner with the shared
