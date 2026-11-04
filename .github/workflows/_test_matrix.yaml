@@ -70,7 +70,8 @@ on:
           token_classification_compare, model_module);
           "integration" runs token_compare and model_components;
           "regression"/"trunk" (default: regression) run the
-          standard Spyre suite set. "perf" runs only spyre-perf-tests, over the `models` list.
+          standard Spyre suite set, including lm-eval quality benchmarks.
+          "quality" runs only lm-eval; "perf" runs only spyre-perf-tests, over the `models` list.
           The tests/spyre/edge_cases/ suite is opted
           into separately via the edge_cases_only boolean input below -- it
           is deliberately outside this shared test_type contract so callers
@@ -91,7 +92,8 @@ on:
           (smoke/load/token-compare/embed-compare/vision/edge-cases) to, e.g.
           "Qwen/Qwen3-0.6B ministral/Ministral-3B-Instruct". Must match paths
           exactly as they appear in tests/model_registry.py. Empty (default)
-          = run every model in the registry.
+          = run every model in the registry. Quality uses perf.yaml nightly.models
+          when this input is empty, and the explicit model list otherwise.
         required: false
         type: string
         default: ''
@@ -146,6 +148,8 @@ on:
         default: false
 
 permissions:
+  # The nested quality workflow checks out the selected source and identity helper.
+  contents: read
   # Needed by collect-failed-suites to list/download failed-suite-* artifacts via the REST API; reusable workflows can only narrow the caller's permissions, so callers must grant this too.
   actions: read
 
@@ -391,6 +395,23 @@ jobs:
           arch: x86_64
           installed: ${{ steps.delta.outputs.installed }}
           library-dir: ${{ github.workspace }}/.torch-spyre-identity
+
+  # Suite key: quality. Reuse the standalone evaluator so regression produces
+  # the same benchmark bundles and per-pod artifact identities. Measurements
+  # are not retried automatically; fail the required check on execution errors.
+  spyre-quality-tests:
+    name: Spyre quality
+    needs: [resolve-test-type, resolve-torch-spyre]
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' quality ')) }}
+    uses: ./.github/workflows/_lm-eval.yaml
+    secrets: inherit
+    with:
+      ref: ${{ inputs.ref }}
+      repository: ${{ inputs.repository }}
+      models: ${{ inputs.models }}
+      image_label: ${{ inputs.image_label }}
+      prebaked_image: ${{ inputs.prebaked_image }}
+      torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
 
   pre-commit:
     name: pre-commit
@@ -3637,6 +3658,7 @@ jobs:
       - spyre-tests-result
       # No pod-level retry for perf (a retried benchmark is a different measurement), so gate on the legs directly.
       - spyre-perf-tests
+      - spyre-quality-tests
     if: always()
     steps:
       - name: Check all suites passed
@@ -3654,7 +3676,8 @@ jobs:
                  contains(needs.check-uv-lock.result, 'failure') || contains(needs.check-uv-lock.result, 'cancelled') ||
                  contains(needs.resolve-torch-spyre.result, 'failure') || contains(needs.resolve-torch-spyre.result, 'cancelled') ||
                  contains(needs.spyre-tests-result.result, 'failure') || contains(needs.spyre-tests-result.result, 'cancelled') ||
-                 contains(needs.spyre-perf-tests.result, 'failure') || contains(needs.spyre-perf-tests.result, 'cancelled') }}; then
+                 contains(needs.spyre-perf-tests.result, 'failure') || contains(needs.spyre-perf-tests.result, 'cancelled') ||
+                 contains(needs.spyre-quality-tests.result, 'failure') || contains(needs.spyre-quality-tests.result, 'cancelled') }}; then
             echo "One or more test suites failed."
             exit 1
           fi

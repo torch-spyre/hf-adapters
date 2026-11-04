@@ -102,9 +102,15 @@ space-separated list of models. `QUALITY_CONFIG` selects an alternate suite;
 Choose a fresh results directory: quality output is protected against overwrite.
 An execution failure in quality makes the aggregate Make command fail.
 
-This Makefile selection is separate from GitHub Actions job selection:
-`integration-tests` defines its jobs through `_test_matrix.yaml`, while quality
-CI continues to use the dedicated `lm-eval.yaml` workflow.
+GitHub Actions schedules suites separately from the Makefile. The shared
+`_test_matrix.yaml` includes quality in `regression` and `trunk`, and supports
+`test_type=quality` for quality alone. The `Spyre quality / LM eval (<model>)`
+jobs use the same evaluator as the dedicated `lm-eval.yaml` workflow. They
+honor the caller's model list, source ref/repository, image label, and
+torch-spyre revision. An empty model list uses `perf.yaml`'s nightly models.
+Quality execution failures fail the required regression check; benchmark jobs
+are not retried automatically. A new workflow dispatch on the updated branch
+is required to pick up workflow changes; re-running an old run uses its old revision.
 
 In the configured Spyre runtime environment:
 
@@ -149,7 +155,10 @@ Each CI evaluation job also derives its tested software artifact ID on that
 job's runner, using the shared torch-spyre identity script and library from
 `main`. The base image is read from `/home/senuser/spyre_artifact.json`, falling
 back to `/home/senuser/spyre_artifact_id.txt`. The installed change is
-`hf-adapters@<checked-out-sha12>`; torch-spyre stays from the image.
+`hf-adapters@<checked-out-sha12>`. With `prebaked_image=true`, torch-spyre stays
+from the image. When regression installs a pinned torch-spyre revision, the
+record also includes `torch-spyre@<installed-sha12>` and retains the full SHA
+in `attachments/torch-spyre-sha.txt`.
 
 The job summary and capture-step outputs expose `artifact_id` and
 `base_artifact_id`. The downloaded `lm-eval-<model-key>` artifact includes
@@ -320,7 +329,7 @@ reports restricted to one model's successful benchmarks.
 ```bash
 python -m pytest -q evals/lm_eval/test_benchmarks.py
 python -m pytest -q evals/lm_eval/test_dashboard.py
-python -m pytest -q evals/lm_eval/test_workflow_identity.py
+python -m pytest -q evals/lm_eval/test_workflow.py
 python -m pytest -q evals/lm_eval/test_bundle.py  # requires requirements-ingest.txt
 python -m pytest -q evals/lm_eval/test_gpqa.py
 python -m unittest evals.lm_eval.test_spyre_lm_eval_backend

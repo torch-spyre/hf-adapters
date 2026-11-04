@@ -55,6 +55,7 @@ _TIERS = ("smoke", "unit", "integration", "regression", "trunk")
 # why each one is out.
 _UNTIERED = {
     "perf",
+    "quality",  # Benchmark JSON; no pytest JUnit tier tags.
     "edge_cases",
     "multicard_smoke",
     "adapter_coverage",
@@ -87,7 +88,8 @@ def test_workflow_gates_are_parseable():
     silently compare against an empty dict and pass."""
     gates = _workflow_gates()
     assert len(gates) >= 12, f"only parsed {len(gates)} suite gates"
-    assert all(tiers for tiers in gates.values()), "a gate parsed with no tiers"
+    # model_support is deliberately selected only by its explicit suite key.
+    assert {suite for suite, tiers in gates.items() if not tiers} == {"model_support"}
 
 
 def test_table_matches_the_workflow_gates():
@@ -201,8 +203,6 @@ def test_the_makefile_copy_is_known_to_disagree_with_the_workflow():
             ["integration", "regression", "trunk", "unit"],
             ["regression", "trunk"],
         ),
-        # Quality is part of Makefile regression; CI uses a separate lm-eval workflow.
-        "quality": (None, ["regression", "trunk"]),
     }, f"the workflow/Makefile divergence changed: {diffs}"
 
 
