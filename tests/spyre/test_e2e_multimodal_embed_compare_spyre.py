@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared multimodal accuracy tests; one reference/device load per checkpoint."""
+"""Shared multimodal accuracy tests with one cached checkpoint at a time."""
 
 from __future__ import annotations
 
@@ -42,13 +42,7 @@ pytestmark = pytest.mark.model_harness("multimodal_embedding")
 
 
 class _ModelRunCache:
-    """Hold at most one checkpoint, and remember a failed load.
-
-    Tests are grouped by ``model_path`` at collection (see
-    ``tests/spyre/conftest.py``), so each checkpoint loads once and is
-    released before the next one loads. A failed load is replayed as a
-    failure for that checkpoint's remaining tests instead of being retried.
-    """
+    """Cache the current checkpoint or its load error until the model path changes."""
 
     def __init__(self) -> None:
         self.model_path: str | None = None
@@ -105,7 +99,7 @@ def _release_model_runs() -> Iterator[None]:
 def _model_run(
     model_path: str, trust_remote_code: bool | None
 ) -> PreparedEmbeddingModel:
-    """Load the CPU reference and Spyre model once per checkpoint; reuse across tests."""
+    """Reuse the cached run while tests request the same checkpoint."""
     return _MODEL_RUNS.get(model_path, trust_remote_code)
 
 
