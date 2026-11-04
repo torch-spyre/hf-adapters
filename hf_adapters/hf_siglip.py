@@ -68,6 +68,10 @@ from hf_adapters.hf_common import (
 
 _is_encoder_only = True
 
+# Validate both towers; _prepare_encoder pads each tower's MLP intermediate size.
+SPYRE_DIMENSION_CONFIGS: tuple[str, ...] = ("text_config", "vision_config")
+SPYRE_PADDED_DIMENSIONS: tuple[str, ...] = ("intermediate_size",)
+
 
 def _patch_encoder(encoder: SiglipEncoder) -> None:
     """Run prepared blocks with stick-aligned sequences and padding masks."""

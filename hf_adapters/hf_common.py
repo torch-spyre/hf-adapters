@@ -34,14 +34,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sympy import factorint
-from transformers import (
-    GenerationConfig,
-    PretrainedConfig,
-    PreTrainedModel,
-    SiglipConfig,
-    SiglipTextConfig,
-    SiglipVisionConfig,
-)
+from transformers import GenerationConfig, PretrainedConfig, PreTrainedModel
 from transformers.generation import GenerateDecoderOnlyOutput
 from transformers.generation.streamers import BaseStreamer
 
@@ -626,7 +619,13 @@ def moe_prefill_all_experts(x, routing_weight, gate, up, down, activation):
     return (down_out * route).sum(dim=0)
 
 
-def assert_spyre_dimensions(config: PretrainedConfig, model_name: str) -> None:
+def assert_spyre_dimensions(
+    config: PretrainedConfig,
+    model_name: str,
+    *,
+    config_names: tuple[str, ...] = (),
+    padded_dimensions: tuple[str, ...] = (),
+) -> None:
     """Reject stick-misaligned dimensions that the adapter does not pad.
 
     The Spyre compiler lays tensors out in ``BLOCK_SIZE``-element sticks.
@@ -637,24 +636,32 @@ def assert_spyre_dimensions(config: PretrainedConfig, model_name: str) -> None:
     and misaligned ones (e.g. ``hidden_size=312``).
 
     ``head_dim`` is not checked — adapters auto-pad it to a stick boundary (see
-    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``). SigLIP text and
-    vision encoders also zero-pad their MLP intermediate dimensions during
-    preparation, so those dimensions are exempt. Hidden dimensions still
-    require alignment. Other models retain the intermediate-dimension check.
+    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``). Callers can
+    declare other dimensions padded during preparation via
+    ``padded_dimensions``, using the canonical names below. All remaining
+    dimensions must already be stick-aligned.
 
     Checks ``hidden_size`` (falling back to DistilBERT's ``dim``) and
     ``intermediate_size`` (falling back to DistilBERT's ``hidden_dim``).
-    SigLIP dual encoders validate both towers; other composite configs use
-    their text config.
+    By default, composite configs use their text config. ``config_names``
+    selects named sub-config attributes to validate instead, applying the
+    same padding allowances to each and identifying the sub-config in errors.
     """
-    if isinstance(config, SiglipConfig):
-        for tower_name in ("text", "vision"):
-            tower_config: PretrainedConfig = getattr(config, f"{tower_name}_config")
-            assert_spyre_dimensions(tower_config, f"{model_name} ({tower_name} tower)")
+    if config_names:
+        for config_name in config_names:
+            sub_config: object = getattr(config, config_name, None)
+            if not isinstance(sub_config, PretrainedConfig):
+                raise ValueError(
+                    f"Model {model_name} has no valid {config_name} configuration"
+                )
+            assert_spyre_dimensions(
+                sub_config,
+                f"{model_name} ({config_name})",
+                padded_dimensions=padded_dimensions,
+            )
         return
 
     dim_config: PretrainedConfig = text_config(config)
-    pads_intermediate = isinstance(dim_config, (SiglipTextConfig, SiglipVisionConfig))
     misaligned: list[tuple[str, int]] = [
         (label, v)
         for label, candidates in (
@@ -673,7 +680,7 @@ def assert_spyre_dimensions(config: PretrainedConfig, model_name: str) -> None:
         )
         is not None
         and v % BLOCK_SIZE != 0
-        and not (label == "intermediate_size" and pads_intermediate)
+        and label not in padded_dimensions
     ]
     if misaligned:
         details = ", ".join(f"{f}={v}" for f, v in misaligned)
