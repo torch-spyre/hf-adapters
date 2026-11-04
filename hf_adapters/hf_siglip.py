@@ -67,8 +67,6 @@ from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
     assert_spyre_dimensions,
-    load_model_common,
-    move_model_to_spyre,
     patch_layernorm,
 )
 
@@ -254,13 +252,3 @@ def prepare_for_spyre(model: SiglipModel) -> None:
         ],
     )
     setattr(model, "_spyre_siglip_prepared", True)
-
-
-def load_model(model_path: str, dtype: torch.dtype = torch.float16) -> SiglipModel:
-    """Load, prepare, and move the dual encoder using the shared loader."""
-    import sys
-
-    module = sys.modules[__name__]
-    model: SiglipModel = load_model_common(model_path, module, dtype)
-    move_model_to_spyre(model, module, dtype)
-    return model
