@@ -256,20 +256,6 @@ def prepare_for_spyre(model: SiglipModel) -> None:
     setattr(model, "_spyre_siglip_prepared", True)
 
 
-def load_hf_model(
-    model_path: str,
-    dtype: torch.dtype = torch.float16,
-    trust_remote_code: bool | None = None,
-) -> SiglipModel:
-    """Load the stock HF dual encoder on CPU for reference or preparation."""
-    model = SiglipModel.from_pretrained(
-        model_path, dtype=dtype, device_map="cpu", trust_remote_code=trust_remote_code
-    )
-    model.eval()
-    model.requires_grad_(False)
-    return model
-
-
 def load_model(model_path: str, dtype: torch.dtype = torch.float16) -> SiglipModel:
     """Load, prepare, and move the dual encoder using the shared loader."""
     import sys
