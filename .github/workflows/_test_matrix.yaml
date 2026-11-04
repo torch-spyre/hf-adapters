@@ -338,7 +338,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # One `artifact-id` record per run for push-test-results-to-clickhouse's v2 ingest. Must run
-  # on the image under test: the base artifact_id lives in its filesystem. Never gates the run.
+  # on the image under test: the base artifact_id lives in its filesystem, but no card, so it takes the cardless pool. Never gates the run.
   artifact-identity:
     name: Derive artifact identity
     needs: [resolve-torch-spyre]
@@ -346,7 +346,7 @@ jobs:
     continue-on-error: true
     runs-on:
       - x86_64
-      - spyre_pf_x1
+      - spyre_pf_x0
       - linux
       - ${{ inputs.image_label }}
     timeout-minutes: 10
