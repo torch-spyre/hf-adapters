@@ -31,28 +31,46 @@ The network is treated gently, on purpose:
 Run it with ``HF_HUB_DISABLE_XET=1`` (the workflow sets this), so each file
 arrives over a single plain HTTP stream instead of Xet's parallel chunk fetches.
 
-Models already in the cache are skipped without a network call, so the run can
-be stopped and dispatched again: it carries on where it stopped. A
-``--max-hours`` budget makes it stop cleanly before the CI job timeout, and a
-``--min-free-gb`` floor keeps it from filling the shared volume.
+Safe to stop and dispatch again:
+
+* A model counts as cached only when every file the warmer would download is on
+  disk, including every shard its weight index lists. Anything less is
+  downloaded again, and ``snapshot_download`` fetches only what is missing.
+* ``--max-hours`` is a hard budget. Each download runs in a child process
+  (``hf_snapshot_worker.py``) that is killed when the budget runs out, and no
+  retry wait or cool-down is started that would outlast it.
+* ``--min-free-gb`` is a floor on free space. A model is downloaded only if its
+  real file sizes from the Hub (or, failing that, its per-dtype safetensors
+  metadata) fit above the floor; a model that cannot be sized is skipped.
+
+Fetching the list is itself a burst of Hub requests: about two per candidate
+model, for tens of thousands of candidates at the default top-K. Two flags keep
+it down:
+
+* ``--catalog-workers`` (default 4, the weekly scan uses 32) caps how many of
+  those requests run at once;
+* ``--model-list-file`` reuses a list the size estimator saved
+  (``--save-model-list``), so an estimate followed by a warm-up fetches once.
 
 Usage::
 
-    # Estimate the download size first (see estimate_top_models_cache_size.py)
-    python .github/cache_config/estimate_top_models_cache_size.py
+    # Estimate the size and save the list
+    python .github/cache_config/estimate_top_models_cache_size.py \\
+        --save-model-list model_list.json
 
+    # Warm the cache from that list, with no second fetch
     python .github/cache_config/warm_top_models_cache.py \\
-        --top-k-generative 10000 --top-k-embedding 10000 \\
+        --model-list-file model_list.json \\
         --sleep-seconds 15 --min-free-gb 500 --max-hours 70
 """
 
 from __future__ import annotations
 
 import argparse
-import errno
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -60,20 +78,15 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 # The project root must be importable before the tests/ and utils/ imports below:
-# this file runs as a plain script from .github/cache_config/.
+# this file runs as a plain script from .github/cache_config/, whose own directory
+# (for hf_snapshot_worker) is already on sys.path.
 _PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-import httpx  # noqa: E402
-from huggingface_hub import constants, snapshot_download  # noqa: E402
-from huggingface_hub.errors import (  # noqa: E402
-    EntryNotFoundError,
-    HfHubHTTPError,
-    LocalEntryNotFoundError,
-    RepositoryNotFoundError,
-    RevisionNotFoundError,
-)
+from hf_snapshot_worker import HTTP_TOO_MANY_REQUESTS, RESULT_PREFIX  # noqa: E402
+from huggingface_hub import HfApi, constants, snapshot_download  # noqa: E402
 from huggingface_hub.hf_api import ModelInfo  # noqa: E402
+from huggingface_hub.utils import filter_repo_objects  # noqa: E402
 
 from tests.spyre.weekly_generation.failure_categories import (  # noqa: E402
     MAX_NUMBER_PARAMS,
@@ -121,14 +134,50 @@ _ALWAYS_IGNORE: tuple[str, ...] = (
 # step touched hold only the config.json that AutoConfig downloaded.
 _WEIGHT_SUFFIXES: tuple[str, ...] = (".safetensors", ".bin")
 
-# Rough on-disk size per parameter (bf16/fp16), used only for the disk-space guard
-# and the dry-run total. Unsized models count as 0 bytes.
-_BYTES_PER_PARAM: int = 2
+# Sharded checkpoints list their shards in one of these; every listed shard must
+# be on disk for the snapshot to load.
+_WEIGHT_INDEX_FILES: tuple[str, ...] = (
+    "model.safetensors.index.json",
+    "pytorch_model.bin.index.json",
+)
+
+# Bytes per element for the safetensors dtypes the Hub reports.
+_DTYPE_BYTES: dict[str, float] = {
+    "F64": 8,
+    "I64": 8,
+    "U64": 8,
+    "C64": 8,
+    "F32": 4,
+    "I32": 4,
+    "U32": 4,
+    "F16": 2,
+    "BF16": 2,
+    "I16": 2,
+    "U16": 2,
+    "F8_E4M3": 1,
+    "F8_E5M2": 1,
+    "F8_E8M0": 1,
+    "I8": 1,
+    "U8": 1,
+    "BOOL": 1,
+    "F6_E2M3": 0.75,
+    "F6_E3M2": 0.75,
+    "F4": 0.5,
+}
+_UNKNOWN_DTYPE_BYTES: float = 2
 
 _DEFAULT_TOP_K: int = 10_000
 
-_HTTP_TOO_MANY_REQUESTS: int = 429
-_HTTP_TRANSIENT_STATUSES: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
+# Threads for the list fetch's per-model Hub checks. The weekly scan uses 32
+# (see utils/hf_model_catalog.py); this one-off job has no deadline to meet.
+_DEFAULT_CATALOG_WORKERS: int = 4
+
+# Bump when the saved model-list layout changes.
+_MODEL_LIST_FORMAT_VERSION: int = 1
+
+_WORKER: Path = Path(__file__).resolve().parent / "hf_snapshot_worker.py"
+_RATE_LIMIT_PAUSE_SECONDS: float = 600.0
+_MAX_BACKOFF_SECONDS: float = 600.0
 
 
 @dataclass
@@ -138,9 +187,12 @@ class ModelResult:
     index: int
     model_id: str
     status: str
-    """cached | downloaded | failed | skipped_disk | planned"""
+    """cached | downloaded | failed | skipped_disk | skipped_unsized | interrupted"""
     downloads: int | None
     parameters: int | None
+    estimated_bytes: int | None = None
+    size_method: str | None = None
+    """exact | safetensors"""
     bytes_on_disk: int | None = None
     seconds: float | None = None
     attempts: int = 0
@@ -183,6 +235,25 @@ def add_model_list_args(parser: argparse.ArgumentParser) -> None:
             f"tests them (default: {MAX_NUMBER_PARAMS:,})."
         ),
     )
+    parser.add_argument(
+        "--catalog-workers",
+        type=int,
+        default=_DEFAULT_CATALOG_WORKERS,
+        help=(
+            "Parallel Hub requests while fetching the list "
+            f"(default: {_DEFAULT_CATALOG_WORKERS}; the weekly scan uses 32)."
+        ),
+    )
+    parser.add_argument(
+        "--model-list-file",
+        type=Path,
+        default=None,
+        help=(
+            "JSON model list to reuse instead of fetching from the Hub. The size "
+            "estimator writes one with --save-model-list; the --top-k-* and "
+            "--max-params flags must match the ones it was built with."
+        ),
+    )
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -202,14 +273,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=500.0,
         help=(
             "Stop when free space on the HF_HOME volume drops below this, and "
-            "skip any model whose estimated size would cross it (default: 500)."
+            "skip any model whose size would cross it (default: 500)."
         ),
     )
     parser.add_argument(
         "--max-hours",
         type=float,
         default=70.0,
-        help="Stop cleanly after this much wall-clock time (default: 70).",
+        help=(
+            "Hard wall-clock budget; a download still running when it ends is "
+            "stopped (default: 70)."
+        ),
     )
     parser.add_argument(
         "--max-attempts",
@@ -222,11 +296,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=Path("warm_cache_report.jsonl"),
         help="Append one JSON line per model here (default: warm_cache_report.jsonl).",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Fetch and filter the list and report the estimated size; download nothing.",
     )
     return parser.parse_args(argv)
 
@@ -277,8 +346,7 @@ def build_model_list(
         mode_rows: list[dict[str, object]] = (
             fetch_metadata(model_ids=model_ids) if model_ids else []
         )
-        mode_rows = [{**row, "mode": mode, "curated": True} for row in mode_rows]
-        curated.extend(mode_rows)
+        curated.extend({**row, "mode": mode, "curated": True} for row in mode_rows)
         if top_k > 0:
             fetched.extend(
                 {**row, "mode": mode, "curated": False}
@@ -297,6 +365,118 @@ def build_model_list(
         flush=True,
     )
     return result.keep
+
+
+def _row_to_json(row: dict[str, object]) -> dict[str, object]:
+    """A catalog row without its live ModelInfo, keeping the two fields used here.
+
+    ``siblings`` (the repo's file names) chooses the weight format and checks a
+    snapshot for completeness; ``safetensors`` (per-dtype parameter counts)
+    sizes the download. Nothing else on ModelInfo is read by these scripts.
+    """
+    out: dict[str, object] = {k: v for k, v in row.items() if k != "model_info"}
+    info: object = row.get("model_info")
+    if isinstance(info, ModelInfo):
+        out["siblings"] = (
+            [s.rfilename for s in info.siblings] if info.siblings is not None else None
+        )
+        out["safetensors_parameters"] = (
+            dict(info.safetensors.parameters) if info.safetensors else None
+        )
+    return out
+
+
+def _row_from_json(data: dict[str, object]) -> dict[str, object]:
+    """Inverse of ``_row_to_json``: rebuild a ModelInfo holding the saved fields."""
+    row: dict[str, object] = {
+        k: v for k, v in data.items() if k not in ("siblings", "safetensors_parameters")
+    }
+    siblings: object = data.get("siblings")
+    by_dtype: object = data.get("safetensors_parameters")
+    kwargs: dict[str, object] = {"id": str(data["model_id"])}
+    if isinstance(siblings, list):
+        kwargs["siblings"] = [{"rfilename": str(name)} for name in siblings]
+    if isinstance(by_dtype, dict) and by_dtype:
+        counts: dict[str, int] = {str(k): int(v) for k, v in by_dtype.items()}
+        kwargs["safetensors"] = {"parameters": counts, "total": sum(counts.values())}
+    row["model_info"] = ModelInfo(**kwargs)
+    return row
+
+
+def list_settings(args: argparse.Namespace) -> dict[str, int]:
+    """The flags that decide which models are on the list."""
+    return {
+        "top_k_generative": args.top_k_generative,
+        "top_k_embedding": args.top_k_embedding,
+        "max_params": args.max_params,
+    }
+
+
+def save_model_list(
+    path: Path, rows: list[dict[str, object]], settings: dict[str, int]
+) -> None:
+    """Write *rows* as JSON, written to a temporary file and renamed into place."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {
+        "format_version": _MODEL_LIST_FORMAT_VERSION,
+        "settings": settings,
+        "models": [_row_to_json(row) for row in rows],
+    }
+    tmp: Path = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.replace(path)
+    print(f"{ts()} Saved {len(rows):,} models to {path}", flush=True)
+
+
+def load_model_list(path: Path, settings: dict[str, int]) -> list[dict[str, object]]:
+    """Read a list saved by ``save_model_list`` and check it was built the same way.
+
+    A list built with other --top-k-* or --max-params values holds different
+    models than asked for, so it is refused instead of silently reused.
+    """
+    payload: object = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path}: not a saved model list")
+    if payload.get("format_version") != _MODEL_LIST_FORMAT_VERSION:
+        raise ValueError(
+            f"{path}: format_version {payload.get('format_version')!r}, "
+            f"expected {_MODEL_LIST_FORMAT_VERSION}"
+        )
+    saved: object = payload.get("settings")
+    if saved != settings:
+        raise ValueError(
+            f"{path} was built with {saved}, but this run asks for {settings}; "
+            "pass the same flags, or fetch a new list"
+        )
+    models: object = payload.get("models")
+    if not isinstance(models, list):
+        raise ValueError(f"{path}: 'models' is not a list")
+    rows: list[dict[str, object]] = [
+        _row_from_json(m) for m in models if isinstance(m, dict)
+    ]
+    print(f"{ts()} Loaded {len(rows):,} models from {path}", flush=True)
+    return rows
+
+
+def get_model_list(args: argparse.Namespace) -> list[dict[str, object]]:
+    """The model list: from ``--model-list-file`` if given, else fetched gently.
+
+    Fetching sets ``HF_CATALOG_MAX_WORKERS`` for the shared catalog code, so its
+    per-model Hub checks run ``--catalog-workers`` at a time instead of 32.
+    """
+    if args.catalog_workers < 1:
+        raise ValueError("--catalog-workers must be >= 1")
+    if args.model_list_file is not None:
+        return load_model_list(args.model_list_file, list_settings(args))
+    os.environ["HF_CATALOG_MAX_WORKERS"] = str(args.catalog_workers)
+    print(
+        f"{ts()} Fetching the model list with {args.catalog_workers} parallel "
+        "Hub request(s)",
+        flush=True,
+    )
+    return build_model_list(
+        args.top_k_generative, args.top_k_embedding, args.max_params
+    )
 
 
 def as_int(value: object) -> int | None:
@@ -323,36 +503,149 @@ def ignore_patterns_for(model_info: ModelInfo | None) -> list[str]:
     return patterns
 
 
+def selected_files(model_info: ModelInfo | None, ignore: list[str]) -> list[str]:
+    """Repo files the warmer downloads, per the catalog's file list (may be empty)."""
+    siblings = model_info.siblings if model_info is not None else None
+    names: list[str] = [s.rfilename for s in siblings or []]
+    return list(filter_repo_objects(items=names, ignore_patterns=ignore))
+
+
+# ---------------------------------------------------------------------------
+# Sizing (shared with estimate_top_models_cache_size.py)
+# ---------------------------------------------------------------------------
+
+
+def safetensors_bytes(model_info: ModelInfo | None) -> int | None:
+    """Weight bytes from the safetensors per-dtype parameter counts, if any."""
+    if model_info is None or not model_info.safetensors:
+        return None
+    by_dtype: dict[str, int] = model_info.safetensors.parameters or {}
+    if not by_dtype:
+        return None
+    return int(
+        sum(
+            count * _DTYPE_BYTES.get(dtype.upper(), _UNKNOWN_DTYPE_BYTES)
+            for dtype, count in by_dtype.items()
+        )
+    )
+
+
+def exact_bytes(api: HfApi, repo_id: str, ignore_patterns: list[str]) -> int | None:
+    """Total size of the files the warmer would download, from the Hub."""
+    try:
+        info: ModelInfo = api.model_info(repo_id, files_metadata=True)
+    except Exception as e:
+        print(f"    {repo_id}: file sizes unavailable ({type(e).__name__})")
+        return None
+    sizes: dict[str, int] = {
+        s.rfilename: (s.lfs.size if s.lfs is not None else s.size) or 0
+        for s in info.siblings or []
+    }
+    kept: list[str] = list(
+        filter_repo_objects(items=list(sizes), ignore_patterns=ignore_patterns)
+    )
+    return sum(sizes[name] for name in kept)
+
+
+def download_size(
+    api: HfApi | None,
+    repo_id: str,
+    ignore_patterns: list[str],
+    model_info: ModelInfo | None,
+) -> tuple[int | None, str | None]:
+    """Bytes a download will add, and how they were found; (None, None) if unknown.
+
+    Real file sizes first. The per-dtype safetensors counts are the fallback:
+    they price fp32 weights at 4 bytes, but miss non-weight files. A parameter
+    count alone is not trusted, since it says nothing about the dtype.
+    """
+    if api is not None:
+        size: int | None = exact_bytes(api, repo_id, ignore_patterns)
+        if size is not None:
+            return size, "exact"
+    size = safetensors_bytes(model_info)
+    if size is not None:
+        return size, "safetensors"
+    return None, None
+
+
 # ---------------------------------------------------------------------------
 # Cache and disk checks (no network)
 # ---------------------------------------------------------------------------
 
 
-def _cached_snapshot(repo_id: str, ignore_patterns: list[str]) -> Path | None:
-    """The local snapshot if it is complete and holds weights, without network.
+def _indexed_shards(snapshot: Path, ignore: list[str]) -> list[str]:
+    """Every shard the snapshot's weight indexes list, minus ignored formats.
 
-    ``local_files_only`` returns the snapshot that ``refs/main`` points at and
-    raises if the cached tree listing shows a file missing. A snapshot with no
-    tree listing, such as one the fetch step's AutoConfig call created, is
-    accepted only if it holds at least one weight file.
+    The ``.bin`` index ships with repos whose ``.bin`` shards the warmer skips
+    in favour of safetensors, so its shards go through the ignore patterns too.
+    An unreadable index makes the snapshot incomplete.
+    """
+    shards: set[str] = set()
+    for index_name in _WEIGHT_INDEX_FILES:
+        index: Path = snapshot / index_name
+        if not index.is_file():
+            continue
+        data: object = json.loads(index.read_text(encoding="utf-8"))
+        weight_map: object = data.get("weight_map") if isinstance(data, dict) else None
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError(f"{index_name} has no weight_map")
+        shards.update(str(name) for name in weight_map.values())
+    return list(filter_repo_objects(items=sorted(shards), ignore_patterns=ignore))
+
+
+def missing_files(
+    snapshot: Path, model_info: ModelInfo | None, ignore: list[str]
+) -> list[str]:
+    """Files the snapshot still needs: catalog files, indexed shards, any weight.
+
+    ``is_file`` follows the snapshot's symlinks, so a link whose blob is missing
+    counts as missing. The catalog's file list describes the Hub's current
+    commit, so an older cached commit can show files as missing; that only
+    costs a ``snapshot_download``, which brings it up to date.
+    """
+    required: set[str] = set(selected_files(model_info, ignore))
+    try:
+        required.update(_indexed_shards(snapshot, ignore))
+    except (OSError, ValueError) as e:
+        return [f"<weight index unreadable: {e}>"]
+    missing: list[str] = sorted(n for n in required if not (snapshot / n).is_file())
+    if missing:
+        return missing
+    has_weights: bool = any(
+        p.name.endswith(_WEIGHT_SUFFIXES) and p.is_file() for p in snapshot.rglob("*")
+    )
+    return [] if has_weights else ["<no weight files>"]
+
+
+def cached_snapshot(
+    repo_id: str,
+    ignore: list[str],
+    model_info: ModelInfo | None,
+    cache_dir: Path | None = None,
+) -> Path | None:
+    """The local snapshot if nothing the warmer downloads is missing; no network.
+
+    ``local_files_only`` resolves ``refs/main`` and, when a tree listing is
+    cached, already rejects missing files. A snapshot without one (such as the
+    config-only snapshot the fetch step's AutoConfig call creates, or one cached
+    by an older ``huggingface_hub``) is checked here instead.
     """
     try:
         path: Path = Path(
             snapshot_download(
                 repo_id=repo_id,
-                ignore_patterns=ignore_patterns,
+                ignore_patterns=ignore,
                 local_files_only=True,
+                cache_dir=cache_dir,
             )
         )
     except Exception:  # LocalEntryNotFoundError, IncompleteSnapshotError, ...
         return None
     try:
-        has_weights: bool = any(
-            p.name.endswith(_WEIGHT_SUFFIXES) for p in path.rglob("*")
-        )
+        return None if missing_files(path, model_info, ignore) else path
     except OSError:
         return None
-    return path if has_weights else None
 
 
 def _snapshot_bytes(path: Path) -> int:
@@ -377,72 +670,96 @@ def _free_bytes(directory: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _http_status(error: Exception) -> int | None:
-    if isinstance(error, HfHubHTTPError) and error.response is not None:
-        return error.response.status_code
-    return None
+@dataclass
+class DownloadOutcome:
+    path: Path | None
+    attempts: int
+    error: str | None
+    out_of_time: bool = False
 
 
-def _is_transient(error: Exception) -> bool:
-    """True for errors a later attempt can fix: rate limits, 5xx, network drops."""
-    # snapshot_download raises LocalEntryNotFoundError when the Hub is unreachable.
-    # Checked first: it subclasses EntryNotFoundError, which is permanent.
-    if isinstance(error, LocalEntryNotFoundError):
-        return True
-    if isinstance(
-        error, (RepositoryNotFoundError, RevisionNotFoundError, EntryNotFoundError)
-    ):
-        return False  # also covers GatedRepoError (a RepositoryNotFoundError)
-    if isinstance(error, HfHubHTTPError):
-        status: int | None = _http_status(error)
-        return status is None or status in _HTTP_TRANSIENT_STATUSES
-    return isinstance(error, (httpx.TransportError, TimeoutError, ConnectionError))
+def _run_worker(repo_id: str, ignore: list[str], timeout: float) -> dict[str, object]:
+    """One download attempt in a child process, killed after *timeout* seconds.
+
+    Raises ``subprocess.TimeoutExpired`` once the child has been killed.
+    """
+    request: str = json.dumps({"repo_id": repo_id, "ignore_patterns": ignore})
+    proc: subprocess.CompletedProcess[str] = subprocess.run(
+        [sys.executable, str(_WORKER), request],
+        stdout=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    for line in reversed(proc.stdout.splitlines()):
+        if line.startswith(RESULT_PREFIX):
+            outcome: object = json.loads(line[len(RESULT_PREFIX) :])
+            if isinstance(outcome, dict):
+                return outcome
+    return {
+        "ok": False,
+        "error": f"download worker exited {proc.returncode} without a result",
+        "status": None,
+        "transient": True,
+        "disk_full": False,
+    }
 
 
-def _download_with_retries(
+def download_with_retries(
     repo_id: str,
-    ignore_patterns: list[str],
-    token: str | None,
+    ignore: list[str],
     max_attempts: int,
-    rate_limit_pause: float,
-) -> tuple[Path | None, int, str | None]:
-    """Download one repo. Returns (snapshot path or None, attempts, last error)."""
+    deadline: float,
+    rate_limit_pause: float = _RATE_LIMIT_PAUSE_SECONDS,
+) -> DownloadOutcome:
+    """Download one repo, retrying transient errors, never past *deadline*.
+
+    *deadline* is a ``time.monotonic()`` value. An attempt still running at the
+    deadline is killed, and a retry wait that would end after it is not started;
+    either way the outcome has ``out_of_time`` set.
+    """
     last_error: str | None = None
     for attempt in range(1, max_attempts + 1):
+        remaining: float = deadline - time.monotonic()
+        if remaining <= 0:
+            return DownloadOutcome(None, attempt - 1, last_error, out_of_time=True)
         try:
-            path: Path = Path(
-                snapshot_download(
-                    repo_id=repo_id,
-                    token=token,
-                    ignore_patterns=ignore_patterns,
-                    max_workers=1,
-                )
+            outcome: dict[str, object] = _run_worker(repo_id, ignore, remaining)
+        except subprocess.TimeoutExpired:
+            return DownloadOutcome(
+                None,
+                attempt,
+                "stopped at the --max-hours budget; the next run resumes it",
+                out_of_time=True,
             )
-            return path, attempt, None
-        except Exception as e:
-            # HfHubHTTPError and LocalEntryNotFoundError are OSErrors too, so the
-            # disk-full check goes by errno, not by exception type.
-            if isinstance(e, OSError) and e.errno == errno.ENOSPC:
-                raise AbortRunError(f"disk full while downloading {repo_id}") from e
-            if not _is_transient(e):
-                return None, attempt, f"{type(e).__name__}: {e}"
-            last_error = f"{type(e).__name__}: {e}"
-            if _http_status(e) == _HTTP_TOO_MANY_REQUESTS:
-                print(
-                    f"    rate limited (429); pausing {rate_limit_pause:.0f}s",
-                    flush=True,
-                )
-                time.sleep(rate_limit_pause)
-                continue
-        if attempt < max_attempts:
-            backoff: float = min(600.0, 60.0 * 2 ** (attempt - 1))
-            print(
-                f"    transient error (attempt {attempt}/{max_attempts}): "
-                f"{last_error}; retrying in {backoff:.0f}s",
-                flush=True,
-            )
-            time.sleep(backoff)
-    return None, max_attempts, last_error
+        if outcome.get("ok"):
+            return DownloadOutcome(Path(str(outcome["path"])), attempt, None)
+        last_error = str(outcome.get("error"))
+        if outcome.get("disk_full"):
+            raise AbortRunError(f"disk full while downloading {repo_id}")
+        if not outcome.get("transient"):
+            return DownloadOutcome(None, attempt, last_error)
+        if attempt == max_attempts:
+            break
+        wait: float = (
+            rate_limit_pause
+            if outcome.get("status") == HTTP_TOO_MANY_REQUESTS
+            else min(_MAX_BACKOFF_SECONDS, 60.0 * 2 ** (attempt - 1))
+        )
+        if time.monotonic() + wait >= deadline:
+            return DownloadOutcome(None, attempt, last_error, out_of_time=True)
+        reason: str = (
+            "rate limited (429)"
+            if outcome.get("status") == HTTP_TOO_MANY_REQUESTS
+            else "transient error"
+        )
+        print(
+            f"    {reason} (attempt {attempt}/{max_attempts}): {last_error}; "
+            f"retrying in {wait:.0f}s",
+            flush=True,
+        )
+        time.sleep(wait)
+    return DownloadOutcome(None, max_attempts, last_error)
 
 
 # ---------------------------------------------------------------------------
@@ -464,10 +781,11 @@ class _Breaker:
         self.consecutive_failures = 0
         self.consecutive_cooldowns = 0
 
-    def record_failure(self) -> None:
+    def record_failure(self) -> float:
+        """Seconds to cool down before the next model (0 for none)."""
         self.consecutive_failures += 1
         if self.consecutive_failures < self.failures_before_cooldown:
-            return
+            return 0.0
         self.consecutive_cooldowns += 1
         if self.consecutive_cooldowns > self.max_cooldowns:
             raise AbortRunError(
@@ -480,15 +798,15 @@ class _Breaker:
             f"({self.consecutive_cooldowns}/{self.max_cooldowns})",
             flush=True,
         )
-        time.sleep(self.cooldown_seconds)
         self.consecutive_failures = 0
+        return self.cooldown_seconds
 
 
 def _write_summary(counts: dict[str, int], total_bytes: int, stop_reason: str) -> None:
     lines: list[str] = [
         f"{ts()} Done: {stop_reason}",
-        *(f"    {status:<13} {n:>6,}" for status, n in sorted(counts.items())),
-        f"    {'bytes':<13} {human_bytes(total_bytes):>6}",
+        *(f"    {status:<15} {n:>6,}" for status, n in sorted(counts.items())),
+        f"    {'bytes':<15} {human_bytes(total_bytes):>6}",
     ]
     print("\n".join(lines), flush=True)
     summary_path: str | None = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -501,8 +819,17 @@ def _write_summary(counts: dict[str, int], total_bytes: int, stop_reason: str) -
             )
 
 
+def _budget_stop(done: int, total: int) -> str:
+    return (
+        f"--max-hours budget reached after {done:,}/{total:,} models; "
+        "dispatch again to continue"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args: argparse.Namespace = _parse_args(argv)
+    # The budget covers the whole run, the list fetch included.
+    deadline: float = time.monotonic() + args.max_hours * 3600
     token: str | None = os.environ.get("HF_TOKEN") or None
     if token is None:
         print("⚠️ HF_TOKEN is not set; anonymous requests get a lower rate limit.")
@@ -511,17 +838,15 @@ def main(argv: list[str] | None = None) -> int:
 
     cache_dir: Path = Path(constants.HF_HUB_CACHE)
     min_free: int = int(args.min_free_gb * 1024**3)
-    deadline: float = time.monotonic() + args.max_hours * 3600
     print(
         f"{ts()} cache={cache_dir} free={human_bytes(_free_bytes(cache_dir))} "
         f"min_free={human_bytes(min_free)} sleep={args.sleep_seconds:.0f}s "
-        f"max_hours={args.max_hours} dry_run={args.dry_run}",
+        f"max_hours={args.max_hours}",
         flush=True,
     )
 
-    models: list[dict[str, object]] = build_model_list(
-        args.top_k_generative, args.top_k_embedding, args.max_params
-    )
+    models: list[dict[str, object]] = get_model_list(args)
+    api: HfApi = HfApi(token=token)
     counts: dict[str, int] = {}
     total_bytes: int = 0
     breaker: _Breaker = _Breaker()
@@ -532,68 +857,61 @@ def main(argv: list[str] | None = None) -> int:
     with open(args.report_file, "a", encoding="utf-8") as report:
         for index, row in enumerate(models, start=1):
             if time.monotonic() >= deadline:
-                stop_reason = (
-                    f"--max-hours budget reached after {index - 1:,}/{len(models):,} "
-                    "models; dispatch again to continue"
-                )
+                stop_reason = _budget_stop(index - 1, len(models))
                 break
 
             repo_id: str = str(row["model_id"])
             info: object = row.get("model_info")
             model_info: ModelInfo | None = info if isinstance(info, ModelInfo) else None
-            params: int | None = as_int(row.get("parameters"))
             result: ModelResult = ModelResult(
                 index=index,
                 model_id=repo_id,
                 status="",
                 downloads=as_int(row.get("downloads")),
-                parameters=params,
+                parameters=as_int(row.get("parameters")),
             )
             ignore: list[str] = ignore_patterns_for(model_info)
             prefix: str = f"{ts()} [{index:,}/{len(models):,}] {repo_id}"
+            touched_network: bool = False
 
             try:
-                cached: Path | None = _cached_snapshot(repo_id, ignore)
-                estimate: int = (params or 0) * _BYTES_PER_PARAM
-                # A dry run downloads nothing, so subtract what it has planned so far.
-                free: int = _free_bytes(cache_dir) - (
-                    total_bytes if args.dry_run else 0
-                )
-                if cached is not None:
+                free: int = _free_bytes(cache_dir)
+                if cached_snapshot(repo_id, ignore, model_info) is not None:
                     result.status = "cached"
                 elif free < min_free:
                     raise AbortRunError(
                         f"free space {human_bytes(free)} is below "
                         f"--min-free-gb ({human_bytes(min_free)})"
                     )
-                elif free - estimate < min_free:
-                    result.status = "skipped_disk"
-                elif args.dry_run:
-                    result.status = "planned"
-                    result.bytes_on_disk = estimate
-                    total_bytes += estimate
                 else:
-                    print(
-                        f"{prefix}: downloading (~{human_bytes(estimate)})", flush=True
-                    )
-                    started: float = time.monotonic()
-                    path, attempts, error = _download_with_retries(
-                        repo_id,
-                        ignore,
-                        token,
-                        args.max_attempts,
-                        rate_limit_pause=600.0,
-                    )
-                    result.seconds = round(time.monotonic() - started, 1)
-                    result.attempts = attempts
-                    if path is not None:
-                        result.status = "downloaded"
-                        result.bytes_on_disk = _snapshot_bytes(path)
-                        total_bytes += result.bytes_on_disk
-                        breaker.record_success()
+                    touched_network = True
+                    size, method = download_size(api, repo_id, ignore, model_info)
+                    result.estimated_bytes, result.size_method = size, method
+                    if size is None:
+                        result.status = "skipped_unsized"
+                    elif free - size < min_free:
+                        result.status = "skipped_disk"
                     else:
-                        result.status = "failed"
-                        result.error = error
+                        print(
+                            f"{prefix}: downloading {human_bytes(size)} ({method})",
+                            flush=True,
+                        )
+                        started: float = time.monotonic()
+                        outcome: DownloadOutcome = download_with_retries(
+                            repo_id, ignore, args.max_attempts, deadline
+                        )
+                        result.seconds = round(time.monotonic() - started, 1)
+                        result.attempts = outcome.attempts
+                        result.error = outcome.error
+                        if outcome.path is not None:
+                            result.status = "downloaded"
+                            result.bytes_on_disk = _snapshot_bytes(outcome.path)
+                            total_bytes += result.bytes_on_disk
+                            breaker.record_success()
+                        elif outcome.out_of_time:
+                            result.status = "interrupted"
+                        else:
+                            result.status = "failed"
             except AbortRunError as e:
                 stop_reason = f"aborted at {repo_id}: {e}"
                 exit_code = 1
@@ -602,26 +920,33 @@ def main(argv: list[str] | None = None) -> int:
             counts[result.status] = counts.get(result.status, 0) + 1
             report.write(json.dumps(asdict(result)) + "\n")
             report.flush()
-            if result.status != "downloaded" or index % 25 == 0:
-                print(f"{prefix}: {result.status}", flush=True)
-            elif result.bytes_on_disk is not None:
+            if result.status == "downloaded" and result.bytes_on_disk is not None:
                 print(
                     f"{prefix}: downloaded {human_bytes(result.bytes_on_disk)} "
                     f"in {result.seconds}s",
                     flush=True,
                 )
-            if result.status == "failed":
+            else:
+                print(f"{prefix}: {result.status}", flush=True)
+            if result.error and result.status != "downloaded":
                 print(f"    {result.error}", flush=True)
 
+            if result.status == "interrupted":
+                stop_reason = _budget_stop(index - 1, len(models))
+                break
+            pause: float = args.sleep_seconds if touched_network else 0.0
             if result.status == "failed":
                 try:
-                    breaker.record_failure()
+                    pause = max(pause, breaker.record_failure())
                 except AbortRunError as e:
                     stop_reason = f"aborted after {repo_id}: {e}"
                     exit_code = 1
                     break
-            if result.status in ("downloaded", "failed"):
-                time.sleep(args.sleep_seconds)
+            if pause > 0:
+                if time.monotonic() + pause >= deadline:
+                    stop_reason = _budget_stop(index, len(models))
+                    break
+                time.sleep(pause)
 
     _write_summary(counts, total_bytes, stop_reason)
     return exit_code

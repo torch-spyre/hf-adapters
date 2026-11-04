@@ -28,11 +28,18 @@ model with one of these methods, best first:
   for repos without safetensors metadata, usually ``.bin``-only repos.
 * ``unknown``: nothing to size the model by. Counted as 0 bytes and reported.
 
+The size estimate itself makes no Hub requests (except with ``--exact``); the
+list fetch does, about two per candidate model, ``--catalog-workers`` at a time
+(default 4). ``--save-model-list`` keeps that list so the warmer can reuse it
+through ``--model-list-file`` instead of fetching it again, and
+``--model-list-file`` here re-estimates a saved list with no fetch at all.
+
 Usage::
 
     python .github/cache_config/estimate_top_models_cache_size.py
     python .github/cache_config/estimate_top_models_cache_size.py \\
-        --top-k-generative 2000 --top-k-embedding 500 --output-csv sizes.csv
+        --top-k-generative 2000 --top-k-embedding 500 --output-csv sizes.csv \\
+        --save-model-list model_list.json
 """
 
 from __future__ import annotations
@@ -51,41 +58,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from huggingface_hub import HfApi  # noqa: E402
 from huggingface_hub.hf_api import ModelInfo  # noqa: E402
-from huggingface_hub.utils import filter_repo_objects  # noqa: E402
 from warm_top_models_cache import (  # noqa: E402
     add_model_list_args,
     as_int,
-    build_model_list,
+    exact_bytes,
+    get_model_list,
     human_bytes,
     ignore_patterns_for,
+    list_settings,
+    safetensors_bytes,
+    save_model_list,
 )
 
 from utils.utilities import ts  # noqa: E402
-
-# Bytes per element for the safetensors dtypes the Hub reports.
-_DTYPE_BYTES: dict[str, float] = {
-    "F64": 8,
-    "I64": 8,
-    "U64": 8,
-    "C64": 8,
-    "F32": 4,
-    "I32": 4,
-    "U32": 4,
-    "F16": 2,
-    "BF16": 2,
-    "I16": 2,
-    "U16": 2,
-    "F8_E4M3": 1,
-    "F8_E5M2": 1,
-    "F8_E8M0": 1,
-    "I8": 1,
-    "U8": 1,
-    "BOOL": 1,
-    "F6_E2M3": 0.75,
-    "F6_E3M2": 0.75,
-    "F4": 0.5,
-}
-_UNKNOWN_DTYPE_BYTES: float = 2
 
 _TOP_N_LARGEST: int = 20
 
@@ -102,38 +87,6 @@ class SizedModel:
     estimated_bytes: int
     method: str
     """exact | safetensors | parameters | unknown"""
-
-
-def safetensors_bytes(model_info: ModelInfo | None) -> int | None:
-    """Weight bytes from the safetensors per-dtype parameter counts, if any."""
-    if model_info is None or not model_info.safetensors:
-        return None
-    by_dtype: dict[str, int] = model_info.safetensors.parameters or {}
-    if not by_dtype:
-        return None
-    return int(
-        sum(
-            count * _DTYPE_BYTES.get(dtype.upper(), _UNKNOWN_DTYPE_BYTES)
-            for dtype, count in by_dtype.items()
-        )
-    )
-
-
-def exact_bytes(api: HfApi, repo_id: str, ignore_patterns: list[str]) -> int | None:
-    """Total size of the files the warmer would download, from the Hub."""
-    try:
-        info: ModelInfo = api.model_info(repo_id, files_metadata=True)
-    except Exception as e:
-        print(f"    {repo_id}: file sizes unavailable ({type(e).__name__})")
-        return None
-    sizes: dict[str, int] = {
-        s.rfilename: (s.lfs.size if s.lfs is not None else s.size) or 0
-        for s in info.siblings or []
-    }
-    kept: list[str] = list(
-        filter_repo_objects(items=list(sizes), ignore_patterns=ignore_patterns)
-    )
-    return sum(sizes[name] for name in kept)
 
 
 def size_model(
@@ -235,14 +188,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Also write one row per model to this CSV.",
     )
+    parser.add_argument(
+        "--save-model-list",
+        type=Path,
+        default=None,
+        help=(
+            "Save the fetched model list as JSON, for the warmer's "
+            "--model-list-file, so it does not fetch the list again."
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args: argparse.Namespace = _parse_args(argv)
-    rows: list[dict[str, object]] = build_model_list(
-        args.top_k_generative, args.top_k_embedding, args.max_params
-    )
+    rows: list[dict[str, object]] = get_model_list(args)
+    # Saved before sizing, so a failure or Ctrl+C there does not lose the fetch.
+    if args.save_model_list is not None:
+        save_model_list(args.save_model_list, rows, list_settings(args))
 
     api: HfApi | None = (
         HfApi(token=os.environ.get("HF_TOKEN") or None) if args.exact else None

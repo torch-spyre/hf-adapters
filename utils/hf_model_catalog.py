@@ -9,6 +9,7 @@ columns* it wants on top of the shared schema.
 
 import csv
 import logging
+import os
 import re
 import time
 from collections.abc import Callable, Iterable, Iterator
@@ -82,6 +83,25 @@ _MAX_FETCH_ATTEMPTS: int = 5
 _MAX_BACKOFF_SECONDS: float = 60.0
 
 _T = TypeVar("_T")
+
+# Threads build_catalog uses for its per-model Hub requests (filter checks and
+# AutoConfig loads). 32 suits the weekly scan, which needs the list fast. The
+# one-off cache warm-up lowers it through this variable to spread its burst out.
+_DEFAULT_CATALOG_MAX_WORKERS: int = 32
+
+
+def catalog_max_workers() -> int:
+    """Thread count for build_catalog: ``HF_CATALOG_MAX_WORKERS`` or 32."""
+    raw: str = os.environ.get("HF_CATALOG_MAX_WORKERS", "").strip()
+    if not raw:
+        return _DEFAULT_CATALOG_MAX_WORKERS
+    try:
+        workers: int = int(raw)
+    except ValueError:
+        raise ValueError(f"HF_CATALOG_MAX_WORKERS must be an integer, got {raw!r}")
+    if workers < 1:
+        raise ValueError(f"HF_CATALOG_MAX_WORKERS must be >= 1, got {workers}")
+    return workers
 
 
 def with_transient_retry(
@@ -380,6 +400,7 @@ def build_catalog(
 
     timings: dict[str, float] = {}
     t_total = time.perf_counter()
+    max_workers: int = catalog_max_workers()
 
     t0 = time.perf_counter()
     candidates: list[ModelInfo] = list(fetch_fn(limit))
@@ -387,7 +408,7 @@ def build_catalog(
     print(f"Retrieved {len(candidates)} raw {label} candidates.")
 
     t0 = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=32) as ex:
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
         keep_flags: list[tuple[bool, str]] = list(
             tqdm(
                 ex.map(_safe_filter, candidates),
@@ -434,7 +455,7 @@ def build_catalog(
     header: list[str] = base_head + extra_head + tail_head
 
     t0 = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=32) as ex:
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
         config_classes: list[str | None] = list(
             tqdm(
                 ex.map(lambda m: get_config_type(m.id, token), models),
