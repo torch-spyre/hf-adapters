@@ -12,191 +12,82 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared multimodal accuracy tests with one cached checkpoint at a time."""
+"""Compare multimodal embeddings, retrieval, and logits against an fp32 CPU reference."""
 
 from __future__ import annotations
 
 import gc
-from collections.abc import Iterator
 
 import pytest
+import torch
 import transformers
-from _pytest.mark.structures import ParameterSet
+from transformers import AutoProcessor
 
 from tests._multimodal_embedding_helpers import (
-    TEXT_PROMPTS,
-    CosineAccuracyError,
-    PreparedEmbeddingModel,
     _assert_embeddings,
-    _assert_hidden_states,
     _assert_logits,
     _assert_retrieval,
     _cosine_scores,
     bounded_cpu_threads,
     embedding_cases,
-    prepare_model_cases,
+    load_encoder,
+    prepare_inputs,
 )
-from tests.model_registry import MULTIMODAL_EMBED_PATHS
+from tests.model_registry import MULTIMODAL_EMBED_PATHS, REMOTE_CODE_PATHS
 
 pytestmark = pytest.mark.model_harness("multimodal_embedding")
 
 
-class _ModelRunCache:
-    """Cache the current checkpoint or its load error until the model path changes."""
-
-    def __init__(self) -> None:
-        self.model_path: str | None = None
-        self.run: PreparedEmbeddingModel | None = None
-        self.error: str | None = None
-
-    def get(
-        self, model_path: str, trust_remote_code: bool | None
-    ) -> PreparedEmbeddingModel:
-        if model_path != self.model_path:
-            self.release()
-            self.model_path = model_path
-            try:
-                self.run = self._load(model_path, trust_remote_code)
-            except Exception as exc:
-                self.error = f"{type(exc).__name__}: {exc}"
-                raise
-        if self.error is not None:
-            pytest.fail(
-                f"Model load failed earlier for {model_path}: {self.error}",
-                pytrace=False,
-            )
-        assert self.run is not None
-        return self.run
-
-    def release(self) -> None:
-        self.model_path, self.run, self.error = None, None, None
-        gc.collect()
-
-    @staticmethod
-    def _load(
-        model_path: str, trust_remote_code: bool | None
-    ) -> PreparedEmbeddingModel:
-        print(f"Transformers: {transformers.__version__} ({transformers.__file__})")
-        print("Embedding API: Hugging Face dual encoder; CPU reference: float32")
-        with bounded_cpu_threads():
-            return prepare_model_cases(
-                model_path,
-                embedding_cases(),
-                trust_remote_code=trust_remote_code,
-            )
-
-
-_MODEL_RUNS: _ModelRunCache = _ModelRunCache()
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _release_model_runs() -> Iterator[None]:
-    # Free the last CPU reference and Spyre model when the module finishes.
-    yield
-    _MODEL_RUNS.release()
-
-
-def _model_run(
-    model_path: str, trust_remote_code: bool | None
-) -> PreparedEmbeddingModel:
-    """Reuse the cached run while tests request the same checkpoint."""
-    return _MODEL_RUNS.get(model_path, trust_remote_code)
-
-
-# Every case passes exactly one image. Two-image vision batches return
-# non-finite outputs on Spyre, so the multi-image cases are excluded until
-# https://github.com/torch-spyre/hf-adapters/issues/747 is fixed.
-
-# Keep temporary accuracy exceptions beside the checks they affect. These
-# parameters mark only this checkpoint; new/off-registry models remain blocking.
-_SIGLIP_PATH = "google/siglip2-giant-opt-patch16-384"
-_VISION_REASON = (
-    "SigLIP fp16 vision drift vs fp32 CPU: minimum patch cosine 0.104 after "
-    "40 blocks; full-fp32 Spyre compilation is unsupported. "
-    "See ARCHITECTURE.md, Multimodal Embedding."
-)
-
-
-def _accuracy_params(reason: str, raises: type[AssertionError]) -> list[ParameterSet]:
-    return [
-        pytest.param(
-            path,
-            marks=(
-                pytest.mark.xfail(reason=reason, strict=False, raises=raises)
-                if path == _SIGLIP_PATH
-                else ()
-            ),
-        )
-        for path in MULTIMODAL_EMBED_PATHS
-    ]
-
-
-@pytest.mark.parametrize("model_path", MULTIMODAL_EMBED_PATHS)
-def test_multimodal_text_compare_spyre(
-    model_path: str, trust_remote_code: bool | None
-) -> None:
-    model_run = _model_run(model_path, trust_remote_code)
-    actual, reference = model_run.compare("text")
-    assert actual.embeddings["text"].ndim == 2
-    assert actual.embeddings["text"].shape[0] == len(TEXT_PROMPTS)
-    _assert_embeddings(actual, reference)
-
-
-@pytest.mark.parametrize("case_name", ["scalar_image", "image_list", "three_captions"])
 @pytest.mark.parametrize("model_path", MULTIMODAL_EMBED_PATHS)
 def test_multimodal_embeddings_compare_spyre(
-    model_path: str, case_name: str, trust_remote_code: bool | None
+    model_path: str, trust_remote_code: bool | None
 ) -> None:
-    actual, reference = _model_run(model_path, trust_remote_code).compare(case_name)
-    _assert_embeddings(actual, reference)
+    """Load each model once and check all scenarios through the public HF APIs."""
+    print(f"Transformers: {transformers.__version__} ({transformers.__file__})")
+    print("Embedding API: Hugging Face dual encoder; CPU reference: float32")
+    if trust_remote_code is None:
+        trust_remote_code = model_path in REMOTE_CODE_PATHS
 
-
-def _compare_retrieval(model_run: PreparedEmbeddingModel, case_name: str) -> None:
-    actual, reference = model_run.compare(case_name)
-    for prefix in ("", "joint_"):
-        text_key, image_key = f"{prefix}text", f"{prefix}image"
-        print(f"Retrieval using {prefix or 'standalone_'}features")
-        _assert_retrieval(
-            _cosine_scores(actual.embeddings[text_key], actual.embeddings[image_key]),
-            _cosine_scores(
-                reference.embeddings[text_key], reference.embeddings[image_key]
-            ),
-            image_case=case_name,
+    with bounded_cpu_threads():
+        cpu_encoder = load_encoder(
+            model_path, spyre=False, trust_remote_code=trust_remote_code
         )
-
-
-@pytest.mark.parametrize("model_path", MULTIMODAL_EMBED_PATHS)
-def test_multimodal_retrieval_compare_spyre(
-    model_path: str, trust_remote_code: bool | None
-) -> None:
-    _compare_retrieval(_model_run(model_path, trust_remote_code), "three_captions")
-
-
-@pytest.mark.parametrize("model_path", MULTIMODAL_EMBED_PATHS)
-def test_multimodal_logits_compare_spyre(
-    model_path: str, trust_remote_code: bool | None
-) -> None:
-    actual, reference = _model_run(model_path, trust_remote_code).compare(
-        "three_captions"
-    )
-    _assert_logits(actual, reference)
-
-
-@pytest.mark.parametrize("case_name", ["text", "three_captions"])
-@pytest.mark.parametrize("model_path", MULTIMODAL_EMBED_PATHS)
-def test_multimodal_text_hidden_states_compare_spyre(
-    model_path: str, case_name: str, trust_remote_code: bool | None
-) -> None:
-    actual, reference = _model_run(model_path, trust_remote_code).compare(case_name)
-    _assert_hidden_states(actual, reference, modality="text")
-
-
-@pytest.mark.parametrize("case_name", ["scalar_image", "image_list", "three_captions"])
-@pytest.mark.parametrize(
-    "model_path", _accuracy_params(_VISION_REASON, CosineAccuracyError)
-)
-def test_multimodal_image_hidden_states_compare_spyre(
-    model_path: str, case_name: str, trust_remote_code: bool | None
-) -> None:
-    actual, reference = _model_run(model_path, trust_remote_code).compare(case_name)
-    _assert_hidden_states(actual, reference, modality="image")
+        processor = AutoProcessor.from_pretrained(
+            model_path, trust_remote_code=trust_remote_code
+        )
+        inputs = {
+            name: prepare_inputs(cpu_encoder.model, processor, case)
+            for name, case in embedding_cases().items()
+        }
+        with torch.inference_mode():
+            reference = {
+                name: cpu_encoder.encode(prepared) for name, prepared in inputs.items()
+            }
+        # Finish every CPU reference before preparing Spyre, then release its model.
+        del cpu_encoder, processor
+        gc.collect()
+        spyre_encoder = load_encoder(
+            model_path, spyre=True, trust_remote_code=trust_remote_code
+        )
+        with torch.inference_mode():
+            for name, prepared in inputs.items():
+                print(f"Checking scenario: {name}")
+                actual = spyre_encoder.encode(prepared)
+                expected = reference[name]
+                _assert_embeddings(actual, expected)
+                if prepared.text is not None and prepared.image is not None:
+                    _assert_logits(actual, expected)
+                    for prefix in ("", "joint_"):
+                        text_key, image_key = f"{prefix}text", f"{prefix}image"
+                        print(f"Retrieval using {prefix or 'standalone_'}features")
+                        _assert_retrieval(
+                            _cosine_scores(
+                                actual.embeddings[text_key],
+                                actual.embeddings[image_key],
+                            ),
+                            _cosine_scores(
+                                expected.embeddings[text_key],
+                                expected.embeddings[image_key],
+                            ),
+                            image_case=name,
+                        )

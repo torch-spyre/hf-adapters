@@ -37,6 +37,7 @@ from transformers import (
 )
 
 from tests import _multimodal_embedding_helpers as helpers
+from tests.spyre import test_e2e_multimodal_embed_compare_spyre as e2e
 
 
 @pytest.fixture(params=["siglip", "clip"])
@@ -94,7 +95,7 @@ def encoder_and_processor(
     return model.eval().requires_grad_(False), processor
 
 
-def test_prepares_once_and_reuses_inputs(
+def test_e2e_prepares_once_and_reuses_inputs(
     monkeypatch: pytest.MonkeyPatch,
     encoder_and_processor: tuple[PreTrainedModel, SiglipProcessor],
 ) -> None:
@@ -124,29 +125,43 @@ def test_prepares_once_and_reuses_inputs(
         return helpers.HuggingFaceEncoder(model)
 
     processor_spy = Mock(wraps=processor)
-    monkeypatch.setattr(helpers, "load_encoder", load_encoder)
+    embedding_check = Mock(wraps=helpers._assert_embeddings)
+    logit_check = Mock(wraps=helpers._assert_logits)
+    # Random tiny checkpoints have no learned image/caption ranking. The ranking
+    # assertion is exercised separately with controlled scores below.
+    retrieval_check = Mock()
+    cases: dict[str, helpers.EmbeddingCase] = {
+        "text": helpers.EmbeddingCase(texts=case.texts),
+        "scalar_image": helpers.EmbeddingCase(images=Image.new("RGB", (19, 21), "red")),
+        "image_list": helpers.EmbeddingCase(images=[Image.new("RGB", (19, 21), "red")]),
+        "batch": case,
+    }
+    monkeypatch.setattr(e2e, "load_encoder", load_encoder)
+    monkeypatch.setattr(e2e, "embedding_cases", Mock(return_value=cases))
+    monkeypatch.setattr(e2e, "_assert_embeddings", embedding_check)
+    monkeypatch.setattr(e2e, "_assert_logits", logit_check)
+    monkeypatch.setattr(e2e, "_assert_retrieval", retrieval_check)
     monkeypatch.setattr(
-        helpers.AutoProcessor, "from_pretrained", Mock(return_value=processor_spy)
+        e2e.AutoProcessor, "from_pretrained", Mock(return_value=processor_spy)
     )
-    run = helpers.prepare_model_cases("test/dual-encoder", {"batch": case})
-    assert events[0] == "load_cpu" and events[-1] == "load_spyre"
-    assert set(events[1:-1]) == {"encode"}
-    actual, reference = run.compare("batch")
-    first_run_events = events.copy()
-    run.compare("batch")
-    assert events == first_run_events  # All later checks reuse the first forward.
-    assert processor_spy.call_count == 2  # Once per modality, not per device/forward.
+    e2e.test_multimodal_embeddings_compare_spyre("test/dual-encoder", False)
+    assert events[0] == "load_cpu"
+    assert events.count("load_cpu") == events.count("load_spyre") == 1
+    spyre_load = events.index("load_spyre")
+    assert set(events[1:spyre_load]) == {"encode"}
+    assert events[spyre_load + 1 :] == events[1:spyre_load]
+    assert (
+        processor_spy.call_count == 5
+    )  # Once per case/modality, shared across devices.
+    assert embedding_check.call_count == len(cases)
+    assert logit_check.call_count == 1
+    assert retrieval_check.call_count == 2  # Standalone and joint features.
     assert observed[0].shape == (2, context_length)
     assert observed[0][0].tolist() == [2] + [0] * (context_length - 1)
     assert observed[0][1].tolist() == [3] * context_length
     for input_ids in observed[1:]:
         torch.testing.assert_close(observed[0], input_ids)
-    assert run.inputs["batch"].text is not None
-    torch.testing.assert_close(run.inputs["batch"].text["input_ids"], observed[0])
-    helpers._assert_embeddings(actual, reference)
-    helpers._assert_hidden_states(actual, reference, modality="text")
-    helpers._assert_hidden_states(actual, reference, modality="image")
-    helpers._assert_logits(actual, reference)
+    actual, reference = logit_check.call_args.args
     # A broken scale/bias must fail even when the embeddings are identical.
     wrong_logits = copy.deepcopy(actual)
     wrong_logits.logits["logits_per_text"] += 5.0
@@ -154,32 +169,40 @@ def test_prepares_once_and_reuses_inputs(
         helpers._assert_logits(wrong_logits, reference)
 
 
-@pytest.mark.parametrize(
-    "output", [None, torch.ones(1, 3), SimpleNamespace(pooler_output=torch.ones(1, 3))]
-)
-def test_missing_tower_outputs_are_blocking(output: Any) -> None:
-    with pytest.raises(AssertionError) as error:
+@pytest.mark.parametrize("output", [None, torch.ones(1, 3), SimpleNamespace()])
+def test_missing_pooled_outputs_are_blocking(output: Any) -> None:
+    with pytest.raises(AssertionError):
         helpers.EmbeddingOutputs().add_features("image", output)
-    assert not isinstance(error.value, helpers.CosineAccuracyError)
 
 
-@pytest.mark.parametrize("problem", ["missing", "shape", "nan"])
-def test_structural_failures_precede_cosine_xfails(problem: str) -> None:
+@pytest.mark.parametrize("field", ["embeddings", "logits"])
+@pytest.mark.parametrize("problem", ["missing", "shape", "nan", "empty"])
+def test_invalid_outputs_are_blocking(field: str, problem: str) -> None:
     reference = helpers.EmbeddingOutputs(
-        embeddings={"text": torch.ones(1, 3), "image": torch.ones(1, 3)},
-        hidden_states={"text": torch.ones(1, 4, 3), "image": torch.ones(1, 4, 3)},
+        embeddings={"image": torch.ones(1, 3)},
+        logits={"logits_per_image": torch.ones(1, 3)},
     )
     actual = copy.deepcopy(reference)
-    actual.embeddings["text"].neg_()  # Would otherwise trigger a cosine xfail first.
+    values: dict[str, torch.Tensor] = getattr(actual, field)
+    key = next(iter(values))
     if problem == "missing":
-        actual.hidden_states.pop("image")
+        values.pop(key)
     elif problem == "shape":
-        actual.hidden_states["image"] = torch.ones(1, 3, 3)
+        values[key] = torch.ones(3)
+    elif problem == "nan":
+        values[key][0, 0] = float("nan")
     else:
-        actual.hidden_states["image"][0, 0, 0] = float("nan")
-    with pytest.raises(AssertionError) as error:
+        values[key] = torch.ones(0, 3)
+        getattr(reference, field)[key] = torch.ones(0, 3)
+    with pytest.raises(AssertionError):
         helpers._assert_embeddings(actual, reference)
-    assert not isinstance(error.value, helpers.CosineAccuracyError)
+
+
+def test_inaccurate_embeddings_are_blocking() -> None:
+    reference = helpers.EmbeddingOutputs(embeddings={"image": torch.ones(1, 3)})
+    actual = helpers.EmbeddingOutputs(embeddings={"image": -torch.ones(1, 3)})
+    with pytest.raises(AssertionError, match="cosine"):
+        helpers._assert_embeddings(actual, reference)
 
 
 def test_retrieval_allows_close_distractors_but_requires_correct_match() -> None:
@@ -187,5 +210,5 @@ def test_retrieval_allows_close_distractors_but_requires_correct_match() -> None
     actual = torch.tensor([[0.102], [0.3], [0.1]])
     helpers._assert_retrieval(actual, reference, image_case="three_captions")
     actual[0, 0] = 0.4
-    with pytest.raises(helpers.RetrievalAccuracyError):
+    with pytest.raises(AssertionError):
         helpers._assert_retrieval(actual, reference, image_case="three_captions")

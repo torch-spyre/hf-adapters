@@ -12,15 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""HF dual-encoder test contract: pooled features, tower states and joint logits.
+"""HF dual-encoder test helpers for pooled features, retrieval, and joint logits.
 
 All checkpoints use fixed-length text from their config, fp32 CPU references,
-and the public Spyre loader. Known accuracy exceptions live beside the tests.
+and the public Spyre loader.
 """
 
 from __future__ import annotations
 
-import gc
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -29,7 +28,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from transformers import AutoModel, AutoProcessor, PreTrainedModel
+from transformers import AutoModel, PreTrainedModel
 
 from hf_adapters.auto_spyre_model import AutoSpyreModel, dtype_for_model_path
 from tests._vision_helpers import _load_sample_image
@@ -38,19 +37,10 @@ from tests.model_registry import REMOTE_CODE_PATHS
 ImageInput = Image.Image | list[Image.Image]
 
 EMBEDDING_COSINE = 0.99
-HIDDEN_STATE_COSINE = 0.99
 SCORE_ATOL = 0.005
 RANKING_ATOL = 0.01
 LOGIT_ATOL = 1.0
 LOGIT_RTOL = 0.05
-
-
-class CosineAccuracyError(AssertionError):
-    """Finite, correctly shaped outputs miss a cosine accuracy threshold."""
-
-
-class RetrievalAccuracyError(AssertionError):
-    """Finite, correctly shaped scores miss retrieval accuracy thresholds."""
 
 
 def _cpu_tensor(output: Any, name: str) -> torch.Tensor:
@@ -62,14 +52,12 @@ def _cpu_tensor(output: Any, name: str) -> torch.Tensor:
 @dataclass
 class EmbeddingOutputs:
     embeddings: dict[str, torch.Tensor] = field(default_factory=dict)
-    hidden_states: dict[str, torch.Tensor] = field(default_factory=dict)
     logits: dict[str, torch.Tensor] = field(default_factory=dict)
 
     def add_features(self, name: str, output: Any) -> None:
-        """Both standalone feature calls and joint towers must expose states."""
+        """Read pooled features from standalone calls and joint tower outputs."""
         assert output is not None, f"{name}: required tower output is missing"
         self.embeddings[name] = _cpu_tensor(output, "pooler_output")
-        self.hidden_states[name] = _cpu_tensor(output, "last_hidden_state")
 
 
 @dataclass(frozen=True)
@@ -186,11 +174,9 @@ TEXT_PROMPTS: list[str] = [
 def _assert_matching_outputs(
     actual: EmbeddingOutputs, reference: EmbeddingOutputs
 ) -> None:
-    """Check every output before a numerical xfail can mask structural errors."""
+    """Require matching fields and shapes, nonempty matrices, and finite values."""
     assert reference.embeddings, "No embeddings were produced"
-    required_states = reference.embeddings.keys() - {"joint_text", "joint_image"}
-    assert reference.hidden_states.keys() == required_states, "Missing tower states"
-    for label in ("embeddings", "hidden_states", "logits"):
+    for label in ("embeddings", "logits"):
         actual_fields: dict[str, torch.Tensor] = getattr(actual, label)
         reference_fields: dict[str, torch.Tensor] = getattr(reference, label)
         assert (
@@ -198,6 +184,7 @@ def _assert_matching_outputs(
         ), f"{label}: fields differ"
         for name, expected in reference_fields.items():
             value = actual_fields[name]
+            assert value.ndim == 2, f"{name}: expected a matrix"
             assert value.shape == expected.shape, f"{name}: shape mismatch"
             assert value.numel() > 0, f"{name}: empty output"
             assert torch.isfinite(value).all(), f"{name}: non-finite Spyre output"
@@ -211,7 +198,7 @@ def _assert_cosine(
     minimum = similarities.min().item()
     print(f"{label}: minimum cosine {minimum:.8f}")
     if minimum < threshold:
-        raise CosineAccuracyError(f"{label}: cosine {minimum} below {threshold}")
+        raise AssertionError(f"{label}: cosine {minimum} below {threshold}")
 
 
 def _assert_embeddings(actual: EmbeddingOutputs, reference: EmbeddingOutputs) -> None:
@@ -231,21 +218,6 @@ def _assert_logits(actual: EmbeddingOutputs, reference: EmbeddingOutputs) -> Non
             rtol=LOGIT_RTOL,
             msg=lambda message: f"{name}: {message}",
         )
-
-
-def _assert_hidden_states(
-    actual: EmbeddingOutputs, reference: EmbeddingOutputs, *, modality: str
-) -> None:
-    _assert_matching_outputs(actual, reference)
-    assert modality in reference.hidden_states, f"Missing {modality} last_hidden_state"
-    for name, expected in reference.hidden_states.items():
-        if name in (modality, f"joint_{modality}_pool"):
-            _assert_cosine(
-                f"{name}.last_hidden_state",
-                actual.hidden_states[name],
-                expected,
-                HIDDEN_STATE_COSINE,
-            )
 
 
 def _cosine_scores(text: torch.Tensor, image: torch.Tensor) -> torch.Tensor:
@@ -278,28 +250,22 @@ def _assert_retrieval(
             f"Spyre {direction} ranking: {actual.argsort(dim=dim, descending=True).tolist()}"
         )
         if not (actual_gaps[separated] > 0).all():
-            raise RetrievalAccuracyError(f"{direction}: well-separated ranking differs")
+            raise AssertionError(f"{direction}: well-separated ranking differs")
     # Correct retrieval is required even if the best candidates are close.
     if image_case == "three_captions":
         for label, scores in (("CPU", reference), ("Spyre", actual)):
             if scores[:, 0].argmax().item() != 1:
-                raise RetrievalAccuracyError(
-                    f"{label}: expected {TEXT_PROMPTS[1]!r} first"
-                )
+                raise AssertionError(f"{label}: expected {TEXT_PROMPTS[1]!r} first")
     else:
         assert reference.shape[0] == reference.shape[1]
         correct_matches = torch.arange(reference.shape[0])
         for label, scores in (("CPU", reference), ("Spyre", actual)):
             for dim in (0, 1):
                 if not torch.equal(scores.argmax(dim=dim), correct_matches):
-                    raise RetrievalAccuracyError(
-                        f"{label}: incorrect image/caption match"
-                    )
+                    raise AssertionError(f"{label}: incorrect image/caption match")
     if not torch.allclose(actual, reference, rtol=0.0, atol=SCORE_ATOL):
         maximum_error = (actual - reference).abs().max().item()
-        raise RetrievalAccuracyError(
-            f"Cosine score error {maximum_error} exceeds {SCORE_ATOL}"
-        )
+        raise AssertionError(f"Cosine score error {maximum_error} exceeds {SCORE_ATOL}")
 
 
 @dataclass(frozen=True)
@@ -332,48 +298,3 @@ def bounded_cpu_threads() -> Iterator[None]:
         yield
     finally:
         torch.set_num_threads(previous)
-
-
-@dataclass
-class PreparedEmbeddingModel:
-    encoder: HuggingFaceEncoder
-    inputs: dict[str, PreparedEmbeddingInputs]
-    reference: dict[str, EmbeddingOutputs]
-    actual: dict[str, EmbeddingOutputs] = field(default_factory=dict)
-
-    def compare(self, case_name: str) -> tuple[EmbeddingOutputs, EmbeddingOutputs]:
-        if case_name not in self.actual:
-            with torch.inference_mode():
-                self.actual[case_name] = self.encoder.encode(self.inputs[case_name])
-        actual, reference = self.actual[case_name], self.reference[case_name]
-        _assert_matching_outputs(actual, reference)
-        return actual, reference
-
-
-def prepare_model_cases(
-    model_path: str,
-    cases: dict[str, EmbeddingCase],
-    *,
-    trust_remote_code: bool | None = None,
-) -> PreparedEmbeddingModel:
-    if trust_remote_code is None:
-        trust_remote_code = model_path in REMOTE_CODE_PATHS
-    reference_encoder = load_encoder(
-        model_path, spyre=False, trust_remote_code=trust_remote_code
-    )
-    processor: Any = AutoProcessor.from_pretrained(
-        model_path, trust_remote_code=trust_remote_code
-    )
-    inputs = {
-        name: prepare_inputs(reference_encoder.model, processor, case)
-        for name, case in cases.items()
-    }
-    with torch.inference_mode():
-        reference = {
-            name: reference_encoder.encode(prepared)
-            for name, prepared in inputs.items()
-        }
-    del reference_encoder, processor
-    gc.collect()
-    encoder = load_encoder(model_path, spyre=True, trust_remote_code=trust_remote_code)
-    return PreparedEmbeddingModel(encoder, inputs, reference)

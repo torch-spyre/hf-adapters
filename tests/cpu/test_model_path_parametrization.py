@@ -12,51 +12,50 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Checkpoint selection must preserve narrowly scoped pytest parameter marks."""
+"""Model overrides preserve scenarios and use the selected harness's failure policy."""
 
 import pytest
 
 pytest_plugins = ["pytester"]
 
 
+@pytest.mark.parametrize("harness", ["multimodal_embedding", "causal"])
 @pytest.mark.parametrize("override", [None, "known/model", "new/model"])
-def test_model_override_preserves_only_matching_marks(
-    pytester: pytest.Pytester, override: str | None
+def test_model_override_uses_harness_policy(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    override: str | None,
+    harness: str,
 ) -> None:
+    import model_registry
+
+    monkeypatch.setattr(
+        model_registry, "NON_BLOCKING_CAUSAL_MODELS", {"known/model": "known failure"}
+    )
     pytester.makeconftest(
         "from tests.conftest import pytest_addoption, pytest_configure, pytest_generate_tests"
     )
-    pytester.makepyfile("""
+    pytester.makepyfile(f"""
         import pytest
+        from model_registry import NON_BLOCKING_CAUSAL_MODELS, xfail_non_blocking
 
-        class AccuracyError(AssertionError):
-            pass
-
-        pytestmark = pytest.mark.model_harness("multimodal_embedding")
-        affected = pytest.param(
-            "known/model", marks=pytest.mark.xfail(
-                reason="known numerical limit", raises=AccuracyError, strict=False,
-            ),
-        )
+        pytestmark = pytest.mark.model_harness({harness!r})
+        table = NON_BLOCKING_CAUSAL_MODELS if {harness!r} == "causal" else {{}}
 
         @pytest.mark.parametrize("case", ["scalar", "batch"])
-        @pytest.mark.parametrize("model_path", [affected])
+        @pytest.mark.parametrize(
+            "model_path", xfail_non_blocking(["known/model"], table=table)
+        )
         def test_accuracy(model_path: str, case: str) -> None:
-            raise AccuracyError(case)
-
-        @pytest.mark.parametrize("model_path", [affected])
-        def test_structure(model_path: str) -> None:
-            raise AssertionError("missing tower output")
-
-        @pytest.mark.parametrize("model_path", ["known/model"])
-        def test_other_check(model_path: str, request: pytest.FixtureRequest) -> None:
-            assert request.node.get_closest_marker("xfail") is None
+            assert model_path != "known/model", case
     """)
     args: list[str] = ["-q"]
     if override is not None:
         args.extend(["--model-path", override])
     result = pytester.runpytest(*args)
     if override == "new/model":
-        result.assert_outcomes(passed=1, failed=3)
+        result.assert_outcomes(passed=2)
+    elif harness == "causal":
+        result.assert_outcomes(xfailed=2)
     else:
-        result.assert_outcomes(passed=1, failed=1, xfailed=2)
+        result.assert_outcomes(failed=2)
