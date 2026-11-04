@@ -173,8 +173,6 @@ for stick alignment. Encoder blocks run on Spyre; token/patch embeddings,
 final norms, text projection, and image attention pooling run on CPU.
 Compiler-added tokens are masked and cropped before pooling. Intermediate
 hidden states and attention weights are not exposed by the adapted encoders.
-Full-checkpoint Spyre vision accuracy remains unresolved, so this checkpoint
-is not counted as verified.
 
 ### Sequence Classification
 
