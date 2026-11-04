@@ -9,8 +9,8 @@ and supports manual runs. It warms the shared `HF_HOME` at
 `manage_cache.py` discovers model repositories from `tests/model_registry.py`.
 The `models` list in `hf_models_and_datasets.yaml` adds extra model repositories.
 The separate `datasets` list declares dataset repositories and exact filenames;
-it currently includes the shared cat image and SigLIP's dog image. These files
-use the default Hub revision, matching the test helpers. Each file is downloaded
+it currently includes the shared cat image used by VLM, CLIP, and SigLIP tests.
+Files use the default Hub revision, matching the test helpers. Each file is downloaded
 and then resolved again with `local_files_only=True`. A failed download or offline
 lookup fails the cache job after the other artifacts have been attempted.
 
