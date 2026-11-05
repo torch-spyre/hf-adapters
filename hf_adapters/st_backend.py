@@ -32,6 +32,10 @@ the backbone via ``AutoSpyreModel.from_pretrained``, then overrides
 ``BaseModelOutput(last_hidden_state=...)`` — exactly the shape that ST's
 ``Transformer.forward`` expects.
 
+Dual encoders exposing ``get_text_features`` and ``get_image_features`` keep
+their native HF forwards and pooling. ST dispatches directly to these feature
+methods, whose Spyre adapters already return CPU embeddings.
+
 The backbone runs on Spyre; ST's Pooling and Normalize run on the host (they are
 dynamic-shaped pointwise ops that do not compile on Spyre). Two pieces arrange
 that with an honest ``model.device`` (Spyre):
@@ -48,8 +52,10 @@ All downstream ST modules (``Pooling``, ``Normalize``, ``model.encode()``,
 """
 
 import types
+from typing import Any
 
 import torch
+from transformers import PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import BaseModelOutput
 
 from hf_adapters.auto_spyre_model import AutoSpyreModel, resolve_adapter_module
@@ -62,17 +68,18 @@ def _to_cpu(t):
 
 
 def _spyre_load_model(
-    self,
-    model_name_or_path,
-    transformer_task,
-    config,
-    backend,
-    is_peft_model,
-    **model_kwargs,
-):
+    self: Any,
+    model_name_or_path: str,
+    transformer_task: str,
+    config: PretrainedConfig,
+    backend: str,
+    is_peft_model: bool,
+    **model_kwargs: Any,
+) -> PreTrainedModel:
     """Replacement for ``Transformer._load_model`` that handles ``backend="spyre"``."""
     if backend != "spyre":
-        return _original_load_model(
+        assert _original_load_model is not None
+        original_model: PreTrainedModel = _original_load_model(
             self,
             model_name_or_path,
             transformer_task,
@@ -81,6 +88,7 @@ def _spyre_load_model(
             is_peft_model,
             **model_kwargs,
         )
+        return original_model
 
     dtype = model_kwargs.pop("dtype", None)
     if dtype is None:
@@ -95,6 +103,13 @@ def _spyre_load_model(
     model = AutoSpyreModel.from_pretrained(
         model_name_or_path, dtype=dtype, trust_remote_code=trust_remote_code
     )
+    # ST detects native dual-encoder feature methods. These adapters already
+    # retain HF pooling/projection and return CPU features; replacing forward
+    # with a token-level prefill driver would break the public joint API.
+    if callable(getattr(model, "get_text_features", None)) and callable(
+        getattr(model, "get_image_features", None)
+    ):
+        return model
     adapter_module = resolve_adapter_module(
         model_name_or_path, trust_remote_code=trust_remote_code
     )
@@ -107,7 +122,12 @@ def _spyre_load_model(
 
     if is_encoder_only:
 
-        def _spyre_forward(self, input_ids=None, attention_mask=None, **kwargs):
+        def _spyre_forward(
+            self: PreTrainedModel,
+            input_ids: torch.Tensor | None = None,
+            attention_mask: torch.Tensor | None = None,
+            **kwargs: Any,
+        ) -> BaseModelOutput:
             token_type_ids = kwargs.get("token_type_ids", None)
             # ST places features on ``model.device`` (Spyre); the prefill drivers
             # build their CPU-side auxiliary tensors from these inputs (e.g.
@@ -120,16 +140,25 @@ def _spyre_load_model(
                 _to_cpu(attention_mask),
                 token_type_ids=_to_cpu(token_type_ids),
             )
-            return BaseModelOutput(last_hidden_state=h)
+            output = BaseModelOutput()
+            output["last_hidden_state"] = h
+            return output
 
     else:
 
-        def _spyre_forward(self, input_ids=None, attention_mask=None, **kwargs):
+        def _spyre_forward(
+            self: PreTrainedModel,
+            input_ids: torch.Tensor | None = None,
+            attention_mask: torch.Tensor | None = None,
+            **kwargs: Any,
+        ) -> BaseModelOutput:
             # See the encoder branch: prefill drivers require CPU inputs.
             h = prefill_embed(
                 run_backbone_forward, self, _to_cpu(input_ids), _to_cpu(attention_mask)
             )
-            return BaseModelOutput(last_hidden_state=h)
+            output = BaseModelOutput()
+            output["last_hidden_state"] = h
+            return output
 
     model.forward = types.MethodType(_spyre_forward, model)
 
@@ -142,7 +171,7 @@ def _spyre_load_model(
     # the host before pooling reads them.
     _original_transformer_forward = self.forward
 
-    def _cpu_pooling_forward(features, **kwargs):
+    def _cpu_pooling_forward(features: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
         features = _original_transformer_forward(features, **kwargs)
         for key, value in features.items():
             if isinstance(value, torch.Tensor):

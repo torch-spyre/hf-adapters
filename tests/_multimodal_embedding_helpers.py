@@ -20,6 +20,7 @@ and the public Spyre loader.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -29,6 +30,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from transformers import AutoModel, PreTrainedModel
+from transformers.utils.hub import cached_file
 
 from hf_adapters.auto_spyre_model import AutoSpyreModel, dtype_for_model_path
 from tests._vision_helpers import _load_sample_image
@@ -129,6 +131,38 @@ class HuggingFaceEncoder:
         return outputs
 
 
+def model_subfolder(model_path: str) -> str:
+    """Find the HF module in SentenceTransformers metadata, locally or on the Hub.
+
+    Native HF repositories have no ``modules.json`` and load from their root.
+    The discovered path is shared by the reference model and processor loaders.
+    """
+    modules_file = cached_file(
+        model_path, "modules.json", _raise_exceptions_for_missing_entries=False
+    )
+    if modules_file is None:
+        return ""
+    with open(modules_file, encoding="utf-8") as handle:
+        modules: Any = json.load(handle)
+    if not isinstance(modules, list):
+        raise ValueError(f"{model_path}: modules.json must contain a list")
+    for module in modules:
+        if not isinstance(module, dict):
+            raise ValueError(f"{model_path}: modules.json entries must be objects")
+        module_type: Any = module.get("type")
+        if isinstance(module_type, str) and module_type.rsplit(".", 1)[-1] in {
+            "CLIPModel",
+            "Transformer",
+        }:
+            subfolder: Any = module.get("path")
+            if not isinstance(subfolder, str):
+                raise ValueError(f"{model_path}: HF module path must be a string")
+            return subfolder
+    raise ValueError(
+        f"{model_path}: modules.json has no CLIPModel or Transformer module"
+    )
+
+
 def load_encoder(
     model_path: str,
     *,
@@ -154,6 +188,7 @@ def load_encoder(
         model = (
             AutoModel.from_pretrained(
                 model_path,
+                subfolder=model_subfolder(model_path),
                 dtype=torch.float32,
                 device_map="cpu",
                 trust_remote_code=trust_remote_code,

@@ -769,18 +769,17 @@ VISION_MODELS = {
         "dtype": "bfloat16",
         "size": "30b",
     },
-    # hf_clip.py — CLIP dual-encoder (image + text -> embeddings via ST backend)
-    "clip_vit_b_32": {
-        "name": "clip-ViT-B-32",
-        "path": "sentence-transformers/clip-ViT-B-32",
-        "adapter": "hf_clip.py",
-        "kind": "clip",  # dual-encoder: image or text -> embedding
-        "size": "0.15b",
-    },
 }
 
 
 MULTIMODAL_EMBEDDING_MODELS: dict[str, dict[str, Any]] = {
+    "clip_vit_b_32": {
+        "name": "clip-ViT-B-32",
+        "path": "sentence-transformers/clip-ViT-B-32",
+        "adapter": "hf_clip.py",
+        "kind": "multimodal_embedding",
+        "size": "0.15b",
+    },
     "siglip2_giant_opt_patch16_384": {
         "name": "SigLIP2 giant-opt patch16 384",
         "path": "google/siglip2-giant-opt-patch16-384",
@@ -972,13 +971,6 @@ VISION_PATHS: list[str] = _exclude(
         predicate=lambda info: info.get("kind") == "vlm",
     )
 )
-CLIP_PATHS: list[str] = _exclude(
-    _select_representative_paths(
-        VISION_MODELS,
-        include_gated=_include_gated_flag,
-        predicate=lambda info: info.get("kind") == "clip",
-    )
-)
 
 
 def _all_paths(
@@ -1061,13 +1053,6 @@ ALL_VISION_PATHS: list[str] = _exclude(
         VISION_MODELS,
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") == "vlm",
-    )
-)
-ALL_CLIP_PATHS: list[str] = _exclude(
-    _all_paths(
-        VISION_MODELS,
-        include_gated=_include_gated_flag,
-        predicate=lambda info: info.get("kind") == "clip",
     )
 )
 

@@ -59,7 +59,8 @@ def generate_matrices(
         ),
         "embed": (registry.EMBED_PATHS, registry.ALL_EMBED_PATHS),
         "vision": (registry.VISION_PATHS, registry.ALL_VISION_PATHS),
-        "clip": (registry.CLIP_PATHS, registry.ALL_CLIP_PATHS),
+        # Keep the existing suite key for dispatch/retry compatibility.
+        "clip": (registry.MULTIMODAL_EMBED_PATHS, registry.ALL_MULTIMODAL_EMBED_PATHS),
         "multimodal_embed_compare": (
             registry.MULTIMODAL_EMBED_PATHS,
             registry.ALL_MULTIMODAL_EMBED_PATHS,
@@ -256,7 +257,9 @@ def main() -> None:
     print(
         f"  Multimodal embedding models ({len(matrices['multimodal_embed_compare'])}): {', '.join(matrices['multimodal_embed_compare'])}"
     )
-    print(f"  CLIP models ({len(matrices['clip'])}): {', '.join(matrices['clip'])}")
+    print(
+        f"  SentenceTransformers multimodal models ({len(matrices['clip'])}): {', '.join(matrices['clip'])}"
+    )
     print(
         f"  Masked-LM models ({len(matrices['masked_lm'])}): {', '.join(matrices['masked_lm'])}"
     )

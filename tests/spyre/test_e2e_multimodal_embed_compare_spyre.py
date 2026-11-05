@@ -31,6 +31,7 @@ from tests._multimodal_embedding_helpers import (
     bounded_cpu_threads,
     embedding_cases,
     load_encoder,
+    model_subfolder,
     prepare_inputs,
 )
 from tests.model_registry import MULTIMODAL_EMBED_PATHS, REMOTE_CODE_PATHS
@@ -53,7 +54,9 @@ def test_multimodal_embeddings_compare_spyre(
             model_path, spyre=False, trust_remote_code=trust_remote_code
         )
         processor = AutoProcessor.from_pretrained(
-            model_path, trust_remote_code=trust_remote_code
+            model_path,
+            subfolder=model_subfolder(model_path),
+            trust_remote_code=trust_remote_code,
         )
         inputs = {
             name: prepare_inputs(cpu_encoder.model, processor, case)

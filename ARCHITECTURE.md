@@ -154,25 +154,35 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 
 ### Multimodal Embedding (text/image→vectors)
 
-`hf_siglip.py` adapts the fixed-resolution SigLIP dual encoder for text/image
-retrieval and similarity scoring through Hugging Face's `SiglipModel` API.
+`hf_clip.py` and `hf_siglip.py` adapt CLIP and fixed-resolution SigLIP dual
+encoders for text/image retrieval and similarity scoring. Both belong to
+`MULTIMODAL_EMBEDDING_MODELS` and use `test_e2e_multimodal_embed_compare_spyre.py`.
+Both also run through `test_sentence_transformers_multimodal_spyre.py` to
+exercise the SentenceTransformers Spyre backend (the legacy `clip` CI suite key).
 
 | Model | model\_type | Text / vision head\_dim | Embedding width | Status |
 |-------|-----------|------------------------|-----------------|--------|
-| google/siglip2-giant-opt-patch16-384 | siglip | 72→128 / 96→128 | 1536 | Experimental; vision accuracy unresolved |
+| sentence-transformers/clip-ViT-B-32 | clip | 64 / 64 | 512 | Verified: text and single-image scenarios |
+| google/siglip2-giant-opt-patch16-384 | siglip | 72→128 / 96→128 | 1536 | Verified: text and single-image scenarios |
 
-Load with `AutoSpyreModel` and `AutoProcessor`. The processor prepares 384×384
-images; tokenize text with `padding="max_length"` (64 tokens).
+Multi-image batches remain excluded from the shared suite pending
+[#747](https://github.com/torch-spyre/hf-adapters/issues/747).
+
+Load with `AutoSpyreModel` and `AutoProcessor`; CLIP's processor is stored in
+the repository's `0_CLIPModel` subfolder. SigLIP's processor prepares 384×384
+images; tokenize its text with `padding="max_length"` (64 tokens).
 `get_text_features` and `get_image_features` return outputs containing
 unnormalized `pooler_output` vectors. The joint forward returns normalized
-text/image embeddings and similarity logits with the learned scale and bias.
+text/image embeddings and similarity logits with the learned scale (and SigLIP's bias).
 
-Both towers reuse compiled pre-LN encoder blocks from `hf_siglip_vision.py`
-and `hf_common.py`. Attention heads and the text MLP (4304→4352) are zero-padded
+Both adapters and `hf_siglip_vision.py` share encoder preparation in
+`_vision_encoder.py` and compiled pre-LN blocks in `hf_common.py`. CLIP text
+retains causal attention; SigLIP text and both vision towers are bidirectional.
+Attention heads and SigLIP's text MLP (4304→4352) are zero-padded
 for stick alignment. Encoder blocks run on Spyre; token/patch embeddings,
-final norms, text projection, and image attention pooling run on CPU.
-Compiler-added tokens are masked and cropped before pooling. Intermediate
-hidden states and attention weights are not exposed by the adapted encoders.
+final norms, projections, and pooling run on CPU.
+Compiler-added tokens are masked and cropped before pooling. The adapted
+dual-encoder forwards do not expose intermediate hidden states or attention weights.
 
 ### Sequence Classification
 

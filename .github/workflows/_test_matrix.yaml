@@ -1338,7 +1338,7 @@ jobs:
           payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
 
   spyre-clip-e2e-tests:
-    name: Spyre CLIP e2e (${{ matrix.model_key }})
+    name: Spyre SentenceTransformers multimodal integration (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
     # Suite key: "clip". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
@@ -1354,7 +1354,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Dynamic matrix: CLIP (kind="clip") models from tests/model_registry.py
+        # All MULTIMODAL_EMBEDDING_MODELS: SentenceTransformers integration.
         model_key: ${{ fromJSON(needs.generate-matrix.outputs.clip_matrix) }}
 
     steps:
@@ -1391,7 +1391,7 @@ jobs:
           pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
           hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
-      - name: Run test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }}
+      - name: Run test_sentence_transformers_multimodal_spyre.py for ${{ matrix.model_key }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -1401,7 +1401,7 @@ jobs:
           cd "$CLONED_HF_ADAPTERS_DIR"
           # shellcheck source=.github/scripts/run-with-pod-stdout.sh
           source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
-          echo "Running test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }}..."
+          echo "Running test_sentence_transformers_multimodal_spyre.py for ${{ matrix.model_key }}..."
           run_teed make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
           echo "tests done"
 
@@ -3079,7 +3079,7 @@ jobs:
           overwrite: true
 
   spyre-clip-e2e-tests-retry:
-    name: Spyre CLIP e2e (${{ matrix.model_key }}) (pod-level retry)
+    name: Spyre SentenceTransformers multimodal integration (${{ matrix.model_key }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
     # Fail-closed on pin failure is emergent, not gated here: if resolve-torch-spyre
     # failed, every primary suite skipped, so nothing ran, so has_failed_clip
@@ -3129,7 +3129,7 @@ jobs:
           pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
           hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
-      - name: Run test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)
+      - name: Run test_sentence_transformers_multimodal_spyre.py for ${{ matrix.model_key }} (pod-level retry)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -3139,7 +3139,7 @@ jobs:
           cd "$CLONED_HF_ADAPTERS_DIR"
           # shellcheck source=.github/scripts/run-with-pod-stdout.sh
           source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
-          echo "Running test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
+          echo "Running test_sentence_transformers_multimodal_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
           run_teed make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
           echo "tests done"
 

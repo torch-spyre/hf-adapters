@@ -16,7 +16,7 @@ from `transformers`.
 **44 adapters · 10K+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
-**multimodal embedding** (SigLIP text/image vectors),
+**multimodal embedding** (CLIP and SigLIP text/image vectors),
 **sequence classification** (sentiment / text categorisation), **structured
 decisions** (variable options plus action selection), **token classification**
 (NER/POS), **vision-language** (image→text), and
