@@ -36,8 +36,8 @@ The network is treated gently, on purpose:
 * after several consecutive failures the run cools down, and gives up if the
   failures continue after repeated cool-downs.
 
-Run it with ``HF_HUB_DISABLE_XET=1`` (the workflow sets this), so each file
-arrives over a single plain HTTP stream instead of Xet's parallel chunk fetches.
+The workflow sets ``HF_HUB_DISABLE_XET=0`` to enable Xet's parallel chunk
+downloads within each file.
 
 Safe to stop and dispatch again:
 
@@ -928,8 +928,6 @@ def main(argv: list[str] | None = None) -> int:
     token: str | None = os.environ.get("HF_TOKEN") or None
     if token is None:
         print("⚠️ HF_TOKEN is not set; anonymous requests get a lower rate limit.")
-    if not constants.HF_HUB_DISABLE_XET:
-        print("⚠️ HF_HUB_DISABLE_XET is not set; Xet fetches file chunks in parallel.")
 
     cache_dir: Path = Path(constants.HF_HUB_CACHE)
     min_free: int = int(args.min_free_gb * 1024**3)
