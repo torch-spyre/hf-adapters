@@ -59,6 +59,7 @@ _UNTIERED = {
     "multicard_smoke",
     "adapter_coverage",
     "model_module",
+    "model_support",
 }
 
 
@@ -82,12 +83,14 @@ def _workflow_gates() -> dict[str, set[str]]:
 # ── the table tracks the workflow ───────────────────────────────────────────────
 
 
-def test_workflow_gates_are_parseable():
+def test_workflow_gates_are_parseable() -> None:
     """Guards the parser itself: if the `if:` shape changes, the drift test below would
     silently compare against an empty dict and pass."""
     gates = _workflow_gates()
     assert len(gates) >= 12, f"only parsed {len(gates)} suite gates"
-    assert all(tiers for tiers in gates.values()), "a gate parsed with no tiers"
+    assert all(
+        tiers for suite, tiers in gates.items() if suite not in _UNTIERED
+    ), "a tiered gate parsed with no tiers"
 
 
 def test_table_matches_the_workflow_gates():
@@ -168,7 +171,7 @@ def _makefile_suites_by_tier() -> dict[str, set[str]]:
     return out
 
 
-def test_the_makefile_copy_is_known_to_disagree_with_the_workflow():
+def test_the_makefile_copy_is_known_to_disagree_with_the_workflow() -> None:
     """Documents a PRE-EXISTING divergence rather than asserting the two agree.
 
     `make tests` and CI maintain the tier->suite mapping separately, and they have
@@ -190,9 +193,6 @@ def test_the_makefile_copy_is_known_to_disagree_with_the_workflow():
     assert diffs == {
         # CI has no tier gate for it (runs unconditionally); the Makefile tiers it.
         "adapter_coverage": (None, ["regression", "trunk", "unit"]),
-        # Has a Makefile target but appears in no suites= list, so `make tests` never
-        # runs it.
-        "clip": (["regression", "trunk", "unit"], None),
         # CI-only: no Makefile target at all (CI drives torchrun directly).
         "multicard_smoke": (["regression", "trunk", "unit"], None),
         # Makefile:8 documents this as an integration suite and CI agrees; the

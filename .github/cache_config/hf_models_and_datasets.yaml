@@ -1,2 +1,9 @@
 # manage_cache.py caches every model in tests/model_registry.py automatically; list only repos to cache in addition to that.
 models: []
+
+# Shared cat fixture for VLM, CLIP, and SigLIP tests.
+# Cache exact files from the same default revision used by hf_hub_download in tests.
+datasets:
+  - repo_id: huggingface/documentation-images
+    files:
+      - pipeline-cat-chonk.jpeg
