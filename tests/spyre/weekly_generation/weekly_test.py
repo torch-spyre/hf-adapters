@@ -42,6 +42,10 @@ Flags:
 * ``--top-k-trending N``             With ``--fetch``: top-N by trending score
   (default: 1000; 0 skips it).
 * ``--max-params N``                 With ``--fetch``: parameter ceiling.
+* ``--random-weights``               Initialize weights from configs, seed 42 by
+  default. Requires ``--write-to-csv`` to keep these results out of checkpoint
+  verification tables. Tokenizer and SentenceTransformer configs are still used.
+* ``--seed N``                       Reproducible initialization seed.
 * ``--write-to-csv F``               Record results in a new CSV instead of
   ClickHouse, for runs with no database access. Write-only: the file must not
   already exist, and nothing is read back.
@@ -229,6 +233,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--random-weights",
+        action="store_true",
+        help="Initialize from configs instead of weights; requires --write-to-csv.",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random weight seed (42).")
+    parser.add_argument(
+        "--models-per-process",
+        type=int,
+        default=None,
+        help="Override batch size; use 1 to isolate each model's resources/results.",
+    )
+    parser.add_argument(
         "--snapshot-date",
         type=date.fromisoformat,
         required=True,
@@ -239,6 +255,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     args = parser.parse_args(argv)
+    if args.random_weights and args.write_to_csv is None:
+        parser.error(
+            "--random-weights requires --write-to-csv: these are architecture checks, not checkpoint verification"
+        )
+    if args.models_per_process is not None and args.models_per_process < 1:
+        parser.error("--models-per-process must be positive")
     # Reject the silent no-op of passing a fetch tuning flag without --fetch.
     if not args.fetch:
         for flag, dest in (
@@ -267,6 +289,9 @@ def main(
     top_k_trending: int,
     max_params: int,
     snapshot_date: date,
+    random_init: bool = False,
+    seed: int = 42,
+    models_per_process_override: int | None = None,
 ) -> None:
     """Evaluate a model list on Spyre, one spawned worker per batch.
 
@@ -286,8 +311,15 @@ def main(
     """
     from tests.spyre.weekly_generation.sink.result_sink import ResultSink
 
+    if random_init and write_to_csv is None:
+        raise ValueError(
+            "Random weights require CSV output, not checkpoint verification tables"
+        )
+    if models_per_process_override is not None and models_per_process_override < 1:
+        raise ValueError("models_per_process_override must be positive")
     print(f"{ts()} Starting main.")
     print(f"{ts()} Snapshot date: {snapshot_date}")
+    print(f"{ts()} Weights: {'random' if random_init else 'pretrained'}; seed: {seed}")
 
     models_per_process = {
         ModelType.GENERATIVE: GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS,
@@ -313,6 +345,23 @@ def main(
     # fetching (a Hub outage, say) still closes the sink — under --fetch the
     # pre-filter has by then already written terminal rows worth keeping.
     try:
+        if write_to_csv is not None:
+            output_path = csv_path_for(write_to_csv, model_type)
+            output_path.with_suffix(".run.json").write_text(
+                json.dumps(
+                    {
+                        "weight_mode": "random" if random_init else "pretrained",
+                        "seed": seed if random_init else None,
+                        "snapshot_date": snapshot_date.isoformat(),
+                        "mode": str(model_type),
+                        "model_list_file": (
+                            str(model_list_file) if model_list_file else None
+                        ),
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
         if fetch:
             rows: list[dict] = fetch_and_filter(
                 model_type=model_type,
@@ -341,7 +390,7 @@ def main(
         total = len(rows)
         print(f"{ts()} Will evaluate {total} model(s).")
 
-        batch_size = models_per_process[model_type]
+        batch_size = models_per_process_override or models_per_process[model_type]
         batches: list[list[dict]] = _chunk_into_batches(
             rows=rows,
             batch_size=batch_size,
@@ -370,6 +419,8 @@ def main(
                     result_queue,
                     model_type,
                     snapshot_date,
+                    random_init,
+                    seed,
                 ),
             )
             proc.start()
@@ -564,6 +615,9 @@ if __name__ == "__main__":
             top_k_trending=args.top_k_trending,
             max_params=args.max_params,
             snapshot_date=args.snapshot_date,
+            random_init=args.random_weights,
+            seed=args.seed,
+            models_per_process_override=args.models_per_process,
         )
     except HardwareExceptionAbortError as e:
         # Non-zero exit so CI / GHA scheduled runs can alert. main()'s
