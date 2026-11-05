@@ -1126,3 +1126,29 @@ class TestCsvSinkIsWriteOnly:
         _add(sink, "org/x")
         sink.close()
         assert len(list(_csv.DictReader(path.open()))) == 2
+
+
+class TestCatalogMaxWorkers:
+    """build_catalog's thread count: default 16, overridable, validated."""
+
+    def test_default_is_16(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from utils.hf_model_catalog import catalog_max_workers
+
+        monkeypatch.delenv("HF_CATALOG_MAX_WORKERS", raising=False)
+        assert catalog_max_workers() == 16
+
+    def test_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from utils.hf_model_catalog import catalog_max_workers
+
+        monkeypatch.setenv("HF_CATALOG_MAX_WORKERS", "4")
+        assert catalog_max_workers() == 4
+
+    @pytest.mark.parametrize("raw", ["0", "-2", "many"])
+    def test_invalid_values_are_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        from utils.hf_model_catalog import catalog_max_workers
+
+        monkeypatch.setenv("HF_CATALOG_MAX_WORKERS", raw)
+        with pytest.raises(ValueError, match="HF_CATALOG_MAX_WORKERS"):
+            catalog_max_workers()

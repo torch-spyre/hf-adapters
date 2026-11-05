@@ -9,6 +9,7 @@ columns* it wants on top of the shared schema.
 
 import csv
 import logging
+import os
 import re
 import time
 from collections.abc import Callable, Iterable, Iterator
@@ -83,6 +84,30 @@ EXPAND_FIELDS: list[ExpandModelProperty_T] = [
 # ``likes`` itself is an all-time total and the API exposes no per-period likes.
 Ranking = Literal["downloads", "trending_score"]
 RANKINGS: tuple[Ranking, ...] = ("downloads", "trending_score")
+
+# Threads build_catalog uses for its per-model Hub calls (the keep() filter and the
+# AutoConfig config-class lookup). Both are network-bound, so this bounds how many
+# requests hit the Hub at once. 16 (down from a hard-coded 32) eases rate-limit
+# pressure; the slower filter is affordable at the weekly scan's 1000-per-ranking
+# sizes. Override with HF_CATALOG_MAX_WORKERS.
+DEFAULT_CATALOG_MAX_WORKERS: int = 16
+
+
+def catalog_max_workers() -> int:
+    """Thread count for build_catalog: HF_CATALOG_MAX_WORKERS, else the default."""
+    raw: str = os.environ.get("HF_CATALOG_MAX_WORKERS", "").strip()
+    if not raw:
+        return DEFAULT_CATALOG_MAX_WORKERS
+    try:
+        value: int = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"HF_CATALOG_MAX_WORKERS must be a positive integer, got {raw!r}"
+        ) from None
+    if value < 1:
+        raise ValueError(f"HF_CATALOG_MAX_WORKERS must be >= 1, got {value}")
+    return value
+
 
 # HF-API gateway 5xx statuses. Anything outside this set (400/401/403/404/...)
 # is a permanent failure and must not be retried.
@@ -390,13 +415,16 @@ def build_catalog(
     timings: dict[str, float] = {}
     t_total = time.perf_counter()
 
+    max_workers: int = catalog_max_workers()
+    print(f"Using {max_workers} worker thread(s) for per-model Hub calls.")
+
     t0 = time.perf_counter()
     candidates: list[ModelInfo] = list(fetch_fn(limit))
     timings["fetch (HF list_models)"] = time.perf_counter() - t0
     print(f"Retrieved {len(candidates)} raw {label} candidates.")
 
     t0 = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=32) as ex:
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
         keep_flags: list[tuple[bool, str]] = list(
             tqdm(
                 ex.map(_safe_filter, candidates),
@@ -443,7 +471,7 @@ def build_catalog(
     header: list[str] = base_head + extra_head + tail_head
 
     t0 = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=32) as ex:
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
         config_classes: list[str | None] = list(
             tqdm(
                 ex.map(lambda m: get_config_type(m.id, token), models),
