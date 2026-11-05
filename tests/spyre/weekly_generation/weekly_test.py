@@ -8,18 +8,15 @@ Two ways to say which models to evaluate — exactly one is required::
 
     # Manual: fetch, filter and evaluate in one pass
     python tests/spyre/weekly_generation/weekly_test.py \\
-        --mode embedding --fetch --top-k 200
+        --mode embedding --fetch --top-k-downloads 200 --top-k-trending 200
 
-Either way the same three pre-filters apply — no adapter for the config class,
-too large for Spyre, MoE — and each dropped model gets a terminal row recording
+Either way the same catalog (ranked top-K by downloads and by trending score,
+plus the curated file and the model registry) and the same pre-filter (too
+large for Spyre) apply, and each dropped model gets a terminal row recording
 why. With ``--model-list-file`` that happened upstream in
 ``.github/scripts/generate_weekly_shards.py``; with ``--fetch`` it happens here,
-through the same ``fetch_and_filter``. So everything that reaches the evaluation
-loop needs a Spyre card.
-
-Filtering before the list is sharded is what keeps shard durations comparable:
-the dropped models cluster by download count, so filtering per-shard used to
-leave some CI jobs finishing in minutes and others running for hours.
+through the same ``fetch_and_filter``. Adapter resolution and MoE classification
+happen in the worker.
 
 ``--mode`` is parsed into a ``ModelType``, which selects the per-process batch
 size, the model class loaded in ``_load_on_cpu``, the verification pipeline in
@@ -40,8 +37,10 @@ Flags:
 * ``--model-list-file F``            Evaluate this JSON list. Mutually exclusive
   with ``--fetch``; one of the two is required.
 * ``--fetch``                        Fetch and filter here instead.
-* ``--top-k N``                      With ``--fetch``: how many to fetch
-  (default: 10000).
+* ``--top-k-downloads N``            With ``--fetch``: top-N by downloads over
+  the last 30 days (default: 1000; 0 skips it).
+* ``--top-k-trending N``             With ``--fetch``: top-N by trending score
+  (default: 1000; 0 skips it).
 * ``--max-params N``                 With ``--fetch``: parameter ceiling.
 * ``--write-to-csv F``               Record results in a new CSV instead of
   ClickHouse, for runs with no database access. Write-only: the file must not
@@ -194,19 +193,29 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--fetch",
         action="store_true",
         help=(
-            "Fetch the top --top-k models for --mode, apply the same "
+            "Fetch the --top-k-downloads / --top-k-trending catalog (plus the "
+            "curated and registry models) for --mode, apply the same "
             "pre-filters, record the terminal rows, and evaluate the survivors — "
             "all in one pass. For manual runs where there is no shard file."
         ),
     )
     fetch_opts = parser.add_argument_group("--fetch options")
     fetch_opts.add_argument(
-        "--top-k",
+        "--top-k-downloads",
         type=int,
-        default=10_000,
+        default=1000,
         help=(
-            "With --fetch: how many top models to fetch by downloads "
-            "(default: 10000). Ignored with --model-list-file."
+            "With --fetch: top models by downloads over the last 30 days, "
+            "counted after the keep() filter (default: 1000; 0 skips it)."
+        ),
+    )
+    fetch_opts.add_argument(
+        "--top-k-trending",
+        type=int,
+        default=1000,
+        help=(
+            "With --fetch: top models by the Hub's trending score, counted "
+            "after the keep() filter (default: 1000; 0 skips it)."
         ),
     )
     fetch_opts.add_argument(
@@ -232,7 +241,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     # Reject the silent no-op of passing a fetch tuning flag without --fetch.
     if not args.fetch:
-        for flag, dest in (("--top-k", "top_k"), ("--max-params", "max_params")):
+        for flag, dest in (
+            ("--top-k-downloads", "top_k_downloads"),
+            ("--top-k-trending", "top_k_trending"),
+            ("--max-params", "max_params"),
+        ):
             if getattr(args, dest) != parser.get_default(dest):
                 parser.error(f"{flag} only applies with --fetch")
     return args
@@ -250,7 +263,8 @@ def main(
     model_list_file: Path | None,
     write_to_csv: Path | None,
     fetch: bool,
-    top_k: int,
+    top_k_downloads: int,
+    top_k_trending: int,
     max_params: int,
     snapshot_date: date,
 ) -> None:
@@ -263,8 +277,8 @@ def main(
 
     Owns the sink for the whole run: it is created here, written to by both the
     ``--fetch`` pre-filter and the evaluation loop, flushed at each batch
-    boundary, and closed once in the ``finally`` below. ``top_k``/``max_params``
-    apply only under *fetch*.
+    boundary, and closed once in the ``finally`` below. ``top_k_downloads``,
+    ``top_k_trending`` and ``max_params`` apply only under *fetch*.
 
     Raises:
         HardwareExceptionAbortError: a batch reported ``hardware_exception``, so
@@ -303,7 +317,8 @@ def main(
             rows: list[dict] = fetch_and_filter(
                 model_type=model_type,
                 snapshot_date=snapshot_date,
-                top_k=top_k,
+                top_k_downloads=top_k_downloads,
+                top_k_trending=top_k_trending,
                 sink=sink,
                 max_params=max_params,
             )
@@ -545,7 +560,8 @@ if __name__ == "__main__":
             model_list_file=args.model_list_file,
             write_to_csv=args.write_to_csv,
             fetch=args.fetch,
-            top_k=args.top_k,
+            top_k_downloads=args.top_k_downloads,
+            top_k_trending=args.top_k_trending,
             max_params=args.max_params,
             snapshot_date=args.snapshot_date,
         )
