@@ -38,6 +38,8 @@ from transformers import GenerationConfig, PretrainedConfig, PreTrainedModel
 from transformers.generation import GenerateDecoderOnlyOutput
 from transformers.generation.streamers import BaseStreamer
 
+from hf_adapters.execution import DenseAttention, compile_block
+
 # Rank-aware device for multi-Spyre (tensor-parallel) runs. torchrun sets
 # LOCAL_RANK before this module is imported, so each process binds to its local
 # AIU. Single-device runs get spyre:0. The conftest CPU-patch overwrites this to
@@ -719,15 +721,17 @@ def get_backbone(model):
 
     Task-specific auto classes (e.g., ``AutoModelForCausalLM``) return a wrapper
     containing a backbone and one or more task heads, while the generic AutoModel
-    class may return the backbone directly. Search the supported wrapper attributes
-    and return the first non-``None`` module. If none is present, treat ``model``
-    itself as the backbone.
+    class may return the backbone directly. Prefer HF's ``base_model`` property;
+    otherwise search the supported wrapper attributes and fall back to ``model``.
 
     Multimodal causal-LM wrappers (e.g. Gemma 4's
     ``Gemma4ForConditionalGeneration``) contain an additional nested
     ``language_model`` level beneath that first module. Descend into it when
     present.
     """
+    inner = getattr(model, "base_model", None)
+    if inner is not None:
+        return getattr(inner, "language_model", inner)
     inner = next(
         (
             backbone
@@ -853,6 +857,27 @@ class PrecomputedRotaryEmbedding(nn.Module):
         self._freq_cache: Optional[torch.Tensor] = None
         self._cached_len = 0
         self._freq_dtype: torch.dtype = torch.float16
+        self._frozen = False
+
+    def freeze(self, max_position: int, dtype: torch.dtype) -> None:
+        """Prebuild a device-indexed cache for a serving engine's bounded context.
+
+        Call on CPU before device placement. The engine must provide positions
+        in [0, max_position); no host synchronization or cache growth occurs in
+        forward. Standalone adapters keep the existing CPU-indexed path.
+        """
+        if self._frozen:
+            raise RuntimeError("RoPE cache has already been frozen")
+        if max_position <= 0:
+            raise ValueError("max_position must be positive")
+        self.set_dtype(dtype)
+        self._extend_cache(max_position)
+        assert self._freq_cache is not None
+        cache = self._freq_cache[:max_position].contiguous()
+        del self._freq_cache
+        self.register_buffer("_freq_cache", cache, persistent=False)
+        self._cached_len = max_position
+        self._frozen = True
 
     def set_dtype(self, dtype: torch.dtype) -> None:
         """Switch the freq cache to a different dtype. Called when the model
@@ -901,6 +926,9 @@ class PrecomputedRotaryEmbedding(nn.Module):
         self._cached_len = target_len
 
     def forward(self, hidden_states, position_ids):
+        if self._frozen:
+            selected = self._freq_cache.index_select(0, position_ids.flatten())
+            return selected.view(*position_ids.shape, *self._freq_cache.shape[1:])
         pos_cpu = position_ids.to("cpu")
         max_pos = int(pos_cpu.max().item()) + 1
         self._extend_cache(max_pos)
@@ -912,17 +940,18 @@ def set_rope_dtype(model, dtype: torch.dtype) -> None:
     """Explicitly set the freq-cache dtype on a model's precomputed RoPE.
 
     ``model._spyre_rope`` is either a single ``PrecomputedRotaryEmbedding``
-    (most adapters) or a ``dict`` of them keyed by layer type (Gemma 3/4, which
-    use different RoPE per sliding/global layer). This applies ``set_dtype`` to
+    (most adapters) or a ``dict``/``nn.ModuleDict`` of them keyed by layer type
+    (for different RoPE per sliding/global layer). This applies ``set_dtype`` to
     whichever shape is present.
     """
     rope = getattr(model, "_spyre_rope", None)
     if rope is None:
         return
-    ropes = rope.values() if isinstance(rope, dict) else [rope]
+    ropes = rope.values() if isinstance(rope, (dict, nn.ModuleDict)) else [rope]
     for r in ropes:
-        if hasattr(r, "set_dtype"):
-            r.set_dtype(dtype)
+        set_dtype = getattr(r, "set_dtype", None)
+        if callable(set_dtype):
+            set_dtype(dtype)
 
 
 def _rope_cache_len(model) -> int:
@@ -3490,10 +3519,31 @@ def generate(
 # ---------------------------------------------------------------------------
 
 
+def project_standard_gqa(attn, hidden_states, selected_freqs):
+    """Shared Q/K/V projections and Spyre RoPE, independent of KV-cache ownership."""
+    bsz, seq_len, _ = hidden_states.shape
+    q = attn.q_proj(hidden_states).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
+    k = attn.k_proj(hidden_states).view(bsz, seq_len, -1, attn.head_dim).transpose(1, 2)
+    v = (
+        attn.v_proj(hidden_states)
+        .view(bsz, seq_len, -1, getattr(attn, "v_head_dim", attn.head_dim))
+        .transpose(1, 2)
+    )
+    if (clip_qkv := getattr(attn, "clip_qkv", None)) is not None:
+        q = q.clamp(min=-clip_qkv, max=clip_qkv)
+        k = k.clamp(min=-clip_qkv, max=clip_qkv)
+        v = v.clamp(min=-clip_qkv, max=clip_qkv)
+    if (q_norm := getattr(attn, "q_norm", None)) is not None:
+        q = q_norm(q)
+    if (k_norm := getattr(attn, "k_norm", None)) is not None:
+        k = k_norm(k)
+    return apply_rope_matmul(q, selected_freqs), apply_rope_matmul(k, selected_freqs), v
+
+
 class StandardGQAAttention(nn.Module):
     """Standard GQA attention split into projection and attention regions."""
 
-    def __init__(self, attn):
+    def __init__(self, attn, runtime=None):
         super().__init__()
         self.q_proj = attn.q_proj
         self.k_proj = attn.k_proj
@@ -3502,57 +3552,21 @@ class StandardGQAAttention(nn.Module):
         self.head_dim = attn.head_dim
         self.v_head_dim = getattr(attn, "v_head_dim", attn.head_dim)
         self.scaling = attn.scaling
-
-    def pre_attn(
-        self,
-        hidden_states,
-        selected_freqs,
-        key_cache,
-        value_cache,
-        cache_index,
-    ):
-        bsz, seq_len, _ = hidden_states.shape
-        q = (
-            self.q_proj(hidden_states)
-            .view(bsz, seq_len, -1, self.head_dim)
-            .transpose(1, 2)
-        )
-        k = (
-            self.k_proj(hidden_states)
-            .view(bsz, seq_len, -1, self.head_dim)
-            .transpose(1, 2)
-        )
-        v = (
-            self.v_proj(hidden_states)
-            .view(bsz, seq_len, -1, self.v_head_dim)
-            .transpose(1, 2)
+        self.clip_qkv = getattr(getattr(attn, "config", None), "clip_qkv", None)
+        self.executor = (
+            DenseAttention(self.scaling) if runtime is None else runtime.attention(attn)
         )
 
-        q = apply_rope_matmul(q, selected_freqs)
-        k = apply_rope_matmul(k, selected_freqs)
+    def pre_attn(self, hidden_states, selected_freqs):
+        return project_standard_gqa(self, hidden_states, selected_freqs)
 
-        key_cache, value_cache = kv_cache_update(
-            k,
-            v,
-            key_cache,
-            value_cache,
-            cache_index,
-        )
-        return q, key_cache, value_cache
-
-    def attn_core(self, q, key_cache, value_cache, attn_mask):
+    def attn_core(self, q, k, v, attn_mask, key_cache, value_cache, cache_index):
         bsz, _, seq_len, _ = q.shape
-        attn_out = F.scaled_dot_product_attention(
-            q,
-            key_cache,
-            value_cache,
-            attn_mask=attn_mask,
-            dropout_p=0.0,
-            scale=self.scaling,
-            enable_gqa=True,
+        attn_out, key_cache, value_cache = self.executor(
+            q, k, v, attn_mask, key_cache, value_cache, cache_index
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
-        return self.o_proj(attn_out)
+        return self.o_proj(attn_out), key_cache, value_cache
 
     def forward(
         self,
@@ -3563,42 +3577,32 @@ class StandardGQAAttention(nn.Module):
         value_cache,
         cache_index,
     ):
-        q, key_cache, value_cache = self.pre_attn(
-            hidden_states, selected_freqs, key_cache, value_cache, cache_index
-        )
-        attn_out = self.attn_core(q, key_cache, value_cache, attn_mask)
-        return attn_out, key_cache, value_cache
+        q, k, v = self.pre_attn(hidden_states, selected_freqs)
+        return self.attn_core(q, k, v, attn_mask, key_cache, value_cache, cache_index)
 
 
 class StandardGQABlock(nn.Module):
     """Standard GQA block compiled as one graph by its factory."""
 
-    def __init__(self, layer, is_res_mul: bool | None = None):
+    def __init__(self, layer, is_res_mul: bool | None = None, runtime=None):
         super().__init__()
-        self.self_attn = StandardGQAAttention(layer.self_attn)
+        self.self_attn = StandardGQAAttention(layer.self_attn, runtime)
         self.mlp = layer.mlp
         self.input_layernorm = layer.input_layernorm
         self.post_attention_layernorm = layer.post_attention_layernorm
         self.residual_multiplier = layer.residual_multiplier if is_res_mul else None
         self.train(layer.training)
 
-    def _region_pre_attn(
-        self,
-        hidden_states,
-        selected_freqs,
-        key_cache,
-        value_cache,
-        cache_index,
-    ):
+    def _region_pre_attn(self, hidden_states, selected_freqs):
         h = self.input_layernorm(hidden_states)
-        return self.self_attn.pre_attn(
-            h, selected_freqs, key_cache, value_cache, cache_index
-        )
+        return self.self_attn.pre_attn(h, selected_freqs)
 
     def _region_attention_tail(
-        self, hidden_states, q, key_cache, value_cache, attn_mask
+        self, hidden_states, q, k, v, key_cache, value_cache, attn_mask, cache_index
     ):
-        attn_out = self.self_attn.attn_core(q, key_cache, value_cache, attn_mask)
+        attn_out, key_cache, value_cache = self.self_attn.attn_core(
+            q, k, v, attn_mask, key_cache, value_cache, cache_index
+        )
 
         if self.residual_multiplier is None:
             h = hidden_states + attn_out
@@ -3612,7 +3616,7 @@ class StandardGQABlock(nn.Module):
             h = residual + h
         else:
             h = residual + h * self.residual_multiplier
-        return h
+        return h, key_cache, value_cache
 
     def forward(
         self,
@@ -3623,13 +3627,10 @@ class StandardGQABlock(nn.Module):
         value_cache,
         cache_index,
     ):
-        q, key_cache, value_cache = self._region_pre_attn(
-            hidden_states, selected_freqs, key_cache, value_cache, cache_index
+        q, k, v = self._region_pre_attn(hidden_states, selected_freqs)
+        return self._region_attention_tail(
+            hidden_states, q, k, v, key_cache, value_cache, attn_mask, cache_index
         )
-        h = self._region_attention_tail(
-            hidden_states, q, key_cache, value_cache, attn_mask
-        )
-        return h, key_cache, value_cache
 
 
 def make_standard_gqa_block(layer, is_res_mul: bool | None = None):
@@ -3637,13 +3638,13 @@ def make_standard_gqa_block(layer, is_res_mul: bool | None = None):
     return torch.compile(StandardGQABlock(layer, is_res_mul), dynamic=False)
 
 
-def prepare_standard_gqa_blocks(layers, is_res_mul: bool | None = None):
+def prepare_standard_gqa_blocks(layers, is_res_mul: bool | None = None, runtime=None):
     """Replace decoder layers with registered, fully compiled Spyre blocks."""
     blocks = []
     for i, layer in enumerate(list(layers)):
-        block = StandardGQABlock(layer, is_res_mul)
+        block = StandardGQABlock(layer, is_res_mul, runtime)
         layers[i] = block
-        blocks.append(torch.compile(block, dynamic=False))
+        blocks.append(compile_block(block, runtime))
     return blocks
 
 
@@ -3663,11 +3664,12 @@ def make_decoder_block(
     scale,
     pre_ln=True,
     query_scale=None,
+    attention=None,
+    runtime=None,
 ):
     """Compiled causal-decoder block for non-RoPE (learned-abs-pos) models.
 
-    Shared by the non-RoPE decoder family — ``hf_gpt2`` today, OPT/BLOOM/MPT to
-    come. These all have the standard-GQA block *shape* (pre/post-LN, KV cache,
+    Shared by GPT-2 and OPT. These have the standard-GQA block *shape* (pre/post-LN, KV cache,
     causal SDPA, residual + FFN tail) but differ from ``make_standard_gqa_block``
     in three ways, and from each other only in *where* their modules live — so,
     like ``make_encoder_block``, adapters resolve their own module layout and
@@ -3677,7 +3679,7 @@ def make_decoder_block(
       - **no RoPE** — positions are learned absolute (added to the token
         embeddings in the backbone), so ``selected_freqs`` is accepted for
         signature parity with the generate/test harness and ignored;
-      - **MHA** — kv heads == attention heads, so no ``enable_gqa=True``;
+      - **MHA** — kv heads == attention heads;
       - **explicit ``scale``** and a configurable ``pre_ln`` LN placement
         (``True`` = norm before each sublayer, as in GPT-2 / BLOOM / OPT≥1.3B;
         ``False`` = norm after, as in OPT-350m). ``query_scale`` optionally
@@ -3695,6 +3697,7 @@ def make_decoder_block(
     ``ffn_out(act(ffn_in(x)))`` rather than as a single module, since some
     models (OPT) have no wrapping MLP module.
     """
+    executor = DenseAttention(scale) if attention is None else attention
 
     def block_forward(
         hidden_states,
@@ -3716,21 +3719,8 @@ def make_decoder_block(
         k = k_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
         v = v_proj(h).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
 
-        key_cache, value_cache = kv_cache_update(
-            k,
-            v,
-            key_cache,
-            value_cache,
-            cache_index,
-        )
-
-        attn_out = F.scaled_dot_product_attention(
-            q,
-            key_cache,
-            value_cache,
-            attn_mask=attn_mask,
-            dropout_p=0.0,
-            scale=scale,
+        attn_out, key_cache, value_cache = executor(
+            q, k, v, attn_mask, key_cache, value_cache, cache_index
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
         attn_out = o_proj(attn_out)
@@ -3749,7 +3739,7 @@ def make_decoder_block(
 
         return h, key_cache, value_cache
 
-    return torch.compile(block_forward, dynamic=False)
+    return compile_block(block_forward, runtime)
 
 
 def standard_gqa_backbone_forward(
@@ -3811,6 +3801,29 @@ def standard_gqa_forward(
 # ---------------------------------------------------------------------------
 
 
+def validate_external_encoder(model, runtime, *, absolute_positions=True):
+    """Check shared encoder constraints before external-runtime preparation."""
+    if runtime is None:
+        return
+    cfg = model.config
+    if getattr(cfg, "is_decoder", False) or getattr(cfg, "add_cross_attention", False):
+        raise ValueError("Encoder execution requires bidirectional self-attention")
+    if (
+        absolute_positions
+        and getattr(cfg, "position_embedding_type", "absolute") != "absolute"
+    ):
+        raise ValueError("Encoder execution requires absolute positions")
+    if not absolute_positions:
+        if runtime.max_model_len > cfg.max_position_embeddings:
+            raise ValueError("max_model_len exceeds the encoder context limit")
+        return
+    emb = get_backbone(model).embeddings
+    padding_idx = emb.position_embeddings.padding_idx
+    offset = padding_idx + 1 if padding_idx is not None else 0
+    if runtime.max_model_len + offset > emb.position_embeddings.num_embeddings:
+        raise ValueError("max_model_len exceeds the encoder position table")
+
+
 def fairseq_position_ids(input_ids: torch.Tensor, padding_idx: int) -> torch.Tensor:
     """fairseq-style positions: real tokens start at ``padding_idx + 1``.
 
@@ -3844,6 +3857,9 @@ def make_encoder_block(
     out_ln,
     num_heads,
     head_dim,
+    runtime=None,
+    layer_idx=None,
+    position_bias=None,
 ):
     """Compile a bidirectional encoder block (MHA + post-LN + FFN + post-LN).
 
@@ -3866,6 +3882,22 @@ def make_encoder_block(
     Dropout is skipped — these adapters are eval-only.
     """
     sdpa_scale = getattr(attn_module, "_spyre_orig_head_dim", head_dim) ** -0.5
+    from hf_adapters.execution import AttentionSpec, compile_block
+
+    attention = None
+    if runtime is not None:
+        attention = runtime.register_attention(
+            AttentionSpec(
+                layer_idx,
+                num_heads,
+                num_heads,
+                head_dim,
+                sdpa_scale,
+                is_causal=False,
+                uses_cache=False,
+                position_bias=position_bias,
+            )
+        )
 
     def block_forward(hidden_states, attn_mask):
         bsz, seq_len, _ = hidden_states.shape
@@ -3893,15 +3925,18 @@ def make_encoder_block(
             .contiguous()
         )
 
-        attn_out = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attn_mask,
-            dropout_p=0.0,
-            is_causal=False,
-            scale=sdpa_scale,
-        )
+        if attention is None:
+            attn_out = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=0.0,
+                is_causal=False,
+                scale=sdpa_scale,
+            )
+        else:
+            attn_out, _, _ = attention(q, k, v, attn_mask, None, None, None)
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
 
         attn_out = o_proj(attn_out)
@@ -3913,7 +3948,7 @@ def make_encoder_block(
 
         return hidden_states
 
-    return torch.compile(block_forward, dynamic=False)
+    return compile_block(block_forward, runtime)
 
 
 def make_vision_encoder_block(
@@ -4004,7 +4039,7 @@ def add_token_type_embedding(h, emb, token_type_ids):
     0.205), so it cannot simply be skipped.
     """
     table = emb.token_type_embeddings
-    if table.num_embeddings == 1:
+    if token_type_ids is None or table.num_embeddings == 1:
         return h + table.weight[0]
     return h + table(token_type_ids)
 
@@ -4095,17 +4130,20 @@ def prepare_rope_and_heads(model):
     )
 
 
-def prepare_standard_gqa(model):
+def prepare_standard_gqa(model, *, runtime=None):
     """Apply Spyre adaptations for standard GQA models in-place.
 
     Args:
         model: HF model (on CPU, eval mode, requires_grad=False).
     """
     prepare_rope_and_heads(model)
-    prepare_lm_head_for_spyre(model)
+    if runtime is None:
+        prepare_lm_head_for_spyre(model)
     backbone = get_backbone(model)
-    model._spyre_compiled_blocks = prepare_standard_gqa_blocks(backbone.layers)
-    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
+    model._spyre_compiled_blocks = prepare_standard_gqa_blocks(
+        backbone.layers, runtime=runtime
+    )
+    model._spyre_compiled_norm = compile_block(backbone.norm, runtime)
 
 
 # ---------------------------------------------------------------------------
