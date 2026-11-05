@@ -28,16 +28,16 @@ no adapter resolves for. The scan's workers never call ``from_pretrained`` on
 those, so their weights would never be read. The weekly scan only deletes weights
 it downloaded itself, so models warmed here stay cached between scans.
 
-The network is treated gently, on purpose:
+How hard it pulls on the network:
 
 * one model at a time, and one file at a time inside it (``max_workers=1``);
+* within that file, though, Xet fetches chunks in parallel: the workflow sets
+  ``HF_HUB_DISABLE_XET=0`` so large files download faster. Set it to ``1`` for a
+  single plain HTTP stream per file, the gentlest setting;
 * a fixed pause after every model that touched the network;
 * transient errors retry with exponential backoff, and HTTP 429 waits longer;
 * after several consecutive failures the run cools down, and gives up if the
   failures continue after repeated cool-downs.
-
-The workflow sets ``HF_HUB_DISABLE_XET=0`` to enable Xet's parallel chunk
-downloads within each file.
 
 Safe to stop and dispatch again:
 
