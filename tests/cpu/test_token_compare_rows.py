@@ -21,8 +21,9 @@ from tests._token_compare_helpers import (
     MAX_LOGIT_DIFF,
     MAX_MEAN_DIFF,
     MIN_COSINE,
-    TOP1_TIE_MARGIN,
     compare_step,
+    next_fed_token,
+    validate_forced_tokens,
 )
 
 _VOCAB = 1000
@@ -50,41 +51,25 @@ def test_exact_top1_match_passes():
     assert row["hf_margin"] == 0.0
 
 
-def test_flip_between_near_tied_tokens_is_tolerated():
-    # Gemma 4 12B-it on Spyre (#494): HF ranks Paris 0.125 above The, Spyre
-    # ranks The 0.25 above Paris. Both sides call it a tie -> numeric noise.
+def test_flip_between_near_tied_tokens_fails():
+    # Gemma 4 12B-it on Spyre (#494): HF ranks Paris 0.125 above The, Spyre ranks
+    # The 0.25 above Paris. Why that flip varies between runs is unexplained, so
+    # it must stay a visible failure.
     row = compare_step(_logits(t0=5.0, t1=4.875), _logits(t0=4.75, t1=5.0))
     assert not row["top1_match"]
-    assert row["near_tie"] and row["top1_ok"] and row["step_ok"]
+    assert not row["top1_ok"] and not row["step_ok"]
+    assert row["logits_ok"]
+
+
+def test_flip_reports_how_far_apart_the_candidates_were():
+    row = compare_step(_logits(t0=5.0, t1=4.875), _logits(t0=4.75, t1=5.0))
     assert row["hf_margin"] == pytest.approx(0.125)
     assert row["spyre_margin"] == pytest.approx(0.25)
 
 
-def test_flip_at_one_logit_gap_is_not_a_tie():
-    # A 1.0-logit gap is a ~2.7x odds ratio: a real preference, not a tie.
-    row = compare_step(_logits(t0=1.0, t1=0.0), _logits(t0=0.0, t1=1.0))
-    assert TOP1_TIE_MARGIN < 1.0
-    assert not row["near_tie"] and not row["step_ok"]
-
-
-def test_flip_with_large_hf_margin_fails():
+def test_confident_flip_fails():
     row = compare_step(_logits(t0=5.0, t1=1.0), _logits(t0=1.0, t1=5.0))
-    assert not row["near_tie"] and not row["top1_ok"]
-
-
-def test_flip_device_confidently_wrong_fails():
-    # HF sees a tie, but Spyre is confidently wrong -> a real defect, not noise.
-    row = compare_step(_logits(t0=5.0, t1=4.9), _logits(t0=0.0, t1=8.0))
-    assert row["hf_margin"] <= TOP1_TIE_MARGIN
-    assert row["spyre_margin"] > TOP1_TIE_MARGIN
-    assert not row["top1_ok"]
-
-
-def test_margin_at_tolerance_is_tolerated():
-    row = compare_step(
-        _logits(t0=TOP1_TIE_MARGIN, t1=0.0), _logits(t0=0.0, t1=TOP1_TIE_MARGIN)
-    )
-    assert row["top1_ok"]
+    assert not row["top1_ok"] and not row["step_ok"]
 
 
 def test_healthy_bf16_noise_passes():
@@ -115,14 +100,45 @@ def test_large_max_diff_fails_even_when_top1_matches():
 
 
 def test_large_mean_diff_fails_even_when_top1_matches():
-    # Every logit shifted by the same amount: cosine and max stay in bounds.
-    hf = torch.full((_VOCAB,), 10.0)
-    hf[0] = 11.0
-    row = compare_step(hf, hf + MAX_MEAN_DIFF + 0.2)
+    # Alternating +/- noise has zero mean, so centring cannot remove it.
+    hf = _randn(seed=0, scale=6.0)
+    hf[0] = 40.0
+    noise = (MAX_MEAN_DIFF + 0.2) * torch.tensor([1.0, -1.0]).repeat(_VOCAB // 2)
+    row = compare_step(hf, hf + noise)
     assert row["top1_match"] and row["cosine"] >= MIN_COSINE
     assert row["max_diff"] <= MAX_LOGIT_DIFF
     assert row["mean_diff"] > MAX_MEAN_DIFF
     assert not row["logits_ok"] and not row["step_ok"]
+
+
+def test_uniform_logit_shift_passes():
+    # Softmax ignores a common offset, so every token probability is unchanged.
+    hf = _randn(seed=0, scale=3.0)
+    row = compare_step(hf, hf + MAX_MEAN_DIFF + 0.2)
+    assert row["mean_diff"] == pytest.approx(0.0, abs=1e-4)
+    assert row["max_diff"] == pytest.approx(0.0, abs=1e-4)
+    assert row["cosine"] == pytest.approx(1.0, abs=1e-5)
+    assert row["logits_ok"] and row["step_ok"]
+
+
+def test_unrelated_logits_with_large_common_offset_fail():
+    # GPT-2-style logits near -80: raw cosine is ~1 for any two such vectors.
+    hf = _randn(seed=0, scale=0.25) - 80.0
+    spyre = _randn(seed=1, scale=0.25) - 80.0
+    hf[0] = spyre[0] = -70.0
+    row = compare_step(hf, spyre)
+    assert row["top1_match"]
+    assert row["raw_cosine"] >= MIN_COSINE
+    assert row["cosine"] < MIN_COSINE
+    assert not row["logits_ok"] and not row["step_ok"]
+
+
+def test_raw_metrics_keep_the_uncentred_values():
+    hf = _randn(seed=0, scale=3.0)
+    row = compare_step(hf, hf + 1.5)
+    assert row["raw_mean_diff"] == pytest.approx(1.5)
+    assert row["raw_max_diff"] == pytest.approx(1.5)
+    assert row["raw_cosine"] < 1.0
 
 
 def test_diffs_compare_shared_vocab_prefix_only():
@@ -139,3 +155,19 @@ def test_nan_logits_are_reported_and_fail():
     row = compare_step(_logits(t0=5.0), spyre)
     assert row["spyre_nan"] and not row["hf_nan"]
     assert not row["top1_ok"] and not row["step_ok"]
+
+
+def test_free_running_feeds_back_the_picked_token():
+    assert next_fed_token(picked=7, step=2, forced_tokens=None) == 7
+
+
+def test_teacher_forcing_feeds_the_reference_token_for_that_step():
+    forced = [10, 11, 12]
+    assert [next_fed_token(99, step, forced) for step in range(3)] == forced
+
+
+def test_forced_tokens_must_cover_prefill_and_every_decode_step():
+    validate_forced_tokens(None, num_decode=4)
+    validate_forced_tokens([1, 2, 3, 4, 5], num_decode=4)
+    with pytest.raises(ValueError, match="need at least 5"):
+        validate_forced_tokens([1, 2, 3, 4], num_decode=4)

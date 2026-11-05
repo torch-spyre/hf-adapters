@@ -399,8 +399,8 @@ uv run pytest -s -vvv tests/spyre/test_load_spyre.py
 tables the token / embedding / VLM tests print.
 
 Numerical gating depends on the workload. The blocking causal token-comparison
-lane requires exact greedy top-1 agreement with CPU over prefill and four decode
-steps. The VLM lane instead asserts a per-step logit cosine floor because its
+lane teacher-forces decode with CPU's tokens and requires exact top-1 agreement
+plus per-step logit bounds over prefill and four decode steps. The VLM lane instead asserts a per-step logit cosine floor because its
 open-ended caption prompts can produce near-tied top-1 candidates (see
 [ARCHITECTURE.md](ARCHITECTURE.md#vision-language-imagetext)).
 
