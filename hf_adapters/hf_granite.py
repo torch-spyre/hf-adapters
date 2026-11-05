@@ -40,6 +40,13 @@ from hf_adapters.hf_common import (
     text_config,
 )
 
+#: Opt in to ``load_model_common(direct_to_device=True)``; see ``hf_llama`` for
+#: the reasoning and ``spyre_direct_load`` for the mechanism.
+SPYRE_SUPPORTS_DIRECT_LOAD = True
+
+#: ``prepare_lm_head_for_spyre`` pads the head on the host; see ``hf_llama``.
+SPYRE_DIRECT_HOST_MODULES = ("lm_head",)
+
 
 def _run_backbone_forward(
     model,
