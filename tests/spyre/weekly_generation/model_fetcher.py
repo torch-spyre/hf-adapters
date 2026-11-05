@@ -11,7 +11,7 @@ A model type's catalog is the union of two kinds of source:
 * **Ranked** (``fetch``): the top-K by a ``Ranking`` -- downloads over the last 30
   days, or the Hub's trending score -- counted *after* the fetcher's ``keep``
   predicate.
-* **By name** (``load_curated``): the hand-maintained curated file plus every
+* **By name** (``load_by_name``): the hand-maintained curated file plus every
   checkpoint registered in ``tests/model_registry.py`` for that type. These bypass
   ``keep`` and are flagged ``curated=True``.
 """
@@ -110,7 +110,7 @@ def _curated_and_registry_ids(model_type: ModelType) -> list[str]:
     return model_ids
 
 
-def load_curated(model_type: ModelType) -> list[dict]:
+def load_by_name(model_type: ModelType) -> list[dict]:
     """Return catalog rows for the by-name *model_type* ids, same shape as ``fetch``.
 
     "By name" is the curated file plus every checkpoint registered for this type

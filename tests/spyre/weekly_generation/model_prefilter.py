@@ -134,7 +134,7 @@ def fetch_and_filter(
 
     The catalog is, deduplicated by ``model_id`` with the first copy winning:
 
-    1. the by-name models -- curated file + model registry (see ``load_curated``);
+    1. the by-name models -- curated file + model registry (see ``load_by_name``);
     2. the top *top_k_downloads* by downloads over the last 30 days;
     3. the top *top_k_trending* by the Hub's trending score.
 
@@ -163,7 +163,7 @@ def fetch_and_filter(
     from tests.spyre.weekly_generation.skip_writer import write_skipped_rows
 
     # the by-name models: curated file + model registry
-    curated_models: list[dict] = model_fetcher.load_curated(model_type=model_type)
+    by_name_models: list[dict] = model_fetcher.load_by_name(model_type=model_type)
 
     # the two ranked top-k lists from hugging face
     by_downloads: list[dict] = model_fetcher.fetch(
@@ -176,7 +176,7 @@ def fetch_and_filter(
     # concatenate and dedup while giving precedence to the by-name rows (they
     # carry curated=True), then downloads, then trending
     models: list[dict] = concat_and_dedup_dicts(
-        first=concat_and_dedup_dicts(first=curated_models, second=by_downloads),
+        first=concat_and_dedup_dicts(first=by_name_models, second=by_downloads),
         second=by_trending,
     )
 

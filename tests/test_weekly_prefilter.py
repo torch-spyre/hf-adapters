@@ -54,7 +54,7 @@ def _row(model_id: str, **overrides: object) -> dict:
     """A catalog row that passes every filter unless *overrides* say otherwise.
 
     ``curated`` is present because both producers stamp it — ``model_fetcher.fetch``
-    with False, ``load_curated`` with True — so a row reaching the pre-filter or the
+    with False, ``load_by_name`` with True — so a row reaching the pre-filter or the
     skip writer always has the key. Omitting it here would let those consumers read
     it with a default they do not need.
     """
@@ -410,7 +410,7 @@ class TestFetchAndFilter:
         def _fake_curated(model_type, **_kw) -> list[dict]:
             return [_row("org/curated", curated=True), _row("org/keep", curated=True)]
 
-        monkeypatch.setattr(model_fetcher, "load_curated", _fake_curated)
+        monkeypatch.setattr(model_fetcher, "load_by_name", _fake_curated)
 
         with CsvResultSink(path=tmp_path / "c.csv") as sink:
             kept = fetch_and_filter(
@@ -444,7 +444,7 @@ class TestFetchAndFilter:
         def _fake_curated(model_type, **_kw) -> list[dict]:
             return [_row("org/curated-moe", is_moe=True, curated=True)]
 
-        monkeypatch.setattr(model_fetcher, "load_curated", _fake_curated)
+        monkeypatch.setattr(model_fetcher, "load_by_name", _fake_curated)
 
         with CsvResultSink(path=tmp_path / "s.csv") as sink:
             kept = fetch_and_filter(
