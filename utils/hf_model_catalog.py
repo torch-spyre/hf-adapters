@@ -14,7 +14,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 from huggingface_hub.errors import HfHubHTTPError
 from huggingface_hub.hf_api import ExpandModelProperty_T, ModelInfo
@@ -69,11 +69,20 @@ EXPAND_FIELDS: list[ExpandModelProperty_T] = [
     "gated",
     "likes",
     "downloads",
+    "trendingScore",
     "createdAt",
     "library_name",
     "tags",
     "siblings",
 ]
+
+# How a ranked fetcher orders the Hub before taking its top-K. A subset of the hub's
+# ModelSort_T: "downloads" is the last-30-days download count (all-time is the
+# separate downloads_all_time field), and "trending_score" is the Hub's
+# recent-activity ranking -- the closest thing to "likes in the last 30 days", since
+# ``likes`` itself is an all-time total and the API exposes no per-period likes.
+Ranking = Literal["downloads", "trending_score"]
+RANKINGS: tuple[Ranking, ...] = ("downloads", "trending_score")
 
 # HF-API gateway 5xx statuses. Anything outside this set (400/401/403/404/...)
 # is a permanent failure and must not be retried.

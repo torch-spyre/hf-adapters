@@ -125,11 +125,20 @@ def prefilter_models(
 def fetch_and_filter(
     model_type: ModelType,
     snapshot_date: date,
-    top_k: int,
+    top_k_downloads: int,
+    top_k_trending: int,
     sink: ResultSink,
     max_params: int,
 ) -> list[dict]:
-    """Fetch *model_type*'s top-*top_k* catalog, filter it, record the verdicts.
+    """Fetch *model_type*'s weekly catalog, filter it, record the verdicts.
+
+    The catalog is, deduplicated by ``model_id`` with the first copy winning:
+
+    1. the by-name models -- curated file + model registry (see ``load_curated``);
+    2. the top *top_k_downloads* by downloads over the last 30 days;
+    3. the top *top_k_trending* by the Hub's trending score.
+
+    A zero *top_k_* skips that ranking.
 
     The one entry point both producers share, which is what keeps "worth handing
     to a Spyre worker" a single definition: ``generate_weekly_shards`` calls it
@@ -146,21 +155,30 @@ def fetch_and_filter(
     left that path writing to a closed file.
 
     Returns:
-        The models to evaluate, in the fetched (downloads-descending) order that
-        the tier router and shard chunker both rely on.
+        The models to evaluate, in the merge order above (each source keeps its
+        own ranking order).
     """
     # Deferred so that importing this module — and running prefilter_models,
     # which is pure — needs neither skip_writer nor anything it pulls in.
     from tests.spyre.weekly_generation.skip_writer import write_skipped_rows
 
-    # obtain the top-k models from hugging face
-    fetched_models: list[dict] = model_fetcher.fetch(model_type=model_type, top_k=top_k)
-
-    # obtain the curated models
+    # the by-name models: curated file + model registry
     curated_models: list[dict] = model_fetcher.load_curated(model_type=model_type)
 
-    # concatenate and dedup while giving precedence to the curated
-    models = concat_and_dedup_dicts(first=curated_models, second=fetched_models)
+    # the two ranked top-k lists from hugging face
+    by_downloads: list[dict] = model_fetcher.fetch(
+        model_type=model_type, top_k=top_k_downloads, ranking="downloads"
+    )
+    by_trending: list[dict] = model_fetcher.fetch(
+        model_type=model_type, top_k=top_k_trending, ranking="trending_score"
+    )
+
+    # concatenate and dedup while giving precedence to the by-name rows (they
+    # carry curated=True), then downloads, then trending
+    models: list[dict] = concat_and_dedup_dicts(
+        first=concat_and_dedup_dicts(first=curated_models, second=by_downloads),
+        second=by_trending,
+    )
 
     # Filter checkpoints known to exceed Spyre's parameter limit.
     result: PrefilterResult = prefilter_models(models, max_params=max_params)
