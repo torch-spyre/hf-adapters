@@ -152,6 +152,28 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 **CPU Accurate** = adapter hidden-states have cosine similarity ≥ 0.999 vs stock HF on CPU (the bound accommodates the bf16-native EmbeddingGemma; fp16 models clear it with wide margin).
 **Spyre Compiles / Spyre Runs** = via `test_e2e_embed_compare_spyre.py`. GTE-Qwen2 compiles and executes end-to-end on Spyre but its pooled embeddings drift from the CPU reference; the Qwen3/Mistral/BERT/XLM-RoBERTa/MPNet/ModernBERT encoder paths match within fp16 noise. EmbeddingGemma runs in **bf16** (fp16 overflows its residual stream) and matches the bf16 CPU reference within bf16 noise (per-token cosine ≥ 0.999; pooled ≥ 0.99).
 
+### Multimodal Embedding (text/image→vectors)
+
+`hf_siglip.py` adapts the fixed-resolution SigLIP dual encoder for text/image
+retrieval and similarity scoring through Hugging Face's `SiglipModel` API.
+
+| Model | model\_type | Text / vision head\_dim | Embedding width | Status |
+|-------|-----------|------------------------|-----------------|--------|
+| google/siglip2-giant-opt-patch16-384 | siglip | 72→128 / 96→128 | 1536 | Experimental; vision accuracy unresolved |
+
+Load with `AutoSpyreModel` and `AutoProcessor`. The processor prepares 384×384
+images; tokenize text with `padding="max_length"` (64 tokens).
+`get_text_features` and `get_image_features` return outputs containing
+unnormalized `pooler_output` vectors. The joint forward returns normalized
+text/image embeddings and similarity logits with the learned scale and bias.
+
+Both towers reuse compiled pre-LN encoder blocks from `hf_siglip_vision.py`
+and `hf_common.py`. Attention heads and the text MLP (4304→4352) are zero-padded
+for stick alignment. Encoder blocks run on Spyre; token/patch embeddings,
+final norms, text projection, and image attention pooling run on CPU.
+Compiler-added tokens are masked and cropped before pooling. Intermediate
+hidden states and attention weights are not exposed by the adapted encoders.
+
 ### Sequence Classification
 
 Encoder models fine-tuned for sequence-level label prediction (sentiment
@@ -241,7 +263,7 @@ all pass that check.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 43 adapters · 68 verified checkpoints · 10K+ compatible models.
+**Coverage:** 44 adapters · 68 verified checkpoints · 10K+ compatible models.
 The 68 verified rows are 40 generative + 13 embedding + 2 seq-classification +
 2 token-classification + 3 structured-decision + 7 vision-language + 1 speculative-decoding drafter (see
 the Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are bare vision-tower components
@@ -297,6 +319,7 @@ pattern, norms, and weight layout.
 | hf\_granite\_vision.py | granite (text) | 1 | — |
 | hf\_granite\_vision\_mm.py | granite4\_vision (multimodal) | 1 | — |
 | hf\_siglip\_vision.py | SigLIP vision tower | 1 | SigLIP towers of other VLMs (extracted as a bare `SiglipVisionModel`) |
+| hf\_siglip.py | siglip (text/image embeddings) | 0 | google/siglip2-giant-opt-patch16-384 (experimental; vision accuracy unresolved). |
 | hf\_mistral3\_vision\_mm.py | mistral3 (multimodal) | 2 | Mistral-Small-3.1/3.2 Vision; Ministral-3-14B-Instruct-2512 (ministral3 text backbone, bf16) |
 | hf\_pixtral\_vision.py | Pixtral vision tower | 1 | Pixtral towers of Mistral3 Vision checkpoints |
 | hf\_bert.py | bert | 3 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants, BERT NER/POS/chunking fine-tunes |
