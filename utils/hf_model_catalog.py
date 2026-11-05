@@ -9,10 +9,13 @@ columns* it wants on top of the shared schema.
 
 import csv
 import logging
+import math
 import re
 import time
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import TypeVar
 
@@ -75,9 +78,9 @@ EXPAND_FIELDS: list[ExpandModelProperty_T] = [
     "siblings",
 ]
 
-# HF-API gateway 5xx statuses. Anything outside this set (400/401/403/404/...)
+# Rate limits and HF-API gateway 5xx statuses. Other statuses (400/401/403/404/...)
 # is a permanent failure and must not be retried.
-_TRANSIENT_HTTP_STATUSES: frozenset[int] = frozenset({500, 502, 503, 504})
+_TRANSIENT_HTTP_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 _MAX_FETCH_ATTEMPTS: int = 5
 _MAX_BACKOFF_SECONDS: float = 60.0
 
@@ -88,15 +91,16 @@ def with_transient_retry(
     call: Callable[[], Iterator[_T] | Iterable[_T]],
     description: str,
 ) -> list[_T]:
-    """Materialize an HF paginated call, retrying transient 5xx failures.
+    """Materialize an HF paginated call, retrying rate limits and transient 5xx failures.
 
     *call* is expected to return an iterable of ``ModelInfo`` (or similar)
     from a ``huggingface_hub`` API method. It is fully consumed into a list
     on each attempt because the pagination endpoint's failure mode is a
     mid-stream 504, and there is no way to resume — the whole traversal has
-    to restart. Transient statuses (500/502/503/504) trigger up to
-    ``_MAX_FETCH_ATTEMPTS`` retries with exponential backoff capped at
-    ``_MAX_BACKOFF_SECONDS``; any other error propagates immediately.
+    to restart. Transient statuses (429/500/502/503/504) trigger up to
+    ``_MAX_FETCH_ATTEMPTS`` attempts with exponential backoff capped at
+    ``_MAX_BACKOFF_SECONDS`` unless the server supplies ``Retry-After``;
+    any other error propagates immediately.
     """
     last_error: HfHubHTTPError | None = None
     for attempt in range(1, _MAX_FETCH_ATTEMPTS + 1):
@@ -109,7 +113,26 @@ def with_transient_retry(
             if status not in _TRANSIENT_HTTP_STATUSES:
                 raise
             last_error = e
-            backoff: float = min(_MAX_BACKOFF_SECONDS, 2.0**attempt)
+            if attempt == _MAX_FETCH_ATTEMPTS:
+                break
+            retry_after: str | None = (
+                e.response.headers.get("Retry-After")
+                if e.response is not None
+                else None
+            )
+            try:
+                delay = float(retry_after or "")
+                if not math.isfinite(delay) or delay < 0:
+                    raise ValueError("invalid Retry-After delay")
+            except ValueError:
+                try:
+                    retry_date = parsedate_to_datetime(retry_after or "")
+                    delay = max(
+                        0.0, (retry_date - datetime.now(timezone.utc)).total_seconds()
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    delay = min(_MAX_BACKOFF_SECONDS, 2.0**attempt)
+            backoff = delay
             print(
                 f"    {description}: HF API returned {status} "
                 f"(attempt {attempt}/{_MAX_FETCH_ATTEMPTS}); "
@@ -211,12 +234,23 @@ def _guarded(fn: Callable[[], bool], name: str) -> tuple[bool, str]:
 
 
 def contains_remote_code(model: ModelInfo) -> bool:
-    """Return False if the model requires trust_remote_code=True to load its config."""
+    """Return whether the config explicitly requires trust_remote_code=True."""
     try:
-        AutoConfig.from_pretrained(model.id, trust_remote_code=False)
+        with_transient_retry(
+            lambda: [AutoConfig.from_pretrained(model.id, trust_remote_code=False)],
+            description=f"AutoConfig[{model.id}]",
+        )
         return False
-    except (ValueError, OSError):
-        return True
+    except Exception as e:
+        if isinstance(e, ValueError) and "trust_remote_code=True" in str(e):
+            return True
+        logging.getLogger(__name__).warning(
+            "Could not determine whether %s requires remote code; keeping it "
+            "for downstream verification: %s",
+            model.id,
+            e,
+        )
+        return False
 
 
 # Filenames transformers' AutoModel.from_pretrained recognizes as native
@@ -308,7 +342,7 @@ def extract_model_size_from_model_name(
 
 def get_param_count(model: ModelInfo) -> int | None:
     if model.safetensors and model.safetensors.parameters:
-        return sum(model.safetensors.parameters.values())
+        return sum(int(value) for value in model.safetensors.parameters.values())
     return None
 
 
