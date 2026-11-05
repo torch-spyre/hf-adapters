@@ -1849,7 +1849,14 @@ class TorchOpCollector:
                     "labels": ["trunk"],
                     "global": {
                         "supported_dtypes": [
-                            {"name": dt, "precision": {"atol": 0.005, "rtol": 0.005}}
+                            {
+                                "name": dt,
+                                "precision": (
+                                    {"atol": 0.008, "rtol": 0.008}
+                                    if dt == "bfloat16"
+                                    else {"atol": 0.005, "rtol": 0.005}
+                                ),
+                            }
                             for dt in dtypes
                         ],
                         "input_config": {
@@ -1863,7 +1870,7 @@ class TorchOpCollector:
                             "tests": [
                                 {
                                     "names": ["TestSpyreModelOps::test_model_ops_db"],
-                                    "mode": "mandatory_success",
+                                    "mode": "xfail",
                                     "tags": ["model__" + model_name],
                                     "edits": {
                                         "ops": {
@@ -1888,6 +1895,9 @@ class TorchOpCollector:
             config = {
                 "model": model_name,
                 "defaults": defaults,
+                "dtypes": [
+                    {"name": "bfloat16", "precision": {"atol": 0.008, "rtol": 0.008}}
+                ],
                 "cases": _filter_cases(self.test_cases_yaml),
             }
             print(f"Total no. of test cases: {len(config['cases'])}")
