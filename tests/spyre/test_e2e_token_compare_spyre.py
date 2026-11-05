@@ -18,9 +18,9 @@ E2E token-level comparison: HF stock forward (CPU) vs adapter forward (Spyre).
 For each model, runs prefill + 4 greedy decode steps on both CPU (stock HF)
 and Spyre (adapter), comparing logits and greedy tokens at each step. Spyre
 decode is teacher-forced with HF's tokens so every step compares the same
-context. Each step must keep the full logit vector within calibrated cosine /
-max-diff / mean-diff bounds, and top-1 must agree, except for a flip between
-near-tied candidates (see ``tests/_token_compare_helpers.py``).
+context. Each step must keep the mean-centred logit vector within calibrated
+cosine / max-diff / mean-diff bounds, and top-1 must agree exactly (see
+``tests/_token_compare_helpers.py``).
 
 Usage (on Spyre pod)::
 
@@ -45,8 +45,9 @@ from tests._token_compare_helpers import (
     MAX_LOGIT_DIFF,
     MAX_MEAN_DIFF,
     MIN_COSINE,
-    TOP1_TIE_MARGIN,
     compare_step,
+    next_fed_token,
+    validate_forced_tokens,
 )
 from tests.conftest import (
     encode_generation_inputs,
@@ -110,9 +111,10 @@ def adapter_greedy_steps(
 
     ``forced_tokens[i]`` (the HF token of step ``i``) is fed as the input of
     decode step ``i + 1`` instead of Spyre's own pick. Without it, one prefill
-    flip between near-tied tokens sends Spyre down a different continuation and
-    every later step compares different contexts (#494).
+    flip sends Spyre down a different continuation and every later step compares
+    different contexts (#494).
     """
+    validate_forced_tokens(forced_tokens, num_decode)
     from hf_adapters.hf_common import (
         BLOCK_SIZE,
         _materialize_decode_mask_heads,
@@ -199,8 +201,7 @@ def adapter_greedy_steps(
     # FMS block walk — BLOCK_SIZE tokens in, one slot written — but generate() no
     # longer does that, and a per-step logits comparison is only meaningful if it
     # exercises the same path production uses.)
-    if forced_tokens is not None:
-        token = forced_tokens[0]
+    token = next_fed_token(token, 0, forced_tokens)
     result = torch.cat([padded_ids, torch.tensor([[token]])], dim=1)
     current_cache_len = padded_len
 
@@ -230,8 +231,7 @@ def adapter_greedy_steps(
 
         token = last_logits.argmax().item()
         results.append({"logits": last_logits, "token": token, "step": step})
-        if forced_tokens is not None and step < len(forced_tokens):
-            token = forced_tokens[step]
+        token = next_fed_token(token, step, forced_tokens)
         result = torch.cat([result, torch.tensor([[token]])], dim=1)
 
     return results
@@ -266,11 +266,13 @@ def _print_table(rows: list[dict[str, Any]]) -> None:
     print("\n## E2E Token Comparison: HF (CPU) vs Adapter (Spyre)\n")
     print(
         "| Model | Step | HF Token | Spyre Token | Match | HF Margin "
-        "| Spyre Margin | Max Diff | Mean Diff | Cosine | HF NaN | Spyre NaN |"
+        "| Spyre Margin | Max Diff | Mean Diff | Cosine | HF NaN | Spyre NaN "
+        "| Raw Max | Raw Mean | Raw Cosine |"
     )
     print(
         "|-------|------|----------|-------------|-------|-----------"
-        "|--------------|----------|-----------|--------|--------|-----------|"
+        "|--------------|----------|-----------|--------|--------|-----------"
+        "|---------|----------|------------|"
     )
     for r in rows:
         if not r["top1_ok"]:
@@ -278,7 +280,7 @@ def _print_table(rows: list[dict[str, Any]]) -> None:
         elif not r["logits_ok"]:
             match = "DRIFT"
         else:
-            match = "OK" if r["top1_match"] else "TIE"
+            match = "OK"
         hf_col = f"{r['hf_token']:>5} {r['hf_str']!r}"
         sp_col = f"{r['spyre_token']:>5} {r['spyre_str']!r}"
         hn = "Yes" if r["hf_nan"] else "No"
@@ -287,7 +289,9 @@ def _print_table(rows: list[dict[str, Any]]) -> None:
             f"| {r['model']} | {r['step']} | {hf_col} | {sp_col} "
             f"| {match} | {r['hf_margin']:.4f} | {r['spyre_margin']:.4f} "
             f"| {r['max_diff']:.4f} | {r['mean_diff']:.6f} | {r['cosine']:.6f} "
-            f"| {hn} | {sn} |"
+            f"| {hn} | {sn} "
+            f"| {r['raw_max_diff']:.4f} | {r['raw_mean_diff']:.6f} "
+            f"| {r['raw_cosine']:.6f} |"
         )
 
 
@@ -364,10 +368,8 @@ def test_e2e_token_compare_spyre(
     )
     _print_table(rows)
     n_match = sum(1 for r in rows if r["top1_match"])
-    n_tie = sum(1 for r in rows if r["near_tie"])
     print(
-        f"\nTop-1 agreement: {n_match}/{len(rows)} steps "
-        f"(+{n_tie} near-tie within {TOP1_TIE_MARGIN} logits); "
+        f"\nTop-1 agreement: {n_match}/{len(rows)} steps; "
         f"bounds: cosine >= {MIN_COSINE}, max diff <= {MAX_LOGIT_DIFF}, "
         f"mean diff <= {MAX_MEAN_DIFF}"
     )
