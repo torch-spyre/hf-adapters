@@ -1,7 +1,9 @@
 name: 'warm_top_models_cache'
 
-# One-off: fill the shared HF cache with the weekly scan's top generative and
-# embedding models, one model at a time with a pause between models. See
+# One-off: fill the shared HF cache with the weekly scan's selection (#752): per
+# model type, the by-name models (curated + model registry), the top-K by
+# downloads and the top-K by trending, minus models over 60B or with no adapter.
+# One model at a time, with a pause between models. See
 # .github/cache_config/warm_top_models_cache.py. Already-cached models are skipped
 # without a network call, so dispatch again to carry on after a stop.
 #
@@ -20,6 +22,7 @@ on:
       - .github/cache_config/test_estimate_top_models_cache_size.py
       - .github/workflows/warm_top_models_cache.yaml
       - utils/hf_model_catalog.py
+      - tests/spyre/weekly_generation/model_fetcher.py
       - .github/cache_config/model_list_from_csvs.py
       - .github/cache_config/test_model_list_from_csvs.py
   push:
@@ -32,20 +35,26 @@ on:
       - .github/cache_config/test_estimate_top_models_cache_size.py
       - .github/workflows/warm_top_models_cache.yaml
       - utils/hf_model_catalog.py
+      - tests/spyre/weekly_generation/model_fetcher.py
       - .github/cache_config/model_list_from_csvs.py
       - .github/cache_config/test_model_list_from_csvs.py
   workflow_dispatch:
     inputs:
-      top_k_generative:
-        description: 'Top generative models to fetch'
+      top_k_downloads:
+        description: 'Per model type, top models by downloads in the last 30 days (0 skips)'
         required: true
         type: number
-        default: 10000
-      top_k_embedding:
-        description: 'Top embedding models to fetch'
+        default: 1000
+      top_k_trending:
+        description: 'Per model type, top models by trending score (0 skips)'
         required: true
         type: number
-        default: 10000
+        default: 1000
+      all_models:
+        description: 'Also warm models no adapter resolves for (the scan never loads them)'
+        required: true
+        type: boolean
+        default: false
       sleep_seconds:
         description: 'Pause between models, in seconds'
         required: true
@@ -134,8 +143,9 @@ jobs:
         with:
           path: 'hf-adapters-repo'
 
-      # The fetchers import transformers (for AutoConfig), so install the locked
-      # project dependencies without torch-spyre.
+      # The fetchers import transformers (for AutoConfig) and the adapter check
+      # imports hf_adapters (torch), so install the locked project dependencies
+      # without torch-spyre.
       - name: Install Python dependencies
         working-directory: 'hf-adapters-repo'
         run: |
@@ -153,8 +163,9 @@ jobs:
           echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           source .venv/bin/activate
           python .github/cache_config/estimate_top_models_cache_size.py \
-            --top-k-generative "${{ inputs.top_k_generative }}" \
-            --top-k-embedding "${{ inputs.top_k_embedding }}" \
+            --top-k-downloads "${{ inputs.top_k_downloads }}" \
+            --top-k-trending "${{ inputs.top_k_trending }}" \
+            ${{ inputs.all_models && '--all-models' || '' }} \
             --save-model-list "$MODEL_LIST_FILE" \
             --output-csv "$SIZE_ESTIMATE_FILE" \
             ${{ inputs.exact_sizes && '--exact' || '' }}
@@ -169,8 +180,9 @@ jobs:
           remaining_hours="$(python -c "import os,time; print(max(0.0, float(os.environ['MAX_HOURS']) - (time.time() - int(os.environ['JOB_START_EPOCH'])) / 3600))")"
           echo "--max-hours left after the list fetch: ${remaining_hours}"
           python .github/cache_config/warm_top_models_cache.py \
-            --top-k-generative "${{ inputs.top_k_generative }}" \
-            --top-k-embedding "${{ inputs.top_k_embedding }}" \
+            --top-k-downloads "${{ inputs.top_k_downloads }}" \
+            --top-k-trending "${{ inputs.top_k_trending }}" \
+            ${{ inputs.all_models && '--all-models' || '' }} \
             --model-list-file "$MODEL_LIST_FILE" \
             --sleep-seconds "${{ inputs.sleep_seconds }}" \
             --min-free-gb "${{ inputs.min_free_gb }}" \

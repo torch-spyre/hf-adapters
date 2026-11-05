@@ -14,10 +14,18 @@
 # limitations under the License.
 """One-off warm-up of the shared HF cache with the weekly scan's model lists.
 
-Builds the same list the weekly scan shards are cut from — the top-K generative
-and embedding models (``utils/fetch_top_*_models.py``) plus the curated lists,
-minus models over the scan's parameter limit — and downloads each one into
-``HF_HOME`` like ``manage_cache.py`` does. The weekly scan only deletes weights
+Builds the same list the weekly scan shards are cut from and downloads each
+model into ``HF_HOME`` like ``manage_cache.py`` does. Per model type (generative
+and embedding), that list is the union of:
+
+1. the by-name models: the curated file plus every checkpoint in
+   ``tests/model_registry.py`` (``model_fetcher.by_name_ids``);
+2. the top ``--top-k-downloads`` by downloads over the last 30 days;
+3. the top ``--top-k-trending`` by the Hub's trending score;
+
+minus models over the scan's parameter limit and, unless ``--all-models``, models
+no adapter resolves for. The scan's workers never call ``from_pretrained`` on
+those, so their weights would never be read. The weekly scan only deletes weights
 it downloaded itself, so models warmed here stay cached between scans.
 
 The network is treated gently, on purpose:
@@ -44,11 +52,12 @@ Safe to stop and dispatch again:
   metadata) fit above the floor; a model that cannot be sized is skipped.
 
 Fetching the list is itself a burst of Hub requests: about two per candidate
-model, for tens of thousands of candidates at the default top-K. Two flags keep
+model, for several thousand candidates at the default top-K. Two flags keep
 it down:
 
-* ``--catalog-workers`` (default 4, the weekly scan uses 32) caps how many of
-  those requests run at once;
+* ``--catalog-workers`` (default 4; the weekly scan uses
+  ``DEFAULT_CATALOG_MAX_WORKERS``, 8) caps how many of those requests run at
+  once, the adapter check included;
 * ``--model-list-file`` reuses a list the size estimator saved
   (``--save-model-list``), so an estimate followed by a warm-up fetches once.
 
@@ -73,7 +82,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -88,6 +97,7 @@ from huggingface_hub import HfApi, constants, snapshot_download  # noqa: E402
 from huggingface_hub.hf_api import ModelInfo  # noqa: E402
 from huggingface_hub.utils import filter_repo_objects  # noqa: E402
 
+from tests.spyre.weekly_generation import model_fetcher  # noqa: E402
 from tests.spyre.weekly_generation.failure_categories import (  # noqa: E402
     MAX_NUMBER_PARAMS,
 )
@@ -95,17 +105,10 @@ from tests.spyre.weekly_generation.model_prefilter import (  # noqa: E402
     PrefilterResult,
     prefilter_models,
 )
-from utils.fetch_top_embedding_models import (  # noqa: E402
-    fetch_curated_embedding_models_metadata,
-    fetch_top_embedding_models,
-)
-from utils.fetch_top_generative_models import (  # noqa: E402
-    fetch_curated_generative_models_metadata,
-    fetch_top_generative_models,
-)
+from tests.spyre.weekly_generation.model_type import ModelType  # noqa: E402
 from utils.hf_model_catalog import (  # noqa: E402
-    load_curated_embedding_models,
-    load_curated_generative_models,
+    DEFAULT_CATALOG_MAX_WORKERS,
+    Ranking,
 )
 from utils.utilities import concat_and_dedup_dicts, ts  # noqa: E402
 
@@ -166,14 +169,17 @@ _DTYPE_BYTES: dict[str, float] = {
 }
 _UNKNOWN_DTYPE_BYTES: float = 2
 
-_DEFAULT_TOP_K: int = 10_000
+# Per ranking and model type, the weekly scan's defaults (generate_weekly_shards.py).
+_DEFAULT_TOP_K: int = 1_000
 
-# Threads for the list fetch's per-model Hub checks. The weekly scan uses 32
-# (see utils/hf_model_catalog.py); this one-off job has no deadline to meet.
+# Threads for the list fetch's per-model Hub checks. The weekly scan uses
+# DEFAULT_CATALOG_MAX_WORKERS (utils/hf_model_catalog.py); this one-off job has no
+# deadline to meet.
 _DEFAULT_CATALOG_WORKERS: int = 4
 
-# Bump when the saved model-list layout changes.
-_MODEL_LIST_FORMAT_VERSION: int = 1
+# Bump when the saved model-list layout changes. 2: the #753 selection (two
+# rankings + model registry) and the adapter check.
+_MODEL_LIST_FORMAT_VERSION: int = 2
 
 _WORKER: Path = Path(__file__).resolve().parent / "hf_snapshot_worker.py"
 _RATE_LIMIT_PAUSE_SECONDS: float = 600.0
@@ -215,16 +221,30 @@ def human_bytes(n: float) -> str:
 def add_model_list_args(parser: argparse.ArgumentParser) -> None:
     """The flags that choose the model list, shared with the size estimator."""
     parser.add_argument(
-        "--top-k-generative",
+        "--top-k-downloads",
         type=int,
         default=_DEFAULT_TOP_K,
-        help=f"How many top generative models to fetch (default: {_DEFAULT_TOP_K}).",
+        help=(
+            "Per model type, the top N by downloads over the last 30 days "
+            f"(default: {_DEFAULT_TOP_K}; 0 skips this ranking)."
+        ),
     )
     parser.add_argument(
-        "--top-k-embedding",
+        "--top-k-trending",
         type=int,
         default=_DEFAULT_TOP_K,
-        help=f"How many top embedding models to fetch (default: {_DEFAULT_TOP_K}).",
+        help=(
+            "Per model type, the top N by the Hub's trending score "
+            f"(default: {_DEFAULT_TOP_K}; 0 skips this ranking)."
+        ),
+    )
+    parser.add_argument(
+        "--all-models",
+        action="store_true",
+        help=(
+            "Keep models no adapter resolves for. By default they are dropped: "
+            "the weekly scan never loads their weights."
+        ),
     )
     parser.add_argument(
         "--max-params",
@@ -241,7 +261,8 @@ def add_model_list_args(parser: argparse.ArgumentParser) -> None:
         default=_DEFAULT_CATALOG_WORKERS,
         help=(
             "Parallel Hub requests while fetching the list "
-            f"(default: {_DEFAULT_CATALOG_WORKERS}; the weekly scan uses 32)."
+            f"(default: {_DEFAULT_CATALOG_WORKERS}; the weekly scan uses "
+            f"{DEFAULT_CATALOG_MAX_WORKERS})."
         ),
     )
     parser.add_argument(
@@ -250,8 +271,9 @@ def add_model_list_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "JSON model list to reuse instead of fetching from the Hub. The size "
-            "estimator writes one with --save-model-list; the --top-k-* and "
-            "--max-params flags must match the ones it was built with."
+            "estimator writes one with --save-model-list; the --top-k-*, "
+            "--max-params and --all-models flags must match the ones it was "
+            "built with."
         ),
     )
 
@@ -305,66 +327,131 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 
-def build_model_list(
-    top_k_generative: int, top_k_embedding: int, max_params: int
-) -> list[dict[str, object]]:
-    """Curated models first, then the fetched top-K of both types by downloads.
+def _mode_rows(
+    model_type: ModelType, top_k_downloads: int, top_k_trending: int
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """*model_type*'s by-name rows and its ranked rows, as ``fetch_and_filter`` merges them.
 
-    Each row gets a ``mode`` ("generative" or "embedding"). A model in both
-    lists keeps its first row. The fetchers leave ``model_info`` on each row;
-    its ``siblings`` decide which weight format to download (see
-    ``ignore_patterns_for``).
+    Calls the same fetchers as ``model_fetcher.fetch`` and ``load_by_name`` but
+    keeps ``model_info``, whose ``siblings`` and ``safetensors`` the warmer reads
+    (``ignore_patterns_for``, ``safetensors_bytes``). Ranked rows already in the
+    by-name set, or in the downloads ranking for a trending row, are dropped.
     """
-    sources: list[
-        tuple[
-            str,
-            Callable[[], list[str]],
-            Callable[..., list[dict[str, object]]],
-            Callable[..., list[dict[str, object]]],
-            int,
-        ]
-    ] = [
-        (
-            "generative",
-            load_curated_generative_models,
-            fetch_curated_generative_models_metadata,
-            fetch_top_generative_models,
-            top_k_generative,
-        ),
-        (
-            "embedding",
-            load_curated_embedding_models,
-            fetch_curated_embedding_models_metadata,
-            fetch_top_embedding_models,
-            top_k_embedding,
-        ),
-    ]
-    curated: list[dict[str, object]] = []
-    fetched: list[dict[str, object]] = []
-    for mode, load_ids, fetch_metadata, fetch_top, top_k in sources:
-        model_ids: list[str] = load_ids()
-        mode_rows: list[dict[str, object]] = (
-            fetch_metadata(model_ids=model_ids) if model_ids else []
+    mode: str = str(model_type)
+    ids: list[str] = model_fetcher.by_name_ids(model_type)
+    by_name: list[dict[str, object]] = [
+        {**row, "mode": mode, "curated": True}
+        for row in (
+            model_fetcher.all_metadata_fetchers[model_type](model_ids=ids)
+            if ids
+            else []
         )
-        curated.extend({**row, "mode": mode, "curated": True} for row in mode_rows)
-        if top_k > 0:
-            fetched.extend(
+    ]
+    ranked: list[dict[str, object]] = []
+    rankings: tuple[tuple[Ranking, int], ...] = (
+        ("downloads", top_k_downloads),
+        ("trending_score", top_k_trending),
+    )
+    for ranking, top_k in rankings:
+        if top_k <= 0:
+            continue
+        ranked = concat_and_dedup_dicts(
+            first=ranked,
+            second=[
                 {**row, "mode": mode, "curated": False}
-                for row in fetch_top(limit=top_k)
-            )
-    fetched.sort(key=lambda row: as_int(row.get("downloads")) or 0, reverse=True)
+                for row in model_fetcher.all_fetchers[model_type](
+                    limit=top_k, ranking=ranking
+                )
+            ],
+        )
+    print(
+        f"{ts()} {mode}: {len(by_name)} by-name + {len(ranked)} ranked "
+        f"(downloads {top_k_downloads}, trending {top_k_trending})",
+        flush=True,
+    )
+    return by_name, ranked
+
+
+def _adapter_verdict(model_id: str) -> str | None:
+    """None when an adapter resolves for *model_id*, else why not.
+
+    Same resolver the scan's worker calls before it loads anything
+    (``resolve_adapter_module_for_test``), minus the pytest conftest it lives in.
+    ``AutoConfig`` reads the config.json the list fetch already cached.
+    """
+    from hf_adapters.auto_spyre_model import resolve_adapter_module
+    from tests.model_registry import REMOTE_CODE_PATHS
+
+    try:
+        resolve_adapter_module(
+            model_id, trust_remote_code=model_id in REMOTE_CODE_PATHS
+        )
+    except Exception as e:  # noqa: BLE001 -- any failure means the worker skips it
+        return type(e).__name__
+    return None
+
+
+def drop_models_without_adapter(
+    rows: list[dict[str, object]], workers: int
+) -> list[dict[str, object]]:
+    """*rows* an adapter resolves for, in order; the scan never loads the others."""
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        verdicts: list[str | None] = list(
+            pool.map(_adapter_verdict, [str(row["model_id"]) for row in rows])
+        )
+    dropped: dict[str, int] = {}
+    for verdict in verdicts:
+        if verdict is not None:
+            dropped[verdict] = dropped.get(verdict, 0) + 1
+    kept: list[dict[str, object]] = [
+        row for row, verdict in zip(rows, verdicts, strict=True) if verdict is None
+    ]
+    print(
+        f"{ts()} adapter check: {len(kept)} kept, {len(rows) - len(kept)} dropped "
+        f"{dict(sorted(dropped.items()))}",
+        flush=True,
+    )
+    return kept
+
+
+def build_model_list(
+    top_k_downloads: int,
+    top_k_trending: int,
+    max_params: int,
+    adapters_only: bool = True,
+    workers: int = _DEFAULT_CATALOG_WORKERS,
+) -> list[dict[str, object]]:
+    """The weekly scan's selection for both model types, as one download queue.
+
+    By-name models of both types come first, then every ranked row by downloads,
+    so a run that stops early has warmed the most-used models. Each row gets a
+    ``mode`` ("generative" or "embedding"); a model in both types keeps its
+    first row. Then the scan's parameter limit and, with *adapters_only*, the
+    adapter check.
+    """
+    by_name: list[dict[str, object]] = []
+    ranked: list[dict[str, object]] = []
+    for model_type in ModelType:
+        mode_by_name, mode_ranked = _mode_rows(
+            model_type, top_k_downloads, top_k_trending
+        )
+        by_name.extend(mode_by_name)
+        ranked.extend(mode_ranked)
+    ranked.sort(key=lambda row: as_int(row.get("downloads")) or 0, reverse=True)
 
     merged: list[dict[str, object]] = concat_and_dedup_dicts(
-        first=curated, second=fetched
+        first=by_name, second=ranked
     )
     result: PrefilterResult = prefilter_models(merged, max_params=max_params)
     print(
-        f"{ts()} {len(curated)} curated + {len(fetched)} fetched -> {len(merged)} "
-        f"unique -> {len(result.keep)} kept ({len(result.skipped)} over "
-        f"{max_params:,} params)",
+        f"{ts()} {len(by_name)} by-name + {len(ranked)} ranked -> {len(merged)} "
+        f"unique -> {len(result.keep)} within {max_params:,} params "
+        f"({len(result.skipped)} over)",
         flush=True,
     )
-    return result.keep
+    if not adapters_only:
+        return result.keep
+    return drop_models_without_adapter(result.keep, workers)
 
 
 def _row_to_json(row: dict[str, object]) -> dict[str, object]:
@@ -403,17 +490,18 @@ def _row_from_json(data: dict[str, object]) -> dict[str, object]:
     return row
 
 
-def list_settings(args: argparse.Namespace) -> dict[str, int]:
+def list_settings(args: argparse.Namespace) -> dict[str, int | bool]:
     """The flags that decide which models are on the list."""
     return {
-        "top_k_generative": args.top_k_generative,
-        "top_k_embedding": args.top_k_embedding,
+        "top_k_downloads": args.top_k_downloads,
+        "top_k_trending": args.top_k_trending,
         "max_params": args.max_params,
+        "adapters_only": not args.all_models,
     }
 
 
 def save_model_list(
-    path: Path, rows: list[dict[str, object]], settings: dict[str, int]
+    path: Path, rows: list[dict[str, object]], settings: dict[str, int | bool]
 ) -> None:
     """Write *rows* as JSON, written to a temporary file and renamed into place."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -428,10 +516,12 @@ def save_model_list(
     print(f"{ts()} Saved {len(rows):,} models to {path}", flush=True)
 
 
-def load_model_list(path: Path, settings: dict[str, int]) -> list[dict[str, object]]:
+def load_model_list(
+    path: Path, settings: dict[str, int | bool]
+) -> list[dict[str, object]]:
     """Read a list saved by ``save_model_list`` and check it was built the same way.
 
-    A list built with other --top-k-* or --max-params values holds different
+    A list built with other --top-k-*, --max-params or --all-models values holds different
     models than asked for, so it is refused instead of silently reused.
     """
     payload: object = json.loads(path.read_text(encoding="utf-8"))
@@ -462,7 +552,8 @@ def get_model_list(args: argparse.Namespace) -> list[dict[str, object]]:
     """The model list: from ``--model-list-file`` if given, else fetched gently.
 
     Fetching sets ``HF_CATALOG_MAX_WORKERS`` for the shared catalog code, so its
-    per-model Hub checks run ``--catalog-workers`` at a time instead of 32.
+    per-model Hub checks run ``--catalog-workers`` at a time instead of the
+    scan's ``DEFAULT_CATALOG_MAX_WORKERS``; the adapter check uses as many.
     """
     if args.catalog_workers < 1:
         raise ValueError("--catalog-workers must be >= 1")
@@ -475,7 +566,11 @@ def get_model_list(args: argparse.Namespace) -> list[dict[str, object]]:
         flush=True,
     )
     return build_model_list(
-        args.top_k_generative, args.top_k_embedding, args.max_params
+        args.top_k_downloads,
+        args.top_k_trending,
+        args.max_params,
+        adapters_only=not args.all_models,
+        workers=args.catalog_workers,
     )
 
 

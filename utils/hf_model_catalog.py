@@ -117,25 +117,6 @@ _MAX_BACKOFF_SECONDS: float = 60.0
 
 _T = TypeVar("_T")
 
-# Threads build_catalog uses for its per-model Hub requests (filter checks and
-# AutoConfig loads). 32 suits the weekly scan, which needs the list fast. The
-# one-off cache warm-up lowers it through this variable to spread its burst out.
-_DEFAULT_CATALOG_MAX_WORKERS: int = 32
-
-
-def catalog_max_workers() -> int:
-    """Thread count for build_catalog: ``HF_CATALOG_MAX_WORKERS`` or 32."""
-    raw: str = os.environ.get("HF_CATALOG_MAX_WORKERS", "").strip()
-    if not raw:
-        return _DEFAULT_CATALOG_MAX_WORKERS
-    try:
-        workers: int = int(raw)
-    except ValueError:
-        raise ValueError(f"HF_CATALOG_MAX_WORKERS must be an integer, got {raw!r}")
-    if workers < 1:
-        raise ValueError(f"HF_CATALOG_MAX_WORKERS must be >= 1, got {workers}")
-    return workers
-
 
 def with_transient_retry(
     call: Callable[[], Iterator[_T] | Iterable[_T]],
@@ -433,7 +414,6 @@ def build_catalog(
 
     timings: dict[str, float] = {}
     t_total = time.perf_counter()
-    max_workers: int = catalog_max_workers()
 
     max_workers: int = catalog_max_workers()
     print(f"Using {max_workers} worker thread(s) for per-model Hub calls.")

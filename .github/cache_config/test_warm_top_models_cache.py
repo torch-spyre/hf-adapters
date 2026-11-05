@@ -246,16 +246,20 @@ class RateLimitTests(unittest.TestCase):
         self.assertTrue(is_transient(LocalEntryNotFoundError("offline")))
 
 
-_SETTINGS: dict[str, int] = {
-    "top_k_generative": 5,
-    "top_k_embedding": 3,
+_SETTINGS: dict[str, int | bool] = {
+    "top_k_downloads": 5,
+    "top_k_trending": 3,
     "max_params": 60_000_000_000,
+    "adapters_only": True,
 }
 
 
 def _args(**overrides: object) -> argparse.Namespace:
     values: dict[str, object] = {
-        **_SETTINGS,
+        "top_k_downloads": 5,
+        "top_k_trending": 3,
+        "max_params": 60_000_000_000,
+        "all_models": False,
         "catalog_workers": 4,
         "model_list_file": None,
         **overrides,
@@ -310,7 +314,9 @@ class SavedModelListTests(unittest.TestCase):
     def test_list_built_with_other_flags_is_refused(self) -> None:
         warm.save_model_list(self.path, self.rows, _SETTINGS)
         with self.assertRaisesRegex(ValueError, "pass the same flags"):
-            warm.load_model_list(self.path, {**_SETTINGS, "top_k_generative": 6})
+            warm.load_model_list(self.path, {**_SETTINGS, "top_k_downloads": 6})
+        with self.assertRaisesRegex(ValueError, "pass the same flags"):
+            warm.load_model_list(self.path, {**_SETTINGS, "adapters_only": False})
 
     def test_unknown_format_is_refused(self) -> None:
         self.path.write_text(json.dumps({"format_version": 99}), encoding="utf-8")
@@ -331,7 +337,7 @@ class CatalogWorkersTests(unittest.TestCase):
     def test_fetch_passes_the_worker_count_to_the_catalog(self) -> None:
         seen: list[str | None] = []
 
-        def fake_build(*_: object) -> list[dict[str, object]]:
+        def fake_build(*_: object, **__: object) -> list[dict[str, object]]:
             seen.append(os.environ.get("HF_CATALOG_MAX_WORKERS"))
             return []
 
@@ -347,17 +353,133 @@ class CatalogWorkersTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             warm.get_model_list(_args(catalog_workers=0))
 
-    def test_catalog_reads_the_variable_and_keeps_32_by_default(self) -> None:
-        from utils.hf_model_catalog import catalog_max_workers
+    def test_catalog_reads_the_variable_and_keeps_the_scan_default(self) -> None:
+        from utils.hf_model_catalog import (
+            DEFAULT_CATALOG_MAX_WORKERS,
+            catalog_max_workers,
+        )
 
+        self.assertEqual(DEFAULT_CATALOG_MAX_WORKERS, 8)
         with patch.dict(os.environ, {"HF_CATALOG_MAX_WORKERS": "4"}):
             self.assertEqual(catalog_max_workers(), 4)
         with patch.dict(os.environ, {"HF_CATALOG_MAX_WORKERS": ""}):
-            self.assertEqual(catalog_max_workers(), 32)
+            self.assertEqual(catalog_max_workers(), 8)
         for bad in ("0", "many"):
             with patch.dict(os.environ, {"HF_CATALOG_MAX_WORKERS": bad}):
                 with self.assertRaises(ValueError):
                     catalog_max_workers()
+
+
+def _catalog_row(model_id: str, downloads: int, parameters: int = 1) -> dict:
+    return {"model_id": model_id, "downloads": downloads, "parameters": parameters}
+
+
+class WeeklySelectionTests(unittest.TestCase):
+    """The list is the weekly scan's: by-name + downloads + trending, per type."""
+
+    def setUp(self) -> None:
+        self.calls: list[tuple[str, int, str]] = []
+        ranked: dict[tuple[str, str], list[dict]] = {
+            ("generative", "downloads"): [
+                _catalog_row("g/dl", 50),
+                _catalog_row("g/both", 40),
+                _catalog_row("g/huge", 30, parameters=70_000_000_000),
+            ],
+            ("generative", "trending_score"): [
+                _catalog_row("g/both", 40),
+                _catalog_row("g/trend", 5),
+                _catalog_row("g/curated", 1),
+            ],
+            ("embedding", "downloads"): [_catalog_row("e/dl", 90)],
+            ("embedding", "trending_score"): [_catalog_row("e/trend", 2)],
+        }
+
+        def fetcher(mode: str):  # type: ignore[no-untyped-def]
+            def fetch(limit: int, ranking: str) -> list[dict]:
+                self.calls.append((mode, limit, ranking))
+                return [dict(r) for r in ranked[(mode, ranking)]]
+
+            return fetch
+
+        def metadata(model_ids: list[str]) -> list[dict]:
+            return [_catalog_row(m, 0) for m in model_ids]
+
+        from tests.spyre.weekly_generation import model_fetcher
+        from tests.spyre.weekly_generation.model_type import ModelType
+
+        by_name: dict[ModelType, list[str]] = {
+            ModelType.GENERATIVE: ["g/curated", "g/registry"],
+            ModelType.EMBEDDING: ["e/registry"],
+        }
+        for patcher in (
+            patch.dict(
+                model_fetcher.all_fetchers,
+                {t: fetcher(str(t)) for t in ModelType},
+            ),
+            patch.dict(
+                model_fetcher.all_metadata_fetchers,
+                {t: metadata for t in ModelType},
+            ),
+            patch.object(model_fetcher, "by_name_ids", lambda t: by_name[t]),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _ids(self, **kwargs: object) -> list[str]:
+        rows = warm.build_model_list(
+            5, 3, 60_000_000_000, adapters_only=False, **kwargs
+        )
+        return [str(r["model_id"]) for r in rows]
+
+    def test_by_name_first_then_ranked_by_downloads_deduplicated(self) -> None:
+        self.assertEqual(
+            self._ids(),
+            [
+                "g/curated",
+                "g/registry",
+                "e/registry",
+                "e/dl",
+                "g/dl",
+                "g/both",
+                "g/trend",
+                "e/trend",
+            ],
+        )
+
+    def test_each_type_fetches_both_rankings_with_their_own_top_k(self) -> None:
+        self._ids()
+        self.assertCountEqual(
+            self.calls,
+            [
+                ("generative", 5, "downloads"),
+                ("generative", 3, "trending_score"),
+                ("embedding", 5, "downloads"),
+                ("embedding", 3, "trending_score"),
+            ],
+        )
+
+    def test_by_name_rows_are_curated_and_keep_their_mode(self) -> None:
+        rows = warm.build_model_list(5, 3, 60_000_000_000, adapters_only=False)
+        flags = {r["model_id"]: (r["mode"], r["curated"]) for r in rows}
+        self.assertEqual(flags["g/curated"], ("generative", True))
+        self.assertEqual(flags["e/registry"], ("embedding", True))
+        self.assertEqual(flags["g/trend"], ("generative", False))
+
+    def test_zero_top_k_skips_that_ranking(self) -> None:
+        warm.build_model_list(5, 0, 60_000_000_000, adapters_only=False)
+        self.assertNotIn("trending_score", [ranking for *_, ranking in self.calls])
+
+    def test_models_without_an_adapter_are_dropped_by_default(self) -> None:
+        def verdict(model_id: str) -> str | None:
+            return (
+                None if model_id.endswith(("dl", "registry")) else "SpyreNoAdapterError"
+            )
+
+        with patch.object(warm, "_adapter_verdict", verdict):
+            rows = warm.build_model_list(5, 3, 60_000_000_000, workers=2)
+        self.assertEqual(
+            [r["model_id"] for r in rows], ["g/registry", "e/registry", "e/dl", "g/dl"]
+        )
 
 
 if __name__ == "__main__":

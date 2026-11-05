@@ -14,8 +14,9 @@
 # limitations under the License.
 """Estimate how much disk ``warm_top_models_cache.py`` would download, without downloading.
 
-Builds the same model list as the warmer (curated + top-K generative + top-K
-embedding, deduplicated, models over the parameter limit dropped) and sizes each
+Builds the same model list as the warmer (the weekly scan's selection: by-name
+models + top-K by downloads + top-K by trending, per model type, deduplicated,
+models over the parameter limit or without an adapter dropped) and sizes each
 model with one of these methods, best first:
 
 * ``exact``: real file sizes from the Hub, after the warmer's ignore patterns.
@@ -38,7 +39,7 @@ Usage::
 
     python .github/cache_config/estimate_top_models_cache_size.py
     python .github/cache_config/estimate_top_models_cache_size.py \\
-        --top-k-generative 2000 --top-k-embedding 500 --output-csv sizes.csv \\
+        --top-k-downloads 2000 --top-k-trending 500 --output-csv sizes.csv \\
         --save-model-list model_list.json
 """
 

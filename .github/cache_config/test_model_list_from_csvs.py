@@ -22,10 +22,11 @@ import model_list_from_csvs as convert
 import warm_top_models_cache as warm
 
 _HEADER: str = "rank,model_id,downloads,parameters,model_type,config_class\n"
-_SETTINGS: dict[str, int] = {
-    "top_k_generative": 2,
-    "top_k_embedding": 5,
+_SETTINGS: dict[str, int | bool] = {
+    "top_k_downloads": 2,
+    "top_k_trending": 0,
     "max_params": 60_000_000_000,
+    "adapters_only": False,
 }
 
 
@@ -58,12 +59,12 @@ class ModelListFromCsvsTests(unittest.TestCase):
             ),
         ):
             return convert.build_from_csvs(
-                self.gen, self.emb, 2, 5, 60_000_000_000, include_curated
+                self.gen, self.emb, 2, 60_000_000_000, include_curated
             )
 
     def test_top_k_cuts_each_csv_then_merges_by_downloads(self) -> None:
         rows = self._build(include_curated=False)
-        # org/gen-c is row 3, past --top-k-generative 2; org/too-big is over 60B.
+        # org/gen-c is row 3, past --top-k-downloads 2; org/too-big is over 60B.
         self.assertEqual(
             [r["model_id"] for r in rows], ["org/emb-a", "org/gen-a", "org/curated"]
         )
@@ -84,7 +85,14 @@ class ModelListFromCsvsTests(unittest.TestCase):
         self.assertEqual(len(loaded), 3)
         self.assertEqual(loaded[1]["parameters"], 1000)
         with self.assertRaises(ValueError):
-            warm.load_model_list(out, {**_SETTINGS, "top_k_generative": 3})
+            warm.load_model_list(out, {**_SETTINGS, "top_k_downloads": 3})
+
+    def test_trending_or_adapter_check_is_refused(self) -> None:
+        for extra in (["--top-k-trending", "5", "--all-models"], []):
+            with self.assertRaises(SystemExit):
+                convert._parse_args(
+                    ["--output", "x.json", "--top-k-trending", "0", *extra]
+                )
 
     def test_missing_column_is_refused(self) -> None:
         bad: Path = self.dir / "bad.csv"

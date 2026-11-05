@@ -19,11 +19,14 @@ Reads a generative and an embedding catalog CSV (the format
 in ``resources/``) and writes the JSON list that ``warm_top_models_cache.py``
 and ``estimate_top_models_cache_size.py`` accept through ``--model-list-file``.
 
-The rules match ``build_model_list``: curated models first (unless
+The rules follow ``build_model_list``: curated models first (unless
 ``--no-curated``), then both CSVs merged by downloads, duplicates dropped, and
-models over ``--max-params`` removed. ``--top-k-*`` cut each CSV to its first N
-rows and are recorded in the file, so the scripts reading it must be given the
-same values.
+models over ``--max-params`` removed. The CSVs are download rankings, so
+``--top-k-downloads`` cuts each one to its first N rows; there is no trending
+ranking and no adapter check here, so ``--top-k-trending`` must be 0 and
+``--all-models`` given. All three are recorded in the file, so the scripts
+reading it must be given the same values. Registry models are not added: the
+file is a snapshot of an older selection.
 
 The CSVs carry no repo file list and no per-dtype parameter counts, so the
 rows hold neither. Consequences for the scripts that read the file:
@@ -39,7 +42,7 @@ Usage::
     python .github/cache_config/model_list_from_csvs.py \\
         --generative-csv resources/top_generative_models_DEPRECATED.csv \\
         --embedding-csv resources/top_embedding_models_DEPRECATED.csv \\
-        --output model_list.json
+        --top-k-trending 0 --all-models --output model_list.json
 """
 
 from __future__ import annotations
@@ -128,15 +131,14 @@ def curated_rows() -> list[dict[str, object]]:
 def build_from_csvs(
     generative_csv: Path,
     embedding_csv: Path,
-    top_k_generative: int,
-    top_k_embedding: int,
+    top_k: int,
     max_params: int,
     include_curated: bool,
 ) -> list[dict[str, object]]:
     """Same ordering and filters as ``build_model_list``, from local files."""
     fetched: list[dict[str, object]] = read_catalog_csv(
-        generative_csv, "generative", top_k_generative
-    ) + read_catalog_csv(embedding_csv, "embedding", top_k_embedding)
+        generative_csv, "generative", top_k
+    ) + read_catalog_csv(embedding_csv, "embedding", top_k)
     fetched.sort(key=lambda row: as_int(row.get("downloads")) or 0, reverse=True)
     curated: list[dict[str, object]] = curated_rows() if include_curated else []
     merged: list[dict[str, object]] = concat_and_dedup_dicts(
@@ -180,7 +182,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         required=True,
         help="Where to write the JSON model list.",
     )
-    return parser.parse_args(argv)
+    args: argparse.Namespace = parser.parse_args(argv)
+    if args.top_k_trending != 0 or not args.all_models:
+        parser.error(
+            "the CSVs hold one download ranking and no adapter verdicts: "
+            "pass --top-k-trending 0 --all-models"
+        )
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -188,8 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     rows: list[dict[str, object]] = build_from_csvs(
         args.generative_csv,
         args.embedding_csv,
-        args.top_k_generative,
-        args.top_k_embedding,
+        args.top_k_downloads,
         args.max_params,
         include_curated=not args.no_curated,
     )
