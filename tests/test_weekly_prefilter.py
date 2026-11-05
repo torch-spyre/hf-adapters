@@ -1129,13 +1129,13 @@ class TestCsvSinkIsWriteOnly:
 
 
 class TestCatalogMaxWorkers:
-    """build_catalog's thread count: default 16, overridable, validated."""
+    """build_catalog's thread count: default 8, overridable, validated."""
 
-    def test_default_is_16(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_is_8(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from utils.hf_model_catalog import catalog_max_workers
 
         monkeypatch.delenv("HF_CATALOG_MAX_WORKERS", raising=False)
-        assert catalog_max_workers() == 16
+        assert catalog_max_workers() == 8
 
     def test_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from utils.hf_model_catalog import catalog_max_workers

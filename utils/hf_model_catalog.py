@@ -87,10 +87,10 @@ RANKINGS: tuple[Ranking, ...] = ("downloads", "trending_score")
 
 # Threads build_catalog uses for its per-model Hub calls (the keep() filter and the
 # AutoConfig config-class lookup). Both are network-bound, so this bounds how many
-# requests hit the Hub at once. 16 (down from a hard-coded 32) eases rate-limit
+# requests hit the Hub at once. 8 (down from a hard-coded 32) eases rate-limit
 # pressure; the slower filter is affordable at the weekly scan's 1000-per-ranking
 # sizes. Override with HF_CATALOG_MAX_WORKERS.
-DEFAULT_CATALOG_MAX_WORKERS: int = 16
+DEFAULT_CATALOG_MAX_WORKERS: int = 8
 
 
 def catalog_max_workers() -> int:
