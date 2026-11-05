@@ -34,7 +34,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sympy import factorint
-from transformers import GenerationConfig, PreTrainedModel
+from transformers import GenerationConfig, PretrainedConfig, PreTrainedModel
 from transformers.generation import GenerateDecoderOnlyOutput
 from transformers.generation.streamers import BaseStreamer
 
@@ -619,8 +619,14 @@ def moe_prefill_all_experts(x, routing_weight, gate, up, down, activation):
     return (down_out * route).sum(dim=0)
 
 
-def assert_spyre_dimensions(config, model_name):
-    """Reject configs whose hidden / intermediate dimensions are stick-misaligned.
+def assert_spyre_dimensions(
+    config: PretrainedConfig,
+    model_name: str,
+    *,
+    config_names: tuple[str, ...] = (),
+    padded_dimensions: tuple[str, ...] = (),
+) -> None:
+    """Reject stick-misaligned dimensions that the adapter does not pad.
 
     The Spyre compiler lays tensors out in ``BLOCK_SIZE``-element sticks.
     Matmuls over a dimension that is not a multiple of ``BLOCK_SIZE`` produce
@@ -630,16 +636,33 @@ def assert_spyre_dimensions(config, model_name):
     and misaligned ones (e.g. ``hidden_size=312``).
 
     ``head_dim`` is not checked — adapters auto-pad it to a stick boundary (see
-    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``); hidden and
-    intermediate dims can't be padded without changing the model's arithmetic.
-    Real models clear this bar; it fires on tiny test fixtures (e.g.
-    ``trl-internal-testing/tiny-*``, ``cointegrated/rubert-tiny2``).
+    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``). Callers can
+    declare other dimensions padded during preparation via
+    ``padded_dimensions``, using the canonical names below. All remaining
+    dimensions must already be stick-aligned.
 
     Checks ``hidden_size`` (falling back to DistilBERT's ``dim``) and
     ``intermediate_size`` (falling back to DistilBERT's ``hidden_dim``).
+    By default, composite configs use their text config. ``config_names``
+    selects named sub-config attributes to validate instead, applying the
+    same padding allowances to each and identifying the sub-config in errors.
     """
-    dim_config = text_config(config)
-    misaligned = [
+    if config_names:
+        for config_name in config_names:
+            sub_config: object = getattr(config, config_name, None)
+            if not isinstance(sub_config, PretrainedConfig):
+                raise ValueError(
+                    f"Model {model_name} has no valid {config_name} configuration"
+                )
+            assert_spyre_dimensions(
+                sub_config,
+                f"{model_name} ({config_name})",
+                padded_dimensions=padded_dimensions,
+            )
+        return
+
+    dim_config: PretrainedConfig = text_config(config)
+    misaligned: list[tuple[str, int]] = [
         (label, v)
         for label, candidates in (
             ("hidden_size", ("hidden_size", "dim")),
@@ -657,15 +680,15 @@ def assert_spyre_dimensions(config, model_name):
         )
         is not None
         and v % BLOCK_SIZE != 0
+        and label not in padded_dimensions
     ]
     if misaligned:
         details = ", ".join(f"{f}={v}" for f, v in misaligned)
         raise SpyreUnsupportedModelError(
             f"Model {model_name} has Spyre-incompatible dimensions: {details} "
             f"(not a multiple of one stick, {BLOCK_SIZE}). The Spyre compiler "
-            f"cannot lower matmuls over stick-misaligned dimensions. Use a model "
-            f"whose hidden_size and intermediate_size are both multiples of "
-            f"{BLOCK_SIZE}."
+            f"cannot lower matmuls over stick-misaligned dimensions. Each "
+            f"dimension that the adapter does not pad must be a multiple of {BLOCK_SIZE}."
         )
 
 
@@ -3895,19 +3918,19 @@ def make_encoder_block(
 
 def make_vision_encoder_block(
     *,
-    q_proj,
-    k_proj,
-    v_proj,
-    o_proj,
-    layer_norm1,
-    layer_norm2,
-    ffn_in,
-    act,
-    ffn_out,
-    num_heads,
-    head_dim,
-    scale,
-):
+    q_proj: torch.nn.Module,
+    k_proj: torch.nn.Module,
+    v_proj: torch.nn.Module,
+    o_proj: torch.nn.Module,
+    layer_norm1: torch.nn.Module,
+    layer_norm2: torch.nn.Module,
+    ffn_in: torch.nn.Module,
+    act: Callable[[torch.Tensor], torch.Tensor],
+    ffn_out: torch.nn.Module,
+    num_heads: int,
+    head_dim: int,
+    scale: float,
+) -> Callable[..., torch.Tensor]:
     """Compile a **pre-LN** bidirectional vision-transformer block (SigLIP/CLIP).
 
     Counterpart of ``make_encoder_block`` (which is post-LN, BERT-style). A
@@ -3917,8 +3940,8 @@ def make_vision_encoder_block(
         h = h + o_proj(SDPA(qkv(layer_norm1(h))))
         h = h + ffn_out(act(ffn_in(layer_norm2(h))))
 
-    There is no attention mask and no KV cache — every patch attends to every
-    patch (full bidirectional attention over a fixed-length patch sequence).
+    There is no KV cache. By default every patch attends to every patch;
+    callers can pass an attention mask for text tokens or padded sequences.
 
     Args:
         q_proj/k_proj/v_proj/o_proj: per-head attention projections
@@ -3931,7 +3954,9 @@ def make_vision_encoder_block(
             softmax temperature).
     """
 
-    def block_forward(hidden_states):
+    def block_forward(
+        hidden_states: torch.Tensor, attn_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         bsz, seq_len, _ = hidden_states.shape
 
         residual = hidden_states
@@ -3944,7 +3969,7 @@ def make_vision_encoder_block(
             q,
             k,
             v,
-            attn_mask=None,
+            attn_mask=attn_mask,
             dropout_p=0.0,
             is_causal=False,
             scale=scale,

@@ -15,7 +15,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 from huggingface_hub.errors import HfHubHTTPError
 from huggingface_hub.hf_api import ExpandModelProperty_T, ModelInfo
@@ -70,11 +70,44 @@ EXPAND_FIELDS: list[ExpandModelProperty_T] = [
     "gated",
     "likes",
     "downloads",
+    "trendingScore",
     "createdAt",
     "library_name",
     "tags",
     "siblings",
 ]
+
+# How a ranked fetcher orders the Hub before taking its top-K. A subset of the hub's
+# ModelSort_T: "downloads" is the last-30-days download count (all-time is the
+# separate downloads_all_time field), and "trending_score" is the Hub's
+# recent-activity ranking -- the closest thing to "likes in the last 30 days", since
+# ``likes`` itself is an all-time total and the API exposes no per-period likes.
+Ranking = Literal["downloads", "trending_score"]
+RANKINGS: tuple[Ranking, ...] = ("downloads", "trending_score")
+
+# Threads build_catalog uses for its per-model Hub calls (the keep() filter and the
+# AutoConfig config-class lookup). Both are network-bound, so this bounds how many
+# requests hit the Hub at once. 8 (down from a hard-coded 32) eases rate-limit
+# pressure; the slower filter is affordable at the weekly scan's 1000-per-ranking
+# sizes. Override with HF_CATALOG_MAX_WORKERS.
+DEFAULT_CATALOG_MAX_WORKERS: int = 8
+
+
+def catalog_max_workers() -> int:
+    """Thread count for build_catalog: HF_CATALOG_MAX_WORKERS, else the default."""
+    raw: str = os.environ.get("HF_CATALOG_MAX_WORKERS", "").strip()
+    if not raw:
+        return DEFAULT_CATALOG_MAX_WORKERS
+    try:
+        value: int = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"HF_CATALOG_MAX_WORKERS must be a positive integer, got {raw!r}"
+        ) from None
+    if value < 1:
+        raise ValueError(f"HF_CATALOG_MAX_WORKERS must be >= 1, got {value}")
+    return value
+
 
 # HF-API gateway 5xx statuses. Anything outside this set (400/401/403/404/...)
 # is a permanent failure and must not be retried.
@@ -401,6 +434,9 @@ def build_catalog(
     timings: dict[str, float] = {}
     t_total = time.perf_counter()
     max_workers: int = catalog_max_workers()
+
+    max_workers: int = catalog_max_workers()
+    print(f"Using {max_workers} worker thread(s) for per-model Hub calls.")
 
     t0 = time.perf_counter()
     candidates: list[ModelInfo] = list(fetch_fn(limit))
