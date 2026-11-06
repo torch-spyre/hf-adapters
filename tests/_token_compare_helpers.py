@@ -33,16 +33,12 @@ from typing import Any
 
 import torch
 
-# Limits calibrated on Spyre (torch-spyre 601e155f) across all 26 models of the
-# default causal collection, teacher-forced, prefill + 4 decode steps (#687).
-# TODO(#494): MIN_COSINE / MAX_LOGIT_DIFF / MAX_MEAN_DIFF and the figures below
-# were measured on raw logits; recalibrate them on the centred metrics.
-#
-# Worst blocking model per metric, over runs with and without
-# CO_OPTIMIZING_LX_PLANNING: cosine 0.9749 and max diff 3.07 (pythia-410m),
-# mean diff 0.72 (Phi-3.5-mini). A drifting model sits past these, e.g.
-# OLMoE-1B-7B decode with the LX co-optimizer on: cosine 0.91, mean diff 1.8
-# -- while top-1 still matched (the same model is at cosine 0.9999 with it off).
+# Limits checked on centred logits, teacher-forced, prefill + 4 decode steps,
+# across the 27 models of the default causal collection (#687). Worst blocking
+# values: cosine 0.980, max diff 3.51, mean diff 0.45 in CI (pythia-410m,
+# torch-spyre 9cffba78); cosine 0.9745, max diff 4.96 on a dev pod (gemma-4-26B
+# decode-4, torch-spyre 64a818de). A fresh compile can move these numbers
+# (torch-spyre#5561), so one run is not a ceiling.
 MIN_COSINE = 0.95
 MAX_LOGIT_DIFF = 5.0
 MAX_MEAN_DIFF = 1.0
