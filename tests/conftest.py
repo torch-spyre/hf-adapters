@@ -51,6 +51,7 @@ from typing import Any, Union
 import pytest
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
+from _pytest.mark.structures import Mark
 from _pytest.nodes import Item
 from _pytest.python import Metafunc
 from transformers import AutoModelForCausalLM, PretrainedConfig
@@ -273,8 +274,8 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
 
     # Drop the decorator's own parametrize markers for ``model_path`` so pytest
     # doesn't raise "duplicate parametrization" when we call metafunc.parametrize
-    # below. Other parameter names on the same @parametrize marker are preserved.
-    kept: list = []
+    # below. Independent scenario parametrizations are preserved.
+    kept: list[Mark] = []
     for marker in metafunc.definition.iter_markers("parametrize"):
         argnames = marker.args[0] if marker.args else ""
         names = [n.strip() for n in argnames.replace(",", " ").split()]
@@ -296,6 +297,7 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
         "causal": model_registry.NON_BLOCKING_CAUSAL_MODELS,
         "vision": model_registry.NON_BLOCKING_VISION_MODELS,
         "embedding": {},
+        "multimodal_embedding": {},
         "masked_lm": {},
         "question_answering": {},
         "reranker": {},

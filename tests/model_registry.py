@@ -27,8 +27,11 @@ from __future__ import annotations
 
 import os
 import types
+from typing import Any
 
-import pytest
+# NOTE: no top-level ``import pytest``. The weekly scan's generate-matrix job imports
+# this registry (WEEKLY_SCAN_*_PATHS) from an environment without the ``test``
+# dependency group; ``xfail_non_blocking`` imports pytest lazily instead.
 
 
 def _include_gated() -> bool:
@@ -779,6 +782,17 @@ VISION_MODELS = {
 }
 
 
+MULTIMODAL_EMBEDDING_MODELS: dict[str, dict[str, Any]] = {
+    "siglip2_giant_opt_patch16_384": {
+        "name": "SigLIP2 giant-opt patch16 384",
+        "path": "google/siglip2-giant-opt-patch16-384",
+        "adapter": "hf_siglip.py",
+        "kind": "multimodal_embedding",
+        "size": "1.8b",
+    },
+}
+
+
 def _get_adapter_module_name(adapter_module: types.ModuleType) -> str:
     """Extract module name from adapter module object (e.g., hf_qwen3)."""
     return adapter_module.__name__.split(".")[-1]
@@ -929,6 +943,12 @@ XPRESS_PATHS: list[str] = _exclude(
 EMBED_PATHS: list[str] = _exclude(
     _select_representative_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)
 )
+MULTIMODAL_EMBED_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        MULTIMODAL_EMBEDDING_MODELS,
+        include_gated=_include_gated_flag,
+    )
+)
 MASKED_LM_PATHS: list[str] = _exclude(
     _select_representative_paths(MASKED_LM_MODELS, include_gated=_include_gated_flag)
 )
@@ -1002,6 +1022,7 @@ REMOTE_CODE_PATHS: frozenset[str] = frozenset(
         TOKEN_CLASSIFICATION_MODELS,
         STRUCTURED_DECISION_MODELS,
         VISION_MODELS,
+        MULTIMODAL_EMBEDDING_MODELS,
     )
     for info in models.values()
     if info.get("trust_remote_code", False)
@@ -1018,6 +1039,9 @@ ALL_CAUSAL_PATHS: list[str] = _exclude(
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") not in (*DRAFTER_KINDS, "diffusion"),
     )
+)
+ALL_MULTIMODAL_EMBED_PATHS: list[str] = _exclude(
+    _all_paths(MULTIMODAL_EMBEDDING_MODELS, include_gated=_include_gated_flag)
 )
 ALL_EMBED_PATHS: list[str] = _exclude(
     _all_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)
@@ -1047,6 +1071,29 @@ ALL_CLIP_PATHS: list[str] = _exclude(
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") == "clip",
     )
+)
+
+
+# Every registered checkpoint the weekly push-to-clickhouse scan evaluates by name,
+# alongside its ranked top-K lists and the curated files (see
+# tests/spyre/weekly_generation/model_fetcher.py). All entries -- not one
+# representative per adapter -- because the point is a weekly check that each
+# registered checkpoint still works. Gated and trust_remote_code entries are always
+# left out, regardless of SPYRE_INCLUDE_GATED / SPYRE_INCLUDE_TRUST_REMOTE_CODE: the
+# scan runs unattended and must not depend on per-environment opt-ins. Only the two
+# registries the scan has an evaluator for are included: token-compare (generative,
+# minus drafters and diffusion, which are not autoregressive LMs) and the text
+# SentenceTransformers embed-compare (embedding).
+WEEKLY_SCAN_GENERATIVE_PATHS: list[str] = _exclude(
+    _all_paths(
+        CAUSAL_LM_MODELS,
+        include_gated=False,
+        include_trust_remote_code=False,
+        predicate=lambda info: info.get("kind") not in (*DRAFTER_KINDS, "diffusion"),
+    )
+)
+WEEKLY_SCAN_EMBEDDING_PATHS: list[str] = _exclude(
+    _all_paths(EMBEDDING_MODELS, include_gated=False, include_trust_remote_code=False)
 )
 
 
@@ -1087,6 +1134,8 @@ def xfail_non_blocking(paths: list[str], *, table: dict[str, str]) -> list[objec
     The test still runs and its outcome (PASS/FAIL) is visible in the report,
     but a failure won't fail the pytest run or block CI.
     """
+    import pytest
+
     return [
         (
             pytest.param(
