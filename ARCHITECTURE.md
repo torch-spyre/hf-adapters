@@ -251,8 +251,9 @@ numbers are stale.** They were recorded against the old `torch-spyre @ 7c6ef99`
 pin; the dependency now tracks `main` (`pyproject.toml`), and decode has since
 been verified working end-to-end on **Granite** and **Qwen3** — both prefill and
 decode produce correct tokens. The measurements are retained only as historical
-context. The blocking causal test lane requires exact greedy top-1 agreement
-with CPU over prefill and four decode steps; Granite, Qwen3, and Gemma 4 E2B/E4B
+context. The blocking causal test lane teacher-forces decode with CPU's tokens
+and requires exact top-1 agreement plus per-step logit bounds over prefill and
+four decode steps; Granite, Qwen3, and Gemma 4 E2B/E4B
 all pass that check.
 
 ## Model Family Coverage
