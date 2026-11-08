@@ -21,15 +21,7 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-from transformers import (
-    CLIPTextConfig,
-    CLIPVisionConfig,
-    SiglipTextConfig,
-    SiglipVisionConfig,
-)
 from transformers.modeling_outputs import BaseModelOutput
-from transformers.models.clip.modeling_clip import CLIPEncoder, CLIPEncoderLayer
-from transformers.models.siglip.modeling_siglip import SiglipEncoder, SiglipEncoderLayer
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
@@ -39,27 +31,22 @@ from hf_adapters.hf_common import (
     pad_encoder_mlp,
 )
 
-Encoder = CLIPEncoder | SiglipEncoder
-EncoderConfig = (
-    CLIPTextConfig | CLIPVisionConfig | SiglipTextConfig | SiglipVisionConfig
-)
 CompiledBlock = Callable[[torch.Tensor, torch.Tensor | None], torch.Tensor]
 
 
-def prepare_encoder(
-    encoder: Encoder, config: EncoderConfig
-) -> tuple[list[CompiledBlock], int]:
-    """Pad heads/MLPs and compile pre-LN blocks with the original SDPA scale."""
+def prepare_encoder(encoder, config) -> tuple[list[CompiledBlock], int]:
+    """Pad heads/MLPs and compile pre-LN blocks with the original SDPA scale.
+
+    Callers must pass pre-LN layers (``h += attn(ln1(h)); h += mlp(ln2(h))``)
+    exposing ``self_attn.{q,k,v,out}_proj``, ``layer_norm1``, ``layer_norm2``
+    and ``mlp.{fc1,activation_fn,fc2}``; the layout is not checked here.
+    """
     num_heads = config.num_attention_heads
     original_head_dim: int = getattr(config, "head_dim", None) or (
         config.hidden_size // num_heads
     )
     head_dim = ((original_head_dim + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
-    layers: list[CLIPEncoderLayer | SiglipEncoderLayer] = []
-    for layer in encoder.layers:
-        if not isinstance(layer, (CLIPEncoderLayer, SiglipEncoderLayer)):
-            raise TypeError(f"Unsupported encoder layer: {type(layer).__name__}")
-        layers.append(layer)
+    layers = list(encoder.layers)
 
     if head_dim > original_head_dim:
         pad_attention_heads_linear(
@@ -96,11 +83,11 @@ def prepare_encoder(
     return blocks, head_dim
 
 
-def patch_encoder(encoder: Encoder, blocks: list[CompiledBlock]) -> None:
+def patch_encoder(encoder, blocks: list[CompiledBlock]) -> None:
     """Install a padded block loop, retaining HF's explicit/implicit causal mask."""
 
     def encoder_forward(
-        self: Encoder,
+        self,
         inputs_embeds: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         **kwargs: Any,
