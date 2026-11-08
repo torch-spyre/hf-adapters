@@ -51,7 +51,7 @@ def generate_matrices(
     # larger model sharing an adapter with a smaller default). Adding a new
     # category later just means adding a row here.
     registry = tests.model_registry
-    categories = {
+    categories: dict[str, tuple[list[str], list[str]]] = {
         "causal": (registry.CAUSAL_PATHS, registry.ALL_CAUSAL_PATHS),
         "multicard_smoke": (
             registry.MULTICARD_SMOKE_PATHS,
@@ -59,12 +59,8 @@ def generate_matrices(
         ),
         "embed": (registry.EMBED_PATHS, registry.ALL_EMBED_PATHS),
         "vision": (registry.VISION_PATHS, registry.ALL_VISION_PATHS),
-        # SentenceTransformers integration for all multimodal embedding models.
-        "sentence_transformers_multimodal": (
-            registry.MULTIMODAL_EMBED_PATHS,
-            registry.ALL_MULTIMODAL_EMBED_PATHS,
-        ),
-        "multimodal_embed_compare": (
+        # Shared by the SentenceTransformers integration and HF comparison suites.
+        "multimodal_embed": (
             registry.MULTIMODAL_EMBED_PATHS,
             registry.ALL_MULTIMODAL_EMBED_PATHS,
         ),
@@ -141,8 +137,7 @@ def generate_matrices(
         "multicard_smoke": paths["multicard_smoke"],
         "embed": paths["embed"],
         "vision": paths["vision"],
-        "sentence_transformers_multimodal": paths["sentence_transformers_multimodal"],
-        "multimodal_embed_compare": paths["multimodal_embed_compare"],
+        "multimodal_embed": paths["multimodal_embed"],
         "masked_lm": paths["masked_lm"],
         "question_answering": paths["question_answering"],
         "combined": combined_paths,
@@ -170,12 +165,7 @@ def format_for_github_actions(matrices: dict[str, list[str]]) -> dict[str, str]:
         "multicard_smoke_matrix": json.dumps(matrices["multicard_smoke"]),
         "embed_matrix": json.dumps(matrices["embed"]),
         "vision_matrix": json.dumps(matrices["vision"]),
-        "sentence_transformers_multimodal_matrix": json.dumps(
-            matrices["sentence_transformers_multimodal"]
-        ),
-        "multimodal_embed_compare_matrix": json.dumps(
-            matrices["multimodal_embed_compare"]
-        ),
+        "multimodal_embed_matrix": json.dumps(matrices["multimodal_embed"]),
         "masked_lm_matrix": json.dumps(matrices["masked_lm"]),
         "question_answering_matrix": json.dumps(matrices["question_answering"]),
         "combined_matrix": json.dumps(matrices["combined"]),
@@ -260,10 +250,7 @@ def main() -> None:
         f"  Vision models ({len(matrices['vision'])}): {', '.join(matrices['vision'])}"
     )
     print(
-        f"  Multimodal embedding models ({len(matrices['multimodal_embed_compare'])}): {', '.join(matrices['multimodal_embed_compare'])}"
-    )
-    print(
-        f"  SentenceTransformers multimodal models ({len(matrices['sentence_transformers_multimodal'])}): {', '.join(matrices['sentence_transformers_multimodal'])}"
+        f"  Multimodal embedding models ({len(matrices['multimodal_embed'])}): {', '.join(matrices['multimodal_embed'])}"
     )
     print(
         f"  Masked-LM models ({len(matrices['masked_lm'])}): {', '.join(matrices['masked_lm'])}"

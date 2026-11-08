@@ -438,8 +438,7 @@ jobs:
       multicard_smoke_matrix: ${{ steps.generate.outputs.multicard_smoke_matrix }}
       embed_matrix: ${{ steps.generate.outputs.embed_matrix }}
       vision_matrix: ${{ steps.generate.outputs.vision_matrix }}
-      sentence_transformers_multimodal_matrix: ${{ steps.generate.outputs.sentence_transformers_multimodal_matrix }}
-      multimodal_embed_compare_matrix: ${{ steps.generate.outputs.multimodal_embed_compare_matrix }}
+      multimodal_embed_matrix: ${{ steps.generate.outputs.multimodal_embed_matrix }}
       masked_lm_matrix: ${{ steps.generate.outputs.masked_lm_matrix }}
       question_answering_matrix: ${{ steps.generate.outputs.question_answering_matrix }}
       combined_matrix: ${{ steps.generate.outputs.combined_matrix }}
@@ -1355,7 +1354,7 @@ jobs:
       fail-fast: false
       matrix:
         # All MULTIMODAL_EMBEDDING_MODELS: SentenceTransformers integration.
-        model_key: ${{ fromJSON(needs.generate-matrix.outputs.sentence_transformers_multimodal_matrix) }}
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.multimodal_embed_matrix) }}
 
     steps:
       - name: Checkout composite actions
@@ -1438,7 +1437,7 @@ jobs:
       fail-fast: false
       matrix:
         # Dynamic matrix: multimodal embedding models from tests/model_registry.py
-        model_key: ${{ fromJSON(needs.generate-matrix.outputs.multimodal_embed_compare_matrix) }}
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.multimodal_embed_matrix) }}
 
     steps:
       - name: Checkout composite actions
