@@ -38,8 +38,6 @@ from transformers import GenerationConfig, PreTrainedModel
 from transformers.generation import GenerateDecoderOnlyOutput
 from transformers.generation.streamers import BaseStreamer
 
-from hf_adapters.execution import DenseAttention, compile_block
-
 # Rank-aware device for multi-Spyre (tensor-parallel) runs. torchrun sets
 # LOCAL_RANK before this module is imported, so each process binds to its local
 # AIU. Single-device runs get spyre:0. The conftest CPU-patch overwrites this to
@@ -3496,6 +3494,35 @@ def generate(
 # ---------------------------------------------------------------------------
 
 
+class DenseAttention:
+    """Dense SDPA with adapter-owned KV-cache updates."""
+
+    def __init__(self, scale):
+        self.scale = scale
+
+    def __call__(self, q, k, v, mask, key_cache, value_cache, cache_index):
+        key_cache, value_cache = kv_cache_update(
+            k, v, key_cache, value_cache, cache_index
+        )
+        output = F.scaled_dot_product_attention(
+            q,
+            key_cache,
+            value_cache,
+            attn_mask=mask,
+            dropout_p=0.0,
+            scale=self.scale,
+            enable_gqa=True,
+        )
+        return output, key_cache, value_cache
+
+
+def compile_block(function, runtime=None):
+    """Compile immediately, or defer compilation to an external runtime."""
+    if runtime is None:
+        return torch.compile(function, dynamic=False)
+    return runtime.wrap(function)
+
+
 def project_standard_gqa(attn, hidden_states, selected_freqs):
     """Shared Q/K/V projections and Spyre RoPE, independent of KV-cache ownership."""
     bsz, seq_len, _ = hidden_states.shape
@@ -3859,7 +3886,7 @@ def make_encoder_block(
     Dropout is skipped — these adapters are eval-only.
     """
     sdpa_scale = getattr(attn_module, "_spyre_orig_head_dim", head_dim) ** -0.5
-    from hf_adapters.execution import AttentionSpec, compile_block
+    from hf_adapters.execution import AttentionSpec
 
     attention = None
     if runtime is not None:

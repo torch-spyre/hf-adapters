@@ -30,10 +30,11 @@ Usage::
     outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
-from hf_adapters.execution import DenseAttention, compile_block
 from hf_adapters.hf_common import (
+    DenseAttention,
     PrecomputedRotaryEmbedding,
     apply_rope_matmul,
+    compile_block,
     get_backbone,
     prepare_lm_head_for_spyre,
     standard_gqa_backbone_forward,

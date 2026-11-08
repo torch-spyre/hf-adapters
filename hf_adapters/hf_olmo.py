@@ -32,8 +32,8 @@ Usage::
 
 import torch.nn.functional as F
 
-from hf_adapters.execution import compile_block
 from hf_adapters.hf_common import (
+    compile_block,
     get_backbone,
     prepare_lm_head_for_spyre,
     prepare_rope_and_heads,

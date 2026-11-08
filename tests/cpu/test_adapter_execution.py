@@ -41,8 +41,8 @@ from transformers import (
     SmolLM3Config,
 )
 
-from hf_adapters.execution import DenseAttention, prepare_adapter_execution
-from hf_adapters.hf_common import get_backbone
+from hf_adapters.execution import prepare_adapter_execution
+from hf_adapters.hf_common import DenseAttention, get_backbone
 
 
 def make_model(family, head_dim, partial, **config_kwargs):

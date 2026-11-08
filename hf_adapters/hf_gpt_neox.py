@@ -51,13 +51,14 @@ Usage::
 import torch
 import torch.nn as nn
 
-from hf_adapters.execution import DenseAttention, compile_block
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
+    DenseAttention,
     PrecomputedRotaryEmbedding,
     _pad_proj_input_simple,
     _pad_proj_output_simple,
     apply_rope_matmul,
+    compile_block,
     get_backbone,
     pad_qk_proj_for_rope,
     permute_proj_for_rope,

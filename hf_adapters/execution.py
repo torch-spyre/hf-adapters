@@ -18,29 +18,6 @@ import importlib
 from dataclasses import dataclass
 
 import torch
-import torch.nn.functional as F
-
-
-class DenseAttention:
-    def __init__(self, scale):
-        self.scale = scale
-
-    def __call__(self, q, k, v, mask, key_cache, value_cache, cache_index):
-        from hf_adapters.hf_common import kv_cache_update
-
-        key_cache, value_cache = kv_cache_update(
-            k, v, key_cache, value_cache, cache_index
-        )
-        output = F.scaled_dot_product_attention(
-            q,
-            key_cache,
-            value_cache,
-            attn_mask=mask,
-            dropout_p=0.0,
-            scale=self.scale,
-            enable_gqa=True,
-        )
-        return output, key_cache, value_cache
 
 
 @dataclass(frozen=True)
@@ -136,12 +113,6 @@ class ExternalRuntime:
                 block.function, dynamic=False, fullgraph=True
             )
         self._compiled = True
-
-
-def compile_block(function, runtime=None):
-    if runtime is None:
-        return torch.compile(function, dynamic=False)
-    return runtime.wrap(function)
 
 
 @dataclass

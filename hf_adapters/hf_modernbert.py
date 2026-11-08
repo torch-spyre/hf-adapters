@@ -53,13 +53,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from hf_adapters.execution import AttentionSpec, compile_block
+from hf_adapters.execution import AttentionSpec
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     InvFreqShim,
     PrecomputedRotaryEmbedding,
     add_sliding_window_band,
     apply_rope_matmul,
+    compile_block,
     get_backbone,
     validate_external_encoder,
 )

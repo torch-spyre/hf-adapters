@@ -27,9 +27,9 @@ Usage::
     outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
-from hf_adapters.execution import compile_block
 from hf_adapters.hf_common import (
     _SDPA_MAX_SEQUENCE_TILE_SIZE,
+    compile_block,
     embed_text_tokens,
     get_backbone,
     prepare_lm_head_for_spyre,
