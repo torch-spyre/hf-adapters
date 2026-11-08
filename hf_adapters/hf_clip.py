@@ -40,14 +40,6 @@ _is_encoder_only = True
 SPYRE_DIMENSION_CONFIGS: tuple[str, ...] = ("text_config", "vision_config")
 SPYRE_PADDED_DIMENSIONS: tuple[str, ...] = ("intermediate_size",)
 
-CLIPAdapterModel = (
-    CLIPModel
-    | CLIPTextModel
-    | CLIPTextModelWithProjection
-    | CLIPVisionModel
-    | CLIPVisionModelWithProjection
-)
-
 
 def load_hf_model(
     model_path: str,
@@ -72,7 +64,7 @@ def load_hf_model(
         )
 
 
-def prepare_for_spyre(model: CLIPAdapterModel) -> None:
+def prepare_for_spyre(model) -> None:
     """Prepare full, projected, or bare CLIP towers without replacing HF pooling."""
     if getattr(model, "_spyre_clip_prepared", False):
         return
