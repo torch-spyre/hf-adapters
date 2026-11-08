@@ -59,8 +59,11 @@ def generate_matrices(
         ),
         "embed": (registry.EMBED_PATHS, registry.ALL_EMBED_PATHS),
         "vision": (registry.VISION_PATHS, registry.ALL_VISION_PATHS),
-        # Keep the existing suite key for dispatch/retry compatibility.
-        "clip": (registry.MULTIMODAL_EMBED_PATHS, registry.ALL_MULTIMODAL_EMBED_PATHS),
+        # SentenceTransformers integration for all multimodal embedding models.
+        "sentence_transformers_multimodal": (
+            registry.MULTIMODAL_EMBED_PATHS,
+            registry.ALL_MULTIMODAL_EMBED_PATHS,
+        ),
         "multimodal_embed_compare": (
             registry.MULTIMODAL_EMBED_PATHS,
             registry.ALL_MULTIMODAL_EMBED_PATHS,
@@ -138,7 +141,7 @@ def generate_matrices(
         "multicard_smoke": paths["multicard_smoke"],
         "embed": paths["embed"],
         "vision": paths["vision"],
-        "clip": paths["clip"],
+        "sentence_transformers_multimodal": paths["sentence_transformers_multimodal"],
         "multimodal_embed_compare": paths["multimodal_embed_compare"],
         "masked_lm": paths["masked_lm"],
         "question_answering": paths["question_answering"],
@@ -167,7 +170,9 @@ def format_for_github_actions(matrices: dict[str, list[str]]) -> dict[str, str]:
         "multicard_smoke_matrix": json.dumps(matrices["multicard_smoke"]),
         "embed_matrix": json.dumps(matrices["embed"]),
         "vision_matrix": json.dumps(matrices["vision"]),
-        "clip_matrix": json.dumps(matrices["clip"]),
+        "sentence_transformers_multimodal_matrix": json.dumps(
+            matrices["sentence_transformers_multimodal"]
+        ),
         "multimodal_embed_compare_matrix": json.dumps(
             matrices["multimodal_embed_compare"]
         ),
@@ -258,7 +263,7 @@ def main() -> None:
         f"  Multimodal embedding models ({len(matrices['multimodal_embed_compare'])}): {', '.join(matrices['multimodal_embed_compare'])}"
     )
     print(
-        f"  SentenceTransformers multimodal models ({len(matrices['clip'])}): {', '.join(matrices['clip'])}"
+        f"  SentenceTransformers multimodal models ({len(matrices['sentence_transformers_multimodal'])}): {', '.join(matrices['sentence_transformers_multimodal'])}"
     )
     print(
         f"  Masked-LM models ({len(matrices['masked_lm'])}): {', '.join(matrices['masked_lm'])}"

@@ -65,7 +65,7 @@ on:
           Which Spyre suites to run: smoke | unit | integration | regression |
           trunk. These tier names are literal, first-class values -- no
           alias-resolution layer. "unit" runs every suite except smoke (load,
-          token_compare, model_components, embed_compare, clip, multimodal_embed_compare, vlm, reranker_compare,
+          token_compare, model_components, embed_compare, sentence_transformers_multimodal, multimodal_embed_compare, vlm, reranker_compare,
           masked_lm_compare, question_answering_compare,
           token_classification_compare, structured_decision_compare, model_module);
           "integration" runs token_compare and model_components;
@@ -438,7 +438,7 @@ jobs:
       multicard_smoke_matrix: ${{ steps.generate.outputs.multicard_smoke_matrix }}
       embed_matrix: ${{ steps.generate.outputs.embed_matrix }}
       vision_matrix: ${{ steps.generate.outputs.vision_matrix }}
-      clip_matrix: ${{ steps.generate.outputs.clip_matrix }}
+      sentence_transformers_multimodal_matrix: ${{ steps.generate.outputs.sentence_transformers_multimodal_matrix }}
       multimodal_embed_compare_matrix: ${{ steps.generate.outputs.multimodal_embed_compare_matrix }}
       masked_lm_matrix: ${{ steps.generate.outputs.masked_lm_matrix }}
       question_answering_matrix: ${{ steps.generate.outputs.question_answering_matrix }}
@@ -1337,13 +1337,13 @@ jobs:
           job_key: vlm
           payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
 
-  spyre-clip-e2e-tests:
+  spyre-sentence-transformers-multimodal-tests:
     name: Spyre SentenceTransformers multimodal integration (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
-    # Suite key: "clip". Part of the "unit" coarse tier.
+    # Suite key: "sentence_transformers_multimodal". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' clip ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' sentence_transformers_multimodal ')) }}
     continue-on-error: true
     runs-on:
       - x86_64
@@ -1355,7 +1355,7 @@ jobs:
       fail-fast: false
       matrix:
         # All MULTIMODAL_EMBEDDING_MODELS: SentenceTransformers integration.
-        model_key: ${{ fromJSON(needs.generate-matrix.outputs.clip_matrix) }}
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.sentence_transformers_multimodal_matrix) }}
 
     steps:
       - name: Checkout composite actions
@@ -1402,22 +1402,22 @@ jobs:
           # shellcheck source=.github/scripts/run-with-pod-stdout.sh
           source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_sentence_transformers_multimodal_spyre.py for ${{ matrix.model_key }}..."
-          run_teed make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
+          run_teed make sentence_transformers_multimodal_tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-sentence-transformers-multimodal-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-clip-${{ env.SAFE_MODEL_KEY }}
-          path: junit-clip-${{ matrix.model_key }}.xml
+          name: junit-sentence-transformers-multimodal-${{ env.SAFE_MODEL_KEY }}
+          path: junit-sentence-transformers-multimodal-${{ matrix.model_key }}.xml
           retention-days: 14
 
       - name: Save suite descriptor for pod-level retry
         if: failure()
         uses: ./.github/actions/save-failed-suite-descriptor
         with:
-          job_key: clip
+          job_key: sentence_transformers_multimodal
           payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
 
   spyre-multimodal-embed-e2e-tests:
@@ -2403,7 +2403,7 @@ jobs:
       - spyre-model-components-tests
       - spyre-embed-compare-tests
       - spyre-vlm-e2e-tests
-      - spyre-clip-e2e-tests
+      - spyre-sentence-transformers-multimodal-tests
       - spyre-multimodal-embed-e2e-tests
       - spyre-reranker-compare-tests
       - spyre-masked-lm-compare-tests
@@ -2433,8 +2433,8 @@ jobs:
       has_failed_embed_compare: ${{ steps.collect.outputs.has_failed_embed_compare }}
       matrix_vlm: ${{ steps.collect.outputs.matrix_vlm }}
       has_failed_vlm: ${{ steps.collect.outputs.has_failed_vlm }}
-      matrix_clip: ${{ steps.collect.outputs.matrix_clip }}
-      has_failed_clip: ${{ steps.collect.outputs.has_failed_clip }}
+      matrix_sentence_transformers_multimodal: ${{ steps.collect.outputs.matrix_sentence_transformers_multimodal }}
+      has_failed_sentence_transformers_multimodal: ${{ steps.collect.outputs.has_failed_sentence_transformers_multimodal }}
       matrix_multimodal_embed_compare: ${{ steps.collect.outputs.matrix_multimodal_embed_compare }}
       has_failed_multimodal_embed_compare: ${{ steps.collect.outputs.has_failed_multimodal_embed_compare }}
       matrix_reranker: ${{ steps.collect.outputs.matrix_reranker }}
@@ -2492,7 +2492,7 @@ jobs:
           # One key per spyre-*-tests job above -- must match the "job_key" each job's "Save suite descriptor" step stamps into suite.json.
           keys = [
               "load", "smoke", "multicard_smoke", "token_compare", "model_components",
-              "embed_compare", "vlm", "clip", "multimodal_embed_compare", "reranker", "masked_lm", "qa",
+              "embed_compare", "vlm", "sentence_transformers_multimodal", "multimodal_embed_compare", "reranker", "masked_lm", "qa",
               "seq_classification", "token_classification", "structured_decision",
               "edge_cases", "model_module",
           ]
@@ -3078,13 +3078,13 @@ jobs:
           retention-days: 14
           overwrite: true
 
-  spyre-clip-e2e-tests-retry:
+  spyre-sentence-transformers-multimodal-tests-retry:
     name: Spyre SentenceTransformers multimodal integration (${{ matrix.model_key }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
     # Fail-closed on pin failure is emergent, not gated here: if resolve-torch-spyre
-    # failed, every primary suite skipped, so nothing ran, so has_failed_clip
+    # failed, every primary suite skipped, so nothing ran, so has_failed_sentence_transformers_multimodal
     # is false and this retry never fires. See spyre-load-tests-retry for the full note.
-    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_clip == 'true' }}
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_sentence_transformers_multimodal == 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -3093,7 +3093,7 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.collect-failed-suites.outputs.matrix_clip) }}
+      matrix: ${{ fromJSON(needs.collect-failed-suites.outputs.matrix_sentence_transformers_multimodal) }}
 
     steps:
       - name: Checkout composite actions
@@ -3140,22 +3140,22 @@ jobs:
           # shellcheck source=.github/scripts/run-with-pod-stdout.sh
           source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           echo "Running test_sentence_transformers_multimodal_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          run_teed make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
+          run_teed make sentence_transformers_multimodal_tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-sentence-transformers-multimodal-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Mark the retry's report with the first attempt's failures
         if: always()
         uses: ./.github/actions/mark-retried-report
         with:
-          artifact_name: junit-clip-${{ env.SAFE_MODEL_KEY }}
-          report: junit-clip-${{ matrix.model_key }}.xml
+          artifact_name: junit-sentence-transformers-multimodal-${{ env.SAFE_MODEL_KEY }}
+          report: junit-sentence-transformers-multimodal-${{ matrix.model_key }}.xml
 
       - name: Upload JUnit results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-clip-${{ env.SAFE_MODEL_KEY }}
-          path: junit-clip-${{ matrix.model_key }}.xml
+          name: junit-sentence-transformers-multimodal-${{ env.SAFE_MODEL_KEY }}
+          path: junit-sentence-transformers-multimodal-${{ matrix.model_key }}.xml
           retention-days: 14
           overwrite: true
 
@@ -3861,7 +3861,7 @@ jobs:
       - spyre-model-components-tests-retry
       - spyre-embed-compare-tests-retry
       - spyre-vlm-e2e-tests-retry
-      - spyre-clip-e2e-tests-retry
+      - spyre-sentence-transformers-multimodal-tests-retry
       - spyre-multimodal-embed-e2e-tests-retry
       - spyre-reranker-compare-tests-retry
       - spyre-masked-lm-compare-tests-retry
@@ -3893,7 +3893,7 @@ jobs:
                  (needs.collect-failed-suites.outputs.has_failed_model_components == 'true' && needs.spyre-model-components-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_embed_compare == 'true' && needs.spyre-embed-compare-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_vlm == 'true' && needs.spyre-vlm-e2e-tests-retry.result != 'success') ||
-                 (needs.collect-failed-suites.outputs.has_failed_clip == 'true' && needs.spyre-clip-e2e-tests-retry.result != 'success') ||
+                 (needs.collect-failed-suites.outputs.has_failed_sentence_transformers_multimodal == 'true' && needs.spyre-sentence-transformers-multimodal-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_multimodal_embed_compare == 'true' && needs.spyre-multimodal-embed-e2e-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_reranker == 'true' && needs.spyre-reranker-compare-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_masked_lm == 'true' && needs.spyre-masked-lm-compare-tests-retry.result != 'success') ||

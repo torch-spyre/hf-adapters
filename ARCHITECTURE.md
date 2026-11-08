@@ -158,7 +158,9 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 encoders for text/image retrieval and similarity scoring. Both belong to
 `MULTIMODAL_EMBEDDING_MODELS` and use `test_e2e_multimodal_embed_compare_spyre.py`.
 Both also run through `test_sentence_transformers_multimodal_spyre.py` to
-exercise the SentenceTransformers Spyre backend (the legacy `clip` CI suite key).
+exercise the SentenceTransformers Spyre backend through
+`make sentence_transformers_multimodal_tests`
+(CI suite key: `sentence_transformers_multimodal`).
 
 | Model | model\_type | Text / vision head\_dim | Embedding width | Status |
 |-------|-----------|------------------------|-----------------|--------|
