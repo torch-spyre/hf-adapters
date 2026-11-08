@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared CLIP/SigLIP encoder preparation and execution on Spyre."""
+"""Shared dual-encoder transformer preparation and execution on Spyre."""
 
 from collections.abc import Callable
 from functools import wraps
@@ -113,7 +113,7 @@ def patch_encoder(encoder: Encoder, blocks: list[CompiledBlock]) -> None:
             )
         seq_len = inputs_embeds.shape[1]
         mask = attention_mask.cpu() if attention_mask is not None else None
-        # HF's SDPA path can omit the CLIP text mask and rely on is_causal.
+        # HF's SDPA path can omit a causal text mask and rely on is_causal.
         # The compiled block uses is_causal=False, so materialize it here.
         if mask is None and kwargs.get("is_causal", False):
             mask = torch.ones((seq_len, seq_len), dtype=torch.bool).tril()[None, None]
