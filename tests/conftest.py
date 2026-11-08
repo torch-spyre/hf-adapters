@@ -113,6 +113,7 @@ if _TARGETS_CPU and not _ALREADY_PATCHED:
     _pkg = types.ModuleType("hf_adapters")
     _pkg.__path__ = [ADAPTERS_DIR]
     sys.modules["hf_adapters"] = _pkg
+    setattr(_pkg, "hf_common", _common_mod)
 
     # Pre-load auto_spyre_model with the patched hf_common already in sys.modules
     # so model_registry's top-level import reuses the patched modules.

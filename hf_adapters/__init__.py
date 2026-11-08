@@ -24,8 +24,6 @@ except ImportError:
     except PackageNotFoundError:
         __version__ = "0.0.0"
 
-from hf_adapters.hf_common import encode_prompts
-
 __all__ = [
     "__version__",
     "AutoSpyreModel",
@@ -40,15 +38,19 @@ __all__ = [
 
 
 def __getattr__(name):
-    # auto_spyre_model is imported lazily, so that it is possible to import specific modules,
-    # e.g., hf_adapters.execution, without importing every model family's dependencies.
+    # Keep package initialization independent of hf_common and model-family imports.
     if name in __all__ and name.startswith("AutoSpyreModel"):
         from hf_adapters import auto_spyre_model
 
         value = getattr(auto_spyre_model, name)
-        globals()[name] = value
-        return value
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    elif name == "encode_prompts":
+        from hf_adapters.hf_common import encode_prompts
+
+        value = encode_prompts
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    globals()[name] = value
+    return value
 
 
 def __dir__():

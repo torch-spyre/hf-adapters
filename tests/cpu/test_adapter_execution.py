@@ -490,7 +490,7 @@ def test_adapter_preparation_does_not_import_serving_libraries_tp_or_registry(fa
 
                 class NoServingImports(importlib.abc.MetaPathFinder):
                     def find_spec(self, fullname, path=None, target=None):
-                        if fullname.split('.')[0] in {'spyre_inference', 'vllm'}:
+                        if fullname.split('.')[0] in {'spyre_inference', 'vllm', 'sglang', 'sglang_spyre_backend'}:
                             raise AssertionError(f'Unexpected serving import: {fullname}')
 
                 sys.meta_path.insert(0, NoServingImports())
@@ -510,7 +510,7 @@ def test_adapter_preparation_does_not_import_serving_libraries_tp_or_registry(fa
                 assert 'hf_adapters.auto_spyre_model' not in sys.modules
                 assert 'hf_adapters.spyre_tensor_parallel' not in sys.modules
                 assert not any(
-                    name.split('.')[0] in {'spyre_inference', 'vllm'}
+                    name.split('.')[0] in {'spyre_inference', 'vllm', 'sglang', 'sglang_spyre_backend'}
                     for name in sys.modules
                 )
                 """),
