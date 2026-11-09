@@ -140,9 +140,7 @@ def _spyre_load_model(
                 _to_cpu(attention_mask),
                 token_type_ids=_to_cpu(token_type_ids),
             )
-            output = BaseModelOutput()
-            output["last_hidden_state"] = h
-            return output
+            return BaseModelOutput(last_hidden_state=h)
 
     else:
 
@@ -156,9 +154,7 @@ def _spyre_load_model(
             h = prefill_embed(
                 run_backbone_forward, self, _to_cpu(input_ids), _to_cpu(attention_mask)
             )
-            output = BaseModelOutput()
-            output["last_hidden_state"] = h
-            return output
+            return BaseModelOutput(last_hidden_state=h)
 
     model.forward = types.MethodType(_spyre_forward, model)
 
