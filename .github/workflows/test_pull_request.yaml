@@ -99,7 +99,7 @@ jobs:
     secrets: inherit
     with:
       # Per-PR ephemeral image label when provided, else the standing set for this event.
-      image_label: ${{ inputs.runner_label || 'image_torch_spyre' }}
+      image_label: ${{ inputs.runner_label || 'image_torch_spyre_rpmrefresh' }}
       extra_test_flags: -vvv -s
       extra_test_flags_multi_spyre: -vvv -s
       ref: ${{ inputs.ref || '' }}
