@@ -21,7 +21,6 @@ embeddings, pooling, and projections remain on CPU.
 
 from __future__ import annotations
 
-import torch
 from transformers import (
     CLIPModel,
     CLIPTextConfig,
@@ -32,7 +31,6 @@ from transformers import (
     CLIPVisionModelWithProjection,
 )
 
-from hf_adapters._model_loading import model_subfolder
 from hf_adapters.hf_common import (
     encoder_backbone_forward,
     patch_cpu_inputs,
@@ -44,21 +42,6 @@ _run_backbone_forward = encoder_backbone_forward
 _is_encoder_only = True
 SPYRE_DIMENSION_CONFIGS: tuple[str, ...] = ("text_config", "vision_config")
 SPYRE_PADDED_DIMENSIONS: tuple[str, ...] = ("intermediate_size",)
-
-
-def load_hf_model(
-    model_path: str,
-    dtype: torch.dtype = torch.float16,
-    trust_remote_code: bool | None = None,
-) -> CLIPModel:
-    """Load CLIP directly or from a SentenceTransformers module subfolder."""
-    return CLIPModel.from_pretrained(
-        model_path,
-        subfolder=model_subfolder(model_path),
-        dtype=dtype,
-        device_map="cpu",
-        trust_remote_code=trust_remote_code,
-    )
 
 
 def prepare_for_spyre(model) -> None:

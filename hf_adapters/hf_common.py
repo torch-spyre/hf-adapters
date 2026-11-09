@@ -2476,9 +2476,9 @@ def _resolve_tp_plan(
 
     from hf_adapters.spyre_tensor_parallel import prepare_spyre_tp_plan
 
-    config_kwargs: dict[str, str] = {"subfolder": subfolder} if subfolder else {}
+    # Same subfolder as the weights (load_model_common passes model_subfolder()).
     cfg: PretrainedConfig = AutoConfig.from_pretrained(
-        model_path, trust_remote_code=trust_remote_code, **config_kwargs
+        model_path, subfolder=subfolder, trust_remote_code=trust_remote_code
     )
     with torch.device("meta"):
         probe = auto_model_cls.from_config(cfg)
