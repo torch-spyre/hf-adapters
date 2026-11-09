@@ -50,6 +50,9 @@ PYTEST_ARGS ?= -s -vvv
 # so any resolve fails there even though the venv already has a local torch build.
 PYTEST ?= uv run --active --no-sync pytest
 
+# Python invocation for target scripts and inline helper invocations; same --active --no-sync reasoning.
+PYTHON ?= uv run --active --no-sync python3
+
 # Benchmark invocation for perf-tests; same --active --no-sync reasoning as PYTEST above.
 PERF_SUITE ?= uv run --active --no-sync spyre-perf-suite
 
@@ -106,8 +109,8 @@ load-tests: ## Run load tests (suite key: load)
 	# gets from --model-path (safe here because MODEL_PATH is always one exact
 	# registry path, never an attacker-controlled or ambiguous substring).
 	@if [ -n "$(strip $(MODEL_PATH))" ]; then \
-	  models="$$(python3 -c "import sys; sys.path.insert(0, 'tests'); import model_registry as mr; print(' '.join(mr.resolve_load_test_models(sys.argv[1:])[0]))" $(MODEL_PATH))"; \
-	  invalid="$$(python3 -c "import sys; sys.path.insert(0, 'tests'); import model_registry as mr; print(' '.join(mr.resolve_load_test_models(sys.argv[1:])[1]))" $(MODEL_PATH))"; \
+	  models="$$($(PYTHON) -c "import sys; sys.path.insert(0, 'tests'); import model_registry as mr; print(' '.join(mr.resolve_load_test_models(sys.argv[1:])[0]))" $(MODEL_PATH))"; \
+	  invalid="$$($(PYTHON) -c "import sys; sys.path.insert(0, 'tests'); import model_registry as mr; print(' '.join(mr.resolve_load_test_models(sys.argv[1:])[1]))" $(MODEL_PATH))"; \
 	  if [ -n "$$invalid" ]; then \
 	    echo "ERROR: Invalid model path(s) for load tests: $$invalid" >&2; \
 	    exit 1; \
@@ -185,7 +188,7 @@ perf-tests: ## Run spyre-perf-suite once per MODEL_PATH model into RESULTS_DIR (
 	if [[ "$(PERF_REPORT)" != split && "$(PERF_REPORT)" != combined ]]; then echo "ERROR: PERF_REPORT must be split or combined" >&2; exit 1; fi; \
 	results="$$(mkdir -p "$(RESULTS_DIR)" && cd "$(RESULTS_DIR)" && pwd)"; \
 	shim="$$results/.hf-adapters-path"; mkdir -p "$$shim" && ln -sfn "$$PWD/hf_adapters" "$$shim/hf_adapters"; \
-	models="$$(python3 -c "import sys; sys.path.insert(0, 'tests'); import model_registry as mr; print(' '.join(mr._exclude(sys.argv[1:])))" $(MODEL_PATH))"; \
+	models="$$($(PYTHON) -c "import sys; sys.path.insert(0, 'tests'); import model_registry as mr; print(' '.join(mr._exclude(sys.argv[1:])))" $(MODEL_PATH))"; \
 	if [[ -z "$$models" ]]; then \
 	  echo "All requested models in MODEL_PATH are excluded on $$(uname -m) (see tests/model_lists/exclude.yaml); skipping perf-tests."; \
 	  if [[ "$(PERF_REPORT)" == combined ]]; then \
