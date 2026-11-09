@@ -196,7 +196,8 @@ returns normalized text/image embeddings and similarity logits with the learned
 scale (and SigLIP's bias); it is not covered by the Spyre suite.
 
 Both adapters and `hf_siglip_vision.py` share encoder preparation in
-`_vision_encoder.py` and compiled pre-LN blocks in `hf_common.py`. CLIP text
+`hf_common.py` (`prepare_pre_ln_encoder`, `patch_pre_ln_encoder_forward`,
+`patch_cpu_inputs`) on top of its compiled pre-LN blocks. CLIP text
 retains causal attention; SigLIP text and both vision towers are bidirectional.
 Attention heads and SigLIP's text MLP (4304→4352) are zero-padded
 for stick alignment. Encoder blocks run on Spyre; token/patch embeddings,

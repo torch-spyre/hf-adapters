@@ -55,9 +55,9 @@ import torch
 import torch.nn.functional as F
 from transformers import SiglipVisionConfig, SiglipVisionModel
 
-from hf_adapters._vision_encoder import prepare_encoder
 from hf_adapters.hf_common import (
     prefill_vision,
+    prepare_pre_ln_encoder,
     vision_backbone_forward,
 )
 
@@ -148,7 +148,7 @@ def prepare_for_spyre(model: Any) -> None:
     cfg = inner.config
     if not isinstance(cfg, SiglipVisionConfig):
         raise TypeError(f"Expected SiglipVisionConfig, got {type(cfg).__name__}")
-    model._spyre_compiled_blocks, model._spyre_head_dim = prepare_encoder(
+    model._spyre_compiled_blocks, model._spyre_head_dim = prepare_pre_ln_encoder(
         inner.encoder, cfg
     )
 

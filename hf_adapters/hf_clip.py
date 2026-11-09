@@ -33,8 +33,12 @@ from transformers import (
 )
 
 from hf_adapters._model_loading import model_subfolder
-from hf_adapters._vision_encoder import patch_cpu_inputs, patch_encoder, prepare_encoder
-from hf_adapters.hf_common import encoder_backbone_forward
+from hf_adapters.hf_common import (
+    encoder_backbone_forward,
+    patch_cpu_inputs,
+    patch_pre_ln_encoder_forward,
+    prepare_pre_ln_encoder,
+)
 
 _run_backbone_forward = encoder_backbone_forward
 _is_encoder_only = True
@@ -84,8 +88,8 @@ def prepare_for_spyre(model) -> None:
         config = tower.config
         if not isinstance(config, (CLIPTextConfig, CLIPVisionConfig)):
             raise TypeError(f"Unsupported CLIP tower config: {type(config).__name__}")
-        blocks, head_dim = prepare_encoder(tower.encoder, config)
-        patch_encoder(tower.encoder, blocks)
+        blocks, head_dim = prepare_pre_ln_encoder(tower.encoder, config)
+        patch_pre_ln_encoder_forward(tower.encoder, blocks)
         setattr(tower.encoder, "_spyre_head_dim", head_dim)
         if not prefix:
             setattr(model, "_spyre_compiled_blocks", blocks)

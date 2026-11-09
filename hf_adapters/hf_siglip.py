@@ -16,7 +16,8 @@
 
 ``google/siglip2-giant-opt-patch16-384`` uses ``SiglipModel``, with a fixed
 384-pixel vision input, rather than the separate Siglip2 NaFlex architecture.
-Both encoders share padding and execution through ``_vision_encoder``.
+Both encoders share padding and execution through the pre-LN encoder helpers
+in ``hf_common``.
 Embeddings, final norms, text projection, and attention pooling stay on CPU,
 while the transformer blocks execute on Spyre.
 
@@ -56,12 +57,16 @@ from transformers.models.siglip.modeling_siglip import (
 )
 
 from hf_adapters import hf_siglip_vision
-from hf_adapters._vision_encoder import patch_cpu_inputs, patch_encoder, prepare_encoder
-from hf_adapters.hf_common import patch_layernorm
+from hf_adapters.hf_common import (
+    patch_cpu_inputs,
+    patch_layernorm,
+    patch_pre_ln_encoder_forward,
+    prepare_pre_ln_encoder,
+)
 
 _is_encoder_only = True
 
-# Validate both towers; prepare_encoder pads each tower's MLP intermediate size.
+# Validate both towers; prepare_pre_ln_encoder pads each tower's MLP intermediate size.
 SPYRE_DIMENSION_CONFIGS: tuple[str, ...] = ("text_config", "vision_config")
 SPYRE_PADDED_DIMENSIONS: tuple[str, ...] = ("intermediate_size",)
 
@@ -108,8 +113,8 @@ def prepare_for_spyre(model: SiglipModel) -> None:
         config = tower.config
         if not isinstance(config, (SiglipTextConfig, SiglipVisionConfig)):
             raise TypeError(f"Unsupported SigLIP config: {type(config).__name__}")
-        blocks, head_dim = prepare_encoder(tower.encoder, config)
-        patch_encoder(tower.encoder, blocks)
+        blocks, head_dim = prepare_pre_ln_encoder(tower.encoder, config)
+        patch_pre_ln_encoder_forward(tower.encoder, blocks)
         setattr(tower.encoder, "_spyre_head_dim", head_dim)
     patch_cpu_inputs(model.text_model, ("input_ids", "attention_mask", "position_ids"))
     _patch_vision_forward(model.vision_model)
