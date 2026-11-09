@@ -35,20 +35,22 @@ in its filter_configs.py.
 SOURCE OF TRUTH is each suite job's `if:` gate in .github/workflows/_test_matrix.yaml,
 because that is what actually decides whether a suite runs. The Makefile's `tests` target
 carries a second, HAND-MAINTAINED copy in its `case` block, and the two have already
-drifted (see tests/test_tier_tags.py, which pins the difference): the Makefile omits `clip`
-from every suites= list, has no `multicard_smoke` target, and puts `model_components` only
+drifted (see tests/test_tier_tags.py, which pins the difference): the Makefile has no
+`multicard_smoke` target and puts `model_components` only
 in regression/trunk even though Makefile:8 documents it as an integration suite. Keep this
 table in step with the WORKFLOW; the test reports drift rather than guessing.
 """
 
 from __future__ import annotations
 
+import platform
+import re
+
 # suite key -> the tiers whose runs include that suite.
 # Mirrors the `if:` gate of each suite job in .github/workflows/_test_matrix.yaml.
-# Five suites are deliberately absent. tier_tags() returns [] for any of them, so their
+# These suites are deliberately absent. tier_tags() returns [] for any of them, so their
 # cases still carry a model tag -- they simply contribute no tier-coverage data.
-#   perf             -- a scaffold that echoes an empty JUnit file with no <testcase>
-#                       elements (Makefile `tests` target): nothing to tag.
+#   perf             -- spyre-perf-suite benchmark XML, not pytest JUnit: nothing to tag.
 #   edge_cases       -- gated on `inputs.edge_cases_only`, never on a tier, and absent
 #                       from every suites= list. Its target still passes --suite so the
 #                       key is declared in one place if it ever joins a tier.
@@ -56,10 +58,12 @@ from __future__ import annotations
 #                       pytest, so it emits no JUnit XML at all.
 #   adapter_coverage -- runs with --noconftest (Makefile), so the autouse fixture never
 #                       binds; passing --suite there would be an unknown-option error.
-#   model_module     -- delegates to the oot_framework run_test.sh, which does its own
-#                       marker-based tagging (torch-spyre's mechanism), not this one.
+#   model_module     -- delegates to the oot_framework run_test.sh, which tags from each
+#                       config's test_suite_config.labels (tests/configs/module_tests).
+#   model_support    -- explicitly selected by suite key; no tier includes the Hub scan.
 SUITE_TIERS: dict[str, tuple[str, ...]] = {
     "clip": ("regression", "trunk", "unit"),
+    "multimodal_embed_compare": ("regression", "trunk", "unit"),
     "embed_compare": ("regression", "trunk", "unit"),
     "load": ("regression", "trunk", "unit"),
     "masked_lm_compare": ("regression", "trunk", "unit"),
@@ -68,6 +72,7 @@ SUITE_TIERS: dict[str, tuple[str, ...]] = {
     "reranker_compare": ("regression", "trunk", "unit"),
     "seq_classification_compare": ("regression", "trunk", "unit"),
     "smoke": ("regression", "trunk"),
+    "structured_decision_compare": ("regression", "trunk", "unit"),
     "token_classification_compare": ("regression", "trunk", "unit"),
     "token_compare": ("integration", "regression", "trunk", "unit"),
     "vlm": ("regression", "trunk", "unit"),
@@ -106,13 +111,19 @@ def model_tag(params) -> str | None:
     return None
 
 
+def platform_tag() -> str:
+    """`platform__<arch>`, normalized like torch-spyre's oot_framework so arches match."""
+    arch = re.sub(r"[^a-zA-Z0-9_]", "_", platform.machine() or "unknown").strip("_")
+    return f"platform__{arch or 'unknown'}"
+
+
 def result_tags(suite: str, params) -> list[tuple[str, str]]:
     """The (name, value) JUnit property pairs for one test case.
 
     Emitted as `<property name="tag" value="namespace__value"/>`, the shape the ClickHouse
     ingest reads (see .github/scripts/ingest_xml_hf_adapters.py extract_properties).
     """
-    tags: list[tuple[str, str]] = []
+    tags: list[tuple[str, str]] = [("tag", platform_tag())]
     model = model_tag(params)
     if model:
         tags.append(("tag", model))

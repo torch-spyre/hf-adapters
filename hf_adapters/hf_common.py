@@ -25,7 +25,8 @@ import math
 import os
 import sys
 import time
-from contextlib import contextmanager, nullcontext
+import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Optional
 
@@ -33,8 +34,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sympy import factorint
-from transformers import GenerationConfig
+from transformers import GenerationConfig, PretrainedConfig, PreTrainedModel
 from transformers.generation import GenerateDecoderOnlyOutput
+from transformers.generation.streamers import BaseStreamer
 
 # Rank-aware device for multi-Spyre (tensor-parallel) runs. torchrun sets
 # LOCAL_RANK before this module is imported, so each process binds to its local
@@ -56,6 +58,20 @@ class SpyreNoAdapterError(ValueError):
     """No Spyre adapter is registered for this model's architecture."""
 
 
+@dataclass(frozen=True)
+class PrefillContext:
+    """Explicit chunk execution parameters for a complete-prompt prefill hook.
+
+    ``attention_mask`` passed to the hook covers the first ``chunk_size`` rows.
+    Call ``build_attention_mask(start)`` for each subsequent chunk, in order.
+    The callback returns a device mask in the full prefill-cache coordinates;
+    its implementation and any mask optimizations stay inside the shared runtime.
+    """
+
+    chunk_size: int
+    build_attention_mask: Callable[[int], torch.Tensor]
+
+
 @contextmanager
 def optional_spyre_config_patch(options: dict[str, Any]) -> Iterator[None]:
     """Apply a torch-spyre config patch when torch-spyre is available."""
@@ -71,18 +87,218 @@ def optional_spyre_config_patch(options: dict[str, Any]) -> Iterator[None]:
         yield
 
 
-def _move_moe_expert_weight(weight):
+def _move_moe_expert_weight(weight, *, matmul_order=False):
     if not str(DEVICE).startswith("spyre"):
         return weight
 
     from torch_spyre.model_utils import dma_moe_expert_weight_to_spyre
 
-    moved = dma_moe_expert_weight_to_spyre(weight)
+    if matmul_order:
+        from torch_spyre._C import (
+            SpyreTensorLayout,
+            copy_tensor,
+            get_elem_in_stick,
+            spyre_empty_with_layout,
+        )
+
+        weight = weight.contiguous()
+        stick = get_elem_in_stick(weight.dtype)
+        if weight.shape[-1] % stick:
+            raise ValueError(
+                f"MoE expert weight free dim {weight.shape[-1]} must span whole "
+                f"{stick}-element sticks."
+            )
+        layout = SpyreTensorLayout(
+            list(weight.shape), list(weight.stride()), weight.dtype, [1, 0, 2]
+        )
+        moved = spyre_empty_with_layout(
+            weight.size(),
+            weight.stride(),
+            weight.dtype,
+            layout,
+            device=torch.device(DEVICE),
+        )
+        copy_tensor(weight, moved, non_blocking=False)
+        return moved
+    moved = dma_moe_expert_weight_to_spyre(weight, device=DEVICE)
     return moved if moved is not None else weight.to(DEVICE)
 
 
-def prepare_moe_expert_weights(experts, *, pad_to_multiple=None):
+def derive_moe_chunks(hidden, top_k, stick, max_cores=None, override=None):
+    """Choose the fewest stick-legal hidden chunks that fill the most cores.
+
+    The gathered decode kernel splits work only across its ``top_k * chunks``
+    entries. A core holds ``top_k * hidden * intermediate / cores_used`` weight
+    elements whatever the chunk count, so the split that fills the most cores
+    also has the smallest per-core working set. ``SPYRE_MOE_CHUNKS`` overrides
+    the selection when set.
+    """
+    if override is None:
+        raw = os.getenv("SPYRE_MOE_CHUNKS")
+        override = int(raw) if raw is not None else None
+    if hidden <= 0 or top_k <= 0 or stick <= 0:
+        raise ValueError(
+            "MoE chunk selection requires positive dimensions, top_k, and stick size"
+        )
+    if hidden % stick:
+        raise ValueError(
+            f"Spyre MoE hidden size {hidden} must be a multiple of "
+            f"{stick}-element sticks."
+        )
+    if override is not None:
+        if override <= 0:
+            raise ValueError(f"SPYRE_MOE_CHUNKS must be positive, got {override}")
+        if hidden % (override * stick):
+            raise ValueError(
+                f"SPYRE_MOE_CHUNKS={override} requires hidden size {hidden} to split "
+                f"into {override} whole {stick}-element-stick chunks."
+            )
+        return override
+
+    if max_cores is None:
+        # Only the core-count derivation needs torch_spyre; the override path
+        # above returns without it, keeping CPU-lane callers import-clean.
+        try:
+            from torch_spyre._inductor import config as spyre_config
+        except ImportError as e:
+            raise ImportError(
+                "Deriving MoE decode chunks from the Spyre core count requires "
+                "torch_spyre; pass max_cores= or set SPYRE_MOE_CHUNKS to run "
+                "without it."
+            ) from e
+        max_cores = spyre_config.sencores
+    if max_cores <= 0:
+        raise ValueError(
+            f"MoE chunk selection requires at least one core, got {max_cores}"
+        )
+
+    hidden_sticks = hidden // stick
+    best_cores, best_chunks = 0, 1
+    for chunks in range(1, hidden_sticks + 1):
+        if hidden_sticks % chunks:
+            continue
+        entries = top_k * chunks
+        cores_used = max(
+            split
+            for split in range(1, min(entries, max_cores) + 1)
+            if entries % split == 0
+        )
+        if cores_used > best_cores:
+            best_cores, best_chunks = cores_used, chunks
+    return best_chunks
+
+
+def moe_chunk_entry_constants(chunks):
+    """fp32 scale ``[1, 1, 1]`` and offsets ``[1, chunks, 1]`` of entry ``e*chunks+c``.
+
+    Region inputs rather than in-graph scalars, so the compiled decode needs no
+    per-call constants; the size-1 stick dim lets them broadcast against the
+    widened fp32 expert index. Moved to the Spyre device once at load.
+    """
+    scale = torch.full((1, 1, 1), float(chunks), dtype=torch.float32)
+    offsets = torch.arange(chunks, dtype=torch.float32).reshape(1, chunks, 1)
+    if str(DEVICE).startswith("spyre"):
+        scale, offsets = scale.to(DEVICE), offsets.to(DEVICE)
+    return scale, offsets
+
+
+def _moe_decode_weight_view(pool, chunks, *, down=False):
+    """Interpret one persistent expert stack as expert-major decode chunks.
+
+    On Spyre the view reinterprets the pool's storage; on CPU it is a reshape
+    (and, for the down pool, a permute) that copies.
+    """
+    experts, contract, free = pool.shape
+    if not str(DEVICE).startswith("spyre"):
+        if down:
+            if free % chunks:
+                raise ValueError(
+                    f"MoE down pool free dim {free} must divide into {chunks} chunks"
+                )
+            return (
+                pool.reshape(experts, contract, chunks, free // chunks)
+                .permute(0, 2, 1, 3)
+                .reshape(experts * chunks, contract, free // chunks)
+            )
+        if contract % chunks:
+            raise ValueError(
+                f"MoE gate/up contract dim {contract} must divide into "
+                f"{chunks} chunks"
+            )
+        return pool.reshape(experts * chunks, contract // chunks, free)
+
+    from torch_spyre._C import (
+        SpyreTensorLayout,
+        get_device_dtype,
+        get_elem_in_stick,
+        get_spyre_tensor_layout,
+        reinterpret_tensor_with_layout,
+    )
+
+    stick = get_elem_in_stick(pool.dtype)
+
+    def check_pool_layout(expected):
+        actual = get_spyre_tensor_layout(pool)
+        if (actual.device_size, actual.stride_map) != (
+            expected.device_size,
+            expected.stride_map,
+        ):
+            raise RuntimeError(
+                f"MoE pool device layout {actual.device_size} / {actual.stride_map} "
+                f"differs from the {expected.device_size} / {expected.stride_map} "
+                "its decode chunk view reinterprets."
+            )
+
+    if down:
+        if free % chunks:
+            raise ValueError(
+                f"MoE down pool free dim {free} must divide into {chunks} chunks"
+            )
+        size = [experts * chunks, contract, free // chunks]
+        stride = [contract * size[-1], size[-1], 1]
+        layout = SpyreTensorLayout(size, stride, pool.dtype, [1, 0, 2])
+        # The persistent down pool must sit in matmul order: the H sticks are
+        # outer to M, so chunking H preserves flat physical order.
+        check_pool_layout(
+            SpyreTensorLayout(
+                list(pool.shape), list(pool.stride()), pool.dtype, [1, 0, 2]
+            )
+        )
+    else:
+        if contract % chunks:
+            raise ValueError(
+                f"MoE gate/up contract dim {contract} must divide into "
+                f"{chunks} chunks"
+            )
+        size = [experts * chunks, contract // chunks, free]
+        stride = [size[1] * free, free, 1]
+        layout = SpyreTensorLayout(
+            [size[0], size[1], free // stick, stick],
+            [stride[0], stride[1], stick, 1],
+            get_device_dtype(pool.dtype),
+        )
+        # The persistent gate/up pools must sit in gather order: contract is
+        # outer to the free-dim sticks, so chunking it preserves flat order.
+        check_pool_layout(
+            SpyreTensorLayout(
+                [experts, contract, free // stick, stick],
+                [contract * free, free, stick, 1],
+                get_device_dtype(pool.dtype),
+            )
+        )
+    return reinterpret_tensor_with_layout(pool, size, stride, 0, layout)
+
+
+def prepare_moe_expert_weights(experts, *, pad_to_multiple=None, decode_chunks=1):
     """Split, transpose, pad, and move persistent MoE weights in place."""
+    if decode_chunks != 1:
+        hidden_size = experts.gate_up_proj.shape[-1]
+        if (
+            pad_to_multiple is None
+            or hidden_size % decode_chunks
+            or (hidden_size // decode_chunks) % pad_to_multiple
+        ):
+            raise ValueError("MoE decode chunks must each span whole hidden sticks")
     gate_up = experts.gate_up_proj.detach()
     del experts.gate_up_proj
 
@@ -94,12 +310,24 @@ def prepare_moe_expert_weights(experts, *, pad_to_multiple=None):
     if intermediate_pad:
         gate = F.pad(gate, (0, intermediate_pad))
     experts.gate_proj = _move_moe_expert_weight(gate)
+    if decode_chunks != 1:
+        experts.decode_gate_proj = _moe_decode_weight_view(
+            experts.gate_proj, decode_chunks
+        )
+    else:
+        # One chunk: the persistent pools are the decode views, and the
+        # whole-expert for_each_tile path consumes them directly.
+        experts.decode_gate_proj = experts.gate_proj
     del gate
 
     up = gate_up[:, intermediate_size:].transpose(1, 2).contiguous()
     if intermediate_pad:
         up = F.pad(up, (0, intermediate_pad))
     experts.up_proj = _move_moe_expert_weight(up)
+    if decode_chunks != 1:
+        experts.decode_up_proj = _moe_decode_weight_view(experts.up_proj, decode_chunks)
+    else:
+        experts.decode_up_proj = experts.up_proj
     del up
     del gate_up
 
@@ -109,7 +337,19 @@ def prepare_moe_expert_weights(experts, *, pad_to_multiple=None):
         # Match the zero-padded local gate/up channels. The added down rows are
         # zero, so each rank's partial output is unchanged before TP all-reduce.
         down = F.pad(down, (0, 0, 0, intermediate_pad))
-    experts.down_proj = _move_moe_expert_weight(down)
+    experts.down_proj = _move_moe_expert_weight(down, matmul_order=decode_chunks != 1)
+    if decode_chunks != 1:
+        experts.decode_down_proj = _moe_decode_weight_view(
+            experts.down_proj, decode_chunks, down=True
+        )
+        experts.decode_chunk_scale, experts.decode_chunk_offsets = (
+            moe_chunk_entry_constants(decode_chunks)
+        )
+    else:
+        experts.decode_down_proj = experts.down_proj
+        experts.decode_chunk_scale, experts.decode_chunk_offsets = (
+            moe_chunk_entry_constants(1)
+        )
 
 
 def moe_topk(probabilities, top_k):
@@ -134,6 +374,9 @@ def moe_decode_selected_experts(
     stick_size,
     activation,
     per_expert_scale_stick=None,
+    decode_chunks=1,
+    chunk_scale=None,
+    chunk_offsets=None,
 ):
     """Gather selected experts and combine their decode outputs."""
     if activation not in ("silu", "gelu_tanh"):
@@ -141,67 +384,195 @@ def moe_decode_selected_experts(
 
     T, H = x.shape
     if x.device.type == "spyre":
-        from torch_spyre._inductor.propagate_hints import spyre_hint
+        from torch_spyre._inductor.wsr import for_each_tile
 
         # Widen topk's fp16 indices onto a stick before converting them to the
-        # device's int32 gather indices. The layout pass inserts the restickify.
-        index_stick = (
-            expert_indices[..., None].expand(T, top_k, stick_size).contiguous()
-        )
-        index_stick = index_stick.to(torch.float32)
-        index_address = index_stick[..., : stick_size // 2].to(torch.int32)
-        expert_indices = index_address[..., 0]
-        hint = spyre_hint(tiles={"row": tile})
-    else:
-        hint = nullcontext()
-
-    with hint:
-        rows = T * top_k
-        intermediate = gate.shape[-1]
-        inputs = x[:, None, :].expand(T, top_k, H).contiguous().reshape(rows, 1, H)
-        selected_gate = gate[expert_indices].reshape(rows, H, intermediate)
-        selected_up = up[expert_indices].reshape(rows, H, intermediate)
-        selected_down = down[expert_indices].reshape(rows, intermediate, H)
-
-        gate_out = torch.bmm(inputs, selected_gate)
-        up_out = torch.bmm(inputs, selected_up)
-        if activation == "silu":
-            activated = F.silu(gate_out) * up_out
+        # device's int32 gather indices. Chunked decode addresses expert-major
+        # entries in flattened (token, selected expert) order.
+        # Every lane holds the index, so take it as the max over the stick: the
+        # float32 holds each pair of sticks in an interleaved order, and a
+        # reduction reads it whole where a slice would split a pair.
+        if decode_chunks == 1:
+            # The layout pass inserts the restickify.
+            index_stick = (
+                expert_indices[..., None].expand(T, top_k, stick_size).contiguous()
+            )
+            index_stick = index_stick.to(torch.float32)
+            index_address = index_stick.amax(-1, keepdim=True).to(torch.int32)
+            expert_indices = index_address[..., 0]
         else:
-            activated = F.gelu(gate_out, approximate="tanh") * up_out
-        expert_out = torch.bmm(activated, selected_down).reshape(T, top_k, H)
-        expert_out = expert_out * weights[..., None]
+            expert_fp32 = (
+                expert_indices.reshape(T * top_k, 1)
+                .expand(T * top_k, stick_size)
+                .contiguous()
+                .to(torch.float32)
+            )
+            expert_indices = expert_fp32.amax(-1).to(torch.int32)
+    else:
+        index_address = None
+        if decode_chunks == 1:
+            index_address = expert_indices[..., None]
+        else:
+            # The chunked entry math reads the widened fp32 index regardless
+            # of device; only the spyre gather needs the int32 conversion.
+            expert_fp32 = (
+                expert_indices.reshape(T * top_k, 1)
+                .expand(T * top_k, stick_size)
+                .contiguous()
+                .to(torch.float32)
+            )
+            expert_indices = expert_indices.reshape(T * top_k)
+
+    rows = T * top_k
+    intermediate = gate.shape[-1]
+    if decode_chunks == 1:
+        inputs = x[:, None, :].expand(T, top_k, H).contiguous().reshape(rows, 1, H)
+        indices = index_address.reshape(rows, -1)
+
+        def expert_body(_, tiles):
+            inputs, indices, gate, up, down = tiles
+            selected = indices[:, 0]
+            selected_gate = gate[selected]
+            selected_up = up[selected]
+            selected_down = down[selected]
+
+            gate_out = torch.bmm(inputs, selected_gate)
+            up_out = torch.bmm(inputs, selected_up)
+            if activation == "silu":
+                activated = F.silu(gate_out) * up_out
+            else:
+                activated = F.gelu(gate_out, approximate="tanh") * up_out
+            return None, torch.bmm(activated, selected_down)
+
+        operands = (inputs, indices, gate, up, down)
+        if x.device.type == "spyre":
+            # Gather weights inside each tile so only its selected experts are
+            # materialized. Use a divisor of rows: for_each_tile needs full tiles.
+            _, expert_out = for_each_tile(
+                expert_body,
+                operands,
+                dims=(0, 0, None, None, None),
+                tile_size=math.gcd(rows, tile),
+                out_dim=0,
+            )
+        else:
+            _, expert_out = expert_body(None, operands)
+
+        expert_out = expert_out * weights.reshape(rows, 1, 1)
         if per_expert_scale_stick is not None:
             expert_scale = per_expert_scale_stick[expert_indices][..., :1]
-            expert_out = expert_out * expert_scale
-        return expert_out.sum(dim=1)
+            expert_out = expert_out * expert_scale.reshape(rows, 1, 1)
+        return expert_out.reshape(T, top_k, H).sum(dim=1)
+
+    # Chunked decode: shares expert-major weight chunks across decode steps.
+    # Entry e*chunks+c selects chunk c of expert e, in (row, chunk) order.
+    # Broadcasting the widened expert index against the [1, chunks, 1] device
+    # offsets -- not a cat of per-chunk index tensors -- keeps the region one
+    # kernel without per-call constants (the cat version splits into
+    # chunks+1 kernels whose launch cost outweighs the narrower slices at
+    # small TP shards).
+    if H % decode_chunks or H // decode_chunks % stick_size:
+        raise ValueError("MoE decode hidden chunks must span whole sticks")
+    slice_rows = H // decode_chunks
+    if (
+        gate.shape[1:] != (slice_rows, intermediate)
+        or up.shape != gate.shape
+        or down.shape != (gate.shape[0], intermediate, slice_rows)
+    ):
+        raise ValueError("MoE decode weights must be expert-major chunks")
+
+    if chunk_scale is None or chunk_offsets is None:
+        # CPU callers and ad-hoc regions build the broadcast constants here.
+        chunk_scale = torch.full((1, 1, 1), float(decode_chunks))
+        chunk_offsets = torch.arange(decode_chunks, dtype=torch.float32).reshape(
+            1, decode_chunks, 1
+        )
+    # The widened fp32 index is [rows, stick]; the constants broadcast to
+    # [rows, chunks, stick] so entries cover every (row, chunk) pair.
+    entries = (expert_fp32[:, None, :] * chunk_scale + chunk_offsets).reshape(
+        rows * decode_chunks, stick_size
+    )
+    slice_index = entries.amax(-1).to(torch.int32)
+    inputs = (
+        x.reshape(T, 1, decode_chunks, slice_rows)
+        .expand(T, top_k, decode_chunks, slice_rows)
+        .contiguous()
+        .reshape(rows * decode_chunks, 1, slice_rows)
+    )
+    gate_out = torch.bmm(
+        inputs,
+        gate[slice_index].reshape(rows * decode_chunks, slice_rows, intermediate),
+    )
+    up_out = torch.bmm(
+        inputs,
+        up[slice_index].reshape(rows * decode_chunks, slice_rows, intermediate),
+    )
+    # Sum the gate/up partial products over the contiguous chunk axis
+    # before the activation, matching the persistent form's rounding.
+    gate_out = gate_out.reshape(rows, decode_chunks, 1, intermediate).sum(dim=1)
+    up_out = up_out.reshape(rows, decode_chunks, 1, intermediate).sum(dim=1)
+
+    if activation == "silu":
+        activated = F.silu(gate_out) * up_out
+    else:
+        activated = F.gelu(gate_out, approximate="tanh") * up_out
+    # Output chunk c of every row is the c-th hidden slice, so the down
+    # parts reshape in place instead of concatenating.
+    act_rep = (
+        activated[:, None]
+        .expand(rows, decode_chunks, 1, intermediate)
+        .reshape(rows * decode_chunks, 1, intermediate)
+    )
+    parts = torch.bmm(
+        act_rep,
+        down[slice_index].reshape(rows * decode_chunks, intermediate, slice_rows),
+    )
+    expert_out = parts.reshape(T, top_k, H)
+    expert_out = expert_out * weights[..., None]
+    if per_expert_scale_stick is not None:
+        expert_scale = per_expert_scale_stick[expert_indices][:, :1].reshape(
+            T, top_k, 1
+        )
+        expert_out = expert_out * expert_scale
+    return expert_out.sum(dim=1)
 
 
 @contextmanager
 def named_moe_prefill_inputs(x, gate, up, down):
-    """Name eager MoE inputs for the immediately following compiled prefill."""
+    """Keep the prefill token work division attached to its eager inputs.
+
+    The expert loop's ``work_div={"T": 32}`` needs these names to resolve to
+    the token axis. Without them the compiler can leave most cores idle.
+    Accept flattened [T, H] or batched [B, T, H] inputs. Keep batch and sequence
+    names separate so flattening them for the expert loop and restoring the
+    batch shape both preserve dimension propagation.
+    """
     if x.device.type != "spyre":
         yield
         return
 
     named_dims = sys.modules["torch_spyre._inductor.wsr.propagate_named_dims"]
-    tokens = x.shape[0] * x.shape[1]
+    batch, tokens, _ = (1, *x.shape) if x.ndim == 2 else x.shape
+    input_names = ("T", "H") if x.ndim == 2 else ("B", "T", "H")
     experts, hidden, intermediate = gate.shape
     try:
         for name, extent in (
+            ("B", batch),
             ("E", experts),
             ("T", tokens),
             ("H", hidden),
             ("M", intermediate),
-            ("ONE", 1),
         ):
             named_dims.declare_tensor_dim(name, extent)
-        named_dims.name_tensor_dims(x, ["T", "H"])
+        named_dims.name_tensor_dims(
+            x, [name for name, size in zip(input_names, x.shape) if size != 1]
+        )
         named_dims.name_tensor_dims(gate, ["E", "H", "M"])
         named_dims.name_tensor_dims(up, ["E", "H", "M"])
         named_dims.name_tensor_dims(down, ["E", "M", "H"])
         yield
     finally:
+        # Compilation consumes these globals; a cache hit does not.
         named_dims.reset()
 
 
@@ -214,8 +585,7 @@ def moe_prefill_all_experts(x, routing_weight, gate, up, down, activation):
         from torch_spyre._inductor.propagate_hints import spyre_hint
         from torch_spyre._inductor.wsr import for_each_tile
 
-        with spyre_hint(named_dims=["E", "T", "ONE"]):
-            route = routing_weight.permute(1, 0, 2).contiguous().clone()
+        route = routing_weight.permute(1, 0, 2).contiguous().clone()
 
         def expert_body(acc, tiles):
             x, route_tile, gate_tile, up_tile, down_tile = tiles
@@ -249,8 +619,14 @@ def moe_prefill_all_experts(x, routing_weight, gate, up, down, activation):
     return (down_out * route).sum(dim=0)
 
 
-def assert_spyre_dimensions(config, model_name):
-    """Reject configs whose hidden / intermediate dimensions are stick-misaligned.
+def assert_spyre_dimensions(
+    config: PretrainedConfig,
+    model_name: str,
+    *,
+    config_names: tuple[str, ...] = (),
+    padded_dimensions: tuple[str, ...] = (),
+) -> None:
+    """Reject stick-misaligned dimensions that the adapter does not pad.
 
     The Spyre compiler lays tensors out in ``BLOCK_SIZE``-element sticks.
     Matmuls over a dimension that is not a multiple of ``BLOCK_SIZE`` produce
@@ -260,16 +636,33 @@ def assert_spyre_dimensions(config, model_name):
     and misaligned ones (e.g. ``hidden_size=312``).
 
     ``head_dim`` is not checked — adapters auto-pad it to a stick boundary (see
-    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``); hidden and
-    intermediate dims can't be padded without changing the model's arithmetic.
-    Real models clear this bar; it fires on tiny test fixtures (e.g.
-    ``trl-internal-testing/tiny-*``, ``cointegrated/rubert-tiny2``).
+    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``). Callers can
+    declare other dimensions padded during preparation via
+    ``padded_dimensions``, using the canonical names below. All remaining
+    dimensions must already be stick-aligned.
 
     Checks ``hidden_size`` (falling back to DistilBERT's ``dim``) and
     ``intermediate_size`` (falling back to DistilBERT's ``hidden_dim``).
+    By default, composite configs use their text config. ``config_names``
+    selects named sub-config attributes to validate instead, applying the
+    same padding allowances to each and identifying the sub-config in errors.
     """
-    dim_config = text_config(config)
-    misaligned = [
+    if config_names:
+        for config_name in config_names:
+            sub_config: object = getattr(config, config_name, None)
+            if not isinstance(sub_config, PretrainedConfig):
+                raise ValueError(
+                    f"Model {model_name} has no valid {config_name} configuration"
+                )
+            assert_spyre_dimensions(
+                sub_config,
+                f"{model_name} ({config_name})",
+                padded_dimensions=padded_dimensions,
+            )
+        return
+
+    dim_config: PretrainedConfig = text_config(config)
+    misaligned: list[tuple[str, int]] = [
         (label, v)
         for label, candidates in (
             ("hidden_size", ("hidden_size", "dim")),
@@ -287,16 +680,38 @@ def assert_spyre_dimensions(config, model_name):
         )
         is not None
         and v % BLOCK_SIZE != 0
+        and label not in padded_dimensions
     ]
     if misaligned:
         details = ", ".join(f"{f}={v}" for f, v in misaligned)
         raise SpyreUnsupportedModelError(
             f"Model {model_name} has Spyre-incompatible dimensions: {details} "
             f"(not a multiple of one stick, {BLOCK_SIZE}). The Spyre compiler "
-            f"cannot lower matmuls over stick-misaligned dimensions. Use a model "
-            f"whose hidden_size and intermediate_size are both multiples of "
-            f"{BLOCK_SIZE}."
+            f"cannot lower matmuls over stick-misaligned dimensions. Each "
+            f"dimension that the adapter does not pad must be a multiple of {BLOCK_SIZE}."
         )
+
+
+def to_default_device_layout(hidden_states: torch.Tensor) -> torch.Tensor:
+    """Copy the embedding output into the default Spyre layout.
+
+    The embedding gives layer 0 its input in a different device layout than
+    the one each block gives the next layer. Dynamo checks the layout of
+    every block input, so layer 0 compiles its own copy of the block. One copy
+    into the default layout (the layout every block returns) lets all layers
+    use the same compiled block. If the layout is already the default, the
+    tensor does not change. Tensors that are not on Spyre are returned as is.
+    """
+    if hidden_states.device.type != "spyre":
+        return hidden_states
+    from torch_spyre._C import SpyreTensorLayout  # type: ignore[import-not-found]
+
+    target = SpyreTensorLayout(hidden_states.size(), hidden_states.dtype)
+    # ``device_layout=`` is added to Tensor.to by torch-spyre.
+    out: torch.Tensor = hidden_states.to(  # type: ignore[call-overload]
+        device_layout=target
+    )
+    return out
 
 
 def get_backbone(model):
@@ -332,12 +747,26 @@ def get_backbone(model):
     return getattr(inner, "language_model", inner)
 
 
-def embed_text_tokens(model, input_ids):
-    """Embed text token ids using the model backbone's embedding policy."""
-    backbone = get_backbone(model)
+def embed_text_tokens(model, input_ids, backbone=None):
+    """Embed text token ids. All adapters use this for their token embedding.
+
+    Moves ``input_ids`` to the embedding's device, looks them up in
+    ``embed_tokens``, and multiplies by ``embedding_multiplier`` when the
+    backbone has one (Granite). Then copies the result into the default Spyre
+    layout (see ``to_default_device_layout``), so layer 0 gets its input in the
+    same layout as the other layers.
+
+    ``backbone`` defaults to ``get_backbone(model)``. Pass it for models that
+    keep ``embed_tokens`` somewhere else (OPT keeps it on ``decoder``).
+    """
+    if backbone is None:
+        backbone = get_backbone(model)
     input_ids = input_ids.to(backbone.embed_tokens.weight.device)
     hidden_states = backbone.embed_tokens(input_ids)
-    return hidden_states * getattr(backbone, "embedding_multiplier", 1.0)
+    multiplier = getattr(backbone, "embedding_multiplier", None)
+    if multiplier is not None:
+        hidden_states = hidden_states * multiplier
+    return to_default_device_layout(hidden_states)
 
 
 def text_config(config):
@@ -359,6 +788,7 @@ def encode_prompts(
     padding_side: str = "left",
     add_generation_prompt: bool = True,
     chat: bool | None = None,
+    chat_template_kwargs: dict | None = None,
 ):
     """Tokenize prompt(s) following the model's canonical input scheme.
 
@@ -366,6 +796,7 @@ def encode_prompts(
     trailing generation prompt. Base models use the tokenizer directly, which
     preserves the checkpoint's own special-token post-processor. ``chat`` can
     force either behavior; by default, the presence of a chat template decides.
+    ``chat_template_kwargs`` passes model-specific options to the chat template.
 
     Returns a padded ``BatchEncoding`` containing ``input_ids`` and
     ``attention_mask``. A single string is normalized to a one-row batch.
@@ -386,6 +817,7 @@ def encode_prompts(
             return_tensors="pt",
             padding=True,
             padding_side=padding_side,
+            **(chat_template_kwargs or {}),
         )
     return tokenizer(
         prompt_list,
@@ -437,7 +869,8 @@ class PrecomputedRotaryEmbedding(nn.Module):
         rope_half = inv_freq.shape[0]  # type: ignore[index]
         t = torch.arange(target_len, dtype=inv_freq.dtype)  # type: ignore[arg-type]
         freqs = torch.outer(
-            t, inv_freq  # type: ignore[arg-type]
+            t,
+            inv_freq,  # type: ignore[arg-type]
         ).float()  # [S, rope_half] # type: ignore[arg-type]
         scaling = getattr(self.original, "attention_scaling", 1.0)
         rot = torch.stack(
@@ -449,7 +882,10 @@ class PrecomputedRotaryEmbedding(nn.Module):
             ],
             dim=1,
         ).view(
-            target_len, 2, 2, rope_half  # type: ignore[arg-type]
+            target_len,
+            2,
+            2,
+            rope_half,  # type: ignore[arg-type]
         )  # type: ignore[arg-type]
 
         if self.padded_head_dim is not None:
@@ -718,11 +1154,28 @@ def permute_proj_for_rope(proj, num_heads, head_dim, perm):
     reordering as the weight or the rotary dims pick up the wrong offsets).
     Bias-free projections (Phi-3) skip the bias branch.
     """
-    w = proj.weight.data.view(num_heads, head_dim, -1)
-    proj.weight.data = w[:, perm, :].contiguous().view(num_heads * head_dim, -1)
+    # TP may load the shard directly on Spyre, whose eager backend cannot perform the advanced indexing used by this one-time permutation.
+    weight_device = proj.weight.device
+    weight_dtype = proj.weight.dtype
+    w = proj.weight.data.to("cpu").view(num_heads, head_dim, -1)
+    permuted_weight = w[:, perm, :].contiguous().view(num_heads * head_dim, -1)
+    if weight_device.type == "spyre":
+        from hf_adapters.spyre_tensor_parallel import _copy_linear
+
+        permuted_weight = _copy_linear(
+            permuted_weight,
+            dtype=weight_dtype,
+            device=weight_device,
+        )
+    else:
+        permuted_weight = permuted_weight.to(weight_device)
+    proj.weight = nn.Parameter(permuted_weight, requires_grad=False)
     if proj.bias is not None:
-        b = proj.bias.data.view(num_heads, head_dim)
-        proj.bias.data = b[:, perm].contiguous().view(num_heads * head_dim)
+        bias_device = proj.bias.device
+        b = proj.bias.data.to("cpu").view(num_heads, head_dim)
+        proj.bias.data = (
+            b[:, perm].contiguous().view(num_heads * head_dim).to(bias_device)
+        )
 
 
 def pad_qk_proj_for_rope(proj, n_heads, orig_head_dim, padded_head_dim):
@@ -777,6 +1230,10 @@ def pad_attention_heads(
     V and O use simple end-padding per head (they don't pass through
     RoPE, so layout within a head doesn't matter).
 
+    Head counts come from the local projections after TP sharding. Projection
+    modules are preserved so their TP hooks (especially O's all-reduce) survive
+    padding. Padded weights stay on CPU until the final model-to-Spyre move.
+
     Note: only Q/K *need* padding for RoPE stick alignment.  V and O
     could use the original head_dim (PyTorch SDPA supports E != Ev),
     which would shrink the KV cache. This is blocked by the Spyre
@@ -790,8 +1247,8 @@ def pad_attention_heads(
         layers: Iterable of decoder layers (each must have ``self_attn``).
         orig_head_dim: Original head dimension.
         padded_head_dim: Target head dimension (must be > orig_head_dim).
-        num_heads: Number of query heads.
-        num_kv_heads: Number of key/value heads.
+        num_heads: Config query-head count, used only as a fallback.
+        num_kv_heads: Config KV-head count, used only as a fallback.
     """
     assert orig_head_dim % 2 == 0, f"head_dim must be even, got {orig_head_dim}"
     assert (
@@ -806,51 +1263,27 @@ def pad_attention_heads(
         f"BLOCK_SIZE ({BLOCK_SIZE})"
     )
 
-    orig_half = orig_head_dim // 2
-    padded_half = padded_head_dim // 2
-
-    def _pad_qk_rope(proj, n_heads):
-        """Interleaved padding for Q/K: pad within each [2, D/2] group."""
-        w = proj.weight
-        hidden = w.shape[1]
-        new_w = torch.zeros(n_heads * padded_head_dim, hidden, dtype=w.dtype)
-        for h in range(n_heads):
-            s = h * orig_head_dim
-            d = h * padded_head_dim
-            new_w[d : d + orig_half, :] = w[s : s + orig_half, :]
-            new_w[d + padded_half : d + padded_half + orig_half, :] = w[
-                s + orig_half : s + orig_head_dim, :
-            ]
-        new_proj = nn.Linear(
-            hidden, n_heads * padded_head_dim, bias=proj.bias is not None
-        )
-        new_proj.weight = nn.Parameter(new_w, requires_grad=False)
-        if proj.bias is not None:
-            new_b = torch.zeros(n_heads * padded_head_dim, dtype=proj.bias.dtype)
-            for h in range(n_heads):
-                s = h * orig_head_dim
-                d = h * padded_head_dim
-                new_b[d : d + orig_half] = proj.bias[s : s + orig_half]
-                new_b[d + padded_half : d + padded_half + orig_half] = proj.bias[
-                    s + orig_half : s + orig_head_dim
-                ]
-            new_proj.bias = nn.Parameter(new_b, requires_grad=False)
-        return new_proj
+    def _pad_in_place(proj, pad_fn, n_heads):
+        # HF's TP loader may already have placed this shard on Spyre. Copy it
+        # once before slicing; the final model move supplies the Linear layout.
+        proj.to("cpu")
+        padded = pad_fn(proj, n_heads, orig_head_dim, padded_head_dim)
+        proj.weight = padded.weight
+        proj.bias = padded.bias
+        proj.in_features = padded.in_features
+        proj.out_features = padded.out_features
 
     for layer in layers:
         attn = layer.self_attn
-        orig_scaling = attn.scaling
-        attn.q_proj = _pad_qk_rope(attn.q_proj, num_heads)
-        attn.k_proj = _pad_qk_rope(attn.k_proj, num_kv_heads)
+        local_q_heads = _projection_head_count(attn.q_proj, num_heads, orig_head_dim)
+        local_k_heads = _projection_head_count(attn.k_proj, num_kv_heads, orig_head_dim)
+        local_v_heads = _projection_head_count(attn.v_proj, num_kv_heads, orig_head_dim)
+        _pad_in_place(attn.q_proj, pad_qk_proj_for_rope, local_q_heads)
+        _pad_in_place(attn.k_proj, pad_qk_proj_for_rope, local_k_heads)
         # V/O padding: needed until torch-spyre/torch-spyre#1739 is resolved.
-        attn.v_proj = _pad_proj_output_simple(
-            attn.v_proj, num_kv_heads, orig_head_dim, padded_head_dim
-        )
-        attn.o_proj = _pad_proj_input_simple(
-            attn.o_proj, num_heads, orig_head_dim, padded_head_dim
-        )
+        _pad_in_place(attn.v_proj, _pad_proj_output_simple, local_v_heads)
+        _pad_in_place(attn.o_proj, _pad_proj_input_simple, local_q_heads)
         attn.head_dim = padded_head_dim
-        attn.scaling = orig_scaling
 
     model._spyre_head_dim = padded_head_dim
 
@@ -1092,19 +1525,27 @@ def pad_lm_head(model, *, min_vocab_size: int | None = None):
         return
     w = head.weight
     vocab = w.shape[0]
-    target_vocab = max(vocab, min_vocab_size or vocab)
-    hidden = w.shape[1]
-    dtype_bytes = w.element_size()
-    # Max residual sticks whose per-core span fits the EAR limit.
-    max_residual = _EAR_LIMIT_BYTES // (hidden * BLOCK_SIZE * dtype_bytes)
-    sticks = (target_vocab + BLOCK_SIZE - 1) // BLOCK_SIZE
-    while _largest_prime_factor(sticks) > max_residual:
-        sticks += 1
-    padded = sticks * BLOCK_SIZE
+    padded = padded_vocab_size(
+        max(vocab, min_vocab_size or vocab), w.shape[1], w.element_size()
+    )
     if padded != vocab:
         head.weight = nn.Parameter(
             F.pad(w, (0, 0, 0, padded - vocab)), requires_grad=False
         )
+
+
+def padded_vocab_size(vocab: int, hidden: int, dtype_bytes: int) -> int:
+    """Smallest stick-aligned output width >= ``vocab`` that fits the EAR limit.
+
+    The padding rule of :func:`pad_lm_head`, for any ``[vocab, hidden]``
+    output-projection weight that is not the model's ``lm_head``.
+    """
+    # Max residual sticks whose per-core span fits the EAR limit.
+    max_residual = _EAR_LIMIT_BYTES // (hidden * BLOCK_SIZE * dtype_bytes)
+    sticks = (vocab + BLOCK_SIZE - 1) // BLOCK_SIZE
+    while _largest_prime_factor(sticks) > max_residual:
+        sticks += 1
+    return sticks * BLOCK_SIZE
 
 
 def prepare_lm_head_for_spyre(
@@ -1218,11 +1659,13 @@ def prepare_lm_head_for_spyre(
     )
 
 
-def run_lm_head(model, hidden_states):
-    """Run the LM-head callable installed by :func:`prepare_lm_head_for_spyre`."""
+def run_lm_head(model, hidden_states, *, logits_to_keep: int = 0):
+    """Run the prepared head on the last requested rows (0 keeps every row)."""
     lm_head_forward = getattr(model, "_spyre_lm_head_forward", None)
     if lm_head_forward is None:
         raise RuntimeError("the model has not had an LM head prepared for Spyre")
+    if logits_to_keep:
+        hidden_states = hidden_states[:, -logits_to_keep:, :].contiguous()
     return lm_head_forward(hidden_states)
 
 
@@ -1325,9 +1768,160 @@ def build_prefill_mask(
             mask[b, :, :, : prompt_offsets[b].item()] = fill
     else:
         mask[:, :, :, :prompt_offsets] = fill
-    for i in range(padded_len):
-        mask[:, :, i, query_start + i + 1 :] = fill
+    query_positions = query_start + torch.arange(padded_len)
+    future = torch.arange(max_cache_len).unsqueeze(0) > query_positions.unsqueeze(1)
+    mask.masked_fill_(future, fill)
     return mask
+
+
+class _ChunkedPrefillMaskBuilder:
+    """Build successive chunk masks without copying every full mask from CPU.
+
+    A chunk beginning at ``s + chunk_size`` has the same causal frontier as the
+    chunk beginning at ``s``, shifted right by ``chunk_size`` columns. Keeping
+    that causal mask resident on the device therefore reduces every later mask
+    to a fixed-shape ``cat`` followed by ``minimum`` with the (small, broadcast)
+    left-padding mask. Only the first full ``[B, 1, Lq, Lk]`` causal mask
+    crosses the host/device boundary.
+
+    Gemma's causal sliding-window mask follows the same recurrence, with the
+    columns shifted in on the left encoding the moving lower window boundary.
+    Sliding states are initialized lazily because most adapters only need the
+    plain causal mask.
+    """
+
+    def __init__(
+        self,
+        batch_size,
+        chunk_size,
+        max_cache_len,
+        prompt_offsets,
+        dtype=torch.float16,
+        *,
+        device=DEVICE,
+    ):
+        self.batch_size = batch_size
+        self.chunk_size = chunk_size
+        self.max_cache_len = max_cache_len
+        self.dtype = dtype
+        self.device = device
+        self._query_start = 0
+        self._sliding_states = {}
+
+        # Keep the real batch dimension. Spyre's elementwise lowering does not
+        # reliably materialize a batch-broadcast input here.
+        self._causal = build_prefill_mask(
+            batch_size, chunk_size, max_cache_len, 0, dtype=dtype
+        ).to(device)
+        # Single-chunk prefill never advances. Avoid allocating, converting and
+        # transferring the potentially large advance-only buffer in that case.
+        self._zero_chunk = None
+        self._masked_chunk = None
+
+        padding_mask = torch.zeros((batch_size, 1, 1, max_cache_len), dtype=dtype)
+        fill = _mask_fill_value(dtype)
+        if isinstance(prompt_offsets, torch.Tensor):
+            for batch_idx in range(batch_size):
+                padding_mask[batch_idx, :, :, : prompt_offsets[batch_idx].item()] = fill
+        else:
+            padding_mask[:, :, :, :prompt_offsets] = fill
+        self._padding_mask = padding_mask.to(device)
+
+    def _advance(self, state, shifted_in):
+        return torch.cat((shifted_in, state[..., : -self.chunk_size]), dim=-1)
+
+    def build(self, query_start):
+        """Return the causal mask for the next sequential query chunk."""
+        if query_start != self._query_start:
+            raise ValueError(
+                "chunked prefill masks must be requested sequentially: "
+                f"expected query_start={self._query_start}, got {query_start}"
+            )
+        if query_start:
+            if self._zero_chunk is None:
+                self._zero_chunk = torch.zeros(
+                    (self.batch_size, 1, self.chunk_size, self.chunk_size),
+                    dtype=self.dtype,
+                ).to(self.device)
+            self._causal = self._advance(self._causal, self._zero_chunk)
+        mask = torch.minimum(self._causal, self._padding_mask)
+        # Gemma's shared sliding-window helper sees this tensor before it enters
+        # a compiled block. Keep the builder metadata on the Python Tensor
+        # wrapper so it can use the device-resident sliding recurrence too.
+        mask._spyre_chunked_prefill_builder = self
+        mask._spyre_chunked_prefill_query_start = query_start
+        self._query_start += self.chunk_size
+        return mask
+
+    def _build_sliding_state(self, query_start, sliding_window):
+        if query_start == 0 and sliding_window >= self.chunk_size:
+            return self._causal
+
+        state = build_prefill_mask(
+            self.batch_size,
+            self.chunk_size,
+            self.max_cache_len,
+            0,
+            dtype=self.dtype,
+            query_start=query_start,
+        )
+        fill = _mask_fill_value(self.dtype)
+        for row in range(self.chunk_size):
+            lower_bound = max(0, query_start + row - sliding_window + 1)
+            state[..., row, :lower_bound] = fill
+        return state.to(self.device)
+
+    def _sliding_shifted_in(self, query_start, sliding_window):
+        """Columns inserted while advancing a clipped sliding window."""
+        first_lower_bound = max(0, query_start - sliding_window + 1)
+        last_lower_bound = max(0, query_start + self.chunk_size - sliding_window)
+        if last_lower_bound == 0:
+            return self._zero_chunk
+        if first_lower_bound >= self.chunk_size:
+            if self._masked_chunk is None:
+                self._masked_chunk = torch.full(
+                    (
+                        self.batch_size,
+                        1,
+                        self.chunk_size,
+                        self.chunk_size,
+                    ),
+                    _mask_fill_value(self.dtype),
+                    dtype=self.dtype,
+                ).to(self.device)
+            return self._masked_chunk
+
+        # Exactly one advance can straddle either edge of the fixed-size
+        # shifted-in chunk. Transfer that small [B,1,Lq,Lq] pattern once; all
+        # other advances reuse the all-zero or all-masked resident tensors.
+        shifted_in = torch.zeros(
+            (self.batch_size, 1, self.chunk_size, self.chunk_size), dtype=self.dtype
+        )
+        fill = _mask_fill_value(self.dtype)
+        for row in range(self.chunk_size):
+            lower_bound = min(
+                self.chunk_size,
+                max(0, query_start + row - sliding_window + 1),
+            )
+            shifted_in[..., row, :lower_bound] = fill
+        return shifted_in.to(self.device)
+
+    def add_causal_sliding_window(self, mask, query_start, sliding_window):
+        """Intersect ``mask`` with Gemma's causal sliding window on-device."""
+        state_entry = self._sliding_states.get(sliding_window)
+        if state_entry is None:
+            sliding_state = self._build_sliding_state(query_start, sliding_window)
+        else:
+            state_start, sliding_state = state_entry
+            if query_start == state_start + self.chunk_size:
+                shifted_in = self._sliding_shifted_in(query_start, sliding_window)
+                sliding_state = self._advance(sliding_state, shifted_in)
+            elif query_start != state_start:
+                # This is not expected from generate(), but keeps the helper
+                # correct if an adapter asks for a discontinuous chunk.
+                sliding_state = self._build_sliding_state(query_start, sliding_window)
+        self._sliding_states[sliding_window] = (query_start, sliding_state)
+        return torch.minimum(mask, sliding_state)
 
 
 def build_expansion_mask(
@@ -1452,7 +2046,13 @@ def add_sliding_window_band(mask, sliding_window):
     return mask + band[None, None, :, :]
 
 
-def add_causal_sliding_window_band(mask, query_cache_coords, sliding_window):
+def add_causal_sliding_window_band(
+    mask,
+    query_cache_coords,
+    sliding_window,
+    *,
+    key_cache_coords=None,
+):
     """Restrict an additive *causal* mask to a backward ``sliding_window`` band.
 
     Gemma 4's sliding ("local") attention layers are causal AND windowed: a
@@ -1478,23 +2078,61 @@ def add_causal_sliding_window_band(mask, query_cache_coords, sliding_window):
         query_cache_coords: ``[B, Lq]`` cache coordinate of each query row
             (column index the row's token occupies / will occupy in the cache).
         sliding_window: window size (number of keys, exclusive lower bound).
+        key_cache_coords: Optional ``[Lk_compact]`` mapping from each physical
+            cache column to its logical full-cache coordinate. Negative entries
+            name slots that have not been written yet. When present, the base
+            mask is gathered into physical cache order before the band is
+            applied; this is used by chunked prefill's compact ring buffer.
 
-    Returns a new mask with the base padding/causality preserved plus -inf on
-    every key outside ``(q - sliding_window, q]``. Same device/dtype as ``mask``.
+    Returns a new mask with the base padding/causality preserved plus a masked
+    fill value on every key outside ``(q - sliding_window, q]``. Same
+    device/dtype as ``mask``.
 
-    The band is computed on **CPU** (integer comparisons + a ``bool`` mask),
-    then added to ``mask`` **on CPU**, and the combined mask is moved back to
-    ``mask``'s original device. The comparisons must not run on Spyre: its
-    Inductor backend rejects ``int64`` compare-to-constant and ``bool``
-    intermediates. The *add* is also kept off-device because an on-device
-    ``-inf + -inf`` has been observed to produce NaN on Spyre in bf16 (see the
-    note at the return). Mirrors ``add_sliding_window_band``.
+    Ordinary masks take the CPU fallback below because Spyre's Inductor backend
+    rejects the integer comparisons and bool intermediates used to build the
+    band. Chunked-prefill masks in logical cache order carry a private builder
+    that advances a device-resident sliding state instead, avoiding a full mask
+    round-trip per chunk. Compact ring-buffer masks still use the CPU fallback
+    to gather the logical mask into physical cache order. Both paths avoid
+    combining two masked cells on-device by addition; ``-inf + -inf`` has been
+    observed to produce NaN on Spyre in bf16.
     """
-    lk = mask.shape[-1]
-    k_col = torch.arange(lk)[None, None, :]  # [1, 1, Lk] on CPU
+    chunked_builder = getattr(mask, "_spyre_chunked_prefill_builder", None)
+    if chunked_builder is not None and key_cache_coords is None:
+        return chunked_builder.add_causal_sliding_window(
+            mask,
+            mask._spyre_chunked_prefill_query_start,
+            sliding_window,
+        )
+
+    mask_cpu = mask.to("cpu")
+    if key_cache_coords is None:
+        lk = mask.shape[-1]
+        k_col = torch.arange(lk)[None, None, :]  # [1, 1, Lk] on CPU
+        invalid = None
+    else:
+        key_cache_coords = key_cache_coords.detach().to("cpu", dtype=torch.long)
+        if key_cache_coords.ndim != 1:
+            raise ValueError(
+                "key_cache_coords must be one-dimensional, got "
+                f"{tuple(key_cache_coords.shape)}"
+            )
+        logical_lk = mask.shape[-1]
+        valid = (key_cache_coords >= 0) & (key_cache_coords < logical_lk)
+        compact_shape = (*mask.shape[:-1], key_cache_coords.numel())
+        compact_mask = torch.zeros(compact_shape, dtype=mask.dtype)
+        if valid.any():
+            compact_mask[..., valid] = mask_cpu.index_select(
+                -1, key_cache_coords[valid]
+            )
+        mask_cpu = compact_mask
+        k_col = key_cache_coords[None, None, :]
+        invalid = ~valid[None, None, :]
     q_coord = query_cache_coords.to("cpu")[:, :, None].to(k_col.dtype)  # [B, Lq, 1]
     delta = q_coord - k_col  # [B, Lq, Lk]
     out_of_band = (delta < 0) | (delta >= sliding_window)  # CPU bool
+    if invalid is not None:
+        out_of_band = out_of_band | invalid
     band = torch.zeros(out_of_band.shape, dtype=mask.dtype)  # CPU float
     band = band.masked_fill(out_of_band, -torch.inf)
     # Combine on CPU, then move the result to the input's device. Doing the
@@ -1505,7 +2143,7 @@ def add_causal_sliding_window_band(mask, query_cache_coords, sliding_window):
     # can overflow once cells are summed. Combining on CPU avoids the issue; the
     # mask is tiny so the round-trip is cheap.
     orig_device = mask.device
-    combined = mask.to("cpu") + band[:, None, :, :]
+    combined = mask_cpu + band[:, None, :, :]
     return combined.to(orig_device)
 
 
@@ -1725,6 +2363,9 @@ def allocate_kv_caches(model, batch_size, max_cache_len, dtype, device=None):
     correctly-sized caches per layer. Returns ``(key_caches, value_caches)``
     lists. ``device`` defaults to the module ``DEVICE`` resolved at call time (so
     the conftest CPU patch applies).
+
+    Models that need specialized per-layer capacities may install a
+    ``model._spyre_cache_allocator`` hook.
     """
     if device is None:
         device = DEVICE
@@ -1855,7 +2496,7 @@ def _resolve_tp_plan(
         if auto_plan and grouped_colwise_policy is not None
         else {}
     )
-    return prepare_spyre_tp_plan(
+    plan = prepare_spyre_tp_plan(
         probe,
         plan,
         cpu_staged_modules=getattr(adapter_module, "SPYRE_TP_CPU_STAGED_MODULES", ()),
@@ -1868,6 +2509,8 @@ def _resolve_tp_plan(
         replicated_embedding_modules=("model.embed_tokens",) if auto_plan else (),
         grouped_colwise_modules=grouped_colwise_modules,
     )
+    # Return cfg too so the caller's from_pretrained() can reuse it instead of re-fetching it from the Hub.
+    return plan, cfg
 
 
 def _resolve_tp_size():
@@ -1984,19 +2627,21 @@ def load_model_common(
     elif tp_plan is not None:
         from transformers.distributed import DistributedConfig
 
+        resolved_tp_plan, cfg = _resolve_tp_plan(
+            model_path,
+            auto_model_cls,
+            tp_plan,
+            adapter_module=module,
+            trust_remote_code=trust_remote_code,
+        )
         distributed_config = DistributedConfig(
             tp_size=_resolve_tp_size(),
-            tp_plan=_resolve_tp_plan(
-                model_path,
-                auto_model_cls,
-                tp_plan,
-                adapter_module=module,
-                trust_remote_code=trust_remote_code,
-            ),
+            tp_plan=resolved_tp_plan,
         )
         with _without_spyre_allocator_warmup(), _prefer_exact_tp_plan_entries():
             model = auto_model_cls.from_pretrained(
                 model_path,
+                config=cfg,
                 dtype=dtype,
                 distributed_config=distributed_config,
                 trust_remote_code=trust_remote_code,
@@ -2348,26 +2993,28 @@ def select_next_token(
 
 
 def generate(
-    run_forward_fn: Optional[Callable],
-    model,
-    input_ids,
-    max_new_tokens=None,
+    run_forward_fn: Callable[..., torch.Tensor] | None,
+    model: PreTrainedModel,
+    input_ids: torch.Tensor,
+    max_new_tokens: int | None = None,
     *,
-    attention_mask=None,
-    generation_config=None,
-    max_length=None,
-    min_new_tokens=None,
-    do_sample=None,
-    temperature=None,
-    top_k=None,
-    top_p=None,
-    eos_token_id=_UNSET,
-    timing=False,
-    prefill_fn: Optional[Callable] = None,
-    decode_fn: Optional[Callable] = None,
-    token_aligned_inputs: Optional[dict[str, tuple[torch.Tensor, Any]]] = None,
-    **kwargs,
-):
+    attention_mask: torch.Tensor | None = None,
+    generation_config: GenerationConfig | None = None,
+    max_length: int | None = None,
+    min_new_tokens: int | None = None,
+    do_sample: bool | None = None,
+    temperature: float | None = None,
+    top_k: int | None = None,
+    top_p: float | None = None,
+    eos_token_id: int | list[int] | None | object = _UNSET,
+    timing: bool = False,
+    prefill_backbone_fn: Callable[..., torch.Tensor] | None = None,
+    prefill_fn: Callable[..., torch.Tensor] | None = None,
+    decode_fn: Callable[..., torch.Tensor] | None = None,
+    token_aligned_inputs: dict[str, tuple[torch.Tensor, Any]] | None = None,
+    streamer: BaseStreamer | None = None,
+    **kwargs: Any,
+) -> torch.Tensor | GenerateDecoderOnlyOutput:
     """Model-agnostic generation: optional chunked prefill, then token decode.
 
     When attached to a model via ``auto_spyre_model.py`` (which binds
@@ -2418,11 +3065,32 @@ def generate(
             generation config; pass ``None`` to disable EOS stopping (matches
             stock ``generate()``).
         timing: Print per-token latency.
+        streamer: Optional HF ``BaseStreamer`` (e.g. ``TextIteratorStreamer``);
+            receives the prompt, then each selected token. Batch size 1 only.
+        prefill_backbone_fn: Optional adapter backbone with the same arguments
+            as ``run_forward_fn``, returning hidden states. Text prefill runs
+            this for every chunk, then applies the prepared LM head only to
+            the last token. Custom ``prefill_fn`` hooks take precedence.
+        prefill_fn: Optional complete-prompt hook, called once with normalized
+            token IDs, positions, token-aligned inputs, caches and an attention
+            mask. Returns logits. Models setting
+            ``_spyre_default_prefill_chunk_size`` opt this hook into chunking:
+            the mask covers the first query chunk and the explicit
+            ``prefill_context: PrefillContext | None`` keyword supplies its
+            size and a callback for subsequent masks. All hooks must accept
+            this keyword; hooks that do not opt in receive ``None``. The hook
+            owns embedding preparation,
+            backbone execution for all chunks, and the final LM-head projection.
+            Without this opt-in, custom hooks receive a full one-shot mask.
         prefill_chunk_size (via generation_config or kwargs): Query length for
-            each prefill chunk. Falls back to the adapter's configured chunk
-            size, or one-shot prefill when the adapter has no override.
+            each prefill chunk when the adapter does not configure one. An
+            adapter-configured chunk size takes precedence; an explicit caller
+            value is ignored with a warning. Otherwise, adapters may set
+            ``_spyre_default_prefill_chunk_size`` for prompts longer than that
+            size. Caller kwargs (including None) and generation config override
+            this default. Without a chunk size, prefill is one-shot.
     """
-    overrides = {
+    overrides: dict[str, Any] = {
         "max_new_tokens": max_new_tokens,
         "max_length": max_length,
         "min_new_tokens": min_new_tokens,
@@ -2450,9 +3118,42 @@ def generate(
         model, generation_config, overrides, kwargs
     )
 
-    prefill_chunk_size = getattr(cfg, "prefill_chunk_size", None)
-    if prefill_chunk_size is None:
-        prefill_chunk_size = getattr(model, "_spyre_prefill_chunk_size", None)
+    configured_prefill_chunk_size = getattr(model, "_spyre_prefill_chunk_size", None)
+    requested_prefill_chunk_size = getattr(cfg, "prefill_chunk_size", None)
+    if (
+        configured_prefill_chunk_size is not None
+        and requested_prefill_chunk_size is not None
+    ):
+        warnings.warn(
+            f"Ignoring prefill_chunk_size={requested_prefill_chunk_size!r}; "
+            f"this model requires prefill_chunk_size={configured_prefill_chunk_size!r}.",
+            UserWarning,
+            stacklevel=2,
+        )
+    prefill_chunk_size = (
+        configured_prefill_chunk_size
+        if configured_prefill_chunk_size is not None
+        else requested_prefill_chunk_size
+    )
+    default_prefill_chunk_size: int | None = getattr(
+        model, "_spyre_default_prefill_chunk_size", None
+    )
+    supports_chunked_prefill = (
+        prefill_fn is None or default_prefill_chunk_size is not None
+    )
+    if (
+        supports_chunked_prefill
+        and prefill_chunk_size is None
+        and "prefill_chunk_size" not in kwargs
+        and default_prefill_chunk_size is not None
+    ):
+        # Count real tokens so caller padding cannot turn a short prompt into
+        # a large prefill. This default is resolved afresh for each request.
+        prompt: NormalizedGenerationInputs = normalize_generation_inputs(
+            input_ids, attention_mask
+        )
+        if prompt.padded_len > default_prefill_chunk_size:
+            prefill_chunk_size = default_prefill_chunk_size
     if prefill_chunk_size is not None and (
         isinstance(prefill_chunk_size, bool)
         or not isinstance(prefill_chunk_size, int)
@@ -2464,14 +3165,12 @@ def generate(
             f"got {prefill_chunk_size!r}"
         )
 
-    # Multimodal prefill hooks consume the complete prompt and token-aligned
-    # processor inputs together, so keep them one-shot and use the SDPA tile
-    # extent. Ordinary text models may opt into chunked prefill.
-    chunked_prefill = prefill_fn is None and prefill_chunk_size is not None
+    # Custom hooks remain one-shot unless their model opts into chunking.
+    chunked_prefill = supports_chunked_prefill and prefill_chunk_size is not None
     pad_to_multiple = (
-        _SDPA_MAX_SEQUENCE_TILE_SIZE
-        if prefill_fn is not None
-        else prefill_chunk_size or BLOCK_SIZE
+        prefill_chunk_size or BLOCK_SIZE
+        if supports_chunked_prefill
+        else _SDPA_MAX_SEQUENCE_TILE_SIZE
     )
     normalized = normalize_generation_inputs(
         input_ids, attention_mask, pad_to_multiple=pad_to_multiple
@@ -2487,6 +3186,9 @@ def generate(
     }
 
     input_length = orig_input_ids.shape[1]
+    # These methods come from HF's generation mixin, not PreTrainedModel.
+    assert callable(model._prepare_generated_length)
+    assert callable(model._validate_generated_length)
     cfg = model._prepare_generated_length(
         generation_config=cfg,
         has_default_max_length=has_default_max_length,
@@ -2504,8 +3206,10 @@ def generate(
     min_new_tokens = cfg.min_new_tokens or 0
     begin_suppress_index = generation_begin_index(input_length, cfg.forced_bos_token_id)
 
-    if prefill_fn is None and run_forward_fn is None:
-        raise ValueError("run_forward_fn or prefill_fn must be provided")
+    if prefill_fn is None and prefill_backbone_fn is None and run_forward_fn is None:
+        raise ValueError(
+            "run_forward_fn, prefill_backbone_fn or prefill_fn must be provided"
+        )
     if decode_fn is None and run_forward_fn is None and effective_max_new_tokens > 1:
         raise ValueError("run_forward_fn or decode_fn must be provided")
 
@@ -2523,6 +3227,21 @@ def generate(
     prefill_kv_len = (
         _sdpa_compatible_kv_length(padded_len) if chunked_prefill else max_cache_len
     )
+    # Compact-cache state needs the left-padding offsets so its runtime attention
+    # mask can exclude padding after prompt rows move to anchored coordinates.
+    model._spyre_prompt_offsets = prompt_offsets
+    # Specialized cache allocators and prefill/decode state transitions need the
+    # padded prompt extent before caches are allocated. Keep this as host metadata;
+    # it is not an input to compiled graphs.
+    model._spyre_padded_prompt_len = padded_len
+    # Specialized cache allocators can use the active chunk geometry to keep
+    # local-attention caches bounded during prefill. Store None for one-shot
+    # prefill so an earlier generate call cannot leave stale chunk metadata.
+    setattr(
+        model,
+        "_spyre_active_prefill_chunk_size",
+        query_chunk_size if chunked_prefill else None,
+    )
 
     # Initialize empty KV caches. Per-layer shapes come from the model
     # (``_spyre_kv_shapes``) for heterogeneous architectures like Gemma 4,
@@ -2537,6 +3256,11 @@ def generate(
     # ``current_cache_len``, so generated tokens are contiguous from ``padded_len``.
     previous_tokens = None
     current_cache_len = padded_len
+
+    if streamer is not None:
+        if batch_size > 1:
+            raise ValueError("`streamer` supports batch size 1 only")
+        streamer.put(orig_input_ids.cpu())
 
     times_list = []
     finished = torch.zeros(batch_size, dtype=torch.bool)
@@ -2563,13 +3287,29 @@ def generate(
                 value_caches, prefill_kv_len, chunked_prefill
             )
             if prefill_fn is not None:
-                prefill_mask = build_prefill_mask(
-                    batch_size,
-                    padded_len,
-                    prefill_kv_len,
-                    prompt_offsets,
-                    dtype=model_d_type,
-                )
+                prefill_context: PrefillContext | None = None
+                if supports_chunked_prefill:
+                    prefill_mask_builder = _ChunkedPrefillMaskBuilder(
+                        batch_size,
+                        query_chunk_size,
+                        prefill_kv_len,
+                        prompt_offsets,
+                        dtype=model_d_type,
+                        device=DEVICE,
+                    )
+                    prefill_mask = prefill_mask_builder.build(0)
+                    prefill_context = PrefillContext(
+                        chunk_size=query_chunk_size,
+                        build_attention_mask=prefill_mask_builder.build,
+                    )
+                else:
+                    prefill_mask = build_prefill_mask(
+                        batch_size,
+                        padded_len,
+                        prefill_kv_len,
+                        prompt_offsets,
+                        dtype=model_d_type,
+                    )
                 logits = prefill_fn(
                     model=model,
                     input_ids=input_ids,
@@ -2578,35 +3318,47 @@ def generate(
                     key_caches=prefill_key_caches,
                     value_caches=prefill_value_caches,
                     cache_index=make_cache_index(0, padded_len, DEVICE),
+                    prefill_context=prefill_context,
                     **normalized_token_inputs,
                 )
             else:
                 # Keep Lk fixed at the complete prefill extent while advancing
                 # Lq. Future cache slots are zero and masked, and fixed shapes
                 # avoid compiling one attention graph for every prefix length.
+                prefill_mask_builder = _ChunkedPrefillMaskBuilder(
+                    batch_size,
+                    query_chunk_size,
+                    prefill_kv_len,
+                    prompt_offsets,
+                    dtype=model_d_type,
+                    device=DEVICE,
+                )
+                text_prefill_fn = prefill_backbone_fn or run_forward_fn
                 for chunk_start in range(0, padded_len, query_chunk_size):
                     chunk_end = chunk_start + query_chunk_size
-                    prefill_mask = build_prefill_mask(
-                        batch_size,
-                        query_chunk_size,
-                        prefill_kv_len,
-                        prompt_offsets,
-                        dtype=model_d_type,
-                        query_start=chunk_start,
-                    )
-                    logits = run_forward_fn(  # type: ignore[misc]
+                    prefill_mask = prefill_mask_builder.build(chunk_start)
+                    prefill_output = text_prefill_fn(  # type: ignore[misc]
                         model,
                         input_ids[:, chunk_start:chunk_end].to(DEVICE),
                         position_ids[:, chunk_start:chunk_end].to(DEVICE),
-                        prefill_mask.to(DEVICE),
+                        prefill_mask,
                         prefill_key_caches,
                         prefill_value_caches,
                         cache_index=make_cache_index(
                             chunk_start, query_chunk_size, DEVICE
                         ),
                     )
-            # Only the last chunk's logits matter for next-token selection.
-            next_logits = logits.to("cpu")[:, -1, :]
+                # Every chunk must populate KV, but only the final prompt
+                # token needs a vocabulary projection for generation.
+                logits = (
+                    run_lm_head(model, prefill_output, logits_to_keep=1)
+                    if prefill_backbone_fn is not None
+                    else prefill_output
+                )
+            # Only the last chunk's final-token logits matter for next-token
+            # selection. Slice on Spyre so the D2H copy transfers [B, V]
+            # instead of the full [B, S, V] prefill output.
+            next_logits = logits[:, -1, :].to("cpu")
             current_cache_len = padded_len
 
         else:
@@ -2652,7 +3404,10 @@ def generate(
                     value_caches=value_caches,
                     cache_index=cache_index,
                 )
-            next_logits = logits.to("cpu")[:, -1, :]
+            # Keep the transfer shape consistent with prefill. Decode normally
+            # has S == 1, but slicing first avoids copying unused rows for any
+            # adapter that returns a wider decode output.
+            next_logits = logits[:, -1, :].to("cpu")
             current_cache_len += 1
 
         # Crop away Spyre LM-head padding before exposing logits or selecting a
@@ -2696,6 +3451,8 @@ def generate(
             next_tokens = next_tokens.masked_fill(finished, pad_token_id)
         generated_columns.append(next_tokens.clone())
         previous_tokens = next_tokens
+        if streamer is not None:
+            streamer.put(next_tokens.cpu())
 
         if eos_ids is not None:
             finished |= torch.isin(next_tokens, eos_ids)
@@ -2703,12 +3460,15 @@ def generate(
         if finished.all():
             break
 
+    if streamer is not None:
+        streamer.end()
+
     if timing and times_list:
-        print(f"\nFirst-token latency: {times_list[0]*1000:.3f} ms")
+        print(f"\nFirst-token latency: {times_list[0] * 1000:.3f} ms")
         if len(times_list) > 1:
             avg = sum(times_list[1:]) / len(times_list[1:])
-            print(f"Avg next-token latency: {avg*1000:.3f} ms")
-        print("Per-token: " + ", ".join(f"{t*1000:.1f}" for t in times_list) + " ms")
+            print(f"Avg next-token latency: {avg * 1000:.3f} ms")
+        print("Per-token: " + ", ".join(f"{t * 1000:.1f}" for t in times_list) + " ms")
 
     if generated_columns:
         generated_ids = torch.stack(generated_columns, dim=1)
@@ -2720,7 +3480,7 @@ def generate(
     return GenerateDecoderOnlyOutput(
         sequences=sequences,  # type: ignore[arg-type]
         scores=tuple(generation_scores) if generation_scores else None,
-        logits=tuple(generation_logits) if generation_logits else None,
+        logits=tuple(generation_logits) if generation_logits else None,  # type: ignore[arg-type]
         past_key_values=None,
     )
 
@@ -2730,94 +3490,8 @@ def generate(
 # ---------------------------------------------------------------------------
 
 
-def _standard_gqa_attention_dim_names(query, key, value):
-    """Return named-dim declarations and per-tensor names for Spyre SDPA.
-
-    The K/V sequence axis is intentionally untracked. ``for_each_tile`` carries
-    that relationship structurally; propagating the full ``max_seqlen_kv`` name
-    into the tile body incorrectly treats the tile index and the within-tile
-    index as a reshape split. K/V retain names for their other axes because
-    those axes still participate in ordinary ``spyre_hint`` tiling.
-    """
-    q_shape = tuple(int(d) for d in query.shape)
-    k_shape = tuple(int(d) for d in key.shape)
-    v_shape = tuple(int(d) for d in value.shape)
-    for name, shape in [("query", q_shape), ("key", k_shape), ("value", v_shape)]:
-        if len(shape) != 4:
-            raise ValueError(f"GQA requires rank-4 {name}, got {shape}")
-    if q_shape[0] != k_shape[0] or k_shape[:3] != v_shape[:3]:
-        raise ValueError(
-            f"Q/K/V batch or K/V prefix mismatch: {q_shape}, {k_shape}, {v_shape}"
-        )
-    if q_shape[3] != k_shape[3]:
-        raise ValueError(f"Q/K head_dim mismatch: {q_shape}, {k_shape}")
-    if q_shape[1] % k_shape[1] != 0:
-        raise ValueError(
-            f"num_kvheads must divide num_heads: {q_shape[1]}, {k_shape[1]}"
-        )
-
-    kv_sequence_placeholder = f"_untracked_{k_shape[2]}"
-    declarations = (
-        ("_b", q_shape[0]),
-        ("num_heads", q_shape[1]),
-        ("num_kvheads", k_shape[1]),
-        ("max_seqlen_q", q_shape[2]),
-        (kv_sequence_placeholder, k_shape[2]),
-        ("head_dim", q_shape[3]),
-        ("value_head_dim", v_shape[3]),
-    )
-    logical_names = (
-        ("_b", "num_heads", "max_seqlen_q", "head_dim"),
-        ("_b", "num_kvheads", kv_sequence_placeholder, "head_dim"),
-        ("_b", "num_kvheads", kv_sequence_placeholder, "value_head_dim"),
-    )
-    tensor_names = tuple(
-        [name for size, name in zip(shape, names, strict=True) if size != 1]
-        for shape, names in zip((q_shape, k_shape, v_shape), logical_names, strict=True)
-    )
-    return declarations, tensor_names
-
-
-def _apply_standard_gqa_attention_dim_names(
-    query, key, value, declare_tensor_dim, name_tensor_dims
-):
-    declarations, tensor_names = _standard_gqa_attention_dim_names(query, key, value)
-    for name, size in declarations:
-        declare_tensor_dim(name, size)
-    for tensor, names in zip((query, key, value), tensor_names, strict=True):
-        name_tensor_dims(tensor, names)
-
-
-@contextmanager
-def _named_standard_gqa_attention_inputs(query, key, value):
-    """Name eager Q/K/V inputs for the immediately following compiled SDPA."""
-    if query.device.type != "spyre":
-        # CPU adapter tests exercise the same block without the Spyre package.
-        yield
-        return
-
-    # Access the module registered by PyTorch's Spyre backend auto-loader.
-    # Importing torch_spyre here can recurse through backend initialization.
-    named_dims = sys.modules["torch_spyre._inductor.wsr.propagate_named_dims"]
-
-    try:
-        _apply_standard_gqa_attention_dim_names(
-            query,
-            key,
-            value,
-            named_dims.declare_tensor_dim,
-            named_dims.name_tensor_dims,
-        )
-        yield
-    finally:
-        # Compilation consumes and clears these globals itself. A cache-hit
-        # execution does not, so clear them here to avoid leaking annotations
-        # into a later, unrelated compilation.
-        named_dims.reset()
-
-
 class StandardGQAAttention(nn.Module):
-    """Split into ``pre_attn`` and ``attn_core`` for eager dim-naming."""
+    """Standard GQA attention split into projection and attention regions."""
 
     def __init__(self, attn):
         super().__init__()
@@ -2897,7 +3571,7 @@ class StandardGQAAttention(nn.Module):
 
 
 class StandardGQABlock(nn.Module):
-    """Two compiled regions with an eager dim-naming boundary between them."""
+    """Standard GQA block compiled as one graph by its factory."""
 
     def __init__(self, layer, is_res_mul: bool | None = None):
         super().__init__()
@@ -2907,11 +3581,6 @@ class StandardGQABlock(nn.Module):
         self.post_attention_layernorm = layer.post_attention_layernorm
         self.residual_multiplier = layer.residual_multiplier if is_res_mul else None
         self.train(layer.training)
-        # Compile the two regions independently. torch.compile is lazy, so
-        # tracing still happens on the first forward (after the model is moved
-        # to Spyre), exactly as when the whole block was compiled.
-        self._pre_attn = torch.compile(self._region_pre_attn, dynamic=False)
-        self._attention_tail = torch.compile(self._region_attention_tail, dynamic=False)
 
     def _region_pre_attn(
         self,
@@ -2954,32 +3623,27 @@ class StandardGQABlock(nn.Module):
         value_cache,
         cache_index,
     ):
-        q, key_cache, value_cache = self._pre_attn(
+        q, key_cache, value_cache = self._region_pre_attn(
             hidden_states, selected_freqs, key_cache, value_cache, cache_index
         )
-        with _named_standard_gqa_attention_inputs(q, key_cache, value_cache):
-            h = self._attention_tail(
-                hidden_states, q, key_cache, value_cache, attn_mask
-            )
+        h = self._region_attention_tail(
+            hidden_states, q, key_cache, value_cache, attn_mask
+        )
         return h, key_cache, value_cache
 
 
 def make_standard_gqa_block(layer, is_res_mul: bool | None = None):
-    """Build one standard GQA block; its two regions are compiled internally."""
-    return StandardGQABlock(layer, is_res_mul)
+    """Build and compile one complete standard GQA block."""
+    return torch.compile(StandardGQABlock(layer, is_res_mul), dynamic=False)
 
 
 def prepare_standard_gqa_blocks(layers, is_res_mul: bool | None = None):
-    """Replace decoder layers with registered Spyre blocks.
-
-    Each block compiles its two regions internally and is returned un-compiled
-    at the top level (the backbone driver still calls ``block(h, ...)``).
-    """
+    """Replace decoder layers with registered, fully compiled Spyre blocks."""
     blocks = []
     for i, layer in enumerate(list(layers)):
         block = StandardGQABlock(layer, is_res_mul)
         layers[i] = block
-        blocks.append(block)
+        blocks.append(torch.compile(block, dynamic=False))
     return blocks
 
 
@@ -3102,8 +3766,7 @@ def standard_gqa_backbone_forward(
     Returns ``last_hidden_state`` (no ``lm_head``). Used directly by embedding
     callers; wrapped by ``standard_gqa_forward`` for causal-LM callers.
     """
-    backbone = get_backbone(model)
-    h = backbone.embed_tokens(input_ids)
+    h = embed_text_tokens(model, input_ids)
 
     selected_freqs = model._spyre_rope(h, position_ids)
 
@@ -3255,19 +3918,19 @@ def make_encoder_block(
 
 def make_vision_encoder_block(
     *,
-    q_proj,
-    k_proj,
-    v_proj,
-    o_proj,
-    layer_norm1,
-    layer_norm2,
-    ffn_in,
-    act,
-    ffn_out,
-    num_heads,
-    head_dim,
-    scale,
-):
+    q_proj: torch.nn.Module,
+    k_proj: torch.nn.Module,
+    v_proj: torch.nn.Module,
+    o_proj: torch.nn.Module,
+    layer_norm1: torch.nn.Module,
+    layer_norm2: torch.nn.Module,
+    ffn_in: torch.nn.Module,
+    act: Callable[[torch.Tensor], torch.Tensor],
+    ffn_out: torch.nn.Module,
+    num_heads: int,
+    head_dim: int,
+    scale: float,
+) -> Callable[..., torch.Tensor]:
     """Compile a **pre-LN** bidirectional vision-transformer block (SigLIP/CLIP).
 
     Counterpart of ``make_encoder_block`` (which is post-LN, BERT-style). A
@@ -3277,8 +3940,8 @@ def make_vision_encoder_block(
         h = h + o_proj(SDPA(qkv(layer_norm1(h))))
         h = h + ffn_out(act(ffn_in(layer_norm2(h))))
 
-    There is no attention mask and no KV cache — every patch attends to every
-    patch (full bidirectional attention over a fixed-length patch sequence).
+    There is no KV cache. By default every patch attends to every patch;
+    callers can pass an attention mask for text tokens or padded sequences.
 
     Args:
         q_proj/k_proj/v_proj/o_proj: per-head attention projections
@@ -3291,7 +3954,9 @@ def make_vision_encoder_block(
             softmax temperature).
     """
 
-    def block_forward(hidden_states):
+    def block_forward(
+        hidden_states: torch.Tensor, attn_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         bsz, seq_len, _ = hidden_states.shape
 
         residual = hidden_states
@@ -3304,7 +3969,7 @@ def make_vision_encoder_block(
             q,
             k,
             v,
-            attn_mask=None,
+            attn_mask=attn_mask,
             dropout_p=0.0,
             is_causal=False,
             scale=scale,
@@ -3704,7 +4369,7 @@ def prefill_question_answering(
     attention_mask,
     token_type_ids=None,
 ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
-    """Run an encoder on Spyre and its extractive-QA head on CPU."""
+    """Run an encoder and its extractive-QA head on Spyre."""
     last_hidden_state = prefill_encoder(
         run_encoder_forward_fn,
         model,
@@ -3736,7 +4401,7 @@ def prefill_sequence_classification(
     attention_mask,
     token_type_ids=None,
 ) -> torch.Tensor:
-    """Run an encoder on Spyre and its sequence-classification head on CPU."""
+    """Run an encoder and its sequence-classification head on Spyre."""
     last_hidden_state = prefill_encoder(
         run_encoder_forward_fn,
         model,
@@ -3763,15 +4428,12 @@ def prefill_token_classification(
     attention_mask,
     token_type_ids=None,
 ) -> torch.Tensor:
-    """Run an encoder on Spyre and its token-classification head on CPU.
+    """Run an encoder and its token-classification head on Spyre.
 
     Drives the encoder backbone via ``prefill_encoder``, then applies
     ``model.classifier`` (a single linear layer whose output dim equals
-    ``config.num_labels``) to every token position.  The head is kept on
-    CPU (via ``_spyre_cpu_submodules``) to avoid:
-
-    - ``aten.slice`` (index operations that don't lower on Spyre).
-    - Any Dropout path that uses ``torch.bernoulli``.
+    ``config.num_labels``) to every token position on device, so only the
+    ``[B, L, num_labels]`` logits are copied to CPU.
 
     Args:
         run_encoder_forward_fn: ``fn(model, input_ids, attn_mask, position_ids,

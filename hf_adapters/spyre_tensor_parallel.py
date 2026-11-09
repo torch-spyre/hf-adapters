@@ -83,10 +83,24 @@ class SpyreColwiseParallel(ColwiseParallel):
     """Colwise checkpoint slicing followed by a Linear-aware Spyre DMA."""
 
     def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
+        # Weight converters for modules with auxiliary scalar state (for
+        # example Gemma 4 clipped linears) reuse the projection's distributed
+        # operation for every source tensor. Scalars have no shardable axis and
+        # must be replicated even though the associated matrix is colwise.
+        ndim = (
+            param.dim() if isinstance(param, torch.Tensor) else len(param.get_shape())
+        )
+        if ndim == 0:
+            return _copy_default(param[...], device=device, dtype=dtype)
         shard = super().shard_tensor(
             param, tensor_idx=tensor_idx, device="cpu", dtype=dtype
         )
         return _copy_linear(shard, device=device, dtype=dtype)
+
+    def get_expected_sharded_shape(self, full_shape):
+        if len(full_shape) == 0:
+            return tuple(full_shape)
+        return super().get_expected_sharded_shape(full_shape)
 
 
 class SpyreColwiseGatherOutputParallel(SpyreColwiseParallel):
@@ -100,10 +114,22 @@ class SpyreRowwiseParallel(RowwiseParallel):
     """Rowwise checkpoint slicing followed by a Linear-aware Spyre DMA."""
 
     def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
+        # See SpyreColwiseParallel: scalar metadata belonging to a sharded
+        # projection is replicated, not indexed along a nonexistent axis.
+        ndim = (
+            param.dim() if isinstance(param, torch.Tensor) else len(param.get_shape())
+        )
+        if ndim == 0:
+            return _copy_default(param[...], device=device, dtype=dtype)
         shard = super().shard_tensor(
             param, tensor_idx=tensor_idx, device="cpu", dtype=dtype
         )
         return _copy_linear(shard, device=device, dtype=dtype)
+
+    def get_expected_sharded_shape(self, full_shape):
+        if len(full_shape) == 0:
+            return tuple(full_shape)
+        return super().get_expected_sharded_shape(full_shape)
 
 
 class SpyreRowwiseSplitInputParallel(SpyreRowwiseParallel):
@@ -372,6 +398,51 @@ def _matches_plan(parameter_name: str, plan: Mapping[str, str]) -> bool:
 
     alternation, _, _ = build_glob_alternation(list(plan))
     return alternation.search(parameter_name) is not None
+
+
+def grouped_kv_projection_modules(
+    model: nn.Module,
+    attention_layers: Iterable[tuple[nn.Module, int]],
+    tp_size: int,
+) -> dict[str, int]:
+    """Select whole-head K/V sharding for unsharded attention layers.
+
+    Adapters supply ``(attention, head_dim)`` pairs so heterogeneous head
+    dimensions remain their responsibility. Ordinary colwise TP is retained
+    when KV heads divide evenly among ranks. Otherwise each complete KV head
+    is replicated within its corresponding group of Q ranks. Missing K/V
+    projections (shared caches or K-equals-V attention) need no placement rule.
+    """
+    from hf_adapters.hf_common import _projection_head_count
+
+    if tp_size <= 0:
+        raise ValueError(f"TP size must be positive, got {tp_size}")
+    module_names = {id(module): name for name, module in model.named_modules()}
+    grouped = {}
+    for attention, head_dim in attention_layers:
+        q_proj = attention.q_proj
+        # A missing/uninspectable projection must not fall back to a global
+        # config count: placement needs its actual, pre-sharding geometry.
+        num_q_heads = _projection_head_count(q_proj, 0, head_dim)
+        if num_q_heads % tp_size != 0:
+            raise ValueError(
+                f"{module_names[id(q_proj)]} cannot split {num_q_heads} query "
+                f"heads across {tp_size} TP ranks without splitting a head"
+            )
+        for name in ("k_proj", "v_proj"):
+            projection = getattr(attention, name, None)
+            if projection is None:
+                continue
+            num_kv_heads = _projection_head_count(projection, 0, head_dim)
+            if num_kv_heads % tp_size == 0:
+                continue
+            if tp_size % num_kv_heads != 0:
+                raise ValueError(
+                    f"{module_names[id(projection)]} cannot distribute "
+                    f"{num_kv_heads} KV heads across {tp_size} TP ranks"
+                )
+            grouped[module_names[id(projection)]] = num_kv_heads
+    return grouped
 
 
 def prepare_spyre_tp_plan(

@@ -51,6 +51,7 @@ from typing import Any, Union
 import pytest
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
+from _pytest.mark.structures import Mark
 from _pytest.nodes import Item
 from _pytest.python import Metafunc
 from transformers import AutoModelForCausalLM, PretrainedConfig
@@ -150,7 +151,12 @@ def encode_generation_inputs(tokenizer: Any, prompts: list[str]):
     """Tokenize canonically, using right padding to exercise input normalization."""
     from hf_adapters.hf_common import encode_prompts
 
-    return encode_prompts(tokenizer, prompts, padding_side="right")
+    return encode_prompts(
+        tokenizer,
+        prompts,
+        padding_side="right",
+        chat_template_kwargs={"enable_thinking": False},
+    )
 
 
 def pytest_configure(config: Config) -> None:
@@ -268,8 +274,8 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
 
     # Drop the decorator's own parametrize markers for ``model_path`` so pytest
     # doesn't raise "duplicate parametrization" when we call metafunc.parametrize
-    # below. Other parameter names on the same @parametrize marker are preserved.
-    kept: list = []
+    # below. Independent scenario parametrizations are preserved.
+    kept: list[Mark] = []
     for marker in metafunc.definition.iter_markers("parametrize"):
         argnames = marker.args[0] if marker.args else ""
         names = [n.strip() for n in argnames.replace(",", " ").split()]
@@ -291,11 +297,13 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
         "causal": model_registry.NON_BLOCKING_CAUSAL_MODELS,
         "vision": model_registry.NON_BLOCKING_VISION_MODELS,
         "embedding": {},
+        "multimodal_embedding": {},
         "masked_lm": {},
         "question_answering": {},
         "reranker": {},
         "seq_classification": model_registry.NON_BLOCKING_SEQUENCE_CLASSIFICATION_MODELS,
         "token_classification": {},
+        "structured_decision": {},
     }
     try:
         non_blocking = non_blocking_tables[harness]

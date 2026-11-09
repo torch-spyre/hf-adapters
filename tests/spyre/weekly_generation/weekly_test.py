@@ -8,18 +8,15 @@ Two ways to say which models to evaluate — exactly one is required::
 
     # Manual: fetch, filter and evaluate in one pass
     python tests/spyre/weekly_generation/weekly_test.py \\
-        --mode embedding --fetch --top-k 200
+        --mode embedding --fetch --top-k-downloads 200 --top-k-trending 200
 
-Either way the same three pre-filters apply — no adapter for the config class,
-too large for Spyre, MoE — and each dropped model gets a terminal row recording
+Either way the same catalog (ranked top-K by downloads and by trending score,
+plus the curated file and the model registry) and the same pre-filter (too
+large for Spyre) apply, and each dropped model gets a terminal row recording
 why. With ``--model-list-file`` that happened upstream in
 ``.github/scripts/generate_weekly_shards.py``; with ``--fetch`` it happens here,
-through the same ``fetch_and_filter``. So everything that reaches the evaluation
-loop needs a Spyre card.
-
-Filtering before the list is sharded is what keeps shard durations comparable:
-the dropped models cluster by download count, so filtering per-shard used to
-leave some CI jobs finishing in minutes and others running for hours.
+through the same ``fetch_and_filter``. Adapter resolution and MoE classification
+happen in the worker.
 
 ``--mode`` is parsed into a ``ModelType``, which selects the per-process batch
 size, the model class loaded in ``_load_on_cpu``, the verification pipeline in
@@ -40,8 +37,10 @@ Flags:
 * ``--model-list-file F``            Evaluate this JSON list. Mutually exclusive
   with ``--fetch``; one of the two is required.
 * ``--fetch``                        Fetch and filter here instead.
-* ``--top-k N``                      With ``--fetch``: how many to fetch
-  (default: 10000).
+* ``--top-k-downloads N``            With ``--fetch``: top-N by downloads over
+  the last 30 days (default: 1000; 0 skips it).
+* ``--top-k-trending N``             With ``--fetch``: top-N by trending score
+  (default: 1000; 0 skips it).
 * ``--max-params N``                 With ``--fetch``: parameter ceiling.
 * ``--write-to-csv F``               Record results in a new CSV instead of
   ClickHouse, for runs with no database access. Write-only: the file must not
@@ -77,7 +76,7 @@ from tests.spyre.weekly_generation.model_prefilter import fetch_and_filter
 from tests.spyre.weekly_generation.model_type import ModelType
 from tests.spyre.weekly_generation.sink.sink_factory import create_sink, csv_path_for
 from tests.spyre.weekly_generation.weekly_sub_process import _process_batch
-from utils.utilities import human_bytes, ts
+from utils.utilities import ts
 
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
@@ -112,59 +111,12 @@ for _p in (_SPYRE_TESTS_DIR, _TESTS_DIR, _UTILS_DIR, _REPO_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-# Weight-file suffixes. A repo with at least one of these cached "has weights";
-# a repo with only config/tokenizer files does not, so its later-downloaded
-# weights are eligible for deletion.
-_WEIGHT_SUFFIXES = (
-    ".safetensors",
-    ".bin",
-    ".pt",
-    ".pth",
-    ".ckpt",
-    ".gguf",
-    ".h5",
-    ".msgpack",
-)
-
 # How many models one spawned child processes before exiting. Higher values
 # amortize per-child spawn + import + kernel-teardown cost (~15 s currently)
 # across more work. Lower values reduce the blast radius when the Spyre
 # driver/state gets into a bad shape mid-batch.
 GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS: int = 10
 EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS: int = 90
-
-
-def _repos_with_weights(repo_ids: list[str]) -> set[str]:
-    """Subset of *repo_ids* that already have >=1 weight file cached at startup.
-
-    Navigates directly to each repo's cache folder using the known HF layout —
-    same trick as ``_delete_repo_weights`` — instead of calling
-    ``scan_cache_dir()``, which walks and stats every blob under HF_HOME. On the
-    Spyre pod that cache is a shared network mount holding the accumulated
-    weights of the whole scan, and up to 32 shard jobs call this concurrently at
-    startup, so the full walk cost hours of wall-clock per job.
-
-    Only models in the current shard are ever looked up (see ``had_weights_map``
-    in ``main``), so scoping the check to *repo_ids* loses nothing.
-    """
-    print(f"{ts()} Scanning the weight cache for {len(repo_ids)} model(s)…", flush=True)
-    started: float = time.monotonic()
-    have: set[str] = set()
-    for repo_id in repo_ids:
-        snapshots_dir = _repo_cache_dir(repo_id) / "snapshots"
-        if not snapshots_dir.is_dir():
-            continue
-        try:
-            if any(p.name.endswith(_WEIGHT_SUFFIXES) for p in snapshots_dir.rglob("*")):
-                have.add(repo_id)
-        except OSError as e:
-            print(f"    warn: could not scan {snapshots_dir}: {e}")
-    print(
-        f"{ts()} Weight-cache scan done in {time.monotonic() - started:.2f}s — "
-        f"{len(have)}/{len(repo_ids)} model(s) already cached.",
-        flush=True,
-    )
-    return have
 
 
 def _get_adapter_dates() -> dict[str, str | None]:
@@ -241,19 +193,29 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--fetch",
         action="store_true",
         help=(
-            "Fetch the top --top-k models for --mode, apply the same "
+            "Fetch the --top-k-downloads / --top-k-trending catalog (plus the "
+            "curated and registry models) for --mode, apply the same "
             "pre-filters, record the terminal rows, and evaluate the survivors — "
             "all in one pass. For manual runs where there is no shard file."
         ),
     )
     fetch_opts = parser.add_argument_group("--fetch options")
     fetch_opts.add_argument(
-        "--top-k",
+        "--top-k-downloads",
         type=int,
-        default=10_000,
+        default=1000,
         help=(
-            "With --fetch: how many top models to fetch by downloads "
-            "(default: 10000). Ignored with --model-list-file."
+            "With --fetch: top models by downloads over the last 30 days, "
+            "counted after the keep() filter (default: 1000; 0 skips it)."
+        ),
+    )
+    fetch_opts.add_argument(
+        "--top-k-trending",
+        type=int,
+        default=1000,
+        help=(
+            "With --fetch: top models by the Hub's trending score, counted "
+            "after the keep() filter (default: 1000; 0 skips it)."
         ),
     )
     fetch_opts.add_argument(
@@ -279,74 +241,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     # Reject the silent no-op of passing a fetch tuning flag without --fetch.
     if not args.fetch:
-        for flag, dest in (("--top-k", "top_k"), ("--max-params", "max_params")):
+        for flag, dest in (
+            ("--top-k-downloads", "top_k_downloads"),
+            ("--top-k-trending", "top_k_trending"),
+            ("--max-params", "max_params"),
+        ):
             if getattr(args, dest) != parser.get_default(dest):
                 parser.error(f"{flag} only applies with --fetch")
     return args
-
-
-def _repo_cache_dir(repo_id: str) -> Path:
-    """Return the local cache folder for a model repo without scanning the cache.
-
-    HF layout: <HF_HUB_CACHE>/models--<org>--<name>
-    e.g. 'BAAI/bge-m3' -> '<cache>/models--BAAI--bge-m3'
-    """
-    from huggingface_hub import constants
-
-    folder_name = "models--" + repo_id.replace("/", "--")
-    return Path(constants.HF_HUB_CACHE) / folder_name
-
-
-def _delete_repo_weights(repo_id_list: list[str]) -> int:
-    """Delete cached weight files (and their blobs) for a list of repos. Keep configs.
-
-    Returns bytes freed. Navigates directly to each repo's cache folder using
-    the known HF layout — avoids the expensive scan_cache_dir() call entirely.
-    Only touches files whose name ends in a weight suffix; resolves each
-    snapshot symlink to its blob and unlinks both.
-    """
-    if not repo_id_list:
-        return 0
-    freed = 0
-    for repo_id in repo_id_list:
-        repo_dir = _repo_cache_dir(repo_id)
-        snapshots_dir = repo_dir / "snapshots"
-        if not snapshots_dir.is_dir():
-            continue
-        for snap in snapshots_dir.rglob("*"):
-            if not snap.name.endswith(_WEIGHT_SUFFIXES):
-                continue
-            try:
-                blob = snap.resolve()
-                if blob.exists():
-                    freed += blob.stat().st_size
-                    blob.unlink()
-                if snap.is_symlink() or snap.exists():
-                    snap.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                print(f"    warn: could not delete {snap}: {e}")
-    return freed
-
-
-def _cleanup_batch_weights(
-    batch_paths: list[str],
-    had_weights_map: dict[str, bool],
-    total_freed: int,
-) -> int:
-    """Delete downloaded weights for paths that were not pre-cached at startup.
-
-    Returns the updated total_freed byte count.
-    """
-    to_delete: list[str] = [
-        path for path in batch_paths if not had_weights_map.get(path, False)
-    ]
-    freed = _delete_repo_weights(to_delete)
-    total_freed += freed
-    if freed:
-        print(f"    freed {human_bytes(freed)} (total {human_bytes(total_freed)})")
-    return total_freed
 
 
 def _chunk_into_batches(rows: list[dict], batch_size: int) -> list[list[dict]]:
@@ -361,7 +263,8 @@ def main(
     model_list_file: Path | None,
     write_to_csv: Path | None,
     fetch: bool,
-    top_k: int,
+    top_k_downloads: int,
+    top_k_trending: int,
     max_params: int,
     snapshot_date: date,
 ) -> None:
@@ -374,8 +277,8 @@ def main(
 
     Owns the sink for the whole run: it is created here, written to by both the
     ``--fetch`` pre-filter and the evaluation loop, flushed at each batch
-    boundary, and closed once in the ``finally`` below. ``top_k``/``max_params``
-    apply only under *fetch*.
+    boundary, and closed once in the ``finally`` below. ``top_k_downloads``,
+    ``top_k_trending`` and ``max_params`` apply only under *fetch*.
 
     Raises:
         HardwareExceptionAbortError: a batch reported ``hardware_exception``, so
@@ -385,8 +288,6 @@ def main(
 
     print(f"{ts()} Starting main.")
     print(f"{ts()} Snapshot date: {snapshot_date}")
-
-    total_freed: int = 0
 
     models_per_process = {
         ModelType.GENERATIVE: GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS,
@@ -398,17 +299,15 @@ def main(
     sink: ResultSink = create_sink(
         model_type=model_type,
         write_to_csv=write_to_csv,
+        model_list_file=model_list_file,
     )
 
-    # All six are read by the finally block, so they are bound before the try
+    # All three are read by the finally block, so they are bound before the try
     # opens — otherwise a failure while building the model list would raise
-    # UnboundLocalError from the cleanup path and mask the real error.
+    # UnboundLocalError from the summary and mask the real error.
     processed = 0
     total = 0
     overall_start = time.monotonic()
-    batch_paths: list[str] = []
-    had_weights_map: dict[str, bool] = {}
-    preexisting: set[str] = set()
 
     # The try opens before the model list is built so that a failure while
     # fetching (a Hub outage, say) still closes the sink — under --fetch the
@@ -418,7 +317,8 @@ def main(
             rows: list[dict] = fetch_and_filter(
                 model_type=model_type,
                 snapshot_date=snapshot_date,
-                top_k=top_k,
+                top_k_downloads=top_k_downloads,
+                top_k_trending=top_k_trending,
                 sink=sink,
                 max_params=max_params,
             )
@@ -441,10 +341,6 @@ def main(
         total = len(rows)
         print(f"{ts()} Will evaluate {total} model(s).")
 
-        # Must run after *rows* is resolved — the cache check is scoped to this
-        # run's models rather than walking the whole (network-mounted) cache.
-        preexisting = _repos_with_weights([str(row["model_id"]) for row in rows])
-
         batch_size = models_per_process[model_type]
         batches: list[list[dict]] = _chunk_into_batches(
             rows=rows,
@@ -464,10 +360,6 @@ def main(
             )
             for path, curated in zip(batch_paths, batch_curated):
                 print(f"{ts()} - {path}" + ("\t(curated)" if curated else ""))
-
-            # Track which weights existed BEFORE this batch ran, so we can
-            # decide per-model whether to delete after.
-            had_weights_map = {path: path in preexisting for path in batch_paths}
 
             result_queue = ctx.SimpleQueue()
             proc = ctx.Process(
@@ -605,12 +497,7 @@ def main(
                     f"curated={rec.get('curated')})"
                 )
 
-            # Cache cleanup: delete weights downloaded during this batch,
-            # regardless of whether the worker processed each model.
-            total_freed = _cleanup_batch_weights(
-                batch_paths, had_weights_map, total_freed
-            )
-
+            # Weights stay cached: the shared HF_HOME keeps every scanned model warm.
             batch_elapsed = time.monotonic() - batch_start
             print(
                 f"{ts()}     batch {batch_idx}/{total_batches} done: "
@@ -627,7 +514,7 @@ def main(
             # hardware exception — the Spyre accelerator is unreachable and
             # every subsequent batch would waste worker time hitting the
             # same wall. The `raise` unwinds through the `finally` clause
-            # below (cache cleanup, sink close, summary), then propagates
+            # below (sink close, summary), then propagates
             # out of main() so the script exits with a non-zero status.
             if any(
                 rec.get("failure_category") == FAILURE_CATEGORY_HARDWARE_EXCEPTION
@@ -647,9 +534,6 @@ def main(
     except KeyboardInterrupt:
         print(f"\n{ts()} Interrupted — results so far are saved; rerun to resume.")
     finally:
-        # Clean up weights for the in-flight batch if interrupted mid-run.
-        _ = _cleanup_batch_weights(batch_paths, had_weights_map, total_freed)
-
         sink.close()
         if write_to_csv:
             # Report the file actually written, not the bare --write-to-csv
@@ -676,7 +560,8 @@ if __name__ == "__main__":
             model_list_file=args.model_list_file,
             write_to_csv=args.write_to_csv,
             fetch=args.fetch,
-            top_k=args.top_k,
+            top_k_downloads=args.top_k_downloads,
+            top_k_trending=args.top_k_trending,
             max_params=args.max_params,
             snapshot_date=args.snapshot_date,
         )

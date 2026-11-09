@@ -238,11 +238,14 @@ def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_
         for layer_type, rope in model._spyre_rope.items()
     }
 
-    # Local layers see the global mask intersected with the sliding-window band.
-    local_mask = add_sliding_window_band(
-        attn_mask.to("cpu"), model.config.sliding_window
-    ).to(attn_mask.device)
-    masks = {"full_attention": attn_mask, "sliding_attention": local_mask}
+    if isinstance(attn_mask, dict):
+        masks = attn_mask
+    else:
+        # Local layers see the global mask intersected with the sliding-window band.
+        local_mask = add_sliding_window_band(
+            attn_mask.to("cpu"), model.config.sliding_window
+        ).to(attn_mask.device)
+        masks = {"full_attention": attn_mask, "sliding_attention": local_mask}
 
     for layer, compiled_block in zip(backbone.layers, model._spyre_compiled_blocks):
         lt = layer.attention_type

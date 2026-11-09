@@ -124,6 +124,92 @@ def _construct_module(
     return module
 
 
+def _is_hf_cache(x):
+    """True for a transformers Cache object (StaticCache & friends).
+
+    Imported lazily and guarded: this test module is also collected on boxes
+    where the installed transformers predates ``cache_utils.Cache``.
+    """
+    try:
+        from transformers.cache_utils import Cache
+    except ImportError:
+        return False
+    return isinstance(x, Cache)
+
+
+def _fresh_cache(cache, *, device):
+    """Return a private, device-placed copy of a transformers Cache object.
+
+    A Cache is NOT a registered pytree node -- ``tree_leaves(static_cache)``
+    returns ``[StaticCache(...)]``, a single opaque leaf. So ``tree_map`` never
+    reaches the backing buffers, and the mappers in ``_fresh_inputs`` /
+    ``_move_inputs`` pass the object straight through because it is not a
+    ``torch.Tensor``. Every forward the test runs then shares ONE cache, which
+    breaks two ways:
+
+    1. Device mismatch. ``_build_cache`` (oot_test_config_models.py) primes the
+       cache with test-device K/V so a lazily-initialized layer pins its buffers
+       on that device. The CPU forward's projections produce CPU ``key_states``,
+       and ``StaticLayer.update()`` then runs
+       ``self.keys.index_copy_(2, cache_position, key_states)`` with a spyre:0
+       destination and a CPU source -> RuntimeError.
+    2. Carry-over. ``update()`` writes the buffers in place and advances
+       ``cumulative_length`` via ``add_``, so whichever pass runs second starts
+       from a cache the first already filled and attends over a longer span.
+       Differences then get attributed to CPU-vs-device (or eager-vs-compile)
+       when they actually come from leftover state.
+
+    Relocating is a walk over the layer's tensor attributes rather than a fixed
+    ``keys``/``values``/``cumulative_length`` list so a cache type with extra
+    buffers (sliding-window offsets, quantized scales) travels too. ``.device``
+    is reassigned alongside them because ``update()`` builds its index with
+    ``torch.arange(kv_length, device=self.device)`` -- move the buffers but
+    leave ``.device`` and the index lands on the wrong device instead.
+
+    The tensors are swapped out for meta stand-ins BEFORE ``deepcopy`` and
+    re-attached as explicit ``clone().to(device)`` afterwards, because
+    ``deepcopy`` of a Spyre tensor goes through ``Tensor.__deepcopy__`` ->
+    ``aten::set_.source_Storage``, which the Spyre backend does not implement
+    (NotImplementedError). Meta tensors carry no storage, so the structural copy
+    stays on ops every backend has.
+    """
+    # device=None means "private copy, leave the buffers where they are"; every
+    # tensor is then cloned onto its own current device.
+    target = None if device is None else torch.device(device)
+
+    # Detach every layer's real tensors, deepcopy only the (now tensor-free)
+    # structure, then give each copy its own relocated buffers.
+    layers = list(getattr(cache, "layers", None) or ())
+    saved = []
+    try:
+        for layer in layers:
+            tensors = {
+                name: val
+                for name, val in vars(layer).items()
+                if isinstance(val, torch.Tensor)
+            }
+            saved.append(tensors)
+            for name, val in tensors.items():
+                setattr(layer, name, torch.empty(0, dtype=val.dtype, device="meta"))
+        fresh = copy.deepcopy(cache)
+    finally:
+        # Restore the originals whatever happened, so a failure here cannot
+        # leave the caller's cache holding meta placeholders.
+        for layer, tensors in zip(layers, saved):
+            for name, val in tensors.items():
+                setattr(layer, name, val)
+
+    for layer, tensors in zip(getattr(fresh, "layers", None) or (), saved):
+        for name, val in tensors.items():
+            fresh_val = val.clone()
+            setattr(layer, name, fresh_val if target is None else fresh_val.to(target))
+        if target is not None:
+            for name, val in list(vars(layer).items()):
+                if isinstance(val, torch.device):
+                    setattr(layer, name, target)
+    return fresh
+
+
 def _move_inputs(module_input, *, dtype=None, device=None):
     """Move a module_input's forward args/kwargs to ``dtype`` and/or ``device``.
 
@@ -138,6 +224,11 @@ def _move_inputs(module_input, *, dtype=None, device=None):
         return str(dtype) in ("torch.float16", "torch.float32", "torch.bfloat16")
 
     def move(x):
+        # Caches are opaque pytree leaves, so intercept before the Tensor check
+        # (a Cache is not a Tensor and would otherwise pass straight through).
+        # See _fresh_cache.
+        if _is_hf_cache(x):
+            return x if device is None else _fresh_cache(x, device=device)
         if not isinstance(x, torch.Tensor):
             return x
         if device is not None and is_interesting_dtype(x.dtype):
@@ -176,6 +267,13 @@ def _fresh_inputs(module_input, *, device):
     """
 
     def fresh(x):
+        # Intercepted before the Tensor check -- see _fresh_cache for why a
+        # shared Cache breaks both the device placement and the comparison.
+        if _is_hf_cache(x):
+            # device=None still needs the private copy, just left in place;
+            # _fresh_cache handles that (a bare copy.deepcopy would not -- it is
+            # the call that raises on a Spyre tensor).
+            return _fresh_cache(x, device=device)
         if not isinstance(x, torch.Tensor):
             return x
         return x.clone().to(device) if device is not None else x.clone()

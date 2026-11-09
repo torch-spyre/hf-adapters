@@ -25,6 +25,13 @@ python .github/scripts/generate_test_matrix.py
 # Exclude specific models (e.g., temporarily broken models)
 python .github/scripts/generate_test_matrix.py --exclude granite-vision phi4
 
+# Restrict every matrix to an explicit allowlist (flips each category from its
+# representative set to ALL registered paths, then filters to these)
+python .github/scripts/generate_test_matrix.py --only Qwen/Qwen3-0.6B ibm-granite/granite-4.1-8b
+
+# Perf tiers only: fail instead of dropping a model perf cannot benchmark
+python .github/scripts/generate_test_matrix.py --strict-perf --only ibm-granite/granite-4.1-8b
+
 # In GitHub Actions workflow
 - name: Generate matrices
   id: generate
@@ -42,6 +49,22 @@ To temporarily exclude models from all test matrices:
    ```yaml
    python .github/scripts/generate_test_matrix.py --exclude granite-vision phi4 other-model
    ```
+
+### The perf matrix and `--strict-perf`
+
+`perf_matrix` is built from the **causal-LM** paths of an explicit `--only` allowlist
+(`tests/model_lists/perf.yaml`), never from the whole registry. The restriction is
+deliberate: spyre-perf-suite's generative harness measures prefill+decode, so an embedding
+or encoder path has no decode phase to benchmark.
+
+Without `--strict-perf` such a path is dropped silently. That is unsafe for a perf run: an
+empty `perf_matrix` makes `spyre-perf-tests`' `if:` skip every leg, and because perf cells
+are `gating: false` the run reports success having measured nothing. Pass `--strict-perf`
+and the script raises instead, naming each path to move.
+
+It is **opt-in** because one `generate-matrix` job emits all 12 matrices for every tier, and
+the non-perf tiers legitimately test encoder and embedding models. `_test_matrix.yaml` passes
+it only when `test_type` is `perf`.
 
 ### Adding New Models
 

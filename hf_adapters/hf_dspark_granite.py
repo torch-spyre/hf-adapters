@@ -34,7 +34,11 @@ No per-head q/k RMSNorm (``use_qk_norm=False``).
 Usage: see ``hf_dspark_qwen3``.
 """
 
-from hf_adapters._dspark_common import prepare_dspark_common, run_draft_block
+from hf_adapters._dspark_common import (
+    kv_pad_for,
+    prepare_dspark_common,
+    run_draft_block,
+)
 
 _run_draft_block = run_draft_block  # reuse the common runner
 CTX_PAD = 56
@@ -42,8 +46,7 @@ CTX_PAD = 56
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to the Granite DSpark drafter in-place."""
-    block_size = int(model.block_size)
-    kv_pad = ((CTX_PAD + block_size + 31) // 32) * 32
+    kv_pad = kv_pad_for(CTX_PAD, int(model.block_size))
     # Granite attention scale is the configured multiplier, not head_dim**-0.5.
     model._spyre_attn_scaling = float(model.config.attention_multiplier)
     prepare_dspark_common(model, ctx_pad=CTX_PAD, kv_pad=kv_pad, use_qk_norm=False)

@@ -24,12 +24,22 @@ fully deterministic across runs.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
+import os
+import stat
+import tempfile
+import warnings
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Literal, Mapping
 
 import torch
 from huggingface_hub import hf_hub_download
 from PIL import Image
-from transformers import AutoProcessor
+from transformers import AutoConfig, AutoProcessor
+from transformers import __version__ as transformers_version
 
 from tests.conftest import load_ref_model
 from tests.model_registry import REMOTE_CODE_PATHS
@@ -50,6 +60,22 @@ SAMPLE_IMAGE = {
     "filename": "pipeline-cat-chonk.jpeg",
     "repo_type": "dataset",
 }
+
+VLM_REFERENCE_CACHE_ENV = "HF_ADAPTERS_VLM_REF_CACHE"
+_VLM_REFERENCE_CACHE_SCHEMA = 1
+# Bump whenever the stock-reference generation algorithm changes in a way that
+# is not already represented in the cache metadata below.
+_VLM_REFERENCE_ALGORITHM_VERSION = 1
+
+
+@dataclass(frozen=True)
+class VLMReference:
+    """The stock-HF outputs needed by the Spyre VLM comparison."""
+
+    logits: list[torch.Tensor]
+    token_ids: list[int]
+    text: str
+
 
 # Registry of diverse sample images for multi-image smoke tests.
 # All sourced from the public ``huggingface/documentation-images`` dataset —
@@ -191,6 +217,234 @@ def build_vlm_batch(
         return_tensors="pt",
     )
     return processor, batch
+
+
+def resolve_model_revision(
+    model_path: str, trust_remote_code: bool | None = None
+) -> str | None:
+    """Resolve the immutable Hub commit used by ``model_path``.
+
+    Persistent reference caching is disabled when Transformers cannot provide
+    a commit hash (for example, for a mutable local model directory). Reusing a
+    reference without an immutable model identity would risk hiding a model
+    update behind a stale cache hit.
+    """
+    try:
+        config = AutoConfig.from_pretrained(
+            model_path, trust_remote_code=trust_remote_code
+        )
+    except Exception as exc:
+        warnings.warn(
+            f"Could not resolve {model_path!r} for VLM reference caching: {exc}",
+            stacklevel=2,
+        )
+        return None
+    return getattr(config, "_commit_hash", None)
+
+
+def _batch_digest(batch: Mapping[str, torch.Tensor]) -> str:
+    """Hash tensor names, metadata, and bytes without dtype conversions."""
+    digest = hashlib.sha256()
+    for name, tensor in sorted(batch.items()):
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"VLM batch value {name!r} is not a tensor")
+        value = tensor.detach().cpu().contiguous()
+        digest.update(name.encode())
+        digest.update(str(value.dtype).encode())
+        digest.update(json.dumps(list(value.shape)).encode())
+        digest.update(value.view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _reference_cache_key(
+    *,
+    model_path: str,
+    model_revision: str,
+    model_dtype: torch.dtype,
+    trust_remote_code: bool,
+    prompt: str,
+    batch: Mapping[str, torch.Tensor],
+    max_new_tokens: int,
+    num_compare_steps: int,
+) -> str:
+    metadata = {
+        "schema": _VLM_REFERENCE_CACHE_SCHEMA,
+        "algorithm": _VLM_REFERENCE_ALGORITHM_VERSION,
+        "model_path": model_path,
+        "model_revision": model_revision,
+        "model_dtype": str(model_dtype),
+        "trust_remote_code": trust_remote_code,
+        "transformers_version": transformers_version,
+        "torch_version": torch.__version__,
+        "prompt": prompt,
+        "generation": {
+            "max_new_tokens": max_new_tokens,
+            "num_compare_steps": num_compare_steps,
+            "do_sample": False,
+            "use_cache": True,
+        },
+        "batch_sha256": _batch_digest(batch),
+    }
+    serialized = json.dumps(metadata, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode()).hexdigest()
+
+
+def _load_cached_vlm_reference(
+    path: Path, cache_key: str, num_compare_steps: int
+) -> VLMReference | None:
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+        if not isinstance(payload, dict) or payload.get("cache_key") != cache_key:
+            raise ValueError("cache key mismatch")
+        logits = payload.get("logits")
+        token_ids = payload.get("token_ids")
+        text = payload.get("text")
+        if not isinstance(logits, torch.Tensor) or logits.ndim != 2:
+            raise ValueError("logits must be a rank-2 tensor")
+        if logits.shape[0] != num_compare_steps or not logits.is_floating_point():
+            raise ValueError("unexpected logits shape or dtype")
+        if not isinstance(token_ids, torch.Tensor) or token_ids.ndim != 1:
+            raise ValueError("token_ids must be a rank-1 tensor")
+        if token_ids.shape[0] != num_compare_steps:
+            raise ValueError("unexpected token_ids shape")
+        if not isinstance(text, str):
+            raise ValueError("decoded text must be a string")
+        return VLMReference(
+            logits=[step.clone() for step in logits.float().unbind()],
+            token_ids=[int(token) for token in token_ids.tolist()],
+            text=text,
+        )
+    except Exception as exc:
+        warnings.warn(
+            f"Ignoring invalid VLM reference cache entry {path}: {exc}",
+            stacklevel=2,
+        )
+        return None
+
+
+def _save_cached_vlm_reference(
+    path: Path, cache_key: str, reference: VLMReference
+) -> None:
+    """Publish a complete cache file atomically for concurrent CI jobs."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Readers need directory search permission as well as readable cache files.
+    # Override restrictive umasks while preserving shared write and special bits.
+    directory_mode = stat.S_IMODE(path.parent.stat().st_mode)
+    if directory_mode & 0o055 != 0o055:
+        path.parent.chmod(directory_mode | 0o055)
+    payload = {
+        "cache_key": cache_key,
+        "logits": torch.stack(reference.logits).float().cpu(),
+        "token_ids": torch.tensor(reference.token_ids, dtype=torch.long),
+        "text": reference.text,
+    }
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", prefix=f".{path.name}.", dir=path.parent, delete=False
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            torch.save(payload, temporary)
+        temporary_path.chmod(0o644)
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def get_or_create_vlm_reference(
+    *,
+    cache_dir: str | Path | None,
+    model_path: str,
+    model_revision: str | None,
+    model_dtype: torch.dtype,
+    trust_remote_code: bool,
+    prompt: str,
+    batch: Mapping[str, torch.Tensor],
+    max_new_tokens: int,
+    num_compare_steps: int,
+    compute: Callable[[], VLMReference],
+) -> tuple[VLMReference, Literal["hit", "saved", "disabled", "write_failed"]]:
+    """Load a stock VLM reference, or compute and persist it on a cache miss.
+
+    Returns ``(reference, cache_status)`` with status ``hit``, ``saved``,
+    ``disabled``, or ``write_failed``. Caching is deliberately opt-in via
+    ``cache_dir`` and requires an immutable model revision. A write failure
+    still returns the computed reference.
+    """
+    if cache_dir is None or model_revision is None:
+        return compute(), "disabled"
+
+    cache_key = _reference_cache_key(
+        model_path=model_path,
+        model_revision=model_revision,
+        model_dtype=model_dtype,
+        trust_remote_code=trust_remote_code,
+        prompt=prompt,
+        batch=batch,
+        max_new_tokens=max_new_tokens,
+        num_compare_steps=num_compare_steps,
+    )
+    path = Path(cache_dir).expanduser() / f"vlm-reference-{cache_key}.pt"
+    if path.is_file():
+        cached = _load_cached_vlm_reference(path, cache_key, num_compare_steps)
+        if cached is not None:
+            return cached, "hit"
+
+    reference = compute()
+    if len(reference.logits) != num_compare_steps:
+        raise ValueError(
+            f"expected {num_compare_steps} reference logit vectors, "
+            f"got {len(reference.logits)}"
+        )
+    if len(reference.token_ids) != num_compare_steps:
+        raise ValueError(
+            f"expected {num_compare_steps} reference token IDs, "
+            f"got {len(reference.token_ids)}"
+        )
+    try:
+        _save_cached_vlm_reference(path, cache_key, reference)
+    except OSError as exc:
+        warnings.warn(
+            f"Could not write VLM reference cache entry {path}: {exc}",
+            stacklevel=2,
+        )
+        return reference, "write_failed"
+    return reference, "saved"
+
+
+def stock_vlm_reference(
+    model,
+    processor: AutoProcessor,
+    batch: dict[str, torch.Tensor],
+    max_new_tokens: int,
+    num_compare_steps: int,
+) -> VLMReference:
+    """Generate one stock-HF run for both comparison logits and caption."""
+    prompt_len = batch["input_ids"].shape[1]
+    with torch.no_grad():
+        generation = model.generate(
+            **batch,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            use_cache=True,
+            output_logits=True,
+            return_dict_in_generate=True,
+        )
+    if len(generation.logits) < num_compare_steps:
+        raise ValueError(
+            f"stock generation produced {len(generation.logits)} steps; "
+            f"{num_compare_steps} are required for comparison"
+        )
+    generated_tokens = generation.sequences[0, prompt_len:]
+    return VLMReference(
+        logits=[
+            generation.logits[step][0].float().cpu().clone()
+            for step in range(num_compare_steps)
+        ],
+        token_ids=[int(token) for token in generated_tokens[:num_compare_steps]],
+        text=processor.tokenizer.decode(generated_tokens, skip_special_tokens=True),
+    )
 
 
 def stock_vlm_generate(

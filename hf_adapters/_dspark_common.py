@@ -204,23 +204,33 @@ def prepare_dspark_common(model, *, ctx_pad, kv_pad, use_qk_norm):
     if not hasattr(model, "_spyre_rope"):
         model._spyre_rope = PrecomputedRotaryEmbedding(model.rotary_emb)
 
+    model._spyre_dspark = {
+        "ctx_pad": ctx_pad,
+        "kv_pad": kv_pad,
+        "block_size": int(model.block_size),
+    }
+    model._spyre_compiled_blocks = compile_dspark_blocks(
+        model, ctx_pad=ctx_pad, kv_pad=kv_pad, use_qk_norm=use_qk_norm
+    )
+
+
+def kv_pad_for(ctx_pad, block_size):
+    """Stick-aligned concat-KV width: ``ctx_pad + block_size`` rounded up to 32."""
+    return ((ctx_pad + block_size + 31) // 32) * 32
+
+
+def compile_dspark_blocks(model, *, ctx_pad, kv_pad, use_qk_norm):
+    """One compiled concat-KV block (``make_dspark_block``) per draft layer."""
     cfg = model.config
-    block_size = int(model.block_size)
     # Default SDPA scaling is head_dim**-0.5; a family may stash an override
     # (e.g. Granite's attention_multiplier) on ``model._spyre_attn_scaling``.
     head_dim = getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads)
     scaling = getattr(model, "_spyre_attn_scaling", head_dim**-0.5)
-
-    model._spyre_dspark = {
-        "ctx_pad": ctx_pad,
-        "kv_pad": kv_pad,
-        "block_size": block_size,
-    }
-    model._spyre_compiled_blocks = [
+    return [
         make_dspark_block(
             layer,
             ctx_pad=ctx_pad,
-            block_size=block_size,
+            block_size=int(model.block_size),
             kv_pad=kv_pad,
             use_qk_norm=use_qk_norm,
             scaling=scaling,

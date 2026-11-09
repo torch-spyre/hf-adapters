@@ -1,6 +1,6 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-37-blue)
+![adapters](https://img.shields.io/badge/adapters-44-blue)
 ![compatible](https://img.shields.io/badge/compatible_models-10K%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -13,17 +13,22 @@ from `transformers`.
 
 ## Supported Models
 
-**37 adapters · 10K+ compatible models**
+**44 adapters · 10K+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
-**sequence classification** (sentiment / text categorisation),
-**token classification** (NER/POS), **vision-language** (image→text), and
+**multimodal embedding** (SigLIP text/image vectors),
+**sequence classification** (sentiment / text categorisation), **structured
+decisions** (variable options plus action selection), **token classification**
+(NER/POS), **vision-language** (image→text), and
 **speculative-decoding drafter** models — from
 Llama / Qwen / Granite / Mistral / Phi / Gemma / OLMo / GPT decoders to BERT /
 XLM-RoBERTa / MPNet / ModernBERT encoders, the Granite Vision 4.1 (SigLIP tower +
-Granite text), Mistral3 Vision (Pixtral tower + Mistral text), and Gemma 4
-(encoder-free and full-vision) multimodal VLMs, plus the DSpark block-propose drafters for
-Qwen 3 / Granite / Gemma 4.
+Granite text), Mistral3 Vision (Pixtral tower + Mistral text), Gemma 4
+(encoder-free and full-vision), and Muse Glimmer multimodal VLMs, the SigLIP
+dual-encoder for text/image embeddings, plus the DSpark block-propose drafters for
+Qwen 3 / Granite / Gemma 4 and the XPress block-propose drafter (Gemma 4 26B-A4B).
+Laya support uses its optional upstream package to construct the stock decision
+model; hf-adapters patches its encoder, decision transformer, and marker selection.
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. The **canonical, per-adapter model lists** — verified
@@ -35,6 +40,9 @@ Spyre numerical accuracy — live in **[ARCHITECTURE.md](ARCHITECTURE.md#verifie
 ```bash
 # Install core deps
 uv sync
+
+# Optional Laya typed-decision support
+uv sync --extra laya
 
 # Install core + dev deps
 uv sync --group dev
@@ -87,6 +95,34 @@ inputs = encode_prompts(tokenizer, ["What is 2+2?"])
 sequences = model.generate(**inputs, max_new_tokens=5)
 ```
 
+## Structured Decisions
+
+Laya keeps its native Agent API while patching its ModernBERT/mmBERT encoder,
+two-layer decision transformer, and marker/CLS selection to run on Spyre:
+
+```python
+from hf_adapters import laya_backend
+
+agent = laya_backend.load("convaiinnovations/laya")
+result = agent.predict(
+    "The production API is down and customers cannot log in.",
+    {
+        "department": {
+            "type": "choice",
+            "instructions": "Which team should handle this?",
+            "criteria": {
+                "billing": "payments and refunds",
+                "technical": "bugs and outages",
+                "other": "anything else",
+            },
+        }
+    },
+)
+```
+
+Question-type lookup, scoring, and Agent orchestration remain on CPU. Select a
+bundled checkpoint with `subfolder="typed-decisions"` or `subfolder="multilingual"`.
+
 ## Embedding Models
 
 For embedding models, use the `sentence-transformers` library with the `backend="spyre"` parameter:
@@ -134,8 +170,9 @@ left-to-right causal generation.
 ## Extractive Question Answering
 
 Use `AutoSpyreModelForQuestionAnswering` with fine-tuned BERT-family QA models.
-The encoder runs on Spyre, the small token-classification head runs on CPU, and
-the normal Hugging Face output contract is preserved:
+The encoder and the `qa_outputs` head both run on Spyre, so only the start/end
+logits are copied back to CPU, and the normal Hugging Face output contract is
+preserved:
 
 ```python
 from transformers import AutoTokenizer
@@ -163,9 +200,9 @@ and hidden-state collection are not currently supported.
 
 Use `AutoSpyreModelForSequenceClassification` for models that return a single
 label per input (sentiment analysis, topic classification, natural language
-inference). The encoder runs on Spyre; the classification head runs on CPU.
-Returns a standard HuggingFace `SequenceClassifierOutput` with
-`logits [B, num_labels]` on CPU:
+inference). The encoder and the classification head both run on Spyre, so only
+the logits leave the device. Returns a standard HuggingFace
+`SequenceClassifierOutput` with `logits [B, num_labels]` on CPU:
 
 ```python
 from transformers import AutoTokenizer
@@ -189,8 +226,8 @@ print(labels)  # → ['POSITIVE', 'NEGATIVE']
 
 Use `AutoSpyreModelForTokenClassification` for token-level label prediction
 (named-entity recognition, part-of-speech tagging, chunking). The encoder runs on
-Spyre; the linear `classifier` head runs on CPU. Returns a standard HuggingFace
-`TokenClassifierOutput` with `logits [B, L, num_labels]`:
+Spyre, as does the linear `classifier` head. Returns a standard HuggingFace
+`TokenClassifierOutput` with `logits [B, L, num_labels]` on CPU:
 
 ```python
 from transformers import AutoTokenizer
@@ -247,9 +284,16 @@ A multimodal checkpoint's config is registered under both auto classes:
 `AutoSpyreModelForCausalLM` selects the text-only adapter (vision tower
 discarded), while `AutoSpyreModelForImageTextToText` selects the combined
 multimodal adapter. This works for Granite Vision (`Granite4VisionConfig`),
-Mistral3 Vision (`Mistral3Config`), and Gemma 4 (`Gemma4UnifiedConfig` for the
-encoder-free variant, or `Gemma4Config` for the full vision-tower variants; see
+Mistral3 Vision (`Mistral3Config`), Gemma 4 (`Gemma4UnifiedConfig` for the
+encoder-free variant, or `Gemma4Config` for the full vision-tower variants),
+as well as Muse Glimmer (`MuseGlimmerConfig`; see
 [ARCHITECTURE.md](ARCHITECTURE.md#multimodal-vlm-path-vision-tower--text-decoder)).
+
+For Muse Glimmer image generation, use `meta-models/Muse-Glimmer-30B` as the
+model and processor path in the example above; the model loads in bf16 by
+default. The combined adapter accepts the processor's
+`pixel_values` and `image_grid_thw` alongside the text inputs and also supports
+text-only prompts through the same API.
 
 ## Repo Structure
 

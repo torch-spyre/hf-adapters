@@ -28,6 +28,7 @@ import torch
 import torch._inductor.compile_fx
 import yaml
 from dotenv import load_dotenv
+from torch._library.fake_class_registry import FakeScriptObject
 from torch.fx.experimental.symbolic_shapes import has_free_symbols, is_concrete_int
 
 USE_OLDFORMAT = os.getenv("USE_OLDFORMAT", None) is not None
@@ -184,7 +185,14 @@ def sanitize_arg(
 # Op-name prefixes that never denote a tensor operation, so they get no test case.
 # torch.cuda.* are host-side device queries (e.g. get_device_capability(), called
 # from transformers' _can_use_grouped_mm) that return Python values, not tensors.
-_SKIPPED_OP_PREFIXES = ("torch.cuda.",)
+# torch.ops.spyre.*, torch_spyre._monkey_patch.* and torch._C._autograd.* come from
+# torch-spyre's own device-copy / dtype plumbing, not from the model.
+_SKIPPED_OP_PREFIXES = (
+    "torch.cuda.",
+    "torch.ops.spyre.",
+    "torch_spyre._monkey_patch.",
+    "torch._C._autograd.",
+)
 
 # ``_operator`` names that must not be spelled "torch." + name, because the
 # trailing underscore in ``operator.and_`` / ``or_`` is only Python
@@ -204,12 +212,14 @@ _OPERATOR_OP_NAMES = {
 
 # Ops whose tensor inputs should use Xavier init when dtype/rank also qualify.
 _XAVIER_OPS = {
+    "torch.sum",
     "torch.conv2d",
     "torch.bmm",
     "torch.matmul",
     "torch._grouped_mm",
     "torch.nn.functional.linear",
     "torch.nn.functional.grouped_mm",
+    "torch.nn.functional.scaled_dot_product_attention",
 }
 _XAVIER_DTYPES = {"torch.float16", "torch.float32", "torch.bfloat16"}
 
@@ -418,6 +428,30 @@ def add_test_case_yaml(
             test_case_yaml["kwmap"] = kwmap
 
     return test_case_yaml
+
+
+def _format_parameters_header(batch=None, input_len=None, output_len=None):
+    """Return the ``%%%`` comment block describing the run parameters, or ``""``.
+
+    Written at the top of each generated YAML so a reader can tell which
+    batch / sequence-length configuration the captured ops came from. Only the
+    parameters that were actually supplied are listed; when all three are
+    ``None`` there is nothing to describe and the block is omitted entirely.
+    """
+    params = [
+        ("batch_size", batch),
+        ("input_token_length", input_len),
+        ("output_token_length", output_len),
+    ]
+    lines = [f"# {name} : {value}" for name, value in params if value is not None]
+    if not lines:
+        return ""
+    return (
+        "#%%% start parameters\n"
+        "#parameters : {\n" + "\n".join(lines) + "\n"
+        "#}\n"
+        "#%%% end parameters\n"
+    )
 
 
 class YamlFmtDumper(yaml.Dumper):
@@ -1548,6 +1582,13 @@ class TorchOpCollector:
             # workaround for Gemma3
             TorchOpCollector.log_function[TorchOpCollector.log_mthd]("Case 6")
             shape = stride = storage_offset = dtype = device = None
+        elif isinstance(meta_val, (FakeScriptObject, torch.ScriptObject)):
+            # Opaque graph input with no tensor metadata, e.g. the encoded layer
+            # name vLLM passes to unified_attention_with_output
+            TorchOpCollector.log_function[TorchOpCollector.log_mthd](
+                "Case 6b: opaque script object"
+            )
+            shape = stride = storage_offset = dtype = device = None
         else:
             TorchOpCollector.log_function[TorchOpCollector.log_mthd]("Case 7: unknown")
             raise RuntimeError(f"{type(meta_val)} : {meta_val}")
@@ -1715,21 +1756,17 @@ class TorchOpCollector:
         return skip, skip_arg_and_cont, is_scalar, is_list
 
     @staticmethod
-    def _compile_fx(
-        model_,
-        example_inputs_,
-        inner_compile=torch._inductor.compile_fx.compile_fx_inner,
-        config_patches=None,
-        decompositions=None,
-        *args,
-        **kwargs,
-    ):
+    def _compile_fx(model_, example_inputs_, *args, **kwargs):
+        # Forward the caller's arguments untouched. Re-spelling them positionally
+        # (and baking in an ``inner_compile`` default) collides with wrappers
+        # such as torch-spyre's, which ``kwargs.setdefault("decompositions", ...)``
+        # and would raise "got multiple values for argument 'decompositions'".
         model_.print_readable(print_output=TorchOpCollector.print_graph_module)
         TorchOpCollector.collect_torchops(
             model_, TorchOpCollector.ops_set, TorchOpCollector.print_output
         )
         return TorchOpCollector.orig_compile_fx(
-            model_, example_inputs_, inner_compile, config_patches, decompositions
+            model_, example_inputs_, *args, **kwargs
         )
 
     def __init__(self, print_output=False, print_graph_module=False):
@@ -1759,7 +1796,15 @@ class TorchOpCollector:
         return False
 
     def write_yaml(
-        self, model_name, output_dir=".", yaml_defaults=None, supress_spyre=False
+        self,
+        model_name,
+        *,
+        output_dir=".",
+        yaml_defaults=None,
+        supress_spyre=True,
+        batch=None,
+        input_len=None,
+        output_len=None,
     ):
         defaults = {**TorchOpCollector.DEFAULT_YAML_DEFAULTS, **(yaml_defaults or {})}
 
@@ -1847,7 +1892,10 @@ class TorchOpCollector:
             }
             print(f"Total no. of test cases: {len(config['cases'])}")
 
+        params_header = _format_parameters_header(batch, input_len, output_len)
+
         with open(os.path.join(output_dir, model_name + ".yaml"), "w") as f:
+            f.write(params_header)
             yaml.dump(
                 config,
                 f,
@@ -1871,6 +1919,7 @@ class TorchOpCollector:
             else:
                 config["cases"] = _filter_cases(self.test_cases_norm_yaml)
             with open(os.path.join(output_dir, model_name + "_spyre.yaml"), "w") as f:
+                f.write(params_header)
                 yaml.dump(
                     config,
                     f,

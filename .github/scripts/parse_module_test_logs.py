@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# v1 module tests: delete once the dashboard reads v2 capabilities
 """
 parse_module_test_logs.py
 --------------------------

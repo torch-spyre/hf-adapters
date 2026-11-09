@@ -46,6 +46,7 @@ from hf_adapters._dspark_common import (
     _pad_markov_w2,
     install_spyre_compute_logits,
     install_spyre_markov,
+    kv_pad_for,
     run_draft_block,
     snapshot_cpu_embeddings,
     snapshot_cpu_fc,
@@ -136,7 +137,7 @@ def prepare_for_spyre(model):
     )
 
     block_size = int(model.block_size)
-    kv_pad = ((CTX_PAD + block_size + 31) // 32) * 32
+    kv_pad = kv_pad_for(CTX_PAD, block_size)
     # Gemma4's rotary registers its freqs per attention type
     # (``full_attention_inv_freq`` / ``full_attention_attention_scaling``) rather
     # than the bare ``inv_freq`` PrecomputedRotaryEmbedding reads, so wrap those

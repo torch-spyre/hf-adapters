@@ -27,8 +27,11 @@ from __future__ import annotations
 
 import os
 import types
+from typing import Any
 
-import pytest
+# NOTE: no top-level ``import pytest``. The weekly scan's generate-matrix job imports
+# this registry (WEEKLY_SCAN_*_PATHS) from an environment without the ``test``
+# dependency group; ``xfail_non_blocking`` imports pytest lazily instead.
 
 
 def _include_gated() -> bool:
@@ -61,6 +64,7 @@ CAUSAL_LM_MODELS = {
         "path": "gpt2",
         "adapter": "hf_gpt2.py",
         "size": "0.1b",
+        "weekly_perf": True,
     },
     # hf_gpt_neo.py
     "gpt_neo": {
@@ -68,6 +72,7 @@ CAUSAL_LM_MODELS = {
         "path": "EleutherAI/gpt-neo-125m",
         "adapter": "hf_gpt_neo.py",
         "size": "0.1b",
+        "weekly_perf": True,
     },
     # hf_opt.py
     "opt": {
@@ -75,6 +80,7 @@ CAUSAL_LM_MODELS = {
         "path": "facebook/opt-125m",
         "adapter": "hf_opt.py",
         "size": "0.1b",
+        "weekly_perf": True,
     },
     # hf_gpt_neox.py
     "pythia_410m": {
@@ -82,6 +88,7 @@ CAUSAL_LM_MODELS = {
         "path": "EleutherAI/pythia-410m",
         "adapter": "hf_gpt_neox.py",
         "size": "0.4b",
+        "weekly_perf": True,
     },
     # hf_granite.py
     "granite8b": {
@@ -96,6 +103,7 @@ CAUSAL_LM_MODELS = {
         "path": "ibm-granite/granite-3.3-2b-instruct",
         "adapter": "hf_granite.py",
         "size": "2b",
+        "weekly_perf": True,
     },
     # hf_granitemoehybrid.py
     "granite4": {
@@ -103,6 +111,7 @@ CAUSAL_LM_MODELS = {
         "path": "ibm-granite/granite-4.0-1b-base",
         "adapter": "hf_granitemoehybrid.py",
         "size": "1b",
+        "weekly_perf": True,
     },
     "granite4_instruct": {
         "name": "Granite 4.0 1B Instruct",
@@ -137,6 +146,7 @@ CAUSAL_LM_MODELS = {
         "path": "ibm-granite/granite-vision-4.1-4b",
         "adapter": "hf_granite_vision.py",
         "size": "4b",
+        "weekly_perf": False,  # Vision models are unsupported by spyre-perf-suite.
     },
     # hf_smollm3.py
     "smollm3": {
@@ -144,6 +154,7 @@ CAUSAL_LM_MODELS = {
         "path": "HuggingFaceTB/SmolLM3-3B-Base",
         "adapter": "hf_smollm3.py",
         "size": "3b",
+        "weekly_perf": True,
     },
     # hf_lfm2.py
     "lfm2_350m": {
@@ -151,6 +162,7 @@ CAUSAL_LM_MODELS = {
         "path": "LiquidAI/LFM2-350M",
         "adapter": "hf_lfm2.py",
         "size": "0.35b",
+        "weekly_perf": True,
     },
     # hf_llama.py
     "tiny_llama": {
@@ -197,6 +209,7 @@ CAUSAL_LM_MODELS = {
         "path": "microsoft/Phi-3.5-mini-instruct",
         "adapter": "hf_phi3.py",
         "size": "3.8b",
+        "weekly_perf": True,
     },
     # hf_qwen2.py
     "qwen2": {
@@ -204,6 +217,7 @@ CAUSAL_LM_MODELS = {
         "path": "Qwen/Qwen2.5-1.5B",
         "adapter": "hf_qwen2.py",
         "size": "1.5b",
+        "weekly_perf": True,
     },
     # hf_qwen3.py
     "qwen3": {
@@ -211,6 +225,30 @@ CAUSAL_LM_MODELS = {
         "path": "Qwen/Qwen3-0.6B",
         "adapter": "hf_qwen3.py",
         "size": "0.6b",
+        "weekly_perf": True,
+    },
+    # hf_qwen3_5.py
+    "qwen3_5_2b": {
+        "name": "Qwen3.5 2B",
+        "path": "Qwen/Qwen3.5-2B",
+        "adapter": "hf_qwen3_5.py",
+        "size": "2b",
+        "weekly_perf": True,
+    },
+    "qwen3_8_27b": {
+        "name": "Qwen3.8 27B",
+        "path": "Qwen/Qwen3.8-27B",
+        "adapter": "hf_qwen3_5.py",
+        "size": "27b",
+    },
+    # hf_qwen3_5_moe.py
+    "qwen3_6_35b_a3b": {
+        "name": "Qwen3.6 35B A3B",
+        "path": "Qwen/Qwen3.6-35B-A3B",
+        "adapter": "hf_qwen3_5_moe.py",
+        "size": "35b",
+        "multicard_smoke": True,
+        "weekly_perf": True,
     },
     # hf_mistral.py
     "ministral": {
@@ -218,6 +256,7 @@ CAUSAL_LM_MODELS = {
         "path": "ministral/Ministral-3B-Instruct",
         "adapter": "hf_mistral.py",
         "size": "3b",
+        "weekly_perf": True,
     },
     # hf_ministral.py
     "ministral8b": {
@@ -225,6 +264,7 @@ CAUSAL_LM_MODELS = {
         "path": "mistralai/Ministral-8B-Instruct-2410",
         "adapter": "hf_ministral.py",
         "size": "8b",
+        "weekly_perf": True,
     },
     # hf_mistral3.py
     "mistral3": {
@@ -244,6 +284,7 @@ CAUSAL_LM_MODELS = {
         "path": "mistralai/Ministral-3-8B-Instruct-2512",
         "adapter": "hf_mistral3.py",
         "size": "8b",
+        "weekly_perf": True,
     },
     # hf_olmo.py
     "olmo1b": {
@@ -251,6 +292,7 @@ CAUSAL_LM_MODELS = {
         "path": "allenai/OLMo-1B-hf",
         "adapter": "hf_olmo.py",
         "size": "1b",
+        "weekly_perf": True,
     },
     # hf_olmo2.py
     "olmo2_1b": {
@@ -258,6 +300,7 @@ CAUSAL_LM_MODELS = {
         "path": "allenai/OLMo-2-0425-1B",
         "adapter": "hf_olmo2.py",
         "size": "1b",
+        "weekly_perf": True,
     },
     # hf_olmoe.py
     "olmoe_1b_7b": {
@@ -265,6 +308,7 @@ CAUSAL_LM_MODELS = {
         "path": "allenai/OLMoE-1B-7B-0924",
         "adapter": "hf_olmoe.py",
         "size": "7b",
+        "weekly_perf": True,
     },
     # hf_gemma2.py
     "gemma2_2b_unsloth": {
@@ -272,6 +316,7 @@ CAUSAL_LM_MODELS = {
         "path": "unsloth/gemma-2-2b-it",
         "adapter": "hf_gemma2.py",
         "size": "2b",
+        "weekly_perf": True,
     },
     "gemma2_9b_unsloth": {
         "name": "Gemma 2 9B",
@@ -285,6 +330,7 @@ CAUSAL_LM_MODELS = {
         "path": "unsloth/gemma-3-1b-it",
         "adapter": "hf_gemma3.py",
         "size": "1b",
+        "weekly_perf": True,
     },
     "gemma3_google": {
         "name": "Gemma 3 1B",
@@ -292,6 +338,14 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_gemma3.py",
         "is_gated": True,
         "size": "1b",
+    },
+    # hf_muse_glimmer.py (text backbone)
+    "muse_glimmer_30b": {
+        "name": "Muse Glimmer 30B (text)",
+        "path": "meta-models/Muse-Glimmer-30B",
+        "adapter": "hf_muse_glimmer.py",
+        "size": "30b",
+        "dtype": "bfloat16",
     },
     # hf_gemma4
     "gemma4_base": {
@@ -307,6 +361,7 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_gemma4.py",
         "size": "12b",
         "always_test": True,
+        "weekly_perf": True,
     },
     "gemma4_31b": {
         "name": "Gemma 4 31B",
@@ -331,6 +386,7 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_gemma4_moe.py",
         "size": "26b",
         "dtype": "bfloat16",
+        "weekly_perf": True,
     },
     # hf_gemma4.py E variants
     "gemma4_e2b": {
@@ -341,6 +397,7 @@ CAUSAL_LM_MODELS = {
         # E2B and E4B exercise distinct released E-variant configurations; keep
         # both in the default matrix even though they share one adapter.
         "always_test": True,
+        "weekly_perf": True,
     },
     "gemma4_e4b": {
         "name": "Gemma 4 E4B",
@@ -348,6 +405,7 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_gemma4.py",
         "size": "4b",
         "always_test": True,
+        "weekly_perf": True,
     },
     # DSpark speculative-decoding drafters (block proposers). kind="dspark_draft"
     # keeps them out of the generate-based causal-LM harnesses (see CAUSAL_PATHS);
@@ -375,6 +433,18 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_dspark_granite.py",
         "size": "1b",
         "kind": "dspark_draft",
+    },
+    # XPress speculative-decoding drafter (DFlash backbone + causal refiner),
+    # Qwen3-style layers for a Gemma 4 26B-A4B target. Exercised by
+    # tests/spyre/test_xpress_draft_spyre.py; vocab weights come from "target".
+    # hf_xpress_qwen3.py
+    "xpress_gemma4_26b": {
+        "name": "XPress Gemma 4 26B-A4B Drafter (b16)",
+        "path": "UIUC-SSAIL/gemma4-26b-a4b-XPress-b16",
+        "adapter": "hf_xpress_qwen3.py",
+        "size": "0.6b",
+        "kind": "xpress_draft",
+        "target": "google/gemma-4-26B-A4B-it",
     },
     "diffusiongemma_26b": {
         "name": "DiffusionGemma 26B-A4B-it",
@@ -586,6 +656,29 @@ MASKED_LM_MODELS = {
 }
 
 
+# Structured-decision models emit variable option logits and separate action logits.
+STRUCTURED_DECISION_MODELS = {
+    "laya": {
+        "name": "Laya",
+        "path": "convaiinnovations/laya",
+        "adapter": "laya_backend.py",
+        "size": "0.4b",
+    },
+    "laya_typed_decisions": {
+        "name": "Laya Typed Decisions",
+        "path": "convaiinnovations/laya-typed-decisions",
+        "adapter": "laya_backend.py",
+        "size": "0.4b",
+    },
+    "laya_multilingual": {
+        "name": "Laya Multilingual",
+        "path": "convaiinnovations/laya-multilingual",
+        "adapter": "laya_backend.py",
+        "size": "0.3b",
+    },
+}
+
+
 # Vision models. ``kind="tower"`` adapters are encoder-only; ``kind="vlm"`` adapters
 # are full multimodal models with a causal text decoder, RoPE, KV caches, and ``generate``.
 VISION_MODELS = {
@@ -669,6 +762,15 @@ VISION_MODELS = {
         "size": "26b",
         "always_test": True,
     },
+    # hf_muse_glimmer_mm.py — Muse vision tower + shared Muse text decoder
+    "muse_glimmer_mm": {
+        "name": "Muse Glimmer 30B (both towers)",
+        "path": "meta-models/Muse-Glimmer-30B",
+        "adapter": "hf_muse_glimmer_mm.py",
+        "kind": "vlm",
+        "dtype": "bfloat16",
+        "size": "30b",
+    },
     # hf_clip.py — CLIP dual-encoder (image + text -> embeddings via ST backend)
     "clip_vit_b_32": {
         "name": "clip-ViT-B-32",
@@ -676,6 +778,17 @@ VISION_MODELS = {
         "adapter": "hf_clip.py",
         "kind": "clip",  # dual-encoder: image or text -> embedding
         "size": "0.15b",
+    },
+}
+
+
+MULTIMODAL_EMBEDDING_MODELS: dict[str, dict[str, Any]] = {
+    "siglip2_giant_opt_patch16_384": {
+        "name": "SigLIP2 giant-opt patch16 384",
+        "path": "google/siglip2-giant-opt-patch16-384",
+        "adapter": "hf_siglip.py",
+        "kind": "multimodal_embedding",
+        "size": "1.8b",
     },
 }
 
@@ -777,10 +890,12 @@ def _exclude(paths: list[str]) -> list[str]:
 _include_gated_flag = _include_gated()
 
 
-# ``kind == "dspark_draft"`` entries are speculative-decoding drafters (block
-# proposers, driven by ``_run_draft_block`` — no ``generate``), so they are
-# registered for adapter-coverage but excluded from the generate-based CPU/Spyre
-# causal-LM harnesses; they are exercised by tests/spyre/test_dspark_draft_spyre.py.
+# ``DRAFTER_KINDS`` entries are speculative-decoding drafters (block proposers,
+# driven by ``_run_draft_block`` / ``propose_block`` — no ``generate``), so they
+# are registered for adapter-coverage but excluded from the generate-based
+# CPU/Spyre causal-LM harnesses; they are exercised by
+# tests/spyre/test_dspark_draft_spyre.py and tests/spyre/test_xpress_draft_spyre.py.
+DRAFTER_KINDS = ("dspark_draft", "xpress_draft")
 # ``kind == "diffusion"`` entries (e.g. DiffusionGemma) use a block-diffusion
 # generate loop that is incompatible with the AR causal-LM harness; they are
 # exercised by tests/spyre/test_diffusion_gemma.py.
@@ -788,9 +903,18 @@ CAUSAL_PATHS: list[str] = _exclude(
     _select_representative_paths(
         CAUSAL_LM_MODELS,
         include_gated=_include_gated_flag,
-        predicate=lambda info: info.get("kind") not in ("dspark_draft", "diffusion"),
+        predicate=lambda info: info.get("kind") not in (*DRAFTER_KINDS, "diffusion"),
     )
 )
+
+WEEKLY_PERF_PATHS: list[str] = _exclude(
+    [
+        info["path"]
+        for info in CAUSAL_LM_MODELS.values()
+        if info.get("weekly_perf", False)
+    ]
+)
+
 MULTICARD_SMOKE_PATHS: list[str] = _exclude(
     [
         info["path"]
@@ -808,8 +932,22 @@ DSPARK_PATHS: list[str] = _exclude(
         predicate=lambda info: info.get("kind") == "dspark_draft",
     )
 )
+# The XPress drafter checkpoints — exercised by tests/spyre/test_xpress_draft_spyre.py.
+XPRESS_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        CAUSAL_LM_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") == "xpress_draft",
+    )
+)
 EMBED_PATHS: list[str] = _exclude(
     _select_representative_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)
+)
+MULTIMODAL_EMBED_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        MULTIMODAL_EMBEDDING_MODELS,
+        include_gated=_include_gated_flag,
+    )
 )
 MASKED_LM_PATHS: list[str] = _exclude(
     _select_representative_paths(MASKED_LM_MODELS, include_gated=_include_gated_flag)
@@ -822,6 +960,11 @@ QUESTION_ANSWERING_PATHS: list[str] = _exclude(
 TOKEN_CLASSIFICATION_PATHS: list[str] = _exclude(
     _select_representative_paths(
         TOKEN_CLASSIFICATION_MODELS, include_gated=_include_gated_flag
+    )
+)
+STRUCTURED_DECISION_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        STRUCTURED_DECISION_MODELS, include_gated=_include_gated_flag
     )
 )
 VISION_PATHS: list[str] = _exclude(
@@ -877,7 +1020,9 @@ REMOTE_CODE_PATHS: frozenset[str] = frozenset(
         MASKED_LM_MODELS,
         QUESTION_ANSWERING_MODELS,
         TOKEN_CLASSIFICATION_MODELS,
+        STRUCTURED_DECISION_MODELS,
         VISION_MODELS,
+        MULTIMODAL_EMBEDDING_MODELS,
     )
     for info in models.values()
     if info.get("trust_remote_code", False)
@@ -892,8 +1037,11 @@ ALL_CAUSAL_PATHS: list[str] = _exclude(
     _all_paths(
         CAUSAL_LM_MODELS,
         include_gated=_include_gated_flag,
-        predicate=lambda info: info.get("kind") not in ("dspark_draft", "diffusion"),
+        predicate=lambda info: info.get("kind") not in (*DRAFTER_KINDS, "diffusion"),
     )
+)
+ALL_MULTIMODAL_EMBED_PATHS: list[str] = _exclude(
+    _all_paths(MULTIMODAL_EMBEDDING_MODELS, include_gated=_include_gated_flag)
 )
 ALL_EMBED_PATHS: list[str] = _exclude(
     _all_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)
@@ -906,6 +1054,9 @@ ALL_QUESTION_ANSWERING_PATHS: list[str] = _exclude(
 )
 ALL_TOKEN_CLASSIFICATION_PATHS: list[str] = _exclude(
     _all_paths(TOKEN_CLASSIFICATION_MODELS, include_gated=_include_gated_flag)
+)
+ALL_STRUCTURED_DECISION_PATHS: list[str] = _exclude(
+    _all_paths(STRUCTURED_DECISION_MODELS, include_gated=_include_gated_flag)
 )
 ALL_VISION_PATHS: list[str] = _exclude(
     _all_paths(
@@ -920,6 +1071,29 @@ ALL_CLIP_PATHS: list[str] = _exclude(
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") == "clip",
     )
+)
+
+
+# Every registered checkpoint the weekly push-to-clickhouse scan evaluates by name,
+# alongside its ranked top-K lists and the curated files (see
+# tests/spyre/weekly_generation/model_fetcher.py). All entries -- not one
+# representative per adapter -- because the point is a weekly check that each
+# registered checkpoint still works. Gated and trust_remote_code entries are always
+# left out, regardless of SPYRE_INCLUDE_GATED / SPYRE_INCLUDE_TRUST_REMOTE_CODE: the
+# scan runs unattended and must not depend on per-environment opt-ins. Only the two
+# registries the scan has an evaluator for are included: token-compare (generative,
+# minus drafters and diffusion, which are not autoregressive LMs) and the text
+# SentenceTransformers embed-compare (embedding).
+WEEKLY_SCAN_GENERATIVE_PATHS: list[str] = _exclude(
+    _all_paths(
+        CAUSAL_LM_MODELS,
+        include_gated=False,
+        include_trust_remote_code=False,
+        predicate=lambda info: info.get("kind") not in (*DRAFTER_KINDS, "diffusion"),
+    )
+)
+WEEKLY_SCAN_EMBEDDING_PATHS: list[str] = _exclude(
+    _all_paths(EMBEDDING_MODELS, include_gated=False, include_trust_remote_code=False)
 )
 
 
@@ -944,6 +1118,7 @@ NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = _non_blocking(
     (
         "smollm3",
         "gemma2_2b_unsloth",  # small gap that happens to flip token for test prompt
+        "olmoe_1b_7b",
     ),
 )
 
@@ -959,6 +1134,8 @@ def xfail_non_blocking(paths: list[str], *, table: dict[str, str]) -> list[objec
     The test still runs and its outcome (PASS/FAIL) is visible in the report,
     but a failure won't fail the pytest run or block CI.
     """
+    import pytest
+
     return [
         (
             pytest.param(

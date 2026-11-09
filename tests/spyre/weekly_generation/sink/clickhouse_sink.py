@@ -40,8 +40,14 @@ class ClickHouseResultSink(ResultSink):
     batch boundaries so a crash loses at most one batch.
     """
 
-    def __init__(self, model_type: ModelType) -> None:
+    def __init__(
+        self, model_type: ModelType, model_list_file: str | None = None
+    ) -> None:
         self._model_type = model_type
+        # Names this process's slice of a sharded scan, for the v2 dedup scope only. The v1
+        # write does not use it: ReplacingMergeTree(snapshot_date) collapses a duplicate
+        # rather than doubling it, which is why v1 never needed a per-shard key.
+        self._model_list_file = model_list_file
         if model_type is ModelType.EMBEDDING:
             self._table_name = EMBEDDING_TABLE_NAME
             create_sql = EMBEDDING_CREATE_TABLE_SQL
@@ -143,7 +149,27 @@ class ClickHouseResultSink(ResultSink):
             column_names=list(TABLE_COLUMNS),
         )
         print("ClickHouse: bulk insert complete.")
+        self._write_v2(self._pending)
         self._pending.clear()
+
+    def _write_v2(self, pending: list[list[Any]]) -> None:
+        """Mirror the flushed rows into the schema-v2 capability tables.
+
+        AFTER the v1 insert and inside try/except, deliberately: v1 is what this scan exists to
+        produce, and a v2 problem -- an unreachable database, a table not yet created, a schema
+        change -- must never cost a verdict that took hours of Spyre time to establish.
+        """
+        try:
+            from tests.spyre.weekly_generation.sink import capability_write
+
+            capability_write.write(
+                capability_write.rows_from_pending(pending, TABLE_COLUMNS),
+                model_list_file=self._model_list_file,
+            )
+        except Exception as exc:  # noqa: BLE001 - v2 must never fail the v1 write
+            print(
+                f"  [warn] v2 capability write failed ({exc}); v1 rows are unaffected."
+            )
 
     def get_models_at_snapshot_date(self, *, snapshot_date: date) -> set[str]:
         """Return every distinct model name recorded for *snapshot_date*.

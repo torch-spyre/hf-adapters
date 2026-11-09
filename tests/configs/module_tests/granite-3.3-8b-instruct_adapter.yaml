@@ -3,6 +3,10 @@
 # Format compatible with PyTorch's test_modules.py (using edits.modules.include)
 
 test_suite_config:
+  labels:
+    - regression
+    - trunk
+    - unit
   files:
     - path: ${TORCH_ROOT}/test/test_modules.py
       unlisted_test_mode: skip
@@ -12,6 +16,7 @@ test_suite_config:
           mode: xfail
           tags:
             - model__granite-3.3-8b-instruct
+            - layout__device
           no_grad: true
           edits:
             modules:
@@ -706,6 +711,7 @@ test_suite_config:
           tags:
             - model__granite-3.3-8b-instruct
             - custom_tests
+            - layout__device
           no_grad: true
           edits:
             modules:

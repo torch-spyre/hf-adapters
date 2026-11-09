@@ -7,7 +7,7 @@ test suites. It supports manual exclusions and an allowlist filter passed as
 command-line arguments.
 
 Usage:
-    python generate_test_matrix.py [--exclude MODEL_PATH ...] [--only MODEL_PATH ...]
+    python generate_test_matrix.py [--exclude MODEL_PATH ...] [--only MODEL_PATH ...] [--strict-perf]
 
 Example:
     python generate_test_matrix.py --exclude granite-vision phi4
@@ -26,7 +26,11 @@ sys.path.insert(0, str(project_root))
 import tests.model_registry  # noqa: E402
 
 
-def generate_matrices(exclude_models=None, only_models=None):
+def generate_matrices(
+    exclude_models: list[str] | None = None,
+    only_models: list[str] | None = None,
+    strict_perf: bool = False,
+) -> dict[str, list[str]]:
     """
     Generate test matrices from the model registry.
 
@@ -56,6 +60,10 @@ def generate_matrices(exclude_models=None, only_models=None):
         "embed": (registry.EMBED_PATHS, registry.ALL_EMBED_PATHS),
         "vision": (registry.VISION_PATHS, registry.ALL_VISION_PATHS),
         "clip": (registry.CLIP_PATHS, registry.ALL_CLIP_PATHS),
+        "multimodal_embed_compare": (
+            registry.MULTIMODAL_EMBED_PATHS,
+            registry.ALL_MULTIMODAL_EMBED_PATHS,
+        ),
         "masked_lm": (registry.MASKED_LM_PATHS, registry.ALL_MASKED_LM_PATHS),
         "question_answering": (
             registry.QUESTION_ANSWERING_PATHS,
@@ -69,6 +77,10 @@ def generate_matrices(exclude_models=None, only_models=None):
         "token_classification": (
             registry.TOKEN_CLASSIFICATION_PATHS,
             registry.ALL_TOKEN_CLASSIFICATION_PATHS,
+        ),
+        "structured_decision": (
+            registry.STRUCTURED_DECISION_PATHS,
+            registry.ALL_STRUCTURED_DECISION_PATHS,
         ),
     }
 
@@ -102,22 +114,44 @@ def generate_matrices(exclude_models=None, only_models=None):
         + paths["token_classification"]
     )
 
+    # Perf is generative-only: spyre-perf-suite's inference.py imports
+    # AutoSpyreModelForCausalLM and measures prefill+decode, so a non-causal path has no
+    # decode phase. Dropping one silently emptied perf_matrix -> legs skipped -> SUCCESS on
+    # a non-gating cell. Only perf tiers pass strict_perf; other tiers want these paths.
+    if strict_perf and only_models:
+        unbenchmarkable = sorted(set(only_models) - set(paths["causal"]))
+        if unbenchmarkable:
+            formatted_paths = "\n  - ".join(unbenchmarkable)
+            raise ValueError(
+                "perf can only benchmark causal-LM paths (spyre-perf-suite measures "
+                "prefill+decode); these are registered but not causal-LM:\n  - "
+                f"{formatted_paths}"
+            )
+        if not paths["causal"]:
+            raise ValueError(
+                "perf resolved an empty model list; every leg would be skipped"
+            )
+
     return {
         "causal": paths["causal"],
         "multicard_smoke": paths["multicard_smoke"],
         "embed": paths["embed"],
         "vision": paths["vision"],
         "clip": paths["clip"],
+        "multimodal_embed_compare": paths["multimodal_embed_compare"],
         "masked_lm": paths["masked_lm"],
         "question_answering": paths["question_answering"],
         "combined": combined_paths,
         "reranker": paths["reranker"],
         "seq_classification": paths["seq_classification"],
         "token_classification": paths["token_classification"],
+        "structured_decision": paths["structured_decision"],
+        # Perf only benchmarks an explicit list (tests/model_lists/perf.yaml), never the whole registry.
+        "perf": paths["causal"] if only_models else [],
     }
 
 
-def format_for_github_actions(matrices):
+def format_for_github_actions(matrices: dict[str, list[str]]) -> dict[str, str]:
     """
     Format matrices as GitHub Actions JSON output.
 
@@ -133,12 +167,17 @@ def format_for_github_actions(matrices):
         "embed_matrix": json.dumps(matrices["embed"]),
         "vision_matrix": json.dumps(matrices["vision"]),
         "clip_matrix": json.dumps(matrices["clip"]),
+        "multimodal_embed_compare_matrix": json.dumps(
+            matrices["multimodal_embed_compare"]
+        ),
         "masked_lm_matrix": json.dumps(matrices["masked_lm"]),
         "question_answering_matrix": json.dumps(matrices["question_answering"]),
         "combined_matrix": json.dumps(matrices["combined"]),
         "reranker_matrix": json.dumps(matrices["reranker"]),
         "seq_classification_matrix": json.dumps(matrices["seq_classification"]),
         "token_classification_matrix": json.dumps(matrices["token_classification"]),
+        "structured_decision_matrix": json.dumps(matrices["structured_decision"]),
+        "perf_matrix": json.dumps(matrices["perf"]),
     }
 
 
@@ -165,7 +204,7 @@ def write_github_output(outputs):
             f.write(f"{key}={value}\n")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate dynamic test matrices for GitHub Actions"
     )
@@ -183,10 +222,21 @@ def main():
         "(e.g., Qwen/Qwen3-0.6B ministral/Ministral-3B-Instruct)",
     )
 
+    parser.add_argument(
+        "--strict-perf",
+        action="store_true",
+        help="Fail instead of dropping non-causal paths from the perf matrix "
+        "(set by the workflow when test_type is perf)",
+    )
+
     args = parser.parse_args()
 
     # Generate matrices
-    matrices = generate_matrices(exclude_models=args.exclude, only_models=args.only)
+    matrices = generate_matrices(
+        exclude_models=args.exclude,
+        only_models=args.only,
+        strict_perf=args.strict_perf,
+    )
 
     # Print summary for workflow logs
     print("Generated test matrices:")
@@ -202,6 +252,9 @@ def main():
     )
     print(
         f"  Vision models ({len(matrices['vision'])}): {', '.join(matrices['vision'])}"
+    )
+    print(
+        f"  Multimodal embedding models ({len(matrices['multimodal_embed_compare'])}): {', '.join(matrices['multimodal_embed_compare'])}"
     )
     print(f"  CLIP models ({len(matrices['clip'])}): {', '.join(matrices['clip'])}")
     print(
@@ -225,6 +278,11 @@ def main():
         f"  Token-classification models ({len(matrices['token_classification'])}): "
         f"{', '.join(matrices['token_classification'])}"
     )
+    print(
+        f"  Structured-decision models ({len(matrices['structured_decision'])}): "
+        f"{', '.join(matrices['structured_decision'])}"
+    )
+    print(f"  Perf models ({len(matrices['perf'])}): {', '.join(matrices['perf'])}")
 
     if args.exclude:
         print(f"\nExcluded models: {', '.join(args.exclude)}")

@@ -18,6 +18,7 @@ on:
     workflows:
       - integration-tests
       - test_pull_request
+      - test_daily
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -26,7 +27,7 @@ on:
         required: false
         default: ''
       workflow_name:
-        description: Workflow name (integration-tests | test_pull_request)
+        description: Workflow name (integration-tests | test_pull_request | test_daily)
         required: false
         default: integration-tests
 
@@ -46,7 +47,8 @@ jobs:
       - x86_64
       - linux
       - image_ingest
-    timeout-minutes: 15
+    # PyPI/GitHub downloads from torch-cicd pods can be slow enough to blow a tighter budget.
+    timeout-minutes: 30
     # Skip if the triggering workflow was cancelled (but ingest failures are fine)
     if: |
       github.event_name == 'workflow_dispatch' ||
@@ -66,15 +68,6 @@ jobs:
       CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
       CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
       CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
-      # Schema-v2 database. Reached by QUALIFYING every v2 statement rather than by a second
-      # connection: test_cases exists in both generations with incompatible shapes, so an
-      # unqualified name would hit the wrong one. Unset/empty makes the v2 write a no-op, so
-      # this is safe before the secret exists.
-      CLICKHOUSE_DB_V2: ${{ secrets.CLICKHOUSE_DB_V2 }}
-      # Dual-write during the migration window: v1 stays authoritative while v2 accumulates
-      # the same runs. No data is ported (v1 rows cannot produce a v2 run_id, the hash inputs
-      # were never recorded per row), so `both` is how v2 gets any history at all.
-      INGEST_SCHEMA: both
 
       # Metadata about the triggering run
       TRIGGERING_RUN_ID: ${{ github.event.workflow_run.id || inputs.gha_run_id }}
@@ -93,26 +86,33 @@ jobs:
     steps:
       # workflow_run always executes this file as it exists on the default
       # branch, so a plain checkout (no ref:) here pulls the canonical copy
-      # of the ingest script regardless of which ref triggered the run.
-      - name: Checkout ingest script
+      # of the ingest scripts regardless of which ref triggered the run.
+      - name: Checkout ingest scripts
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           sparse-checkout: |
+            .github/scripts/list_run_artifacts.py
+            .github/scripts/download_xml_artifacts.py
+            .github/scripts/flatten_xml_artifacts.py
             .github/scripts/ingest_xml_hf_adapters.py
           sparse-checkout-cone-mode: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          # Picks the version from checksums bundled in this pin instead of fetching the full
+          # versions manifest, whose download times out from torch-cicd pods.
+          version: latest-known
 
       - name: setup venv
         run: |
-          uv venv
-          source .venv/bin/activate
+          uv venv .venv-v1
+          source .venv-v1/bin/activate
           echo "VIRTUAL_ENV $VIRTUAL_ENV"
 
       - name: Install Python dependencies
         run: |
-          source .venv/bin/activate
+          source .venv-v1/bin/activate
           uv pip install requests clickhouse-driver clickhouse-connect lxml regex \
             "git+https://github.com/torch-spyre/torch-spyre@main#subdirectory=extensions/clickhouse-ingest"
 
@@ -161,84 +161,41 @@ jobs:
       # Download every artifact from the triggering run and unzip it — artifact
       # *names* carry no file extension (only the file inside the zip does), so
       # filtering has to happen post-unzip by actual filename, not by artifact name.
-      #
-      # `--paginate` is required: the artifacts endpoint defaults to 30 per
-      # page, and a run with more jobs than that silently lost every artifact
-      # past the first page, with no error — rows just never showed up in
-      # ClickHouse. `--paginate` applies `--jq` per page and concatenates the
-      # filtered results across pages (`gh api` rejects `--slurp` combined
-      # with `--jq`), so the per-artifact objects come out as a JSON stream,
-      # not a single array; python3 slurps that stream into one array below.
+      # Listing is paginated (see list_run_artifacts.py for why that matters).
       # ---------------------------------------------------------------------------
       - name: List artifacts from triggering run
         id: list-artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ARTIFACTS=$(gh api --paginate \
-            "/repos/${{ github.repository }}/actions/runs/${TRIGGERING_RUN_ID}/artifacts?per_page=100" \
-            --jq '.artifacts[] | {id: .id, name: .name}' \
-            | python3 -c "import json,sys; print(json.dumps([json.loads(l) for l in sys.stdin if l.strip()]))")
-          echo "artifacts=$ARTIFACTS" >> "$GITHUB_OUTPUT"
-          echo "Found artifacts:"
-          echo "$ARTIFACTS" | python3 -c "import json,sys; [print(' •', a['name']) for a in json.load(sys.stdin)]"
+          python3 .github/scripts/list_run_artifacts.py --run-id "${TRIGGERING_RUN_ID}"
 
       - name: Download XML artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACTS: ${{ steps.list-artifacts.outputs.artifacts }}
         run: |
-          mkdir -p xml_artifacts
-          export ARTIFACTS='${{ steps.list-artifacts.outputs.artifacts }}'
-          python3 <<'PYEOF'
-          import json, os, subprocess, sys
-          from pathlib import Path
-
-          artifacts = json.loads(os.environ['ARTIFACTS'])
-          repo  = os.environ['GITHUB_REPOSITORY']
-          for a in artifacts:
-              print(f"Downloading: {a['name']} (id={a['id']})")
-              with open(f"xml_artifacts/{a['name']}.zip", "wb") as f:
-                result = subprocess.run([
-                    "gh", "api",
-                    f"/repos/{repo}/actions/artifacts/{a['id']}/zip",
-                ], check=True, env={**os.environ}, capture_output=True)
-                f.write(result.stdout)
-              # Each artifact unzips into its OWN subdirectory (named after
-              # the artifact, which is unique per suite+model) rather than a
-              # shared flat one: a single-file artifact's upload strips its
-              # model-key subdirectory, so two suites can both produce a
-              # "Qwen3-0.6B.xml" and would otherwise clobber each other.
-              # ingest_xml_hf_adapters.py globs --xml-dir recursively and
-              # derives a unique filename from the path relative to it, so
-              # this nesting is exactly what it expects.
-              dest = Path("xml_artifacts") / a["name"]
-              subprocess.run(
-                  ["unzip", "-o", f"xml_artifacts/{a['name']}.zip", "-d", str(dest)],
-                  check=True,
-              )
-          PYEOF
+          python3 .github/scripts/download_xml_artifacts.py --out-dir xml_artifacts
           echo "Downloaded XML files:"
           find xml_artifacts -name "*.xml" 2>/dev/null || echo "(none)"
 
-      # The orchestrator's uuid, uploaded by _test_matrix as the `run-id` artifact (this
-      # workflow runs on workflow_run, so it cannot receive it as a dispatch input). Absent on
-      # a GHA-initiated run => empty => the ingest derives its own id from the run coordinate.
+      # Both ids are one-file artifacts of the triggering run (workflow_run gets no dispatch
+      # inputs). Empty is normal and the ingest derives its own run_id / writes cases only.
       - name: Recover threaded run_id
         id: threaded-run-id
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          RID=""
-          AID=$(gh api --paginate \
-            "/repos/${{ github.repository }}/actions/runs/${TRIGGERING_RUN_ID}/artifacts?per_page=100" \
-            --jq '.artifacts[] | select(.name == "run-id") | .id' | head -1)
-          if [[ -n "${AID}" ]]; then
-            gh api "/repos/${{ github.repository }}/actions/artifacts/${AID}/zip" > run-id.zip || true
-            unzip -o -q run-id.zip -d run-id-dir || true
-            RID=$(tr -d '[:space:]' < run-id-dir/run-id.txt 2>/dev/null || echo "")
-          fi
-          echo "Threaded run_id: ${RID:-<none, ingest will derive>}"
-          echo "run_id=${RID}" >> "${GITHUB_OUTPUT}"
+        uses: torch-spyre/torch-spyre/.github/actions/recover-threaded-run-id@main
+        with:
+          triggering-run-id: ${{ env.TRIGGERING_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Recover this run's artifact_id
+        id: leg-artifact-id
+        uses: torch-spyre/torch-spyre/.github/actions/recover-threaded-run-id@main
+        with:
+          triggering-run-id: ${{ env.TRIGGERING_RUN_ID }}
+          artifact-name: artifact-id
+          label: Leg artifact_id
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract suite tier from display title
         id: extract-tier
@@ -275,7 +232,7 @@ jobs:
           PR_NUMBER: ${{ steps.resolve-pr.outputs.pr_number }}
           TIER: ${{ steps.extract-tier.outputs.tier }}
         run: |
-          source .venv/bin/activate
+          source .venv-v1/bin/activate
           python3 .github/scripts/ingest_xml_hf_adapters.py \
             --xml-dir xml_artifacts \
             --workflow "${TRIGGERING_WORKFLOW}" \
@@ -287,6 +244,44 @@ jobs:
             --pr-number    "${PR_NUMBER}" \
             --trigger-type "${TIER}" \
             --platform "${LEG_ARCH}"
+
+      # The shared action's ingest_xml.py globs --xml-dir non-recursively, so the
+      # per-artifact subdirectories are flattened first (see flatten_xml_artifacts.py).
+      - name: Flatten XML artifacts for v2 ingest (non-recursive glob)
+        run: |
+          python3 .github/scripts/flatten_xml_artifacts.py \
+            --src-dir xml_artifacts --dest-dir xml_artifacts_flat
+          echo "Flattened XML files:"
+          find xml_artifacts_flat -name "*.xml" 2>/dev/null || echo "(none)"
+
+      # Schema-v2: the same test_cases/test_case_runs tables torch-spyre writes, via its reusable action.
+      - name: Ingest XML into shared v2 ClickHouse tables
+        uses: torch-spyre/torch-spyre/.github/actions/ingest-xml-to-clickhouse@main
+        with:
+          # Already holds the ingest library, so the action skips a second install.
+          venv: .venv-v1
+          xml-dir: xml_artifacts_flat
+          workflow: ${{ env.TRIGGERING_WORKFLOW }}
+          branch: ${{ env.TRIGGERING_BRANCH }}
+          sha: ${{ env.TRIGGERING_SHA }}
+          run-id: ${{ steps.threaded-run-id.outputs.run_id }}
+          gha-run-id: ${{ env.TRIGGERING_RUN_ID }}
+          artifact-id: ${{ steps.leg-artifact-id.outputs.value }}
+          repository: ${{ github.repository }}
+          triggered-at: ${{ env.TRIGGERING_AT }}
+          pr-number: ${{ steps.resolve-pr.outputs.pr_number }}
+          # Tags the leg's artifact <repo>@<sha12> (push to main) or <repo>#<pr>[@<sha12>] (PR).
+          ci-event: ${{ env.TRIGGERING_EVENT }}
+          trigger-type: ${{ steps.extract-tier.outputs.tier }}
+          platform: x86_64
+          component: hf-adapters
+          schema: v2
+          clickhouse-host: ${{ secrets.CLICKHOUSE_HOST }}
+          clickhouse-port: ${{ secrets.CLICKHOUSE_PORT }}
+          clickhouse-user: ${{ secrets.CLICKHOUSE_USER }}
+          clickhouse-pass: ${{ secrets.CLICKHOUSE_PASS }}
+          clickhouse-db: ${{ secrets.CLICKHOUSE_DB }}
+          clickhouse-db-v2: ${{ secrets.CLICKHOUSE_DB_V2 }}
 
       - name: Summary
         if: always()
@@ -307,25 +302,28 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Ingest raw GHA job logs from spyre-model-module-tests into ClickHouse.
-  # Runs alongside the existing XML ingest whenever integration-tests or
-  # test_pull_request completes — those are the only two workflows that actually
-  # run spyre-model-module-tests (test_daily sets edge_cases_only:true which
-  # skips module tests entirely, so it is deliberately not in the trigger list).
+  # Fires when integration-tests or test_daily completes — those are the only
+  # two workflows that run spyre-model-module-tests.
+  # test_pull_request is excluded. test_daily now runs module tests alongside
+  # its edge-case leg (run-module-tests job, test_type: model_module).
   # Produces two richer tables: module_test_suites + module_test_variants.
   # ---------------------------------------------------------------------------
+  # v1 module tests: delete once the dashboard reads v2 capabilities
   ingest-module-logs:
     name: Ingest module-test logs -> ClickHouse
     runs-on:
       - x86_64
       - linux
       - image_ingest
-    timeout-minutes: 20
-    # Only fire when integration-tests completes (not on every PR / test_pull_request run).
-    # For manual re-ingest, only accept workflow_name == 'integration-tests'.
+    # Same slow-download headroom as the ingest job above.
+    timeout-minutes: 30
+    # Fire when integration-tests or test_daily completes (not on every
+    # PR / test_pull_request run). For manual re-ingest, accept either name.
     if: |
-      (github.event_name == 'workflow_dispatch' && inputs.workflow_name == 'integration-tests') ||
+      (github.event_name == 'workflow_dispatch' &&
+       (inputs.workflow_name == 'integration-tests' || inputs.workflow_name == 'test_daily')) ||
       (github.event_name == 'workflow_run' &&
-       github.event.workflow_run.name == 'integration-tests' &&
+       (github.event.workflow_run.name == 'integration-tests' || github.event.workflow_run.name == 'test_daily') &&
        github.event.workflow_run.conclusion != 'cancelled')
 
     env:
@@ -344,13 +342,18 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           sparse-checkout: |
+            .github/scripts/download_module_test_logs.py
             .github/scripts/parse_module_test_logs.py
             .github/scripts/ingest_module_tests.py
             tests/configs/module_tests
           sparse-checkout-cone-mode: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          # Picks the version from checksums bundled in this pin instead of fetching the full
+          # versions manifest, whose download times out from torch-cicd pods.
+          version: latest-known
 
       - name: Set up venv and install dependencies
         run: |
@@ -376,59 +379,15 @@ jobs:
 
       # ---------------------------------------------------------------------------
       # Download the raw job logs for every "Spyre model-module tests" job leg
-      # from the triggering run. Each leg corresponds to one config/model YAML.
-      # The GHA jobs API lists all jobs for the run; we filter by name prefix and
-      # download the text log for each matching job into raw_logs/.
+      # from the triggering run into raw_logs/ (one leg per config/model YAML).
       # ---------------------------------------------------------------------------
       - name: Download model-module test job logs
         id: download-logs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          mkdir -p raw_logs
-
-          # List all jobs for the triggering run, filter to "Spyre model-module tests" legs
-          gh api --paginate \
-            "/repos/${{ github.repository }}/actions/runs/${TRIGGERING_RUN_ID}/jobs?per_page=100" \
-            --jq '.jobs[] | select(.name | startswith("Spyre model-module tests")) | {id: .id, name: .name}' \
-          | python3 -c "
-          import json, sys
-          jobs = [json.loads(l) for l in sys.stdin if l.strip()]
-          print(json.dumps(jobs))
-          " > jobs.json
-
-          JOB_COUNT=$(python3 -c "import json; print(len(json.load(open('jobs.json'))))")
-          echo "Found ${JOB_COUNT} model-module test job(s)"
-          echo "job_count=${JOB_COUNT}" >> "${GITHUB_OUTPUT}"
-
-          python3 - <<'PYEOF'
-          import json, os, subprocess
-          from pathlib import Path
-
-          jobs    = json.load(open("jobs.json"))
-          repo    = os.environ["GITHUB_REPOSITORY"]
-          run_id  = os.environ["TRIGGERING_RUN_ID"]
-          token   = os.environ["GH_TOKEN"]
-
-          for job in jobs:
-              job_id   = job["id"]
-              job_name = job["name"]
-              # Sanitise for use as filename: replace / and spaces
-              safe     = job_name.replace("/", "_").replace(" ", "_")
-              out_path = Path("raw_logs") / f"{job_id}_{safe}.txt"
-              result   = subprocess.run(
-                  ["gh", "api", f"/repos/{repo}/actions/jobs/{job_id}/logs"],
-                  capture_output=True,
-                  env={**os.environ},
-              )
-              if result.returncode == 0 and result.stdout:
-                  out_path.write_bytes(result.stdout)
-                  print(f"  saved: {out_path.name} ({len(result.stdout)} bytes)")
-              else:
-                  print(f"  WARN: no log for job {job_id} ({job_name}): {result.stderr.decode()[:200]}")
-          PYEOF
-
+          python3 .github/scripts/download_module_test_logs.py \
+            --run-id "${TRIGGERING_RUN_ID}" --out-dir raw_logs
           echo "Log files downloaded:"
           ls -lh raw_logs/ || echo "(none)"
 
@@ -449,9 +408,6 @@ jobs:
           python3 .github/scripts/parse_module_test_logs.py \
             raw_logs \
             --output "module_tests_${TRIGGERING_RUN_ID}.json"
-          echo "Produced module_tests_${TRIGGERING_RUN_ID}.json"
-          cat "module_tests_${TRIGGERING_RUN_ID}.json" | python3 -c \
-            "import json,sys; d=json.load(sys.stdin); print(f'  {len(d)} suite record(s)')"
 
       # ---------------------------------------------------------------------------
       # Ingest the JSON into ClickHouse: module_test_suites + module_test_variants

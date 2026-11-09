@@ -35,6 +35,8 @@ def main():
     )
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     encoded_input = tokenizer(prompt, return_tensors="pt").to(device)
+    input_ids = encoded_input["input_ids"]
+    batch, input_len = input_ids.shape[0], input_ids.shape[-1]
 
     past_key_values = StaticCache(config=model.config, max_cache_len=2048)
 
@@ -46,9 +48,10 @@ def main():
 
     with TorchOpCollector() as ctx:
         with torch.no_grad():
-            model.generate(
+            outputs = model.generate(
                 **encoded_input, past_key_values=past_key_values, use_cache=True
             )
+    output_len = len(outputs[0]) - input_len
 
     # print traced torch op
     for op in ctx.ops_list:
@@ -61,7 +64,12 @@ def main():
         print(op, ctx.test_case_count[op])
     print(f"Total ops with test configs generated: {len(ctx.test_gen_ops)}")
 
-    ctx.write_yaml(os.path.basename(model_path))
+    ctx.write_yaml(
+        os.path.basename(model_path),
+        batch=batch,
+        input_len=input_len,
+        output_len=output_len,
+    )
 
 
 if __name__ == "__main__":

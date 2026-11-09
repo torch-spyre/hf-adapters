@@ -1,4 +1,4 @@
-"""Fetch the top generative models from Hugging Face, ranked by downloads."""
+"""Fetch the top generative models from Hugging Face, ranked by downloads or trending score."""
 
 import os
 import sys
@@ -12,6 +12,7 @@ from utils.fetch_curated_models_metadata import _create_fetch_metadata, keep_all
 from utils.hf_model_catalog import (
     EXPAND_FIELDS,
     RESOURCES_DIR,
+    Ranking,
     _guarded,
     build_catalog,
     contains_remote_code,
@@ -22,23 +23,28 @@ from utils.hf_model_catalog import (
 from utils.utilities import ts
 
 
-def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
-    """Top text-generation models by downloads (over-fetched to absorb the
-    GGUF/MLX entries dropped by the filter).
+def _create_fetch(ranking: Ranking) -> Callable[[HfApi, int], list[ModelInfo]]:
+    """Build a ``_fetch``-shaped callable that ranks text-generation models by *ranking*."""
 
-    Retries transient 5xx gateway errors with exponential backoff via
-    ``with_transient_retry``; permanent failures propagate.
-    """
-    print(f"{ts()} Fetching top {limit} text-generation models by downloads...")
-    return with_transient_retry(
-        lambda: api.list_models(
-            pipeline_tag="text-generation",
-            sort="downloads",
-            limit=int(limit * 2.5),
-            expand=EXPAND_FIELDS,
-        ),
-        description="list_models[text-generation]",
-    )
+    def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
+        """Top text-generation models by *ranking* (over-fetched to absorb the
+        GGUF/MLX entries dropped by the filter).
+
+        Retries transient 5xx gateway errors with exponential backoff via
+        ``with_transient_retry``; permanent failures propagate.
+        """
+        print(f"{ts()} Fetching top {limit} text-generation models by {ranking}...")
+        return with_transient_retry(
+            lambda: api.list_models(
+                pipeline_tag="text-generation",
+                sort=ranking,
+                limit=int(limit * 3.5),
+                expand=EXPAND_FIELDS,
+            ),
+            description=f"list_models[text-generation, sort={ranking}]",
+        )
+
+    return _fetch
 
 
 def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
@@ -97,10 +103,16 @@ def _fetch_generative_models(
 
 
 def fetch_top_generative_models(
-    limit: int, output_csv: Path | str | None = None
+    limit: int,
+    output_csv: Path | str | None = None,
+    ranking: Ranking = "downloads",
 ) -> list[dict[str, object]]:
+    """Top *limit* generative models by *ranking*, counted after ``keep``."""
     return _fetch_generative_models(
-        fetcher=_fetch, keeper=keep, limit=limit, output_csv=output_csv
+        fetcher=_create_fetch(ranking),
+        keeper=keep,
+        limit=limit,
+        output_csv=output_csv,
     )
 
 
