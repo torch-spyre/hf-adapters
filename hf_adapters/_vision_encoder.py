@@ -120,7 +120,7 @@ def patch_encoder(encoder, blocks: list[CompiledBlock]) -> None:
         if mask is not None:
             mask = mask.to(DEVICE)
         hidden = hidden.clone()
-        for block in blocks:
+        for block in self._spyre_compiled_blocks:
             hidden = block(hidden, mask)
             if hidden.device.type == "spyre":
                 hidden = hidden.clone()
