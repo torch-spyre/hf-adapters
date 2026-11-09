@@ -32,6 +32,7 @@ from transformers import (
     CLIPVisionModelWithProjection,
 )
 
+from hf_adapters._model_loading import model_subfolder
 from hf_adapters._vision_encoder import patch_cpu_inputs, patch_encoder, prepare_encoder
 from hf_adapters.hf_common import encoder_backbone_forward
 
@@ -47,21 +48,13 @@ def load_hf_model(
     trust_remote_code: bool | None = None,
 ) -> CLIPModel:
     """Load CLIP directly or from a SentenceTransformers module subfolder."""
-    try:
-        return CLIPModel.from_pretrained(
-            model_path,
-            dtype=dtype,
-            device_map="cpu",
-            trust_remote_code=trust_remote_code,
-        )
-    except OSError:
-        return CLIPModel.from_pretrained(
-            model_path,
-            subfolder="0_CLIPModel",
-            dtype=dtype,
-            device_map="cpu",
-            trust_remote_code=trust_remote_code,
-        )
+    return CLIPModel.from_pretrained(
+        model_path,
+        subfolder=model_subfolder(model_path),
+        dtype=dtype,
+        device_map="cpu",
+        trust_remote_code=trust_remote_code,
+    )
 
 
 def prepare_for_spyre(model) -> None:

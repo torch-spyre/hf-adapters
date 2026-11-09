@@ -44,7 +44,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from types import MethodType, ModuleType
-from typing import Any, Optional, Union, cast
+from typing import Any, Optional, Union
 
 import torch
 from transformers import (
@@ -157,6 +157,7 @@ from hf_adapters import (
     hf_xlm_roberta,
     hf_xpress_qwen3,
 )
+from hf_adapters._model_loading import model_subfolder
 from hf_adapters.hf_common import (
     SpyreNoAdapterError,
     SpyreUnsupportedFeatureError,
@@ -275,42 +276,20 @@ MODEL_DTYPE_POLICIES: dict[str, ModelDTypePolicy] = {
 }
 
 
-# Known sub-module subfolders used by sentence-transformers composite repos,
-# e.g. sentence-transformers/clip-ViT-B-32 stores its model under '0_CLIPModel'.
-_ST_SUBFOLDERS = ("0_CLIPModel", "0_Transformer")
-
-
-def _autoconfig_with_subfolder_fallback(
-    model_name_or_path: Union[str, os.PathLike[str]],
+def _load_model_config(
+    model_name_or_path: str | os.PathLike[str],
     trust_remote_code: bool | None = None,
 ) -> PretrainedConfig | None:
-    """Load ``AutoConfig`` for *model_name_or_path*, probing known ST subfolders on failure.
-
-    Returns the first config that loads successfully, or ``None`` if every
-    attempt fails.
-    """
+    """Load the configuration from the same repository location as the weights."""
     try:
-        return cast(
-            PretrainedConfig,
-            AutoConfig.from_pretrained(
-                model_name_or_path, trust_remote_code=trust_remote_code
-            ),
+        config: PretrainedConfig = AutoConfig.from_pretrained(
+            model_name_or_path,
+            subfolder=model_subfolder(model_name_or_path),
+            trust_remote_code=trust_remote_code,
         )
     except Exception:
-        pass
-    for sub in _ST_SUBFOLDERS:
-        try:
-            return cast(
-                PretrainedConfig,
-                AutoConfig.from_pretrained(
-                    model_name_or_path,
-                    subfolder=sub,
-                    trust_remote_code=trust_remote_code,
-                ),
-            )
-        except Exception:
-            pass
-    return None
+        return None
+    return config
 
 
 def dtype_for_model_path(
@@ -335,7 +314,7 @@ def dtype_for_model_path(
     elif policy.dtype is not None:
         dtype = policy.dtype
     else:
-        config = _autoconfig_with_subfolder_fallback(
+        config = _load_model_config(
             model_name_or_path, trust_remote_code=trust_remote_code
         )
         text_config = getattr(config, "text_config", None)
@@ -358,7 +337,7 @@ def resolve_adapter_module(
     ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
     trust_remote_code: bool | None = None,
 ) -> ModuleType:
-    model_config = _autoconfig_with_subfolder_fallback(
+    model_config = _load_model_config(
         model_name_or_path, trust_remote_code=trust_remote_code
     )
     if model_config is None:

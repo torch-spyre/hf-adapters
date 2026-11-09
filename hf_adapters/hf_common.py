@@ -28,6 +28,7 @@ import time
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
+from types import ModuleType
 from typing import Any, Callable, Iterator, Optional
 
 import torch
@@ -2453,8 +2454,14 @@ def _move_to_spyre_with_layout(model, dtype):
 
 
 def _resolve_tp_plan(
-    model_path, auto_model_cls, tp_plan, adapter_module, trust_remote_code=None
-):
+    model_path: str | os.PathLike[str],
+    auto_model_cls: Any,
+    tp_plan: dict[str, str] | str,
+    adapter_module: ModuleType | None,
+    trust_remote_code: bool | None = None,
+    *,
+    subfolder: str = "",
+) -> tuple[dict[str, str], PretrainedConfig]:
     """Resolve and translate an HF TP plan to Spyre placement styles.
 
     The model is instantiated on ``meta`` both to obtain HF's fully-namespaced
@@ -2467,11 +2474,19 @@ def _resolve_tp_plan(
 
     from hf_adapters.spyre_tensor_parallel import prepare_spyre_tp_plan
 
-    cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
+    config_kwargs: dict[str, str] = {"subfolder": subfolder} if subfolder else {}
+    cfg: PretrainedConfig = AutoConfig.from_pretrained(
+        model_path, trust_remote_code=trust_remote_code, **config_kwargs
+    )
     with torch.device("meta"):
         probe = auto_model_cls.from_config(cfg)
     auto_plan = tp_plan == "auto"
-    plan = dict(probe.tp_plan or {}) if auto_plan else dict(tp_plan)
+    if isinstance(tp_plan, str):
+        if not auto_plan:
+            raise ValueError(f"Expected tp_plan='auto' or a mapping, got {tp_plan!r}")
+        plan: dict[str, str] = dict(probe.tp_plan or {})
+    else:
+        plan = dict(tp_plan)
     replicated_linear_modules = {"lm_head"} if auto_plan else set()
     adapter_replication_policy = getattr(
         adapter_module, "spyre_tp_replicated_linear_modules", None
@@ -2583,13 +2598,13 @@ def _prefer_exact_tp_plan_entries():
 
 
 def load_model_common(
-    model_path,
-    module,
-    dtype=torch.float16,
-    auto_model_cls=None,
-    tp_plan=None,
-    trust_remote_code=None,
-):
+    model_path: str | os.PathLike[str],
+    module: ModuleType | None,
+    dtype: torch.dtype = torch.float16,
+    auto_model_cls: Any = None,
+    tp_plan: dict[str, str] | str | None = None,
+    trust_remote_code: bool | None = None,
+) -> PreTrainedModel:
     """Load an HF model.
 
     Args:
@@ -2607,18 +2622,21 @@ def load_model_common(
             to HF's ``from_pretrained``) so checkpoints shipping custom modeling
             code load only when the caller explicitly opts in.
     """
+    from hf_adapters._model_loading import model_subfolder
+
     if auto_model_cls is None:
         from transformers import AutoModel
 
         auto_model_cls = AutoModel
 
-    if hasattr(module, "load_hf_model"):
+    model: PreTrainedModel
+    if module is not None and hasattr(module, "load_hf_model"):
         # _sig was already inspected above (for the tp_plan support check).
         # Re-inspect here to determine which optional kwargs this loader accepts.
         import inspect as _inspect
 
         _sig = _inspect.signature(module.load_hf_model)
-        _kwargs: dict = {}
+        _kwargs: dict[str, Any] = {}
         if tp_plan is not None and "tp_plan" in _sig.parameters:
             _kwargs["tp_plan"] = tp_plan
         if "trust_remote_code" in _sig.parameters:
@@ -2627,12 +2645,14 @@ def load_model_common(
     elif tp_plan is not None:
         from transformers.distributed import DistributedConfig
 
+        subfolder = model_subfolder(model_path)
         resolved_tp_plan, cfg = _resolve_tp_plan(
             model_path,
             auto_model_cls,
             tp_plan,
             adapter_module=module,
             trust_remote_code=trust_remote_code,
+            subfolder=subfolder,
         )
         distributed_config = DistributedConfig(
             tp_size=_resolve_tp_size(),
@@ -2641,6 +2661,7 @@ def load_model_common(
         with _without_spyre_allocator_warmup(), _prefer_exact_tp_plan_entries():
             model = auto_model_cls.from_pretrained(
                 model_path,
+                subfolder=subfolder,
                 config=cfg,
                 dtype=dtype,
                 distributed_config=distributed_config,
@@ -2649,6 +2670,7 @@ def load_model_common(
     else:
         model = auto_model_cls.from_pretrained(
             model_path,
+            subfolder=model_subfolder(model_path),
             dtype=dtype,
             device_map="cpu",
             trust_remote_code=trust_remote_code,
