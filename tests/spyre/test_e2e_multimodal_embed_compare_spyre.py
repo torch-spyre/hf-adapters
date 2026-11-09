@@ -23,6 +23,7 @@ import torch
 import transformers
 from transformers import AutoProcessor
 
+from hf_adapters._model_loading import model_subfolder
 from tests._multimodal_embedding_helpers import (
     _assert_embeddings,
     _assert_logits,
@@ -31,7 +32,6 @@ from tests._multimodal_embedding_helpers import (
     bounded_cpu_threads,
     embedding_cases,
     load_encoder,
-    model_subfolder,
     prepare_inputs,
 )
 from tests.model_registry import MULTIMODAL_EMBED_PATHS, REMOTE_CODE_PATHS
