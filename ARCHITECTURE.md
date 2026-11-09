@@ -156,18 +156,18 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 
 `hf_clip.py` and `hf_siglip.py` adapt CLIP and fixed-resolution SigLIP dual
 encoders for text/image retrieval and similarity scoring. Both belong to
-`MULTIMODAL_EMBEDDING_MODELS` and use `test_e2e_multimodal_embed_compare_spyre.py`.
-Both also run through `test_sentence_transformers_multimodal_spyre.py` to
-exercise the SentenceTransformers Spyre backend through
-`make sentence_transformers_multimodal_tests`
-(CI suite key: `sentence_transformers_multimodal`).
+`MULTIMODAL_EMBEDDING_MODELS` and are verified by
+`test_sentence_transformers_multimodal_spyre.py`, which compares SentenceTransformers
+`encode()` on CPU against `backend="spyre"` for text, a single image, and an image
+list (`make sentence_transformers_multimodal_tests`, CI suite key:
+`sentence_transformers_multimodal`).
 
 | Model | model\_type | Text / vision head\_dim | Embedding width | Status |
 |-------|-----------|------------------------|-----------------|--------|
 | sentence-transformers/clip-ViT-B-32 | clip | 64 / 64 | 512 | Verified: text and single-image scenarios |
 | google/siglip2-giant-opt-patch16-384 | siglip | 72→128 / 96→128 | 1536 | Verified: text and single-image scenarios |
 
-Multi-image batches remain excluded from the shared suite pending
+Multi-image batches remain excluded from the suite pending
 [#747](https://github.com/torch-spyre/hf-adapters/issues/747).
 
 Load with `AutoSpyreModel` and `AutoProcessor`; CLIP's processor is stored in

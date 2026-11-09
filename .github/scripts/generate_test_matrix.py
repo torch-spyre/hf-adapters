@@ -59,7 +59,7 @@ def generate_matrices(
         ),
         "embed": (registry.EMBED_PATHS, registry.ALL_EMBED_PATHS),
         "vision": (registry.VISION_PATHS, registry.ALL_VISION_PATHS),
-        # Shared by the SentenceTransformers integration and HF comparison suites.
+        # Consumed by the SentenceTransformers multimodal suite.
         "multimodal_embed": (
             registry.MULTIMODAL_EMBED_PATHS,
             registry.ALL_MULTIMODAL_EMBED_PATHS,
