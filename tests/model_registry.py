@@ -29,7 +29,9 @@ import os
 import types
 from typing import Any
 
-import pytest
+# NOTE: no top-level ``import pytest``. The weekly scan's generate-matrix job imports
+# this registry (WEEKLY_SCAN_*_PATHS) from an environment without the ``test``
+# dependency group; ``xfail_non_blocking`` imports pytest lazily instead.
 
 
 def _include_gated() -> bool:
@@ -1072,6 +1074,29 @@ ALL_CLIP_PATHS: list[str] = _exclude(
 )
 
 
+# Every registered checkpoint the weekly push-to-clickhouse scan evaluates by name,
+# alongside its ranked top-K lists and the curated files (see
+# tests/spyre/weekly_generation/model_fetcher.py). All entries -- not one
+# representative per adapter -- because the point is a weekly check that each
+# registered checkpoint still works. Gated and trust_remote_code entries are always
+# left out, regardless of SPYRE_INCLUDE_GATED / SPYRE_INCLUDE_TRUST_REMOTE_CODE: the
+# scan runs unattended and must not depend on per-environment opt-ins. Only the two
+# registries the scan has an evaluator for are included: token-compare (generative,
+# minus drafters and diffusion, which are not autoregressive LMs) and the text
+# SentenceTransformers embed-compare (embedding).
+WEEKLY_SCAN_GENERATIVE_PATHS: list[str] = _exclude(
+    _all_paths(
+        CAUSAL_LM_MODELS,
+        include_gated=False,
+        include_trust_remote_code=False,
+        predicate=lambda info: info.get("kind") not in (*DRAFTER_KINDS, "diffusion"),
+    )
+)
+WEEKLY_SCAN_EMBEDDING_PATHS: list[str] = _exclude(
+    _all_paths(EMBEDDING_MODELS, include_gated=False, include_trust_remote_code=False)
+)
+
+
 def _non_blocking(models: dict[str, dict], keys: tuple[str, ...]) -> dict[str, str]:
     """Build a ``{path: xfail reason}`` table from registry keys."""
     return {
@@ -1109,6 +1134,8 @@ def xfail_non_blocking(paths: list[str], *, table: dict[str, str]) -> list[objec
     The test still runs and its outcome (PASS/FAIL) is visible in the report,
     but a failure won't fail the pytest run or block CI.
     """
+    import pytest
+
     return [
         (
             pytest.param(
