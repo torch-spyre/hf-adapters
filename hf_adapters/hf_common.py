@@ -1718,16 +1718,27 @@ def split_fused_linear(w: torch.Tensor) -> tuple[nn.Linear, nn.Linear]:
 
     Used by models with fused QKV (phi3) or fused gate+up MLP (granitemoehybrid).
     Each half of the weight becomes a separate linear layer with bias=False.
+
+    If the weight is already on Spyre, its device layout may have the stick
+    dimension on dim 0. Cloning an offset slice of such a tensor (w[half:])
+    fails in torch_spyre's restickify pass ("no mechanism to resolve stick
+    incompatibility"). To avoid that, split on CPU and upload each half so
+    Spyre assigns a fresh layout.
     """
     half = w.shape[0] // 2
     hidden = w.shape[1]
+    device = w.device
+
+    src = w.detach()
+    if device.type != "cpu":
+        src = src.to("cpu")
 
     def _mk(data):
         p = nn.Linear(hidden, half, bias=False)
-        p.weight = nn.Parameter(data.clone(), requires_grad=False)
+        p.weight = nn.Parameter(data.clone().to(device), requires_grad=False)
         return p
 
-    return _mk(w[:half]), _mk(w[half:])
+    return _mk(src[:half]), _mk(src[half:])
 
 
 # ---------------------------------------------------------------------------
