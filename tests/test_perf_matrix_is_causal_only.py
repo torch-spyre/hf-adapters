@@ -14,9 +14,9 @@ import pytest
 import yaml
 
 from tests.model_registry import (
-    ALL_CAUSAL_PATHS,
     CAUSAL_PATHS,
     EMBED_PATHS,
+    GLOBAL_ALL_CAUSAL_PATHS,
     MASKED_LM_PATHS,
     QUESTION_ANSWERING_PATHS,
     TOKEN_CLASSIFICATION_PATHS,
@@ -113,10 +113,11 @@ def test_every_perf_list_file_is_benchmarkable() -> None:
     perf_lists = sorted(list_dir.glob("perf*.yaml"))
     assert perf_lists, f"no perf list files found in {list_dir}"
 
-    # ALL_CAUSAL_PATHS, not CAUSAL_PATHS: a perf list names specific large checkpoints
-    # (granite-4.1-8b, Ministral-3-14B) that are registered causal-LMs but are not their
-    # adapter's smallest representative. This is the set --only resolves against.
-    causal = set(ALL_CAUSAL_PATHS)
+    # GLOBAL_ALL_CAUSAL_PATHS, not CAUSAL_PATHS / ALL_CAUSAL_PATHS: a perf list
+    # names specific large checkpoints (granite-4.1-8b, Ministral-3-14B) that are
+    # registered causal-LMs. Since committed perf lists describe x86 CI, validation
+    # uses the architecture-independent set of eligible causal models.
+    causal = set(GLOBAL_ALL_CAUSAL_PATHS)
     offenders: dict[str, list[str]] = {}
     for path in perf_lists:
         with open(path) as handle:
