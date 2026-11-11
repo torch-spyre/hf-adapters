@@ -5,7 +5,6 @@
 
 import os
 import tempfile
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -35,6 +34,10 @@ if int(os.environ.get("WORLD_SIZE", "1")) < 2:
     pytest.skip("requires at least two torchrun ranks", allow_module_level=True)
 
 
+class _TPNumericalMismatchError(AssertionError):
+    """Only numerical parity failures qualify for the tracked MoE xfails."""
+
+
 @pytest.mark.parametrize(
     "family",
     [
@@ -45,15 +48,26 @@ if int(os.environ.get("WORLD_SIZE", "1")) < 2:
         "qwen3_5",
         "qwen3_5_moe",
         "gemma4",
-        "gemma4_moe",
+        pytest.param(
+            "gemma4_moe",
+            marks=pytest.mark.xfail(
+                strict=True,
+                raises=_TPNumericalMismatchError,
+                reason="Gemma MoE decode divergence: https://github.com/torch-spyre/hf-adapters/issues/773",
+            ),
+        ),
         "qwen3_5_hybrid",
-        "qwen3_5_moe_hybrid",
+        pytest.param(
+            "qwen3_5_moe_hybrid",
+            marks=pytest.mark.xfail(
+                strict=True,
+                raises=_TPNumericalMismatchError,
+                reason="Rank-dependent MoE routing: https://github.com/torch-spyre/hf-adapters/issues/772",
+            ),
+        ),
     ],
 )
 def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
-    if not dist.is_initialized():
-        dist.init_process_group("cpu:gloo,spyre:spyreccl")
-    rank = dist.get_rank()
     torch.set_num_threads(2)
     torch.random.default_generator.manual_seed(522)
     base_family = family.removesuffix("_hybrid")
@@ -132,36 +146,41 @@ def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
     }
     with torch.no_grad():
         expected = reference.generate(ids, **kwargs)
-    paths: list[str | None] = [
-        tempfile.mkdtemp(prefix=f"hf-tp-{family}-") if rank == 0 else None
-    ]
-    dist.broadcast_object_list(paths, src=0)
-    assert paths[0] is not None
-    checkpoint = Path(paths[0])
-    if rank == 0:
-        reference.save_pretrained(checkpoint)
-    dist.barrier()
-    if family == "qwen3":
-        # The group above only coordinates the fixture. Exercise the public
-        # loader's automatic initialization, as used by run_multicard_smoke.
-        dist.destroy_process_group()
-        assert not dist.is_initialized()
-    model = AutoSpyreModelForCausalLM.from_pretrained(
-        checkpoint, dtype=torch.float16, tp_plan="auto"
-    )
+    # Start with independent seeded checkpoints so the public loader can create
+    # the first group. Once it exists, HF saves only on rank zero: share that
+    # checkpoint without destroying/reinitializing torchrun's rendezvous group.
+    with tempfile.TemporaryDirectory(prefix=f"hf-tp-{family}-") as local_checkpoint:
+        checkpoint = local_checkpoint
+        if dist.is_initialized():
+            paths = [local_checkpoint]
+            dist.broadcast_object_list(paths, src=0)
+            checkpoint = paths[0]
+            if dist.get_rank() == 0:
+                reference.save_pretrained(checkpoint)
+            dist.barrier()
+        else:
+            reference.save_pretrained(checkpoint)
+        model = AutoSpyreModelForCausalLM.from_pretrained(
+            checkpoint, dtype=torch.float16, tp_plan="auto"
+        )
+        dist.barrier()  # All ranks must finish reading before rank zero cleans up.
     assert dist.is_initialized()
     assert not any(isinstance(param, DTensor) for param in model.parameters())
     with torch.no_grad():
         actual = model.generate(ids, **kwargs)
-    torch.testing.assert_close(actual.sequences.cpu(), expected.sequences)
-    for step, (got, want) in enumerate(
-        zip(actual.logits, expected.logits, strict=True)
-    ):
-        torch.testing.assert_close(
-            got.cpu().float(),
-            want.float(),
-            atol=0.02,
-            rtol=0.02,
-            msg=f"{family}: logits differ at generation step {step}",
-        )
+    for got in actual.logits:
         assert torch.isfinite(got.cpu()).all()
+    try:
+        torch.testing.assert_close(actual.sequences.cpu(), expected.sequences)
+        for step, (got, want) in enumerate(
+            zip(actual.logits, expected.logits, strict=True)
+        ):
+            torch.testing.assert_close(
+                got.cpu().float(),
+                want.float(),
+                atol=0.02,
+                rtol=0.02,
+                msg=f"{family}: logits differ at generation step {step}",
+            )
+    except AssertionError as error:
+        raise _TPNumericalMismatchError(str(error)) from error

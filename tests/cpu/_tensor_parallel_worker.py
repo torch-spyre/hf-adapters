@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
 import torch
 import torch.distributed as dist
 from safetensors import safe_open
@@ -358,6 +359,52 @@ def check_models(root: Path, world_size: int, rank: int) -> None:
     assert loaded.tp_plan["model.layers.*.self_attn.k_proj"] == SPYRE_COLWISE
 
 
+def check_incomplete_checkpoints(root: Path, rank: int) -> None:
+    reference = Qwen3ForCausalLM(
+        Qwen3Config(
+            vocab_size=32,
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            head_dim=8,
+        )
+    ).eval()
+    module_name = "model.layers.0.self_attn.q_proj"
+    key = f"{module_name}.weight"
+    for missing in (True, False):
+        checkpoint = root / ("missing" if missing else "mismatched")
+        if rank == 0:
+            state = dict(reference.state_dict())
+            if missing:
+                state.pop(key)
+            else:
+                state[key] = state[key][:-1]
+            reference.save_pretrained(checkpoint, state_dict=state)
+        dist.barrier()
+        for staged in (False, True):
+            plan = prepare_spyre_tp_plan(
+                reference,
+                {module_name: "colwise"},
+                cpu_replicated_modules={module_name} if staged else (),
+            )
+            with (
+                spyre_tp_loading(),
+                pytest.raises(
+                    ValueError, match="Spyre TP requires complete checkpoint weights"
+                ) as caught,
+            ):
+                AutoModelForCausalLM.from_pretrained(
+                    checkpoint,
+                    ignore_mismatched_sizes=True,
+                    distributed_config=DistributedConfig(
+                        tp_size=dist.get_world_size(), tp_plan=plan
+                    ),
+                )
+            assert key in str(caught.value)
+
+
 def main() -> None:
     torch.set_num_threads(1)
     torch.random.default_generator.manual_seed(522)
@@ -374,6 +421,7 @@ def main() -> None:
         ):
             check_styles(root, world_size, rank)
             check_models(root, world_size, rank)
+            check_incomplete_checkpoints(root, rank)
         print(
             f"TP{world_size} rank {rank}: all loading, placement and numerical checks passed",
             flush=True,

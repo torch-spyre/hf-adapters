@@ -258,7 +258,7 @@ def prepare_for_spyre(model: Any) -> None:
     # apply_rope_matmul pairs (j, j+head_dim//2). Permute Q/K weights so
     # both agree. Q·K^T dot product is invariant under same permutation.
     # Computed on the original head_dim; stick padding (below) happens after.
-    prf = cfg.rope_parameters.get("partial_rotary_factor", 1.0)
+    prf = (cfg.rope_parameters or {}).get("partial_rotary_factor", 1.0)
     rope_dim = int(prf * hd)
     rope_perm = rope_dim_permutation(hd, rope_dim) if rope_dim != hd else None
 

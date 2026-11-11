@@ -629,7 +629,9 @@ def _setup_qwen3_5_text_decoder(
             f"Qwen3.5 head_dim={cfg.head_dim} is too small for Spyre RoPE; head padding is not implemented"
         )
 
-    rope_dim = int(cfg.rope_parameters.get("partial_rotary_factor", 1.0) * cfg.head_dim)
+    rope_dim = int(
+        (cfg.rope_parameters or {}).get("partial_rotary_factor", 1.0) * cfg.head_dim
+    )
     if rope_dim % 2:
         raise ValueError(f"Qwen3.5 rotary dimension must be even, got {rope_dim}")
     non_rotary_dim = cfg.head_dim - rope_dim

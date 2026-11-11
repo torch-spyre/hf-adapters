@@ -42,6 +42,8 @@ from hf_adapters.spyre_tensor_parallel import (
     SPYRE_ROWWISE,
     SpyreEmbeddingColwiseParallel,
     SpyreEmbeddingRowwiseParallel,
+    SpyreRowwiseParallel,
+    SpyreRowwiseSplitInputParallel,
     _matches_plan,
     _reassemble_all_gather_last_dim,
     prepare_spyre_tp_plan,
@@ -101,6 +103,8 @@ class _ToyModel(nn.Module):
 
 
 class _FakeMesh:
+    _group = SimpleNamespace(group_name="test_group")
+
     def __init__(self, size, rank):
         self._size = size
         self._rank = rank
@@ -112,8 +116,8 @@ class _FakeMesh:
         return self._rank
 
     @staticmethod
-    def get_group():
-        return SimpleNamespace(group_name="test_group")
+    def get_group() -> SimpleNamespace:
+        return _FakeMesh._group
 
 
 def test_reassemble_dim0_all_gather_on_last_dimension():
@@ -153,6 +157,49 @@ def test_plan_matching_uses_transformers_glob_semantics():
     assert _matches_plan("model.layers.3.self_attn.q_proj.weight", plan)
     assert not _matches_plan("model.layers.3.self_attn.k_proj.weight", plan)
     assert not _matches_plan("model.layers.3.self_attn.q_proj.weight", {})
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "vision.model.layers.3.self_attn.q_proj.weight",
+        "modelXlayers.3.self_attn.q_proj.weight",
+        "model.layers.3.self_attn.q_projection.weight",
+        "model.layers.3.self_attn.q_proj.extra.weight",
+    ],
+)
+def test_plan_matching_rejects_partial_names(name: str) -> None:
+    assert not _matches_plan(name, {"model.layers.*.self_attn.q_proj": SPYRE_COLWISE})
+
+
+@pytest.mark.parametrize("split_input", [False, True])
+def test_biased_rowwise_forward_compiles_once(
+    monkeypatch: pytest.MonkeyPatch, split_input: bool
+) -> None:
+    from torch._dynamo.testing import CompileCounter
+
+    from hf_adapters import spyre_tensor_parallel
+
+    def reduce_twice(value: torch.Tensor, group_name: str) -> torch.Tensor:
+        return value * 2
+
+    monkeypatch.setattr(
+        spyre_tensor_parallel, "spyre_compiled_all_reduce", reduce_twice
+    )
+    layer = nn.Linear(8, 4)
+    bias = layer.bias
+    style = SpyreRowwiseSplitInputParallel() if split_input else SpyreRowwiseParallel()
+    style.install_forward(layer, _FakeMesh(size=2, rank=1))
+    layer.weight = nn.Parameter(torch.randn(4, 4))
+    counter = CompileCounter()
+    compiled = torch.compile(layer, backend=counter, fullgraph=True)
+    for _ in range(3):
+        inputs = torch.randn(2, 8 if split_input else 4)
+        local = inputs[:, 4:] if split_input else inputs
+        expected = torch.nn.functional.linear(local, layer.weight) * 2 + bias
+        torch.testing.assert_close(compiled(inputs), expected)
+        assert layer.bias is bias
+    assert counter.frame_count == 1
 
 
 @pytest.mark.parametrize("padding_idx", [None, 0, 4])
@@ -571,7 +618,7 @@ def test_single_stick_vocabulary_shard_needs_no_prime_factor() -> None:
 
 
 def test_tp_loader_hooks_restore_after_failure() -> None:
-    from transformers import core_model_loading
+    from transformers import PreTrainedModel, core_model_loading
     from transformers.distributed import mixin, tensor_parallel, utils
 
     originals = (
@@ -581,6 +628,7 @@ def test_tp_loader_hooks_restore_after_failure() -> None:
         tensor_parallel._get_parameter_plan,
         mixin.resolve_parallel_plans,
         utils._ensure_torch_distributed,
+        PreTrainedModel._move_missing_keys_from_meta_to_device,
     )
     with pytest.raises(RuntimeError, match="checkpoint failure"):
         with spyre_tp_loading():
@@ -592,6 +640,7 @@ def test_tp_loader_hooks_restore_after_failure() -> None:
         tensor_parallel._get_parameter_plan,
         mixin.resolve_parallel_plans,
         utils._ensure_torch_distributed,
+        PreTrainedModel._move_missing_keys_from_meta_to_device,
     )
 
 

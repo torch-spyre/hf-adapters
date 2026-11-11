@@ -679,6 +679,50 @@ jobs:
       - name: Run mypy
         run: uv run --no-sync mypy --config-file=pyproject.toml
 
+  cpu-tp-tests:
+    name: CPU TP and Transformers compatibility
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_tests }}
+    timeout-minutes: 15
+    env:
+      UV_NO_SYNC: "0"
+      UV_PROJECT_ENVIRONMENT: .venv
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.ref || '' }}
+          repository: ${{ inputs.repository != '' && inputs.repository || github.repository }}
+      - name: Set up Python and uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Install CPU test dependencies
+        run: uv sync --frozen --no-default-groups --group test
+      - name: Run offline TP2/TP4 and compatibility regressions
+        env:
+          HF_HUB_OFFLINE: "1"
+          OMP_NUM_THREADS: "1"
+        run: |
+          uv run --no-sync python -m pytest \
+            tests/cpu/test_tensor_parallel_loading.py \
+            tests/cpu/test_spyre_tensor_parallel.py \
+            tests/cpu/test_transformers_tp_contract.py \
+            tests/cpu/test_rotary_config_compatibility.py \
+            tests/cpu/test_vision_transformers_compatibility.py \
+            tests/cpu/test_muse_glimmer_mm.py \
+            -q --tb=short --junitxml=cpu-tp-results.xml
+      - name: Upload CPU results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cpu-tp-results
+          path: cpu-tp-results.xml
+
 # NOTE (issue #449): if re-enabling cpu-tests, add `resolve-torch-spyre` to its
 # `needs:` and pass `torch_spyre_sha:
 # ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}` to build-hf-adapters
@@ -910,6 +954,57 @@ jobs:
         with:
           job_key: smoke
           payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
+
+  spyre-tp-regression-tests:
+    name: Spyre TP2 regression tests
+    needs: [resolve-test-type, resolve-torch-spyre]
+    if: ${{ !cancelled() && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' multicard_smoke ')) }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x2
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 30
+    # Gate directly: numerical regressions must fail, including strict XPASS.
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
+          sparse-checkout-cone-mode: false
+      - uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          prebaked_image: ${{ inputs.prebaked_image }}
+      - name: Run compiled checkpoint, bias, and embedding regressions
+        env:
+          SPYRE_DEVICES: "0,1"
+          COLL_ALLREDUCE_ALGO: "PairwisePow2"
+          HF_DEACTIVATE_ASYNC_LOAD: "1"
+          HF_HUB_OFFLINE: "1"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
+          run_teed uv run --active --no-sync torchrun \
+            --standalone --nproc-per-node=2 --max-restarts=0 \
+            --log-dir=tp-logs --tee=3 -m pytest \
+            tests/spyre/test_tp_transformers_loading_spyre.py \
+            tests/spyre/test_tp_rowwise_bias_spyre.py \
+            tests/spyre/test_tp_embedding_collective_spyre.py -sv --tb=short
+      - name: Upload per-rank TP logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: spyre-tp-regression-logs
+          path: ${{ env.CLONED_HF_ADAPTERS_DIR }}/tp-logs/
 
   spyre-multicard-smoke-tests:
     name: Spyre multicard smoke x2 (${{ matrix.model_key }})
@@ -3926,6 +4021,8 @@ jobs:
       - generate-module-config-matrix
       - adapter-coverage
       - check-uv-lock
+      - cpu-tp-tests
+      - spyre-tp-regression-tests
 #      - cpu-tests
       # resolve-torch-spyre gates the whole matrix (every suite/retry job needs
       # it; issue #449). When it FAILS, each suite job's result-guard excludes
@@ -3957,6 +4054,8 @@ jobs:
                  contains(needs.generate-module-config-matrix.result, 'failure') || contains(needs.generate-module-config-matrix.result, 'cancelled') ||
                  contains(needs.adapter-coverage.result, 'failure') || contains(needs.adapter-coverage.result, 'cancelled') ||
                  contains(needs.check-uv-lock.result, 'failure') || contains(needs.check-uv-lock.result, 'cancelled') ||
+                 (!inputs.skip_tests && needs.cpu-tp-tests.result != 'success') ||
+                 contains(needs.spyre-tp-regression-tests.result, 'failure') || contains(needs.spyre-tp-regression-tests.result, 'cancelled') ||
                  contains(needs.resolve-torch-spyre.result, 'failure') || contains(needs.resolve-torch-spyre.result, 'cancelled') ||
                  contains(needs.spyre-tests-result.result, 'failure') || contains(needs.spyre-tests-result.result, 'cancelled') ||
                  contains(needs.spyre-perf-tests.result, 'failure') || contains(needs.spyre-perf-tests.result, 'cancelled') }}; then

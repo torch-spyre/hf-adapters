@@ -21,8 +21,9 @@ CPU-to-device copy with torch-spyre's layout-aware DMA helpers.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping
-from contextlib import contextmanager, nullcontext
+import re
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import replace
 from datetime import timedelta
 from functools import lru_cache
@@ -31,10 +32,11 @@ from unittest.mock import patch
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
 from torch.distributed.tensor.placement_types import Placement, Shard, _StridedShard
-from transformers.core_model_loading import build_glob_alternation
+from transformers import PreTrainedModel
 from transformers.distributed.sharding_utils import DtensorShardOperation
 from transformers.distributed.tensor_parallel import (
     ALL_PARALLEL_STYLES,
@@ -113,10 +115,10 @@ class SpyreShardOperation(DtensorShardOperation):
 
     def __init__(self, param: DTensor) -> None:
         self.copy_kind: _CopyKind = getattr(param, "_spyre_copy_kind", "default")
+        self.param_name: str = getattr(param, "_spyre_param_name", "<unnamed>")
         self.param_shape = param.shape
         # Upstream's constructor indexes axis 0 even for replicated scalars.
-        self.scalar = param.ndim == 0
-        if not self.scalar:
+        if param.ndim != 0:
             super().__init__(param)
 
     def shard_tensor(
@@ -129,6 +131,16 @@ class SpyreShardOperation(DtensorShardOperation):
         # Weight converters can feed scalar clipping bounds through the same
         # operation as their matrix. Replicate that state on every rank.
         shape = source.shape if isinstance(source, torch.Tensor) else source.get_shape()
+        # Without a converter, the disk tensor must match the global parameter.
+        # Checking only the local shard can hide a truncated tensor on all but
+        # the final rank. Converters always supply tensor_idx and may legitimately
+        # feed smaller pieces (e.g. separate gate/up or per-expert matrices).
+        if len(shape) != 0 and tensor_idx is None and tuple(shape) != self.param_shape:
+            raise ValueError(
+                "Spyre TP requires complete checkpoint weights; "
+                f"{self.param_name}: checkpoint shape {tuple(shape)} "
+                f"!= planned shape {self.param_shape}"
+            )
         shard: torch.Tensor | None
         if len(shape) == 0:
             shard = source[...].to(device="cpu", dtype=dtype)
@@ -193,6 +205,7 @@ class _SpyreLocalParallel(TensorParallelLayer):
 
     copy_kind: _CopyKind = "default"
     style_name = SPYRE_REPLICATED
+    _replicated = False
 
     def shard_param(self, module: nn.Module, param: str, mesh: DeviceMesh) -> None:
         value = module._parameters.get(param)
@@ -211,8 +224,6 @@ class _SpyreLocalParallel(TensorParallelLayer):
         setattr(placeholder, "_spyre_copy_kind", self.copy_kind)
         setattr(module, "_hf_device_mesh", mesh)
         setattr(module, "_hf_tp_plan", self.style_name)
-
-    _replicated = False
 
     def context_around_forward(self, module: nn.Module, mesh: DeviceMesh) -> Any:
         return nullcontext()
@@ -284,6 +295,12 @@ class SpyreRowwiseParallel(_SpyreLocalParallel, RowwiseParallel):
     style_name = SPYRE_ROWWISE
 
     def install_forward(self, module: nn.Module, mesh: DeviceMesh) -> nn.Module:
+        standard_linear = (
+            isinstance(module, nn.Linear)
+            and getattr(module.forward, "__func__", None) is nn.Linear.forward
+        )
+        if module._parameters.get("bias") is not None and not standard_linear:
+            raise ValueError("Biased Spyre rowwise TP requires a standard nn.Linear")
         result = super().install_forward(module, mesh)
         setattr(
             module,
@@ -292,21 +309,17 @@ class SpyreRowwiseParallel(_SpyreLocalParallel, RowwiseParallel):
                 _module_size(module, "in_features"), mesh.size(), mesh.get_local_rank()
             )[0],
         )
-        return result
+        if standard_linear and isinstance(module, nn.Linear):
 
-    @contextmanager
-    def context_around_forward(
-        self, module: nn.Module, mesh: DeviceMesh
-    ) -> Iterator[None]:
-        # The replicated bias must be added once, after reducing partial products.
-        bias = module._parameters.get("bias")
-        if bias is not None:
-            module._parameters["bias"] = None
-        try:
-            yield
-        finally:
-            if bias is not None:
-                module._parameters["bias"] = bias
+            def linear_forward(input: torch.Tensor) -> torch.Tensor:
+                args, _ = self.transform_inputs_pre_forward(module, (input,), {}, mesh)
+                # Form the local partial without bias. Do not mutate module state
+                # inside Dynamo; add the replicated bias once, after reduction.
+                output = F.linear(args[0], module.weight)
+                return self.transform_output_post_forward(module, output, mesh)
+
+            setattr(module, "forward", linear_forward)
+        return result
 
     def transform_output_post_forward(
         self, module: nn.Module, output: torch.Tensor, mesh: DeviceMesh
@@ -366,6 +379,10 @@ class SpyreEmbeddingRowwiseParallel(_SpyreLocalParallel, EmbeddingParallel):
                 size == mod.weight.shape[0]
             ), "embedding vocabulary shard has the wrong size"
             input_tensor = inputs[0]
+            # Spyre integer masking is host-staged: each call transfers IDs to
+            # CPU, then local IDs and the validity mask back to the input device.
+            # This also applies to one-token decode; benchmark the complete
+            # embedding call (including these copies), not just its compiled body.
             host = input_tensor.cpu()
             invalid = (host < start) | (host >= end)
             masked = host.clone() - start
@@ -437,17 +454,24 @@ class SpyreReplicatedEmbeddingParallel(SpyreReplicatedInferenceParallel):
     style_name = SPYRE_REPLICATED_EMBEDDING
 
 
-@lru_cache(maxsize=None)
 def _grouped_mesh(mesh: DeviceMesh, num_shards: int) -> DeviceMesh:
     if mesh.size() % num_shards:
         raise ValueError(
             f"TP size {mesh.size()} is not divisible by {num_shards} grouped-colwise shards"
         )
-    return mesh._unflatten(
-        0,
-        (num_shards, mesh.size() // num_shards),
-        (f"spyre_shard_{num_shards}", f"spyre_replica_{num_shards}"),
-    )
+    # Keep children with their owning mesh, not in a process-global cache that
+    # would retain every mesh/process group after the caller releases it.
+    grouped: dict[int, DeviceMesh] | None = getattr(mesh, "_spyre_grouped_meshes", None)
+    if grouped is None:
+        grouped = {}
+        setattr(mesh, "_spyre_grouped_meshes", grouped)
+    if num_shards not in grouped:
+        grouped[num_shards] = mesh._unflatten(
+            0,
+            (num_shards, mesh.size() // num_shards),
+            (f"spyre_shard_{num_shards}", f"spyre_replica_{num_shards}"),
+        )
+    return grouped[num_shards]
 
 
 class SpyreGroupedColwiseParallel(_SpyreLocalParallel):
@@ -548,6 +572,11 @@ def spyre_tp_loading() -> Iterator[None]:
     of shard-on-read, weight conversion, shape validation and missing-key checks.
     Rewrapping a loaded shard as a DTensor would hide its device layout and make
     adapter padding operate on the global shape, so retain the local tensor.
+
+    These patches affect the entire process. Callers must serialize HF model
+    loads (including non-Spyre loads) while this context is active. The context
+    covers HF's own checkpoint worker threads, but is not safe for concurrent
+    independent from_pretrained calls.
     """
     from transformers import core_model_loading
     from transformers.distributed import mixin, tensor_parallel, utils
@@ -558,7 +587,27 @@ def spyre_tp_loading() -> Iterator[None]:
     original_lookup = tensor_parallel._get_parameter_plan
     original_device = core_model_loading.get_device
     original_initialize = utils._ensure_torch_distributed
+    # HF annotates missing_keys as list[str] but passes/operates on a set.
+    original_move_missing: Callable[..., None] = (
+        PreTrainedModel._move_missing_keys_from_meta_to_device
+    )
     staged_parameters: set[str] = set()
+    cleanup = ExitStack()
+
+    def preserve_placement_tags(
+        model: nn.Module,
+        state: dict[str, torch.Tensor],
+        prefix: str,
+        local_metadata: dict[str, Any],
+    ) -> None:
+        # HF reads loading placeholders through state_dict(), which detaches
+        # DTensors and loses Python attributes. Restore placement on that view
+        # so checkpoint slicing still selects our layout-aware shard operation.
+        for name, parameter in model.named_parameters():
+            copy_kind: _CopyKind | None = getattr(parameter, "_spyre_copy_kind", None)
+            if copy_kind is not None and prefix + name in state:
+                setattr(state[prefix + name], "_spyre_copy_kind", copy_kind)
+                setattr(state[prefix + name], "_spyre_param_name", prefix + name)
 
     def initialize_distributed(device_type: str | None = None) -> None:
         if device_type is None:
@@ -597,6 +646,31 @@ def spyre_tp_loading() -> Iterator[None]:
     def local_parameter(local: torch.Tensor, ref: DTensor) -> torch.Tensor:
         return local if hasattr(ref, "_spyre_copy_kind") else original_wrap(local, ref)
 
+    def move_missing(
+        model: PreTrainedModel,
+        missing_keys: set[str],
+        device_map: dict[str, Any] | None,
+        device_mesh: Any,
+        hf_quantizer: Any,
+    ) -> None:
+        # modeling_utils has direct imports of get_device/_dtensor_from_local_like.
+        # Reject incomplete planned weights before that path allocates generic
+        # device tensors or wraps local shards back into DTensors. Tied aliases
+        # are legitimately absent and are materialized by HF's tie_weights.
+        unsupported = sorted(
+            name
+            for name in missing_keys - model.all_tied_weights_keys.keys()
+            if hasattr(model.get_parameter_or_buffer(name), "_spyre_copy_kind")
+        )
+        if unsupported:
+            raise ValueError(
+                "Spyre TP requires complete checkpoint weights; missing or mismatched "
+                f"planned parameters: {', '.join(unsupported)}"
+            )
+        original_move_missing(
+            model, missing_keys, device_map, device_mesh, hf_quantizer
+        )
+
     def exact_first(
         parameter_name: str, plan: dict[str, str], is_weight: bool = True
     ) -> str | None:
@@ -617,14 +691,22 @@ def spyre_tp_loading() -> Iterator[None]:
         ):
             # Our plan is already complete, and exact per-layer overrides are
             # valid. HF 5.22's override validator only accepts wildcard names.
-            names = [name for name, _ in model.named_modules()] + [
+            names = {name for name, _ in model.named_modules()} | {
                 name for name, _ in model.named_parameters()
-            ]
+            }
+            # HF plans may include optional branches absent from this config
+            # (e.g. Gemma's MoE rules on a dense checkpoint). Preserve those
+            # declared defaults while validating additional caller overrides.
+            known_names = (
+                set(model.tp_plan)
+                | names
+                | {replace_layer_number_by_wildcard(name) for name in names}
+            )
             unknown = [
                 key
                 for key in plan
-                if key not in model.tp_plan
-                and not any(_matches_plan(name, {key: plan[key]}) for name in names)
+                if key not in known_names
+                and not any(_plan_pattern(key).fullmatch(name) for name in names)
             ]
             if unknown:
                 raise ValueError(
@@ -635,16 +717,22 @@ def spyre_tp_loading() -> Iterator[None]:
                 if style is not None and style.copy_kind == "cpu":
                     staged_parameters.add(name)
             model._tp_plan = dict(plan)
+            handle = model.register_state_dict_post_hook(preserve_placement_tags)
+            cleanup.callback(handle.remove)
             return original_resolve(model, replace(distributed_config, tp_plan=None))
         return original_resolve(model, distributed_config)
 
     with (
+        cleanup,
         patch.object(utils, "_ensure_torch_distributed", initialize_distributed),
         patch.object(core_model_loading, "DtensorShardOperation", shard_operation),
         patch.object(core_model_loading, "_dtensor_from_local_like", local_parameter),
         patch.object(core_model_loading, "get_device", parameter_device),
         patch.object(tensor_parallel, "_get_parameter_plan", exact_first),
         patch.object(mixin, "resolve_parallel_plans", resolve_plans),
+        patch.object(
+            PreTrainedModel, "_move_missing_keys_from_meta_to_device", move_missing
+        ),
     ):
         yield
 
@@ -710,12 +798,19 @@ def register_spyre_tp_styles() -> None:
         ALL_PARALLEL_STYLES.register(name, style)  # type: ignore[arg-type]
 
 
-def _matches_plan(parameter_name: str, plan: Mapping[str, str]) -> bool:
-    if not plan:
-        return False
+@lru_cache(maxsize=512)
+def _plan_pattern(key: str) -> re.Pattern[str]:
+    """Compile a TP glob; dots and other non-wildcard characters are literal."""
+    return re.compile(re.escape(key).replace(r"\*", ".*"))
 
-    alternation, _, _ = build_glob_alternation(list(plan))
-    return alternation.search(parameter_name) is not None
+
+def _matches_plan(parameter_name: str, plan: Mapping[str, str]) -> bool:
+    parent = parameter_name.rpartition(".")[0]
+    return any(
+        _plan_pattern(key).fullmatch(parameter_name)
+        or _plan_pattern(key).fullmatch(parent)
+        for key in plan
+    )
 
 
 def grouped_kv_projection_modules(

@@ -342,10 +342,10 @@ def _vision_features(
     indices, weights = get_vision_interpolation_indices_and_weights(
         grid,
         cfg.pos_emb_height,
-        mode="bilinear",
-        align_corners=False,
+        mode=tower.patch_embedder.interpolation_mode,
+        align_corners=tower.patch_embedder.interpolation_align_corners,
         spatial_merge_size=1,
-        padding="zeros",
+        padding=tower.patch_embedder.interpolation_padding,
     )
     pos_table = tower.patch_embedder.position_embedding_table.weight.detach().cpu()
     positions = (pos_table[indices] * weights[:, :, None]).sum(1).to(dtype)
