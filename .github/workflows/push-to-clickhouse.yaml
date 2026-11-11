@@ -84,6 +84,14 @@ on:
           - dev
           - prod
         default: dev
+      torch_spyre_sha:
+        description: >-
+          torch-spyre commit SHA (full or short), branch, or tag to pin the
+          whole scan to. Empty = origin/main. Must be compatible with the
+          torch/torchvision versions in this branch's uv.lock.
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   # Scoped per-ref: a new commit on a given branch cancels and supersedes
@@ -353,6 +361,16 @@ jobs:
   # checkout -- and its origin remote, the only place the torch-spyre URL exists
   # -- is present. It runs in parallel with generate-matrix and needs no
   # HF/ClickHouse credentials.
+  #
+  # A manual dispatch may override origin/main with the `torch_spyre_sha` input
+  # (bisecting, reproducing an old week, validating a fix). The override is
+  # resolved HERE to a full 40-char SHA, so every shard still installs one
+  # identical commit even when the user passed a short SHA or a branch name.
+  # Scheduled runs have an empty `inputs` context and keep tracking origin/main.
+  #
+  # Only the INSTALLED torch-spyre follows the pin: CH_INGEST_LIB and the identity
+  # library in link-artifact deliberately stay at torch-spyre main, because every
+  # writer must compute run_id/capability_id/artifact_id with the same formula.
   # ---------------------------------------------------------------------------
   resolve-torch-spyre:
     name: Resolve torch-spyre revision
@@ -360,36 +378,68 @@ jobs:
     timeout-minutes: 15
     outputs:
       torch_spyre_sha: ${{ steps.resolve.outputs.torch_spyre_sha }}
+      torch_spyre_source: ${{ steps.resolve.outputs.torch_spyre_source }}
     steps:
-      - name: Resolve origin/main to a pinned SHA
+      - name: Resolve the torch-spyre revision to a pinned SHA
         id: resolve
         working-directory: /home/senuser/torch-spyre
+        env:
+          # Via env, not inline ${{ }}, so a user-typed value can't inject shell.
+          REQUESTED: ${{ inputs.torch_spyre_sha }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           git config --global --add safe.directory '*'
-          # `git fetch origin` updates refs/remotes/origin/main to what origin
-          # advertises NOW; `git rev-parse origin/main` reads that ref, NOT this
-          # pod's stale checked-out HEAD -- which is what makes the pin immune to
-          # per-pod image drift.
-          git fetch --force origin
-          SHA="$(git rev-parse origin/main)"
+          # `git fetch origin` updates refs/remotes/origin/* to what origin
+          # advertises NOW; rev-parse reads those refs, NOT this pod's stale
+          # checked-out HEAD -- which is what makes the pin immune to per-pod
+          # image drift.
+          git fetch --force --tags origin
+          REQUESTED="$(echo "$REQUESTED" | xargs)"   # trim whitespace
+          if [[ -z "$REQUESTED" ]]; then
+            SOURCE="origin/main"
+            SHA="$(git rev-parse origin/main)"
+          else
+            SOURCE="override '${REQUESTED}'"
+            # A commit that no fetched branch contains (e.g. a PR head) has to be
+            # fetched by name; harmless if it's already present or is a branch/tag.
+            git fetch --force origin "$REQUESTED" 2>/dev/null || true
+            # Branch names resolve via origin/<name> first, so a stale local
+            # branch in the baked checkout can't shadow the remote one.
+            SHA="$(git rev-parse --verify --quiet "origin/${REQUESTED}^{commit}" \
+                || git rev-parse --verify --quiet "${REQUESTED}^{commit}")" || {
+              echo "::error::torch_spyre_sha '${REQUESTED}' does not resolve to a torch-spyre commit"
+              exit 1
+            }
+          fi
           if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "resolve-torch-spyre: origin/main did not resolve to a 40-char SHA (got '$SHA')" >&2
+            echo "::error::torch-spyre ${SOURCE} did not resolve to a 40-char SHA (got '$SHA')"
             exit 1
           fi
-          echo "Resolved torch-spyre origin/main -> ${SHA}"
+          echo "Resolved torch-spyre ${SOURCE} -> ${SHA}"
           echo "torch_spyre_sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "torch_spyre_source=${SOURCE}" >> "$GITHUB_OUTPUT"
+
+          # Not refused, just flagged: rows written to prod are dated with
+          # today's snapshot_date, so a non-main pin there can skew the
+          # week-over-week reports.
+          if [[ -n "$REQUESTED" && "$CLICKHOUSE_TARGET" == "prod" ]]; then
+            echo "::warning::Writing to PROD with torch-spyre pinned to ${SOURCE} (${SHA}), not origin/main." \
+                 "These rows will carry snapshot_date for this run and may skew week-over-week reports."
+          fi
 
       - name: Record pinned SHA in the run summary
+        env:
+          SHA: ${{ steps.resolve.outputs.torch_spyre_sha }}
+          SOURCE: ${{ steps.resolve.outputs.torch_spyre_source }}
         run: |
           {
             echo "## Pinned torch-spyre revision (weekly scan)"
             echo ""
-            echo "Every model-scan job installs torch-spyre at this exact commit:"
+            echo "Every model-scan job installs torch-spyre at this exact commit (from ${SOURCE}):"
             echo ""
             echo '```'
-            echo "${{ steps.resolve.outputs.torch_spyre_sha }}"
+            echo "${SHA}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
