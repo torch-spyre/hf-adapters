@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -46,6 +47,41 @@ from hf_adapters.spyre_tensor_parallel import (
     prepare_spyre_tp_plan,
     spyre_tp_loading,
 )
+
+
+def test_spyre_loader_initializes_cpu_and_device_backends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from transformers.distributed import utils
+
+    original = utils._ensure_torch_distributed
+    monkeypatch.setenv("RANK", "1")
+    monkeypatch.setenv("LOCAL_RANK", "1")
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setattr(torch.distributed, "is_initialized", Mock(return_value=False))
+    initialize = Mock()
+    monkeypatch.setattr(torch.distributed, "init_process_group", initialize)
+
+    with spyre_tp_loading():
+        utils._ensure_torch_distributed("spyre")
+
+    initialize.assert_called_once()
+    assert initialize.call_args.kwargs["backend"] == "cpu:gloo,spyre:spyreccl"
+    assert initialize.call_args.kwargs.get("device_id") is None
+    assert utils._ensure_torch_distributed is original
+
+
+def test_spyre_loader_keeps_existing_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from transformers.distributed import utils
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", Mock(return_value=True))
+    initialize = Mock()
+    monkeypatch.setattr(torch.distributed, "init_process_group", initialize)
+    with spyre_tp_loading():
+        utils._ensure_torch_distributed("spyre")
+    initialize.assert_not_called()
 
 
 class _ToyModel(nn.Module):
@@ -119,8 +155,10 @@ def test_plan_matching_uses_transformers_glob_semantics():
     assert not _matches_plan("model.layers.3.self_attn.q_proj.weight", {})
 
 
+@pytest.mark.parametrize("padding_idx", [None, 0, 4])
 def test_vocab_parallel_embedding_preserves_custom_forward_and_uneven_range(
     monkeypatch: pytest.MonkeyPatch,
+    padding_idx: int | None,
 ) -> None:
     class ScaledEmbedding(nn.Embedding):
         def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -132,7 +170,7 @@ def test_vocab_parallel_embedding_preserves_custom_forward_and_uneven_range(
         lambda outputs, _group_name: outputs,
     )
 
-    embedding = ScaledEmbedding(5, 2)
+    embedding = ScaledEmbedding(5, 2, padding_idx=padding_idx)
     style = SpyreEmbeddingRowwiseParallel()
     style.install_forward(embedding, _FakeMesh(size=2, rank=1))
     # Simulate Transformers replacing the full meta parameter with rank 1's
@@ -534,7 +572,7 @@ def test_single_stick_vocabulary_shard_needs_no_prime_factor() -> None:
 
 def test_tp_loader_hooks_restore_after_failure() -> None:
     from transformers import core_model_loading
-    from transformers.distributed import mixin, tensor_parallel
+    from transformers.distributed import mixin, tensor_parallel, utils
 
     originals = (
         core_model_loading.DtensorShardOperation,
@@ -542,6 +580,7 @@ def test_tp_loader_hooks_restore_after_failure() -> None:
         core_model_loading.get_device,
         tensor_parallel._get_parameter_plan,
         mixin.resolve_parallel_plans,
+        utils._ensure_torch_distributed,
     )
     with pytest.raises(RuntimeError, match="checkpoint failure"):
         with spyre_tp_loading():
@@ -552,6 +591,7 @@ def test_tp_loader_hooks_restore_after_failure() -> None:
         core_model_loading.get_device,
         tensor_parallel._get_parameter_plan,
         mixin.resolve_parallel_plans,
+        utils._ensure_torch_distributed,
     )
 
 

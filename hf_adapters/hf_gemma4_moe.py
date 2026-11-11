@@ -50,6 +50,8 @@ from hf_adapters.swa_attention import allocate_swa_caches
 # ``_prepare_experts`` performs its split/transpose/pad and one final custom
 # DMA, avoiding a Spyre -> CPU -> Spyre round trip.
 SPYRE_TP_CPU_STAGED_MODULES = {
+    "model.layers.*.experts.gate_up_proj",
+    "model.layers.*.experts.down_proj",
     "model.language_model.layers.*.experts.gate_up_proj",
     "model.language_model.layers.*.experts.down_proj",
 }

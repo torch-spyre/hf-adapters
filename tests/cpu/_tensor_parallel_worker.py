@@ -20,6 +20,8 @@ from transformers import (
     AutoModelForCausalLM,
     Gemma3ForCausalLM,
     Gemma3TextConfig,
+    Gemma4ForCausalLM,
+    Gemma4TextConfig,
     GraniteConfig,
     GraniteForCausalLM,
     Phi3Config,
@@ -40,6 +42,8 @@ from hf_adapters import (
     auto_spyre_model,
     hf_common,
     hf_gemma3,
+    hf_gemma4,
+    hf_gemma4_moe,
     hf_granite,
     hf_phi3,
     hf_qwen3,
@@ -79,7 +83,7 @@ def check_styles(root: Path, world_size: int, rank: int) -> None:
         model.col = nn.Linear(8, 11)
         model.row = nn.Linear(8, 11)
         model.grouped = nn.Linear(8, 8)
-        model.embed = nn.Embedding(11, 8)
+        model.embed = nn.Embedding(11, 8, padding_idx=10)
         model.hidden_embed = nn.Embedding(11, 11)
         model.experts = nn.Module()
         model.experts.gate_up_proj = nn.Parameter(torch.empty(2, 16, 8))
@@ -165,7 +169,7 @@ def check_styles(root: Path, world_size: int, rank: int) -> None:
         model.row(inputs),
         torch.nn.functional.linear(inputs, full["row.weight"], full["row.bias"]),
     )
-    ids = torch.tensor([[0, 4, 8], [1, 5, 7]])
+    ids = torch.tensor([[0, 4, 8], [1, 5, 10]])
     torch.testing.assert_close(
         model.embed(ids), torch.nn.functional.embedding(ids, full["embed.weight"])
     )
@@ -182,6 +186,8 @@ def check_models(root: Path, world_size: int, rank: int) -> None:
         ("qwen3", Qwen3Config, Qwen3ForCausalLM, hf_qwen3, 4),
         ("granite", GraniteConfig, GraniteForCausalLM, hf_granite, 4),
         ("gemma3", Gemma3TextConfig, Gemma3ForCausalLM, hf_gemma3, 1),
+        ("gemma4", Gemma4TextConfig, Gemma4ForCausalLM, hf_gemma4, 2),
+        ("gemma4_moe", Gemma4TextConfig, Gemma4ForCausalLM, hf_gemma4_moe, 2),
         ("phi3", Phi3Config, Phi3ForCausalLM, hf_phi3, 4),
         ("qwen3_5", Qwen3_5TextConfig, Qwen3_5ForCausalLM, hf_qwen3_5, 4),
         ("qwen3_5_moe", Qwen3_5MoeTextConfig, Qwen3_5MoeForCausalLM, hf_qwen3_5_moe, 4),
@@ -205,7 +211,14 @@ def check_models(root: Path, world_size: int, rank: int) -> None:
                     "num_experts_per_tok": 2,
                     "moe_intermediate_size": 256,
                     "shared_expert_intermediate_size": 256,
-                    "layer_types": ["full_attention", "full_attention"],
+                    "layer_types": [
+                        "full_attention" if family == "phi3" else "linear_attention",
+                        "full_attention",
+                    ],
+                    "linear_num_key_heads": 2,
+                    "linear_num_value_heads": 4,
+                    "linear_key_head_dim": 128,
+                    "linear_value_head_dim": 128,
                     "rope_parameters": {
                         "rope_type": "default",
                         "rope_theta": 10000.0,
@@ -213,7 +226,23 @@ def check_models(root: Path, world_size: int, rank: int) -> None:
                     },
                 }
                 if family in ("phi3", "qwen3_5", "qwen3_5_moe")
-                else {}
+                else (
+                    {
+                        "global_head_dim": 128,
+                        "vocab_size_per_layer_input": 131,
+                        "hidden_size_per_layer_input": (
+                            0 if family == "gemma4_moe" else 64
+                        ),
+                        "layer_types": ["sliding_attention", "full_attention"],
+                        "sliding_window": 128,
+                        "enable_moe_block": family == "gemma4_moe",
+                        "num_experts": 4,
+                        "top_k_experts": 2,
+                        "moe_intermediate_size": 256,
+                    }
+                    if family in ("gemma4", "gemma4_moe")
+                    else {}
+                )
             ),
         )
         reference = model_cls(config).eval()
@@ -234,7 +263,17 @@ def check_models(root: Path, world_size: int, rank: int) -> None:
         torch.testing.assert_close(
             loaded(ids, use_cache=False).logits, expected, atol=2e-6, rtol=2e-5
         )
+        if family == "qwen3_5":
+            linear_attn: nn.Module = loaded.model.layers[0].linear_attn
+            assert linear_attn.in_proj_a.weight.shape[0] == 4
+            assert linear_attn.in_proj_b.weight.shape[0] == 4
+            assert linear_attn.in_proj_qkv.weight.shape[0] == 1024 // world_size
         del loaded
+        if family == "gemma4_moe":
+            # Preparation uses Spyre-only packed-expert DMA/operators. The
+            # compiled hardware suite covers generation; CPU checks the real
+            # checkpoint converter, local placement, and stock TP forward.
+            continue
         spyre = auto_spyre_model.AutoSpyreModelForCausalLM.from_pretrained(
             str(checkpoint), dtype=torch.float32, tp_plan="auto"
         )

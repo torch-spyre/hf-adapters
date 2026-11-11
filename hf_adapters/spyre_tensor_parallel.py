@@ -24,6 +24,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
+from datetime import timedelta
 from functools import lru_cache
 from typing import Any, Literal
 from unittest.mock import patch
@@ -349,6 +350,12 @@ class SpyreEmbeddingRowwiseParallel(_SpyreLocalParallel, EmbeddingParallel):
             module.weight.shape[0], mesh.size(), mesh.get_local_rank()
         )
         end = start + size
+        if module.padding_idx is not None:
+            module.padding_idx = (
+                module.padding_idx - start
+                if start <= module.padding_idx < end
+                else None
+            )
         original_forward = module.forward
 
         def prepare_inputs(
@@ -543,14 +550,28 @@ def spyre_tp_loading() -> Iterator[None]:
     adapter padding operate on the global shape, so retain the local tensor.
     """
     from transformers import core_model_loading
-    from transformers.distributed import mixin, tensor_parallel
+    from transformers.distributed import mixin, tensor_parallel, utils
 
     original_shard = core_model_loading.DtensorShardOperation
     original_wrap = core_model_loading._dtensor_from_local_like
     original_resolve = mixin.resolve_parallel_plans
     original_lookup = tensor_parallel._get_parameter_plan
     original_device = core_model_loading.get_device
+    original_initialize = utils._ensure_torch_distributed
     staged_parameters: set[str] = set()
+
+    def initialize_distributed(device_type: str | None = None) -> None:
+        if device_type is None:
+            device_type = torch._C._get_accelerator().type
+        if device_type != "spyre":
+            original_initialize(device_type)
+        elif not torch.distributed.is_initialized():
+            # HF's backend map omits Spyre. Do not pass device_id here: that
+            # makes DeviceMesh use split_group, unsupported by SpyreCCL.
+            # HF binds LOCAL_RANK when it constructs the mesh afterward.
+            torch.distributed.init_process_group(
+                backend="cpu:gloo,spyre:spyreccl", timeout=timedelta(hours=2)
+            )
 
     def parameter_device(
         device_map: dict[str, Any] | None,
@@ -618,6 +639,7 @@ def spyre_tp_loading() -> Iterator[None]:
         return original_resolve(model, distributed_config)
 
     with (
+        patch.object(utils, "_ensure_torch_distributed", initialize_distributed),
         patch.object(core_model_loading, "DtensorShardOperation", shard_operation),
         patch.object(core_model_loading, "_dtensor_from_local_like", local_parameter),
         patch.object(core_model_loading, "get_device", parameter_device),

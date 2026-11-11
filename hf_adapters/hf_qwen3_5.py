@@ -42,6 +42,22 @@ from hf_adapters.hf_common import (
 )
 
 
+def spyre_tp_replicated_linear_modules(model: nn.Module, tp_size: int) -> set[str]:
+    """Keep DeltaNet's small scalar gates off the sub-stick all-gather path.
+
+    Each gate emits one scalar per value head. Splitting those few rows across
+    ranks requires sub-stick copies during batched decode, unsupported by
+    Spyre. The much larger QKV, Z, and output projections remain sharded.
+    """
+    del tp_size
+    return {
+        name
+        for name, module in model.named_modules()
+        if isinstance(module, nn.Linear)
+        and name.endswith((".linear_attn.in_proj_a", ".linear_attn.in_proj_b"))
+    }
+
+
 def _rms_norm(x, norm):
     """Qwen3.5 RMSNorm, avoiding ``pow`` in compiled Spyre regions."""
     input_dtype = x.dtype
