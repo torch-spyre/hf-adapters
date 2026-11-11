@@ -172,13 +172,26 @@ def _prepare_clip_encoder(encoder_module, config):
         if pad_len > 0:
             h = F.pad(h, (0, 0, 0, pad_len))  # pad seq dim on the right
             if combined_mask is None:
-                combined_mask = torch.ones((1, 1, orig_seq, orig_seq), dtype=torch.bool)
-            # Pad mask from [B,1,S,S] to [B,1,S_pad,S_pad], disallowing
-            # compiler-added positions in both the query and key dimensions.
-            mask_value = False if combined_mask.dtype == torch.bool else float("-inf")
-            combined_mask = F.pad(
-                combined_mask, (0, pad_len, 0, pad_len), value=mask_value
-            )
+                # No explicit mask (vision tower): additive float mask that
+                # blocks only the padded KEY columns. Padded query rows still
+                # see the real keys, so no softmax row is fully masked. A
+                # bool mask with fully-masked padded query rows gave wrong
+                # results on Spyre for some checkpoints (e.g. fashionCLIP,
+                # cos ~0.2-0.4 vs reference) while float_key matches CPU.
+                padded_seq = orig_seq + pad_len
+                combined_mask = torch.zeros(
+                    (1, 1, padded_seq, padded_seq), dtype=h.dtype
+                )
+                combined_mask[..., orig_seq:] = float("-inf")
+            else:
+                # Pad mask from [B,1,S,S] to [B,1,S_pad,S_pad], disallowing
+                # compiler-added positions in both the query and key dimensions.
+                mask_value = (
+                    False if combined_mask.dtype == torch.bool else float("-inf")
+                )
+                combined_mask = F.pad(
+                    combined_mask, (0, pad_len, 0, pad_len), value=mask_value
+                )
         if combined_mask is not None:
             combined_mask = combined_mask.to(DEVICE)
         h = h.clone()  # canonical layout before first block
