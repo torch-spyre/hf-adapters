@@ -40,6 +40,7 @@ prefill + single-token decode generation loop.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from types import MethodType, ModuleType
@@ -77,6 +78,7 @@ from transformers import (
     MistralConfig,
     ModernBertConfig,
     MPNetConfig,
+    MuseGlimmerConfig,
     Olmo2Config,
     OlmoConfig,
     OlmoeConfig,
@@ -90,10 +92,12 @@ from transformers import (
     Qwen3_5TextConfig,
     Qwen3Config,
     RobertaConfig,
+    SiglipConfig,
     SmolLM3Config,
     XLMRobertaConfig,
 )
 from transformers.configuration_utils import PretrainedConfig
+from transformers.generation import GenerateDecoderOnlyOutput
 from transformers.modeling_outputs import (
     MaskedLMOutput,
     QuestionAnsweringModelOutput,
@@ -137,6 +141,8 @@ from hf_adapters import (
     hf_mistral3_vision_mm,
     hf_modernbert,
     hf_mpnet,
+    hf_muse_glimmer,
+    hf_muse_glimmer_mm,
     hf_olmo,
     hf_olmo2,
     hf_olmoe,
@@ -146,6 +152,7 @@ from hf_adapters import (
     hf_qwen3,
     hf_qwen3_5,
     hf_qwen3_5_moe,
+    hf_siglip,
     hf_smollm3,
     hf_xlm_roberta,
     hf_xpress_qwen3,
@@ -185,6 +192,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     Mistral3Config: hf_mistral3,
     ModernBertConfig: hf_modernbert,
     MPNetConfig: hf_mpnet,
+    MuseGlimmerConfig: hf_muse_glimmer,
     OlmoConfig: hf_olmo,
     Olmo2Config: hf_olmo2,
     OlmoeConfig: hf_olmoe,
@@ -197,6 +205,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     Qwen3_5MoeConfig: hf_qwen3_5_moe,
     Qwen3_5MoeTextConfig: hf_qwen3_5_moe,
     RobertaConfig: hf_xlm_roberta,
+    SiglipConfig: hf_siglip,
     SmolLM3Config: hf_smollm3,
     XLMRobertaConfig: hf_xlm_roberta,
 }
@@ -229,6 +238,7 @@ IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     Gemma4UnifiedConfig: hf_gemma4_mm,
     Granite4VisionConfig: hf_granite_vision_mm,
     Mistral3Config: hf_mistral3_vision_mm,
+    MuseGlimmerConfig: hf_muse_glimmer_mm,
 }
 
 # Sequence-classification mapping — used by
@@ -258,6 +268,7 @@ class ModelDTypePolicy:
 
 
 MODEL_DTYPE_POLICIES: dict[str, ModelDTypePolicy] = {
+    "convaiinnovations/laya": ModelDTypePolicy(dtype=torch.float16),
     "google/embeddinggemma-300m": ModelDTypePolicy(dtype=torch.bfloat16),
     "ibm-granite/granite-4.0-1b-base": ModelDTypePolicy(cpu_dtype=torch.float32),
     "ibm-granite/granite-4.0-1b": ModelDTypePolicy(cpu_dtype=torch.float32),
@@ -356,24 +367,32 @@ def resolve_adapter_module(
     # Architecture-name dispatch first: DSpark drafters share their base model's
     # config class but carry a distinct ``*DSparkModel`` architecture, so route on
     # the architecture name before falling through to config-class dispatch.
+    adapter_module: ModuleType
     for arch in getattr(model_config, "architectures", None) or []:
         if arch in ARCH_TO_ADAPTER_MODULE_MAPPING:
-            assert_spyre_dimensions(model_config, model_name=str(model_name_or_path))
-            return ARCH_TO_ADAPTER_MODULE_MAPPING[arch]
+            adapter_module = ARCH_TO_ADAPTER_MODULE_MAPPING[arch]
+            break
+    else:
+        if type(model_config) not in mapping:
+            raise SpyreNoAdapterError(
+                f"Model {model_name_or_path} of type {type(model_config)} "
+                "is not supported"
+            )
 
-    if type(model_config) not in mapping:
-        raise SpyreNoAdapterError(
-            f"Model {model_name_or_path} of type {type(model_config)} "
-            "is not supported"
-        )
+        adapter_module = mapping[type(model_config)]
+        if adapter_module is hf_gemma4:
+            text_cfg: PretrainedConfig = getattr(
+                model_config, "text_config", model_config
+            )
+            if getattr(text_cfg, "enable_moe_block", False):
+                adapter_module = hf_gemma4_moe
 
-    adapter_module = mapping[type(model_config)]
-    if adapter_module is hf_gemma4:
-        text_cfg = getattr(model_config, "text_config", model_config)
-        if getattr(text_cfg, "enable_moe_block", False):
-            adapter_module = hf_gemma4_moe
-
-    assert_spyre_dimensions(model_config, model_name=str(model_name_or_path))
+    assert_spyre_dimensions(
+        model_config,
+        model_name=str(model_name_or_path),
+        config_names=getattr(adapter_module, "SPYRE_DIMENSION_CONFIGS", ()),
+        padded_dimensions=getattr(adapter_module, "SPYRE_PADDED_DIMENSIONS", ()),
+    )
     return adapter_module
 
 
@@ -871,14 +890,17 @@ def _run_vlm_text_forward(
     input_ids: torch.Tensor,
     position_ids: torch.Tensor,
     attention_mask: torch.Tensor,
-    key_caches,
-    value_caches,
+    key_caches: list[torch.Tensor],
+    value_caches: list[torch.Tensor],
     cache_index: torch.Tensor,
-):
+) -> torch.Tensor:
     """Run one text-only VLM decoder step through the adapter's shared backbone."""
-    return module._logits_from_embeds(
+    embed: Callable[[torch.nn.Module, torch.Tensor], torch.Tensor] = getattr(
+        model, "_spyre_embed_tokens", hf_common.embed_text_tokens
+    )
+    logits: torch.Tensor = module._logits_from_embeds(
         model,
-        hf_common.embed_text_tokens(model, input_ids),
+        embed(model, input_ids),
         position_ids,
         attention_mask,
         key_caches,
@@ -886,6 +908,7 @@ def _run_vlm_text_forward(
         cache_index,
         input_ids=input_ids,
     )
+    return logits
 
 
 def _generate_image_text_to_text(
@@ -894,36 +917,40 @@ def _generate_image_text_to_text(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor | None = None,
     **kwargs: Any,
-):
+) -> torch.Tensor | GenerateDecoderOnlyOutput:
     """Run multimodal prefill and text decode through the shared generation loop."""
     # Processor outputs consumed by this adapter rather than by generation config.
-    adapter_input_names = module._GENERATION_INPUT_NAMES
-    missing = set(adapter_input_names) - set(kwargs)
+    adapter_input_names: tuple[str, ...] = module._GENERATION_INPUT_NAMES
+    required_input_names: tuple[str, ...] = getattr(
+        module, "_GENERATION_REQUIRED_INPUT_NAMES", adapter_input_names
+    )
+    missing = set(required_input_names) - set(kwargs)
     if missing:
         raise TypeError(
             f"Missing processor inputs for {module.__name__}: {sorted(missing)}"
         )
-    adapter_inputs = {name: kwargs.pop(name) for name in adapter_input_names}
-
+    adapter_inputs: dict[str, Any] = {
+        name: kwargs.pop(name, None) for name in adapter_input_names
+    }
     # Inputs keyed by token position need the same compaction/padding as input_ids.
     # The mapping value is the padding value for each tensor.
-    aligned_specs = module._GENERATION_TOKEN_ALIGNED_INPUTS
-    token_aligned_inputs = {
+    aligned_specs: dict[str, Any] = module._GENERATION_TOKEN_ALIGNED_INPUTS
+    token_aligned_inputs: dict[str, tuple[torch.Tensor, Any]] = {
         name: (adapter_inputs[name], pad_value)
         for name, pad_value in aligned_specs.items()
     }
     # Image tensors and metadata are passed to prefill unchanged.
-    pass_through_inputs = {
+    pass_through_inputs: dict[str, Any] = {
         name: value
         for name, value in adapter_inputs.items()
         if name not in aligned_specs
     }
 
     # Only prefill is multimodal; subsequent decode steps are ordinary text.
-    prefill_fn = partial(
+    run_forward_fn: Callable[..., torch.Tensor] = partial(_run_vlm_text_forward, module)
+    prefill_fn: Callable[..., torch.Tensor] = partial(
         module._prefill_forward, logits_to_keep=1, **pass_through_inputs
     )
-    run_forward_fn = partial(_run_vlm_text_forward, module)
 
     return hf_common.generate(
         run_forward_fn,

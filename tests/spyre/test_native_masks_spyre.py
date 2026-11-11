@@ -14,13 +14,11 @@
 
 """Device coverage for adapter masks that previously ran on the CPU."""
 
-import warnings
 from types import SimpleNamespace
 
 import pytest
 import torch
 import torch_spyre  # noqa: F401
-from torch_spyre.ops.fallbacks import FallbackWarning
 
 from hf_adapters.hf_common import build_prefill_mask, fairseq_position_ids
 from hf_adapters.hf_gemma4 import _query_row_mask
@@ -100,13 +98,7 @@ def test_fairseq_positions_handle_internal_padding_and_large_token_ids(padding_i
                 position += 1
                 expected[row, col] = position
 
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "default",
-            message="aten.cumsum.default is falling back to cpu",
-            category=FallbackWarning,
-        )
-        actual = fairseq_position_ids(ids.to("spyre"), padding_idx=padding_idx)
+    actual = fairseq_position_ids(ids.to("spyre"), padding_idx=padding_idx)
 
     assert actual.device.type == "spyre"
     assert actual.dtype == torch.int32

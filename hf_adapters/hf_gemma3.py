@@ -64,12 +64,16 @@ Usage::
     outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
+from collections.abc import Callable
+from typing import Any
+
 import torch
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
     InvFreqShim,
     PrecomputedRotaryEmbedding,
+    _projection_head_count,
     add_causal_sliding_window_band,
     apply_rope_matmul,
     embed_text_tokens,
@@ -79,7 +83,10 @@ from hf_adapters.hf_common import (
     run_lm_head,
     text_config,
 )
+from hf_adapters.spyre_tensor_parallel import grouped_kv_projection_modules
 from hf_adapters.swa_attention import (
+    AnchoredStep,
+    SlidingPrefillStep,
     SlidingWindowCache,
     allocate_swa_caches,
     anchored_step,
@@ -91,6 +98,23 @@ from hf_adapters.swa_attention import (
     sliding_window_attention,
     valid_start_for,
 )
+
+
+def spyre_tp_grouped_colwise_modules(model, tp_size):
+    """Keep complete KV heads when there are fewer KV heads than TP ranks.
+
+    Gemma 3 1B has four Q heads and one KV head. At TP=4 each rank gets one
+    Q head, but all four ranks need the same complete K/V projections. The
+    grouped-colwise style shards whole KV heads and replicates each within
+    its corresponding group of Q ranks.
+    """
+    backbone = get_backbone(model)
+    head_dim = text_config(model.config).head_dim
+    return grouped_kv_projection_modules(
+        model,
+        ((layer.self_attn, head_dim) for layer in backbone.layers),
+        tp_size,
+    )
 
 
 def _patch_gemma_rmsnorm(rmsnorm_cls):
@@ -125,15 +149,24 @@ def _patch_gemma_rmsnorm(rmsnorm_cls):
 
 
 def _make_compiled_block(
-    layer,
-    num_q_heads,
-    num_kv_heads,
-    head_dim,
-    is_sliding=False,
-    window_size=None,
-    swa_mode=None,
-):
-    """Compile one Gemma 3 dense decoder layer.
+    layer: torch.nn.Module,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    is_sliding: bool = False,
+    window_size: int | None = None,
+    swa_mode: str | None = None,
+    *,
+    query_norm: torch.nn.Module | None = None,
+    key_norm: torch.nn.Module | None = None,
+    query_scale: float | None = None,
+    output_gate: torch.nn.Module | None = None,
+    use_rope: bool = True,
+) -> Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Compile a sandwich-norm decoder layer (Gemma 3 or Muse Glimmer).
+
+    Muse Glimmer supplies its shared weightless Q/K norm, query multiplier,
+    output gate, and per-layer RoPE switch. Defaults preserve Gemma 3.
 
     Block signature carries the per-layer mask and RoPE freqs (which differ
     between sliding and global layers), so the caller selects them:
@@ -148,34 +181,37 @@ def _make_compiled_block(
 
     When ``is_sliding`` and ``swa_mode`` is set, the sliding layer reads its window
     out of a compact KV buffer via ``spyre::sliding_window_attention`` instead of
-    scoring the whole cache behind a band mask. Prefill and anchored decode pass
+    scoring the whole cache behind a band mask. Gated single-token decode uses
+    grouped matmuls over that same compact buffer to avoid the native scan's
+    layout overhead when fused with the gate. Prefill and anchored decode pass
     the same fixed-shape tensor-mask API, so positions do not specialize the graph
     (see ``swa_attention``). Global layers, and every layer when ``swa_mode is
     None``, stay on band-masked SDPA.
     """
-    attn = layer.self_attn
-    q_proj = attn.q_proj
-    k_proj = attn.k_proj
-    v_proj = attn.v_proj
-    o_proj = attn.o_proj
-    q_norm = attn.q_norm
-    k_norm = attn.k_norm
-    scaling = attn.scaling  # query_pre_attn_scalar ** -0.5
+    attn = layer.get_submodule("self_attn")
+    q_proj = attn.get_submodule("q_proj")
+    k_proj = attn.get_submodule("k_proj")
+    v_proj = attn.get_submodule("v_proj")
+    o_proj = attn.get_submodule("o_proj")
+    q_norm = query_norm if query_norm is not None else attn.get_submodule("q_norm")
+    k_norm = key_norm if key_norm is not None else attn.get_submodule("k_norm")
+    scaling: float = getattr(attn, "scaling")
 
-    input_ln = layer.input_layernorm
-    post_attn_ln = layer.post_attention_layernorm
-    pre_ff_ln = layer.pre_feedforward_layernorm
-    post_ff_ln = layer.post_feedforward_layernorm
-    mlp = layer.mlp
+    input_ln = layer.get_submodule("input_layernorm")
+    post_attn_ln = layer.get_submodule("post_attention_layernorm")
+    pre_ff_ln = layer.get_submodule("pre_feedforward_layernorm")
+    post_ff_ln = layer.get_submodule("post_feedforward_layernorm")
+    mlp = layer.get_submodule("mlp")
+    uses_swa = is_sliding and swa_mode is not None
 
     def block_forward(
-        hidden_states,
-        selected_freqs,
-        attn_mask,
-        key_cache,
-        value_cache,
-        cache_index,
-    ):
+        hidden_states: torch.Tensor,
+        selected_freqs: torch.Tensor,
+        attn_mask: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        cache_index: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         residual = hidden_states
         h = input_ln(hidden_states)
 
@@ -191,9 +227,12 @@ def _make_compiled_block(
 
         q = q_norm(q)
         k = k_norm(k)
+        if query_scale is not None:
+            q = q * query_scale
 
-        q = apply_rope_matmul(q, selected_freqs)
-        k = apply_rope_matmul(k, selected_freqs)
+        if use_rope:
+            q = apply_rope_matmul(q, selected_freqs)
+            k = apply_rope_matmul(k, selected_freqs)
 
         key_cache, value_cache = kv_cache_update(
             k,
@@ -203,7 +242,29 @@ def _make_compiled_block(
             cache_index,
         )
 
-        if is_sliding and swa_mode is not None:
+        if output_gate is not None:
+            # A contiguous Q keeps both SDPA and native SWA's grouped-GQA
+            # output compatible with the gate in head layout.
+            q = q.contiguous()
+        if uses_swa and output_gate is not None and seq_len == 1:
+            # The anchored mask already contains the complete window/padding
+            # semantics. A single query needs only O(window) score storage;
+            # grouped matmuls retain compact KV heads and avoid the SWA scan's
+            # grouped-output layout overhead inside a fully compiled block.
+            grouped_q: torch.Tensor = q.reshape(
+                bsz, num_kv_heads, num_q_heads // num_kv_heads, seq_len, head_dim
+            )
+            scores: torch.Tensor = torch.matmul(
+                grouped_q * scaling, key_cache.unsqueeze(2).transpose(-1, -2)
+            )
+            scores = scores + attn_mask.unsqueeze(1)
+            probabilities: torch.Tensor = torch.softmax(
+                scores, dim=-1, dtype=torch.float32
+            ).to(q.dtype)
+            attn_out: torch.Tensor = torch.matmul(
+                probabilities, value_cache.unsqueeze(2)
+            ).reshape(bsz, num_q_heads, seq_len, head_dim)
+        elif uses_swa:
             # The mask carries the window, cache position, and padding as tensor
             # data. Scale is Gemma 3's own query_pre_attn_scalar ** -0.5, not
             # head_dim ** -0.5.
@@ -226,6 +287,11 @@ def _make_compiled_block(
                 scale=scaling,
                 enable_gqa=True,
             )
+        if output_gate is not None:
+            gate: torch.Tensor = torch.sigmoid(output_gate(h)).view(
+                bsz, seq_len, num_q_heads, head_dim
+            )
+            attn_out = attn_out * gate.transpose(1, 2)
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
         attn_out = o_proj(attn_out)
         # Sandwich: norm the attention output BEFORE adding the residual.
@@ -240,7 +306,9 @@ def _make_compiled_block(
 
         return h, key_cache, value_cache
 
-    return torch.compile(block_forward, dynamic=False)
+    return torch.compile(
+        block_forward, dynamic=False, fullgraph=output_gate is not None
+    )
 
 
 def _add_bidirectional_sliding_window_band(mask, query_cache_coords, sliding_window):
@@ -292,14 +360,38 @@ def _add_bidirectional_sliding_window_band(mask, query_cache_coords, sliding_win
 
 
 def _run_backbone_forward(
-    model,
-    input_ids,
-    position_ids,
-    attn_mask,
-    key_caches,
-    value_caches,
-    cache_index,
-):
+    model: torch.nn.Module,
+    input_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+    attn_mask: torch.Tensor,
+    key_caches: list[torch.Tensor],
+    value_caches: list[torch.Tensor],
+    cache_index: torch.Tensor,
+) -> torch.Tensor:
+    """Embed token IDs and run the shared sandwich-norm decoder."""
+    embed: Callable[[torch.nn.Module, torch.Tensor], torch.Tensor] = getattr(
+        model, "_spyre_embed_tokens", embed_text_tokens
+    )
+    return _run_backbone_from_embeds(
+        model,
+        embed(model, input_ids),
+        position_ids,
+        attn_mask,
+        key_caches,
+        value_caches,
+        cache_index,
+    )
+
+
+def _run_backbone_from_embeds(
+    model: torch.nn.Module,
+    hidden_states: torch.Tensor,
+    position_ids: torch.Tensor,
+    attn_mask: torch.Tensor,
+    key_caches: list[torch.Tensor],
+    value_caches: list[torch.Tensor],
+    cache_index: torch.Tensor,
+) -> torch.Tensor:
     """Gemma 3 backbone: scaled embedding, per-type RoPE + masks, blocks, norm.
 
     The base ``attn_mask`` is whatever mask the caller built (column index =
@@ -311,15 +403,15 @@ def _run_backbone_forward(
     path and symmetric (``_add_bidirectional_sliding_window_band``) for embedders;
     global layers use the base mask as-is.
     """
-    backbone = get_backbone(model)
-    cfg = text_config(model.config)
+    backbone: Any = get_backbone(model)
+    cfg: Any = text_config(model.config)
 
-    h = embed_text_tokens(model, input_ids)
+    h: torch.Tensor = hidden_states
 
     # Per-layer-type RoPE freqs (sliding theta vs global theta).
-    freqs = {
-        layer_type: rope(h, position_ids)
-        for layer_type, rope in model._spyre_rope.items()
+    ropes: dict[str, PrecomputedRotaryEmbedding] = getattr(model, "_spyre_rope")
+    freqs: dict[str, torch.Tensor] = {
+        layer_type: rope(h, position_ids) for layer_type, rope in ropes.items()
     }
 
     # block_base is the cache column this block's row 0 occupies. Decode writes one
@@ -328,15 +420,17 @@ def _run_backbone_forward(
     # per step (not per layer) in eager code outside the compiled block, and it is
     # needed to build the runtime sliding mask outside the compiled blocks.
     # Gemma 3/4 are the only adapters that read a scalar out of cache_index at all.
-    swa_mode = getattr(model, "_spyre_swa_mode", None)
-    bsz, seq_len = input_ids.shape[0], input_ids.shape[1]
+    swa_mode: str | None = getattr(model, "_spyre_swa_mode", None)
+    bsz, seq_len = h.shape[:2]
     block_base = int(cache_index[0])
 
-    prefill_step = None
+    prefill_step: SlidingPrefillStep | None = None
     if swa_mode == "anchored" and seq_len > 1:
-        prompt_len = getattr(model, "_spyre_padded_prompt_len", block_base + seq_len)
+        prompt_len: int = getattr(
+            model, "_spyre_padded_prompt_len", block_base + seq_len
+        )
         sliding_layer = cfg.layer_types.index("sliding_attention")
-        capacity = physical_cache_capacity(key_caches[sliding_layer])
+        capacity: int = physical_cache_capacity(key_caches[sliding_layer])
         if prompt_len > capacity:
             prefill_step = prefill_ring_step(
                 block_base, seq_len, capacity, cache_index.device
@@ -347,7 +441,7 @@ def _run_backbone_forward(
     # making it the only position-dependent input to compiled attention.
     query_coords = (torch.arange(seq_len)[None, :] + block_base).expand(bsz, seq_len)
     if getattr(cfg, "use_bidirectional_attention", False):
-        sliding_mask = _add_bidirectional_sliding_window_band(
+        sliding_mask: torch.Tensor = _add_bidirectional_sliding_window_band(
             attn_mask, query_coords, cfg.sliding_window
         )
     else:
@@ -359,14 +453,17 @@ def _run_backbone_forward(
                 prefill_step.key_cache_coords if prefill_step is not None else None
             ),
         )
-    masks = {"full_attention": attn_mask, "sliding_attention": sliding_mask}
+    masks: dict[str, torch.Tensor] = {
+        "full_attention": attn_mask,
+        "sliding_attention": sliding_mask,
+    }
 
     # Anchored compact-buffer bookkeeping for the op path (mirrors hf_gemma4's
     # _run_blocks_over_embeds). A prefill call (seq_len > 1) starts a new
     # generation, so drop any state a previous generate() left behind.
     if seq_len > 1 and block_base == 0:
-        model._spyre_swa_state = None
-    state = getattr(model, "_spyre_swa_state", None)
+        setattr(model, "_spyre_swa_state", None)
+    state: SlidingWindowCache | None = getattr(model, "_spyre_swa_state", None)
 
     if swa_mode == "anchored" and state is None and seq_len == 1:
         prompt_len = getattr(model, "_spyre_padded_prompt_len", block_base)
@@ -376,7 +473,7 @@ def _run_backbone_forward(
         compact_sliding_buffers(
             cfg.layer_types, key_caches, value_caches, state, prompt_len
         )
-        model._spyre_swa_state = state
+        setattr(model, "_spyre_swa_state", state)
 
     if swa_mode and state is not None:
         # Anchored decode: position and padding travel in one fixed-shape runtime
@@ -384,7 +481,7 @@ def _run_backbone_forward(
         # On a shift step roll each sliding layer's compact buffer down one stick
         # BEFORE its block writes — eager, into fresh allocations, kept out of the
         # graph (see roll_compact_buffer for why an in-graph roll self-aliases).
-        step = anchored_step(state, cache_index.device, h.dtype)
+        step: AnchoredStep = anchored_step(state, cache_index.device, h.dtype)
         if step.do_shift:
             roll_sliding_buffers(cfg.layer_types, key_caches, value_caches)
         masks["sliding_attention"] = step.attention_mask
@@ -396,8 +493,11 @@ def _run_backbone_forward(
     else:
         sliding_index = cache_index
 
-    sliding_masks_by_capacity = {}
-    for i, compiled_block in enumerate(model._spyre_compiled_blocks):
+    sliding_masks_by_capacity: dict[int, torch.Tensor] = {}
+    compiled_blocks: list[
+        Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+    ] = getattr(model, "_spyre_compiled_blocks")
+    for i, compiled_block in enumerate(compiled_blocks):
         lt = cfg.layer_types[i]
         is_sliding = lt == "sliding_attention"
         selected_mask = masks[lt]
@@ -477,7 +577,7 @@ def prepare_for_spyre(model):
     1. Patch ``Gemma3RMSNorm`` for the fp16 Spyre path.
     2. Build one ``PrecomputedRotaryEmbedding`` per layer type from the model's
        per-type ``inv_freq`` buffers (no head padding — D/2 >= 64 already).
-    3. Record per-layer KV-cache shapes (single head_dim for all layers).
+    3. Derive local head counts and KV-cache shapes from the loaded projections.
     4. Prepare the padded LM head (no-op for the bare embedder
        backbone, which has no ``lm_head``).
     5. Compile each decoder layer's block.
@@ -491,13 +591,32 @@ def prepare_for_spyre(model):
     _patch_gemma_rmsnorm(rmsnorm_cls)
 
     head_dim = cfg.head_dim
-    num_q_heads = cfg.num_attention_heads
-    num_kv_heads = cfg.num_key_value_heads
 
     assert head_dim % 2 == 0 and head_dim // 2 >= 64, (
         f"Gemma 3 head_dim={head_dim}: head_dim/2 must be >= 64 (one Spyre "
         "stick). A padded variant is not implemented for this adapter."
     )
+
+    # HF updates projection metadata when loading TP shards; config counts
+    # remain global. Use the local geometry for both views and cache allocation.
+    num_q_heads_per_layer = []
+    kv_shapes = []
+    for i, layer in enumerate(backbone.layers):
+        attn = layer.self_attn
+        num_q_heads = _projection_head_count(
+            attn.q_proj, cfg.num_attention_heads, head_dim
+        )
+        num_kv_heads = _projection_head_count(
+            attn.k_proj, cfg.num_key_value_heads, head_dim
+        )
+        num_v_heads = _projection_head_count(
+            attn.v_proj, cfg.num_key_value_heads, head_dim
+        )
+        if num_v_heads != num_kv_heads or num_q_heads % num_kv_heads != 0:
+            raise ValueError(f"Gemma 3 layer {i} has incompatible local Q/K/V heads")
+        num_q_heads_per_layer.append(num_q_heads)
+        kv_shapes.append((num_kv_heads, head_dim, head_dim))
+    model._spyre_kv_shapes = kv_shapes
 
     # One PrecomputedRotaryEmbedding per layer type, reading the model's per-type
     # inv_freq + attention_scaling buffers via a shim.
@@ -509,13 +628,6 @@ def prepare_for_spyre(model):
         model._spyre_rope[layer_type] = PrecomputedRotaryEmbedding(
             InvFreqShim(inv_freq, scaling)
         )
-
-    # Per-layer KV-cache shapes. Unlike Gemma 4, all layers share one head_dim
-    # and num_key_value_heads, so every entry is identical — but we keep the
-    # per-layer list so the shared allocator / KV machinery sees the same shape.
-    model._spyre_kv_shapes = [
-        (num_kv_heads, head_dim, head_dim) for _ in cfg.layer_types
-    ]
 
     # final_logit_softcapping is None on published Gemma 3 (dropped from Gemma
     # 2); apply it defensively if a checkpoint sets it.
@@ -546,8 +658,8 @@ def prepare_for_spyre(model):
     model._spyre_compiled_blocks = [
         _make_compiled_block(
             layer,
-            num_q_heads,
-            num_kv_heads,
+            num_q_heads_per_layer[i],
+            kv_shapes[i][0],
             head_dim,
             is_sliding=(cfg.layer_types[i] == "sliding_attention"),
             window_size=cfg.sliding_window,

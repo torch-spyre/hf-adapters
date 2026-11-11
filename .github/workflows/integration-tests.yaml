@@ -156,8 +156,9 @@ concurrency:
   # cancel-in-progress, silently killing a run mid-job with no test failure and
   # no error -- see the run/job-level symptoms this fixes. Disambiguating by
   # test_type stops different suites from colliding at all.
+  # perf also keys on perf_schedule, so a weekly perf dispatch never queues behind (and times out waiting on) a nightly one.
   group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.pull_request.html_url) || (github.event_name == 'workflow_dispatch'
-    && inputs.pr_url_hash != '' && inputs.pr_url_hash) || format('{0}-{1}', github.ref, inputs.test_type) }}
+    && inputs.pr_url_hash != '' && inputs.pr_url_hash) || format('{0}-{1}{2}', github.ref, inputs.test_type, inputs.test_type == 'perf' && format('-{0}', inputs.perf_schedule) || '') }}
   # Only cancel for a PR-context run (re-running the same PR should supersede
   # its own stale run). A non-PR dispatch is never "the same PR re-triggered" --
   # cancelling it destroys a run that has nothing superseding it, so a same

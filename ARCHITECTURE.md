@@ -40,6 +40,7 @@ which models are supported on Spyre.
 | Gemma 4 31B | gemma4 | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 4 31B Instruct | gemma4 | 256 / 512 | 128 / 256 | Yes | Yes | Yes | Yes |
 | Gemma 3 1B | gemma3\_text | 256 | 128 | Yes | Yes | Yes | Yes |
+| Muse Glimmer 30B (text backbone) | muse\_glimmer | 128 | 64 | Yes | Yes | Yes | Yes (bf16) |
 | Gemma 2 9B | gemma2 | 256 | 128 | Yes | Yes | Yes | Yes |
 | GPT-2 124M | gpt2 | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
 | GPT-Neo 125M | gpt_neo | 64 | n/a (no RoPE) | Yes | Yes | Yes | Yes |
@@ -116,6 +117,14 @@ CPU where integer/control-flow-heavy frontend or pooling operations do not lower
 | Gemma 4 12B IT | gemma4\_unified | Encoder-free vision embedder + Gemma 4 text | Yes | Yes | Yes | Yes |
 | Gemma 4 E2B | gemma4 | Gemma 4 vision tower + PLE/KV-sharing text | Yes | Yes | Yes | Yes |
 | Gemma 4 26B-A4B | gemma4 | Gemma 4 vision tower + MoE text | Yes | Not run | Yes | Yes |
+| Muse Glimmer 30B | muse\_glimmer | Muse vision tower + shared Muse text decoder | Yes (padded) | Local FP32 check | Yes | Yes (bf16) |
+
+Local tiny-model FP32 generation checks match stock Hugging Face for Muse Glimmer. On the full
+bf16 checkpoint, the strict CPU caption-equality test currently produces a
+different continuation from stock; exact CPU caption parity is not claimed.
+Spyre prefill plus four teacher-forced decode steps match all five stock top-1
+tokens with logit cosine ≥ 0.999991, and image generation identifies the sample
+Pallas's cat and snowy setting.
 
 **CPU Accurate** = adapter `generate` matches stock `model.generate` token-for-token on CPU (`test_vlm_e2e_cpu.py`).
 **Spyre Runs** = `test_vlm_e2e_spyre.py` drives the adapter teacher-forced on stock's tokens and asserts per-step logit cosine ≥ 0.99 vs the CPU reference over prefill + decode steps (top-1 agreement is reported, not asserted — an open-ended caption hits near-ties where the bf16-substrate winner is numerically arbitrary; see Multimodal VLM Path). granite-vision-4.1 holds cosine ≥ 0.99991 at every step and produces a correct, coherent caption. Gemma 4 12B IT runs in **bf16** (like the rest of the Gemma family, it overflows its residual stream in fp16) and holds cosine ≥ 0.99939 at every step with 5/5 top-1 agreement. Gemma 4 E2B holds cosine ≥ 0.99502 with 4/5 top-1 agreement after preserving stock PLE and mask semantics and running its 16-layer vision transformer on Spyre. Gemma 4 26B-A4B holds cosine ≥ 0.99956 with 4/5 top-1 agreement while running its 27-layer vision transformer on Spyre.
@@ -143,6 +152,28 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 **CPU Accurate** = adapter hidden-states have cosine similarity ≥ 0.999 vs stock HF on CPU (the bound accommodates the bf16-native EmbeddingGemma; fp16 models clear it with wide margin).
 **Spyre Compiles / Spyre Runs** = via `test_e2e_embed_compare_spyre.py`. GTE-Qwen2 compiles and executes end-to-end on Spyre but its pooled embeddings drift from the CPU reference; the Qwen3/Mistral/BERT/XLM-RoBERTa/MPNet/ModernBERT encoder paths match within fp16 noise. EmbeddingGemma runs in **bf16** (fp16 overflows its residual stream) and matches the bf16 CPU reference within bf16 noise (per-token cosine ≥ 0.999; pooled ≥ 0.99).
 
+### Multimodal Embedding (text/image→vectors)
+
+`hf_siglip.py` adapts the fixed-resolution SigLIP dual encoder for text/image
+retrieval and similarity scoring through Hugging Face's `SiglipModel` API.
+
+| Model | model\_type | Text / vision head\_dim | Embedding width | Status |
+|-------|-----------|------------------------|-----------------|--------|
+| google/siglip2-giant-opt-patch16-384 | siglip | 72→128 / 96→128 | 1536 | Experimental; vision accuracy unresolved |
+
+Load with `AutoSpyreModel` and `AutoProcessor`. The processor prepares 384×384
+images; tokenize text with `padding="max_length"` (64 tokens).
+`get_text_features` and `get_image_features` return outputs containing
+unnormalized `pooler_output` vectors. The joint forward returns normalized
+text/image embeddings and similarity logits with the learned scale and bias.
+
+Both towers reuse compiled pre-LN encoder blocks from `hf_siglip_vision.py`
+and `hf_common.py`. Attention heads and the text MLP (4304→4352) are zero-padded
+for stick alignment. Encoder blocks run on Spyre; token/patch embeddings,
+final norms, text projection, and image attention pooling run on CPU.
+Compiler-added tokens are masked and cropped before pooling. Intermediate
+hidden states and attention weights are not exposed by the adapted encoders.
+
 ### Sequence Classification
 
 Encoder models fine-tuned for sequence-level label prediction (sentiment
@@ -162,6 +193,28 @@ logit cosine ≥ 0.999 vs stock HF on CPU (`test_seq_classification_cpu_accuracy
 **Spyre Runs** = via `test_e2e_seq_classification_compare_spyre.py`;
 per-sequence logit cosine ≥ 0.99 and exact label match vs CPU reference.
 RoBERTa large MNLI uses `hf_xlm_roberta.py` (shared with the XLM-RoBERTa and reranker adapters); `RobertaConfig` is already registered in `SEQUENCE_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING`.
+
+### Structured Decisions
+
+Laya combines a ModernBERT encoder with a custom two-layer decision transformer,
+variable option scorer, and action head. `hf_adapters.laya_backend.load()` returns the
+upstream Laya Agent with its ModernBERT encoder and decision transformer on Spyre. Question-type
+embedding, option scoring, action scoring, and Agent orchestration remain on CPU. Install the
+optional runtime with `pip install 'hf-adapters-spyre[laya]'`.
+
+| Model | model\_type | head\_dim | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
+|-------|-----------|---------|--------------|-------------|---------------|-----------|
+| Laya (`convaiinnovations/laya`) | laya (ModernBERT-large encoder) | 64→128 | Yes (padded) | Yes | Yes | Yes |
+| Laya Typed Decisions (`typed-decisions`) | laya (ModernBERT-large encoder) | 64→128 | Yes (padded) | Yes | Yes | Yes |
+| Laya Multilingual (`multilingual`) | laya (mmBERT, 768 hidden / 22 layers) | 64→128 | Yes (padded) | Yes | Yes | Yes |
+
+The table's `64→128` dimension applies to the RoPE encoder attention. The non-RoPE
+decision-transformer attention runs at its native stick-aligned head dimension of 64.
+
+**CPU Accurate** = option/action argmax matches the upstream Laya forward and
+valid-option logit cosine is ≥ 0.998. **Spyre Runs** = the structured-decision comparison
+requires valid-option logit cosine ≥ 0.98 plus exact option/action argmax, and
+covers sequential inputs and parallel option masks with repeated-call stability.
 
 ### Token Classification (NER)
 
@@ -210,9 +263,9 @@ all pass that check.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 40 adapters · 63 verified checkpoints · 10K+ compatible models.
-The 63 verified rows are 39 generative + 13 embedding + 2 seq-classification +
-2 token-classification + 6 vision-language + 1 speculative-decoding drafter (see
+**Coverage:** 44 adapters · 68 verified checkpoints · 10K+ compatible models.
+The 68 verified rows are 40 generative + 13 embedding + 2 seq-classification +
+2 token-classification + 3 structured-decision + 7 vision-language + 1 speculative-decoding drafter (see
 the Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are bare vision-tower components
 used by VLM adapters and are not included in the adapter count. The three DSpark
 speculative-decoding drafter adapters and the XPress drafter adapter are included
@@ -253,6 +306,8 @@ pattern, norms, and weight layout.
 | hf\_xpress\_qwen3.py | qwen3 (`Qwen3XPressModel` drafter) | 1 | XPress speculative-decoding drafter: DFlash block backbone (Qwen3-style layers, mixed sliding/full) + causal refiner, block 16, K=6 Jacobi passes, top-C=512. Vocab weights from the target. UIUC-SSAIL/gemma4-26b-a4b-XPress-b16 (Gemma 4 26B-A4B target); same adapter should load UIUC-SSAIL/Qwen3-8B-XPress-b16. Block-propose API (`propose_block`). Spyre (bf16) vs fp32 speculators-math oracle: block-hidden cos 0.9998, base-logit cos 0.9999; ~50 ms per 15-token proposal at top-C=512. |
 | hf\_diffusion\_gemma.py | diffusion\_gemma | 1 | google/diffusiongemma-26B-A4B-it. MoE runs on CPU; attention + dense MLP compiled on Spyre. Block-diffusion generate loop. Gated. |
 | hf\_gemma3.py | gemma3\_text / gemma3 (dense) | 2 | Gemma 3 4B/12B/27B (text decoder of the multimodal checkpoints); EmbeddingGemma (bidirectional embedder). Not Gemma 3n (PLE). |
+| hf\_muse\_glimmer.py | muse\_glimmer (text) | 1 | Muse Glimmer text-decoder fine-tunes with the same gated, sliding/global architecture. |
+| hf\_muse\_glimmer\_mm.py | muse\_glimmer (multimodal) | 1 | Muse Glimmer image-to-text checkpoints with the same vision tower and perception projector, sharing the optimized text decoder. |
 | hf\_gemma2.py | gemma2 | 1 | Gemma 2 2B and Gemma 2 fine-tunes. |
 | hf\_olmo.py | olmo | 1 | OLMo 7B |
 | hf\_olmo2.py | olmo2 | 1 | OLMo 2 7B |
@@ -264,6 +319,7 @@ pattern, norms, and weight layout.
 | hf\_granite\_vision.py | granite (text) | 1 | — |
 | hf\_granite\_vision\_mm.py | granite4\_vision (multimodal) | 1 | — |
 | hf\_siglip\_vision.py | SigLIP vision tower | 1 | SigLIP towers of other VLMs (extracted as a bare `SiglipVisionModel`) |
+| hf\_siglip.py | siglip (text/image embeddings) | 0 | google/siglip2-giant-opt-patch16-384 (experimental; vision accuracy unresolved). |
 | hf\_mistral3\_vision\_mm.py | mistral3 (multimodal) | 2 | Mistral-Small-3.1/3.2 Vision; Ministral-3-14B-Instruct-2512 (ministral3 text backbone, bf16) |
 | hf\_pixtral\_vision.py | Pixtral vision tower | 1 | Pixtral towers of Mistral3 Vision checkpoints |
 | hf\_bert.py | bert | 3 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants, BERT NER/POS/chunking fine-tunes |
@@ -271,6 +327,7 @@ pattern, norms, and weight layout.
 | hf\_xlm\_roberta.py | xlm-roberta / roberta | 3 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes, RoBERTa NER/QA/classifier fine-tunes |
 | hf\_mpnet.py | mpnet | 1 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base, all-mpnet-base-v1 |
 | hf\_modernbert.py | modernbert | 3 | answerdotai/ModernBERT-base, answerdotai/ModernBERT-large, other ModernBERT embed/classifier fine-tunes |
+| laya\_backend.py | laya (ModernBERT / mmBERT encoder) | 3 | Root English, bundled typed-decisions, and multilingual checkpoints |
 
 **Verified** = checkpoints tested in CI (appear in the matrix above).
 **Also Compatible** = same `model_type` in HuggingFace config; expected
@@ -618,6 +675,36 @@ bf16-native — fp16 overflows the residual stream (stock HF NaNs in fp16 too) �
 so its RoPE freq cache is matched to bf16 via the explicit `set_rope_dtype`
 propagation, which handles Gemma's per-layer-type dict of RoPE modules.
 
+**Muse Glimmer text decoder:** `hf_muse_glimmer.py` provides the shared decoder
+for `AutoSpyreModelForCausalLM` and the combined image-to-text adapter
+`hf_muse_glimmer_mm.py`. Both load the stock `MuseGlimmerForConditionalGeneration`.
+Its 52-layer decoder reuses Gemma 3's sandwich-norm
+blocks and sliding/global cache driver, plus the shared generation, RoPE,
+KV-cache, and LM-head utilities. The repeating pattern is three local layers
+(window 2048, RoPE theta 500000), then one global layer without RoPE. The native
+128-wide heads need no padding. Muse Glimmer adds weightless embedding and Q/K
+normalization, a query multiplier, and a sigmoid gate before the attention output
+projection. Logits are multiplied by `output_multiplier` before the tanh softcap.
+Requests whose full generation cache fits within the sliding window use ordinary
+SDPA; larger requests use compact anchored caches with native SWA for prefill.
+Single-token decode uses grouped matmuls and fp32 softmax over the compact cache,
+with the runtime mask enforcing the sliding window and padding. All paths make Q
+contiguous and apply the gate in head layout inside one compiled decoder graph.
+Embeddings use the decoder's linear-output device layout, allowing Dynamo to
+reuse the same compiled graph for the first and subsequent structurally identical
+layers.
+For causal-LM and Muse VLM generation, prompts longer than 512 real tokens default to
+512-token prefill chunks to bound compilation, while short prompts retain
+64-token alignment. The adapter sets `_spyre_default_prefill_chunk_size`; the common
+`generate()` method resolves the policy for each request. Explicit
+`prefill_chunk_size` kwargs or generation configuration take precedence;
+explicitly passing `prefill_chunk_size=None` requests one-shot prefill. Stock Muse
+norms preserve fp32 accumulation; no class-wide Gemma norm patch is applied.
+Image/video placeholder input embeddings are mapped to token zero, as in the
+stock conditional model, without changing their output logits. Attention, gating,
+and the MLP execute on Spyre. Image-to-text generation injects projected image
+features at the placeholder positions before running this same decoder.
+
 **Dual head_dim + proportional RoPE** (Gemma 4): `hf_gemma4.py` is Gemma 3
 plus its hardest features, targeting the dense decoders (12B / 31B) and the
 E2B / E4B variants. The sliding and global layers use a different `head_dim`
@@ -685,8 +772,38 @@ pre-norm state and sum into the residual together. `nn.LayerNorm` and exact
 
 ### Multimodal VLM Path (vision tower + text decoder)
 
-Two adapters compose into a full image→text VLM. They are the first multimodal
-support and the first vision-encoder support in the repo.
+Combined adapters connect a vision frontend to a causal text decoder and the
+shared generation machinery.
+
+**Muse Glimmer** (`hf_muse_glimmer_mm.py`): runs Muse's vision encoder and
+perception projector, scatters image features into normalized text embeddings,
+then uses the shared Muse/Gemma 3 decoder and generation/cache machinery.
+The image encoder runs once during prefill; subsequent steps decode text.
+The shared `_generate_image_text_to_text()` entry point binds `_prefill_forward()`
+for every VLM adapter. Muse's hook embeds text and encodes/scatters images once,
+then calls its internal backbone for each chunk and projects the requested final
+rows. The generation wrapper does not call Muse's embedding or backbone helpers.
+The shared loop passes chunk size and mask construction explicitly through the
+typed `PrefillContext` argument. Muse does not infer chunking from tensor
+attributes or depend on the shared runtime's private mask-builder class.
+The VLM API accepts `pixel_values` and `image_grid_thw` together, or text inputs
+alone. Text-only calls use the same optimized decoder and chunk policy. Image
+calls encode and scatter image features once into the normalized prompt, then
+run decoder prefill in 512-token chunks when the prompt exceeds 512 real tokens.
+Short prompts retain 64-token alignment. Explicit `prefill_chunk_size` overrides
+are supported, including `None` for one-shot prefill; only the last prefill token
+is projected through the LM head.
+
+Vision blocks use window or per-image full attention, spatial RoPE with Muse's
+`[width, height, width, height]` ordering and +1 position offset, and GELU MLPs.
+Rotary products and sums preserve stock fp32 arithmetic before casting to bf16.
+Q/K/V/O heads are padded from 96 to 128 while preserving the original attention
+scale. Matching layers share a compiled executor with explicit weight inputs.
+The 1176-wide patch projection, positional interpolation, window metadata,
+unpermutation, and pixel shuffle run on CPU; encoder blocks, final vision norm,
+and the perception projector run on Spyre. Local CPU checks cover single and
+multiple images, a mixed image/text batch, text-only VLM generation, and requested
+prefill logits against stock Hugging Face.
 
 **SigLIP vision tower** (`hf_siglip_vision.py`): a **pre-LN, bidirectional,
 no-RoPE, no-KV-cache** ViT encoder over a fixed patch sequence (Granite Vision

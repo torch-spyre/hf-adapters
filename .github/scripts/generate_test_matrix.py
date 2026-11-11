@@ -60,6 +60,10 @@ def generate_matrices(
         "embed": (registry.EMBED_PATHS, registry.ALL_EMBED_PATHS),
         "vision": (registry.VISION_PATHS, registry.ALL_VISION_PATHS),
         "clip": (registry.CLIP_PATHS, registry.ALL_CLIP_PATHS),
+        "multimodal_embed_compare": (
+            registry.MULTIMODAL_EMBED_PATHS,
+            registry.ALL_MULTIMODAL_EMBED_PATHS,
+        ),
         "masked_lm": (registry.MASKED_LM_PATHS, registry.ALL_MASKED_LM_PATHS),
         "question_answering": (
             registry.QUESTION_ANSWERING_PATHS,
@@ -73,6 +77,10 @@ def generate_matrices(
         "token_classification": (
             registry.TOKEN_CLASSIFICATION_PATHS,
             registry.ALL_TOKEN_CLASSIFICATION_PATHS,
+        ),
+        "structured_decision": (
+            registry.STRUCTURED_DECISION_PATHS,
+            registry.ALL_STRUCTURED_DECISION_PATHS,
         ),
     }
 
@@ -130,18 +138,20 @@ def generate_matrices(
         "embed": paths["embed"],
         "vision": paths["vision"],
         "clip": paths["clip"],
+        "multimodal_embed_compare": paths["multimodal_embed_compare"],
         "masked_lm": paths["masked_lm"],
         "question_answering": paths["question_answering"],
         "combined": combined_paths,
         "reranker": paths["reranker"],
         "seq_classification": paths["seq_classification"],
         "token_classification": paths["token_classification"],
+        "structured_decision": paths["structured_decision"],
         # Perf only benchmarks an explicit list (tests/model_lists/perf.yaml), never the whole registry.
         "perf": paths["causal"] if only_models else [],
     }
 
 
-def format_for_github_actions(matrices):
+def format_for_github_actions(matrices: dict[str, list[str]]) -> dict[str, str]:
     """
     Format matrices as GitHub Actions JSON output.
 
@@ -157,12 +167,16 @@ def format_for_github_actions(matrices):
         "embed_matrix": json.dumps(matrices["embed"]),
         "vision_matrix": json.dumps(matrices["vision"]),
         "clip_matrix": json.dumps(matrices["clip"]),
+        "multimodal_embed_compare_matrix": json.dumps(
+            matrices["multimodal_embed_compare"]
+        ),
         "masked_lm_matrix": json.dumps(matrices["masked_lm"]),
         "question_answering_matrix": json.dumps(matrices["question_answering"]),
         "combined_matrix": json.dumps(matrices["combined"]),
         "reranker_matrix": json.dumps(matrices["reranker"]),
         "seq_classification_matrix": json.dumps(matrices["seq_classification"]),
         "token_classification_matrix": json.dumps(matrices["token_classification"]),
+        "structured_decision_matrix": json.dumps(matrices["structured_decision"]),
         "perf_matrix": json.dumps(matrices["perf"]),
     }
 
@@ -190,7 +204,7 @@ def write_github_output(outputs):
             f.write(f"{key}={value}\n")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate dynamic test matrices for GitHub Actions"
     )
@@ -239,6 +253,9 @@ def main():
     print(
         f"  Vision models ({len(matrices['vision'])}): {', '.join(matrices['vision'])}"
     )
+    print(
+        f"  Multimodal embedding models ({len(matrices['multimodal_embed_compare'])}): {', '.join(matrices['multimodal_embed_compare'])}"
+    )
     print(f"  CLIP models ({len(matrices['clip'])}): {', '.join(matrices['clip'])}")
     print(
         f"  Masked-LM models ({len(matrices['masked_lm'])}): {', '.join(matrices['masked_lm'])}"
@@ -260,6 +277,10 @@ def main():
     print(
         f"  Token-classification models ({len(matrices['token_classification'])}): "
         f"{', '.join(matrices['token_classification'])}"
+    )
+    print(
+        f"  Structured-decision models ({len(matrices['structured_decision'])}): "
+        f"{', '.join(matrices['structured_decision'])}"
     )
     print(f"  Perf models ({len(matrices['perf'])}): {', '.join(matrices['perf'])}")
 

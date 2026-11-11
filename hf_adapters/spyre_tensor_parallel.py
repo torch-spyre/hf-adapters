@@ -29,13 +29,20 @@ from transformers.core_model_loading import build_glob_alternation
 from transformers.integrations.tensor_parallel import (
     ALL_PARALLEL_STYLES,
     ColwiseParallel,
-    EmbeddingParallel,
     PackedColwiseParallel,
     ReplicatedWithGradAllReduce,
     RowwiseParallel,
     TensorParallelLayer,
     replace_layer_number_by_wildcard,
 )
+
+try:
+    from transformers.integrations.tensor_parallel import EmbeddingParallel
+except ImportError:
+
+    class EmbeddingParallel(TensorParallelLayer):  # type: ignore[no-redef]
+        pass
+
 
 SPYRE_COLWISE = "spyre_colwise"
 SPYRE_COLWISE_GATHER_OUTPUT = "spyre_colwise_gather_output"
@@ -107,7 +114,11 @@ class SpyreColwiseGatherOutputParallel(SpyreColwiseParallel):
     """State-preserving variant for HF's ``colwise_gather_output`` style."""
 
     def __init__(self, **kwargs):
-        super().__init__(gather_output=True, **kwargs)
+        try:
+            super().__init__(gather_output=True, **kwargs)
+        except TypeError:
+            super().__init__(**kwargs)
+            self.gather_output = True
 
 
 class SpyreRowwiseParallel(RowwiseParallel):
@@ -136,7 +147,11 @@ class SpyreRowwiseSplitInputParallel(SpyreRowwiseParallel):
     """State-preserving variant for HF's ``rowwise_split_input`` style."""
 
     def __init__(self, **kwargs):
-        super().__init__(split_input=True, **kwargs)
+        try:
+            super().__init__(split_input=True, **kwargs)
+        except TypeError:
+            super().__init__(**kwargs)
+            self.split_input = True
 
 
 class _SpyreEmbeddingParallel(EmbeddingParallel):
@@ -151,7 +166,11 @@ class SpyreEmbeddingRowwiseParallel(_SpyreEmbeddingParallel):
     """Vocab-sharded embedding with host-side ID masking for Spyre."""
 
     def __init__(self, **kwargs):
-        super().__init__(embedding_dim_sharding=0, **kwargs)
+        try:
+            super().__init__(embedding_dim_sharding=0, **kwargs)
+        except TypeError:
+            super().__init__(**kwargs)
+            self.embedding_dim_sharding = 0
 
     def _prepare_input_fn(self, mod, inputs, *, vocab_start, vocab_end):
         input_tensor = inputs[0] if inputs else inputs
@@ -210,7 +229,11 @@ class SpyreEmbeddingColwiseParallel(_SpyreEmbeddingParallel):
     """Hidden-dimension-sharded embedding with a fixed dim-1 policy."""
 
     def __init__(self, **kwargs):
-        super().__init__(embedding_dim_sharding=1, **kwargs)
+        try:
+            super().__init__(embedding_dim_sharding=1, **kwargs)
+        except TypeError:
+            super().__init__(**kwargs)
+            self.embedding_dim_sharding = 1
 
 
 class SpyreReplicatedInferenceParallel(ReplicatedWithGradAllReduce):
@@ -399,6 +422,51 @@ def _matches_plan(parameter_name: str, plan: Mapping[str, str]) -> bool:
 
     alternation, _, _ = build_glob_alternation(list(plan))
     return alternation.search(parameter_name) is not None
+
+
+def grouped_kv_projection_modules(
+    model: nn.Module,
+    attention_layers: Iterable[tuple[nn.Module, int]],
+    tp_size: int,
+) -> dict[str, int]:
+    """Select whole-head K/V sharding for unsharded attention layers.
+
+    Adapters supply ``(attention, head_dim)`` pairs so heterogeneous head
+    dimensions remain their responsibility. Ordinary colwise TP is retained
+    when KV heads divide evenly among ranks. Otherwise each complete KV head
+    is replicated within its corresponding group of Q ranks. Missing K/V
+    projections (shared caches or K-equals-V attention) need no placement rule.
+    """
+    from hf_adapters.hf_common import _projection_head_count
+
+    if tp_size <= 0:
+        raise ValueError(f"TP size must be positive, got {tp_size}")
+    module_names = {id(module): name for name, module in model.named_modules()}
+    grouped = {}
+    for attention, head_dim in attention_layers:
+        q_proj = attention.q_proj
+        # A missing/uninspectable projection must not fall back to a global
+        # config count: placement needs its actual, pre-sharding geometry.
+        num_q_heads = _projection_head_count(q_proj, 0, head_dim)
+        if num_q_heads % tp_size != 0:
+            raise ValueError(
+                f"{module_names[id(q_proj)]} cannot split {num_q_heads} query "
+                f"heads across {tp_size} TP ranks without splitting a head"
+            )
+        for name in ("k_proj", "v_proj"):
+            projection = getattr(attention, name, None)
+            if projection is None:
+                continue
+            num_kv_heads = _projection_head_count(projection, 0, head_dim)
+            if num_kv_heads % tp_size == 0:
+                continue
+            if tp_size % num_kv_heads != 0:
+                raise ValueError(
+                    f"{module_names[id(projection)]} cannot distribute "
+                    f"{num_kv_heads} KV heads across {tp_size} TP ranks"
+                )
+            grouped[module_names[id(projection)]] = num_kv_heads
+    return grouped
 
 
 def prepare_spyre_tp_plan(

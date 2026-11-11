@@ -26,9 +26,14 @@ automatically cover them by selecting one representative model per adapter.
 from __future__ import annotations
 
 import os
+import platform
 import types
+from typing import Any
 
-import pytest
+# NOTE: no top-level ``import pytest``. The weekly scan's generate-matrix job imports
+# this registry (WEEKLY_SCAN_*_PATHS) from an environment without the ``test``
+# dependency group; ``xfail_non_blocking`` imports pytest lazily instead.
+import yaml
 
 
 def _include_gated() -> bool:
@@ -335,6 +340,14 @@ CAUSAL_LM_MODELS = {
         "adapter": "hf_gemma3.py",
         "is_gated": True,
         "size": "1b",
+    },
+    # hf_muse_glimmer.py (text backbone)
+    "muse_glimmer_30b": {
+        "name": "Muse Glimmer 30B (text)",
+        "path": "meta-models/Muse-Glimmer-30B",
+        "adapter": "hf_muse_glimmer.py",
+        "size": "30b",
+        "dtype": "bfloat16",
     },
     # hf_gemma4
     "gemma4_base": {
@@ -645,6 +658,29 @@ MASKED_LM_MODELS = {
 }
 
 
+# Structured-decision models emit variable option logits and separate action logits.
+STRUCTURED_DECISION_MODELS = {
+    "laya": {
+        "name": "Laya",
+        "path": "convaiinnovations/laya",
+        "adapter": "laya_backend.py",
+        "size": "0.4b",
+    },
+    "laya_typed_decisions": {
+        "name": "Laya Typed Decisions",
+        "path": "convaiinnovations/laya-typed-decisions",
+        "adapter": "laya_backend.py",
+        "size": "0.4b",
+    },
+    "laya_multilingual": {
+        "name": "Laya Multilingual",
+        "path": "convaiinnovations/laya-multilingual",
+        "adapter": "laya_backend.py",
+        "size": "0.3b",
+    },
+}
+
+
 # Vision models. ``kind="tower"`` adapters are encoder-only; ``kind="vlm"`` adapters
 # are full multimodal models with a causal text decoder, RoPE, KV caches, and ``generate``.
 VISION_MODELS = {
@@ -728,6 +764,15 @@ VISION_MODELS = {
         "size": "26b",
         "always_test": True,
     },
+    # hf_muse_glimmer_mm.py — Muse vision tower + shared Muse text decoder
+    "muse_glimmer_mm": {
+        "name": "Muse Glimmer 30B (both towers)",
+        "path": "meta-models/Muse-Glimmer-30B",
+        "adapter": "hf_muse_glimmer_mm.py",
+        "kind": "vlm",
+        "dtype": "bfloat16",
+        "size": "30b",
+    },
     # hf_clip.py — CLIP dual-encoder (image + text -> embeddings via ST backend)
     "clip_vit_b_32": {
         "name": "clip-ViT-B-32",
@@ -735,6 +780,17 @@ VISION_MODELS = {
         "adapter": "hf_clip.py",
         "kind": "clip",  # dual-encoder: image or text -> embedding
         "size": "0.15b",
+    },
+}
+
+
+MULTIMODAL_EMBEDDING_MODELS: dict[str, dict[str, Any]] = {
+    "siglip2_giant_opt_patch16_384": {
+        "name": "SigLIP2 giant-opt patch16 384",
+        "path": "google/siglip2-giant-opt-patch16-384",
+        "adapter": "hf_siglip.py",
+        "kind": "multimodal_embedding",
+        "size": "1.8b",
     },
 }
 
@@ -804,28 +860,53 @@ def _select_representative_paths(
     return paths
 
 
-def _load_excluded_paths() -> frozenset[str]:
-    """Load excluded model paths from tests/model_lists/exclude.yaml."""
+def _load_excluded_paths(arch_specific: bool = True) -> frozenset[str]:
+    """Load excluded model paths from tests/model_lists/exclude.yaml.
+
+    Always loads the ``models:`` section.  On ppc64le also loads the
+    ``ppc64le_models:`` section so Qwen (and any future ppc64le-only exclusions)
+    are never downloaded or run on that architecture.  Pass
+    ``arch_specific=False`` to load only the architecture-independent list.
+    """
     exclude_file = os.path.join(
         os.path.dirname(__file__), "model_lists", "exclude.yaml"
     )
     if not os.path.isfile(exclude_file):
         return frozenset()
-    excluded: set[str] = set()
-    with open(exclude_file) as f:
-        for line in f:
-            stripped = line.split("#", 1)[0].strip()
-            if stripped.startswith("- "):
-                excluded.add(stripped[2:].strip())
+
+    with open(exclude_file, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"{exclude_file} did not parse to a mapping")
+
+    allowed_sections = {"models", "ppc64le_models"}
+    unexpected = set(data.keys()) - allowed_sections
+    if unexpected:
+        raise ValueError(
+            f"{exclude_file} contains unexpected section(s): {sorted(unexpected)}; "
+            f"allowed: {sorted(allowed_sections)}"
+        )
+
+    for key, val in data.items():
+        if not (isinstance(val, list) and all(isinstance(x, str) for x in val)):
+            raise ValueError(
+                f"{exclude_file} '{key}' section must be a list of strings (got {type(val).__name__})"
+            )
+
+    excluded: set[str] = set(data.get("models") or [])
+    if arch_specific and platform.machine() == "ppc64le":
+        excluded |= set(data.get("ppc64le_models") or [])
     return frozenset(excluded)
 
 
 _EXCLUDED_PATHS = _load_excluded_paths()
+_GLOBAL_EXCLUDED_PATHS = _load_excluded_paths(arch_specific=False)
 
 
-def _exclude(paths: list[str]) -> list[str]:
+def _exclude(paths: list[str], arch_specific: bool = True) -> list[str]:
     """Drop any path listed in tests/model_lists/exclude.yaml."""
-    return [p for p in paths if p not in _EXCLUDED_PATHS]
+    excluded = _EXCLUDED_PATHS if arch_specific else _GLOBAL_EXCLUDED_PATHS
+    return [p for p in paths if p not in excluded]
 
 
 # At least one representative model per adapter module (smallest by size), plus
@@ -858,7 +939,8 @@ WEEKLY_PERF_PATHS: list[str] = _exclude(
         info["path"]
         for info in CAUSAL_LM_MODELS.values()
         if info.get("weekly_perf", False)
-    ]
+    ],
+    arch_specific=False,
 )
 
 MULTICARD_SMOKE_PATHS: list[str] = _exclude(
@@ -889,6 +971,12 @@ XPRESS_PATHS: list[str] = _exclude(
 EMBED_PATHS: list[str] = _exclude(
     _select_representative_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)
 )
+MULTIMODAL_EMBED_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        MULTIMODAL_EMBEDDING_MODELS,
+        include_gated=_include_gated_flag,
+    )
+)
 MASKED_LM_PATHS: list[str] = _exclude(
     _select_representative_paths(MASKED_LM_MODELS, include_gated=_include_gated_flag)
 )
@@ -900,6 +988,11 @@ QUESTION_ANSWERING_PATHS: list[str] = _exclude(
 TOKEN_CLASSIFICATION_PATHS: list[str] = _exclude(
     _select_representative_paths(
         TOKEN_CLASSIFICATION_MODELS, include_gated=_include_gated_flag
+    )
+)
+STRUCTURED_DECISION_PATHS: list[str] = _exclude(
+    _select_representative_paths(
+        STRUCTURED_DECISION_MODELS, include_gated=_include_gated_flag
     )
 )
 VISION_PATHS: list[str] = _exclude(
@@ -955,7 +1048,9 @@ REMOTE_CODE_PATHS: frozenset[str] = frozenset(
         MASKED_LM_MODELS,
         QUESTION_ANSWERING_MODELS,
         TOKEN_CLASSIFICATION_MODELS,
+        STRUCTURED_DECISION_MODELS,
         VISION_MODELS,
+        MULTIMODAL_EMBEDDING_MODELS,
     )
     for info in models.values()
     if info.get("trust_remote_code", False)
@@ -973,6 +1068,17 @@ ALL_CAUSAL_PATHS: list[str] = _exclude(
         predicate=lambda info: info.get("kind") not in (*DRAFTER_KINDS, "diffusion"),
     )
 )
+GLOBAL_ALL_CAUSAL_PATHS: list[str] = _exclude(
+    _all_paths(
+        CAUSAL_LM_MODELS,
+        include_gated=_include_gated_flag,
+        predicate=lambda info: info.get("kind") not in (*DRAFTER_KINDS, "diffusion"),
+    ),
+    arch_specific=False,
+)
+ALL_MULTIMODAL_EMBED_PATHS: list[str] = _exclude(
+    _all_paths(MULTIMODAL_EMBEDDING_MODELS, include_gated=_include_gated_flag)
+)
 ALL_EMBED_PATHS: list[str] = _exclude(
     _all_paths(EMBEDDING_MODELS, include_gated=_include_gated_flag)
 )
@@ -984,6 +1090,9 @@ ALL_QUESTION_ANSWERING_PATHS: list[str] = _exclude(
 )
 ALL_TOKEN_CLASSIFICATION_PATHS: list[str] = _exclude(
     _all_paths(TOKEN_CLASSIFICATION_MODELS, include_gated=_include_gated_flag)
+)
+ALL_STRUCTURED_DECISION_PATHS: list[str] = _exclude(
+    _all_paths(STRUCTURED_DECISION_MODELS, include_gated=_include_gated_flag)
 )
 ALL_VISION_PATHS: list[str] = _exclude(
     _all_paths(
@@ -998,6 +1107,29 @@ ALL_CLIP_PATHS: list[str] = _exclude(
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") == "clip",
     )
+)
+
+
+# Every registered checkpoint the weekly push-to-clickhouse scan evaluates by name,
+# alongside its ranked top-K lists and the curated files (see
+# tests/spyre/weekly_generation/model_fetcher.py). All entries -- not one
+# representative per adapter -- because the point is a weekly check that each
+# registered checkpoint still works. Gated and trust_remote_code entries are always
+# left out, regardless of SPYRE_INCLUDE_GATED / SPYRE_INCLUDE_TRUST_REMOTE_CODE: the
+# scan runs unattended and must not depend on per-environment opt-ins. Only the two
+# registries the scan has an evaluator for are included: token-compare (generative,
+# minus drafters and diffusion, which are not autoregressive LMs) and the text
+# SentenceTransformers embed-compare (embedding).
+WEEKLY_SCAN_GENERATIVE_PATHS: list[str] = _exclude(
+    _all_paths(
+        CAUSAL_LM_MODELS,
+        include_gated=False,
+        include_trust_remote_code=False,
+        predicate=lambda info: info.get("kind") not in (*DRAFTER_KINDS, "diffusion"),
+    )
+)
+WEEKLY_SCAN_EMBEDDING_PATHS: list[str] = _exclude(
+    _all_paths(EMBEDDING_MODELS, include_gated=False, include_trust_remote_code=False)
 )
 
 
@@ -1038,6 +1170,8 @@ def xfail_non_blocking(paths: list[str], *, table: dict[str, str]) -> list[objec
     The test still runs and its outcome (PASS/FAIL) is visible in the report,
     but a failure won't fail the pytest run or block CI.
     """
+    import pytest
+
     return [
         (
             pytest.param(
@@ -1134,3 +1268,37 @@ SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
 ALL_SEQ_CLASSIFICATION_PATHS: list[str] = _exclude(
     _all_paths(SEQ_CLASSIFICATION_MODELS, include_gated=_include_gated_flag)
 )
+
+
+def get_load_test_paths() -> frozenset[str]:
+    """Return all valid registered model paths exercised by load tests."""
+    return frozenset(
+        CAUSAL_PATHS
+        + EMBED_PATHS
+        + MASKED_LM_PATHS
+        + QUESTION_ANSWERING_PATHS
+        + SEQ_CLASSIFICATION_PATHS
+        + TOKEN_CLASSIFICATION_PATHS
+    )
+
+
+def resolve_load_test_models(
+    raw_models: list[str],
+) -> tuple[list[str], list[str]]:
+    """Partition requested model paths into (valid_models_to_run, invalid_models).
+
+    Models excluded on the current architecture are filtered out as intentional skips.
+    Any remaining model not present in registered load test paths is returned as invalid.
+    """
+    excluded = _load_excluded_paths()
+    valid_load_paths = get_load_test_paths()
+    to_run: list[str] = []
+    invalid: list[str] = []
+    for model in raw_models:
+        if model in excluded:
+            continue
+        if model in valid_load_paths:
+            to_run.append(model)
+        else:
+            invalid.append(model)
+    return to_run, invalid

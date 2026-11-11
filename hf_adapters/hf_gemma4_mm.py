@@ -67,10 +67,12 @@ Scope: **text + image**. Audio and video are asserted out loudly
 """
 
 import torch
+from transformers import PretrainedConfig, PreTrainedModel
 
 from hf_adapters import hf_gemma4, hf_gemma4_moe, hf_gemma4_vision
 from hf_adapters.hf_common import (
     DEVICE,
+    PrefillContext,
     embed_text_tokens,
     get_backbone,
     get_model_dtype,
@@ -335,8 +337,8 @@ def _blockwise_band(mm_token_type_ids, padded_len, max_cache_len, dtype):
 
     Reproduces stock ``blockwise_overlay(get_block_sequence_ids_for_mask(...))``:
     two tokens attend to each other iff they share the same image group id
-    (>= 0). Kept on CPU for the prefix sum and the fp32-predicate/fp16-mask
-    layout mismatch (torch-spyre#2252). Only used at prefill.
+    (>= 0). Kept on CPU because the fp32 comparison predicates cannot yet
+    combine with the fp16/bf16 mask layout (torch-spyre#2252). Only used at prefill.
 
     ``mm_token_type_ids`` is the left-padded ``[B, padded_len]`` type map
     (0=text, 1=image). Cache column ``c`` at prefill holds the token at padded
@@ -487,18 +489,19 @@ def _logits_from_embeds(
 
 def _prefill_forward(
     *,
-    model,
-    input_ids,
-    position_ids,
-    attention_mask,
-    key_caches,
-    value_caches,
-    cache_index,
-    pixel_values,
-    image_position_ids,
-    mm_token_type_ids,
-    logits_to_keep=0,
-):
+    model: PreTrainedModel,
+    input_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    key_caches: list[torch.Tensor],
+    value_caches: list[torch.Tensor],
+    cache_index: torch.Tensor,
+    pixel_values: torch.Tensor,
+    image_position_ids: torch.Tensor,
+    mm_token_type_ids: torch.Tensor,
+    logits_to_keep: int = 0,
+    prefill_context: PrefillContext | None = None,
+) -> torch.Tensor:
     """Shared multimodal prefill: padded ids + image → requested logits.
 
     Builds scaled text embeddings with the image features scattered into the
@@ -509,18 +512,27 @@ def _prefill_forward(
     ``logits_to_keep=1`` projects only the final row for generation; the default
     keeps full-sequence logits for direct callers.
     """
-    dtype = get_model_dtype(model)
-    cfg = text_config(model.config)
-    image_features = _image_features(model, pixel_values, image_position_ids)
+    if prefill_context is not None:
+        raise ValueError("Gemma 4 does not support chunked multimodal prefill")
+    dtype: torch.dtype = get_model_dtype(model)
+    cfg: PretrainedConfig = text_config(model.config)
+    image_features: torch.Tensor = _image_features(
+        model, pixel_values, image_position_ids
+    )
+    inputs_embeds: torch.Tensor
+    ple_context_embeds: torch.Tensor | None
+    ple_input_ids: torch.Tensor
     inputs_embeds, ple_context_embeds, ple_input_ids = _embed_and_scatter(
         model, input_ids, image_features
     )
 
-    masks = None
+    masks: dict[str, torch.Tensor] | None = None
     if getattr(cfg, "use_bidirectional_attention", None) == "vision":
         padded_len = input_ids.shape[1]
         max_cache_len = attention_mask.shape[-1]
-        blockwise = _blockwise_band(mm_token_type_ids, padded_len, max_cache_len, dtype)
+        blockwise: torch.Tensor = _blockwise_band(
+            mm_token_type_ids, padded_len, max_cache_len, dtype
+        )
         masks = _build_mm_masks(
             attention_mask,
             blockwise,
@@ -528,7 +540,7 @@ def _prefill_forward(
             unified=getattr(model.model, "vision_tower", None) is None,
         )
         masks = {lt: m.to(DEVICE) for lt, m in masks.items()}
-    return _logits_from_embeds(
+    logits: torch.Tensor = _logits_from_embeds(
         model,
         inputs_embeds.to(DEVICE),
         position_ids.to(DEVICE),
@@ -543,3 +555,4 @@ def _prefill_forward(
             ple_context_embeds.to(DEVICE) if ple_context_embeds is not None else None
         ),
     )
+    return logits
