@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from tests.spyre.weekly_generation.failure_categories import (
+    FAILURE_CATEGORY_ARCH_EXCLUDED,
     FAILURE_CATEGORY_MODEL_TOO_LARGE,
     MAX_NUMBER_PARAMS,
 )
@@ -92,6 +93,26 @@ class TestFilterBranches:
         result = _filter([_row("org/moe", is_moe=True)])
         assert [row["model_id"] for row in result.keep] == ["org/moe"]
         assert result.skipped == []
+
+    def test_arch_excluded_model_is_skipped(self, monkeypatch) -> None:
+        """issue #767: the exclusion gate covers every selection source."""
+        monkeypatch.setattr(
+            "tests.spyre.weekly_generation.model_prefilter._arch_excluded_paths",
+            lambda: {"Qwen/Qwen3-0.6B"},
+        )
+        result = _filter([_row("Qwen/Qwen3-0.6B"), _row("org/ok")])
+        assert [r["model_id"] for r in result.keep] == ["org/ok"]
+        assert result.skipped[0].failure_category == FAILURE_CATEGORY_ARCH_EXCLUDED
+
+    def test_arch_exclusion_applies_to_curated_rows_too(self, monkeypatch) -> None:
+        """Curated bypasses the ranked gates, but not the arch exclusion."""
+        monkeypatch.setattr(
+            "tests.spyre.weekly_generation.model_prefilter._arch_excluded_paths",
+            lambda: {"org/curated-bad"},
+        )
+        result = _filter([_row("org/curated-bad", curated=True)])
+        assert result.keep == []
+        assert result.skipped[0].failure_category == FAILURE_CATEGORY_ARCH_EXCLUDED
 
 
 class TestPrefilterIsPure:

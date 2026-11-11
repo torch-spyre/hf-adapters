@@ -16,11 +16,25 @@ from datetime import date
 
 from tests.spyre.weekly_generation import model_fetcher
 from tests.spyre.weekly_generation.failure_categories import (
+    FAILURE_CATEGORY_ARCH_EXCLUDED,
     FAILURE_CATEGORY_MODEL_TOO_LARGE,
 )
 from tests.spyre.weekly_generation.model_type import ModelType
 from tests.spyre.weekly_generation.sink.result_sink import ResultSink
 from utils.utilities import concat_and_dedup_dicts
+
+
+def _arch_excluded_paths() -> set[str]:
+    """Model ids excluded on this architecture (``tests/model_lists/exclude.yaml``).
+
+    Deferred so importing this module stays cheap; ``model_registry`` reads the
+    exclusion file once at its own import. Ranked top-K selection bypasses the
+    registry lists, so this gate is what keeps arch-excluded models out of the
+    weekly scan regardless of which source proposed them (issue #767).
+    """
+    from tests.model_registry import _EXCLUDED_PATHS
+
+    return _EXCLUDED_PATHS
 
 
 @dataclass(frozen=True)
@@ -105,7 +119,18 @@ def prefilter_models(
     """
     result = PrefilterResult()
 
+    excluded = _arch_excluded_paths()
     for row in models:
+        if row.get("model_id") in excluded:
+            result.skipped.append(
+                SkippedModel(
+                    row=row,
+                    failure_category=FAILURE_CATEGORY_ARCH_EXCLUDED,
+                    reason="excluded on this architecture by tests/model_lists/exclude.yaml",
+                )
+            )
+            continue
+
         params = _parameter_count(row)
         if params is not None and params > max_params:
             result.skipped.append(
