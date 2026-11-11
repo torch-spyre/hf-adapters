@@ -27,10 +27,9 @@ Usage::
     outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
-import torch
-
 from hf_adapters.hf_common import (
     _SDPA_MAX_SEQUENCE_TILE_SIZE,
+    compile_block,
     embed_text_tokens,
     get_backbone,
     prepare_lm_head_for_spyre,
@@ -91,14 +90,23 @@ def _run_forward(
     return run_lm_head(model, h)
 
 
-def prepare_for_spyre(model):
-    """Apply Spyre adaptations to Granite 3.3 model in-place."""
+def prepare_for_spyre(model, *, runtime=None):
+    """Prepare Granite in-place with optional external attention execution.
+
+    The serving path prepares only the backbone. Its caller owns the LM head,
+    KV cache, and the timing of compilation after device placement.
+    """
     prepare_rope_and_heads(model)
     logits_scaling = text_config(model.config).logits_scaling
-    prepare_lm_head_for_spyre(
-        model, logits_processor=lambda logits: logits / logits_scaling
-    )
+    if runtime is None:
+        prepare_lm_head_for_spyre(
+            model, logits_processor=lambda logits: logits / logits_scaling
+        )
+    else:
+        runtime.logits_scale = 1.0 / logits_scaling
     backbone = get_backbone(model)
-    model._spyre_compiled_blocks = prepare_standard_gqa_blocks(backbone.layers, True)
-    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
+    model._spyre_compiled_blocks = prepare_standard_gqa_blocks(
+        backbone.layers, True, runtime
+    )
+    model._spyre_compiled_norm = compile_block(backbone.norm, runtime)
     model._spyre_prefill_chunk_size = _SDPA_MAX_SEQUENCE_TILE_SIZE

@@ -30,10 +30,10 @@ Usage::
     outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
-import torch
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
+    compile_block,
     get_backbone,
     prepare_lm_head_for_spyre,
     prepare_rope_and_heads,
@@ -76,13 +76,16 @@ def _patch_olmo_layernorm(layernorm_cls):
     layernorm_cls.forward = _forward_fp16
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model, *, runtime=None):
     """Apply Spyre adaptations to OLMo model in-place."""
     from transformers.models.olmo.modeling_olmo import OlmoLayerNorm
 
     prepare_rope_and_heads(model)
     _patch_olmo_layernorm(OlmoLayerNorm)
-    prepare_lm_head_for_spyre(model)
+    if runtime is None:
+        prepare_lm_head_for_spyre(model)
     backbone = get_backbone(model)
-    model._spyre_compiled_blocks = prepare_standard_gqa_blocks(backbone.layers)
-    model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
+    model._spyre_compiled_blocks = prepare_standard_gqa_blocks(
+        backbone.layers, runtime=runtime
+    )
+    model._spyre_compiled_norm = compile_block(backbone.norm, runtime)

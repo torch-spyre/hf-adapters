@@ -95,6 +95,10 @@ inputs = encode_prompts(tokenizer, ["What is 2+2?"])
 sequences = model.generate(**inputs, max_new_tokens=5)
 ```
 
+For experimental serving through vLLM/SGLang, see the
+[HF-adapters serving integration guide](docs/hf_adapters_serving_integration.md)
+for the shared design, APIs, and adapter requirements.
+
 ## Structured Decisions
 
 Laya keeps its native Agent API while patching its ModernBERT/mmBERT encoder,

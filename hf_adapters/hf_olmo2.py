@@ -30,13 +30,11 @@ Usage::
     outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
-import torch
-import torch.nn.functional as F
-
 from hf_adapters.hf_common import (
+    DenseAttention,
     apply_rope_matmul,
+    compile_block,
     get_backbone,
-    kv_cache_update,
     prepare_lm_head_for_spyre,
     prepare_rope_and_heads,
     standard_gqa_backbone_forward,
@@ -44,7 +42,7 @@ from hf_adapters.hf_common import (
 )
 
 
-def _make_compiled_block(layer):
+def _make_compiled_block(layer, runtime=None):
     """Compiled block for OLMo2: post-norm + Q/K RMSNorm."""
     attn = layer.self_attn
     mlp = layer.mlp
@@ -54,6 +52,9 @@ def _make_compiled_block(layer):
     q_norm = attn.q_norm
     k_norm = attn.k_norm
     v_head_dim = getattr(attn, "v_head_dim", attn.head_dim)
+    attention = (
+        DenseAttention(attn.scaling) if runtime is None else runtime.attention(attn)
+    )
 
     def block_forward(
         hidden_states,
@@ -78,22 +79,8 @@ def _make_compiled_block(layer):
         q = apply_rope_matmul(q, selected_freqs)
         k = apply_rope_matmul(k, selected_freqs)
 
-        key_cache, value_cache = kv_cache_update(
-            k,
-            v,
-            key_cache,
-            value_cache,
-            cache_index,
-        )
-
-        attn_out = F.scaled_dot_product_attention(
-            q,
-            key_cache,
-            value_cache,
-            attn_mask=attn_mask,
-            dropout_p=0.0,
-            scale=attn.scaling,
-            enable_gqa=True,
+        attn_out, key_cache, value_cache = attention(
+            q, k, v, attn_mask, key_cache, value_cache, cache_index
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
         attn_out = attn.o_proj(attn_out)
@@ -106,18 +93,19 @@ def _make_compiled_block(layer):
 
         return h, key_cache, value_cache
 
-    return torch.compile(block_forward, dynamic=False)
+    return compile_block(block_forward, runtime)
 
 
 _run_forward = standard_gqa_forward
 _run_backbone_forward = standard_gqa_backbone_forward
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model, *, runtime=None):
     """Apply Spyre adaptations to OLMo2 model in-place."""
     prepare_rope_and_heads(model)
-    prepare_lm_head_for_spyre(model)
+    if runtime is None:
+        prepare_lm_head_for_spyre(model)
     model._spyre_compiled_blocks = [
-        _make_compiled_block(layer) for layer in get_backbone(model).layers
+        _make_compiled_block(layer, runtime) for layer in get_backbone(model).layers
     ]
-    model._spyre_compiled_norm = torch.compile(get_backbone(model).norm, dynamic=False)
+    model._spyre_compiled_norm = compile_block(get_backbone(model).norm, runtime)

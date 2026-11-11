@@ -50,16 +50,16 @@ Usage::
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
+    DenseAttention,
     PrecomputedRotaryEmbedding,
     _pad_proj_input_simple,
     _pad_proj_output_simple,
     apply_rope_matmul,
+    compile_block,
     get_backbone,
-    kv_cache_update,
     pad_qk_proj_for_rope,
     permute_proj_for_rope,
     prepare_lm_head_for_spyre,
@@ -93,9 +93,9 @@ def _split_fused_qkv(layer, num_heads, head_dim):
     w_q = torch.zeros(num_heads * head_dim, hidden, dtype=w.dtype)
     w_k = torch.zeros(num_heads * head_dim, hidden, dtype=w.dtype)
     w_v = torch.zeros(num_heads * head_dim, hidden, dtype=w.dtype)
-    b_q = torch.zeros(num_heads * head_dim, dtype=b.dtype)
-    b_k = torch.zeros(num_heads * head_dim, dtype=b.dtype)
-    b_v = torch.zeros(num_heads * head_dim, dtype=b.dtype)
+    b_q = torch.zeros(num_heads * head_dim, dtype=b.dtype) if b is not None else None
+    b_k = torch.zeros(num_heads * head_dim, dtype=b.dtype) if b is not None else None
+    b_v = torch.zeros(num_heads * head_dim, dtype=b.dtype) if b is not None else None
 
     for h in range(num_heads):
         src = h * stride
@@ -103,14 +103,16 @@ def _split_fused_qkv(layer, num_heads, head_dim):
         w_q[dst : dst + head_dim] = w[src : src + head_dim]
         w_k[dst : dst + head_dim] = w[src + head_dim : src + 2 * head_dim]
         w_v[dst : dst + head_dim] = w[src + 2 * head_dim : src + 3 * head_dim]
-        b_q[dst : dst + head_dim] = b[src : src + head_dim]
-        b_k[dst : dst + head_dim] = b[src + head_dim : src + 2 * head_dim]
-        b_v[dst : dst + head_dim] = b[src + 2 * head_dim : src + 3 * head_dim]
+        if b is not None:
+            b_q[dst : dst + head_dim] = b[src : src + head_dim]
+            b_k[dst : dst + head_dim] = b[src + head_dim : src + 2 * head_dim]
+            b_v[dst : dst + head_dim] = b[src + 2 * head_dim : src + 3 * head_dim]
 
     def _mk(w_data, b_data):
-        p = nn.Linear(hidden, num_heads * head_dim, bias=True)
+        p = nn.Linear(hidden, num_heads * head_dim, bias=b_data is not None)
         p.weight = nn.Parameter(w_data.clone(), requires_grad=False)
-        p.bias = nn.Parameter(b_data.detach().clone(), requires_grad=False)
+        if b_data is not None:
+            p.bias = nn.Parameter(b_data.detach().clone(), requires_grad=False)
         return p
 
     return _mk(w_q, b_q), _mk(w_k, b_k), _mk(w_v, b_v)
@@ -121,8 +123,10 @@ def _split_fused_qkv(layer, num_heads, head_dim):
 # ---------------------------------------------------------------------------
 
 
-def _make_compiled_block(layer, q_proj, k_proj, v_proj, head_dim, num_heads, scale):
-    """Compiled block for GPT-NeoX with parallel residual.
+def _make_compiled_block(
+    layer, q_proj, k_proj, v_proj, head_dim, num_heads, scale, runtime=None
+):
+    """Compiled block for GPT-NeoX with parallel or sequential residual.
 
     Parallel residual means attn and MLP both read from the same pre-norm
     state and are summed together into the residual (not chained through each
@@ -135,6 +139,12 @@ def _make_compiled_block(layer, q_proj, k_proj, v_proj, head_dim, num_heads, sca
     dense_h_to_4h = layer.mlp.dense_h_to_4h
     act = layer.mlp.act
     dense_4h_to_h = layer.mlp.dense_4h_to_h
+    parallel = layer.use_parallel_residual
+    attention = (
+        DenseAttention(scale)
+        if runtime is None
+        else runtime.attention(layer.attention, head_size=head_dim)
+    )
 
     def block_forward(
         hidden_states,
@@ -146,9 +156,7 @@ def _make_compiled_block(layer, q_proj, k_proj, v_proj, head_dim, num_heads, sca
     ):
         residual = hidden_states
 
-        # Parallel residual: both branches read from the same normed input.
         attn_input = input_ln(hidden_states)
-        mlp_input = post_attn_ln(hidden_states)
 
         bsz, seq_len, _ = attn_input.shape
         q = q_proj(attn_input).view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
@@ -158,27 +166,22 @@ def _make_compiled_block(layer, q_proj, k_proj, v_proj, head_dim, num_heads, sca
         q = apply_rope_matmul(q, selected_freqs)
         k = apply_rope_matmul(k, selected_freqs)
 
-        key_cache, value_cache = kv_cache_update(
-            k, v, key_cache, value_cache, cache_index
-        )
-
-        attn_out = F.scaled_dot_product_attention(
-            q,
-            key_cache,
-            value_cache,
-            attn_mask=attn_mask,
-            dropout_p=0.0,
-            scale=scale,
+        attn_out, key_cache, value_cache = attention(
+            q, k, v, attn_mask, key_cache, value_cache, cache_index
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
         attn_out = dense(attn_out)
 
+        mlp_input = post_attn_ln(residual if parallel else residual + attn_out)
         mlp_out = dense_4h_to_h(act(dense_h_to_4h(mlp_input)))
-
-        h = residual + attn_out + mlp_out
+        h = (
+            mlp_out + attn_out + residual
+            if parallel
+            else mlp_out + (residual + attn_out)
+        )
         return h, key_cache, value_cache
 
-    return torch.compile(block_forward, dynamic=False)
+    return compile_block(block_forward, runtime)
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +239,7 @@ def _run_forward(
     return run_lm_head(model, h)
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model, *, runtime=None):
     """Apply Spyre adaptations to a GPT-NeoX model in-place.
 
     Splits the fused QKV projection, applies the partial-RoPE permutation,
@@ -274,9 +277,10 @@ def prepare_for_spyre(model):
     # GPT-NeoX named its output projection ``embed_out`` pre-transformers-5.14
     # and ``lm_head`` from 5.14 on; the shared helper resolves either name.
     vocab_size = model.config.vocab_size
-    prepare_lm_head_for_spyre(
-        model, logits_processor=lambda logits: logits[..., :vocab_size]
-    )
+    if runtime is None:
+        prepare_lm_head_for_spyre(
+            model, logits_processor=lambda logits: logits[..., :vocab_size]
+        )
 
     # Split fused QKV, apply permutation, pad if needed; register as submodules.
     model._spyre_q_projs = nn.ModuleList()
@@ -318,7 +322,7 @@ def prepare_for_spyre(model):
     orig_scale = bb.layers[0].attention.scaling
 
     model._spyre_compiled_blocks = [
-        _make_compiled_block(layer, qp, kp, vp, work_hd, num_heads, orig_scale)
+        _make_compiled_block(layer, qp, kp, vp, work_hd, num_heads, orig_scale, runtime)
         for layer, qp, kp, vp in zip(
             bb.layers,
             model._spyre_q_projs,

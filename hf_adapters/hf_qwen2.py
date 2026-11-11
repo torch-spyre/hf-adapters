@@ -39,6 +39,6 @@ _run_forward = standard_gqa_forward
 _run_backbone_forward = standard_gqa_backbone_forward
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model, *, runtime=None):
     """Apply Spyre adaptations to Qwen2 model in-place."""
-    prepare_standard_gqa(model)
+    prepare_standard_gqa(model, runtime=runtime)
