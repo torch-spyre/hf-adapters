@@ -276,6 +276,7 @@ def _moe_decode_weight_view(pool, chunks, *, down=False):
             [size[0], size[1], free // stick, stick],
             [stride[0], stride[1], stick, 1],
             get_device_dtype(pool.dtype),
+            valid_elements={(0,): size[0], (1,): size[1], (2, 3): free},
         )
         # The persistent gate/up pools must sit in gather order: contract is
         # outer to the free-dim sticks, so chunking it preserves flat order.
@@ -284,6 +285,7 @@ def _moe_decode_weight_view(pool, chunks, *, down=False):
                 [experts, contract, free // stick, stick],
                 [contract * free, free, stick, 1],
                 get_device_dtype(pool.dtype),
+                valid_elements={(0,): experts, (1,): contract, (2, 3): free},
             )
         )
     return reinterpret_tensor_with_layout(pool, size, stride, 0, layout)
@@ -2355,6 +2357,12 @@ def _cache_position_first_stl(batch_size, num_kv_heads, max_cache_len, head_dim,
             1,  # elems per stick
         ],
         device_dtype=get_device_dtype(dtype),
+        valid_elements={
+            (0,): max_cache_len,
+            (1,): num_kv_heads,
+            (2, 4): head_dim,
+            (3,): batch_size,
+        },
     )
 
 
