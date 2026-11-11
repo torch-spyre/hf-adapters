@@ -20,6 +20,8 @@ latter has independent convolution and recurrent states, so this adapter uses
 heterogeneous entries in the generic generation cache lists.
 """
 
+from typing import Any
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -581,7 +583,9 @@ def _prepare_linear_attention_constants(linear_attn):
     linear_attn.conv1d = nn.Identity()
 
 
-def _setup_qwen3_5_text_decoder(model):
+def _setup_qwen3_5_text_decoder(
+    model: Any,
+) -> tuple[Any, nn.Module, torch.Tensor | None]:
     """Prepare shared Qwen3.5 state, leaving block construction to the caller."""
     cfg = text_config(model.config)
     backbone = get_backbone(model)
@@ -609,7 +613,7 @@ def _setup_qwen3_5_text_decoder(model):
             f"Qwen3.5 head_dim={cfg.head_dim} is too small for Spyre RoPE; head padding is not implemented"
         )
 
-    rope_dim = int(cfg.partial_rotary_factor * cfg.head_dim)
+    rope_dim = int(cfg.rope_parameters.get("partial_rotary_factor", 1.0) * cfg.head_dim)
     if rope_dim % 2:
         raise ValueError(f"Qwen3.5 rotary dimension must be even, got {rope_dim}")
     non_rotary_dim = cfg.head_dim - rope_dim
@@ -627,9 +631,12 @@ def _setup_qwen3_5_text_decoder(model):
     prepare_lm_head_for_spyre(model)
     model._spyre_q_projs = nn.ModuleList()
     model._spyre_gate_projs = nn.ModuleList()
-    model._spyre_compiled_norm = torch.compile(
-        lambda hidden_states: _rms_norm(hidden_states, backbone.norm), dynamic=False
-    )
+
+    def final_norm(hidden_states: torch.Tensor) -> torch.Tensor:
+        output: torch.Tensor = _rms_norm(hidden_states, backbone.norm)
+        return output
+
+    model._spyre_compiled_norm = torch.compile(final_norm, dynamic=False)
 
     rope_permutation = (
         rope_dim_permutation(cfg.head_dim, rope_dim)

@@ -1472,8 +1472,8 @@ def patch_new_gelu(gelu_cls):
 
 
 def _largest_prime_factor(n: int) -> int:
-    """Largest prime factor of ``n`` (n >= 2). Used to bound the lm_head span."""
-    return int(max(factorint(n)))
+    """Largest prime factor, or 1 for a single stick, for the LM-head span."""
+    return int(max(factorint(n), default=1))
 
 
 # Spyre per-core EAR (effective address range) limit for one tensor: 256 MB.
@@ -2548,48 +2548,14 @@ def _without_spyre_allocator_warmup():
         modeling_utils.caching_allocator_warmup = original
 
 
-@contextmanager
-def _prefer_exact_tp_plan_entries():
-    """Honor exact per-layer TP entries before Transformers' wildcard lookup.
-
-    Transformers documents exact TP rules, but its current lookup immediately
-    replaces every numeric layer index with ``*``. That makes a generic rule
-    win even when an exact override is present. Gemma 4 needs exact overrides
-    for only the full-attention K/V projections whose KV-head count is smaller
-    than the TP degree.
-    """
-    from transformers import modeling_utils
-    from transformers.integrations import tensor_parallel
-
-    original = tensor_parallel._get_parameter_tp_plan
-
-    def exact_first(parameter_name, tp_plan, is_weight=True):
-        if parameter_name in tp_plan:
-            return tp_plan[parameter_name]
-        if is_weight and "." in parameter_name:
-            module_name = parameter_name.rsplit(".", 1)[0]
-            if module_name in tp_plan:
-                return tp_plan[module_name]
-        return original(parameter_name, tp_plan, is_weight=is_weight)
-
-    original_modeling_lookup = modeling_utils._get_parameter_tp_plan
-    tensor_parallel._get_parameter_tp_plan = exact_first
-    modeling_utils._get_parameter_tp_plan = exact_first
-    try:
-        yield
-    finally:
-        tensor_parallel._get_parameter_tp_plan = original
-        modeling_utils._get_parameter_tp_plan = original_modeling_lookup
-
-
 def load_model_common(
-    model_path,
-    module,
-    dtype=torch.float16,
-    auto_model_cls=None,
-    tp_plan=None,
-    trust_remote_code=None,
-):
+    model_path: str | os.PathLike[str],
+    module: Any,
+    dtype: torch.dtype = torch.float16,
+    auto_model_cls: Any = None,
+    tp_plan: dict[str, str] | str | None = None,
+    trust_remote_code: bool | None = None,
+) -> PreTrainedModel:
     """Load an HF model.
 
     Args:
@@ -2607,6 +2573,7 @@ def load_model_common(
             to HF's ``from_pretrained``) so checkpoints shipping custom modeling
             code load only when the caller explicitly opts in.
     """
+    model: PreTrainedModel
     if auto_model_cls is None:
         from transformers import AutoModel
 
@@ -2638,7 +2605,9 @@ def load_model_common(
             tp_size=_resolve_tp_size(),
             tp_plan=resolved_tp_plan,
         )
-        with _without_spyre_allocator_warmup(), _prefer_exact_tp_plan_entries():
+        from hf_adapters.spyre_tensor_parallel import spyre_tp_loading
+
+        with _without_spyre_allocator_warmup(), spyre_tp_loading():
             model = auto_model_cls.from_pretrained(
                 model_path,
                 config=cfg,

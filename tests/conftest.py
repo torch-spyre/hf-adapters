@@ -366,7 +366,9 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
     if skip_reason:
         skip_spyre = pytest.mark.skip(reason=skip_reason)
         for item in items:
-            if "spyre" in item.nodeid or item.get_closest_marker("requires_spyre"):
+            if "tests/spyre/" in item.nodeid or item.get_closest_marker(
+                "requires_spyre"
+            ):
                 item.add_marker(skip_spyre)
 
     if not config.getoption("--run-slow"):

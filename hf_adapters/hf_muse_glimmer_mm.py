@@ -26,16 +26,17 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
 from transformers import PreTrainedModel
 from transformers.models.muse_glimmer.modeling_muse_glimmer import (
-    get_vision_bilinear_indices_and_weights,
+    MuseGlimmerVisionEncoderLayer,
 )
 from transformers.vision_utils import (
     get_vision_cu_seqlens,
+    get_vision_interpolation_indices_and_weights,
     get_vision_position_ids,
     get_vision_window_index,
 )
@@ -59,7 +60,6 @@ from hf_adapters.hf_common import (
 
 if TYPE_CHECKING:
     from transformers.models.muse_glimmer.modeling_muse_glimmer import (
-        MuseGlimmerVisionEncoderLayer,
         MuseGlimmerVisionModel,
     )
 
@@ -220,7 +220,8 @@ def _layernorm(
 
 def _apply_vision_rope(x: torch.Tensor, rope: torch.Tensor) -> torch.Tensor:
     """Match stock Muse's fp32 rotary products and sum before the output cast."""
-    return cast(torch.Tensor, apply_rope_matmul(x.float(), rope.float()).to(x.dtype))
+    rotated: torch.Tensor = apply_rope_matmul(x.float(), rope.float())
+    return rotated.to(x.dtype)
 
 
 def _make_vision_forward(spec: _VisionBlockSpec) -> _VisionBlock:
@@ -290,7 +291,8 @@ def _make_vision_projector(
     norm: torch.nn.Module = model.model.perception_emb_norm
 
     def project(hidden_states: torch.Tensor) -> torch.Tensor:
-        return cast(torch.Tensor, norm(projection(adapter(hidden_states))))
+        output: torch.Tensor = norm(projection(adapter(hidden_states)))
+        return output
 
     return torch.compile(project, dynamic=False)
 
@@ -337,11 +339,16 @@ def _vision_features(
             "pixel_values and image_grid_thw describe different patch counts"
         )
     padded = math.ceil(total / BLOCK_SIZE) * BLOCK_SIZE
-    indices, weights = get_vision_bilinear_indices_and_weights(
-        grid, cfg.pos_emb_height, spatial_merge_size=1
+    indices, weights = get_vision_interpolation_indices_and_weights(
+        grid,
+        cfg.pos_emb_height,
+        mode="bilinear",
+        align_corners=False,
+        spatial_merge_size=1,
+        padding="zeros",
     )
     pos_table = tower.patch_embedder.position_embedding_table.weight.detach().cpu()
-    positions = (pos_table[indices] * weights[:, :, None]).sum(0).to(dtype)
+    positions = (pos_table[indices] * weights[:, :, None]).sum(1).to(dtype)
     window_index, window_cu = get_vision_window_index(
         grid,
         spatial_merge_size=1,
@@ -357,10 +364,9 @@ def _vision_features(
     h = tower.ln_pre(h + positions[window_index]).to(DEVICE)
     if padded > total:
         h = F.pad(h, (0, 0, 0, padded - total))
-    head_dim = cast(int, model._spyre_vision_head_dim)
-    rope = _vision_rope_matrices(
-        cast(torch.Tensor, model._spyre_vision_inv_freq), position_ids, head_dim, dtype
-    )
+    head_dim: int = getattr(model, "_spyre_vision_head_dim")
+    inv_freq: torch.Tensor = getattr(model, "_spyre_vision_inv_freq")
+    rope = _vision_rope_matrices(inv_freq, position_ids, head_dim, dtype)
     if padded > total:
         identity = torch.zeros(padded - total, 2, 2, head_dim // 2, dtype=dtype)
         identity[:, 0, 0] = 1
@@ -371,19 +377,20 @@ def _vision_features(
         "full_attention": _segment_mask(full_cu, total, padded, dtype).to(DEVICE),
         "window_attention": _segment_mask(window_cu, total, padded, dtype).to(DEVICE),
     }
-    blocks = cast(list[_VisionBlock], model._spyre_vision_blocks)
+    blocks: list[_VisionBlock] = getattr(model, "_spyre_vision_blocks")
     assert cfg.layer_types is not None
     for i, block in enumerate(blocks):
-        layer = cast("MuseGlimmerVisionEncoderLayer", tower.layers[i])
+        layer = tower.layers[i]
+        assert isinstance(layer, MuseGlimmerVisionEncoderLayer)
         h = block(_vision_block_state(layer), h, rope, masks[cfg.layer_types[i]])
-    norm = cast(
-        Callable[[torch.Tensor], torch.Tensor], model._spyre_compiled_vision_norm
+    norm: Callable[[torch.Tensor], torch.Tensor] = getattr(
+        model, "_spyre_compiled_vision_norm"
     )
     h = norm(h[:total]).cpu()
     h = h[torch.argsort(window_index)]
     h = _pixel_shuffle_cpu(h, grid, cfg.merge_size).to(dtype).to(DEVICE)
-    projector = cast(
-        Callable[[torch.Tensor], torch.Tensor], model._spyre_compiled_vision_projector
+    projector: Callable[[torch.Tensor], torch.Tensor] = getattr(
+        model, "_spyre_compiled_vision_projector"
     )
     return projector(h)
 
@@ -406,12 +413,12 @@ def _embed_and_scatter(
             "Image features and image tokens do not match: "
             f"tokens {image_tokens}, features {tuple(image_features.shape)}"
         )
-    keep = (~image_mask).unsqueeze(-1).to(h.dtype).to(h.device)
+    keep: torch.Tensor = (~image_mask).unsqueeze(-1).to(h.dtype).to(h.device)
     additive = torch.zeros(h.shape, dtype=h.dtype)
     additive[image_mask] = image_features.to("cpu", h.dtype).reshape(
         image_tokens, hidden
     )
-    return cast(torch.Tensor, h * keep + additive.to(h.device))
+    return h * keep + additive.to(h.device)
 
 
 def prepare_for_spyre(model: PreTrainedModel) -> None:
@@ -430,7 +437,8 @@ def prepare_for_spyre(model: PreTrainedModel) -> None:
     ] = {}
     blocks: list[_VisionBlock] = []
     for module in tower.layers:
-        layer = cast("MuseGlimmerVisionEncoderLayer", module)
+        assert isinstance(module, MuseGlimmerVisionEncoderLayer)
+        layer = module
         layer.attn.q_proj = pad_qk_proj_for_rope(
             layer.attn.q_proj, cfg.num_attention_heads, original_head_dim, head_dim
         )

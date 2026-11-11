@@ -34,6 +34,8 @@ Usage::
     outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
+from typing import Any
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -61,6 +63,23 @@ from hf_adapters.hf_common import (
 # Partial-RoPE alignment (rope_dim_permutation / permute_proj_for_rope /
 # pad_qk_proj_for_rope) is shared with hf_gpt_neox and lives in hf_common.
 # ---------------------------------------------------------------------------
+
+
+def spyre_tp_cpu_replicated_modules(model: nn.Module, tp_size: int) -> set[str]:
+    """Stage full fused weights for the adapter's QKV and gate/up splitting.
+
+    HF gathers the outputs of these projections before splitting them. This
+    adapter instead splits their weights during preparation, bypassing the
+    gather hooks. Keep those weights replicated on CPU until preparation;
+    o_proj and down_proj retain HF's rowwise split-input placement.
+    """
+    del tp_size
+    return {
+        name
+        for name, module in model.named_modules()
+        if isinstance(module, nn.Linear)
+        and name.endswith((".self_attn.qkv_proj", ".mlp.gate_up_proj"))
+    }
 
 
 def _split_fused_qkv(attn, num_q, num_kv, head_dim):
@@ -206,7 +225,7 @@ def _run_forward(
     return run_lm_head(model, h)
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model: Any) -> None:
     """Apply Spyre adaptations to Phi-3 model in-place."""
     cfg = model.config
     hd = cfg.hidden_size // cfg.num_attention_heads
@@ -239,7 +258,7 @@ def prepare_for_spyre(model):
     # apply_rope_matmul pairs (j, j+head_dim//2). Permute Q/K weights so
     # both agree. Q·K^T dot product is invariant under same permutation.
     # Computed on the original head_dim; stick padding (below) happens after.
-    prf = getattr(cfg, "partial_rotary_factor", 1.0)
+    prf = cfg.rope_parameters.get("partial_rotary_factor", 1.0)
     rope_dim = int(prf * hd)
     rope_perm = rope_dim_permutation(hd, rope_dim) if rope_dim != hd else None
 
