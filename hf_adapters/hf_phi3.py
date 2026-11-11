@@ -279,9 +279,25 @@ def prepare_for_spyre(model: Any) -> None:
             q = pad_qk_proj_for_rope(q, num_q, hd, padded_head_dim)
             k = pad_qk_proj_for_rope(k, num_kv, hd, padded_head_dim)
             v = _pad_proj_output_simple(v, num_kv, hd, padded_head_dim)
-            layer.self_attn.o_proj = _pad_proj_input_simple(
-                layer.self_attn.o_proj, num_q, hd, padded_head_dim
+            # Q/K/V are replicated, but O may be a rowwise local shard. Pad
+            # only the heads owned here and retain the module's split-input
+            # and all-reduce forward. Device weights must be staged before
+            # the helper's CPU slicing/assignment.
+            o_proj: nn.Linear = layer.self_attn.o_proj
+            local_width = o_proj.weight.shape[1]
+            if local_width % hd:
+                raise ValueError(
+                    "Phi-3 TP head padding requires whole heads per o_proj shard; "
+                    f"got {local_width} columns with head_dim={hd}"
+                )
+            o_proj.to("cpu")
+            padded_o: nn.Linear = _pad_proj_input_simple(
+                o_proj, local_width // hd, hd, padded_head_dim
             )
+            o_proj.weight = padded_o.weight
+            o_proj.bias = padded_o.bias
+            o_proj.in_features = padded_o.in_features
+            o_proj.out_features = padded_o.out_features
         model._spyre_q_projs.append(q)
         model._spyre_k_projs.append(k)
         model._spyre_v_projs.append(v)

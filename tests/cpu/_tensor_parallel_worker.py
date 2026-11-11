@@ -27,6 +27,7 @@ from transformers import (
     GraniteForCausalLM,
     Phi3Config,
     Phi3ForCausalLM,
+    PreTrainedModel,
     Qwen3_5ForCausalLM,
     Qwen3_5MoeForCausalLM,
     Qwen3_5MoeTextConfig,
@@ -182,25 +183,41 @@ def check_styles(root: Path, world_size: int, rank: int) -> None:
     assert plan["experts.down_proj"] == SPYRE_CPU_ROWWISE
 
 
+def check_save_rejected(model: PreTrainedModel, destination: Path) -> None:
+    for distributed_checkpoint in (False, True):
+        with pytest.raises(NotImplementedError, match="save_pretrained.*Spyre TP"):
+            model.save_pretrained(
+                destination, distributed_checkpoint=distributed_checkpoint
+            )
+        assert not destination.exists(), "saving must fail before creating any files"
+
+
 def check_models(root: Path, world_size: int, rank: int) -> None:
     for family, config_cls, model_cls, adapter, kv_heads in (
         ("qwen3", Qwen3Config, Qwen3ForCausalLM, hf_qwen3, 4),
         ("granite", GraniteConfig, GraniteForCausalLM, hf_granite, 4),
         ("gemma3", Gemma3TextConfig, Gemma3ForCausalLM, hf_gemma3, 1),
         ("gemma4", Gemma4TextConfig, Gemma4ForCausalLM, hf_gemma4, 2),
+        ("gemma4_replicated", Gemma4TextConfig, Gemma4ForCausalLM, hf_gemma4, 2),
         ("gemma4_moe", Gemma4TextConfig, Gemma4ForCausalLM, hf_gemma4_moe, 2),
         ("phi3", Phi3Config, Phi3ForCausalLM, hf_phi3, 4),
+        ("phi3_padded", Phi3Config, Phi3ForCausalLM, hf_phi3, 4),
         ("qwen3_5", Qwen3_5TextConfig, Qwen3_5ForCausalLM, hf_qwen3_5, 4),
         ("qwen3_5_moe", Qwen3_5MoeTextConfig, Qwen3_5MoeForCausalLM, hf_qwen3_5_moe, 4),
     ):
+        base_family = family.removesuffix("_replicated").removesuffix("_padded")
+        hidden_size = (
+            384 if family == "phi3_padded" else 512 if base_family == "phi3" else 256
+        )
+        tp_plan: str | dict[str, str] = {} if family == "gemma4_replicated" else "auto"
         config = config_cls(
             vocab_size=131,
-            hidden_size=512 if family == "phi3" else 256,
+            hidden_size=hidden_size,
             intermediate_size=512,
             num_hidden_layers=2,
             num_attention_heads=4,
             num_key_value_heads=kv_heads,
-            head_dim=128,
+            head_dim=96 if family == "phi3_padded" else 128,
             max_position_embeddings=256,
             tie_word_embeddings=False,
             pad_token_id=0,
@@ -213,7 +230,11 @@ def check_models(root: Path, world_size: int, rank: int) -> None:
                     "moe_intermediate_size": 256,
                     "shared_expert_intermediate_size": 256,
                     "layer_types": [
-                        "full_attention" if family == "phi3" else "linear_attention",
+                        (
+                            "full_attention"
+                            if base_family == "phi3"
+                            else "linear_attention"
+                        ),
                         "full_attention",
                     ],
                     "linear_num_key_heads": 2,
@@ -226,7 +247,7 @@ def check_models(root: Path, world_size: int, rank: int) -> None:
                         "partial_rotary_factor": 0.75,
                     },
                 }
-                if family in ("phi3", "qwen3_5", "qwen3_5_moe")
+                if base_family in ("phi3", "qwen3_5", "qwen3_5_moe")
                 else (
                     {
                         "global_head_dim": 128,
@@ -241,7 +262,7 @@ def check_models(root: Path, world_size: int, rank: int) -> None:
                         "top_k_experts": 2,
                         "moe_intermediate_size": 256,
                     }
-                    if family in ("gemma4", "gemma4_moe")
+                    if base_family in ("gemma4", "gemma4_moe")
                     else {}
                 )
             ),
@@ -258,9 +279,11 @@ def check_models(root: Path, world_size: int, rank: int) -> None:
             adapter,
             torch.float32,
             AutoModelForCausalLM,
-            tp_plan="auto",
+            tp_plan=tp_plan,
         )
         assert not any(isinstance(param, DTensor) for param in loaded.parameters())
+        if family == "qwen3":
+            check_save_rejected(loaded, root / "save-before-preparation")
         torch.testing.assert_close(
             loaded(ids, use_cache=False).logits, expected, atol=2e-6, rtol=2e-5
         )
@@ -276,8 +299,14 @@ def check_models(root: Path, world_size: int, rank: int) -> None:
             # checkpoint converter, local placement, and stock TP forward.
             continue
         spyre = auto_spyre_model.AutoSpyreModelForCausalLM.from_pretrained(
-            str(checkpoint), dtype=torch.float32, tp_plan="auto"
+            str(checkpoint), dtype=torch.float32, tp_plan=tp_plan
         )
+        if family == "qwen3":
+            check_save_rejected(spyre, root / "save-after-preparation")
+        if family == "phi3_padded":
+            projection = spyre.model.layers[0].self_attn.o_proj
+            assert projection.weight.shape == (384, 512 // world_size)
+            assert projection._hf_tp_plan == "spyre_rowwise_split_input"
         expected_generation = reference.generate(
             ids,
             max_new_tokens=3,

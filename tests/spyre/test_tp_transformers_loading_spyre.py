@@ -45,9 +45,11 @@ class _TPNumericalMismatchError(AssertionError):
         "granite",
         "gemma3",
         "phi3",
+        "phi3_padded",
         "qwen3_5",
         "qwen3_5_moe",
         "gemma4",
+        "gemma4_replicated",
         pytest.param(
             "gemma4_moe",
             marks=pytest.mark.xfail(
@@ -70,7 +72,11 @@ class _TPNumericalMismatchError(AssertionError):
 def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
     torch.set_num_threads(2)
     torch.random.default_generator.manual_seed(522)
-    base_family = family.removesuffix("_hybrid")
+    base_family = (
+        family.removesuffix("_hybrid")
+        .removesuffix("_replicated")
+        .removesuffix("_padded")
+    )
     config_cls, model_cls = {
         "qwen3": (Qwen3Config, Qwen3ForCausalLM),
         "granite": (GraniteConfig, GraniteForCausalLM),
@@ -121,14 +127,16 @@ def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
         )
     config = config_cls(
         vocab_size=256,
-        hidden_size=512 if family == "phi3" else 256,
+        hidden_size=(
+            384 if family == "phi3_padded" else 512 if base_family == "phi3" else 256
+        ),
         intermediate_size=512,
         num_hidden_layers=2,
         num_attention_heads=4,
         num_key_value_heads=(
             1 if family == "gemma3" else 2 if family.startswith("gemma4") else 4
         ),
-        head_dim=128,
+        head_dim=96 if family == "phi3_padded" else 128,
         max_position_embeddings=256,
         tie_word_embeddings=False,
         eos_token_id=None,
@@ -161,7 +169,9 @@ def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
         else:
             reference.save_pretrained(checkpoint)
         model = AutoSpyreModelForCausalLM.from_pretrained(
-            checkpoint, dtype=torch.float16, tp_plan="auto"
+            checkpoint,
+            dtype=torch.float16,
+            tp_plan={} if family == "gemma4_replicated" else "auto",
         )
         dist.barrier()  # All ranks must finish reading before rank zero cleans up.
     assert dist.is_initialized()

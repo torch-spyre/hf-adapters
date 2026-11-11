@@ -21,7 +21,9 @@ HF_HUB_OFFLINE=1 OMP_NUM_THREADS=1 uv run --no-sync python -m pytest \
 The loading test launches real Gloo workers at TP2 and TP4, requiring local
 socket access. It covers checkpoint slicing, grouped KV replication, packed
 and separate expert weights, CPU staging, tied embeddings, exact plan overrides,
-and incomplete checkpoints. Native HF forwards and supported CPU adapter paths
+incomplete checkpoints, and rejection of unsafe TP checkpoint saving. Phi-3
+includes 96-wide heads that require padding; Gemma 4 includes an explicit empty
+(replicated) plan. Native HF forwards and supported CPU adapter paths
 are compared in float32; packed Gemma MoE adapter execution requires Spyre.
 Separate tests check repeated fullgraph compilation with rowwise bias, private
 upstream API signatures, rotary configuration, and vision parity.
@@ -43,7 +45,7 @@ python -m torch.distributed.run --standalone --nproc-per-node=2 \
   tests/spyre/test_tp_embedding_collective_spyre.py -sv --tb=short
 ```
 
-The ten small-checkpoint cases use fp16, two input sequences, and three generated
+The twelve small-checkpoint cases use fp16, two input sequences, and three generated
 tokens. They require finite logits, exact token agreement, and HF-reference
 logit parity (`atol=0.02`, `rtol=0.02`) on every rank. The biased linear test
 covers repeated compiled prefill and decode; the embedding test checks exact
@@ -71,6 +73,13 @@ The loader rejects missing or mismatched Spyre-planned checkpoint weights,
 excluding legitimate tied aliases, before HF can allocate generic device
 buffers. Its scoped patches affect the process: independent HF model loads
 must be serialized while `spyre_tp_loading()` is active.
+
+`save_pretrained()` is explicitly unsupported on Spyre TP models, including
+before adapter preparation and when requesting a distributed checkpoint. HF
+5.22 only gathers DTensors; saving our ordinary local parameters would silently
+write incomplete weights. The guard raises before creating output files. Load
+the original checkpoint without Spyre TP when a complete checkpoint is needed.
+Phi-3 padding requires each output-projection shard to contain whole heads.
 
 These tests do not cover every registered production checkpoint, the complete
 OOT matrix, or four-card Spyre execution. Vocab-parallel embedding stages integer

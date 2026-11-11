@@ -27,6 +27,7 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import replace
 from datetime import timedelta
 from functools import lru_cache
+from types import MethodType
 from typing import Any, Literal
 from unittest.mock import patch
 
@@ -564,6 +565,14 @@ def _gather_uneven_last_dim(
     )
 
 
+def _reject_local_tp_save(model: nn.Module, *args: Any, **kwargs: Any) -> None:
+    """HF 5.22 cannot reconstruct global weights from our ordinary local shards."""
+    raise NotImplementedError(
+        "save_pretrained() is not supported for Spyre TP models with local weights. "
+        "Load the original checkpoint without Spyre TP to save a complete model."
+    )
+
+
 @contextmanager
 def spyre_tp_loading() -> Iterator[None]:
     """Bridge HF's DTensor loader to Spyre's local-parameter compiled adapters.
@@ -717,6 +726,11 @@ def spyre_tp_loading() -> Iterator[None]:
                 if style is not None and style.copy_kind == "cpu":
                     staged_parameters.add(name)
             model._tp_plan = dict(plan)
+            # HF's save helper only gathers DTensors. Its ordinary-tensor path
+            # would silently write rank zero's local shards as full weights.
+            # Keep this per-model guard after the temporary loader patches exit,
+            # including before adapter preparation or process-group teardown.
+            model.save_pretrained = MethodType(_reject_local_tp_save, model)
             handle = model.register_state_dict_post_hook(preserve_placement_tags)
             cleanup.callback(handle.remove)
             return original_resolve(model, replace(distributed_config, tp_plan=None))

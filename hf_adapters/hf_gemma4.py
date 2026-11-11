@@ -90,6 +90,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributed.device_mesh import DeviceMesh
 
 from hf_adapters.hf_common import (
     InvFreqShim,
@@ -107,6 +108,7 @@ from hf_adapters.hf_common import (
     text_config,
 )
 from hf_adapters.spyre_tensor_parallel import (
+    SPYRE_REPLICATED,
     SPYRE_REPLICATED_LINEAR,
     SPYRE_ROWWISE,
     grouped_kv_projection_modules,
@@ -751,7 +753,13 @@ def _make_block_forward(spec):
     return forward
 
 
-def _block_spec(block, layer_type, window_size, swa_mode, swa_is_causal):
+def _block_spec(
+    block: Gemma4Block,
+    layer_type: str,
+    window_size: int,
+    swa_mode: str | None,
+    swa_is_causal: bool,
+) -> _Gemma4BlockSpec:
     kind, attn = _block_kind_and_attention(block)
     if kind == "writer":
         num_kv_heads = attn.num_kv_heads
@@ -811,29 +819,35 @@ def _block_spec(block, layer_type, window_size, swa_mode, swa_is_causal):
     # hooks. The compiled executor uses their weights through F.linear instead,
     # so carry the process-group name into the graph and reduce explicitly.
     rowwise_projections = (attn.o_proj, block.mlp.down_proj)
-    device_meshes = [
+    device_meshes: list[DeviceMesh | None] = [
         getattr(projection, "_hf_device_mesh", None)
         for projection in rowwise_projections
     ]
-    if any(mesh is not None for mesh in device_meshes):
+    plans: list[str | None] = [
+        getattr(projection, "_hf_tp_plan", None) for projection in rowwise_projections
+    ]
+    tp_group_name: str | None
+    if all(plan in (None, SPYRE_REPLICATED, SPYRE_REPLICATED_LINEAR) for plan in plans):
+        # Explicit empty plans still attach a mesh for replicated placement.
+        # These weights are complete; reducing their outputs would scale them
+        # by the TP degree.
+        tp_group_name = None
+    else:
         if any(mesh is None for mesh in device_meshes):
             raise ValueError(
                 "Gemma 4 TP requires both o_proj and down_proj on a device mesh"
             )
-        plans = [
-            getattr(projection, "_hf_tp_plan", None)
-            for projection in rowwise_projections
-        ]
         if any(plan != SPYRE_ROWWISE for plan in plans):
             raise ValueError(
-                "Gemma 4 compiled TP requires rowwise o_proj and down_proj"
+                "Gemma 4 compiled TP requires matching rowwise or replicated "
+                "o_proj and down_proj"
             )
-        group_names = [mesh.get_group().group_name for mesh in device_meshes]
+        group_names = [
+            mesh.get_group().group_name for mesh in device_meshes if mesh is not None
+        ]
         if group_names[0] != group_names[1]:
             raise ValueError("Gemma 4 o_proj and down_proj must use the same TP group")
         tp_group_name = group_names[0]
-    else:
-        tp_group_name = None
 
     # Gemma 4's base TP plan deliberately omits the PLE projections. The
     # adapter's plan completion therefore replicates them, and unlike o_proj
