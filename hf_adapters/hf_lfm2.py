@@ -34,6 +34,7 @@ from hf_adapters.hf_common import (
     kv_cache_update,
     pad_attention_heads,
     prepare_lm_head_for_spyre,
+    query_validity_mask,
     run_lm_head,
 )
 
@@ -263,14 +264,26 @@ def _make_conv_block(layer):
     )
 
 
+def _pad_decode_validity(mask):
+    # A one-token decode only occupies column zero of the convolution stick.
+    # Avoid F.pad's unaligned slice write, which Spyre cannot lower for B=1.
+    columns = torch.arange(BLOCK_SIZE, dtype=mask.dtype).to(mask.device)
+    return mask * (columns == 0).to(mask.dtype)
+
+
+_compiled_pad_decode_validity = torch.compile(
+    _pad_decode_validity, dynamic=False, fullgraph=True
+)
+
+
 def _padding_mask(attn_mask, seq_len, cache_index):
     """Recover per-query input validity from the additive causal mask."""
-    block_start = int(cache_index[0])
-    rows = torch.arange(seq_len)
-    diagonal = attn_mask.to("cpu")[:, 0, rows, block_start + rows]
-    padding_mask = (diagonal == 0).to(dtype=attn_mask.dtype)
+    padding_mask = query_validity_mask(attn_mask)
     if seq_len == 1:
-        padding_mask = F.pad(padding_mask, (0, BLOCK_SIZE - 1))
+        if padding_mask.device.type == "spyre":
+            padding_mask = _compiled_pad_decode_validity(padding_mask)
+        else:
+            padding_mask = F.pad(padding_mask, (0, BLOCK_SIZE - 1))
     return padding_mask.to(device=DEVICE)
 
 
