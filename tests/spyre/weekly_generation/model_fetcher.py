@@ -96,8 +96,12 @@ def fetch(
     return models
 
 
-def _curated_and_registry_ids(model_type: ModelType) -> list[str]:
-    """Curated-file ids, then registry paths not already listed, in that order."""
+def by_name_ids(model_type: ModelType) -> list[str]:
+    """Curated-file ids, then registry paths not already listed, in that order.
+
+    Public so the cache warm-up (``.github/cache_config/warm_top_models_cache.py``)
+    builds its list from the same by-name ids as the scan.
+    """
     seen: set[str] = set()
     model_ids: list[str] = []
     for model_id in (
@@ -135,7 +139,7 @@ def load_by_name(model_type: ModelType) -> list[dict]:
     abort the weekly scan.
     """
     curated_count: int = len(all_curated_loaders[model_type]())
-    model_ids: list[str] = _curated_and_registry_ids(model_type)
+    model_ids: list[str] = by_name_ids(model_type)
     print(
         f"{ts()} Found {len(model_ids)} by-name {model_type} model(s): "
         f"{curated_count} curated + {len(model_ids) - curated_count} more "

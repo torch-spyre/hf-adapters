@@ -22,6 +22,7 @@ state in one process.
 import os
 import sys
 import traceback as _traceback
+from contextlib import AbstractContextManager, nullcontext
 from datetime import date
 from multiprocessing.queues import SimpleQueue
 
@@ -50,6 +51,8 @@ def _process_batch(
     result_queue: SimpleQueue,
     model_type: ModelType,
     snapshot_date: date,
+    random_init: bool = False,
+    seed: int = 42,
 ) -> None:
     """Worker target: evaluate up to one batch of models in a single spawned child.
 
@@ -137,7 +140,15 @@ def _process_batch(
             rec["adapter_name"] = adapter_name
             rec["added_date"] = adapter_dates.get(adapter_name)
 
-            metrics = eval_model(model_path, adapter_module, model_type)
+            weight_context: AbstractContextManager[None]
+            if random_init:
+                from tests.spyre.weekly_generation.random_weights import random_weights
+
+                weight_context = random_weights(seed)
+            else:
+                weight_context = nullcontext()
+            with weight_context:
+                metrics = eval_model(model_path, adapter_module, model_type)
             rec["verified_on_cpu"] = bool(metrics.get("load", False))
             rec["verified_on_spyre"] = bool(metrics.get("correct", False))
             rec["error"] = metrics.get("error") or None

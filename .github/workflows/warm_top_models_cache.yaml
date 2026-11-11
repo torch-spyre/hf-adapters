@@ -1,0 +1,201 @@
+name: 'warm_top_models_cache'
+
+# One-off: fill the shared HF cache with the weekly scan's selection (#752): per
+# model type, the by-name models (curated + model registry), the top-K by
+# downloads and the top-K by trending, minus models over 60B or with no adapter.
+# One model at a time, with a pause between models. See
+# .github/cache_config/warm_top_models_cache.py. Already-cached models are skipped
+# without a network call, so dispatch again to carry on after a stop.
+#
+# Avoid the weekly scan window (Saturday 22:00 UTC to Monday 09:00 New York):
+# the scan reads this same cache and does its own downloads.
+#
+# Pull requests and pushes that touch these scripts run only the offline tests.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/cache_config/warm_top_models_cache.py
+      - .github/cache_config/estimate_top_models_cache_size.py
+      - .github/cache_config/hf_snapshot_worker.py
+      - .github/cache_config/test_warm_top_models_cache.py
+      - .github/cache_config/test_estimate_top_models_cache_size.py
+      - .github/workflows/warm_top_models_cache.yaml
+      - utils/hf_model_catalog.py
+      - tests/spyre/weekly_generation/model_fetcher.py
+      - .github/cache_config/model_list_from_csvs.py
+      - .github/cache_config/test_model_list_from_csvs.py
+  push:
+    branches: [main]
+    paths:
+      - .github/cache_config/warm_top_models_cache.py
+      - .github/cache_config/estimate_top_models_cache_size.py
+      - .github/cache_config/hf_snapshot_worker.py
+      - .github/cache_config/test_warm_top_models_cache.py
+      - .github/cache_config/test_estimate_top_models_cache_size.py
+      - .github/workflows/warm_top_models_cache.yaml
+      - utils/hf_model_catalog.py
+      - tests/spyre/weekly_generation/model_fetcher.py
+      - .github/cache_config/model_list_from_csvs.py
+      - .github/cache_config/test_model_list_from_csvs.py
+  workflow_dispatch:
+    inputs:
+      top_k_downloads:
+        description: 'Per model type, top models by downloads in the last 30 days (0 skips)'
+        required: true
+        type: number
+        default: 1000
+      top_k_trending:
+        description: 'Per model type, top models by trending score (0 skips)'
+        required: true
+        type: number
+        default: 1000
+      all_models:
+        description: 'Also warm models no adapter resolves for (the scan never loads them)'
+        required: true
+        type: boolean
+        default: false
+      sleep_seconds:
+        description: 'Pause between models, in seconds'
+        required: true
+        type: number
+        default: 15
+      min_free_gb:
+        description: 'Stop when free space on /storage-1 drops below this many GB'
+        required: true
+        type: number
+        default: 500
+      max_hours:
+        description: 'Stop cleanly after this many hours (job timeout is 72h)'
+        required: true
+        type: number
+        default: 70
+      dry_run:
+        description: 'Only estimate the download size; download nothing'
+        required: true
+        type: boolean
+        default: true
+      exact_sizes:
+        description: 'Estimate from real Hub file sizes (one extra request per model)'
+        required: true
+        type: boolean
+        default: false
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Warm-cache tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      # The scripts import the fetchers (transformers, huggingface_hub), so the
+      # tests need the same locked dependencies as the warm job. No network calls.
+      - name: Install Python dependencies
+        run: |
+          uv venv
+          uv sync --frozen --no-install-project --no-default-groups --group models-ops
+
+      - name: Run tests
+        run: >-
+          .venv/bin/python -m unittest discover -s .github/cache_config
+          -p 'test_*.py' -v
+
+  warm_cache:
+    if: github.event_name == 'workflow_dispatch'
+    needs: test
+    # Job-level, so test runs on pull requests never queue behind it. Same group
+    # as add_or_remove_artifacts_from_cache, so the nightly cache job never
+    # downloads at the same time as this one; while this runs, the nightly waits.
+    concurrency:
+      group: 'add_or_remove_model_from_cache'
+    runs-on:
+      - x86_64
+      - spyre_pf_x0
+      - linux
+      - image_torch_spyre # set having 0 spyre cards and pvc mounted
+    timeout-minutes: 4320
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_HOME: /storage-1/hf-adapters/.cache/huggingface
+      # Allow Xet to download file chunks in parallel.
+      HF_HUB_DISABLE_XET: '0'
+      HF_HUB_DOWNLOAD_TIMEOUT: '60'
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+      TOKENIZERS_PARALLELISM: 'false'
+      REPORT_FILE: ${{ github.workspace }}/warm_cache_report.jsonl
+      SIZE_ESTIMATE_FILE: ${{ github.workspace }}/cache_size_estimate.csv
+      MODEL_LIST_FILE: ${{ github.workspace }}/model_list.json
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: 'hf-adapters-repo'
+
+      # The fetchers import transformers (for AutoConfig) and the adapter check
+      # imports hf_adapters (torch), so install the locked project dependencies
+      # without torch-spyre.
+      - name: Install Python dependencies
+        working-directory: 'hf-adapters-repo'
+        run: |
+          uv venv
+          source .venv/bin/activate
+          uv sync --frozen --no-install-project --no-default-groups --group models-ops
+
+      # Every dispatch fetches the list once, here, at --catalog-workers' gentle
+      # default of 4 parallel requests, and saves it; the warm step reuses that
+      # file instead of fetching again. The start time is recorded so the warm
+      # step's --max-hours budget covers this fetch too.
+      - name: Fetch the model list and estimate the download size
+        working-directory: 'hf-adapters-repo'
+        run: |
+          echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+          source .venv/bin/activate
+          python .github/cache_config/estimate_top_models_cache_size.py \
+            --top-k-downloads "${{ inputs.top_k_downloads }}" \
+            --top-k-trending "${{ inputs.top_k_trending }}" \
+            ${{ inputs.all_models && '--all-models' || '' }} \
+            --save-model-list "$MODEL_LIST_FILE" \
+            --output-csv "$SIZE_ESTIMATE_FILE" \
+            ${{ inputs.exact_sizes && '--exact' || '' }}
+
+      - name: Warm the cache
+        if: ${{ !inputs.dry_run }}
+        working-directory: 'hf-adapters-repo'
+        env:
+          MAX_HOURS: ${{ inputs.max_hours }}
+        run: |
+          source .venv/bin/activate
+          remaining_hours="$(python -c "import os,time; print(max(0.0, float(os.environ['MAX_HOURS']) - (time.time() - int(os.environ['JOB_START_EPOCH'])) / 3600))")"
+          echo "--max-hours left after the list fetch: ${remaining_hours}"
+          python .github/cache_config/warm_top_models_cache.py \
+            --top-k-downloads "${{ inputs.top_k_downloads }}" \
+            --top-k-trending "${{ inputs.top_k_trending }}" \
+            ${{ inputs.all_models && '--all-models' || '' }} \
+            --model-list-file "$MODEL_LIST_FILE" \
+            --sleep-seconds "${{ inputs.sleep_seconds }}" \
+            --min-free-gb "${{ inputs.min_free_gb }}" \
+            --max-hours "$remaining_hours" \
+            --report-file "$REPORT_FILE"
+
+      - name: Upload report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: warm-cache-report
+          path: |
+            ${{ env.REPORT_FILE }}
+            ${{ env.SIZE_ESTIMATE_FILE }}
+            ${{ env.MODEL_LIST_FILE }}
+          if-no-files-found: ignore
