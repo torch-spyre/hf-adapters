@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 import torch
 import torch.distributed as dist
+from safetensors.torch import save_file
 from torch.distributed.tensor import DTensor
 from transformers import (
     Gemma3ForCausalLM,
@@ -42,6 +43,8 @@ class _TPNumericalMismatchError(AssertionError):
     "family",
     [
         "qwen3",
+        "qwen3_tied_embedding",
+        "qwen3_tied_head",
         "granite",
         "gemma3",
         "phi3",
@@ -72,8 +75,14 @@ class _TPNumericalMismatchError(AssertionError):
 def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
     torch.set_num_threads(2)
     torch.random.default_generator.manual_seed(522)
+    omitted_alias: str | None = {
+        "qwen3_tied_embedding": "lm_head.weight",
+        "qwen3_tied_head": "model.embed_tokens.weight",
+    }.get(family)
     base_family = (
-        family.removesuffix("_hybrid")
+        "qwen3"
+        if omitted_alias is not None
+        else family.removesuffix("_hybrid")
         .removesuffix("_replicated")
         .removesuffix("_padded")
     )
@@ -138,7 +147,7 @@ def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
         ),
         head_dim=96 if family == "phi3_padded" else 128,
         max_position_embeddings=256,
-        tie_word_embeddings=False,
+        tie_word_embeddings=omitted_alias is not None,
         eos_token_id=None,
         pad_token_id=0,
         bos_token_id=1,
@@ -154,6 +163,18 @@ def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
     }
     with torch.no_grad():
         expected = reference.generate(ids, **kwargs)
+
+    def save_checkpoint(path: str) -> None:
+        if omitted_alias is None:
+            reference.save_pretrained(path)
+        else:
+            # Preserve the chosen alias direction instead of letting HF's save
+            # helper choose which copy of shared storage to keep.
+            reference.config.save_pretrained(path)
+            state = dict(reference.state_dict())
+            state.pop(omitted_alias)
+            save_file(state, os.path.join(path, "model.safetensors"))
+
     # Start with independent seeded checkpoints so the public loader can create
     # the first group. Once it exists, HF saves only on rank zero: share that
     # checkpoint without destroying/reinitializing torchrun's rendezvous group.
@@ -164,10 +185,10 @@ def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
             dist.broadcast_object_list(paths, src=0)
             checkpoint = paths[0]
             if dist.get_rank() == 0:
-                reference.save_pretrained(checkpoint)
+                save_checkpoint(checkpoint)
             dist.barrier()
         else:
-            reference.save_pretrained(checkpoint)
+            save_checkpoint(checkpoint)
         model = AutoSpyreModelForCausalLM.from_pretrained(
             checkpoint,
             dtype=torch.float16,

@@ -672,11 +672,39 @@ def spyre_tp_loading() -> Iterator[None]:
     ) -> None:
         # modeling_utils has direct imports of get_device/_dtensor_from_local_like.
         # Reject incomplete planned weights before that path allocates generic
-        # device tensors or wraps local shards back into DTensors. Tied aliases
-        # are legitimately absent and are materialized by HF's tie_weights.
+        # device tensors or wraps local shards back into DTensors. HF tying is
+        # symmetric: any successfully loaded member can supply its tied group.
+        tied_neighbors: dict[str, set[str]] = {}
+        for target, source in model.all_tied_weights_keys.items():
+            tied_neighbors.setdefault(target, set()).add(source)
+            tied_neighbors.setdefault(source, set()).add(target)
+        remaining = set(tied_neighbors)
+        loaded_aliases: set[str] = set()
+        embedding_sources: dict[str, torch.Tensor] = {}
+        while remaining:
+            group: set[str] = set()
+            pending = [remaining.pop()]
+            while pending:
+                name = pending.pop()
+                group.add(name)
+                neighbors = tied_neighbors[name] & remaining
+                remaining.difference_update(neighbors)
+                pending.extend(neighbors)
+            loaded = [
+                name
+                for name in group - missing_keys
+                if not model.get_parameter_or_buffer(name).is_meta
+            ]
+            if not loaded:
+                continue
+            loaded_aliases.update(group)
+            for name in group & missing_keys:
+                ref = model.get_parameter_or_buffer(name)
+                if getattr(ref, "_spyre_copy_kind", None) == "embedding":
+                    embedding_sources.update((alias, ref) for alias in loaded)
         unsupported = sorted(
             name
-            for name in missing_keys - model.all_tied_weights_keys.keys()
+            for name in missing_keys - loaded_aliases
             if hasattr(model.get_parameter_or_buffer(name), "_spyre_copy_kind")
         )
         if unsupported:
@@ -684,8 +712,46 @@ def spyre_tp_loading() -> Iterator[None]:
                 "Spyre TP requires complete checkpoint weights; missing or mismatched "
                 f"planned parameters: {', '.join(unsupported)}"
             )
+        # Reverse tying can make an embedding inherit a linear DMA layout (or
+        # a full vocabulary instead of its local shard). Restore the embedding's
+        # placement before HF shares the loaded parameter with the missing alias.
+        # Adapter preparation later gives the LM head its own linear layout.
+        for name, ref in embedding_sources.items():
+            parameter = model.get_parameter_or_buffer(name)
+            parent_name, _, param_name = name.rpartition(".")
+            parent = model.get_submodule(parent_name)
+            local_shape = (
+                ref.to_local().shape if isinstance(ref, DTensor) else ref.shape
+            )
+            moved: torch.Tensor | None
+            if parameter.shape == local_shape:
+                if parameter.device.type != "spyre" or isinstance(parent, nn.Embedding):
+                    continue
+                moved = _copy_embedding(
+                    parameter.detach().cpu(),
+                    device=parameter.device,
+                    dtype=parameter.dtype,
+                )
+            elif isinstance(ref, DTensor) and parameter.shape == ref.shape:
+                moved = SpyreShardOperation(ref).shard_tensor(
+                    parameter.detach().cpu(),
+                    device=parameter.device,
+                    dtype=parameter.dtype,
+                )
+                assert moved is not None
+            else:
+                raise ValueError(
+                    f"Tied parameter {name} has an incompatible embedding shard shape"
+                )
+            replacement = nn.Parameter(moved, requires_grad=parameter.requires_grad)
+            setattr(replacement, "_is_hf_initialized", True)
+            setattr(parent, param_name, replacement)
+        # Preserve the missing-key set used by HF's later symmetric tie_weights.
+        # Until then, leave resolvable aliases on meta and skip their random init.
+        for name in missing_keys & loaded_aliases:
+            setattr(model.get_parameter_or_buffer(name), "_is_hf_initialized", True)
         original_move_missing(
-            model, missing_keys, device_map, device_mesh, hf_quantizer
+            model, missing_keys - loaded_aliases, device_map, device_mesh, hf_quantizer
         )
 
     def exact_first(

@@ -645,6 +645,65 @@ def test_tp_loader_hooks_restore_after_failure() -> None:
 
 
 @pytest.mark.parametrize(
+    ("loaded_name", "materialized"),
+    [
+        ("source", True),
+        ("first", True),
+        ("second", True),
+        (None, False),
+        ("second", False),
+    ],
+)
+def test_missing_tied_group_requires_a_materialized_member(
+    loaded_name: str | None, materialized: bool
+) -> None:
+    from transformers import PretrainedConfig, PreTrainedModel
+
+    model = PreTrainedModel(PretrainedConfig())
+    names = ("source", "first", "second")
+    for name in names:
+        layer = nn.Linear(4, 4, bias=False, device="meta")
+        setattr(layer.weight, "_spyre_copy_kind", "linear")
+        setattr(model, name, layer)
+    model.all_tied_weights_keys = {
+        "first.weight": "source.weight",
+        "second.weight": "source.weight",
+    }
+    missing = {f"{name}.weight" for name in names if name != loaded_name}
+    # HF marks mapping targets initialized even when they have not been loaded.
+    for key in model.all_tied_weights_keys:
+        setattr(model.get_parameter(key), "_is_hf_initialized", True)
+    if materialized:
+        assert loaded_name is not None
+        model.get_submodule(loaded_name).weight = nn.Parameter(
+            torch.arange(16.0).reshape(4, 4)
+        )
+
+    with spyre_tp_loading():
+        if not materialized:
+            with pytest.raises(
+                ValueError, match="Spyre TP requires complete checkpoint weights"
+            ):
+                model._move_missing_keys_from_meta_to_device(
+                    missing, {"": "cpu"}, None, None
+                )
+            return
+        before = missing.copy()
+        model._move_missing_keys_from_meta_to_device(missing, {"": "cpu"}, None, None)
+        assert missing == before
+        for key in missing:
+            parameter = model.get_parameter(key)
+            assert parameter.is_meta
+            assert parameter._is_hf_initialized
+
+    model.tie_weights(missing_keys=missing, recompute_mapping=False)
+    assert not missing
+    assert loaded_name is not None
+    loaded = model.get_parameter(f"{loaded_name}.weight")
+    assert all(model.get_parameter(f"{name}.weight") is loaded for name in names)
+
+
+@pytest.mark.parametrize(
     ("key", "accepted"),
     [
         ("model.layers.0.self_attn.q_proj", True),

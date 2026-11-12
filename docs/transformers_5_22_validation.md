@@ -21,8 +21,9 @@ HF_HUB_OFFLINE=1 OMP_NUM_THREADS=1 uv run --no-sync python -m pytest \
 The loading test launches real Gloo workers at TP2 and TP4, requiring local
 socket access. It covers checkpoint slicing, grouped KV replication, packed
 and separate expert weights, CPU staging, tied embeddings, exact plan overrides,
-incomplete checkpoints, and rejection of unsafe TP checkpoint saving. Phi-3
-includes 96-wide heads that require padding; Gemma 4 includes an explicit empty
+incomplete checkpoints, both tied-alias directions, and rejection of unsafe TP
+checkpoint saving. Phi-3 includes 96-wide heads that require padding; Gemma 4
+includes an explicit empty
 (replicated) plan. Native HF forwards and supported CPU adapter paths
 are compared in float32; packed Gemma MoE adapter execution requires Spyre.
 Separate tests check repeated fullgraph compilation with rowwise bias, private
@@ -45,11 +46,15 @@ python -m torch.distributed.run --standalone --nproc-per-node=2 \
   tests/spyre/test_tp_embedding_collective_spyre.py -sv --tb=short
 ```
 
-The twelve small-checkpoint cases use fp16, two input sequences, and three generated
+The fourteen small-checkpoint cases use fp16, two input sequences, and three generated
 tokens. They require finite logits, exact token agreement, and HF-reference
 logit parity (`atol=0.02`, `rtol=0.02`) on every rank. The biased linear test
 covers repeated compiled prefill and decode; the embedding test checks exact
 collective output.
+
+Tied Qwen3 checkpoints cover both embedding-only and LM-head-only weights.
+CPU checks also cover both directions with uneven vocabulary shards and reject
+tied groups with no usable checkpoint weight.
 
 Two numerical cases remain strict expected failures:
 

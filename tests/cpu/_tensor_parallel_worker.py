@@ -341,19 +341,23 @@ def check_models(root: Path, world_size: int, rank: int) -> None:
         pad_token_id=0,
     )
     tied_reference = Qwen3ForCausalLM(tied_config).eval()
-    checkpoint = root / "tied"
-    if rank == 0:
-        tied_reference.save_pretrained(checkpoint)
-    dist.barrier()
-    tied_model = auto_spyre_model.AutoSpyreModelForCausalLM.from_pretrained(
-        str(checkpoint),
-        dtype=torch.float32,
-        tp_plan={"model.embed_tokens": "embedding_rowwise"},
-    )
     expected_tokens = tied_reference.generate(ids, max_new_tokens=3, do_sample=False)
-    torch.testing.assert_close(
-        tied_model.generate(ids, max_new_tokens=3, do_sample=False), expected_tokens
-    )
+    for omitted in ("lm_head.weight", "model.embed_tokens.weight"):
+        checkpoint = root / f"tied-{omitted}"
+        if rank == 0:
+            tied_reference.config.save_pretrained(checkpoint)
+            state = dict(tied_reference.state_dict())
+            state.pop(omitted)
+            save_file(state, checkpoint / "model.safetensors")
+        dist.barrier()
+        tied_model = auto_spyre_model.AutoSpyreModelForCausalLM.from_pretrained(
+            str(checkpoint),
+            dtype=torch.float32,
+            tp_plan={"model.embed_tokens": "embedding_rowwise"},
+        )
+        torch.testing.assert_close(
+            tied_model.generate(ids, max_new_tokens=3, do_sample=False), expected_tokens
+        )
 
     # Explicit overrides must win over a wildcard, and unspecified rules in an
     # explicit plan must not be silently merged back from the model defaults.
@@ -386,6 +390,80 @@ def check_models(root: Path, world_size: int, rank: int) -> None:
     assert loaded.model.layers[1].self_attn.k_proj.weight.shape[0] == 512 // world_size
     assert loaded.model.layers[0].self_attn.q_proj.weight.shape[0] == 512
     assert loaded.tp_plan["model.layers.*.self_attn.k_proj"] == SPYRE_COLWISE
+
+
+def check_tied_checkpoint_aliases(world_size: int) -> None:
+    from transformers import modeling_utils
+
+    reference = Qwen3ForCausalLM(
+        Qwen3Config(
+            vocab_size=32,
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            head_dim=8,
+            tie_word_embeddings=True,
+        )
+    ).eval()
+    embedding_key = "model.embed_tokens.weight"
+    head_key = "lm_head.weight"
+    ids = torch.tensor([[1, 3, 5]])
+    expected = reference(ids).logits
+    plan = prepare_spyre_tp_plan(reference, {})
+
+    for omitted in (head_key, embedding_key):
+        state = dict(reference.state_dict())
+        state.pop(omitted)
+        stock = Qwen3ForCausalLM.from_pretrained(
+            None, config=reference.config, state_dict=state, dtype=torch.float32
+        ).eval()
+        torch.testing.assert_close(stock(ids).logits, expected, atol=0, rtol=0)
+        with (
+            spyre_tp_loading(),
+            patch.object(
+                modeling_utils,
+                "_dtensor_from_local_like",
+                side_effect=AssertionError("tied aliases must not allocate DTensors"),
+            ),
+        ):
+            loaded = Qwen3ForCausalLM.from_pretrained(
+                None,
+                config=reference.config,
+                state_dict=state,
+                dtype=torch.float32,
+                distributed_config=DistributedConfig(tp_size=world_size, tp_plan=plan),
+            ).eval()
+        assert loaded.model.embed_tokens.weight is loaded.lm_head.weight
+        assert not any(isinstance(param, DTensor) for param in loaded.parameters())
+        torch.testing.assert_close(loaded(ids).logits, expected, atol=0, rtol=0)
+
+    for invalid in ("both_missing", embedding_key, head_key, "unrelated_missing"):
+        state = dict(reference.state_dict())
+        if invalid == "both_missing":
+            state.pop(embedding_key)
+            state.pop(head_key)
+        elif invalid == "unrelated_missing":
+            state.pop(embedding_key)
+            state.pop("model.layers.0.self_attn.q_proj.weight")
+        else:
+            state.pop(head_key if invalid == embedding_key else embedding_key)
+            state[invalid] = state[invalid][:-1]
+        with (
+            spyre_tp_loading(),
+            pytest.raises(
+                ValueError, match="Spyre TP requires complete checkpoint weights"
+            ),
+        ):
+            Qwen3ForCausalLM.from_pretrained(
+                None,
+                config=reference.config,
+                state_dict=state,
+                dtype=torch.float32,
+                ignore_mismatched_sizes=True,
+                distributed_config=DistributedConfig(tp_size=world_size, tp_plan=plan),
+            )
 
 
 def check_incomplete_checkpoints(root: Path, rank: int) -> None:
@@ -450,6 +528,7 @@ def main() -> None:
         ):
             check_styles(root, world_size, rank)
             check_models(root, world_size, rank)
+            check_tied_checkpoint_aliases(world_size)
             check_incomplete_checkpoints(root, rank)
         print(
             f"TP{world_size} rank {rank}: all loading, placement and numerical checks passed",
