@@ -81,10 +81,15 @@ That SIGTERM goes to the ranks that were still running; torchrun stops the
 whole gang once any rank exits nonzero. It is the result of the failure, never
 the cause -- read the RESULTS SUMMARY above it for the real verdict.
 
-Note: a ``corrupted double-linked list`` / SIGABRT crash may appear after the
-RESULTS SUMMARY prints.  This is a known shutdown bug in the Spyre runtime
-(libsenlib-dd2.so destructors) and does not affect correctness — if the
-summary shows ``Status: PASS`` the test passed.
+Before exiting, the script calls ``dist.destroy_process_group()``. Once
+torch-spyre#6009 lands, this calls ``SpyreCCLBackend::shutdown()`` and so
+``spyre_comms::finalize_library()``; until then ``shutdown()`` is an empty
+function and the call does not reach ``finalize_library()``. The intent is to
+release the Spyre runtime in order instead of leaving it to static destructors
+in unspecified order, which may have contributed to the ``corrupted
+double-linked list`` / SIGABRT after the RESULTS SUMMARY. That has not been
+proven, so if a SIGABRT (exit 134) follows ``Status: PASS``, treat it as a
+teardown problem, not a model failure.
 """
 
 import argparse
@@ -252,7 +257,7 @@ def main(argv: list[str] | None = None) -> None:
 
         def generate_ctx():
             # Exits (and on_trace_ready fires) inside run_multicard_smoke_test,
-            # well before the os._exit() below skips all teardown.
+            # well before the process group is destroyed below.
             return profile(
                 activities=[ProfilerActivity.CPU, ProfilerActivity.PrivateUse1],
                 record_shapes=True,
@@ -336,17 +341,31 @@ def main(argv: list[str] | None = None) -> None:
     # siblings alive, and torchrun SIGTERMs them mid-print -- truncating their
     # summaries and making one rank's failure look like an unrelated signal
     # kill. Sync first so every rank prints fully and they exit together.
+    barrier_ok = True
     if world_size > 1 and dist.is_available() and dist.is_initialized():
         try:
             dist.barrier()
         except Exception as e:  # pragma: no cover - teardown best effort
+            barrier_ok = False
             sys.stdout.write(f"\n[rank {local_rank}] exit barrier skipped: {e}\n")
             sys.stdout.flush()
 
-    # os._exit (not sys.exit) is deliberate: it skips interpreter teardown and
-    # so avoids the libsenlib-dd2.so destructor SIGABRT described in the module
-    # docstring. It also skips atexit/buffer flushing, hence the flushes above.
-    os._exit(1 if failed else 0)
+    # destroy_process_group() -> SpyreCCLBackend::shutdown() ->
+    # spyre_comms::finalize_library() (once torch-spyre#6009 lands). Must run
+    # before interpreter teardown so the Spyre runtime is released in order.
+    # Best effort: a teardown error must not turn the verdict into a traceback.
+    # Skipped if the exit barrier failed, since a peer is likely gone and
+    # finalize_library()'s own barrier could hang until torchrun kills the rank.
+    if barrier_ok and dist.is_available() and dist.is_initialized():
+        try:
+            dist.destroy_process_group()
+        except Exception as e:  # pragma: no cover - teardown best effort
+            sys.stdout.write(
+                f"\n[rank {local_rank}] destroy_process_group failed: {e}\n"
+            )
+            sys.stdout.flush()
+
+    sys.exit(1 if failed else 0)
 
 
 if __name__ == "__main__":
