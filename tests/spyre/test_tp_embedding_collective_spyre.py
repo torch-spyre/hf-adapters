@@ -48,7 +48,7 @@ class _WorldMesh:
         return dist.get_rank()
 
 
-def test_mask_on_host_then_compile_embedding_and_reduce_on_device():
+def test_mask_on_host_then_compile_embedding_and_reduce_on_device() -> None:
     if not dist.is_initialized():
         dist.init_process_group("cpu:gloo,spyre:spyreccl")
 
@@ -70,10 +70,12 @@ def test_mask_on_host_then_compile_embedding_and_reduce_on_device():
     weight = _dma_to_spyre_indirect_access(weight_cpu, device=device)
 
     global_ids = torch.tensor([[0, 511, 512, 1000]], dtype=torch.int32).repeat(1, 16)
-    embedding = torch.nn.Embedding(local_vocab, hidden_size)
-    embedding.weight = torch.nn.Parameter(weight, requires_grad=False)
+    embedding = torch.nn.Embedding(
+        local_vocab * dist.get_world_size(), hidden_size, device="meta"
+    )
     style = SpyreEmbeddingRowwiseParallel()
-    style.prepare_module_tp(embedding, _WorldMesh())
+    style.install_forward(embedding, _WorldMesh())
+    embedding.weight = torch.nn.Parameter(weight, requires_grad=False)
     reduced = embedding(global_ids.to(device))
     expected = global_ids.to(torch.float16).unsqueeze(-1).expand_as(reduced.cpu())
     torch.testing.assert_close(reduced.cpu(), expected, rtol=0, atol=0)

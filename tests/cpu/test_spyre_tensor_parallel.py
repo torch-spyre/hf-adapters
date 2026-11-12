@@ -13,18 +13,17 @@
 # limitations under the License.
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
 import torch.nn as nn
-from safetensors import safe_open
-from safetensors.torch import save_file
-from transformers.integrations.tensor_parallel import ALL_PARALLEL_STYLES
+from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
 
 from hf_adapters import hf_gemma4, hf_gemma4_mm, hf_gemma4_moe
 from hf_adapters.hf_common import (
-    _prefer_exact_tp_plan_entries,
     _resolve_tp_plan,
+    padded_vocab_size,
     prepare_lm_head_for_spyre,
     run_lm_head,
     untie_embedding_and_lm_head,
@@ -41,8 +40,6 @@ from hf_adapters.spyre_tensor_parallel import (
     SPYRE_REPLICATED_EMBEDDING,
     SPYRE_REPLICATED_LINEAR,
     SPYRE_ROWWISE,
-    SpyreColwiseGatherOutputParallel,
-    SpyreColwiseParallel,
     SpyreEmbeddingColwiseParallel,
     SpyreEmbeddingRowwiseParallel,
     SpyreRowwiseParallel,
@@ -50,8 +47,43 @@ from hf_adapters.spyre_tensor_parallel import (
     _matches_plan,
     _reassemble_all_gather_last_dim,
     prepare_spyre_tp_plan,
-    register_spyre_tp_styles,
+    spyre_tp_loading,
 )
+
+
+def test_spyre_loader_initializes_cpu_and_device_backends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from transformers.distributed import utils
+
+    original = utils._ensure_torch_distributed
+    monkeypatch.setenv("RANK", "1")
+    monkeypatch.setenv("LOCAL_RANK", "1")
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setattr(torch.distributed, "is_initialized", Mock(return_value=False))
+    initialize = Mock()
+    monkeypatch.setattr(torch.distributed, "init_process_group", initialize)
+
+    with spyre_tp_loading():
+        utils._ensure_torch_distributed("spyre")
+
+    initialize.assert_called_once()
+    assert initialize.call_args.kwargs["backend"] == "cpu:gloo,spyre:spyreccl"
+    assert initialize.call_args.kwargs.get("device_id") is None
+    assert utils._ensure_torch_distributed is original
+
+
+def test_spyre_loader_keeps_existing_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from transformers.distributed import utils
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", Mock(return_value=True))
+    initialize = Mock()
+    monkeypatch.setattr(torch.distributed, "init_process_group", initialize)
+    with spyre_tp_loading():
+        utils._ensure_torch_distributed("spyre")
+    initialize.assert_not_called()
 
 
 class _ToyModel(nn.Module):
@@ -71,6 +103,8 @@ class _ToyModel(nn.Module):
 
 
 class _FakeMesh:
+    _group = SimpleNamespace(group_name="test_group")
+
     def __init__(self, size, rank):
         self._size = size
         self._rank = rank
@@ -82,8 +116,8 @@ class _FakeMesh:
         return self._rank
 
     @staticmethod
-    def get_group():
-        return SimpleNamespace(group_name="test_group")
+    def get_group() -> SimpleNamespace:
+        return _FakeMesh._group
 
 
 def test_reassemble_dim0_all_gather_on_last_dimension():
@@ -125,11 +159,56 @@ def test_plan_matching_uses_transformers_glob_semantics():
     assert not _matches_plan("model.layers.3.self_attn.q_proj.weight", {})
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "vision.model.layers.3.self_attn.q_proj.weight",
+        "modelXlayers.3.self_attn.q_proj.weight",
+        "model.layers.3.self_attn.q_projection.weight",
+        "model.layers.3.self_attn.q_proj.extra.weight",
+    ],
+)
+def test_plan_matching_rejects_partial_names(name: str) -> None:
+    assert not _matches_plan(name, {"model.layers.*.self_attn.q_proj": SPYRE_COLWISE})
+
+
+@pytest.mark.parametrize("split_input", [False, True])
+def test_biased_rowwise_forward_compiles_once(
+    monkeypatch: pytest.MonkeyPatch, split_input: bool
+) -> None:
+    from torch._dynamo.testing import CompileCounter
+
+    from hf_adapters import spyre_tensor_parallel
+
+    def reduce_twice(value: torch.Tensor, group_name: str) -> torch.Tensor:
+        return value * 2
+
+    monkeypatch.setattr(
+        spyre_tensor_parallel, "spyre_compiled_all_reduce", reduce_twice
+    )
+    layer = nn.Linear(8, 4)
+    bias = layer.bias
+    style = SpyreRowwiseSplitInputParallel() if split_input else SpyreRowwiseParallel()
+    style.install_forward(layer, _FakeMesh(size=2, rank=1))
+    layer.weight = nn.Parameter(torch.randn(4, 4))
+    counter = CompileCounter()
+    compiled = torch.compile(layer, backend=counter, fullgraph=True)
+    for _ in range(3):
+        inputs = torch.randn(2, 8 if split_input else 4)
+        local = inputs[:, 4:] if split_input else inputs
+        expected = torch.nn.functional.linear(local, layer.weight) * 2 + bias
+        torch.testing.assert_close(compiled(inputs), expected)
+        assert layer.bias is bias
+    assert counter.frame_count == 1
+
+
+@pytest.mark.parametrize("padding_idx", [None, 0, 4])
 def test_vocab_parallel_embedding_preserves_custom_forward_and_uneven_range(
-    monkeypatch,
-):
+    monkeypatch: pytest.MonkeyPatch,
+    padding_idx: int | None,
+) -> None:
     class ScaledEmbedding(nn.Embedding):
-        def forward(self, input_ids):
+        def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
             return super().forward(input_ids) * 3
 
     monkeypatch.setattr(torch, "compile", lambda fn, **_kwargs: fn)
@@ -138,9 +217,9 @@ def test_vocab_parallel_embedding_preserves_custom_forward_and_uneven_range(
         lambda outputs, _group_name: outputs,
     )
 
-    embedding = ScaledEmbedding(5, 2)
+    embedding = ScaledEmbedding(5, 2, padding_idx=padding_idx)
     style = SpyreEmbeddingRowwiseParallel()
-    style.prepare_module_tp(embedding, _FakeMesh(size=2, rank=1))
+    style.install_forward(embedding, _FakeMesh(size=2, rank=1))
     # Simulate Transformers replacing the full meta parameter with rank 1's
     # uneven local shard after TP hooks have been installed.
     embedding.weight = nn.Parameter(
@@ -328,7 +407,7 @@ def test_prepare_spyre_tp_plan_translates_and_covers_placement():
     assert result["lm_head"] == SPYRE_REPLICATED_LINEAR
 
 
-def test_embedding_styles_reconstruct_with_their_registered_dimension():
+def test_embedding_styles_reconstruct_with_their_registered_dimension() -> None:
     prepare_spyre_tp_plan(_ToyModel(), {})
 
     row_style = ALL_PARALLEL_STYLES[SPYRE_EMBEDDING_ROWWISE]
@@ -337,9 +416,9 @@ def test_embedding_styles_reconstruct_with_their_registered_dimension():
     reconstructed_col = col_style.__class__()
 
     assert isinstance(reconstructed_row, SpyreEmbeddingRowwiseParallel)
-    assert reconstructed_row.embedding_dim_sharding == 0
+    assert reconstructed_row.shard_dim == 0
     assert isinstance(reconstructed_col, SpyreEmbeddingColwiseParallel)
-    assert reconstructed_col.embedding_dim_sharding == 1
+    assert reconstructed_col.shard_dim == 1
 
 
 def test_explicit_embedding_and_lm_head_styles_are_not_forced_replicated():
@@ -353,78 +432,6 @@ def test_explicit_embedding_and_lm_head_styles_are_not_forced_replicated():
 
     assert result["model.embed_tokens"] == SPYRE_EMBEDDING_ROWWISE
     assert result["lm_head"] == SPYRE_COLWISE
-
-
-def test_cpu_staged_styles_return_local_cpu_shards():
-    register_spyre_tp_styles()
-
-    class Mesh:
-        shape = (2,)
-
-        @staticmethod
-        def size():
-            return 2
-
-    packed = ALL_PARALLEL_STYLES[SPYRE_CPU_PACKED_COLWISE].__class__(
-        device_mesh=Mesh(), rank=1, empty_param=torch.empty(2, 8, 8)
-    )
-    rowwise = ALL_PARALLEL_STYLES[SPYRE_CPU_ROWWISE].__class__(
-        device_mesh=Mesh(), rank=1, empty_param=torch.empty(2, 8, 8)
-    )
-
-    packed_shard = packed.shard_tensor(torch.arange(128).reshape(8, 16))
-    rowwise_shard = rowwise.shard_tensor(torch.arange(128).reshape(2, 8, 8))
-
-    assert packed_shard.device.type == "cpu"
-    assert packed_shard.shape == (4, 16)
-    assert rowwise_shard.device.type == "cpu"
-    assert rowwise_shard.shape == (2, 8, 4)
-
-
-@pytest.mark.parametrize(
-    "style_cls",
-    (
-        SpyreColwiseParallel,
-        SpyreColwiseGatherOutputParallel,
-        SpyreRowwiseParallel,
-        SpyreRowwiseSplitInputParallel,
-    ),
-)
-@pytest.mark.parametrize("checkpoint_slice", (False, True))
-def test_linear_tp_styles_replicate_scalar_conversion_state(
-    monkeypatch, tmp_path, style_cls, checkpoint_slice
-):
-    copied = []
-
-    def fake_copy_default(tensor, *, device, dtype):
-        copied.append((tensor, device, dtype))
-        return tensor.to(dtype=dtype)
-
-    monkeypatch.setattr(
-        "hf_adapters.spyre_tensor_parallel._copy_default", fake_copy_default
-    )
-    scalar = torch.tensor(3.0)
-
-    def check_scalar(param):
-        style = style_cls()
-        result = style.shard_tensor(param, device="spyre:0", dtype=torch.float16)
-        assert result.shape == ()
-        assert result.dtype == torch.float16
-        assert result.item() == scalar.item()
-        assert style.get_expected_sharded_shape(torch.Size([])) == ()
-        assert style.get_expected_sharded_shape([]) == ()
-
-    if checkpoint_slice:
-        checkpoint = tmp_path / "scalar.safetensors"
-        save_file({"clip_bound": scalar}, checkpoint)
-        with safe_open(checkpoint, framework="pt", device="cpu") as tensors:
-            check_scalar(tensors.get_slice("clip_bound"))
-    else:
-        check_scalar(scalar)
-
-    assert [(device, dtype) for _, device, dtype in copied] == [
-        ("spyre:0", torch.float16),
-    ]
 
 
 def test_gemma4_tp4_groups_kv_only_when_a_shard_would_split_a_head():
@@ -588,9 +595,8 @@ def test_gemma4_vlm_forwards_text_policies_and_replicates_vision_encoder():
     )
 
 
-def test_exact_tp_plan_entry_precedes_transformers_wildcard_lookup():
-    from transformers import modeling_utils
-    from transformers.integrations import tensor_parallel
+def test_exact_tp_plan_entry_precedes_transformers_wildcard_lookup() -> None:
+    from transformers.distributed import tensor_parallel
 
     parameter = "model.layers.5.self_attn.k_proj.weight"
     plan = {
@@ -598,14 +604,186 @@ def test_exact_tp_plan_entry_precedes_transformers_wildcard_lookup():
         "model.layers.5.self_attn.k_proj": SPYRE_REPLICATED_LINEAR,
     }
 
-    assert tensor_parallel._get_parameter_tp_plan(parameter, plan) == SPYRE_COLWISE
-    with _prefer_exact_tp_plan_entries():
+    assert tensor_parallel._get_parameter_plan(parameter, plan) == SPYRE_COLWISE
+    with spyre_tp_loading():
         assert (
-            tensor_parallel._get_parameter_tp_plan(parameter, plan)
+            tensor_parallel._get_parameter_plan(parameter, plan)
             == SPYRE_REPLICATED_LINEAR
         )
-        assert (
-            modeling_utils._get_parameter_tp_plan(parameter, plan)
-            == SPYRE_REPLICATED_LINEAR
+    assert tensor_parallel._get_parameter_plan(parameter, plan) == SPYRE_COLWISE
+
+
+def test_single_stick_vocabulary_shard_needs_no_prime_factor() -> None:
+    assert padded_vocab_size(33, 256, 4) == 64
+
+
+def test_tp_loader_hooks_restore_after_failure() -> None:
+    from transformers import PreTrainedModel, core_model_loading
+    from transformers.distributed import mixin, tensor_parallel, utils
+
+    originals = (
+        core_model_loading.DtensorShardOperation,
+        core_model_loading._dtensor_from_local_like,
+        core_model_loading.get_device,
+        tensor_parallel._get_parameter_plan,
+        mixin.resolve_parallel_plans,
+        utils._ensure_torch_distributed,
+        PreTrainedModel._move_missing_keys_from_meta_to_device,
+    )
+    with pytest.raises(RuntimeError, match="checkpoint failure"):
+        with spyre_tp_loading():
+            raise RuntimeError("checkpoint failure")
+    assert originals == (
+        core_model_loading.DtensorShardOperation,
+        core_model_loading._dtensor_from_local_like,
+        core_model_loading.get_device,
+        tensor_parallel._get_parameter_plan,
+        mixin.resolve_parallel_plans,
+        utils._ensure_torch_distributed,
+        PreTrainedModel._move_missing_keys_from_meta_to_device,
+    )
+
+
+@pytest.mark.parametrize(
+    ("loaded_name", "materialized"),
+    [
+        ("source", True),
+        ("first", True),
+        ("second", True),
+        (None, False),
+        ("second", False),
+    ],
+)
+def test_missing_tied_group_requires_a_materialized_member(
+    loaded_name: str | None, materialized: bool
+) -> None:
+    from transformers import PretrainedConfig, PreTrainedModel
+
+    model = PreTrainedModel(PretrainedConfig())
+    names = ("source", "first", "second")
+    for name in names:
+        layer = nn.Linear(4, 4, bias=False, device="meta")
+        setattr(layer.weight, "_spyre_copy_kind", "linear")
+        setattr(model, name, layer)
+    model.all_tied_weights_keys = {
+        "first.weight": "source.weight",
+        "second.weight": "source.weight",
+    }
+    missing = {f"{name}.weight" for name in names if name != loaded_name}
+    # HF marks mapping targets initialized even when they have not been loaded.
+    for key in model.all_tied_weights_keys:
+        setattr(model.get_parameter(key), "_is_hf_initialized", True)
+    if materialized:
+        assert loaded_name is not None
+        model.get_submodule(loaded_name).weight = nn.Parameter(
+            torch.arange(16.0).reshape(4, 4)
         )
-    assert tensor_parallel._get_parameter_tp_plan(parameter, plan) == SPYRE_COLWISE
+
+    with spyre_tp_loading():
+        if not materialized:
+            with pytest.raises(
+                ValueError, match="Spyre TP requires complete checkpoint weights"
+            ):
+                model._move_missing_keys_from_meta_to_device(
+                    missing, {"": "cpu"}, None, None
+                )
+            return
+        before = missing.copy()
+        model._move_missing_keys_from_meta_to_device(missing, {"": "cpu"}, None, None)
+        assert missing == before
+        for key in missing:
+            parameter = model.get_parameter(key)
+            assert parameter.is_meta
+            assert parameter._is_hf_initialized
+
+    model.tie_weights(missing_keys=missing, recompute_mapping=False)
+    assert not missing
+    assert loaded_name is not None
+    loaded = model.get_parameter(f"{loaded_name}.weight")
+    assert all(model.get_parameter(f"{name}.weight") is loaded for name in names)
+
+
+@pytest.mark.parametrize(
+    ("key", "accepted"),
+    [
+        ("model.layers.0.self_attn.q_proj", True),
+        ("model.layers.0.self_attn.q_proj.weight", True),
+        ("model.layers.*.self_attn.q_proj", True),
+        ("model.layers.*.self_attn.q_proj.weight", True),
+        ("model.layers.*.optional_proj", True),
+        ("vision.model.layers.0.self_attn.q_proj", False),
+        ("model.layers.*.self_attn.q_*", False),
+    ],
+)
+def test_tp_plan_validation_accepts_only_resolvable_or_declared_keys(
+    key: str, accepted: bool
+) -> None:
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+    from transformers.distributed import DistributedConfig, mixin, tensor_parallel
+
+    with torch.device("meta"):
+        model = Qwen3ForCausalLM(
+            Qwen3Config(
+                vocab_size=128,
+                hidden_size=128,
+                intermediate_size=256,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                num_key_value_heads=2,
+                head_dim=64,
+            )
+        )
+    # HF defaults may name optional branches absent from a particular config.
+    model._tp_plan["model.layers.*.optional_proj"] = "colwise"
+    plan = prepare_spyre_tp_plan(model, {key: "colwise"})
+    config = DistributedConfig(tp_size=2, tp_plan=plan)
+
+    with spyre_tp_loading():
+        if not accepted:
+            with pytest.raises(ValueError, match="TP plan keys match no model"):
+                mixin.resolve_parallel_plans(model, config)
+            return
+        resolved, _ = mixin.resolve_parallel_plans(model, config)
+        assert resolved[key] == SPYRE_COLWISE
+        parameter = key.replace("*", "0")
+        if not parameter.endswith(".weight"):
+            parameter += ".weight"
+        assert tensor_parallel._get_parameter_plan(parameter, resolved) == SPYRE_COLWISE
+
+
+def test_cpu_staging_survives_converter_final_device_lookup() -> None:
+    from transformers import Qwen3Config, Qwen3ForCausalLM, core_model_loading
+    from transformers.distributed import DistributedConfig, mixin
+
+    with torch.device("meta"):
+        model = Qwen3ForCausalLM(
+            Qwen3Config(
+                vocab_size=128,
+                hidden_size=128,
+                intermediate_size=256,
+                num_hidden_layers=2,
+                num_attention_heads=2,
+                num_key_value_heads=2,
+                head_dim=64,
+            )
+        )
+    staged = "model.layers.0.self_attn.q_proj"
+    plan = prepare_spyre_tp_plan(
+        model,
+        {"model.layers.*.self_attn.q_proj": "colwise"},
+        cpu_replicated_modules={staged},
+    )
+    device_map = {"": "cuda:7"}
+    with spyre_tp_loading():
+        mixin.resolve_parallel_plans(model, DistributedConfig(tp_size=2, tp_plan=plan))
+        assert core_model_loading.get_device(device_map, f"{staged}.weight") == "cpu"
+        assert core_model_loading.get_device(
+            device_map, f"{staged}.weight", valid_torch_device=True
+        ) == torch.device("cpu")
+        assert (
+            core_model_loading.get_device(
+                device_map, "model.layers.1.self_attn.q_proj.weight"
+            )
+            == "cuda:7"
+        )
+    assert core_model_loading.get_device(device_map, f"{staged}.weight") == "cuda:7"

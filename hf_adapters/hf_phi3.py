@@ -34,6 +34,8 @@ Usage::
     outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
+from typing import Any
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -61,6 +63,23 @@ from hf_adapters.hf_common import (
 # Partial-RoPE alignment (rope_dim_permutation / permute_proj_for_rope /
 # pad_qk_proj_for_rope) is shared with hf_gpt_neox and lives in hf_common.
 # ---------------------------------------------------------------------------
+
+
+def spyre_tp_cpu_replicated_modules(model: nn.Module, tp_size: int) -> set[str]:
+    """Stage full fused weights for the adapter's QKV and gate/up splitting.
+
+    HF gathers the outputs of these projections before splitting them. This
+    adapter instead splits their weights during preparation, bypassing the
+    gather hooks. Keep those weights replicated on CPU until preparation;
+    o_proj and down_proj retain HF's rowwise split-input placement.
+    """
+    del tp_size
+    return {
+        name
+        for name, module in model.named_modules()
+        if isinstance(module, nn.Linear)
+        and name.endswith((".self_attn.qkv_proj", ".mlp.gate_up_proj"))
+    }
 
 
 def _split_fused_qkv(attn, num_q, num_kv, head_dim):
@@ -206,7 +225,7 @@ def _run_forward(
     return run_lm_head(model, h)
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model: Any) -> None:
     """Apply Spyre adaptations to Phi-3 model in-place."""
     cfg = model.config
     hd = cfg.hidden_size // cfg.num_attention_heads
@@ -239,7 +258,7 @@ def prepare_for_spyre(model):
     # apply_rope_matmul pairs (j, j+head_dim//2). Permute Q/K weights so
     # both agree. Q·K^T dot product is invariant under same permutation.
     # Computed on the original head_dim; stick padding (below) happens after.
-    prf = getattr(cfg, "partial_rotary_factor", 1.0)
+    prf = (cfg.rope_parameters or {}).get("partial_rotary_factor", 1.0)
     rope_dim = int(prf * hd)
     rope_perm = rope_dim_permutation(hd, rope_dim) if rope_dim != hd else None
 
@@ -260,9 +279,25 @@ def prepare_for_spyre(model):
             q = pad_qk_proj_for_rope(q, num_q, hd, padded_head_dim)
             k = pad_qk_proj_for_rope(k, num_kv, hd, padded_head_dim)
             v = _pad_proj_output_simple(v, num_kv, hd, padded_head_dim)
-            layer.self_attn.o_proj = _pad_proj_input_simple(
-                layer.self_attn.o_proj, num_q, hd, padded_head_dim
+            # Q/K/V are replicated, but O may be a rowwise local shard. Pad
+            # only the heads owned here and retain the module's split-input
+            # and all-reduce forward. Device weights must be staged before
+            # the helper's CPU slicing/assignment.
+            o_proj: nn.Linear = layer.self_attn.o_proj
+            local_width = o_proj.weight.shape[1]
+            if local_width % hd:
+                raise ValueError(
+                    "Phi-3 TP head padding requires whole heads per o_proj shard; "
+                    f"got {local_width} columns with head_dim={hd}"
+                )
+            o_proj.to("cpu")
+            padded_o: nn.Linear = _pad_proj_input_simple(
+                o_proj, local_width // hd, hd, padded_head_dim
             )
+            o_proj.weight = padded_o.weight
+            o_proj.bias = padded_o.bias
+            o_proj.in_features = padded_o.in_features
+            o_proj.out_features = padded_o.out_features
         model._spyre_q_projs.append(q)
         model._spyre_k_projs.append(k)
         model._spyre_v_projs.append(v)
