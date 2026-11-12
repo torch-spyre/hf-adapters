@@ -644,6 +644,54 @@ def test_tp_loader_hooks_restore_after_failure() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("key", "accepted"),
+    [
+        ("model.layers.0.self_attn.q_proj", True),
+        ("model.layers.0.self_attn.q_proj.weight", True),
+        ("model.layers.*.self_attn.q_proj", True),
+        ("model.layers.*.self_attn.q_proj.weight", True),
+        ("model.layers.*.optional_proj", True),
+        ("vision.model.layers.0.self_attn.q_proj", False),
+        ("model.layers.*.self_attn.q_*", False),
+    ],
+)
+def test_tp_plan_validation_accepts_only_resolvable_or_declared_keys(
+    key: str, accepted: bool
+) -> None:
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+    from transformers.distributed import DistributedConfig, mixin, tensor_parallel
+
+    with torch.device("meta"):
+        model = Qwen3ForCausalLM(
+            Qwen3Config(
+                vocab_size=128,
+                hidden_size=128,
+                intermediate_size=256,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                num_key_value_heads=2,
+                head_dim=64,
+            )
+        )
+    # HF defaults may name optional branches absent from a particular config.
+    model._tp_plan["model.layers.*.optional_proj"] = "colwise"
+    plan = prepare_spyre_tp_plan(model, {key: "colwise"})
+    config = DistributedConfig(tp_size=2, tp_plan=plan)
+
+    with spyre_tp_loading():
+        if not accepted:
+            with pytest.raises(ValueError, match="TP plan keys match no model"):
+                mixin.resolve_parallel_plans(model, config)
+            return
+        resolved, _ = mixin.resolve_parallel_plans(model, config)
+        assert resolved[key] == SPYRE_COLWISE
+        parameter = key.replace("*", "0")
+        if not parameter.endswith(".weight"):
+            parameter += ".weight"
+        assert tensor_parallel._get_parameter_plan(parameter, resolved) == SPYRE_COLWISE
+
+
 def test_cpu_staging_survives_converter_final_device_lookup() -> None:
     from transformers import Qwen3Config, Qwen3ForCausalLM, core_model_loading
     from transformers.distributed import DistributedConfig, mixin

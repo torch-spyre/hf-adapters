@@ -29,7 +29,6 @@ from datetime import timedelta
 from functools import lru_cache
 from types import MethodType
 from typing import Any, Literal
-from unittest.mock import patch
 
 import torch
 import torch.nn as nn
@@ -68,7 +67,10 @@ _CopyKind = Literal["default", "linear", "embedding", "cpu"]
 
 
 def _copy_default(
-    shard: torch.Tensor, *, device: torch.device | str | None, dtype: torch.dtype | None
+    shard: torch.Tensor,
+    *,
+    device: torch.device | str | int | None,
+    dtype: torch.dtype | None,
 ) -> torch.Tensor:
     if device is None or torch.device(device).type != "spyre":
         return shard.to(device=device, dtype=dtype)
@@ -81,7 +83,10 @@ def _copy_default(
 
 
 def _copy_linear(
-    shard: torch.Tensor, *, device: torch.device | str | None, dtype: torch.dtype | None
+    shard: torch.Tensor,
+    *,
+    device: torch.device | str | int | None,
+    dtype: torch.dtype | None,
 ) -> torch.Tensor:
     if device is None or torch.device(device).type != "spyre":
         return shard.to(device=device, dtype=dtype)
@@ -96,7 +101,10 @@ def _copy_linear(
 
 
 def _copy_embedding(
-    shard: torch.Tensor, *, device: torch.device | str | None, dtype: torch.dtype | None
+    shard: torch.Tensor,
+    *,
+    device: torch.device | str | int | None,
+    dtype: torch.dtype | None,
 ) -> torch.Tensor:
     if device is None or torch.device(device).type != "spyre":
         return shard.to(device=device, dtype=dtype)
@@ -126,7 +134,7 @@ class SpyreShardOperation(DtensorShardOperation):
         self,
         source: Any,
         tensor_idx: int | None = None,
-        device: torch.device | str | None = None,
+        device: torch.device | str | int | None = None,
         dtype: torch.dtype | None = None,
     ) -> torch.Tensor | None:
         # Weight converters can feed scalar clipping bounds through the same
@@ -386,7 +394,7 @@ class SpyreEmbeddingRowwiseParallel(_SpyreLocalParallel, EmbeddingParallel):
             # embedding call (including these copies), not just its compiled body.
             host = input_tensor.cpu()
             invalid = (host < start) | (host >= end)
-            masked = host.clone() - start
+            masked = host - start
             masked[invalid] = 0
             valid = (
                 (~invalid).to(mod.weight.dtype).unsqueeze(-1).to(input_tensor.device)
@@ -711,12 +719,10 @@ def spyre_tp_loading() -> Iterator[None]:
                 | names
                 | {replace_layer_number_by_wildcard(name) for name in names}
             )
-            unknown = [
-                key
-                for key in plan
-                if key not in known_names
-                and not any(_plan_pattern(key).fullmatch(name) for name in names)
-            ]
+            # HF lookup supports exact names and numeric-component wildcards,
+            # not arbitrary globs. A regex scan both costs keys × names and
+            # accepts patterns that HF would never apply to a parameter.
+            unknown = [key for key in plan if key not in known_names]
             if unknown:
                 raise ValueError(
                     f"TP plan keys match no model modules or parameters: {unknown}"
@@ -736,18 +742,20 @@ def spyre_tp_loading() -> Iterator[None]:
             return original_resolve(model, replace(distributed_config, tp_plan=None))
         return original_resolve(model, distributed_config)
 
-    with (
-        cleanup,
-        patch.object(utils, "_ensure_torch_distributed", initialize_distributed),
-        patch.object(core_model_loading, "DtensorShardOperation", shard_operation),
-        patch.object(core_model_loading, "_dtensor_from_local_like", local_parameter),
-        patch.object(core_model_loading, "get_device", parameter_device),
-        patch.object(tensor_parallel, "_get_parameter_plan", exact_first),
-        patch.object(mixin, "resolve_parallel_plans", resolve_plans),
-        patch.object(
-            PreTrainedModel, "_move_missing_keys_from_meta_to_device", move_missing
-        ),
-    ):
+    replacements: tuple[tuple[object, str, Any], ...] = (
+        (utils, "_ensure_torch_distributed", initialize_distributed),
+        (core_model_loading, "DtensorShardOperation", shard_operation),
+        (core_model_loading, "_dtensor_from_local_like", local_parameter),
+        (core_model_loading, "get_device", parameter_device),
+        (tensor_parallel, "_get_parameter_plan", exact_first),
+        (mixin, "resolve_parallel_plans", resolve_plans),
+        (PreTrainedModel, "_move_missing_keys_from_meta_to_device", move_missing),
+    )
+    with cleanup:
+        for target, name, replacement in replacements:
+            original = getattr(target, name)
+            setattr(target, name, replacement)
+            cleanup.callback(setattr, target, name, original)
         yield
 
 
