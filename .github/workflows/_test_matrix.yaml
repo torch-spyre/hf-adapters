@@ -964,7 +964,8 @@ jobs:
       - spyre_pf_x2
       - linux
       - ${{ inputs.image_label }}
-    timeout-minutes: 30
+    # Cold compilation of the expanded model matrix can exceed 30 minutes.
+    timeout-minutes: 60
     # Gate directly: numerical regressions must fail, including strict XPASS.
     steps:
       - name: Checkout composite actions
