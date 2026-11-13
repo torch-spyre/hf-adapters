@@ -63,6 +63,9 @@ JUNIT_XML ?=
 # it in one shot (ingest_xml.py globs non-recursively).
 RESULTS_DIR ?= .
 
+# Benchmark-definition wrappers (bench-validate, bench-plan, bench-run, ...); see benchmarks/README.md.
+include mk/bench.mk
+
 ifneq ($(MODEL_KEY),)
 K_ARGS := -k "$(MODEL_KEY)"
 else

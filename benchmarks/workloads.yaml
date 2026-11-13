@@ -1,0 +1,8 @@
+apiVersion: bench/v1alpha1
+kind: Workload
+metadata:
+  name: greedy-parity
+  description: "greedy decoding of a model compared with a reference output set; the reference is bound where a case is instantiated"
+spec:
+  type: llm/parity
+  sampling: {temperature: 0, max_tokens: 64}
