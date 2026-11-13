@@ -1,0 +1,4 @@
+apiVersion: bench/v1alpha1
+kind: System
+metadata: {name: hf-models-spyre-fp16}
+spec: {type: kernel/op-library, backend: spyre, library: torch-spyre, precision: fp16, harness: harness-a}

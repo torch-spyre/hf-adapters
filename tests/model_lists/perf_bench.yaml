@@ -1,0 +1,17 @@
+# Benchmark-side metadata for the models in perf.yaml; read only by
+# scripts/generate_bench_definitions.py. perf.yaml stays the single model list.
+#
+# schedule: cadence per perf.yaml section. A model in both sections takes `nightly`.
+# est_hours is a placeholder until measured durations exist. `overrides` is keyed by
+# model path and wins over the section default.
+schedule:
+  nightly: {preferred: nightly, fallback: weekly, est_hours: 1.0, priority: 60}
+  weekly: {preferred: weekly, est_hours: 1.0, priority: 40}
+  overrides: {}
+
+# Model path -> benchmark name where it differs from the path's last segment.
+benchmark_names:
+  ibm-granite/granite-4.1-8b: granite
+
+# Model path whose cases form the sanity tier (the `smoke` selection).
+sanity_model: gpt2

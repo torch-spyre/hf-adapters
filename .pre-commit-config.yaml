@@ -9,6 +9,11 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+        exclude: ^benchmarks/
+      - id: check-yaml
+        name: check yaml (benchmarks, multi-document)
+        args: [--allow-multiple-documents]
+        files: ^benchmarks/
       - id: check-toml
       - id: check-json
       - id: check-added-large-files
@@ -51,3 +56,14 @@ repos:
         language: system
         types: [python]
         files: ^hf_adapters/
+
+  # Benchmark definitions: advisory, passes when the spyre-bench engine is not installed
+  - repo: local
+    hooks:
+      - id: bench-validate
+        name: benchmark definitions
+        entry: scripts/bench_validate_hook.sh
+        language: python
+        additional_dependencies: [pyyaml]
+        files: ^(benchmarks/|tests/model_lists/perf(_bench)?\.yaml$|scripts/generate_bench_definitions\.py$)
+        pass_filenames: false
