@@ -1,0 +1,47 @@
+name: test_merge_group
+
+# Merge-queue stand-in for the Jenkins "Spyre Test (amd64)" required check. Inert unless the
+# repo variable GHA_FULL_MERGE_QUEUE_TESTS is "true"; revert by deleting that variable, not this file.
+run-name: merge-queue
+
+on:
+  merge_group:
+    types: [checks_requested]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  run-tests:
+    if: ${{ vars.GHA_FULL_MERGE_QUEUE_TESTS == 'true' }}
+    uses: ./.github/workflows/_test_matrix.yaml
+    secrets: inherit
+    with:
+      image_label: image_torch_spyre
+      extra_test_flags: -vvv -s
+      extra_test_flags_multi_spyre: -vvv -s
+
+  # The name switches so the required context is only ever posted from here during an outage;
+  # a skipped job under that name would otherwise satisfy it while Jenkins is still testing.
+  gate:
+    name: ${{ vars.GHA_FULL_MERGE_QUEUE_TESTS == 'true' && 'Spyre Test (amd64)' || 'gha-merge-queue-tests (inactive)' }}
+    runs-on: ubuntu-latest
+    needs: [run-tests]
+    if: always()
+    steps:
+      - name: Jenkins owns the check
+        if: ${{ vars.GHA_FULL_MERGE_QUEUE_TESTS != 'true' }}
+        run: echo "GHA_FULL_MERGE_QUEUE_TESTS is not set; Jenkins owns the Spyre Test (amd64) check."
+      - name: Check all suites passed
+        if: ${{ vars.GHA_FULL_MERGE_QUEUE_TESTS == 'true' }}
+        run: |-
+          if ${{ needs.run-tests.result != 'success' }}; then
+            echo "One or more test suites failed."
+            exit 1
+          fi
+          echo "All test suites passed."
