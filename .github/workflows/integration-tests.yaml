@@ -190,6 +190,7 @@ jobs:
           TRIGGERING_SHA: ${{ inputs.triggering_sha || '(not specified)' }}
           PR_URL_HASH: ${{ inputs.pr_url_hash || '(not specified)' }}
           HF_ADAPTERS_REF: ${{ inputs.ref || github.sha }}
+          TORCH_SPYRE_REF: ${{ inputs.torch_spyre_ref || '(none)' }}
         run: |
           {
             echo "## Integration test triggered by upstream change"
@@ -200,6 +201,7 @@ jobs:
             echo "| Upstream commit | ${TRIGGERING_SHA} |"
             echo "| PR URL hash     | ${PR_URL_HASH} |"
             echo "| hf-adapters ref | ${HF_ADAPTERS_REF} |"
+            echo "| torch-spyre ref | ${TORCH_SPYRE_REF} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # push-test-results-to-clickhouse.yaml ALREADY looks for this artifact (see its
