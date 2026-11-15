@@ -123,3 +123,24 @@ jobs:
             exit 1
           fi
           echo "All test suites passed."
+
+  # Posts the required "Spyre Test (amd64)" context on PRs where GHA ran the suite and owns the
+  # check; the name only matches then, so a skipped run can never satisfy it.
+  spyre-test-amd64:
+    name: ${{ (vars.GHA_FULL_MERGE_QUEUE_TESTS == 'true' && github.event_name == 'pull_request' && (github.event.pull_request.auto_merge == null || vars.GHA_TESTS_ON_AUTO_MERGE == 'true')) && 'Spyre Test (amd64)' || 'gha-pr-spyre-test (inactive)' }}
+    runs-on: ubuntu-latest
+    needs: [run-tests]
+    if: always() && github.event_name == 'pull_request'
+    steps:
+      - name: GHA does not own this check here
+        if: ${{ !(vars.GHA_FULL_MERGE_QUEUE_TESTS == 'true' && github.event_name == 'pull_request' && (github.event.pull_request.auto_merge == null || vars.GHA_TESTS_ON_AUTO_MERGE == 'true')) }}
+        run: echo "Jenkins owns the Spyre Test (amd64) check for this PR."
+      - name: Check all suites passed
+        if: ${{ vars.GHA_FULL_MERGE_QUEUE_TESTS == 'true' && github.event_name == 'pull_request' && (github.event.pull_request.auto_merge == null || vars.GHA_TESTS_ON_AUTO_MERGE == 'true') }}
+        run: |-
+          if ${{ needs.run-tests.result == 'success' }}; then
+            echo "All test suites passed."
+            exit 0
+          fi
+          echo "Test suites failed, were cancelled, or did not run."
+          exit 1
