@@ -29,6 +29,7 @@ from transformers import (
     Qwen3ForCausalLM,
 )
 
+from hf_adapters import hf_qwen3_5_moe
 from hf_adapters.auto_spyre_model import AutoSpyreModelForCausalLM
 
 if int(os.environ.get("WORLD_SIZE", "1")) < 2:
@@ -62,17 +63,12 @@ class _TPNumericalMismatchError(AssertionError):
             ),
         ),
         "qwen3_5_hybrid",
-        pytest.param(
-            "qwen3_5_moe_hybrid",
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=_TPNumericalMismatchError,
-                reason="Rank-dependent MoE routing: https://github.com/torch-spyre/hf-adapters/issues/772",
-            ),
-        ),
+        "qwen3_5_moe_hybrid",
     ],
 )
-def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
+def test_tp_checkpoint_and_compiled_generation(
+    family: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     torch.set_num_threads(2)
     torch.random.default_generator.manual_seed(522)
     omitted_alias: str | None = {
@@ -154,6 +150,24 @@ def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
         **extra,
     )
     reference = model_cls(config).to(torch.float16).eval()
+    reference_routes: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    def record_reference_routing(
+        module: torch.nn.Module,
+        args: tuple[torch.Tensor, ...],
+        output: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ) -> None:
+        _, weights, indices = output
+        reference_routes.append((weights.detach().clone(), indices.detach().clone()))
+
+    hooks = (
+        [
+            layer.mlp.gate.register_forward_hook(record_reference_routing)
+            for layer in reference.model.layers
+        ]
+        if base_family == "qwen3_5_moe"
+        else []
+    )
     ids = torch.tensor([[1, 3, 5, 7], [1, 4, 6, 8]])
     kwargs: dict[str, Any] = {
         "max_new_tokens": 3,
@@ -163,6 +177,8 @@ def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
     }
     with torch.no_grad():
         expected = reference.generate(ids, **kwargs)
+    for hook in hooks:
+        hook.remove()
 
     def save_checkpoint(path: str) -> None:
         if omitted_alias is None:
@@ -197,8 +213,50 @@ def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
         dist.barrier()  # All ranks must finish reading before rank zero cleans up.
     assert dist.is_initialized()
     assert not any(isinstance(param, DTensor) for param in model.parameters())
+    routes: list[tuple[torch.Tensor, torch.Tensor]] = []
+    if base_family == "qwen3_5_moe":
+        original_router = hf_qwen3_5_moe._router_topk_cpu
+
+        def record_routing(
+            x: torch.Tensor,
+            router_weight: torch.Tensor,
+            top_k: int,
+            tp_group: dist.ProcessGroup | None = None,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            weights, indices = original_router(x, router_weight, top_k, tp_group)
+            routes.append((weights.clone(), indices.clone()))
+            return weights, indices
+
+        monkeypatch.setattr(hf_qwen3_5_moe, "_router_topk_cpu", record_routing)
     with torch.no_grad():
         actual = model.generate(ids, **kwargs)
+    if base_family == "qwen3_5_moe":
+        all_routes: list[list[tuple[torch.Tensor, torch.Tensor]] | None] = [
+            None for _ in range(dist.get_world_size())
+        ]
+        dist.all_gather_object(all_routes, routes)
+        for rank, rank_routes in enumerate(all_routes):
+            assert rank_routes is not None
+            assert len(rank_routes) == 3 * config.num_hidden_layers
+            for call, ((weights, indices), (want_weights, want_indices)) in enumerate(
+                zip(rank_routes, routes, strict=True)
+            ):
+                # Routing disagreement is a TP correctness failure, independent
+                # of generated tokens or any numerical-parity expected failure.
+                torch.testing.assert_close(
+                    indices,
+                    want_indices,
+                    atol=0,
+                    rtol=0,
+                    msg=f"{family}: rank {rank} selected different experts at call {call}",
+                )
+                torch.testing.assert_close(
+                    weights,
+                    want_weights,
+                    atol=0,
+                    rtol=0,
+                    msg=f"{family}: rank {rank} used different router weights at call {call}",
+                )
     for got in actual.logits:
         assert torch.isfinite(got.cpu()).all()
     try:
@@ -214,4 +272,21 @@ def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
                 msg=f"{family}: logits differ at generation step {step}",
             )
     except AssertionError as error:
-        raise _TPNumericalMismatchError(str(error)) from error
+        diagnostics = [str(error)]
+        for step, (got, want) in enumerate(
+            zip(actual.logits, expected.logits, strict=True)
+        ):
+            max_error = (got.cpu().float() - want.float()).abs().max().item()
+            diagnostics.append(f"step {step}: maximum logit error={max_error:.8g}")
+        for call, ((weights, indices), (want_weights, want_indices)) in enumerate(
+            zip(routes, reference_routes, strict=True)
+        ):
+            # Prefill includes padding; decode routes have matching shapes and
+            # expose which layer first departs from the reference decision.
+            if indices.shape == want_indices.shape:
+                diagnostics.append(
+                    f"routing call {call}: experts={indices.tolist()}, "
+                    f"HF experts={want_indices.tolist()}, "
+                    f"weights={weights.tolist()}, HF weights={want_weights.tolist()}"
+                )
+        raise _TPNumericalMismatchError("\n".join(diagnostics)) from error

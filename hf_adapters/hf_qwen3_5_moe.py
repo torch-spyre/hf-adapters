@@ -20,9 +20,15 @@ one-token decode gathers only the selected experts. Both paths also evaluate
 the sigmoid-gated shared expert present in every Qwen3.5 MoE layer.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributed.device_mesh import DeviceMesh
 
 from hf_adapters import hf_qwen3_5
 from hf_adapters.hf_common import (
@@ -46,6 +52,11 @@ from hf_adapters.hf_qwen3_5 import (
     _setup_qwen3_5_text_decoder,
 )
 from hf_adapters.spyre_tensor_parallel import spyre_compiled_all_reduce
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+        Qwen3_5MoeSparseMoeBlock,
+    )
 
 # Keep local TP expert shards on CPU until ``prepare_moe_expert_weights`` performs
 # their split/transpose/pad and final device transfer.
@@ -76,8 +87,13 @@ def spyre_tp_replicated_linear_modules(model, tp_size):
     }
 
 
-def _router_topk_cpu(x, router_weight, top_k):
-    """Apply the stock Qwen3.5 router exactly on CPU.
+def _router_topk_cpu(
+    x: torch.Tensor,
+    router_weight: torch.Tensor,
+    top_k: int,
+    tp_group: dist.ProcessGroup | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply the stock CPU router and share one decision across expert shards.
 
     Routing is deliberately a graph boundary. Besides preserving HF's fp32
     softmax, this avoids the keep_by_index -> packed-BMM layout permutation in
@@ -89,11 +105,30 @@ def _router_topk_cpu(x, router_weight, top_k):
     probabilities = torch.softmax(router_logits, dtype=torch.float32, dim=-1)
     weights, expert_indices = torch.topk(probabilities, top_k, dim=-1)
     weights = weights / weights.sum(dim=-1, keepdim=True)
-    return weights.to(x.dtype), expert_indices
+    weights = weights.to(x.dtype)
+    if tp_group is not None and dist.get_world_size(tp_group) > 1:
+        # Replicated Spyre computations can differ slightly across ranks. Near
+        # a top-k boundary that can select different experts, whose partials
+        # must never be summed together. Share both indices AND mixture weights
+        # from the TP group's leader before prefill/decode evaluates any expert.
+        # These CPU tensors use the group's Gloo backend, outside compiled code.
+        leader = dist.get_global_rank(tp_group, 0)
+        dist.broadcast(weights, src=leader, group=tp_group)
+        dist.broadcast(expert_indices, src=leader, group=tp_group)
+    return weights, expert_indices
 
 
-def _route_decode_on_cpu(x, mlp, top_k, stick_size):
-    weights, expert_indices = _router_topk_cpu(x.to("cpu"), mlp.gate.weight, top_k)
+def _expert_tp_group(mlp: Qwen3_5MoeSparseMoeBlock) -> dist.ProcessGroup | None:
+    mesh: DeviceMesh | None = getattr(mlp.experts, "_hf_device_mesh", None)
+    return mesh.get_group() if mesh is not None else None
+
+
+def _route_decode_on_cpu(
+    x: torch.Tensor, mlp: Qwen3_5MoeSparseMoeBlock, top_k: int, stick_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    weights, expert_indices = _router_topk_cpu(
+        x.to("cpu"), mlp.gate.weight, top_k, _expert_tp_group(mlp)
+    )
     weights = weights[..., None].expand(-1, -1, stick_size).contiguous()
     # Keep every routed expert index exact during CPU-to-Spyre transport. Model
     # dtypes such as bfloat16 cannot represent every integer above 256.
@@ -121,8 +156,12 @@ def _moe_decode(x, mlp, weights, expert_indices, top_k, stick_size):
     )
 
 
-def _moe_prefill_routing(x, mlp, top_k):
-    weights, selected = _router_topk_cpu(x.to("cpu"), mlp.gate.weight, top_k)
+def _moe_prefill_routing(
+    x: torch.Tensor, mlp: Qwen3_5MoeSparseMoeBlock, top_k: int
+) -> torch.Tensor:
+    weights, selected = _router_topk_cpu(
+        x.to("cpu"), mlp.gate.weight, top_k, _expert_tp_group(mlp)
+    )
     routing = torch.zeros(
         x.shape[0], mlp.gate.weight.shape[0], dtype=x.dtype, device="cpu"
     ).scatter(-1, selected, weights)

@@ -71,6 +71,11 @@ on:
         required: false
         type: boolean
         default: false
+      tp_test_filter:
+        description: Optional pytest -k expression for TP2 checkpoint regressions (unit/regression/trunk); empty runs all cases
+        required: false
+        type: string
+        default: ''
       test_type:
         description: >-
           Test tier to run: unit | integration | regression | trunk -- literal,
@@ -298,6 +303,7 @@ jobs:
       ref: ${{ inputs.ref || '' }}
       repository: ${{ inputs.repository || '' }}
       test_type: ${{ inputs.test_type || 'integration' }}
+      tp_test_filter: ${{ inputs.tp_test_filter || '' }}
       models: ${{ (inputs.models != '' && inputs.models) || needs.resolve-models.outputs.models || '' }}
       # Caller's choice: true for a per-PR/ephemeral image already baked with the exact torch-spyre under test;default false pins origin/main like every other caller.
       prebaked_image: ${{ inputs.prebaked_image }}

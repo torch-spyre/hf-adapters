@@ -13,6 +13,7 @@ HF_HUB_OFFLINE=1 OMP_NUM_THREADS=1 uv run --no-sync python -m pytest \
   tests/cpu/test_tensor_parallel_loading.py \
   tests/cpu/test_spyre_tensor_parallel.py \
   tests/cpu/test_transformers_tp_contract.py \
+  tests/cpu/test_qwen3_5_delta_recurrence.py \
   tests/cpu/test_rotary_config_compatibility.py \
   tests/cpu/test_vision_transformers_compatibility.py \
   tests/cpu/test_muse_glimmer_mm.py -q --tb=short
@@ -28,6 +29,17 @@ includes an explicit empty
 are compared in float32; packed Gemma MoE adapter execution requires Spyre.
 Separate tests check repeated fullgraph compilation with rowwise bias, private
 upstream API signatures, rotary configuration, and vision parity.
+The Gloo workers also force conflicting close router scores across TP ranks and
+require identical expert indices and weights for prefill and decode in fp16,
+bf16, and fp32. TP4 includes two independent groups, with a nonzero global
+leader, and verifies that a model without an expert mesh keeps local routing.
+The hybrid attention test compares the CPU delta-rule output and fp32 recurrent
+cache against Transformers for fp16, bf16, and fp32 inputs. Q/K normalization
+stays in fp32, matching the upstream recurrence's precision boundary.
+The causal-convolution regression checks prefill, decode, and cache updates
+against Transformers' convolution helpers. Convolution runs alongside the
+existing CPU recurrence, preserving the reference accumulation and cast before
+SiLU without relying on fp32 Spyre convolution graphs.
 
 ## Two-card Spyre regressions
 
@@ -56,12 +68,18 @@ Tied Qwen3 checkpoints cover both embedding-only and LM-head-only weights.
 CPU checks also cover both directions with uneven vocabulary shards and reject
 tied groups with no usable checkpoint weight.
 
-Two numerical cases remain strict expected failures:
+Qwen3.5 MoE cases additionally compare every layer's prefill/decode expert
+indices and routing weights exactly across ranks. Routing uses the expert TP
+group leader's CPU decision, shared through that group's Gloo backend before
+evaluating expert shards. This covers the rank disagreement in
+[#772](https://github.com/torch-spyre/hf-adapters/issues/772); its hybrid numerical
+comparison runs without an xfail.
 
-- Hybrid Qwen3.5 MoE rank-dependent expert routing: [#772](https://github.com/torch-spyre/hf-adapters/issues/772).
+One numerical case remains a strict expected failure:
+
 - Gemma 4 MoE decode divergence: [#773](https://github.com/torch-spyre/hf-adapters/issues/773).
 
-Only token/logit mismatches qualify for these xfails. Loading, compilation,
+Only token/logit mismatches qualify for this xfail. Loading, compilation,
 non-finite outputs, and unexpected passes fail the suite. Full-attention
 Qwen3.5 MoE coverage does not establish hybrid MoE correctness; production
 text smoke tests do not establish reference-logit parity.
@@ -73,6 +91,9 @@ text smoke tests do not establish reference-logit parity.
 command in `spyre-tp-regression-tests` for regression, trunk, unit, and explicit
 multicard-smoke runs. Both feed the existing merge-gating result job. Per-rank
 hardware logs and CPU JUnit results are uploaded as artifacts.
+For focused hardware iterations, `integration-tests.yaml` accepts an optional
+`tp_test_filter` pytest expression (for example, `qwen3_5`) with `test_type=unit`,
+`regression`, or `trunk`. Normal PR CI leaves it empty and runs every TP case.
 
 The loader rejects missing or mismatched Spyre-planned checkpoint weights,
 excluding legitimate tied aliases, before HF can allocate generic device
