@@ -26,13 +26,13 @@ process with its own LOCAL_RANK and device assignment.
 
 Requirements
 ------------
-- transformers==5.22.x  (see pyproject.toml)
+- transformers==5.23.x  (see pyproject.toml)
 
 How to run
 ----------
 First make sure transformers is at the right version::
 
-    uv pip install "transformers==5.22.0"
+    uv pip install "transformers==5.23.0"
 
 SPYRE_DEVICES tells the Flex runtime which card indices to use per rank.
 Index-to-physical-card mapping is handled internally by Flex and is not

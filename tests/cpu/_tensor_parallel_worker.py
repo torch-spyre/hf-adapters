@@ -27,6 +27,7 @@ from transformers import (
     GraniteForCausalLM,
     Phi3Config,
     Phi3ForCausalLM,
+    PretrainedConfig,
     PreTrainedModel,
     Qwen3_5ForCausalLM,
     Qwen3_5MoeForCausalLM,
@@ -80,7 +81,7 @@ def _cpu_route(
 
 def check_styles(root: Path, world_size: int, rank: int) -> None:
     mesh = dist.init_device_mesh("cpu", (world_size,), mesh_dim_names=("tp",))
-    model = nn.Module()
+    model = PreTrainedModel(PretrainedConfig())
     with torch.device("meta"):
         model.col = nn.Linear(8, 11)
         model.row = nn.Linear(8, 11)
@@ -92,6 +93,7 @@ def check_styles(root: Path, world_size: int, rank: int) -> None:
         model.experts.down_proj = nn.Parameter(torch.empty(2, 8, 8))
         model.scalar = nn.Linear(8, 8, bias=False)
         model.scalar.bound = nn.Parameter(torch.empty(()))
+    model.init_parallel_plans()
     full: dict[str, torch.Tensor] = {
         name: torch.arange(param.numel(), dtype=torch.float32).reshape(param.shape)
         / 100
@@ -112,7 +114,10 @@ def check_styles(root: Path, world_size: int, rank: int) -> None:
         grouped_colwise_modules={"grouped": 2},
     )
     with spyre_tp_loading():
-        apply_tensor_parallelism(model, mesh, plan)
+        resolved, _, _ = model._resolve_parallel_plans(
+            DistributedConfig(tp_size=world_size, tp_plan=plan)
+        )
+        apply_tensor_parallelism(model, mesh, resolved)
     for name, placeholder in list(model.named_parameters()):
         assert isinstance(placeholder, DTensor), name
         op = SpyreShardOperation(placeholder)

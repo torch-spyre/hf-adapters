@@ -1,6 +1,6 @@
-# Transformers 5.22 compatibility checks
+# Transformers 5.23 compatibility checks
 
-This project pins Transformers 5.22.0 and tokenizers 0.23.3. Run the commands
+This project pins Transformers 5.23.0 and tokenizers 0.23.3. Run the commands
 below from the repository root. Validation results and historical investigations
 belong in [PR #771](https://github.com/torch-spyre/hf-adapters/pull/771), rather
 than in this document.
@@ -27,7 +27,9 @@ includes an explicit empty
 (replicated) plan. Native HF forwards and supported CPU adapter paths
 are compared in float32; packed Gemma MoE adapter execution requires Spyre.
 Separate tests check repeated fullgraph compilation with rowwise bias, private
-upstream API signatures, rotary configuration, and vision parity.
+upstream API signatures, rotary configuration, and vision parity. Plan-resolution
+checks cover Transformers 5.23's model methods and concrete module/parameter
+plans, including exact overrides and parameter sharding before module hooks.
 
 ## Two-card Spyre regressions
 
@@ -81,7 +83,7 @@ must be serialized while `spyre_tp_loading()` is active.
 
 `save_pretrained()` is explicitly unsupported on Spyre TP models, including
 before adapter preparation and when requesting a distributed checkpoint. HF
-5.22 only gathers DTensors; saving our ordinary local parameters would silently
+5.23 only gathers DTensors; saving our ordinary local parameters would silently
 write incomplete weights. The guard raises before creating output files. Load
 the original checkpoint without Spyre TP when a complete checkpoint is needed.
 Phi-3 padding requires each output-projection shard to contain whole heads.

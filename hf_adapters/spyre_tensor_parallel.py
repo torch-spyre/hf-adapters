@@ -37,6 +37,8 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
 from torch.distributed.tensor.placement_types import Placement, Shard, _StridedShard
 from transformers import PreTrainedModel
+from transformers.distributed import DistributedConfig
+from transformers.distributed.parallel_utils import replace_layer_number_by_wildcard
 from transformers.distributed.sharding_utils import DtensorShardOperation
 from transformers.distributed.tensor_parallel import (
     ALL_PARALLEL_STYLES,
@@ -45,7 +47,6 @@ from transformers.distributed.tensor_parallel import (
     PackedColwiseParallel,
     RowwiseParallel,
     TensorParallelLayer,
-    replace_layer_number_by_wildcard,
 )
 
 SPYRE_COLWISE = "spyre_colwise"
@@ -154,7 +155,7 @@ class SpyreShardOperation(DtensorShardOperation):
         if len(shape) == 0:
             shard = source[...].to(device="cpu", dtype=dtype)
         elif any(isinstance(p, _StridedShard) for p in self.placements):
-            # HF 5.22's per-expert path drops the packed split factor. A
+            # HF's per-expert path drops the packed split factor. A
             # converter may also supply gate/up separately instead of a fused
             # matrix. Describe the source's actual layout before shard-on-read.
             dropped_axis = int(
@@ -574,7 +575,7 @@ def _gather_uneven_last_dim(
 
 
 def _reject_local_tp_save(model: nn.Module, *args: Any, **kwargs: Any) -> None:
-    """HF 5.22 cannot reconstruct global weights from our ordinary local shards."""
+    """HF cannot reconstruct global weights from our ordinary local shards."""
     raise NotImplementedError(
         "save_pretrained() is not supported for Spyre TP models with local weights. "
         "Load the original checkpoint without Spyre TP to save a complete model."
@@ -596,12 +597,12 @@ def spyre_tp_loading() -> Iterator[None]:
     independent from_pretrained calls.
     """
     from transformers import core_model_loading
-    from transformers.distributed import mixin, tensor_parallel, utils
+    from transformers.distributed import mixin, utils
 
     original_shard = core_model_loading.DtensorShardOperation
     original_wrap = core_model_loading._dtensor_from_local_like
-    original_resolve = mixin.resolve_parallel_plans
-    original_lookup = tensor_parallel._get_parameter_plan
+    original_resolve = mixin.DistributedMixin._resolve_parallel_plans
+    original_lookup = mixin._get_parameter_plan
     original_device = core_model_loading.get_device
     original_initialize = utils._ensure_torch_distributed
     # HF annotates missing_keys as list[str] but passes/operates on a set.
@@ -766,14 +767,14 @@ def spyre_tp_loading() -> Iterator[None]:
         return original_lookup(parameter_name, plan, is_weight=is_weight)
 
     def resolve_plans(
-        model: Any, distributed_config: Any
-    ) -> tuple[dict[str, str], dict[str, str]]:
+        model: PreTrainedModel, distributed_config: DistributedConfig
+    ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
         plan = distributed_config.tp_plan
         if isinstance(plan, dict) and any(
             style.startswith("spyre_") for style in plan.values()
         ):
             # Our plan is already complete, and exact per-layer overrides are
-            # valid. HF 5.22's override validator only accepts wildcard names.
+            # valid. HF's override validator only accepts wildcard names.
             names = {name for name, _ in model.named_modules()} | {
                 name for name, _ in model.named_parameters()
             }
@@ -802,7 +803,7 @@ def spyre_tp_loading() -> Iterator[None]:
             # would silently write rank zero's local shards as full weights.
             # Keep this per-model guard after the temporary loader patches exit,
             # including before adapter preparation or process-group teardown.
-            model.save_pretrained = MethodType(_reject_local_tp_save, model)
+            setattr(model, "save_pretrained", MethodType(_reject_local_tp_save, model))
             handle = model.register_state_dict_post_hook(preserve_placement_tags)
             cleanup.callback(handle.remove)
             return original_resolve(model, replace(distributed_config, tp_plan=None))
@@ -813,8 +814,8 @@ def spyre_tp_loading() -> Iterator[None]:
         (core_model_loading, "DtensorShardOperation", shard_operation),
         (core_model_loading, "_dtensor_from_local_like", local_parameter),
         (core_model_loading, "get_device", parameter_device),
-        (tensor_parallel, "_get_parameter_plan", exact_first),
-        (mixin, "resolve_parallel_plans", resolve_plans),
+        (mixin, "_get_parameter_plan", exact_first),
+        (mixin.DistributedMixin, "_resolve_parallel_plans", resolve_plans),
         (PreTrainedModel, "_move_missing_keys_from_meta_to_device", move_missing),
     )
     with cleanup:

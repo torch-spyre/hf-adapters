@@ -12,7 +12,7 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import _StridedShard
 from transformers import core_model_loading, modeling_utils
-from transformers.distributed import mixin, tensor_parallel, utils
+from transformers.distributed import mixin, parallel_utils, tensor_parallel, utils
 
 
 @pytest.mark.parametrize(
@@ -24,8 +24,13 @@ from transformers.distributed import mixin, tensor_parallel, utils
             core_model_loading.get_device,
             ("device_map", "param_name", "valid_torch_device"),
         ),
-        (tensor_parallel._get_parameter_plan, ("parameter_name", "plan", "is_weight")),
-        (mixin.resolve_parallel_plans, ("model", "distributed_config")),
+        (mixin._get_parameter_plan, ("parameter_name", "plan", "is_weight")),
+        (
+            mixin.DistributedMixin._resolve_parallel_plans,
+            ("self", "distributed_config"),
+        ),
+        (mixin.DistributedMixin._expand_parallel_plan, ("self", "plan")),
+        (tensor_parallel.apply_tensor_parallelism, ("model", "tp_mesh", "tp_plan")),
         (utils._ensure_torch_distributed, ("device_type",)),
         (
             modeling_utils.PreTrainedModel._move_missing_keys_from_meta_to_device,
@@ -45,6 +50,7 @@ def test_private_tp_signatures(
 
 
 def test_missing_key_aliases_and_accelerator_contract() -> None:
+    assert mixin._get_parameter_plan is parallel_utils._get_parameter_plan
     assert modeling_utils.get_device is core_model_loading.get_device
     assert (
         modeling_utils._dtensor_from_local_like

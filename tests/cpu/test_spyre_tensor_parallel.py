@@ -596,7 +596,7 @@ def test_gemma4_vlm_forwards_text_policies_and_replicates_vision_encoder():
 
 
 def test_exact_tp_plan_entry_precedes_transformers_wildcard_lookup() -> None:
-    from transformers.distributed import tensor_parallel
+    from transformers.distributed import mixin
 
     parameter = "model.layers.5.self_attn.k_proj.weight"
     plan = {
@@ -604,13 +604,10 @@ def test_exact_tp_plan_entry_precedes_transformers_wildcard_lookup() -> None:
         "model.layers.5.self_attn.k_proj": SPYRE_REPLICATED_LINEAR,
     }
 
-    assert tensor_parallel._get_parameter_plan(parameter, plan) == SPYRE_COLWISE
+    assert mixin._get_parameter_plan(parameter, plan) == SPYRE_COLWISE
     with spyre_tp_loading():
-        assert (
-            tensor_parallel._get_parameter_plan(parameter, plan)
-            == SPYRE_REPLICATED_LINEAR
-        )
-    assert tensor_parallel._get_parameter_plan(parameter, plan) == SPYRE_COLWISE
+        assert mixin._get_parameter_plan(parameter, plan) == SPYRE_REPLICATED_LINEAR
+    assert mixin._get_parameter_plan(parameter, plan) == SPYRE_COLWISE
 
 
 def test_single_stick_vocabulary_shard_needs_no_prime_factor() -> None:
@@ -619,14 +616,14 @@ def test_single_stick_vocabulary_shard_needs_no_prime_factor() -> None:
 
 def test_tp_loader_hooks_restore_after_failure() -> None:
     from transformers import PreTrainedModel, core_model_loading
-    from transformers.distributed import mixin, tensor_parallel, utils
+    from transformers.distributed import mixin, utils
 
     originals = (
         core_model_loading.DtensorShardOperation,
         core_model_loading._dtensor_from_local_like,
         core_model_loading.get_device,
-        tensor_parallel._get_parameter_plan,
-        mixin.resolve_parallel_plans,
+        mixin._get_parameter_plan,
+        mixin.DistributedMixin._resolve_parallel_plans,
         utils._ensure_torch_distributed,
         PreTrainedModel._move_missing_keys_from_meta_to_device,
     )
@@ -637,8 +634,8 @@ def test_tp_loader_hooks_restore_after_failure() -> None:
         core_model_loading.DtensorShardOperation,
         core_model_loading._dtensor_from_local_like,
         core_model_loading.get_device,
-        tensor_parallel._get_parameter_plan,
-        mixin.resolve_parallel_plans,
+        mixin._get_parameter_plan,
+        mixin.DistributedMixin._resolve_parallel_plans,
         utils._ensure_torch_distributed,
         PreTrainedModel._move_missing_keys_from_meta_to_device,
     )
@@ -719,7 +716,7 @@ def test_tp_plan_validation_accepts_only_resolvable_or_declared_keys(
     key: str, accepted: bool
 ) -> None:
     from transformers import Qwen3Config, Qwen3ForCausalLM
-    from transformers.distributed import DistributedConfig, mixin, tensor_parallel
+    from transformers.distributed import DistributedConfig
 
     with torch.device("meta"):
         model = Qwen3ForCausalLM(
@@ -741,19 +738,28 @@ def test_tp_plan_validation_accepts_only_resolvable_or_declared_keys(
     with spyre_tp_loading():
         if not accepted:
             with pytest.raises(ValueError, match="TP plan keys match no model"):
-                mixin.resolve_parallel_plans(model, config)
+                model._resolve_parallel_plans(config)
             return
-        resolved, _ = mixin.resolve_parallel_plans(model, config)
-        assert resolved[key] == SPYRE_COLWISE
+        resolved, ep_plan, fsdp_plan = model._resolve_parallel_plans(config)
+        assert not ep_plan
+        assert not fsdp_plan
+        assert all("*" not in name for name in resolved)
         parameter = key.replace("*", "0")
         if not parameter.endswith(".weight"):
             parameter += ".weight"
-        assert tensor_parallel._get_parameter_plan(parameter, resolved) == SPYRE_COLWISE
+        if "optional_proj" in key:
+            assert parameter not in resolved
+        else:
+            assert resolved[parameter] == SPYRE_COLWISE
+            module = parameter.removesuffix(".weight")
+            if not key.endswith(".weight"):
+                assert resolved[module] == SPYRE_COLWISE
+                assert list(resolved).index(parameter) < list(resolved).index(module)
 
 
 def test_cpu_staging_survives_converter_final_device_lookup() -> None:
     from transformers import Qwen3Config, Qwen3ForCausalLM, core_model_loading
-    from transformers.distributed import DistributedConfig, mixin
+    from transformers.distributed import DistributedConfig
 
     with torch.device("meta"):
         model = Qwen3ForCausalLM(
@@ -775,7 +781,7 @@ def test_cpu_staging_survives_converter_final_device_lookup() -> None:
     )
     device_map = {"": "cuda:7"}
     with spyre_tp_loading():
-        mixin.resolve_parallel_plans(model, DistributedConfig(tp_size=2, tp_plan=plan))
+        model._resolve_parallel_plans(DistributedConfig(tp_size=2, tp_plan=plan))
         assert core_model_loading.get_device(device_map, f"{staged}.weight") == "cpu"
         assert core_model_loading.get_device(
             device_map, f"{staged}.weight", valid_torch_device=True
