@@ -20,9 +20,11 @@ distilbert/distilbert-base-uncased-finetuned-sst-2-english).
 
 Key differences from BERT (``hf_bert``) handled here:
 
-- **Backbone path**: ``model.distilbert`` (not ``model.bert``). ``get_backbone``
-  does not recognise this attribute, so ``_run_backbone_forward`` accesses the
-  backbone directly.
+- **Backbone path**: ``model.distilbert`` on task wrappers, the model itself
+  for a bare ``DistilBertModel``. Resolved by ``_get_distilbert_backbone``, not
+  the shared ``get_backbone``: a bare ``DistilBertModel`` has a ``.transformer``
+  attribute (the layer stack, not a backbone), which ``get_backbone`` would
+  pick up as if it were GPT-2's ``model.transformer``.
 - **Layer list**: ``backbone.transformer.layer`` (not ``backbone.encoder.layer``).
 - **Attention module names**: ``layer.attention.{q_lin, k_lin, v_lin, out_lin}``
   (BERT uses ``attention.self.{query, key, value}`` + ``attention.output.dense``).
@@ -58,9 +60,24 @@ from hf_adapters.hf_common import (
     BLOCK_SIZE,
     _pad_proj_input_simple,
     _pad_proj_output_simple,
-    get_backbone,
     make_encoder_block,
 )
+
+
+def _get_distilbert_backbone(model: nn.Module) -> nn.Module:
+    """Return the ``DistilBertModel`` for a bare model or a task wrapper.
+
+    Task wrappers (``DistilBertForMaskedLM``, ``...ForSequenceClassification``,
+    ``...ForQuestionAnswering``, ...) hold the backbone at ``.distilbert``; the
+    bare ``DistilBertModel`` that ``AutoModel`` returns for embedding
+    checkpoints is the backbone itself.
+
+    ``hf_common.get_backbone`` is deliberately not used: for a bare
+    ``DistilBertModel`` it matches the ``transformer`` attribute (DistilBERT's
+    layer stack) and returns that instead of the model.
+    """
+    backbone: nn.Module | None = getattr(model, "distilbert", None)
+    return model if backbone is None else backbone
 
 
 def _make_compiled_encoder_block(layer):
@@ -92,7 +109,7 @@ def _make_compiled_encoder_block(layer):
 def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_ids):
     """Encoder backbone forward for DistilBERT.
 
-    Uses ``get_backbone`` so the function works both when ``model`` is a
+    Uses ``_get_distilbert_backbone`` so the function works both when ``model`` is a
     task-wrapper (``DistilBertForSequenceClassification``, etc., which carry a
     ``.distilbert`` sub-module) and when it is the bare backbone itself
     (``DistilBertModel``, returned by ``AutoModel``).
@@ -101,7 +118,7 @@ def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_
     The parameter is retained so ``prefill_encoder`` can dispatch through the
     same callable shape as BERT/XLM-R.
     """
-    backbone = get_backbone(model)
+    backbone: nn.Module = _get_distilbert_backbone(model)
     emb = backbone.embeddings
     h = emb.word_embeddings(input_ids) + emb.position_embeddings(position_ids)
     h = emb.LayerNorm(h)
@@ -156,7 +173,7 @@ def prepare_for_spyre(model):
     ``classifier(hidden_states)`` call-site that
     ``prefill_sequence_classification`` expects.
     """
-    backbone = get_backbone(model)
+    backbone: nn.Module = _get_distilbert_backbone(model)
     cfg = model.config
     orig_head_dim = cfg.dim // cfg.n_heads
     stick_aligned_head_dim = (
