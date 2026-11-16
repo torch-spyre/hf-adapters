@@ -1,0 +1,16 @@
+# Benchmark-side metadata for the models in perf.yaml; read only by
+# scripts/generate_bench_definitions.py. perf.yaml stays the single model list.
+#
+# est_hours: cost hint per perf.yaml section (placeholder until measured durations exist). A model in
+# both sections takes `nightly`. `overrides` is keyed by model path and wins. Cadence is the invoker's.
+est_hours:
+  nightly: 1.0
+  weekly: 1.0
+  overrides: {}
+
+# Model path -> benchmark name where it differs from the path's last segment.
+benchmark_names:
+  ibm-granite/granite-4.1-8b: granite
+
+# Model path whose cases form the sanity tier (the `smoke` selection).
+sanity_model: gpt2

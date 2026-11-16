@@ -1,0 +1,813 @@
+component	name	row	config_name	run_mode	kernel_name	benchmark_id
+hf-adapters	gemma-2-2b-it	report	full_model	prefill_only		7f4fc2aa-c152-53eb-b9ff-a558d3f903a6
+hf-adapters	gemma-2-2b-it	kernel	full_model	prefill_only	aten::copy_	e51b9a9c-9f34-547f-8b72-67f13aabb54e
+hf-adapters	gemma-2-2b-it	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	cd5071d6-cc3a-5c85-8d1b-5e52a803de0e
+hf-adapters	gemma-2-2b-it	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	8e42f3c4-4754-5b35-8a97-d09eb3948e46
+hf-adapters	gemma-2-2b-it	total	full_model	prefill_only	Total	4d75fa22-41fb-577c-8361-e80c41925d57
+hf-adapters	gemma-2-2b-it	report	full_model	decode_only		0d2469de-fa52-5ebd-b42b-b3a0c07815eb
+hf-adapters	gemma-2-2b-it	kernel	full_model	decode_only	aten::copy_	eb56fa1c-469e-5318-b3dc-2ad0888058fd
+hf-adapters	gemma-2-2b-it	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	7ef1b4e4-d309-5e9a-ae5e-d603a0463334
+hf-adapters	gemma-2-2b-it	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	a9368455-7bcf-59b5-a5ea-8af4597210ec
+hf-adapters	gemma-2-2b-it	total	full_model	decode_only	Total	29b2749b-fdc4-5e4a-8441-8104dc069890
+hf-adapters	gemma-2-2b-it	report	full_model	generate		abf4fa41-3d20-5818-a0cb-020a8825b135
+hf-adapters	gemma-2-2b-it	kernel	full_model	generate	aten::copy_	17aec663-522c-535d-8ca8-79df6f62247a
+hf-adapters	gemma-2-2b-it	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	4496c525-c53e-5443-b10b-6e3998453a7e
+hf-adapters	gemma-2-2b-it	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	74a454dc-bcf1-595d-a257-77952a9b703f
+hf-adapters	gemma-2-2b-it	total	full_model	generate	Total	fc1432ba-6960-5b3e-92f9-3c072e6a329d
+hf-adapters	gemma-2-2b-it	report	one_block	prefill_only		8ccba927-7dcf-59fe-b796-1dafc53bd327
+hf-adapters	gemma-2-2b-it	kernel	one_block	prefill_only	aten::copy_	a50b9878-b889-5676-b193-df3caf5d1a24
+hf-adapters	gemma-2-2b-it	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	3f9b40d8-5308-53cf-9e45-e0a1d75e1c0b
+hf-adapters	gemma-2-2b-it	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	211e1645-a7dd-5da0-84a6-c1b47cb6a08a
+hf-adapters	gemma-2-2b-it	total	one_block	prefill_only	Total	8ad712fb-aa2e-52e8-966f-419755fb7bd0
+hf-adapters	gemma-2-2b-it	report	one_block	decode_only		ae07ce2e-d47c-58a5-812d-adf40ca433d7
+hf-adapters	gemma-2-2b-it	kernel	one_block	decode_only	aten::copy_	6d3a1885-cca1-5577-95ab-e144bf089a85
+hf-adapters	gemma-2-2b-it	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	bf6f133f-8d71-5054-b9a2-672dc004bcc1
+hf-adapters	gemma-2-2b-it	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	686f5415-7c7b-5c49-a137-cb9ff227a5cd
+hf-adapters	gemma-2-2b-it	total	one_block	decode_only	Total	3acc68cc-c819-53f3-a5ba-8b865d16905d
+hf-adapters	gemma-2-2b-it	report	one_block	generate		56e2e150-50f8-55b3-a0e5-ba27e159eec7
+hf-adapters	gemma-2-2b-it	kernel	one_block	generate	aten::copy_	e68a94b4-99c8-5e04-8191-2a76ffd367ea
+hf-adapters	gemma-2-2b-it	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	e72560dd-eaee-5fa0-bd2a-a08f2e40dda3
+hf-adapters	gemma-2-2b-it	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	262a4fa5-9ff3-53e7-bcbf-e786acb238c2
+hf-adapters	gemma-2-2b-it	total	one_block	generate	Total	835ab12e-f1c2-57ab-a5f3-11010b08ed54
+hf-adapters	gemma-3-1b-it	report	full_model	prefill_only		09bf0ff4-3f51-53dd-ab78-610121b6cbaf
+hf-adapters	gemma-3-1b-it	kernel	full_model	prefill_only	aten::copy_	ec2d20fb-da76-5ff4-9775-54f40671fac0
+hf-adapters	gemma-3-1b-it	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	489d8a0a-15ea-55a2-a7a9-07cf094b7147
+hf-adapters	gemma-3-1b-it	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	9a73c6b3-2597-5fd9-8564-8bfd4e273fa7
+hf-adapters	gemma-3-1b-it	total	full_model	prefill_only	Total	c5aa2439-c564-5635-a530-3df5d3331524
+hf-adapters	gemma-3-1b-it	report	full_model	decode_only		b1b7d929-c4ea-5799-84b3-270b571b55cc
+hf-adapters	gemma-3-1b-it	kernel	full_model	decode_only	aten::copy_	e8b5f53c-9eed-510e-8c8d-42fb378e43d9
+hf-adapters	gemma-3-1b-it	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	b829b506-b56e-5328-83b8-83bc570be3ed
+hf-adapters	gemma-3-1b-it	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	9094261e-80e8-590d-97f3-c9492c92fe6e
+hf-adapters	gemma-3-1b-it	total	full_model	decode_only	Total	cba57658-37f8-537d-b4f4-cd21f57cc7b9
+hf-adapters	gemma-3-1b-it	report	full_model	generate		803f995b-fd1b-5085-9525-cfb3e5a0a7df
+hf-adapters	gemma-3-1b-it	kernel	full_model	generate	aten::copy_	eda6a5fc-88c1-503e-975e-d69ce209b6f8
+hf-adapters	gemma-3-1b-it	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	b9865e64-4b14-51eb-9946-83882a226fca
+hf-adapters	gemma-3-1b-it	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	682539f2-fae0-5639-95b3-618d1f0ad6d5
+hf-adapters	gemma-3-1b-it	total	full_model	generate	Total	2764b959-086f-50d9-a876-d6b987d2bc48
+hf-adapters	gemma-3-1b-it	report	one_block	prefill_only		74952faa-9aef-5aea-88b6-feaf11ecb7e9
+hf-adapters	gemma-3-1b-it	kernel	one_block	prefill_only	aten::copy_	a4a74ea4-cbe3-5362-b2c2-4cecd25757e2
+hf-adapters	gemma-3-1b-it	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	b8ea6b4b-00e1-54ed-ae41-633bc02629ed
+hf-adapters	gemma-3-1b-it	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	d8e97068-b1e2-5dd0-9031-24f67373554d
+hf-adapters	gemma-3-1b-it	total	one_block	prefill_only	Total	ef04ea8a-ee09-5dcd-813c-88f7cbeeb729
+hf-adapters	gemma-3-1b-it	report	one_block	decode_only		2625ca9f-1654-599d-9805-9f04e7784058
+hf-adapters	gemma-3-1b-it	kernel	one_block	decode_only	aten::copy_	dfadd23f-0ba7-53ea-a04b-c74fe248f656
+hf-adapters	gemma-3-1b-it	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	7673cce9-c04d-5fee-a284-dbeee651cb54
+hf-adapters	gemma-3-1b-it	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	aa17156b-4601-5c77-a23c-e6705729ec82
+hf-adapters	gemma-3-1b-it	total	one_block	decode_only	Total	d8f28dd8-cca0-56a1-8109-cbbab1ac9310
+hf-adapters	gemma-3-1b-it	report	one_block	generate		9c323df8-3606-5346-866d-f1684d253b17
+hf-adapters	gemma-3-1b-it	kernel	one_block	generate	aten::copy_	b7ef2414-7eff-50d5-8bee-23a67429db53
+hf-adapters	gemma-3-1b-it	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	e428dc22-14da-52eb-a014-55ca827ae796
+hf-adapters	gemma-3-1b-it	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	3c5f5185-0e48-5a70-8812-77979352cb21
+hf-adapters	gemma-3-1b-it	total	one_block	generate	Total	d1de3de3-d85f-5fbf-af48-eb118248bbdc
+hf-adapters	gemma-4-12b-it	report	full_model	prefill_only		939b0125-ac77-5a52-ae29-59955d657e4f
+hf-adapters	gemma-4-12b-it	kernel	full_model	prefill_only	aten::copy_	45b7d11a-9ace-5dfc-8771-e45a3fe7d936
+hf-adapters	gemma-4-12b-it	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	9f1b22fc-e189-56a3-a8c7-37edf9c560f0
+hf-adapters	gemma-4-12b-it	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	c8ba4b51-ef60-54b3-a808-1ec5146b8ca8
+hf-adapters	gemma-4-12b-it	total	full_model	prefill_only	Total	11e143ea-3949-5ee1-a19a-7a556fe6d510
+hf-adapters	gemma-4-12b-it	report	full_model	decode_only		26edbefb-2f85-589c-b9d2-a52a9ed5c25c
+hf-adapters	gemma-4-12b-it	kernel	full_model	decode_only	aten::copy_	6b7678e8-5e97-5342-847f-aa514cf278f8
+hf-adapters	gemma-4-12b-it	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	82196a84-3017-5251-80ea-d61fe358d1e5
+hf-adapters	gemma-4-12b-it	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	b1658fca-c7ab-5121-a0c4-499bb0ea67be
+hf-adapters	gemma-4-12b-it	total	full_model	decode_only	Total	17336fea-55a0-5df3-a75c-fcdbc9709d67
+hf-adapters	gemma-4-12b-it	report	full_model	generate		3bc05781-c409-54a3-8c29-17f49cde956e
+hf-adapters	gemma-4-12b-it	kernel	full_model	generate	aten::copy_	4bdc2836-c8f9-54e2-af91-c508449df567
+hf-adapters	gemma-4-12b-it	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	75d53fa1-8f5b-5708-999c-c6950950c35c
+hf-adapters	gemma-4-12b-it	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	5d29ee1d-8182-55ca-8bac-396c57e6c91b
+hf-adapters	gemma-4-12b-it	total	full_model	generate	Total	68b94ce3-880a-5a49-94cb-23bf687d1e27
+hf-adapters	gemma-4-12b-it	report	one_block	prefill_only		b66e1813-c207-59cc-a3b6-d5493b1ef8fb
+hf-adapters	gemma-4-12b-it	kernel	one_block	prefill_only	aten::copy_	c5eed65f-7706-5360-9ec9-acfcd42c5974
+hf-adapters	gemma-4-12b-it	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	0074ef31-0d00-59f7-baf8-709b7db33685
+hf-adapters	gemma-4-12b-it	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	4547a652-4ea5-5ee0-bb60-838237c4239d
+hf-adapters	gemma-4-12b-it	total	one_block	prefill_only	Total	a6ac0e6e-c089-52e0-ae69-3271e9ed3b01
+hf-adapters	gemma-4-12b-it	report	one_block	decode_only		f240cbde-fd36-5bc5-b2c9-12f734644fbe
+hf-adapters	gemma-4-12b-it	kernel	one_block	decode_only	aten::copy_	ad0ec39c-993d-5173-bd2d-952940d7d6e8
+hf-adapters	gemma-4-12b-it	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	e744aadd-c9b5-5804-a932-21d8c586c216
+hf-adapters	gemma-4-12b-it	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	3fcaf3c7-8d97-5977-87ef-5d4cfdc3f85e
+hf-adapters	gemma-4-12b-it	total	one_block	decode_only	Total	73f6dad1-5ed9-5c2a-b327-da2dba38eedb
+hf-adapters	gemma-4-12b-it	report	one_block	generate		fdaabf2d-7bad-5fcb-8adb-971a1d9ea287
+hf-adapters	gemma-4-12b-it	kernel	one_block	generate	aten::copy_	44982216-7604-5bfd-a24d-dfca673085aa
+hf-adapters	gemma-4-12b-it	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	126d6d11-9251-585e-9141-6f28d1149729
+hf-adapters	gemma-4-12b-it	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	8cf01fb9-3a9f-5c95-8bfe-115b4bc157de
+hf-adapters	gemma-4-12b-it	total	one_block	generate	Total	f7f7b373-533c-5d02-94d8-23f42a22ad82
+hf-adapters	gemma-4-26b-a4b-it	report	full_model	prefill_only		dfd18e8a-a401-5d25-9483-ba59976b8fcb
+hf-adapters	gemma-4-26b-a4b-it	kernel	full_model	prefill_only	aten::copy_	35183ee6-b5ff-55e6-b854-8cd581f7f160
+hf-adapters	gemma-4-26b-a4b-it	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	2260f339-6733-54a0-a0d3-c53c66596f80
+hf-adapters	gemma-4-26b-a4b-it	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	f4d586c7-72f1-5c3e-a3b8-0698a85375ba
+hf-adapters	gemma-4-26b-a4b-it	total	full_model	prefill_only	Total	236c52e9-5d15-5f2c-b5d5-f909915c0796
+hf-adapters	gemma-4-26b-a4b-it	report	full_model	decode_only		10eb73d4-aeeb-5e13-b44f-5f5234b2f39d
+hf-adapters	gemma-4-26b-a4b-it	kernel	full_model	decode_only	aten::copy_	1fb23e33-72b6-5c3c-8ff3-b596a7d45ddc
+hf-adapters	gemma-4-26b-a4b-it	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	a3086e94-1ade-5c44-9118-5108ed8f16d0
+hf-adapters	gemma-4-26b-a4b-it	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	df2d1844-1655-5740-94ae-a37bf732dbaf
+hf-adapters	gemma-4-26b-a4b-it	total	full_model	decode_only	Total	96512c3c-c404-5306-9307-f680a086ec35
+hf-adapters	gemma-4-26b-a4b-it	report	full_model	generate		8a1cfdef-1bb1-5e89-8a0a-18e757678841
+hf-adapters	gemma-4-26b-a4b-it	kernel	full_model	generate	aten::copy_	9b72af7f-a106-5708-9287-9fea8bf0ab57
+hf-adapters	gemma-4-26b-a4b-it	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	fb45d39e-cf1f-5484-b514-db69af62603b
+hf-adapters	gemma-4-26b-a4b-it	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	d6138644-b954-51c4-b709-e4325abb3d38
+hf-adapters	gemma-4-26b-a4b-it	total	full_model	generate	Total	9fedeefe-0e50-57fc-8f25-272efa51455b
+hf-adapters	gemma-4-26b-a4b-it	report	one_block	prefill_only		1f59f759-5840-5081-9096-b3d1bafbdbe2
+hf-adapters	gemma-4-26b-a4b-it	kernel	one_block	prefill_only	aten::copy_	d52fe281-98b2-5135-9279-37ef5b55e68a
+hf-adapters	gemma-4-26b-a4b-it	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	e3868c52-0557-54df-b71d-d73585a15d94
+hf-adapters	gemma-4-26b-a4b-it	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	6dc87e57-6ec6-52f9-b8c4-e139f2635574
+hf-adapters	gemma-4-26b-a4b-it	total	one_block	prefill_only	Total	26c87d2b-cbbc-5a70-a9d6-6392d02f9ef1
+hf-adapters	gemma-4-26b-a4b-it	report	one_block	decode_only		e644cf69-8a31-58a6-86dd-06db257140c7
+hf-adapters	gemma-4-26b-a4b-it	kernel	one_block	decode_only	aten::copy_	7d1cf167-c1b5-5092-bd9e-18858fe460c3
+hf-adapters	gemma-4-26b-a4b-it	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	0ced610d-f64c-5aa1-b4b9-7574341c60bd
+hf-adapters	gemma-4-26b-a4b-it	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	98ded049-6da9-5c97-b3a7-bb812c36cd03
+hf-adapters	gemma-4-26b-a4b-it	total	one_block	decode_only	Total	544c9567-5737-5aa1-864b-f1ec66d413a8
+hf-adapters	gemma-4-26b-a4b-it	report	one_block	generate		fcb079ee-e374-512e-91de-c863279f86a6
+hf-adapters	gemma-4-26b-a4b-it	kernel	one_block	generate	aten::copy_	08352af5-be6f-5ba0-a672-4b8c3a9797e1
+hf-adapters	gemma-4-26b-a4b-it	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	ba622851-eb95-5030-94c3-b25622277946
+hf-adapters	gemma-4-26b-a4b-it	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	a75d008c-cda0-529d-b5be-7b998978ab6f
+hf-adapters	gemma-4-26b-a4b-it	total	one_block	generate	Total	d3e2f791-0e9c-516c-ad2b-df9b04dd81d6
+hf-adapters	gemma-4-e2b-it	report	full_model	prefill_only		e44fb314-28c5-5069-9278-b33d5f69420a
+hf-adapters	gemma-4-e2b-it	kernel	full_model	prefill_only	aten::copy_	46b98bce-f595-507e-bd44-610f9394bf6a
+hf-adapters	gemma-4-e2b-it	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	32680ae1-3b24-5e16-a9bb-223651aaed2a
+hf-adapters	gemma-4-e2b-it	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	d2a7a1cd-7e4c-5e76-890c-7108d0f399dc
+hf-adapters	gemma-4-e2b-it	total	full_model	prefill_only	Total	0b79ee55-25f2-53f8-868c-eaf7d93d34d2
+hf-adapters	gemma-4-e2b-it	report	full_model	decode_only		225337da-d19d-594e-89a4-5aff4e7dc352
+hf-adapters	gemma-4-e2b-it	kernel	full_model	decode_only	aten::copy_	67ba7db9-78bc-57de-af21-915e2d388da8
+hf-adapters	gemma-4-e2b-it	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	97d7332f-3350-54c5-9f9d-2b293a52013a
+hf-adapters	gemma-4-e2b-it	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	e320bb78-5571-5629-969e-88da2f2e5c46
+hf-adapters	gemma-4-e2b-it	total	full_model	decode_only	Total	ec0c8f05-9f12-5fc3-a2a9-522f069bf35e
+hf-adapters	gemma-4-e2b-it	report	full_model	generate		985a41ad-9ce6-5152-9a64-db7703f65182
+hf-adapters	gemma-4-e2b-it	kernel	full_model	generate	aten::copy_	52823877-512a-5761-b799-58e56fcb8805
+hf-adapters	gemma-4-e2b-it	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	62573241-15ab-5b95-82f0-622428bb5d9b
+hf-adapters	gemma-4-e2b-it	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	3e451c27-324b-539a-b7a8-921e2bb00e56
+hf-adapters	gemma-4-e2b-it	total	full_model	generate	Total	f6c2a955-c963-5763-8479-3c68017a686b
+hf-adapters	gemma-4-e2b-it	report	one_block	prefill_only		2fe5b422-628c-509f-8bbc-dc911c3b3918
+hf-adapters	gemma-4-e2b-it	kernel	one_block	prefill_only	aten::copy_	b4d6e633-a244-5b8a-b275-1a4decde0bae
+hf-adapters	gemma-4-e2b-it	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	6ab47f7c-7d1f-5a79-bbfb-658307bdae24
+hf-adapters	gemma-4-e2b-it	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	89537f3d-5644-545a-868d-531280bf8397
+hf-adapters	gemma-4-e2b-it	total	one_block	prefill_only	Total	6cbd2d6c-220d-5f58-b9dd-f68cf69d0b5b
+hf-adapters	gemma-4-e2b-it	report	one_block	decode_only		94525254-02e9-53d6-986e-acd0f60ee949
+hf-adapters	gemma-4-e2b-it	kernel	one_block	decode_only	aten::copy_	71f6259b-234b-5c8c-812a-2d66c23d1e14
+hf-adapters	gemma-4-e2b-it	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	252e10de-e989-511b-9cf9-b9d6bbac6300
+hf-adapters	gemma-4-e2b-it	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	67a5bc28-6d44-598d-bb58-6a250b5d7e70
+hf-adapters	gemma-4-e2b-it	total	one_block	decode_only	Total	4d094482-cfcc-59ce-95a2-304b1beee3cf
+hf-adapters	gemma-4-e2b-it	report	one_block	generate		a5cbc1f0-33d5-5508-ab2e-ab5e1b69b6c3
+hf-adapters	gemma-4-e2b-it	kernel	one_block	generate	aten::copy_	0268cbac-c258-5898-ae36-02153636057d
+hf-adapters	gemma-4-e2b-it	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	4aa52630-1ef2-5ef3-98eb-3c1bf5f5c6e4
+hf-adapters	gemma-4-e2b-it	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	995db97a-5869-5e33-8eee-c535d106a0b4
+hf-adapters	gemma-4-e2b-it	total	one_block	generate	Total	17bbb23e-bb4f-5b63-8546-6209b2e96cd3
+hf-adapters	gemma-4-e4b	report	full_model	prefill_only		cb31c861-3af3-5f0b-b886-56edbef1d5f0
+hf-adapters	gemma-4-e4b	kernel	full_model	prefill_only	aten::copy_	53f4effe-5bd7-55d5-86e1-85d80fb4db90
+hf-adapters	gemma-4-e4b	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	dc5b491d-9bc6-5925-bf91-75de712ff230
+hf-adapters	gemma-4-e4b	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	bf7f356f-0e06-5e52-87d3-8be99f3302dc
+hf-adapters	gemma-4-e4b	total	full_model	prefill_only	Total	5855401d-b6de-564f-8d7b-b551c97de1de
+hf-adapters	gemma-4-e4b	report	full_model	decode_only		9175b93d-7fa4-57ae-acd4-35eff40ffc7c
+hf-adapters	gemma-4-e4b	kernel	full_model	decode_only	aten::copy_	45d20bd6-d3c4-5cb4-9a8f-4d076523bc02
+hf-adapters	gemma-4-e4b	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	58155f22-b2fe-5f6d-992d-3afb8a6384b8
+hf-adapters	gemma-4-e4b	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	14430a6e-972b-58eb-8bab-8b3437c28218
+hf-adapters	gemma-4-e4b	total	full_model	decode_only	Total	3221921b-4f03-57eb-8694-43630c1bfe55
+hf-adapters	gemma-4-e4b	report	full_model	generate		90723b82-4d1c-5c69-9128-96d38460cef0
+hf-adapters	gemma-4-e4b	kernel	full_model	generate	aten::copy_	45561c4a-87d0-55b1-a3f2-1ec0533b57e7
+hf-adapters	gemma-4-e4b	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	bc4430fc-e0c6-5cfa-9fbd-45aa3287eb4d
+hf-adapters	gemma-4-e4b	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	f4b5a2d5-a915-5a3f-9b62-79859dfc96ad
+hf-adapters	gemma-4-e4b	total	full_model	generate	Total	0d200934-8712-5c0d-aa47-06b6bf9f4177
+hf-adapters	gemma-4-e4b	report	one_block	prefill_only		5ed0994f-829e-54af-8839-0807614c918d
+hf-adapters	gemma-4-e4b	kernel	one_block	prefill_only	aten::copy_	a548f81b-35cf-5311-ab06-b23b08a11f2e
+hf-adapters	gemma-4-e4b	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	685c2fa9-9a49-5e0f-ac70-1b0e8b2bc77b
+hf-adapters	gemma-4-e4b	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	f416b321-6179-54ea-bde4-4a1c00510620
+hf-adapters	gemma-4-e4b	total	one_block	prefill_only	Total	4367b031-060c-5d44-8bf6-9e961467bd27
+hf-adapters	gemma-4-e4b	report	one_block	decode_only		ded35305-7e7c-59ed-8c38-410be95c7bdb
+hf-adapters	gemma-4-e4b	kernel	one_block	decode_only	aten::copy_	46f3050f-428f-5f0d-b18b-25455f7ff22a
+hf-adapters	gemma-4-e4b	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	6af872ad-a694-5412-8778-2d167ee7430c
+hf-adapters	gemma-4-e4b	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	8a74df83-6465-536f-9f39-c1c376e15b4e
+hf-adapters	gemma-4-e4b	total	one_block	decode_only	Total	a9ce5adf-d962-5c9b-ac2d-29bd6ddab0f9
+hf-adapters	gemma-4-e4b	report	one_block	generate		43dc96b1-b8bf-52b7-a042-16bc62d5f04b
+hf-adapters	gemma-4-e4b	kernel	one_block	generate	aten::copy_	bba7d837-7f57-59d5-9bd1-a095c443834c
+hf-adapters	gemma-4-e4b	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	f754da08-d02a-541d-915b-5785e8608eee
+hf-adapters	gemma-4-e4b	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	1139a782-9b7b-5521-b583-70c0f64bee8e
+hf-adapters	gemma-4-e4b	total	one_block	generate	Total	8321fd6e-8388-5176-93ea-6762b83db684
+hf-adapters	gpt-neo-125m	report	full_model	prefill_only		d158648d-eebe-5ae2-82b5-00e8b758de15
+hf-adapters	gpt-neo-125m	kernel	full_model	prefill_only	aten::copy_	a6bb69ab-111a-52bb-8d11-3ea61a5dc160
+hf-adapters	gpt-neo-125m	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	ca69122c-0daf-5a1e-b2ad-421726df6699
+hf-adapters	gpt-neo-125m	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	15344fcf-48a3-52b1-8b67-9c110f5cc39d
+hf-adapters	gpt-neo-125m	total	full_model	prefill_only	Total	f7e1fc06-a012-5b95-9fa6-0256e93fa54f
+hf-adapters	gpt-neo-125m	report	full_model	decode_only		4c964a46-4d36-5da2-85eb-c8801dadb9ed
+hf-adapters	gpt-neo-125m	kernel	full_model	decode_only	aten::copy_	29085c01-6413-53d1-a39e-db87c2b9341c
+hf-adapters	gpt-neo-125m	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	e2b79512-bc1f-5ada-875b-0d9841cc14a4
+hf-adapters	gpt-neo-125m	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	688279bc-46c2-52c9-ab39-9028c09df7c7
+hf-adapters	gpt-neo-125m	total	full_model	decode_only	Total	535afe04-5a5b-54b1-aa46-de9c77be1c4e
+hf-adapters	gpt-neo-125m	report	full_model	generate		561b4d2e-8f1c-5ce6-a25d-86da6c2e5d92
+hf-adapters	gpt-neo-125m	kernel	full_model	generate	aten::copy_	1dfcd6ac-4947-572a-b92e-c1d1e57f8e1a
+hf-adapters	gpt-neo-125m	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	86dcc450-1d40-528e-91f2-a5fe4b2043a7
+hf-adapters	gpt-neo-125m	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	c1847734-0e01-5703-8de5-f19819d4deb3
+hf-adapters	gpt-neo-125m	total	full_model	generate	Total	e1e07c28-3f4f-59fc-bcb8-b288a44a79cd
+hf-adapters	gpt-neo-125m	report	one_block	prefill_only		72b26cb4-c078-5b5e-bd07-a80379a2bb15
+hf-adapters	gpt-neo-125m	kernel	one_block	prefill_only	aten::copy_	25741eaa-4e68-5c16-939b-15533ab629cf
+hf-adapters	gpt-neo-125m	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	7d7ac50c-2a7d-5972-9fb8-1e7cd695e760
+hf-adapters	gpt-neo-125m	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	795cded3-9b0b-5d94-a703-291c3a7b0020
+hf-adapters	gpt-neo-125m	total	one_block	prefill_only	Total	bc33f32a-9536-5478-ada2-44be8c2a09da
+hf-adapters	gpt-neo-125m	report	one_block	decode_only		5e662c34-e8e8-5a71-bc31-10871440b83d
+hf-adapters	gpt-neo-125m	kernel	one_block	decode_only	aten::copy_	fd844bdd-21f4-5f88-a94d-53bf734c6dc5
+hf-adapters	gpt-neo-125m	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	0e3f262c-f9fa-5ece-9c9e-062296202d66
+hf-adapters	gpt-neo-125m	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	adc9adff-60df-5435-89cb-d7cdadbfbc0d
+hf-adapters	gpt-neo-125m	total	one_block	decode_only	Total	8e058cff-0a75-5d05-a2df-ad921780aba9
+hf-adapters	gpt-neo-125m	report	one_block	generate		a14cad4b-4214-504c-b94d-8bc71a25b60e
+hf-adapters	gpt-neo-125m	kernel	one_block	generate	aten::copy_	82cada33-6a9b-55e2-a1ba-f785eaa9b03b
+hf-adapters	gpt-neo-125m	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	9e802b93-d413-5a11-879a-54fa33234800
+hf-adapters	gpt-neo-125m	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	db23e553-68e0-5d36-90f4-1023e80caf72
+hf-adapters	gpt-neo-125m	total	one_block	generate	Total	884f2379-e521-54de-9e6d-6f2e2b36befe
+hf-adapters	gpt2	report	full_model	prefill_only		039d007c-4563-50ee-ad49-241e611099a4
+hf-adapters	gpt2	kernel	full_model	prefill_only	aten::copy_	7dea70be-20e4-53cc-88d7-b3aa26502b4f
+hf-adapters	gpt2	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	4f91c11f-f18a-596d-a791-a7f48c65c92d
+hf-adapters	gpt2	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	81173077-af57-50df-ac96-be08833b1fe6
+hf-adapters	gpt2	total	full_model	prefill_only	Total	6390c470-275f-58f6-9695-946790967a0b
+hf-adapters	gpt2	report	full_model	decode_only		95647fe5-d5fb-512a-b687-92da31c0fc62
+hf-adapters	gpt2	kernel	full_model	decode_only	aten::copy_	858ccaca-5619-5bc9-8f0c-87e85250bb61
+hf-adapters	gpt2	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	374f468a-b24c-5205-b8b4-33048aee5afe
+hf-adapters	gpt2	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	8e684f69-4f83-5943-baeb-6b0b6584b0b2
+hf-adapters	gpt2	total	full_model	decode_only	Total	f36a58ce-58c4-58d5-9156-f957c5f1bc86
+hf-adapters	gpt2	report	full_model	generate		34977c13-81c2-5abb-a090-727c1586084b
+hf-adapters	gpt2	kernel	full_model	generate	aten::copy_	27b2494f-8f23-5ecc-8a1d-745fea9c5ea7
+hf-adapters	gpt2	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	0b92e6ce-f6ff-5346-acce-2f90c1e9e429
+hf-adapters	gpt2	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	a2888403-7774-517c-9953-d9c9efdf6c33
+hf-adapters	gpt2	total	full_model	generate	Total	9fd71c68-5566-5af8-bc97-5bd08dc895bf
+hf-adapters	gpt2	report	one_block	prefill_only		d61d03f9-6546-5623-ab2d-5399e59f7238
+hf-adapters	gpt2	kernel	one_block	prefill_only	aten::copy_	63452e5e-e980-5ef7-99f0-fad98db17d31
+hf-adapters	gpt2	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	356d4680-8144-5b39-9c98-4988abc7f80d
+hf-adapters	gpt2	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	6bb176a1-5f91-517f-b3e2-151afdee86c3
+hf-adapters	gpt2	total	one_block	prefill_only	Total	42ea5b66-308f-5393-bb48-1c09d7781ee5
+hf-adapters	gpt2	report	one_block	decode_only		80a03002-202a-51fc-a15e-9d2956dfd9c3
+hf-adapters	gpt2	kernel	one_block	decode_only	aten::copy_	d9d4fcf3-b566-522f-8e90-63a62d2da0e9
+hf-adapters	gpt2	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	9b054fd3-f73f-56b9-9d28-4adbbd4a36ba
+hf-adapters	gpt2	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	444400c2-47fa-501e-a1ac-a430aedc2339
+hf-adapters	gpt2	total	one_block	decode_only	Total	089e6d9c-ff34-5f4a-9ba9-686a7f0a8583
+hf-adapters	gpt2	report	one_block	generate		688ecb0c-5124-593f-870b-05a90d1ccd40
+hf-adapters	gpt2	kernel	one_block	generate	aten::copy_	bca6e837-5def-5f27-a687-b5b01c345d95
+hf-adapters	gpt2	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	ddd63171-6a99-5c69-95ae-ffb1851cafd9
+hf-adapters	gpt2	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	e0b0b465-9549-52d9-ad3c-f7c33daaef00
+hf-adapters	gpt2	total	one_block	generate	Total	6170b646-dd90-5cb7-aab2-65b68bc464a7
+hf-adapters	granite-3.3-2b-instruct	report	full_model	prefill_only		579d64d1-760f-5205-868a-b784c65f570b
+hf-adapters	granite-3.3-2b-instruct	kernel	full_model	prefill_only	aten::copy_	874ff726-dd84-584a-a8e6-d9dc67180e2b
+hf-adapters	granite-3.3-2b-instruct	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	f111af71-4fb7-5530-939c-37f255ab7aa3
+hf-adapters	granite-3.3-2b-instruct	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	34193548-c5c6-5d97-a408-7a819be2e569
+hf-adapters	granite-3.3-2b-instruct	total	full_model	prefill_only	Total	ea66b413-642c-5548-af95-3ce0f40f7b24
+hf-adapters	granite-3.3-2b-instruct	report	full_model	decode_only		f9ff5b33-8b20-5739-9cf3-dff69477eb90
+hf-adapters	granite-3.3-2b-instruct	kernel	full_model	decode_only	aten::copy_	3b8c97f5-896c-5276-bb65-99f45e5b2488
+hf-adapters	granite-3.3-2b-instruct	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	bb730f17-888d-5f8a-9ae0-9831151bf2c7
+hf-adapters	granite-3.3-2b-instruct	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	319ce32b-8f67-5635-a369-9e3901ec70c1
+hf-adapters	granite-3.3-2b-instruct	total	full_model	decode_only	Total	4281d067-da59-53ef-8e7e-1725bad6fe68
+hf-adapters	granite-3.3-2b-instruct	report	full_model	generate		e9e8c404-902c-533a-a59b-0cf3d9554a76
+hf-adapters	granite-3.3-2b-instruct	kernel	full_model	generate	aten::copy_	5be16615-7db7-5640-8f14-f741af27391d
+hf-adapters	granite-3.3-2b-instruct	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	4b7c2706-93e3-5753-9504-276cc3ba8881
+hf-adapters	granite-3.3-2b-instruct	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	dc81caa2-8f76-5834-8f11-ddfcded47a72
+hf-adapters	granite-3.3-2b-instruct	total	full_model	generate	Total	e1e0be2c-fb02-58ac-b8ed-deb1b989df70
+hf-adapters	granite-3.3-2b-instruct	report	one_block	prefill_only		0c13fed8-5485-55e6-b71f-f1ec937fb2e7
+hf-adapters	granite-3.3-2b-instruct	kernel	one_block	prefill_only	aten::copy_	52aa73b9-9e6f-52ec-96d1-5b9c6113f34d
+hf-adapters	granite-3.3-2b-instruct	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	bc5b73c8-090b-5090-89dc-7eb7029d5224
+hf-adapters	granite-3.3-2b-instruct	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	52c1e014-4fc8-5896-a0a1-f2fd8c28bdd5
+hf-adapters	granite-3.3-2b-instruct	total	one_block	prefill_only	Total	0ad8f543-e14e-5dff-9350-d481abbfe7bb
+hf-adapters	granite-3.3-2b-instruct	report	one_block	decode_only		0d9e8cea-e65e-59da-9fc6-9ab8b5185983
+hf-adapters	granite-3.3-2b-instruct	kernel	one_block	decode_only	aten::copy_	084f0dbf-07a2-5002-b28b-590e57481841
+hf-adapters	granite-3.3-2b-instruct	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	15c86b86-71a2-5e1f-af7b-0937486b2a8e
+hf-adapters	granite-3.3-2b-instruct	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	97446e9f-d3b2-5371-a043-92179fb6bec0
+hf-adapters	granite-3.3-2b-instruct	total	one_block	decode_only	Total	c46b8255-4ada-58ba-abc1-7aeb1cd15834
+hf-adapters	granite-3.3-2b-instruct	report	one_block	generate		d3bb83c7-2459-52cf-9b18-75e5fb1bf632
+hf-adapters	granite-3.3-2b-instruct	kernel	one_block	generate	aten::copy_	c7f67b8f-a206-576b-95e2-529a6d94b34d
+hf-adapters	granite-3.3-2b-instruct	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	6284e828-8647-56a7-a61a-92b9d8282475
+hf-adapters	granite-3.3-2b-instruct	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	e15bef02-c560-5299-af62-499a0414b9c3
+hf-adapters	granite-3.3-2b-instruct	total	one_block	generate	Total	f2a169d8-128f-5e87-a8f5-1c451730440e
+hf-adapters	granite-4.0-1b-base	report	full_model	prefill_only		1e14c2ea-e5c7-5832-b6ca-065e8ca67720
+hf-adapters	granite-4.0-1b-base	kernel	full_model	prefill_only	aten::copy_	66a73607-664a-5ab5-b931-f4896940e939
+hf-adapters	granite-4.0-1b-base	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	2a6717c0-1198-58b0-b200-afe0b672435f
+hf-adapters	granite-4.0-1b-base	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	f328271d-9b44-5090-99fe-26e2903bf63d
+hf-adapters	granite-4.0-1b-base	total	full_model	prefill_only	Total	bee13baf-7ee4-5422-82ef-2dbc20db43bd
+hf-adapters	granite-4.0-1b-base	report	full_model	decode_only		8cd068e7-4edd-5e65-ac83-2837477e4208
+hf-adapters	granite-4.0-1b-base	kernel	full_model	decode_only	aten::copy_	f5dd9867-d10c-5025-9440-840fcbfbc95b
+hf-adapters	granite-4.0-1b-base	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	a902c899-a088-5a21-a189-7e51838243f4
+hf-adapters	granite-4.0-1b-base	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	81d69288-17c0-5c1c-a0c0-5d5d30654ae8
+hf-adapters	granite-4.0-1b-base	total	full_model	decode_only	Total	5e167c56-2382-556f-98b4-b228ecab9860
+hf-adapters	granite-4.0-1b-base	report	full_model	generate		82333bf1-9470-59d4-ba2b-5ed7b208d749
+hf-adapters	granite-4.0-1b-base	kernel	full_model	generate	aten::copy_	cef16af1-f447-5ec8-adfe-8ffe61bb3fca
+hf-adapters	granite-4.0-1b-base	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	90d17cf8-b11d-52c3-b0b9-2dfb9bdce391
+hf-adapters	granite-4.0-1b-base	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	07d28ab1-5be0-5aa1-9d8b-15a357564b2a
+hf-adapters	granite-4.0-1b-base	total	full_model	generate	Total	7c5bb3d8-46fb-58b8-a723-3827408c202b
+hf-adapters	granite-4.0-1b-base	report	one_block	prefill_only		003a4f06-254a-520f-8011-d2b5542d0e44
+hf-adapters	granite-4.0-1b-base	kernel	one_block	prefill_only	aten::copy_	a3100d91-f343-5236-952f-5a6b6039d5b2
+hf-adapters	granite-4.0-1b-base	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	646c0ddb-cbfd-5907-8d8e-bbb46c72b3dc
+hf-adapters	granite-4.0-1b-base	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	ce24bd44-6dbe-527f-9c5f-9e7c4cb4a44d
+hf-adapters	granite-4.0-1b-base	total	one_block	prefill_only	Total	06ee8cfb-3514-5e3f-a38a-d9ff44ed5ced
+hf-adapters	granite-4.0-1b-base	report	one_block	decode_only		26e446aa-a6f9-59d5-b81d-c807f01790e4
+hf-adapters	granite-4.0-1b-base	kernel	one_block	decode_only	aten::copy_	66cb56c8-6a04-597f-b21e-8a0ef1e8e366
+hf-adapters	granite-4.0-1b-base	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	00cbd4bb-e0c8-5cf0-a03b-d7794fae201e
+hf-adapters	granite-4.0-1b-base	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	a47da6d3-937f-5017-82fe-496b710be92b
+hf-adapters	granite-4.0-1b-base	total	one_block	decode_only	Total	83ad0e1b-770f-5e62-b97f-0ac04f8439ab
+hf-adapters	granite-4.0-1b-base	report	one_block	generate		50d10e8a-0826-5182-8d6b-11cd6257b4f5
+hf-adapters	granite-4.0-1b-base	kernel	one_block	generate	aten::copy_	bfb6086c-4eec-566f-b63a-22d1497a635a
+hf-adapters	granite-4.0-1b-base	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	0db36138-843b-5c8c-ba42-861d4203fc76
+hf-adapters	granite-4.0-1b-base	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	601185de-b91d-5909-af3b-87e486cd965c
+hf-adapters	granite-4.0-1b-base	total	one_block	generate	Total	ba1ba241-ad97-5931-8907-c643fc104514
+hf-adapters	granite	report	full_model	prefill_only		163bf5c6-81b9-5d47-baa0-43b27f9a692f
+hf-adapters	granite	kernel	full_model	prefill_only	aten::copy_	dfdedcb6-be9f-5eb9-adca-ef264639035d
+hf-adapters	granite	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	d0480a49-20ef-52f0-910e-db5d9ff0d54f
+hf-adapters	granite	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	273d55c0-3855-5116-8347-fce5459e009f
+hf-adapters	granite	total	full_model	prefill_only	Total	9ec8853d-2850-5710-8907-fb658254117a
+hf-adapters	granite	report	full_model	decode_only		72d5299c-f1c7-5f00-9599-5bee71f897fe
+hf-adapters	granite	kernel	full_model	decode_only	aten::copy_	9ebc4d8a-e37b-50fc-a730-46549fe8059a
+hf-adapters	granite	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	8496bd50-5709-5e1a-acaf-a0c3b34190e8
+hf-adapters	granite	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	75a667e9-8de9-5b7e-9223-e2db8ae4e723
+hf-adapters	granite	total	full_model	decode_only	Total	62ef8078-ca87-5f1c-83f0-6944f9047131
+hf-adapters	granite	report	full_model	generate		3635d87a-d91d-55d5-b0bb-74c96ed1c5ab
+hf-adapters	granite	kernel	full_model	generate	aten::copy_	979263fc-d41e-5bf7-9f52-7fd19be0af68
+hf-adapters	granite	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	83366860-5853-5e37-b90a-d10bf0cacc0d
+hf-adapters	granite	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	c4f63c96-6e80-5b9f-8d42-8b3afb418645
+hf-adapters	granite	total	full_model	generate	Total	e37f33e5-145b-5542-9048-259910cc9c76
+hf-adapters	granite	report	one_block	prefill_only		10a77712-8cec-5d9e-9897-9021ffb4ac30
+hf-adapters	granite	kernel	one_block	prefill_only	aten::copy_	29b815a7-065c-57f7-b130-28edc8e17638
+hf-adapters	granite	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	74fd06e4-c312-5646-901e-9263d9d747b4
+hf-adapters	granite	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	65141074-df57-581d-9303-c32a1e3feb15
+hf-adapters	granite	total	one_block	prefill_only	Total	5637302d-1623-5d5e-b886-413371a85812
+hf-adapters	granite	report	one_block	decode_only		4bb6669b-fc8b-50bd-a4e9-362b29703d08
+hf-adapters	granite	kernel	one_block	decode_only	aten::copy_	e2e6323a-9c85-5cbe-ba0b-84dd2b7ea340
+hf-adapters	granite	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	66ab3161-675d-59f7-800a-f1719a373c38
+hf-adapters	granite	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	364638fb-7880-5665-8790-6f263760a90d
+hf-adapters	granite	total	one_block	decode_only	Total	98af04c1-2b73-5979-b3c6-9a8fbcdfe432
+hf-adapters	granite	report	one_block	generate		754489a8-d812-50a1-8f6c-7bf83cd25475
+hf-adapters	granite	kernel	one_block	generate	aten::copy_	a092f4f1-ce54-54c7-bbaa-c5ec2c1ec422
+hf-adapters	granite	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	aca3d966-baca-5d6f-9944-15eef8b8fdc0
+hf-adapters	granite	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	ce337fba-de05-567e-ac56-19d9112af16d
+hf-adapters	granite	total	one_block	generate	Total	15b23209-d17f-5185-9105-ba449679d0c6
+hf-adapters	lfm2-350m	report	full_model	prefill_only		c06e9028-fba2-529e-812e-b29695a1cc5b
+hf-adapters	lfm2-350m	kernel	full_model	prefill_only	aten::copy_	42f70376-9ade-557e-a85e-0cff1ba2fe80
+hf-adapters	lfm2-350m	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	7edb0a1d-50ae-589e-ac02-7b9a5fdee88e
+hf-adapters	lfm2-350m	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	6eeac178-95e6-55be-900d-144013f3a122
+hf-adapters	lfm2-350m	total	full_model	prefill_only	Total	c9c13748-9d89-55a5-a7cf-d75b6931f93e
+hf-adapters	lfm2-350m	report	full_model	decode_only		c5388ec2-da91-5643-b003-6386e6a5fa03
+hf-adapters	lfm2-350m	kernel	full_model	decode_only	aten::copy_	e88290e5-96cb-51d9-86d8-f0654b45fa47
+hf-adapters	lfm2-350m	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	7362c007-aaef-5b22-b2ef-9303c02dfbf2
+hf-adapters	lfm2-350m	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	80c29565-a0f5-529a-a77c-b4a1279e9acc
+hf-adapters	lfm2-350m	total	full_model	decode_only	Total	19f75433-7e7c-533b-842e-97dc2e8eb7ab
+hf-adapters	lfm2-350m	report	full_model	generate		3fdc27bd-cced-55c7-b109-943021efad75
+hf-adapters	lfm2-350m	kernel	full_model	generate	aten::copy_	b442c5d9-6211-51ea-ba31-694a0d7e4b48
+hf-adapters	lfm2-350m	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	381c673d-3eaf-5be6-94ac-936d3b6f0011
+hf-adapters	lfm2-350m	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	bf04a960-fb1a-505b-8681-8bfface9d136
+hf-adapters	lfm2-350m	total	full_model	generate	Total	0b4595b6-8e3e-5d3c-93cc-10d55f692afe
+hf-adapters	lfm2-350m	report	one_block	prefill_only		a2a6e54b-1692-5e33-9486-ed0b76cd8ae8
+hf-adapters	lfm2-350m	kernel	one_block	prefill_only	aten::copy_	fe6b5668-7a45-535d-8866-076a87eab209
+hf-adapters	lfm2-350m	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	269982ca-da67-509d-84c4-ccbac05cda41
+hf-adapters	lfm2-350m	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	72569c6c-b607-5cd7-b97b-0a9976fa8665
+hf-adapters	lfm2-350m	total	one_block	prefill_only	Total	4ba7850e-4420-5fe5-9652-f8602f986471
+hf-adapters	lfm2-350m	report	one_block	decode_only		55328bdb-07a3-54ee-b326-f3995a26fc1c
+hf-adapters	lfm2-350m	kernel	one_block	decode_only	aten::copy_	ee4990a1-8e2a-50b1-9430-3d1c9976579b
+hf-adapters	lfm2-350m	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	410dfc74-0283-5b3d-93a6-e5c88a674324
+hf-adapters	lfm2-350m	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	f7ac2d72-f31d-54dd-8d27-862029a35138
+hf-adapters	lfm2-350m	total	one_block	decode_only	Total	5e4cc6e6-7353-576d-b7d1-0a3a391664e7
+hf-adapters	lfm2-350m	report	one_block	generate		3e170095-7c4d-571f-a205-961a34cbcba1
+hf-adapters	lfm2-350m	kernel	one_block	generate	aten::copy_	57d3d8d5-0f45-5584-8a50-a6a80f4055b7
+hf-adapters	lfm2-350m	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	de3982d4-4c6c-515f-b940-cde834dda676
+hf-adapters	lfm2-350m	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	2acf2f41-2df0-5d36-b048-2189422d3cf4
+hf-adapters	lfm2-350m	total	one_block	generate	Total	fd94320d-d48e-526b-9f39-8ffa139023c3
+hf-adapters	ministral-3-14b-instruct-2512	report	full_model	prefill_only		f6913b7f-1884-517b-b387-369c43b4bbf6
+hf-adapters	ministral-3-14b-instruct-2512	kernel	full_model	prefill_only	aten::copy_	62c2465b-2a20-5211-ba86-1ec2e1c57864
+hf-adapters	ministral-3-14b-instruct-2512	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	cb6520d6-1f5d-555d-a988-d164d1145042
+hf-adapters	ministral-3-14b-instruct-2512	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	60a4d20d-b9ef-525d-a85e-07c27e5b519e
+hf-adapters	ministral-3-14b-instruct-2512	total	full_model	prefill_only	Total	06ff076a-be07-5d88-975e-731805525027
+hf-adapters	ministral-3-14b-instruct-2512	report	full_model	decode_only		e8f9b758-7ef1-5eaa-8b71-da3251d76812
+hf-adapters	ministral-3-14b-instruct-2512	kernel	full_model	decode_only	aten::copy_	ed1767e8-407d-5480-8840-3860cff75892
+hf-adapters	ministral-3-14b-instruct-2512	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	98d2dd4a-6c80-57a3-b844-c345184da450
+hf-adapters	ministral-3-14b-instruct-2512	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	5c13f4b5-9efe-5d7f-af61-7db6b271d5a4
+hf-adapters	ministral-3-14b-instruct-2512	total	full_model	decode_only	Total	0ed0d852-1d2c-5cb6-863f-142553877a74
+hf-adapters	ministral-3-14b-instruct-2512	report	full_model	generate		f46eed7a-4fb3-5ee3-9ba0-aa69dc7afb8f
+hf-adapters	ministral-3-14b-instruct-2512	kernel	full_model	generate	aten::copy_	ac8c8777-cbd3-5922-99f7-04059ff1251b
+hf-adapters	ministral-3-14b-instruct-2512	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	f5892fd3-c7dd-5a69-8252-cefed01e9ba0
+hf-adapters	ministral-3-14b-instruct-2512	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	a00e9e05-60e6-5996-93d7-17301af33fe0
+hf-adapters	ministral-3-14b-instruct-2512	total	full_model	generate	Total	0b69a151-46b0-5080-9f68-b29764d2a066
+hf-adapters	ministral-3-14b-instruct-2512	report	one_block	prefill_only		1e4c5038-faa2-5665-ae66-61e4cb07a608
+hf-adapters	ministral-3-14b-instruct-2512	kernel	one_block	prefill_only	aten::copy_	9d2e853d-6863-56f2-b721-71764f4bd99f
+hf-adapters	ministral-3-14b-instruct-2512	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	23f92799-7b04-5df2-a55e-ae4c9e95a87a
+hf-adapters	ministral-3-14b-instruct-2512	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	15da511b-e271-571e-be13-58988bc1a0f7
+hf-adapters	ministral-3-14b-instruct-2512	total	one_block	prefill_only	Total	9c3e2d63-590f-5322-83bd-0a0e90917794
+hf-adapters	ministral-3-14b-instruct-2512	report	one_block	decode_only		46bdac79-48ae-52f2-bd66-2e3264589fc6
+hf-adapters	ministral-3-14b-instruct-2512	kernel	one_block	decode_only	aten::copy_	e7c8e9b7-fa8e-5e85-898f-6d9c2ad6d74e
+hf-adapters	ministral-3-14b-instruct-2512	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	0ab1a5bc-8944-56d2-b3e0-a5fe8e768fab
+hf-adapters	ministral-3-14b-instruct-2512	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	649b645f-73ca-53e4-9d12-96272772d9b5
+hf-adapters	ministral-3-14b-instruct-2512	total	one_block	decode_only	Total	96e42c52-cbec-551b-ad10-7bcc6a02d27a
+hf-adapters	ministral-3-14b-instruct-2512	report	one_block	generate		37557e3d-6804-53ef-8447-26610143e518
+hf-adapters	ministral-3-14b-instruct-2512	kernel	one_block	generate	aten::copy_	cf9d313c-9246-5278-b835-9635a0f7ce06
+hf-adapters	ministral-3-14b-instruct-2512	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	3de1c4ac-5603-56be-80dd-7b0c6b1fffa8
+hf-adapters	ministral-3-14b-instruct-2512	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	5e3f66ce-bed7-5b75-83be-1d07a19800f3
+hf-adapters	ministral-3-14b-instruct-2512	total	one_block	generate	Total	0f13c27b-b2f6-5fd2-94f2-6cddac91d9a4
+hf-adapters	ministral-3-8b-instruct-2512	report	full_model	prefill_only		cdb676ee-6b46-5d2a-b675-f0e7c349de80
+hf-adapters	ministral-3-8b-instruct-2512	kernel	full_model	prefill_only	aten::copy_	f8885671-56fc-5b21-8af3-22c36d4b920e
+hf-adapters	ministral-3-8b-instruct-2512	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	f841c790-26d8-56db-acb3-ef32be5b5d6f
+hf-adapters	ministral-3-8b-instruct-2512	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	e41ce996-864e-582f-8908-ab606f662c02
+hf-adapters	ministral-3-8b-instruct-2512	total	full_model	prefill_only	Total	e80f3345-5518-52f8-9dc6-ec2174fd5bdb
+hf-adapters	ministral-3-8b-instruct-2512	report	full_model	decode_only		861b40ce-6a08-580e-b52c-eb1d2a16fbee
+hf-adapters	ministral-3-8b-instruct-2512	kernel	full_model	decode_only	aten::copy_	f6c3effd-22e9-55ff-bd1c-dc5efbd8792f
+hf-adapters	ministral-3-8b-instruct-2512	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	2b4aa460-e2ab-556f-88ed-2ed098f8744c
+hf-adapters	ministral-3-8b-instruct-2512	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	aa967c8b-232b-577a-acb5-ed9705df2992
+hf-adapters	ministral-3-8b-instruct-2512	total	full_model	decode_only	Total	7fa194d4-c75e-5b39-a19b-67e7448e9cf3
+hf-adapters	ministral-3-8b-instruct-2512	report	full_model	generate		f01cb5d1-03be-5904-92c8-79b0bdd1e10b
+hf-adapters	ministral-3-8b-instruct-2512	kernel	full_model	generate	aten::copy_	f310c1d0-0594-5d09-8912-de93b4577589
+hf-adapters	ministral-3-8b-instruct-2512	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	f292ebbe-fd4f-55e6-81cf-6d5628673ba1
+hf-adapters	ministral-3-8b-instruct-2512	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	b2b8cf0e-5bd7-5724-be63-fc7fdffe257e
+hf-adapters	ministral-3-8b-instruct-2512	total	full_model	generate	Total	2e0f5f79-7eb5-5624-815b-5520f3018f01
+hf-adapters	ministral-3-8b-instruct-2512	report	one_block	prefill_only		067ee6f9-e6b5-5f1a-8de7-07f90c21025e
+hf-adapters	ministral-3-8b-instruct-2512	kernel	one_block	prefill_only	aten::copy_	23e0b967-44b4-53a4-a214-a9f060899bcf
+hf-adapters	ministral-3-8b-instruct-2512	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	11805380-4e6a-5191-ab51-5010ec802a6d
+hf-adapters	ministral-3-8b-instruct-2512	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	855063f4-db82-5018-b882-c0b31d94fedf
+hf-adapters	ministral-3-8b-instruct-2512	total	one_block	prefill_only	Total	f0cbc2df-3a12-5d56-b0d3-cb4e3ffe2d92
+hf-adapters	ministral-3-8b-instruct-2512	report	one_block	decode_only		3683827b-f539-510f-9292-4e2fae01be57
+hf-adapters	ministral-3-8b-instruct-2512	kernel	one_block	decode_only	aten::copy_	24b126c8-41a9-5684-ab49-21a153e5d178
+hf-adapters	ministral-3-8b-instruct-2512	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	ded48789-bd97-5f1b-91a1-8edcb7bac264
+hf-adapters	ministral-3-8b-instruct-2512	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	234e3be1-fc12-50aa-b6de-e8fbcb5ee2e5
+hf-adapters	ministral-3-8b-instruct-2512	total	one_block	decode_only	Total	ee693af4-5f15-5771-9b5b-6362cf8309b3
+hf-adapters	ministral-3-8b-instruct-2512	report	one_block	generate		aea2818e-7f38-5e47-94cf-61a2c377c3ec
+hf-adapters	ministral-3-8b-instruct-2512	kernel	one_block	generate	aten::copy_	570d4093-44b1-5fed-8988-29ade40377bb
+hf-adapters	ministral-3-8b-instruct-2512	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	1637d9cf-8c3c-57b5-af18-696d640e6cb0
+hf-adapters	ministral-3-8b-instruct-2512	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	713199b4-889a-55aa-a2c0-603cc386842a
+hf-adapters	ministral-3-8b-instruct-2512	total	one_block	generate	Total	998c48e2-5417-54d7-9b00-5430edad6d91
+hf-adapters	ministral-3b-instruct	report	full_model	prefill_only		f2e7e640-9030-5b21-9c24-723986935d48
+hf-adapters	ministral-3b-instruct	kernel	full_model	prefill_only	aten::copy_	2789d3e6-edc0-5641-b1b5-bdec91f73940
+hf-adapters	ministral-3b-instruct	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	ab25efad-2527-5fb8-9947-ef8432bfbff8
+hf-adapters	ministral-3b-instruct	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	4e878dff-0ec6-565b-85b4-2e8a742f8e4c
+hf-adapters	ministral-3b-instruct	total	full_model	prefill_only	Total	976de717-06ac-5ace-8302-faa6c6cffecc
+hf-adapters	ministral-3b-instruct	report	full_model	decode_only		1263fa0c-52a9-5f4d-9569-0e027e7e254d
+hf-adapters	ministral-3b-instruct	kernel	full_model	decode_only	aten::copy_	36ae2f03-bfe8-5cf3-9293-2071d3f80a78
+hf-adapters	ministral-3b-instruct	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	498dd7e2-f7a3-5067-b0be-d6d8955896c7
+hf-adapters	ministral-3b-instruct	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	93cbce8d-010e-5ec7-bd49-5aa27fd8934a
+hf-adapters	ministral-3b-instruct	total	full_model	decode_only	Total	aca789b3-d8e2-5490-884d-1c61e7e60110
+hf-adapters	ministral-3b-instruct	report	full_model	generate		8da9f85f-24ec-50c1-b64f-657fd0176f68
+hf-adapters	ministral-3b-instruct	kernel	full_model	generate	aten::copy_	2e28f222-510e-5c0d-b79e-5861c064ef95
+hf-adapters	ministral-3b-instruct	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	646cfcee-1cbf-56ab-97c9-2d03111baba5
+hf-adapters	ministral-3b-instruct	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	59ff08e9-6726-5742-9fd0-14d694bb690e
+hf-adapters	ministral-3b-instruct	total	full_model	generate	Total	90b5c2ee-c4d7-540a-9fd4-fc769ff31493
+hf-adapters	ministral-3b-instruct	report	one_block	prefill_only		0760560a-6d12-55af-8969-8fb6d09cc44a
+hf-adapters	ministral-3b-instruct	kernel	one_block	prefill_only	aten::copy_	7db89e92-4f28-5162-afe2-c170bc4a88e1
+hf-adapters	ministral-3b-instruct	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	8421c322-d340-50da-8e32-0387b543d1e6
+hf-adapters	ministral-3b-instruct	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	fb329568-ec1e-562d-8b42-87ad2ba25302
+hf-adapters	ministral-3b-instruct	total	one_block	prefill_only	Total	f2644e95-05df-588f-b242-4bee170c97b5
+hf-adapters	ministral-3b-instruct	report	one_block	decode_only		ed4a16f9-7b49-5654-be27-cc7caba1e8d5
+hf-adapters	ministral-3b-instruct	kernel	one_block	decode_only	aten::copy_	4610702d-63e5-5d94-8c29-2113bf513657
+hf-adapters	ministral-3b-instruct	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	c96d4a5f-34b4-5595-bb35-dc9c249e4bfd
+hf-adapters	ministral-3b-instruct	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	b130efaf-f558-591d-9516-81bf62f9b0fa
+hf-adapters	ministral-3b-instruct	total	one_block	decode_only	Total	21449eac-5ebf-52a0-b8ef-8f3733866e6b
+hf-adapters	ministral-3b-instruct	report	one_block	generate		bce8a2fd-1173-5d64-a367-164c0ecf79d5
+hf-adapters	ministral-3b-instruct	kernel	one_block	generate	aten::copy_	8ad14f3b-4d6f-538a-8953-ed43e2b58477
+hf-adapters	ministral-3b-instruct	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	051d2c17-28ee-5906-8207-773bb52f3ec3
+hf-adapters	ministral-3b-instruct	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	10f5cd75-f8f3-5aab-bbc8-077c6b898938
+hf-adapters	ministral-3b-instruct	total	one_block	generate	Total	71aa31f5-d266-52cc-b067-20143dd355fe
+hf-adapters	ministral-8b-instruct-2410	report	full_model	prefill_only		7adf010e-ad0d-5e66-8f03-280912f14544
+hf-adapters	ministral-8b-instruct-2410	kernel	full_model	prefill_only	aten::copy_	b383a5f6-669c-5071-b229-bef4cb4e5b06
+hf-adapters	ministral-8b-instruct-2410	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	3f492be5-be8e-5e9c-a00c-8f528db3594d
+hf-adapters	ministral-8b-instruct-2410	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	c1e66f95-8e71-50b1-af04-1a0ba865b18c
+hf-adapters	ministral-8b-instruct-2410	total	full_model	prefill_only	Total	45c16001-a4ef-5f99-a5a1-8469d9e0309a
+hf-adapters	ministral-8b-instruct-2410	report	full_model	decode_only		446200dd-afa3-51fa-8a31-155fd6b4c42f
+hf-adapters	ministral-8b-instruct-2410	kernel	full_model	decode_only	aten::copy_	30e121ef-d6d3-5c9f-bc47-5a9c955b378c
+hf-adapters	ministral-8b-instruct-2410	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	6a4b7d0a-bb97-53f4-b08f-964f4dc8025b
+hf-adapters	ministral-8b-instruct-2410	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	2519af75-5ec1-5967-8dbb-872bcfe896e1
+hf-adapters	ministral-8b-instruct-2410	total	full_model	decode_only	Total	3fee88a0-c6e0-538d-8f64-8f555824c71e
+hf-adapters	ministral-8b-instruct-2410	report	full_model	generate		6993e36b-601b-5adb-9b47-19a5ce0838ba
+hf-adapters	ministral-8b-instruct-2410	kernel	full_model	generate	aten::copy_	7411995d-aedc-5ed4-8b43-8a3ea7294395
+hf-adapters	ministral-8b-instruct-2410	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	632e064a-7400-5cc5-b08a-35dbf8134a51
+hf-adapters	ministral-8b-instruct-2410	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	ac79681e-fa59-5ca1-a59d-97cef827cbc4
+hf-adapters	ministral-8b-instruct-2410	total	full_model	generate	Total	56f661ee-4dce-5cbe-8c0f-c153042f0ca4
+hf-adapters	ministral-8b-instruct-2410	report	one_block	prefill_only		ff952cb7-c291-54cb-bdf6-38763ee30136
+hf-adapters	ministral-8b-instruct-2410	kernel	one_block	prefill_only	aten::copy_	f835fecb-743e-5177-941f-36d605d39c4d
+hf-adapters	ministral-8b-instruct-2410	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	36e05f59-f476-507f-9414-4f106d990553
+hf-adapters	ministral-8b-instruct-2410	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	d1ba9974-f072-5f7f-893a-5a534b5baa74
+hf-adapters	ministral-8b-instruct-2410	total	one_block	prefill_only	Total	1c31a28d-3e8e-5de6-8299-d767f6f384d3
+hf-adapters	ministral-8b-instruct-2410	report	one_block	decode_only		e41b0116-4548-54b7-b293-9a5c32cd2de6
+hf-adapters	ministral-8b-instruct-2410	kernel	one_block	decode_only	aten::copy_	ad6c4092-274f-57e0-a1fe-645366952ebc
+hf-adapters	ministral-8b-instruct-2410	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	37c3e994-93b1-5eee-bb5c-35e1fabfe753
+hf-adapters	ministral-8b-instruct-2410	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	d6ca08b9-9403-562c-ab22-520b03aac1e3
+hf-adapters	ministral-8b-instruct-2410	total	one_block	decode_only	Total	ef98d6f6-5d0c-5945-b66e-f074a13b9528
+hf-adapters	ministral-8b-instruct-2410	report	one_block	generate		a0d7f860-03c0-5ff2-9fde-b2c5571e7c70
+hf-adapters	ministral-8b-instruct-2410	kernel	one_block	generate	aten::copy_	37bd1619-f487-5a0c-a742-5145fee18cd2
+hf-adapters	ministral-8b-instruct-2410	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	5507a798-6dd9-5455-9256-170f883ddeda
+hf-adapters	ministral-8b-instruct-2410	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	fb8fcd5b-b74d-5cf8-9525-abfd540b1892
+hf-adapters	ministral-8b-instruct-2410	total	one_block	generate	Total	49c7859a-b7cd-5d59-99c4-b1e848adba36
+hf-adapters	olmo-1b-hf	report	full_model	prefill_only		d98a37ce-a72e-5e93-8e38-723af51ef62a
+hf-adapters	olmo-1b-hf	kernel	full_model	prefill_only	aten::copy_	0aaf7957-5f96-50f4-8688-0dcaba651347
+hf-adapters	olmo-1b-hf	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	966ef0b1-a370-505b-8938-a98e228e6cb0
+hf-adapters	olmo-1b-hf	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	1f3b02ae-058f-50cb-8ccd-3fdf0e31e9f5
+hf-adapters	olmo-1b-hf	total	full_model	prefill_only	Total	e5679522-c0c6-5d9a-82bb-87d17855c02b
+hf-adapters	olmo-1b-hf	report	full_model	decode_only		b2bafa2f-07c7-5761-9835-ef8d10a99abd
+hf-adapters	olmo-1b-hf	kernel	full_model	decode_only	aten::copy_	7102dddc-8122-527e-b9ff-16630b48d411
+hf-adapters	olmo-1b-hf	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	b3829a86-6186-537b-8ecd-55642da7519d
+hf-adapters	olmo-1b-hf	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	2e5c02da-ff9c-5a05-9ae6-ac673aa86165
+hf-adapters	olmo-1b-hf	total	full_model	decode_only	Total	4d429334-562b-54b5-9b67-15fc0c5fd26b
+hf-adapters	olmo-1b-hf	report	full_model	generate		e2c5e065-52f6-5685-81a6-eae86562c52b
+hf-adapters	olmo-1b-hf	kernel	full_model	generate	aten::copy_	434f2903-4ef6-5d59-a2af-dd45058e186b
+hf-adapters	olmo-1b-hf	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	34880fe5-e74a-582b-b6f9-b694abf25c59
+hf-adapters	olmo-1b-hf	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	24846353-1735-5274-b2a3-cf74b6af0aad
+hf-adapters	olmo-1b-hf	total	full_model	generate	Total	590dfd3f-eb10-515c-bd20-98c2cae9e0ad
+hf-adapters	olmo-1b-hf	report	one_block	prefill_only		8e1eafc9-9709-52cd-be38-6672a9bfc653
+hf-adapters	olmo-1b-hf	kernel	one_block	prefill_only	aten::copy_	751e9b03-0f70-5940-83c2-14099c64830e
+hf-adapters	olmo-1b-hf	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	1e704fdf-fdce-5edf-ae8b-93402112663c
+hf-adapters	olmo-1b-hf	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	4053f146-0c75-568e-b52e-571570662d04
+hf-adapters	olmo-1b-hf	total	one_block	prefill_only	Total	6cdd9717-ad4a-5425-af4c-100361ca1172
+hf-adapters	olmo-1b-hf	report	one_block	decode_only		505cbf9a-ccc8-5de4-a50f-8eed2404792d
+hf-adapters	olmo-1b-hf	kernel	one_block	decode_only	aten::copy_	7ca64a7e-26b1-5586-869c-f6fa488e0aea
+hf-adapters	olmo-1b-hf	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	601ef6e0-a38c-58d0-9a14-a15cf740b22a
+hf-adapters	olmo-1b-hf	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	415035cb-d3eb-5f5c-90fa-e0e304fa6ee0
+hf-adapters	olmo-1b-hf	total	one_block	decode_only	Total	927f0673-56f9-507e-ad50-39fc23ccdeb3
+hf-adapters	olmo-1b-hf	report	one_block	generate		81cec366-bd67-5cda-b22b-c2072ebc69e6
+hf-adapters	olmo-1b-hf	kernel	one_block	generate	aten::copy_	696eecbd-2953-5e49-8519-578e66dac09b
+hf-adapters	olmo-1b-hf	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	d2ea17fb-ff36-5096-afa1-a20bedcca30d
+hf-adapters	olmo-1b-hf	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	61c2c55e-8b56-5774-999b-4c7f3b74cfa5
+hf-adapters	olmo-1b-hf	total	one_block	generate	Total	02810627-5c52-586d-bce4-52047566ec91
+hf-adapters	olmo-2-0425-1b	report	full_model	prefill_only		16f9dfc2-6c14-5bf6-869f-a520a84a34aa
+hf-adapters	olmo-2-0425-1b	kernel	full_model	prefill_only	aten::copy_	c14222fd-fe52-59ce-b5d3-0fc048f756f8
+hf-adapters	olmo-2-0425-1b	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	470f3587-519b-53e5-b083-8fe389c39bc4
+hf-adapters	olmo-2-0425-1b	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	5cb7f9b5-69af-5ae3-b791-e032d7958ecc
+hf-adapters	olmo-2-0425-1b	total	full_model	prefill_only	Total	885c73bc-58a3-55d2-a3b5-ceae58612129
+hf-adapters	olmo-2-0425-1b	report	full_model	decode_only		13f05046-76a4-55cf-bbda-5c2c0fcf7d91
+hf-adapters	olmo-2-0425-1b	kernel	full_model	decode_only	aten::copy_	d5b722e9-5b5e-5621-917b-71b0bed81ddb
+hf-adapters	olmo-2-0425-1b	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	67538698-7441-560a-9ca8-1c5f9391cbff
+hf-adapters	olmo-2-0425-1b	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	fa544007-7419-5f95-86ff-79dbe1b070c5
+hf-adapters	olmo-2-0425-1b	total	full_model	decode_only	Total	5486b0e6-5aec-59f9-a895-588c550346fc
+hf-adapters	olmo-2-0425-1b	report	full_model	generate		4d4c04d8-6420-5e87-bea9-4cd1294cff85
+hf-adapters	olmo-2-0425-1b	kernel	full_model	generate	aten::copy_	34aeed0e-9c35-57d9-a408-f789aaabfb9e
+hf-adapters	olmo-2-0425-1b	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	fa118110-08a2-5a62-82f2-fec5d17a6bce
+hf-adapters	olmo-2-0425-1b	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	f1c67474-f91c-59f4-9671-aed8ef4d1c7f
+hf-adapters	olmo-2-0425-1b	total	full_model	generate	Total	08ab1604-7343-5053-bb7c-db1851d96636
+hf-adapters	olmo-2-0425-1b	report	one_block	prefill_only		db322fc5-1f9f-53d7-a7c8-d4af5148e069
+hf-adapters	olmo-2-0425-1b	kernel	one_block	prefill_only	aten::copy_	0f6e9fca-cd7d-5571-90de-0c167b08288d
+hf-adapters	olmo-2-0425-1b	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	14cd7710-ea7e-54bc-91dc-f51439ab240b
+hf-adapters	olmo-2-0425-1b	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	b903c8f3-8b81-51b3-85fc-c40d9a9bf7d1
+hf-adapters	olmo-2-0425-1b	total	one_block	prefill_only	Total	dd5caa14-c26c-507b-b71e-09811c872b15
+hf-adapters	olmo-2-0425-1b	report	one_block	decode_only		0bcb3b77-8983-5f42-aac8-045285e23622
+hf-adapters	olmo-2-0425-1b	kernel	one_block	decode_only	aten::copy_	13f35960-c607-549a-9d36-6acce328c438
+hf-adapters	olmo-2-0425-1b	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	c26b0641-1d2f-5af9-b95f-77addab93c30
+hf-adapters	olmo-2-0425-1b	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	0834e49d-03df-5d33-8246-d800f2472247
+hf-adapters	olmo-2-0425-1b	total	one_block	decode_only	Total	af97e6f5-ec69-5562-9e9e-1d4985513454
+hf-adapters	olmo-2-0425-1b	report	one_block	generate		1bf59f97-5c96-5b76-816a-c7d377509ad2
+hf-adapters	olmo-2-0425-1b	kernel	one_block	generate	aten::copy_	9ff1b51f-de50-58bb-821e-bab9453470a5
+hf-adapters	olmo-2-0425-1b	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	4a3636b1-28fe-5708-b107-46f1f93fde69
+hf-adapters	olmo-2-0425-1b	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	00abd341-03ab-5173-9bac-568294709445
+hf-adapters	olmo-2-0425-1b	total	one_block	generate	Total	e2d993ed-3d3c-51a1-8c8f-cb1abbe52f2b
+hf-adapters	olmoe-1b-7b-0924	report	full_model	prefill_only		902e20d0-c4dc-5685-b540-7a3e106d79f0
+hf-adapters	olmoe-1b-7b-0924	kernel	full_model	prefill_only	aten::copy_	60152374-0212-506a-9920-1740fe47549e
+hf-adapters	olmoe-1b-7b-0924	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	d43d4300-6b0d-5eab-beff-bf6976e446ea
+hf-adapters	olmoe-1b-7b-0924	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	d7d00655-4ee5-5da1-8478-bf2a64d31f7f
+hf-adapters	olmoe-1b-7b-0924	total	full_model	prefill_only	Total	ea15df21-2534-5642-9e55-7ff5035b2c94
+hf-adapters	olmoe-1b-7b-0924	report	full_model	decode_only		3ed2e39e-5341-5352-ae9a-38659ad0204d
+hf-adapters	olmoe-1b-7b-0924	kernel	full_model	decode_only	aten::copy_	6291587f-a5b6-552c-a606-ed0b022123c5
+hf-adapters	olmoe-1b-7b-0924	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	5d3d6ddc-6a1d-5348-af35-88c76a166be1
+hf-adapters	olmoe-1b-7b-0924	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	8facf16f-1093-5f93-95c6-aada030ab181
+hf-adapters	olmoe-1b-7b-0924	total	full_model	decode_only	Total	a9166a8e-55bb-5be4-b947-192f3e812c4f
+hf-adapters	olmoe-1b-7b-0924	report	full_model	generate		c059d412-90af-5cbd-89ec-3342b8aaadd0
+hf-adapters	olmoe-1b-7b-0924	kernel	full_model	generate	aten::copy_	a4478e4b-ded5-5078-9202-c048b321a700
+hf-adapters	olmoe-1b-7b-0924	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	c4cedde2-5fc6-5d44-9a22-c8af672d4907
+hf-adapters	olmoe-1b-7b-0924	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	29a0bc6a-71a3-5b73-a5d2-5eb3a6b0024d
+hf-adapters	olmoe-1b-7b-0924	total	full_model	generate	Total	a695bac7-f507-52a4-9ce2-24d05d5f0604
+hf-adapters	olmoe-1b-7b-0924	report	one_block	prefill_only		d83275d6-92aa-576a-881c-3e80d9dce52f
+hf-adapters	olmoe-1b-7b-0924	kernel	one_block	prefill_only	aten::copy_	c660bacc-2183-5a59-8cb9-b30b39d8a5d2
+hf-adapters	olmoe-1b-7b-0924	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	4d58dda6-2df4-5a6c-8e80-baedeca60c74
+hf-adapters	olmoe-1b-7b-0924	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	ba17680c-05ac-5478-b9f6-44bd52897c5f
+hf-adapters	olmoe-1b-7b-0924	total	one_block	prefill_only	Total	d5ba0b0a-bc02-52d0-a356-8ac4909d8c94
+hf-adapters	olmoe-1b-7b-0924	report	one_block	decode_only		d993fe3d-0802-5d94-9511-a71abdc91aec
+hf-adapters	olmoe-1b-7b-0924	kernel	one_block	decode_only	aten::copy_	aa8c558f-7293-5278-a849-25fbeed712c0
+hf-adapters	olmoe-1b-7b-0924	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	539a0f64-fbc2-5119-88a9-bb6279c986d7
+hf-adapters	olmoe-1b-7b-0924	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	b1db82a4-7f06-5e15-9ea2-b92a8a733573
+hf-adapters	olmoe-1b-7b-0924	total	one_block	decode_only	Total	d2861227-a01e-554c-9b2a-f0ecf228a589
+hf-adapters	olmoe-1b-7b-0924	report	one_block	generate		734cc05d-87bd-599b-9ee5-87c8e6254467
+hf-adapters	olmoe-1b-7b-0924	kernel	one_block	generate	aten::copy_	a2ddc000-3f7e-5c25-b1ee-3a7cd8014106
+hf-adapters	olmoe-1b-7b-0924	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	c6a03f1e-94f2-5df7-8714-86ac9b98d7dd
+hf-adapters	olmoe-1b-7b-0924	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	df76e58b-bec3-5a78-92cc-d11ad19e4108
+hf-adapters	olmoe-1b-7b-0924	total	one_block	generate	Total	f81314c9-fd8d-5645-a720-9681e776ed1b
+hf-adapters	opt-125m	report	full_model	prefill_only		9c2b84f0-40e3-5105-8a6f-c857a38611cd
+hf-adapters	opt-125m	kernel	full_model	prefill_only	aten::copy_	cfe71b6c-8b4b-51bd-8781-647f038f1691
+hf-adapters	opt-125m	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	298df5d8-5331-5d0c-9f0c-4be296988eb5
+hf-adapters	opt-125m	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	b848ea39-eeb3-5eff-8915-b40fcb0a45a8
+hf-adapters	opt-125m	total	full_model	prefill_only	Total	16478753-39c0-522d-996b-c656fb5ad054
+hf-adapters	opt-125m	report	full_model	decode_only		65159e55-f10b-5bd5-81a4-17a22918ecb7
+hf-adapters	opt-125m	kernel	full_model	decode_only	aten::copy_	3a812ee9-dcdd-589a-8678-1929278edb85
+hf-adapters	opt-125m	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	1708c163-30e8-5082-87e8-9afbac5a635e
+hf-adapters	opt-125m	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	5646e59c-2802-54fc-9e41-edda127ae7ac
+hf-adapters	opt-125m	total	full_model	decode_only	Total	0be7a880-8aa4-5397-ae01-a0e4f7dcfed8
+hf-adapters	opt-125m	report	full_model	generate		c541d46b-013e-53e7-a19b-b790633cefc4
+hf-adapters	opt-125m	kernel	full_model	generate	aten::copy_	9d68e4a0-4423-5fde-a133-c79a6624988c
+hf-adapters	opt-125m	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	628003d8-a8ce-5c1f-afc2-4582c08f71ad
+hf-adapters	opt-125m	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	e0c8d19a-f6a8-5f49-a151-928df7131ada
+hf-adapters	opt-125m	total	full_model	generate	Total	e8d3807f-5eee-5073-bdb0-910a5c2f28c9
+hf-adapters	opt-125m	report	one_block	prefill_only		845d6c9f-8b7f-53d9-951e-934e716f0732
+hf-adapters	opt-125m	kernel	one_block	prefill_only	aten::copy_	4487f2db-c837-54a3-8b69-91c8712e6bb0
+hf-adapters	opt-125m	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	4081d7cf-3c1b-5f6a-a03e-b6c1cfc30a12
+hf-adapters	opt-125m	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	5f24928f-31f3-52bc-a7a3-25ffe63b2a06
+hf-adapters	opt-125m	total	one_block	prefill_only	Total	72bb5683-de1a-5584-a9f0-dc7dcc3f5fd1
+hf-adapters	opt-125m	report	one_block	decode_only		c5b29706-67ca-5746-8f59-3612f5768707
+hf-adapters	opt-125m	kernel	one_block	decode_only	aten::copy_	7965446b-5579-583a-9c37-cd4391289ad2
+hf-adapters	opt-125m	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	e7634a9f-c413-55cb-a2d9-0afe172bc3f9
+hf-adapters	opt-125m	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	c0d76f57-732f-555d-837c-8847af67b277
+hf-adapters	opt-125m	total	one_block	decode_only	Total	b46505e8-5059-5713-887b-b40bd77d8cb0
+hf-adapters	opt-125m	report	one_block	generate		c8b40159-b6b1-524c-bdc2-96ee309e3b89
+hf-adapters	opt-125m	kernel	one_block	generate	aten::copy_	adbb45ea-dc28-544f-a1f6-0e12a5b7530c
+hf-adapters	opt-125m	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	073f65a5-f1b2-58cc-a774-917662ada408
+hf-adapters	opt-125m	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	9dcf473c-5806-57d5-b3ff-758d1926ba9a
+hf-adapters	opt-125m	total	one_block	generate	Total	37041b3b-daf2-59e4-b6d4-48006dec05a4
+hf-adapters	phi-3.5-mini-instruct	report	full_model	prefill_only		a97b1f39-991a-5216-8327-539e6016e2bc
+hf-adapters	phi-3.5-mini-instruct	kernel	full_model	prefill_only	aten::copy_	7d436e0b-c547-5a90-9720-900bd40ced27
+hf-adapters	phi-3.5-mini-instruct	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	d0258722-6963-5cc7-a011-f3116f326846
+hf-adapters	phi-3.5-mini-instruct	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	db6182df-d35e-53a9-a7c8-027e66febaae
+hf-adapters	phi-3.5-mini-instruct	total	full_model	prefill_only	Total	6885e541-8531-5851-80cd-bbdabbd0eeaf
+hf-adapters	phi-3.5-mini-instruct	report	full_model	decode_only		5c5c23fc-e056-5f50-9aaf-98b51ce64d84
+hf-adapters	phi-3.5-mini-instruct	kernel	full_model	decode_only	aten::copy_	2696ead8-af55-594f-832e-06ca7c34f756
+hf-adapters	phi-3.5-mini-instruct	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	cfdb3060-cb33-5775-ad9c-6b8e76364e58
+hf-adapters	phi-3.5-mini-instruct	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	fb0110c5-b19c-5845-b169-84c4b1c04177
+hf-adapters	phi-3.5-mini-instruct	total	full_model	decode_only	Total	fab5f68b-2760-50b8-be57-2abaa0e89800
+hf-adapters	phi-3.5-mini-instruct	report	full_model	generate		25d909f6-7f0f-5832-92ab-789cd7760f9e
+hf-adapters	phi-3.5-mini-instruct	kernel	full_model	generate	aten::copy_	80084f7f-d858-55bf-9952-739d194e5636
+hf-adapters	phi-3.5-mini-instruct	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	98107dca-110b-5c32-919e-07cd27689e6c
+hf-adapters	phi-3.5-mini-instruct	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	fd6c2d49-1939-5094-b818-7fdd82f7e93a
+hf-adapters	phi-3.5-mini-instruct	total	full_model	generate	Total	93894939-a827-56da-a5a8-a61639ee1e62
+hf-adapters	phi-3.5-mini-instruct	report	one_block	prefill_only		2e91b708-cef8-573b-91c9-6e923965e844
+hf-adapters	phi-3.5-mini-instruct	kernel	one_block	prefill_only	aten::copy_	588d8ed6-9df4-54d2-a242-6ea252f7c3d3
+hf-adapters	phi-3.5-mini-instruct	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	2cc59aa2-6c43-5070-9d1e-490442e858e9
+hf-adapters	phi-3.5-mini-instruct	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	2d184999-212d-564f-8663-38952ed2041f
+hf-adapters	phi-3.5-mini-instruct	total	one_block	prefill_only	Total	7811c611-435a-567f-98fa-6ce33d8e32dd
+hf-adapters	phi-3.5-mini-instruct	report	one_block	decode_only		bc38e8d0-40ec-5a9f-8951-5e721eea77a5
+hf-adapters	phi-3.5-mini-instruct	kernel	one_block	decode_only	aten::copy_	82c3bfe8-30ac-5668-aa26-965b468bc742
+hf-adapters	phi-3.5-mini-instruct	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	1dad4ada-b60c-5325-974f-73ab44884747
+hf-adapters	phi-3.5-mini-instruct	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	028af1ee-3562-580e-b151-6800e76059bc
+hf-adapters	phi-3.5-mini-instruct	total	one_block	decode_only	Total	80eaba25-c9fc-5e12-b47e-e895dfbe902f
+hf-adapters	phi-3.5-mini-instruct	report	one_block	generate		d310152f-e4de-59b9-941c-1ba2112677ef
+hf-adapters	phi-3.5-mini-instruct	kernel	one_block	generate	aten::copy_	61d8457a-5a65-5a5f-be9d-604f9515be0d
+hf-adapters	phi-3.5-mini-instruct	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	a47e05e3-98c4-58a8-bdd3-6900af96325f
+hf-adapters	phi-3.5-mini-instruct	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	e46157db-7722-5174-bec3-3faef3ba877a
+hf-adapters	phi-3.5-mini-instruct	total	one_block	generate	Total	7034dc24-030a-5944-a714-7143336c1d3d
+hf-adapters	pythia-410m	report	full_model	prefill_only		91713529-6baf-5817-a556-8308e1ee6478
+hf-adapters	pythia-410m	kernel	full_model	prefill_only	aten::copy_	845e1196-5a33-5236-820e-cf2023ade322
+hf-adapters	pythia-410m	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	5ccf7747-e09f-5854-b6c0-0f4cf0082834
+hf-adapters	pythia-410m	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	0e029f77-cb79-54ef-91b1-f58d3db4a0d1
+hf-adapters	pythia-410m	total	full_model	prefill_only	Total	15664c3a-dd99-581a-b01d-0135744bc301
+hf-adapters	pythia-410m	report	full_model	decode_only		ea96e9b2-f613-51e4-96a2-c53862d33495
+hf-adapters	pythia-410m	kernel	full_model	decode_only	aten::copy_	c4e77e9a-ebf6-59c9-b405-597b7dd77929
+hf-adapters	pythia-410m	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	7e96805f-727e-5f9d-8749-9d0aa5119c3d
+hf-adapters	pythia-410m	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	5ba4a590-39fd-55dc-be6e-78518fdbe1e2
+hf-adapters	pythia-410m	total	full_model	decode_only	Total	2a57431a-5744-5532-ac83-9cf94fce27ce
+hf-adapters	pythia-410m	report	full_model	generate		3360b3a1-648d-5f4d-b66f-e9e34501c9e6
+hf-adapters	pythia-410m	kernel	full_model	generate	aten::copy_	8ea590b1-47cd-56a5-b999-d01aad73a7eb
+hf-adapters	pythia-410m	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	5f34df99-75e2-5424-bcd2-b0ac537ee768
+hf-adapters	pythia-410m	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	3b11416a-e6dc-5288-8d57-312507a89bdc
+hf-adapters	pythia-410m	total	full_model	generate	Total	bc3e196b-9aad-5564-a30f-6047fcdc94a4
+hf-adapters	pythia-410m	report	one_block	prefill_only		471a2191-cbd3-53ea-8eec-3d6caaa312a1
+hf-adapters	pythia-410m	kernel	one_block	prefill_only	aten::copy_	736706b8-cd30-5c23-9a30-3bff275e5e91
+hf-adapters	pythia-410m	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	e52edfab-13db-5762-81c0-c8d696326d14
+hf-adapters	pythia-410m	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	73872d96-ce23-5f25-9abf-1696361ce838
+hf-adapters	pythia-410m	total	one_block	prefill_only	Total	05a35862-b8cc-59d7-8de6-e90cbc4dfbc3
+hf-adapters	pythia-410m	report	one_block	decode_only		3b699494-35cf-587f-9f18-d7ea07d09351
+hf-adapters	pythia-410m	kernel	one_block	decode_only	aten::copy_	736453a1-40f3-5b66-bc3c-72ff1f6ca02c
+hf-adapters	pythia-410m	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	176f72d1-b81c-5416-8bb8-d8f2ba5dcc79
+hf-adapters	pythia-410m	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	a99af1f8-125f-5e25-b797-4315841884e2
+hf-adapters	pythia-410m	total	one_block	decode_only	Total	04b0d662-8672-51ea-a0b9-561ec2ac58c0
+hf-adapters	pythia-410m	report	one_block	generate		4b905bf9-3196-5118-a7b9-ae026465eb29
+hf-adapters	pythia-410m	kernel	one_block	generate	aten::copy_	7c824b9f-05bd-5b2e-be4b-6be9f16d8b43
+hf-adapters	pythia-410m	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	e794cf78-021b-5442-8df5-83e91cb2850e
+hf-adapters	pythia-410m	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	1ff462ed-243d-50aa-9ea2-a2967b78da30
+hf-adapters	pythia-410m	total	one_block	generate	Total	f59ca5fe-871e-5b5b-afa6-fb716cdf42c9
+hf-adapters	qwen2.5-1.5b	report	full_model	prefill_only		30f55943-591d-57bb-a029-717bdc4e8199
+hf-adapters	qwen2.5-1.5b	kernel	full_model	prefill_only	aten::copy_	68829b6e-8a75-577e-b6ff-4e469a0a90ab
+hf-adapters	qwen2.5-1.5b	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	8199b9e1-2b33-525d-a20b-37ab13560608
+hf-adapters	qwen2.5-1.5b	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	773236e0-04ef-5eee-8911-07d262c7e587
+hf-adapters	qwen2.5-1.5b	total	full_model	prefill_only	Total	2eca50f9-be89-5a0b-ad87-d81444c7bcee
+hf-adapters	qwen2.5-1.5b	report	full_model	decode_only		ee425097-ee85-526b-be5b-442ea4524b36
+hf-adapters	qwen2.5-1.5b	kernel	full_model	decode_only	aten::copy_	b9075db6-d50b-538f-bbb3-93031fa54b32
+hf-adapters	qwen2.5-1.5b	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	37768c1a-cef3-5bf1-aceb-bcc948ae8486
+hf-adapters	qwen2.5-1.5b	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	bb7d30ff-de05-5f99-86d3-af85e9f7ac1d
+hf-adapters	qwen2.5-1.5b	total	full_model	decode_only	Total	b6ec116f-d93a-5b6b-9cff-bb3359e8d24f
+hf-adapters	qwen2.5-1.5b	report	full_model	generate		9134da99-2099-5975-a1f7-50ac6d1e33f7
+hf-adapters	qwen2.5-1.5b	kernel	full_model	generate	aten::copy_	de397c8c-52bf-5209-9bb3-0081c63b46a8
+hf-adapters	qwen2.5-1.5b	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	809f5e72-e8b9-54a5-b998-7a44119edc81
+hf-adapters	qwen2.5-1.5b	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	48168ced-ce28-5dec-8e0f-995dc5896858
+hf-adapters	qwen2.5-1.5b	total	full_model	generate	Total	4182c3b9-bfbb-5c27-9c94-c6f2a0ab6f12
+hf-adapters	qwen2.5-1.5b	report	one_block	prefill_only		e7c4e119-56f3-505a-bf94-cb0432a730f3
+hf-adapters	qwen2.5-1.5b	kernel	one_block	prefill_only	aten::copy_	1cf585d2-ec3e-5805-bd65-1adab61b3f88
+hf-adapters	qwen2.5-1.5b	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	05c9ae92-2cbd-578f-a62d-0a5d7a2dfca0
+hf-adapters	qwen2.5-1.5b	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	2736628d-38c8-5178-996e-0b8eb00ac55f
+hf-adapters	qwen2.5-1.5b	total	one_block	prefill_only	Total	7792724f-9c50-5830-a90c-36f4cbc1d8b6
+hf-adapters	qwen2.5-1.5b	report	one_block	decode_only		e49d1043-2b47-5aa2-99a7-293ad3ed10e4
+hf-adapters	qwen2.5-1.5b	kernel	one_block	decode_only	aten::copy_	e486fe46-0523-5346-8b33-c6a4bdf0741e
+hf-adapters	qwen2.5-1.5b	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	d40521af-501e-5a2a-b757-0f8b0603e6d9
+hf-adapters	qwen2.5-1.5b	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	2b7eb73e-9ef8-56d6-bdd3-d6f96c2e1ba8
+hf-adapters	qwen2.5-1.5b	total	one_block	decode_only	Total	eef89074-b48c-5405-ab41-841375143cbe
+hf-adapters	qwen2.5-1.5b	report	one_block	generate		f1e4e640-fdec-51e7-9f07-594143390070
+hf-adapters	qwen2.5-1.5b	kernel	one_block	generate	aten::copy_	f04c8e57-ba2f-5261-a40a-26f2dd2758be
+hf-adapters	qwen2.5-1.5b	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	94f348fb-5bf4-5188-8099-6b0eb0dfdc5a
+hf-adapters	qwen2.5-1.5b	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	2becefc9-7e22-5aa9-b1c2-20fe0a718b96
+hf-adapters	qwen2.5-1.5b	total	one_block	generate	Total	6b239bd2-5f86-50b7-8512-a6c9a2abe858
+hf-adapters	qwen3-0.6b	report	full_model	prefill_only		e8c15c6b-26ea-5952-9de2-3614d0e91327
+hf-adapters	qwen3-0.6b	kernel	full_model	prefill_only	aten::copy_	7951a885-819d-572e-99b6-7e946ab163be
+hf-adapters	qwen3-0.6b	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	9a1dc094-7d11-5c39-8e4c-f278781783f0
+hf-adapters	qwen3-0.6b	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	7d713b1d-ed36-57c6-8ec1-c6472de02c7e
+hf-adapters	qwen3-0.6b	total	full_model	prefill_only	Total	b27b703f-120c-5359-8c13-19058ecbe454
+hf-adapters	qwen3-0.6b	report	full_model	decode_only		bc83bfb2-595d-5f1f-9413-5cbdeac2cbb2
+hf-adapters	qwen3-0.6b	kernel	full_model	decode_only	aten::copy_	555e5b32-7d6f-5def-8b3b-941f3928fad1
+hf-adapters	qwen3-0.6b	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	70f612ac-b8b4-5d02-b036-54badb03a4b7
+hf-adapters	qwen3-0.6b	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	79fc88ba-ecc7-5a60-b1f9-c62e14843728
+hf-adapters	qwen3-0.6b	total	full_model	decode_only	Total	288ec2a6-1fa2-5af8-a4f5-0727cc424676
+hf-adapters	qwen3-0.6b	report	full_model	generate		f19ee490-9c4b-5bd6-95a5-ff2b50a48a21
+hf-adapters	qwen3-0.6b	kernel	full_model	generate	aten::copy_	44381cc4-8fb7-5073-9be3-6703a9f33d55
+hf-adapters	qwen3-0.6b	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	6cd79e7b-23ff-5de1-a34a-b43644247763
+hf-adapters	qwen3-0.6b	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	bf3f2ec8-c823-545b-9c12-d5e092e75ca2
+hf-adapters	qwen3-0.6b	total	full_model	generate	Total	b9ab4b83-9583-58d1-82f3-237848dc55bf
+hf-adapters	qwen3-0.6b	report	one_block	prefill_only		cab10d86-85f3-5a20-b128-e989223937f9
+hf-adapters	qwen3-0.6b	kernel	one_block	prefill_only	aten::copy_	0d826d7f-7ded-5342-ab45-e85d76fd0c9d
+hf-adapters	qwen3-0.6b	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	486be5c5-36bd-53bd-a394-a3c8f508f7f2
+hf-adapters	qwen3-0.6b	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	1fd1e6d1-2224-5227-a3bd-e192bb87d5ce
+hf-adapters	qwen3-0.6b	total	one_block	prefill_only	Total	6105f9e9-9fff-5c92-9bbe-c857d7e93c3a
+hf-adapters	qwen3-0.6b	report	one_block	decode_only		e21ca5ea-a4d0-52c8-b5fa-d90af220a97b
+hf-adapters	qwen3-0.6b	kernel	one_block	decode_only	aten::copy_	c0290be2-0b7e-5434-b92c-fb8af723c254
+hf-adapters	qwen3-0.6b	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	8a43cfd7-7a5c-58f2-b50a-4ec307f79435
+hf-adapters	qwen3-0.6b	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	96b0c139-cd1d-55a0-a262-32a1ea754c06
+hf-adapters	qwen3-0.6b	total	one_block	decode_only	Total	4078deaf-0e6f-5008-9ae0-239043501bb6
+hf-adapters	qwen3-0.6b	report	one_block	generate		f32a9789-c562-5361-a876-e5f35bb1e743
+hf-adapters	qwen3-0.6b	kernel	one_block	generate	aten::copy_	bcc59e2d-5119-51e5-9754-33fd026086d2
+hf-adapters	qwen3-0.6b	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	2ab87869-a93a-5aa6-be46-0f74f7ac2dd1
+hf-adapters	qwen3-0.6b	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	08feafee-a741-5f9a-a375-a45aae6f7498
+hf-adapters	qwen3-0.6b	total	one_block	generate	Total	a173b758-a35b-5565-93f8-f8c28d45be40
+hf-adapters	qwen3.5-2b	report	full_model	prefill_only		98f08f9f-e74d-587d-a883-6e09723d3083
+hf-adapters	qwen3.5-2b	kernel	full_model	prefill_only	aten::copy_	66462cab-26bd-5a6f-b694-e302d5154b1f
+hf-adapters	qwen3.5-2b	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	9b1582bd-248e-57ec-a0cf-24521be034ac
+hf-adapters	qwen3.5-2b	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	226a7875-0aed-5184-8513-94c65a5c5714
+hf-adapters	qwen3.5-2b	total	full_model	prefill_only	Total	be85a1cc-467a-50b4-9ca6-a38162fa8ba0
+hf-adapters	qwen3.5-2b	report	full_model	decode_only		23e8962f-3cec-5f55-a494-97163e5e1228
+hf-adapters	qwen3.5-2b	kernel	full_model	decode_only	aten::copy_	c77d7a2e-c16b-5e05-9bf5-040c1d3e0324
+hf-adapters	qwen3.5-2b	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	9096b964-c604-5bc1-a7cf-fb4026c1ea1a
+hf-adapters	qwen3.5-2b	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	91d53dcc-9402-5ae9-9b85-76bcaa02b2ac
+hf-adapters	qwen3.5-2b	total	full_model	decode_only	Total	ea13b00d-06d4-5ce6-8ba0-382e3ab392bb
+hf-adapters	qwen3.5-2b	report	full_model	generate		692e6cf1-bd98-5d94-8b0c-6fa3864e433e
+hf-adapters	qwen3.5-2b	kernel	full_model	generate	aten::copy_	199517db-5293-5338-bdc5-fcbf17e7aa0f
+hf-adapters	qwen3.5-2b	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	26b314e3-2741-576f-806d-778a38ab830c
+hf-adapters	qwen3.5-2b	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	e9434734-1f51-5a57-abf9-d2614be9ef21
+hf-adapters	qwen3.5-2b	total	full_model	generate	Total	934f0a25-6d2a-54cf-985f-7db4e7f99116
+hf-adapters	qwen3.5-2b	report	one_block	prefill_only		bb7c9eca-884f-5e66-8655-25764d80f3ed
+hf-adapters	qwen3.5-2b	kernel	one_block	prefill_only	aten::copy_	5e6b8f2d-4138-5e01-87ce-3eecadeb125b
+hf-adapters	qwen3.5-2b	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	04076415-8153-5413-b2bd-4f6f9795364e
+hf-adapters	qwen3.5-2b	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	6ea14a86-78fe-597e-b4e0-4e59c69f404c
+hf-adapters	qwen3.5-2b	total	one_block	prefill_only	Total	ce933308-8ae1-58ff-b84d-d0142874d55b
+hf-adapters	qwen3.5-2b	report	one_block	decode_only		fc8bfd17-8a0f-5120-bd2d-89542e61dc0b
+hf-adapters	qwen3.5-2b	kernel	one_block	decode_only	aten::copy_	6b92e6e5-4624-5247-b7df-379cc8e8bff8
+hf-adapters	qwen3.5-2b	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	7a80a29b-7ca0-5faa-a3e9-7340efdd3582
+hf-adapters	qwen3.5-2b	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	d1967bd7-8f74-5fd3-bcb6-51b25612ad34
+hf-adapters	qwen3.5-2b	total	one_block	decode_only	Total	0b894338-cd76-5a86-bf18-16445f70449f
+hf-adapters	qwen3.5-2b	report	one_block	generate		742b23e4-7c7b-5fe1-b691-56952f6a21e9
+hf-adapters	qwen3.5-2b	kernel	one_block	generate	aten::copy_	b70e92b5-4dbe-565d-936c-e3b0fe778a0c
+hf-adapters	qwen3.5-2b	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	670c8549-528c-5b1f-badb-bb879bac40c5
+hf-adapters	qwen3.5-2b	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	df547106-cd18-539f-9fab-9dd0af850504
+hf-adapters	qwen3.5-2b	total	one_block	generate	Total	8f166baa-678b-50f9-9689-0a0d0624fc4d
+hf-adapters	qwen3.6-35b-a3b	report	full_model	prefill_only		08333e1c-8a05-5230-8d7a-6c85dcf0531c
+hf-adapters	qwen3.6-35b-a3b	kernel	full_model	prefill_only	aten::copy_	1c1c01dc-9ebc-5ec9-9026-4b86c7a75e28
+hf-adapters	qwen3.6-35b-a3b	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	aa8fdee6-1053-5dd6-8a99-8aede78a9236
+hf-adapters	qwen3.6-35b-a3b	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	4c4a0fd4-14a0-5bd7-98d2-8fcc31892fa6
+hf-adapters	qwen3.6-35b-a3b	total	full_model	prefill_only	Total	bebeef6d-7c1f-5e1d-a5cc-2631610feb4d
+hf-adapters	qwen3.6-35b-a3b	report	full_model	decode_only		93f92f31-ac2e-5093-a3ad-6a141ea8712c
+hf-adapters	qwen3.6-35b-a3b	kernel	full_model	decode_only	aten::copy_	1e2bc633-021c-549a-b45f-818064dc54a2
+hf-adapters	qwen3.6-35b-a3b	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	bcf76eff-7a4d-5d01-9618-0d4ac30ae94b
+hf-adapters	qwen3.6-35b-a3b	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	dc5f7e23-9b57-5e85-9b9e-a75c8ddb7a8e
+hf-adapters	qwen3.6-35b-a3b	total	full_model	decode_only	Total	1823bac0-54a0-5a5b-9a66-3b0817011eba
+hf-adapters	qwen3.6-35b-a3b	report	full_model	generate		c1a6dc08-7be3-5893-a57e-2ca557619c70
+hf-adapters	qwen3.6-35b-a3b	kernel	full_model	generate	aten::copy_	45232391-1185-52cd-8c67-99f7d9f8fa99
+hf-adapters	qwen3.6-35b-a3b	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	9d4a69ae-1b06-59bf-b7d9-8a6578cee082
+hf-adapters	qwen3.6-35b-a3b	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	87ed6692-e21d-53cb-9c75-a913dbfbadd6
+hf-adapters	qwen3.6-35b-a3b	total	full_model	generate	Total	eb9f4e99-9fbb-5423-8513-647a04b1dab9
+hf-adapters	qwen3.6-35b-a3b	report	one_block	prefill_only		bf1f88ed-2590-50e5-bd03-033b73dd6945
+hf-adapters	qwen3.6-35b-a3b	kernel	one_block	prefill_only	aten::copy_	a0938a38-469e-5098-b1bc-143323428197
+hf-adapters	qwen3.6-35b-a3b	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	57137eec-1bb1-515b-a671-a584f7131a51
+hf-adapters	qwen3.6-35b-a3b	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	c912f015-7e72-5f5c-ae97-fb9382b10d5d
+hf-adapters	qwen3.6-35b-a3b	total	one_block	prefill_only	Total	2347ad4b-5678-5551-88f6-7f300420b3a1
+hf-adapters	qwen3.6-35b-a3b	report	one_block	decode_only		50db0896-355c-5fe3-8a3d-faa9ea19d6b5
+hf-adapters	qwen3.6-35b-a3b	kernel	one_block	decode_only	aten::copy_	4281ff8c-02b5-5025-ba93-02902743cbd7
+hf-adapters	qwen3.6-35b-a3b	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	3889f90d-fbc9-5928-bc1a-8ac7453ba5ff
+hf-adapters	qwen3.6-35b-a3b	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	15fef7c0-b6ec-5ef2-914f-1b7b99331d03
+hf-adapters	qwen3.6-35b-a3b	total	one_block	decode_only	Total	af527e97-fe0d-53e2-b897-62549fb7d415
+hf-adapters	qwen3.6-35b-a3b	report	one_block	generate		87c88a22-b01f-5aed-b295-cbea171902a9
+hf-adapters	qwen3.6-35b-a3b	kernel	one_block	generate	aten::copy_	7decf2a6-a7b1-5764-9b36-0ed15f2ecdb8
+hf-adapters	qwen3.6-35b-a3b	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	e200bd80-f2fd-59c6-bc1b-23631e9e0012
+hf-adapters	qwen3.6-35b-a3b	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	a639d4d6-9372-5691-9b05-a74120ce5915
+hf-adapters	qwen3.6-35b-a3b	total	one_block	generate	Total	c8389224-f5ce-5d32-9c3f-0f3b8d6ff682
+hf-adapters	smollm3-3b-base	report	full_model	prefill_only		552994f3-b995-5806-96b2-ae0edaf02322
+hf-adapters	smollm3-3b-base	kernel	full_model	prefill_only	aten::copy_	f8dfa666-ec56-5c15-850c-368c3bdf15c5
+hf-adapters	smollm3-3b-base	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@2	99ff380d-08a2-5a69-826a-e3901de7aa5d
+hf-adapters	smollm3-3b-base	kernel	full_model	prefill_only	spyre_kernel_v1_fused_add#2@1	d71d5c2b-fc41-5903-a10b-13ca5bc92f93
+hf-adapters	smollm3-3b-base	total	full_model	prefill_only	Total	45b19e5c-e63b-51a0-a4f5-1dac505642eb
+hf-adapters	smollm3-3b-base	report	full_model	decode_only		989dc219-08b6-5b0f-8ff0-25786240042b
+hf-adapters	smollm3-3b-base	kernel	full_model	decode_only	aten::copy_	2a9f9f48-9037-5444-8f76-d39afd420af6
+hf-adapters	smollm3-3b-base	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@2	406dd309-17f6-5a4b-a33d-43510df1ec9c
+hf-adapters	smollm3-3b-base	kernel	full_model	decode_only	spyre_kernel_v1_fused_add#2@1	d0b62654-a21c-5844-b464-073218428fee
+hf-adapters	smollm3-3b-base	total	full_model	decode_only	Total	2764a787-1b40-5ba4-8103-9d5ac10958d9
+hf-adapters	smollm3-3b-base	report	full_model	generate		54a61e27-ef23-5713-8755-34b87bd13056
+hf-adapters	smollm3-3b-base	kernel	full_model	generate	aten::copy_	4da7d5ae-c730-5094-9ef2-e2e6e4e1ae87
+hf-adapters	smollm3-3b-base	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@2	5043112f-91cf-5eec-b039-7764e455156a
+hf-adapters	smollm3-3b-base	kernel	full_model	generate	spyre_kernel_v1_fused_add#2@1	87e1052a-69b6-5591-8613-c6601a5560de
+hf-adapters	smollm3-3b-base	total	full_model	generate	Total	8ce43040-69f8-5faa-befc-67fa300f2494
+hf-adapters	smollm3-3b-base	report	one_block	prefill_only		ba7a6e11-e431-52a0-bb95-90e1e65dd7ef
+hf-adapters	smollm3-3b-base	kernel	one_block	prefill_only	aten::copy_	4a17784c-e6fe-5bc9-aeae-6d46388db16a
+hf-adapters	smollm3-3b-base	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@2	793883e3-2562-5401-94ed-081ad773945a
+hf-adapters	smollm3-3b-base	kernel	one_block	prefill_only	spyre_kernel_v1_fused_add#2@1	0ceb27d3-3999-5e3e-9696-8862a4fbb127
+hf-adapters	smollm3-3b-base	total	one_block	prefill_only	Total	f4ae2f13-1f61-5b8a-b544-82d6e1752fef
+hf-adapters	smollm3-3b-base	report	one_block	decode_only		8709a29d-3554-507a-ae18-9445adc2973d
+hf-adapters	smollm3-3b-base	kernel	one_block	decode_only	aten::copy_	09921029-b9bc-5282-8bf0-33d2f4a94968
+hf-adapters	smollm3-3b-base	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@2	b9d0819d-817b-5286-afc0-082817f3a845
+hf-adapters	smollm3-3b-base	kernel	one_block	decode_only	spyre_kernel_v1_fused_add#2@1	a2fbb4a3-a2f1-5384-8106-41b389faff37
+hf-adapters	smollm3-3b-base	total	one_block	decode_only	Total	ff953c3c-3169-5917-90bd-437a3c16f7f7
+hf-adapters	smollm3-3b-base	report	one_block	generate		aed53336-c10c-5f93-a57f-c40dd5048689
+hf-adapters	smollm3-3b-base	kernel	one_block	generate	aten::copy_	6f76831a-0a50-5dad-83b0-2dca83cf63df
+hf-adapters	smollm3-3b-base	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@2	08d76922-2880-5df9-b1dd-bde1ca39d65d
+hf-adapters	smollm3-3b-base	kernel	one_block	generate	spyre_kernel_v1_fused_add#2@1	da707993-4aa0-51bc-9580-13cd4375168f
+hf-adapters	smollm3-3b-base	total	one_block	generate	Total	271b8487-dc70-51ed-aeff-6de7ea3b0df0
+hf-adapters	eval_slot-12_qwen3-0.6b_l50	quality				c7ff4cec-f2d6-597a-899f-699b54e4e4ff
+hf-adapters	eval_slot-14_qwen3-0.6b_l50	quality				f4152c2f-db5a-55f0-b32f-ebc2daf8d0bb
