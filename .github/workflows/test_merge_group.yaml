@@ -1,0 +1,61 @@
+name: test_merge_group
+
+# Merge-queue stand-in for the Jenkins "Spyre Test (amd64)" required check. Inert unless the
+# repo variable GHA_FULL_MERGE_QUEUE_TESTS is "true"; revert by deleting that variable, not this file.
+run-name: merge-queue
+
+on:
+  merge_group:
+    types: [checks_requested]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  # The variable is read once here so the gate's name, its steps and the matrix cannot disagree
+  # if it is flipped while a queue entry is running.
+  decide:
+    name: Decide whether GHA owns the check
+    runs-on: ubuntu-latest
+    outputs:
+      owns: ${{ steps.v.outputs.owns }}
+    steps:
+      - id: v
+        env:
+          OWNS: ${{ vars.GHA_FULL_MERGE_QUEUE_TESTS == 'true' }}
+        run: echo "owns=${OWNS}" >> "$GITHUB_OUTPUT"
+
+  run-tests:
+    needs: decide
+    if: ${{ needs.decide.outputs.owns == 'true' }}
+    uses: ./.github/workflows/_test_matrix.yaml
+    secrets: inherit
+    with:
+      image_label: image_torch_spyre_mq
+      extra_test_flags: -vvv -s
+      extra_test_flags_multi_spyre: -vvv -s
+
+  # The name switches so the required context is only ever posted from here during an outage;
+  # a skipped job under that name would otherwise satisfy it while Jenkins is still testing.
+  gate:
+    name: ${{ needs.decide.outputs.owns == 'true' && 'Spyre Test (amd64)' || 'gha-merge-queue-tests (inactive)' }}
+    runs-on: ubuntu-latest
+    needs: [decide, run-tests]
+    if: always()
+    steps:
+      - name: Jenkins owns the check
+        if: ${{ needs.decide.outputs.owns != 'true' }}
+        run: echo "GHA_FULL_MERGE_QUEUE_TESTS is not set; Jenkins owns the Spyre Test (amd64) check."
+      - name: Check all suites passed
+        if: ${{ needs.decide.outputs.owns == 'true' }}
+        run: |-
+          if ${{ needs.run-tests.result != 'success' }}; then
+            echo "One or more test suites failed."
+            exit 1
+          fi
+          echo "All test suites passed."
