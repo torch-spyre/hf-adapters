@@ -190,9 +190,11 @@ def _causal_conv_prefill(
     history = torch.cat((conv_state, x), dim=-1).float()
     # Match conv1d's accumulation and its cast before the SiLU activation.
     # Rounding every individual product/sum perturbs the recurrent cache.
+    # Spyre cannot change dtype on a view with a nonzero storage offset.
+    shift_matrices = shift_matrices.float()
     output = torch.zeros_like(x, dtype=torch.float32)
     for lag in reversed(range(len(taps) - 1)):
-        shifted = torch.matmul(history, shift_matrices[lag].float())
+        shifted = torch.matmul(history, shift_matrices[lag])
         output = output + shifted * taps[-2 - lag].float()
     output = output + x.float() * taps[-1].float()
     return F.silu(output.to(x.dtype)), x
