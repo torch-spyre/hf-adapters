@@ -60,6 +60,11 @@ on:
         required: false
         type: string
         default: ''
+      tp_test_filter:
+        description: Optional pytest -k expression for the small-checkpoint TP2 regressions; empty runs every case
+        required: false
+        type: string
+        default: ''
       test_type:
         description: >-
           Which Spyre suites to run: smoke | unit | integration | regression |
@@ -712,6 +717,7 @@ jobs:
             tests/cpu/test_tensor_parallel_loading.py \
             tests/cpu/test_spyre_tensor_parallel.py \
             tests/cpu/test_transformers_tp_contract.py \
+            tests/cpu/test_qwen3_5_delta_recurrence.py \
             tests/cpu/test_rotary_config_compatibility.py \
             tests/cpu/test_vision_transformers_compatibility.py \
             tests/cpu/test_muse_glimmer_mm.py \
@@ -984,6 +990,7 @@ jobs:
           prebaked_image: ${{ inputs.prebaked_image }}
       - name: Run compiled checkpoint, bias, and embedding regressions
         env:
+          TP_TEST_FILTER: ${{ inputs.tp_test_filter }}
           SPYRE_DEVICES: "0,1"
           COLL_ALLREDUCE_ALGO: "PairwisePow2"
           HF_DEACTIVATE_ASYNC_LOAD: "1"
@@ -994,12 +1001,16 @@ jobs:
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
           source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
+          filter_args=()
+          if [[ -n "$TP_TEST_FILTER" ]]; then
+            filter_args=(-k "$TP_TEST_FILTER")
+          fi
           run_teed uv run --active --no-sync torchrun \
             --standalone --nproc-per-node=2 --max-restarts=0 \
             --log-dir=tp-logs --tee=3 -m pytest \
             tests/spyre/test_tp_transformers_loading_spyre.py \
             tests/spyre/test_tp_rowwise_bias_spyre.py \
-            tests/spyre/test_tp_embedding_collective_spyre.py -sv --tb=short
+            tests/spyre/test_tp_embedding_collective_spyre.py -sv --tb=short "${filter_args[@]}"
       - name: Upload per-rank TP logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

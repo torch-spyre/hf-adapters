@@ -20,7 +20,9 @@ latter has independent convolution and recurrent states, so this adapter uses
 heterogeneous entries in the generic generation cache lists.
 """
 
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -40,6 +42,12 @@ from hf_adapters.hf_common import (
     run_lm_head,
     text_config,
 )
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5GatedDeltaNet
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+        Qwen3_5MoeGatedDeltaNet,
+    )
 
 
 def spyre_tp_replicated_linear_modules(model: nn.Module, tp_size: int) -> set[str]:
@@ -247,7 +255,18 @@ def _linear_split_inputs(linear_attn, mixed_qkv):
     return query.clone(), key.clone(), value.clone()
 
 
-def _linear_normalize_inputs(linear_attn, query, key, value):
+def _linear_normalize_inputs(
+    linear_attn: Qwen3_5GatedDeltaNet | Qwen3_5MoeGatedDeltaNet,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # HF normalizes Q/K after upcasting inside the fp32 delta-rule kernel.
+    # Rounding the normalization to the model dtype changes the recurrent
+    # state and can flip later MoE selections near a top-k boundary. This
+    # helper already runs on CPU; retain fp32 through the recurrence.
+    query = query.float()
+    key = key.float()
     batch_size, sequence_length = query.shape[:2]
     query_heads = query.view(
         batch_size, sequence_length, linear_attn.num_k_heads, linear_attn.head_k_dim
