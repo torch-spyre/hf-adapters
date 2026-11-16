@@ -187,14 +187,15 @@ def _causal_conv_prefill(
     # The history boundary is stick-aligned. A single 128x64 matmul per lag avoids
     # the partial-stick slices and output-stack mutations rejected by Spyre layout
     # propagation, as well as adding matmuls with incompatible element arrangements.
-    history = torch.cat((conv_state, x), dim=-1).float()
+    history = torch.cat((conv_state, x), dim=-1)
     # Match conv1d's accumulation and its cast before the SiLU activation.
     # Rounding every individual product/sum perturbs the recurrent cache.
-    # Spyre cannot change dtype on a view with a nonzero storage offset.
-    shift_matrices = shift_matrices.float()
     output = torch.zeros_like(x, dtype=torch.float32)
     for lag in reversed(range(len(taps) - 1)):
-        shifted = torch.matmul(history, shift_matrices[lag])
+        # One-hot selectors copy values exactly in the model dtype. Keep these
+        # matmuls off Spyre's unsupported fp32 BMM path, then upcast before the
+        # actual convolution multiplication and accumulation.
+        shifted = torch.matmul(history, shift_matrices[lag]).float()
         output = output + shifted * taps[-2 - lag].float()
     output = output + x.float() * taps[-1].float()
     return F.silu(output.to(x.dtype)), x
