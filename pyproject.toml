@@ -149,7 +149,7 @@ test = [
     "pytest>=9.0,<9.1",
     "laya>=0.3.28,<0.4",
     "Pillow",
-    "torchvision~=0.28.0",
+    "torchvision~=0.29.0",
     "PyYAML",
     # tests/spyre/weekly_generation/snapshot_model_counts.py. <3.1.0 on s390x: its sdist
     # does not build there (xtensor-stack/xsimd#954).

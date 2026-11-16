@@ -34,7 +34,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sympy import factorint
-from transformers import GenerationConfig, PreTrainedModel
+from transformers import GenerationConfig, PretrainedConfig, PreTrainedModel
 from transformers.generation import GenerateDecoderOnlyOutput
 from transformers.generation.streamers import BaseStreamer
 
@@ -619,8 +619,14 @@ def moe_prefill_all_experts(x, routing_weight, gate, up, down, activation):
     return (down_out * route).sum(dim=0)
 
 
-def assert_spyre_dimensions(config, model_name):
-    """Reject configs whose hidden / intermediate dimensions are stick-misaligned.
+def assert_spyre_dimensions(
+    config: PretrainedConfig,
+    model_name: str,
+    *,
+    config_names: tuple[str, ...] = (),
+    padded_dimensions: tuple[str, ...] = (),
+) -> None:
+    """Reject stick-misaligned dimensions that the adapter does not pad.
 
     The Spyre compiler lays tensors out in ``BLOCK_SIZE``-element sticks.
     Matmuls over a dimension that is not a multiple of ``BLOCK_SIZE`` produce
@@ -630,16 +636,33 @@ def assert_spyre_dimensions(config, model_name):
     and misaligned ones (e.g. ``hidden_size=312``).
 
     ``head_dim`` is not checked — adapters auto-pad it to a stick boundary (see
-    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``); hidden and
-    intermediate dims can't be padded without changing the model's arithmetic.
-    Real models clear this bar; it fires on tiny test fixtures (e.g.
-    ``trl-internal-testing/tiny-*``, ``cointegrated/rubert-tiny2``).
+    ``prepare_rope_and_heads`` / ``hf_bert.prepare_for_spyre``). Callers can
+    declare other dimensions padded during preparation via
+    ``padded_dimensions``, using the canonical names below. All remaining
+    dimensions must already be stick-aligned.
 
     Checks ``hidden_size`` (falling back to DistilBERT's ``dim``) and
     ``intermediate_size`` (falling back to DistilBERT's ``hidden_dim``).
+    By default, composite configs use their text config. ``config_names``
+    selects named sub-config attributes to validate instead, applying the
+    same padding allowances to each and identifying the sub-config in errors.
     """
-    dim_config = text_config(config)
-    misaligned = [
+    if config_names:
+        for config_name in config_names:
+            sub_config: object = getattr(config, config_name, None)
+            if not isinstance(sub_config, PretrainedConfig):
+                raise ValueError(
+                    f"Model {model_name} has no valid {config_name} configuration"
+                )
+            assert_spyre_dimensions(
+                sub_config,
+                f"{model_name} ({config_name})",
+                padded_dimensions=padded_dimensions,
+            )
+        return
+
+    dim_config: PretrainedConfig = text_config(config)
+    misaligned: list[tuple[str, int]] = [
         (label, v)
         for label, candidates in (
             ("hidden_size", ("hidden_size", "dim")),
@@ -657,15 +680,15 @@ def assert_spyre_dimensions(config, model_name):
         )
         is not None
         and v % BLOCK_SIZE != 0
+        and label not in padded_dimensions
     ]
     if misaligned:
         details = ", ".join(f"{f}={v}" for f, v in misaligned)
         raise SpyreUnsupportedModelError(
             f"Model {model_name} has Spyre-incompatible dimensions: {details} "
             f"(not a multiple of one stick, {BLOCK_SIZE}). The Spyre compiler "
-            f"cannot lower matmuls over stick-misaligned dimensions. Use a model "
-            f"whose hidden_size and intermediate_size are both multiples of "
-            f"{BLOCK_SIZE}."
+            f"cannot lower matmuls over stick-misaligned dimensions. Each "
+            f"dimension that the adapter does not pad must be a multiple of {BLOCK_SIZE}."
         )
 
 
@@ -1784,6 +1807,17 @@ class _ChunkedPrefillMaskBuilder:
         self.device = device
         self._query_start = 0
         self._sliding_states = {}
+        offsets = (
+            prompt_offsets.detach().to("cpu").tolist()
+            if isinstance(prompt_offsets, torch.Tensor)
+            else [prompt_offsets] * batch_size
+        )
+        # Match the prefix slices used by build_prefill_mask, including their
+        # clipping at the cache boundary. Retain only O(batch) CPU metadata.
+        self._padding_end = torch.tensor(
+            [slice(None, int(offset)).indices(max_cache_len)[1] for offset in offsets],
+            dtype=torch.long,
+        )
 
         # Keep the real batch dimension. Spyre's elementwise lowering does not
         # reliably materialize a batch-broadcast input here.
@@ -1797,11 +1831,8 @@ class _ChunkedPrefillMaskBuilder:
 
         padding_mask = torch.zeros((batch_size, 1, 1, max_cache_len), dtype=dtype)
         fill = _mask_fill_value(dtype)
-        if isinstance(prompt_offsets, torch.Tensor):
-            for batch_idx in range(batch_size):
-                padding_mask[batch_idx, :, :, : prompt_offsets[batch_idx].item()] = fill
-        else:
-            padding_mask[:, :, :, :prompt_offsets] = fill
+        for batch_idx in range(batch_size):
+            padding_mask[batch_idx, :, :, : self._padding_end[batch_idx].item()] = fill
         self._padding_mask = padding_mask.to(device)
 
     def _advance(self, state, shifted_in):
@@ -1829,6 +1860,45 @@ class _ChunkedPrefillMaskBuilder:
         mask._spyre_chunked_prefill_query_start = query_start
         self._query_start += self.chunk_size
         return mask
+
+    def live_query_rows(self, query_start):
+        """Return CPU row validity from the causal mask's padding boundary."""
+        query = query_start + torch.arange(self.chunk_size)
+        return (query[None, :] >= self._padding_end[:, None]) & (
+            self._padding_end[:, None] < self.max_cache_len
+        )
+
+    def compact_sliding_mask(
+        self, mask, query_start, query_cache_coords, sliding_window, key_cache_coords
+    ):
+        """Build only the ring-cache columns of a known chunked causal mask.
+
+        The builder already knows every logical mask entry from the causal
+        frontier and left-padding boundary. Reconstruct the compact input on
+        CPU rather than transferring the full device mask back to gather it.
+        """
+        keys = key_cache_coords.detach().to("cpu", dtype=torch.long)
+        if keys.ndim != 1:
+            raise ValueError(
+                f"key_cache_coords must be one-dimensional, got {tuple(keys.shape)}"
+            )
+        keys = keys[None, None, :]
+        query = query_start + torch.arange(self.chunk_size)
+        allowed = (keys >= self._padding_end[:, None, None]) & (
+            keys <= query[None, :, None]
+        )
+        compact = torch.full(
+            allowed.shape, _mask_fill_value(mask.dtype), dtype=mask.dtype
+        ).masked_fill(allowed, 0)
+        # Keep the ordinary helper's distinction between finite base-mask
+        # padding and -inf outside the sliding band or in unwritten slots.
+        band_query = query_cache_coords.detach().to("cpu", dtype=torch.long)
+        delta = band_query[:, :, None] - keys
+        invalid = (keys < 0) | (keys >= self.max_cache_len)
+        out_of_band = (delta < 0) | (delta >= sliding_window) | invalid
+        return compact.masked_fill(out_of_band, -torch.inf)[:, None, :, :].to(
+            mask.device
+        )
 
     def _build_sliding_state(self, query_start, sliding_window):
         if query_start == 0 and sliding_window >= self.chunk_size:
@@ -2067,15 +2137,23 @@ def add_causal_sliding_window_band(
 
     Ordinary masks take the CPU fallback below because Spyre's Inductor backend
     rejects the integer comparisons and bool intermediates used to build the
-    band. Chunked-prefill masks in logical cache order carry a private builder
-    that advances a device-resident sliding state instead, avoiding a full mask
-    round-trip per chunk. Compact ring-buffer masks still use the CPU fallback
-    to gather the logical mask into physical cache order. Both paths avoid
+    band. Chunked-prefill masks carry a private builder that advances a
+    device-resident sliding state in logical cache order, or reconstructs only
+    the compact ring-cache columns from its causal/padding metadata. Both avoid
+    a full mask round-trip per chunk. All paths avoid
     combining two masked cells on-device by addition; ``-inf + -inf`` has been
     observed to produce NaN on Spyre in bf16.
     """
     chunked_builder = getattr(mask, "_spyre_chunked_prefill_builder", None)
-    if chunked_builder is not None and key_cache_coords is None:
+    if chunked_builder is not None and key_cache_coords is not None:
+        return chunked_builder.compact_sliding_mask(
+            mask,
+            mask._spyre_chunked_prefill_query_start,
+            query_cache_coords,
+            sliding_window,
+            key_cache_coords,
+        )
+    if chunked_builder is not None:
         return chunked_builder.add_causal_sliding_window(
             mask,
             mask._spyre_chunked_prefill_query_start,
@@ -2118,7 +2196,7 @@ def add_causal_sliding_window_band(
     # SDPA softmax, giving all-NaN Gemma 4 logits. fp16 happened not to hit this.
     # A finite sentinel (e.g. finfo.min) is not a reliable substitute here — it
     # can overflow once cells are summed. Combining on CPU avoids the issue; the
-    # mask is tiny so the round-trip is cheap.
+    # mask retains any restrictions not described by a chunked causal builder.
     orig_device = mask.device
     combined = mask_cpu + band[:, None, :, :]
     return combined.to(orig_device)
@@ -3895,19 +3973,19 @@ def make_encoder_block(
 
 def make_vision_encoder_block(
     *,
-    q_proj,
-    k_proj,
-    v_proj,
-    o_proj,
-    layer_norm1,
-    layer_norm2,
-    ffn_in,
-    act,
-    ffn_out,
-    num_heads,
-    head_dim,
-    scale,
-):
+    q_proj: torch.nn.Module,
+    k_proj: torch.nn.Module,
+    v_proj: torch.nn.Module,
+    o_proj: torch.nn.Module,
+    layer_norm1: torch.nn.Module,
+    layer_norm2: torch.nn.Module,
+    ffn_in: torch.nn.Module,
+    act: Callable[[torch.Tensor], torch.Tensor],
+    ffn_out: torch.nn.Module,
+    num_heads: int,
+    head_dim: int,
+    scale: float,
+) -> Callable[..., torch.Tensor]:
     """Compile a **pre-LN** bidirectional vision-transformer block (SigLIP/CLIP).
 
     Counterpart of ``make_encoder_block`` (which is post-LN, BERT-style). A
@@ -3917,8 +3995,8 @@ def make_vision_encoder_block(
         h = h + o_proj(SDPA(qkv(layer_norm1(h))))
         h = h + ffn_out(act(ffn_in(layer_norm2(h))))
 
-    There is no attention mask and no KV cache — every patch attends to every
-    patch (full bidirectional attention over a fixed-length patch sequence).
+    There is no KV cache. By default every patch attends to every patch;
+    callers can pass an attention mask for text tokens or padded sequences.
 
     Args:
         q_proj/k_proj/v_proj/o_proj: per-head attention projections
@@ -3931,7 +4009,9 @@ def make_vision_encoder_block(
             softmax temperature).
     """
 
-    def block_forward(hidden_states):
+    def block_forward(
+        hidden_states: torch.Tensor, attn_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         bsz, seq_len, _ = hidden_states.shape
 
         residual = hidden_states
@@ -3944,7 +4024,7 @@ def make_vision_encoder_block(
             q,
             k,
             v,
-            attn_mask=None,
+            attn_mask=attn_mask,
             dropout_p=0.0,
             is_causal=False,
             scale=scale,

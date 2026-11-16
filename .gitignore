@@ -253,5 +253,5 @@ torch_compile_debug/
 hf_adapters/_version.py
 
 # Agents
-./agents
+/.agents/
 AGENTS.md

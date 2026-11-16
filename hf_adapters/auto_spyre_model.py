@@ -92,6 +92,7 @@ from transformers import (
     Qwen3_5TextConfig,
     Qwen3Config,
     RobertaConfig,
+    SiglipConfig,
     SmolLM3Config,
     XLMRobertaConfig,
 )
@@ -151,6 +152,7 @@ from hf_adapters import (
     hf_qwen3,
     hf_qwen3_5,
     hf_qwen3_5_moe,
+    hf_siglip,
     hf_smollm3,
     hf_xlm_roberta,
     hf_xpress_qwen3,
@@ -203,6 +205,7 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     Qwen3_5MoeConfig: hf_qwen3_5_moe,
     Qwen3_5MoeTextConfig: hf_qwen3_5_moe,
     RobertaConfig: hf_xlm_roberta,
+    SiglipConfig: hf_siglip,
     SmolLM3Config: hf_smollm3,
     XLMRobertaConfig: hf_xlm_roberta,
 }
@@ -364,24 +367,32 @@ def resolve_adapter_module(
     # Architecture-name dispatch first: DSpark drafters share their base model's
     # config class but carry a distinct ``*DSparkModel`` architecture, so route on
     # the architecture name before falling through to config-class dispatch.
+    adapter_module: ModuleType
     for arch in getattr(model_config, "architectures", None) or []:
         if arch in ARCH_TO_ADAPTER_MODULE_MAPPING:
-            assert_spyre_dimensions(model_config, model_name=str(model_name_or_path))
-            return ARCH_TO_ADAPTER_MODULE_MAPPING[arch]
+            adapter_module = ARCH_TO_ADAPTER_MODULE_MAPPING[arch]
+            break
+    else:
+        if type(model_config) not in mapping:
+            raise SpyreNoAdapterError(
+                f"Model {model_name_or_path} of type {type(model_config)} "
+                "is not supported"
+            )
 
-    if type(model_config) not in mapping:
-        raise SpyreNoAdapterError(
-            f"Model {model_name_or_path} of type {type(model_config)} "
-            "is not supported"
-        )
+        adapter_module = mapping[type(model_config)]
+        if adapter_module is hf_gemma4:
+            text_cfg: PretrainedConfig = getattr(
+                model_config, "text_config", model_config
+            )
+            if getattr(text_cfg, "enable_moe_block", False):
+                adapter_module = hf_gemma4_moe
 
-    adapter_module = mapping[type(model_config)]
-    if adapter_module is hf_gemma4:
-        text_cfg = getattr(model_config, "text_config", model_config)
-        if getattr(text_cfg, "enable_moe_block", False):
-            adapter_module = hf_gemma4_moe
-
-    assert_spyre_dimensions(model_config, model_name=str(model_name_or_path))
+    assert_spyre_dimensions(
+        model_config,
+        model_name=str(model_name_or_path),
+        config_names=getattr(adapter_module, "SPYRE_DIMENSION_CONFIGS", ()),
+        padded_dimensions=getattr(adapter_module, "SPYRE_PADDED_DIMENSIONS", ()),
+    )
     return adapter_module
 
 

@@ -54,7 +54,7 @@ def _row(model_id: str, **overrides: object) -> dict:
     """A catalog row that passes every filter unless *overrides* say otherwise.
 
     ``curated`` is present because both producers stamp it — ``model_fetcher.fetch``
-    with False, ``load_curated`` with True — so a row reaching the pre-filter or the
+    with False, ``load_by_name`` with True — so a row reaching the pre-filter or the
     skip writer always has the key. Omitting it here would let those consumers read
     it with a default they do not need.
     """
@@ -302,10 +302,13 @@ class TestFetchAndFilter:
     def _stub_fetcher(self, monkeypatch):
         """Replace the Hub fetchers so no network call happens.
 
-        Both sources must be stubbed: ``fetch_and_filter`` reads the top-K
-        ranking *and* the curated lists, so leaving the curated loaders live
-        would let these tests reach the Hub (and make them depend on whatever
-        ids the checked-in curated files happen to hold).
+        Every source must be stubbed: ``fetch_and_filter`` reads both top-K
+        rankings, the curated lists *and* the model registry, so leaving the
+        by-name sources live would let these tests reach the Hub (and make them
+        depend on whatever ids the checked-in files happen to hold).
+
+        The fake ranked fetcher returns the same rows for both rankings, so the
+        cross-ranking dedup is exercised by every test that uses this fixture.
         """
         import tests.spyre.weekly_generation.model_fetcher as model_fetcher
 
@@ -332,6 +335,11 @@ class TestFetchAndFilter:
             "all_curated_loaders",
             {ModelType.GENERATIVE: lambda: [], ModelType.EMBEDDING: lambda: []},
         )
+        monkeypatch.setattr(
+            model_fetcher,
+            "all_registry_paths",
+            {ModelType.GENERATIVE: [], ModelType.EMBEDDING: []},
+        )
         return rows
 
     def test_keeps_survivors_records_verdicts_and_leaves_sink_open(
@@ -349,7 +357,8 @@ class TestFetchAndFilter:
         kept = fetch_and_filter(
             model_type=ModelType.GENERATIVE,
             snapshot_date=today,
-            top_k=10,
+            top_k_downloads=10,
+            top_k_trending=10,
             sink=sink,
             max_params=MAX_NUMBER_PARAMS,
         )
@@ -401,13 +410,14 @@ class TestFetchAndFilter:
         def _fake_curated(model_type, **_kw) -> list[dict]:
             return [_row("org/curated", curated=True), _row("org/keep", curated=True)]
 
-        monkeypatch.setattr(model_fetcher, "load_curated", _fake_curated)
+        monkeypatch.setattr(model_fetcher, "load_by_name", _fake_curated)
 
         with CsvResultSink(path=tmp_path / "c.csv") as sink:
             kept = fetch_and_filter(
                 model_type=ModelType.GENERATIVE,
                 snapshot_date=date.today(),
-                top_k=10,
+                top_k_downloads=10,
+                top_k_trending=10,
                 sink=sink,
                 max_params=MAX_NUMBER_PARAMS,
             )
@@ -434,13 +444,14 @@ class TestFetchAndFilter:
         def _fake_curated(model_type, **_kw) -> list[dict]:
             return [_row("org/curated-moe", is_moe=True, curated=True)]
 
-        monkeypatch.setattr(model_fetcher, "load_curated", _fake_curated)
+        monkeypatch.setattr(model_fetcher, "load_by_name", _fake_curated)
 
         with CsvResultSink(path=tmp_path / "s.csv") as sink:
             kept = fetch_and_filter(
                 model_type=ModelType.GENERATIVE,
                 snapshot_date=date.today(),
-                top_k=10,
+                top_k_downloads=10,
+                top_k_trending=10,
                 sink=sink,
                 max_params=MAX_NUMBER_PARAMS,
             )
@@ -462,7 +473,8 @@ class TestFetchAndFilter:
             kept = fetch_and_filter(
                 model_type=ModelType.GENERATIVE,
                 snapshot_date=date.today(),
-                top_k=10,
+                top_k_downloads=10,
+                top_k_trending=10,
                 sink=sink,
                 max_params=MAX_NUMBER_PARAMS,
             )
@@ -485,7 +497,8 @@ class TestFetchAndFilter:
             kept = fetch_and_filter(
                 model_type=ModelType.GENERATIVE,
                 snapshot_date=date.today(),
-                top_k=10,
+                top_k_downloads=10,
+                top_k_trending=10,
                 sink=sink,
                 max_params=MAX_NUMBER_PARAMS,
             )
@@ -505,11 +518,154 @@ class TestFetchAndFilter:
             kept = fetch_and_filter(
                 model_type=ModelType.GENERATIVE,
                 snapshot_date=date.today(),
-                top_k=10,
+                top_k_downloads=10,
+                top_k_trending=10,
                 sink=sink,
                 max_params=1,  # every stub row is 1e9 params
             )
         assert kept == []
+
+    def test_rankings_are_merged_downloads_first_then_trending(
+        self, tmp_path, monkeypatch, _stub_fetcher
+    ) -> None:
+        """Both rankings are fetched, deduped, and downloads-ranked rows lead."""
+        import tests.spyre.weekly_generation.model_fetcher as model_fetcher
+        from tests.spyre.weekly_generation.model_prefilter import fetch_and_filter
+        from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
+
+        calls: list[tuple[str, int]] = []
+
+        def _fake(limit: int, ranking: str, **_kw: object) -> list[dict]:
+            calls.append((ranking, limit))
+            by_ranking: dict[str, list[dict]] = {
+                "downloads": [_row("org/popular"), _row("org/both")],
+                "trending_score": [_row("org/new-hot"), _row("org/both")],
+            }
+            return [dict(r) for r in by_ranking[ranking]]
+
+        monkeypatch.setattr(
+            model_fetcher,
+            "all_fetchers",
+            {ModelType.GENERATIVE: _fake, ModelType.EMBEDDING: _fake},
+        )
+
+        with CsvResultSink(path=tmp_path / "r.csv") as sink:
+            kept = fetch_and_filter(
+                model_type=ModelType.GENERATIVE,
+                snapshot_date=date.today(),
+                top_k_downloads=7,
+                top_k_trending=3,
+                sink=sink,
+                max_params=MAX_NUMBER_PARAMS,
+            )
+
+        assert sorted(calls) == [("downloads", 7), ("trending_score", 3)]
+        assert [r["model_id"] for r in kept] == [
+            "org/popular",
+            "org/both",
+            "org/new-hot",
+        ]
+        assert all(r["curated"] is False for r in kept)
+
+    def test_zero_top_k_skips_that_ranking(
+        self, tmp_path, monkeypatch, _stub_fetcher
+    ) -> None:
+        """A zero count must not reach the Hub at all (Makefile passes 0)."""
+        import tests.spyre.weekly_generation.model_fetcher as model_fetcher
+        from tests.spyre.weekly_generation.model_prefilter import fetch_and_filter
+        from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
+
+        rankings: list[str] = []
+
+        def _fake(limit: int, ranking: str, **_kw: object) -> list[dict]:
+            rankings.append(ranking)
+            return [_row(f"org/{ranking}")]
+
+        monkeypatch.setattr(
+            model_fetcher,
+            "all_fetchers",
+            {ModelType.GENERATIVE: _fake, ModelType.EMBEDDING: _fake},
+        )
+
+        with CsvResultSink(path=tmp_path / "z.csv") as sink:
+            kept = fetch_and_filter(
+                model_type=ModelType.EMBEDDING,
+                snapshot_date=date.today(),
+                top_k_downloads=5,
+                top_k_trending=0,
+                sink=sink,
+                max_params=MAX_NUMBER_PARAMS,
+            )
+
+        assert rankings == ["downloads"]
+        assert [r["model_id"] for r in kept] == ["org/downloads"]
+
+    def test_registry_paths_join_the_by_name_set_after_curated(
+        self, tmp_path, monkeypatch, _stub_fetcher
+    ) -> None:
+        """Registry ids are resolved with the curated ones, deduped, curated=True.
+
+        'org/keep' is registered *and* top-K ranked: the by-name copy must win.
+        'org/curated' is in both by-name sources and must be resolved once.
+        """
+        import tests.spyre.weekly_generation.model_fetcher as model_fetcher
+        from tests.spyre.weekly_generation.model_prefilter import fetch_and_filter
+        from tests.spyre.weekly_generation.sink.csv_sink import CsvResultSink
+
+        resolved: list[list[str]] = []
+
+        def _fake_metadata(model_ids: list[str], **_kw: object) -> list[dict]:
+            resolved.append(list(model_ids))
+            return [_row(mid) for mid in model_ids]
+
+        monkeypatch.setattr(
+            model_fetcher,
+            "all_curated_loaders",
+            {
+                ModelType.GENERATIVE: lambda: ["org/curated"],
+                ModelType.EMBEDDING: lambda: [],
+            },
+        )
+        monkeypatch.setattr(
+            model_fetcher,
+            "all_registry_paths",
+            {
+                ModelType.GENERATIVE: ["org/curated", "org/registered", "org/keep"],
+                ModelType.EMBEDDING: [],
+            },
+        )
+        monkeypatch.setattr(
+            model_fetcher,
+            "all_metadata_fetchers",
+            {ModelType.GENERATIVE: _fake_metadata, ModelType.EMBEDDING: _fake_metadata},
+        )
+
+        with CsvResultSink(path=tmp_path / "g.csv") as sink:
+            kept = fetch_and_filter(
+                model_type=ModelType.GENERATIVE,
+                snapshot_date=date.today(),
+                top_k_downloads=10,
+                top_k_trending=10,
+                sink=sink,
+                max_params=MAX_NUMBER_PARAMS,
+            )
+
+        assert resolved == [["org/curated", "org/registered", "org/keep"]]
+        assert [r["model_id"] for r in kept] == [
+            "org/curated",
+            "org/registered",
+            "org/keep",
+            "org/moe",
+            "org/keep-too",
+        ]
+        curated_flags: dict[str, bool] = {r["model_id"]: r["curated"] for r in kept}
+        assert curated_flags == {
+            "org/curated": True,
+            "org/registered": True,
+            "org/keep": True,
+            "org/moe": False,
+            "org/keep-too": False,
+        }
 
 
 class TestCuratedKeeperWiring:
@@ -597,6 +753,27 @@ class TestCuratedKeeperWiring:
         assert captured[fe.__name__] is fe.keep
         assert captured[fg.__name__] is not keep_all
         assert captured[fe.__name__] is not keep_all
+
+    @pytest.mark.parametrize("ranking", ["downloads", "trending_score"])
+    def test_ranked_entry_points_sort_the_hub_by_the_requested_ranking(
+        self, ranking: str
+    ) -> None:
+        """The ranking must reach list_models' ``sort`` for every pipeline tag."""
+        import utils.fetch_top_embedding_models as fe
+        import utils.fetch_top_generative_models as fg
+
+        class _Api:
+            def __init__(self) -> None:
+                self.sorts: list[str] = []
+
+            def list_models(self, *, sort: str, **_kw: object) -> list[object]:
+                self.sorts.append(sort)
+                return []
+
+        for mod in (fg, fe):
+            api = _Api()
+            mod._create_fetch(ranking)(api, 10)
+            assert api.sorts and set(api.sorts) == {ranking}
 
 
 def _fake_sink_cls():
@@ -949,3 +1126,29 @@ class TestCsvSinkIsWriteOnly:
         _add(sink, "org/x")
         sink.close()
         assert len(list(_csv.DictReader(path.open()))) == 2
+
+
+class TestCatalogMaxWorkers:
+    """build_catalog's thread count: default 8, overridable, validated."""
+
+    def test_default_is_8(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from utils.hf_model_catalog import catalog_max_workers
+
+        monkeypatch.delenv("HF_CATALOG_MAX_WORKERS", raising=False)
+        assert catalog_max_workers() == 8
+
+    def test_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from utils.hf_model_catalog import catalog_max_workers
+
+        monkeypatch.setenv("HF_CATALOG_MAX_WORKERS", "4")
+        assert catalog_max_workers() == 4
+
+    @pytest.mark.parametrize("raw", ["0", "-2", "many"])
+    def test_invalid_values_are_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        from utils.hf_model_catalog import catalog_max_workers
+
+        monkeypatch.setenv("HF_CATALOG_MAX_WORKERS", raw)
+        with pytest.raises(ValueError, match="HF_CATALOG_MAX_WORKERS"):
+            catalog_max_workers()

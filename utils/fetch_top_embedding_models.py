@@ -1,4 +1,4 @@
-"""Fetch the top embedding models from Hugging Face, ranked by downloads.
+"""Fetch the top embedding models from Hugging Face, ranked by downloads or trending score.
 
 Embedding (sentence/text-embedding) models on the Hub almost always carry
 exactly one ``pipeline_tag`` — and for the most popular models (BGE, E5,
@@ -31,6 +31,7 @@ from utils.fetch_curated_models_metadata import _create_fetch_metadata, keep_all
 from utils.hf_model_catalog import (
     EXPAND_FIELDS,
     RESOURCES_DIR,
+    Ranking,
     _guarded,
     build_catalog,
     contains_remote_code,
@@ -119,33 +120,46 @@ def _is_multimodal(model: ModelInfo, _config_class: str | None = None) -> bool:
     return bool(tags(model) & multimodal_tags)
 
 
-def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
-    """Query both embedding pipeline tags and return a deduplicated list,
-    sorted by downloads descending. Over-fetched (x2) to absorb the noise +
-    rerankers + GGUF/MLX entries removed by the filter.
+def _create_fetch(ranking: Ranking) -> Callable[[HfApi, int], list[ModelInfo]]:
+    """Build a ``_fetch``-shaped callable that ranks embedding models by *ranking*."""
 
-    Each per-tag call is wrapped in ``with_transient_retry`` so a mid-fetch
-    504 from the HF gateway does not abort the run.
-    """
-    print(f"{ts()} Fetching top {limit} text-embedding models by downloads...")
-    per_tag_limit: int = int(limit * 2)
-    by_id: dict[str, ModelInfo] = {}
-    for tag in EMBEDDING_PIPELINE_TAGS:
-        print(f"Fetching up to {per_tag_limit} '{tag}' models by downloads...")
-        models: list[ModelInfo] = with_transient_retry(
-            lambda t=tag: api.list_models(
-                pipeline_tag=t,
-                sort="downloads",
-                limit=per_tag_limit,
-                expand=EXPAND_FIELDS,
-            ),
-            description=f"list_models[{tag}]",
+    def _rank_key(m: ModelInfo) -> int:
+        value: int | None = (
+            m.downloads
+            if ranking == "downloads"
+            else getattr(m, "trending_score", None)
         )
-        for m in models:
-            # First tag wins on dupes; they carry identical metadata anyway.
-            by_id.setdefault(m.id, m)
+        return value or 0
 
-    return sorted(by_id.values(), key=lambda m: (m.downloads or 0), reverse=True)
+    def _fetch(api: HfApi, limit: int) -> list[ModelInfo]:
+        """Query both embedding pipeline tags and return a deduplicated list,
+        sorted by *ranking* descending. Over-fetched (x2) to absorb the noise +
+        rerankers + GGUF/MLX entries removed by the filter.
+
+        Each per-tag call is wrapped in ``with_transient_retry`` so a mid-fetch
+        504 from the HF gateway does not abort the run.
+        """
+        print(f"{ts()} Fetching top {limit} text-embedding models by {ranking}...")
+        per_tag_limit: int = int(limit * 2)
+        by_id: dict[str, ModelInfo] = {}
+        for tag in EMBEDDING_PIPELINE_TAGS:
+            print(f"Fetching up to {per_tag_limit} '{tag}' models by {ranking}...")
+            models: list[ModelInfo] = with_transient_retry(
+                lambda t=tag: api.list_models(
+                    pipeline_tag=t,
+                    sort=ranking,
+                    limit=per_tag_limit,
+                    expand=EXPAND_FIELDS,
+                ),
+                description=f"list_models[{tag}, sort={ranking}]",
+            )
+            for m in models:
+                # First tag wins on dupes; they carry identical metadata anyway.
+                by_id.setdefault(m.id, m)
+
+        return sorted(by_id.values(), key=_rank_key, reverse=True)
+
+    return _fetch
 
 
 def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
@@ -216,10 +230,16 @@ def _fetch_embedding_models(
 
 
 def fetch_top_embedding_models(
-    limit: int, output_csv: Path | str | None = None
+    limit: int,
+    output_csv: Path | str | None = None,
+    ranking: Ranking = "downloads",
 ) -> list[dict[str, object]]:
+    """Top *limit* embedding models by *ranking*, counted after ``keep``."""
     return _fetch_embedding_models(
-        fetcher=_fetch, keeper=keep, limit=limit, output_csv=output_csv
+        fetcher=_create_fetch(ranking),
+        keeper=keep,
+        limit=limit,
+        output_csv=output_csv,
     )
 
 

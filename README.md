@@ -1,6 +1,6 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-43-blue)
+![adapters](https://img.shields.io/badge/adapters-44-blue)
 ![compatible](https://img.shields.io/badge/compatible_models-10K%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -13,16 +13,22 @@ from `transformers`.
 
 ## Supported Models
 
-![adapters](https://img.shields.io/badge/adapters-43-blue)
+**44 adapters · 10K+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
+**multimodal embedding** (SigLIP text/image vectors),
 **sequence classification** (sentiment / text categorisation), **structured
 decisions** (variable options plus action selection), **token classification**
 (NER/POS), **vision-language** (image→text), and
 **speculative-decoding drafter** models — from
 Llama / Qwen / Granite / Mistral / Phi / Gemma / OLMo / GPT decoders to BERT /
 XLM-RoBERTa / MPNet / ModernBERT encoders, the Granite Vision 4.1 (SigLIP tower +
-![adapters](https://img.shields.io/badge/adapters-43-blue)
+Granite text), Mistral3 Vision (Pixtral tower + Mistral text), Gemma 4
+(encoder-free and full-vision), and Muse Glimmer multimodal VLMs, the SigLIP
+dual-encoder for text/image embeddings, plus the DSpark block-propose drafters for
+Qwen 3 / Granite / Gemma 4 and the XPress block-propose drafter (Gemma 4 26B-A4B).
+Laya support uses its optional upstream package to construct the stock decision
+model; hf-adapters patches its encoder, decision transformer, and marker selection.
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. The **canonical, per-adapter model lists** — verified
