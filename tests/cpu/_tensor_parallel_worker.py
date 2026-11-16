@@ -595,7 +595,10 @@ def main() -> None:
             patch.object(hf_qwen3_5_moe, "_route_decode_on_cpu", _cpu_route),
             torch.no_grad(),
         ):
-            check_moe_routing_consensus(world_size)
+            # The adversarial router's temporary Linear must not change the
+            # seeded checkpoints exercised by the existing numerical tests.
+            with torch.random.fork_rng(devices=[]):
+                check_moe_routing_consensus(world_size)
             check_styles(root, world_size, rank)
             check_models(root, world_size, rank)
             check_tied_checkpoint_aliases(world_size)
