@@ -8,3 +8,10 @@ models:
   - google/gemma-4-12B-it
   - google/gemma-4-26B-A4B-it
   - ibm-granite/granite-vision-4.1-4b
+  # Small LayerNorm-based models: the entries above are all RMSNorm, so these
+  # cover the LayerNorm lowering path (see torch-spyre/torch-spyre#6254).
+  - gpt2
+  - EleutherAI/gpt-neo-125m
+  - facebook/opt-125m
+  - EleutherAI/pythia-410m
+  - allenai/OLMo-1B-hf
