@@ -78,6 +78,75 @@ def _cpu_route(
     return weights, indices.to(torch.int64)
 
 
+def check_moe_routing_consensus(world_size: int) -> None:
+    # TP4 also exercises two independent TP groups, including a group whose
+    # leader is global rank 2. Routing must not broadcast from global rank 0.
+    mesh = dist.init_device_mesh(
+        "cpu", (world_size // 2, 2), mesh_dim_names=("replica", "tp")
+    )["tp"]
+    group = mesh.get_group()
+    group_leader = dist.get_global_rank(group, 0)
+    for dtype in (torch.float16, torch.bfloat16, torch.float32):
+        mlp = nn.Module()
+        mlp.gate = nn.Linear(2, 300, bias=False, dtype=dtype)
+        mlp.experts = nn.Module()
+        mlp.experts._hf_device_mesh = mesh
+        mlp.gate.weight[:, 0] = -4
+        mlp.gate.weight[:, 1] = 0
+        mlp.gate.weight[0, 0] = 2
+        mlp.gate.weight[1] = torch.tensor([0, 1], dtype=dtype)
+        mlp.gate.weight[299] = torch.tensor([0, -1], dtype=dtype)
+        for tokens in (1, 5):
+            reference_input = torch.ones(tokens, 2, dtype=dtype)
+            reference_input[:, 1] = -0.001 if group_leader == 0 else 0.001
+            local_input = reference_input.clone()
+            if mesh.get_local_rank() != 0:
+                local_input[:, 1].neg_()
+                local_input[:, 0] += 0.125
+            expected_weights, expected_indices = hf_qwen3_5_moe._router_topk_cpu(
+                reference_input, mlp.gate.weight, 2
+            )
+            local_weights, local_indices = hf_qwen3_5_moe._router_topk_cpu(
+                local_input, mlp.gate.weight, 2
+            )
+            if mesh.get_local_rank() != 0:
+                assert not torch.equal(local_indices, expected_indices)
+                assert not torch.equal(local_weights, expected_weights)
+
+            expected_prefill = torch.zeros(tokens, 300, dtype=dtype).scatter(
+                -1, expected_indices, expected_weights
+            )
+            actual_prefill = hf_qwen3_5_moe._moe_prefill_routing(local_input, mlp, 2)
+            gathered = [torch.empty_like(actual_prefill) for _ in range(mesh.size())]
+            dist.all_gather(gathered, actual_prefill, group=group)
+            for actual in gathered:
+                torch.testing.assert_close(actual, expected_prefill, atol=0, rtol=0)
+
+            # Call the device helper directly: its float32 transport must retain
+            # expert 299 exactly even for bfloat16 model weights.
+            actual_weights, actual_indices = _device_route(local_input, mlp, 2, 64)
+            for actual, expected in (
+                (actual_weights, expected_weights[..., None].expand(-1, -1, 64)),
+                (
+                    actual_indices,
+                    expected_indices.float()[..., None].expand(-1, -1, 64),
+                ),
+            ):
+                gathered = [torch.empty_like(actual) for _ in range(mesh.size())]
+                dist.all_gather(gathered, actual, group=group)
+                for value in gathered:
+                    torch.testing.assert_close(value, expected, atol=0, rtol=0)
+
+        # A distributed process can also host a replicated model. Only the
+        # expert mesh opts this MLP into routing synchronization.
+        del mlp.experts._hf_device_mesh
+        actual = hf_qwen3_5_moe._moe_prefill_routing(local_input, mlp, 2)
+        expected_local = torch.zeros_like(actual).scatter(
+            -1, local_indices, local_weights
+        )
+        torch.testing.assert_close(actual, expected_local, atol=0, rtol=0)
+
+
 def check_styles(root: Path, world_size: int, rank: int) -> None:
     mesh = dist.init_device_mesh("cpu", (world_size,), mesh_dim_names=("tp",))
     model = nn.Module()
@@ -526,6 +595,7 @@ def main() -> None:
             patch.object(hf_qwen3_5_moe, "_route_decode_on_cpu", _cpu_route),
             torch.no_grad(),
         ):
+            check_moe_routing_consensus(world_size)
             check_styles(root, world_size, rank)
             check_models(root, world_size, rank)
             check_tied_checkpoint_aliases(world_size)

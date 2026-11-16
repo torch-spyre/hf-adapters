@@ -28,6 +28,10 @@ includes an explicit empty
 are compared in float32; packed Gemma MoE adapter execution requires Spyre.
 Separate tests check repeated fullgraph compilation with rowwise bias, private
 upstream API signatures, rotary configuration, and vision parity.
+The Gloo workers also force conflicting close router scores across TP ranks and
+require identical expert indices and weights for prefill and decode in fp16,
+bf16, and fp32. TP4 includes two independent groups, with a nonzero global
+leader, and verifies that a model without an expert mesh keeps local routing.
 
 ## Two-card Spyre regressions
 
@@ -56,12 +60,18 @@ Tied Qwen3 checkpoints cover both embedding-only and LM-head-only weights.
 CPU checks also cover both directions with uneven vocabulary shards and reject
 tied groups with no usable checkpoint weight.
 
-Two numerical cases remain strict expected failures:
+Qwen3.5 MoE cases additionally compare every layer's prefill/decode expert
+indices and routing weights exactly across ranks. Routing uses the expert TP
+group leader's CPU decision, shared through that group's Gloo backend before
+evaluating expert shards. This covers the rank disagreement in
+[#772](https://github.com/torch-spyre/hf-adapters/issues/772); its hybrid numerical
+comparison runs without an xfail.
 
-- Hybrid Qwen3.5 MoE rank-dependent expert routing: [#772](https://github.com/torch-spyre/hf-adapters/issues/772).
+One numerical case remains a strict expected failure:
+
 - Gemma 4 MoE decode divergence: [#773](https://github.com/torch-spyre/hf-adapters/issues/773).
 
-Only token/logit mismatches qualify for these xfails. Loading, compilation,
+Only token/logit mismatches qualify for this xfail. Loading, compilation,
 non-finite outputs, and unexpected passes fail the suite. Full-attention
 Qwen3.5 MoE coverage does not establish hybrid MoE correctness; production
 text smoke tests do not establish reference-logit parity.

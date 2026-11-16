@@ -29,6 +29,7 @@ from transformers import (
     Qwen3ForCausalLM,
 )
 
+from hf_adapters import hf_qwen3_5_moe
 from hf_adapters.auto_spyre_model import AutoSpyreModelForCausalLM
 
 if int(os.environ.get("WORLD_SIZE", "1")) < 2:
@@ -62,17 +63,12 @@ class _TPNumericalMismatchError(AssertionError):
             ),
         ),
         "qwen3_5_hybrid",
-        pytest.param(
-            "qwen3_5_moe_hybrid",
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=_TPNumericalMismatchError,
-                reason="Rank-dependent MoE routing: https://github.com/torch-spyre/hf-adapters/issues/772",
-            ),
-        ),
+        "qwen3_5_moe_hybrid",
     ],
 )
-def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
+def test_tp_checkpoint_and_compiled_generation(
+    family: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     torch.set_num_threads(2)
     torch.random.default_generator.manual_seed(522)
     omitted_alias: str | None = {
@@ -197,8 +193,50 @@ def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
         dist.barrier()  # All ranks must finish reading before rank zero cleans up.
     assert dist.is_initialized()
     assert not any(isinstance(param, DTensor) for param in model.parameters())
+    routes: list[tuple[torch.Tensor, torch.Tensor]] = []
+    if base_family == "qwen3_5_moe":
+        original_router = hf_qwen3_5_moe._router_topk_cpu
+
+        def record_routing(
+            x: torch.Tensor,
+            router_weight: torch.Tensor,
+            top_k: int,
+            tp_group: dist.ProcessGroup | None = None,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            weights, indices = original_router(x, router_weight, top_k, tp_group)
+            routes.append((weights.clone(), indices.clone()))
+            return weights, indices
+
+        monkeypatch.setattr(hf_qwen3_5_moe, "_router_topk_cpu", record_routing)
     with torch.no_grad():
         actual = model.generate(ids, **kwargs)
+    if base_family == "qwen3_5_moe":
+        all_routes: list[list[tuple[torch.Tensor, torch.Tensor]] | None] = [
+            None for _ in range(dist.get_world_size())
+        ]
+        dist.all_gather_object(all_routes, routes)
+        for rank, rank_routes in enumerate(all_routes):
+            assert rank_routes is not None
+            assert len(rank_routes) == 3 * config.num_hidden_layers
+            for call, ((weights, indices), (want_weights, want_indices)) in enumerate(
+                zip(rank_routes, routes, strict=True)
+            ):
+                # Routing disagreement is a TP correctness failure, independent
+                # of generated tokens or any numerical-parity expected failure.
+                torch.testing.assert_close(
+                    indices,
+                    want_indices,
+                    atol=0,
+                    rtol=0,
+                    msg=f"{family}: rank {rank} selected different experts at call {call}",
+                )
+                torch.testing.assert_close(
+                    weights,
+                    want_weights,
+                    atol=0,
+                    rtol=0,
+                    msg=f"{family}: rank {rank} used different router weights at call {call}",
+                )
     for got in actual.logits:
         assert torch.isfinite(got.cpu()).all()
     try:
