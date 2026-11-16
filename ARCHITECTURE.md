@@ -154,25 +154,56 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 
 ### Multimodal Embedding (text/image→vectors)
 
-`hf_siglip.py` adapts the fixed-resolution SigLIP dual encoder for text/image
-retrieval and similarity scoring through Hugging Face's `SiglipModel` API.
+`hf_clip.py` and `hf_siglip.py` adapt CLIP and fixed-resolution SigLIP dual
+encoders for text/image retrieval and similarity scoring. Both belong to
+`MULTIMODAL_EMBEDDING_MODELS` and are verified by
+`test_sentence_transformers_multimodal_spyre.py`, which compares SentenceTransformers
+`encode()` on CPU against `backend="spyre"` for text, a single image, and an image
+list (`make sentence_transformers_multimodal_tests`, CI suite key:
+`sentence_transformers_multimodal`).
 
 | Model | model\_type | Text / vision head\_dim | Embedding width | Status |
 |-------|-----------|------------------------|-----------------|--------|
-| google/siglip2-giant-opt-patch16-384 | siglip | 72→128 / 96→128 | 1536 | Experimental; vision accuracy unresolved |
+| sentence-transformers/clip-ViT-B-32 | clip | 64 / 64 | 512 | Verified: text and single-image scenarios |
+| google/siglip2-giant-opt-patch16-384 | siglip | 72→128 / 96→128 | 1536 | Verified: text and single-image scenarios |
 
-Load with `AutoSpyreModel` and `AutoProcessor`. The processor prepares 384×384
-images; tokenize text with `padding="max_length"` (64 tokens).
-`get_text_features` and `get_image_features` return outputs containing
-unnormalized `pooler_output` vectors. The joint forward returns normalized
-text/image embeddings and similarity logits with the learned scale and bias.
+Multi-image batches remain excluded from the suite pending
+[#747](https://github.com/torch-spyre/hf-adapters/issues/747).
 
-Both towers reuse compiled pre-LN encoder blocks from `hf_siglip_vision.py`
-and `hf_common.py`. Attention heads and the text MLP (4304→4352) are zero-padded
+The default entry point is SentenceTransformers, as for text embedders:
+
+```python
+import hf_adapters.st_backend  # Register Spyre backend
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("sentence-transformers/clip-ViT-B-32", backend="spyre")
+text_emb = model.encode(["A cat in the snow"])
+image_emb = model.encode(image)  # PIL.Image or a list of images
+```
+
+`st_backend` detects dual encoders (models exposing `get_text_features` and
+`get_image_features`) and keeps their native HF forwards, so ST routes text and
+images to the matching Spyre tower. Text towers have fixed shapes on Spyre, so
+pass `processing_kwargs={"text": {"padding": "max_length", "truncation": True,
+"max_length": <text max_position_embeddings>}}` to `encode()` (77 tokens for
+CLIP, 64 for SigLIP).
+
+The HF API is also supported: load with `AutoSpyreModel` and `AutoProcessor`
+(CLIP's processor is stored in the repository's `0_CLIPModel` subfolder; SigLIP's
+prepares 384×384 images). `get_text_features` and `get_image_features` return
+outputs containing unnormalized `pooler_output` vectors. The joint forward
+returns normalized text/image embeddings and similarity logits with the learned
+scale (and SigLIP's bias); it is not covered by the Spyre suite.
+
+Both adapters and `hf_siglip_vision.py` share encoder preparation in
+`hf_common.py` (`prepare_pre_ln_encoder`, `patch_pre_ln_encoder_forward`,
+`patch_cpu_inputs`) on top of its compiled pre-LN blocks. CLIP text
+retains causal attention; SigLIP text and both vision towers are bidirectional.
+Attention heads and SigLIP's text MLP (4304→4352) are zero-padded
 for stick alignment. Encoder blocks run on Spyre; token/patch embeddings,
-final norms, text projection, and image attention pooling run on CPU.
-Compiler-added tokens are masked and cropped before pooling. Intermediate
-hidden states and attention weights are not exposed by the adapted encoders.
+final norms, projections, and pooling run on CPU.
+Compiler-added tokens are masked and cropped before pooling. The adapted
+dual-encoder forwards do not expose intermediate hidden states or attention weights.
 
 ### Sequence Classification
 
@@ -263,8 +294,8 @@ all pass that check.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 44 adapters · 68 verified checkpoints · 10K+ compatible models.
-The 68 verified rows are 40 generative + 13 embedding + 2 seq-classification +
+**Coverage:** 45 adapters · 70 verified checkpoints · 10K+ compatible models.
+The 70 verified rows are 40 generative + 13 embedding + 2 multimodal-embedding + 2 seq-classification +
 2 token-classification + 3 structured-decision + 7 vision-language + 1 speculative-decoding drafter (see
 the Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are bare vision-tower components
 used by VLM adapters and are not included in the adapter count. The three DSpark
@@ -319,7 +350,8 @@ pattern, norms, and weight layout.
 | hf\_granite\_vision.py | granite (text) | 1 | — |
 | hf\_granite\_vision\_mm.py | granite4\_vision (multimodal) | 1 | — |
 | hf\_siglip\_vision.py | SigLIP vision tower | 1 | SigLIP towers of other VLMs (extracted as a bare `SiglipVisionModel`) |
-| hf\_siglip.py | siglip (text/image embeddings) | 0 | google/siglip2-giant-opt-patch16-384 (experimental; vision accuracy unresolved). |
+| hf\_clip.py | clip (text/image embeddings) | 1 | sentence-transformers/clip-ViT-B-32; other CLIP ViT dual encoders (openai/clip-vit-base-patch32/16, clip-ViT-B-16, clip-ViT-L-14) |
+| hf\_siglip.py | siglip (text/image embeddings) | 1 | Other fixed-resolution SigLIP / SigLIP2 dual encoders |
 | hf\_mistral3\_vision\_mm.py | mistral3 (multimodal) | 2 | Mistral-Small-3.1/3.2 Vision; Ministral-3-14B-Instruct-2512 (ministral3 text backbone, bf16) |
 | hf\_pixtral\_vision.py | Pixtral vision tower | 1 | Pixtral towers of Mistral3 Vision checkpoints |
 | hf\_bert.py | bert | 3 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants, BERT NER/POS/chunking fine-tunes |
