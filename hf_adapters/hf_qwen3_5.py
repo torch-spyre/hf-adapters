@@ -22,6 +22,7 @@ heterogeneous entries in the generic generation cache lists.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -44,9 +45,17 @@ from hf_adapters.hf_common import (
 )
 
 if TYPE_CHECKING:
-    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5GatedDeltaNet
+    from transformers.models.qwen3_5.modeling_qwen3_5 import (
+        Qwen3_5DecoderLayer,
+        Qwen3_5GatedDeltaNet,
+        Qwen3_5RMSNorm,
+        Qwen3_5RMSNormGated,
+    )
     from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+        Qwen3_5MoeDecoderLayer,
         Qwen3_5MoeGatedDeltaNet,
+        Qwen3_5MoeRMSNorm,
+        Qwen3_5MoeRMSNormGated,
     )
 
 
@@ -66,7 +75,9 @@ def spyre_tp_replicated_linear_modules(model: nn.Module, tp_size: int) -> set[st
     }
 
 
-def _rms_norm(x, norm):
+def _rms_norm(
+    x: torch.Tensor, norm: Qwen3_5RMSNorm | Qwen3_5MoeRMSNorm
+) -> torch.Tensor:
     """Qwen3.5 RMSNorm, avoiding ``pow`` in compiled Spyre regions."""
     input_dtype = x.dtype
     x_float = x.float()
@@ -76,7 +87,11 @@ def _rms_norm(x, norm):
     return (x_float * (1.0 + norm.weight.float())).to(input_dtype)
 
 
-def _gated_rms_norm(x, gate, norm):
+def _gated_rms_norm(
+    x: torch.Tensor,
+    gate: torch.Tensor,
+    norm: Qwen3_5RMSNormGated | Qwen3_5MoeRMSNormGated,
+) -> torch.Tensor:
     """Qwen3.5's norm-before-SiLU-gate output normalization."""
     input_dtype = x.dtype
     x_float = x.float()
@@ -85,12 +100,17 @@ def _gated_rms_norm(x, gate, norm):
     )
     # Preserve HF's cast boundary: the normalized value is rounded to the model
     # dtype before the learned weight and fp32 gate are applied.
-    normalized = norm.weight * x_float.to(input_dtype)
+    normalized: torch.Tensor = norm.weight * x_float.to(input_dtype)
     return (normalized * F.silu(gate.float())).to(input_dtype)
 
 
-def _dense_mlp(x, mlp):
-    return mlp.down_proj(F.silu(mlp.gate_proj(x)) * mlp.up_proj(x))
+def _dense_mlp(x: torch.Tensor, mlp: nn.Module) -> torch.Tensor:
+    gate_proj, up_proj, down_proj = mlp.gate_proj, mlp.up_proj, mlp.down_proj
+    assert isinstance(gate_proj, nn.Module)
+    assert isinstance(up_proj, nn.Module)
+    assert isinstance(down_proj, nn.Module)
+    output: torch.Tensor = down_proj(F.silu(gate_proj(x)) * up_proj(x))
+    return output
 
 
 def _split_gated_q_projection(attn, num_heads, head_dim):
@@ -177,45 +197,28 @@ def _make_attention_block(layer, q_proj, gate_proj, head_dim):
     )
 
 
-def _causal_conv_prefill(
+def _causal_conv_on_cpu(
     x: torch.Tensor,
     conv_state: torch.Tensor,
-    taps: nn.ParameterList | tuple[torch.Tensor, ...],
-    shift_matrices: torch.Tensor,
+    weight: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Depthwise causal convolution over one fixed, stick-sized prefill chunk."""
-    # The history boundary is stick-aligned. A single 128x64 matmul per lag avoids
-    # the partial-stick slices and output-stack mutations rejected by Spyre layout
-    # propagation, as well as adding matmuls with incompatible element arrangements.
-    history = torch.cat((conv_state, x), dim=-1)
-    # Match conv1d's accumulation and its cast before the SiLU activation.
-    # Rounding every individual product/sum perturbs the recurrent cache.
-    output = torch.zeros_like(x, dtype=torch.float32)
-    for lag in reversed(range(len(taps) - 1)):
-        # One-hot selectors copy values exactly in the model dtype. Keep these
-        # matmuls off Spyre's unsupported fp32 BMM path, then upcast before the
-        # actual convolution multiplication and accumulation.
-        shifted = torch.matmul(history, shift_matrices[lag]).float()
-        output = output + shifted * taps[-2 - lag].float()
-    output = output + x.float() * taps[-1].float()
-    return F.silu(output.to(x.dtype)), x
+    """Use stock conv1d at the existing CPU delta-rule boundary.
 
-
-def _causal_conv_decode(
-    x: torch.Tensor,
-    conv_state: torch.Tensor,
-    taps: tuple[torch.Tensor, ...],
-    decode_matrices: tuple[torch.Tensor, ...],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Update the convolution state using only stick-aligned operands."""
-    x_stick = F.pad(x, (0, BLOCK_SIZE - x.shape[-1]))
-    output = torch.zeros_like(x_stick, dtype=torch.float32)
-    for lag in reversed(range(1, len(taps))):
-        shifted = conv_state.float() @ decode_matrices[lag - 1].float()
-        output = output + shifted * taps[-1 - lag].float()
-    output = output + x_stick.float() * taps[-1].float()
-    new_state = conv_state @ decode_matrices[-2] + x_stick @ decode_matrices[-1]
-    return F.silu(output[..., : x.shape[-1]].to(x.dtype)), new_state
+    Both prefill and decode preserve conv1d's accumulation and cast before
+    SiLU. Per-tap low-precision arithmetic changes later MoE routing, while
+    the equivalent fp32 Spyre graph is not reliable for these layouts.
+    """
+    if any(tensor.device.type != "cpu" for tensor in (x, conv_state, weight)):
+        raise RuntimeError("Qwen3.5 causal convolution must be CPU staged")
+    history_length = weight.shape[-1] - 1
+    history = (
+        torch.cat((conv_state[..., -history_length:], x), dim=-1)
+        if history_length
+        else x
+    )
+    output = F.silu(F.conv1d(history, weight[:, None, :], groups=weight.shape[0]))
+    new_state = torch.cat((conv_state, x), dim=-1)[..., -conv_state.shape[-1] :]
+    return output, new_state.contiguous()
 
 
 def _delta_recurrence(
@@ -252,7 +255,10 @@ def _delta_recurrence(
     )
 
 
-def _linear_projection(linear_attn, hidden_states):
+def _linear_projection(
+    linear_attn: Qwen3_5GatedDeltaNet | Qwen3_5MoeGatedDeltaNet,
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     batch_size, sequence_length, _ = hidden_states.shape
     mixed_qkv = linear_attn.in_proj_qkv(hidden_states).transpose(1, 2)
     z = linear_attn.in_proj_z(hidden_states).view(
@@ -263,7 +269,10 @@ def _linear_projection(linear_attn, hidden_states):
     return mixed_qkv, z, beta, a
 
 
-def _linear_split_inputs(linear_attn, mixed_qkv):
+def _linear_split_inputs(
+    linear_attn: Qwen3_5GatedDeltaNet | Qwen3_5MoeGatedDeltaNet,
+    mixed_qkv: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     mixed_qkv = mixed_qkv.transpose(1, 2)
     query, key, value = torch.split(
         mixed_qkv,
@@ -310,13 +319,17 @@ def _linear_normalize_inputs(
     return query, key, value
 
 
-def _make_linear_attention_block(layer):
+def _make_linear_attention_block(
+    layer: Qwen3_5DecoderLayer | Qwen3_5MoeDecoderLayer,
+) -> tuple[Callable[..., Any], ...]:
     linear_attn = layer.linear_attn
     input_norm = layer.input_layernorm
     post_attention_norm = layer.post_attention_layernorm
     mlp = layer.mlp
+    conv_weight = linear_attn._spyre_conv_weight_cpu
+    assert isinstance(conv_weight, torch.Tensor)
 
-    def finish_norm(z, core_output):
+    def finish_norm(z: torch.Tensor, core_output: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length = z.shape[:2]
         return _gated_rms_norm(
             core_output.reshape(-1, linear_attn.head_v_dim),
@@ -324,42 +337,53 @@ def _make_linear_attention_block(layer):
             linear_attn.norm,
         ).view(batch_size, sequence_length, -1)
 
-    def finish_projection(residual, core_output):
-        return residual + linear_attn.out_proj(core_output)
+    def finish_projection(
+        residual: torch.Tensor, core_output: torch.Tensor
+    ) -> torch.Tensor:
+        output: torch.Tensor = residual + linear_attn.out_proj(core_output)
+        return output
 
-    def split_inputs(conv_output):
+    def split_inputs(
+        conv_output: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return _linear_split_inputs(linear_attn, conv_output)
 
-    def normalize_inputs(query, key, value):
+    def normalize_inputs(
+        query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return _linear_normalize_inputs(linear_attn, query, key, value)
 
-    def ffn_forward(hidden_states):
+    def ffn_forward(hidden_states: torch.Tensor) -> torch.Tensor:
         residual = hidden_states
         h = _rms_norm(hidden_states, post_attention_norm)
         return residual + _dense_mlp(h, mlp)
 
-    def project_hidden(hidden_states, padding_mask):
+    def project_hidden(
+        hidden_states: torch.Tensor, padding_mask: torch.Tensor
+    ) -> torch.Tensor:
         h = _rms_norm(hidden_states, input_norm)
         return h * padding_mask[:, :, None]
 
-    def project_values(h):
+    def project_values(
+        h: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return _linear_projection(linear_attn, h)
 
-    def conv_prefill(mixed_qkv, conv_state):
-        conv_output, _ = _causal_conv_prefill(
-            mixed_qkv,
-            conv_state,
-            linear_attn._spyre_conv_taps,
-            linear_attn._spyre_conv_shift_matrices,
+    def conv_prefill(mixed_qkv: torch.Tensor, conv_state: torch.Tensor) -> torch.Tensor:
+        conv_output, _ = _causal_conv_on_cpu(
+            mixed_qkv.to("cpu"),
+            conv_state.to("cpu"),
+            conv_weight,
         )
         return conv_output
 
-    def conv_decode(mixed_qkv, conv_state):
-        output, new_state = _causal_conv_decode(
+    def conv_decode(
+        mixed_qkv: torch.Tensor, conv_state: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        output, new_state = _causal_conv_on_cpu(
             mixed_qkv.to("cpu"),
             conv_state.to("cpu"),
-            linear_attn._spyre_conv_taps_cpu,
-            linear_attn._spyre_conv_decode_matrices_cpu,
+            conv_weight,
         )
         return output, new_state.to(conv_state.device, conv_state.dtype)
 
@@ -587,53 +611,20 @@ def _allocate_caches(model, batch_size, max_cache_len, dtype, device):
     return key_caches, value_caches
 
 
-def _prepare_linear_attention_constants(linear_attn):
-    conv_weight = linear_attn.conv1d.weight[:, 0, :].detach().to("cpu")
-    taps_cpu = tuple(
-        conv_weight[:, index].reshape(1, -1, 1).contiguous()
-        for index in range(linear_attn.conv_kernel_size)
-    )
-    linear_attn._spyre_conv_taps = nn.ParameterList(
-        nn.Parameter(tap.clone(), requires_grad=False) for tap in taps_cpu
-    )
+def _prepare_linear_attention_constants(
+    linear_attn: Qwen3_5GatedDeltaNet | Qwen3_5MoeGatedDeltaNet,
+) -> None:
     # Plain tensor attributes stay on CPU when the registered model state moves.
-    linear_attn._spyre_conv_taps_cpu = tuple(tap.clone() for tap in taps_cpu)
-
-    shift_matrices = torch.zeros(
-        linear_attn.conv_kernel_size - 1,
-        2 * BLOCK_SIZE,
-        BLOCK_SIZE,
-        dtype=conv_weight.dtype,
+    linear_attn._spyre_conv_weight_cpu = (
+        linear_attn.conv1d.weight[:, 0, :].detach().to("cpu").clone().contiguous()
     )
-    for lag in range(1, linear_attn.conv_kernel_size):
-        shift_matrices[
-            lag - 1,
-            BLOCK_SIZE - lag : 2 * BLOCK_SIZE - lag,
-            :,
-        ] = torch.eye(BLOCK_SIZE, dtype=conv_weight.dtype)
-    linear_attn._spyre_conv_shift_matrices = nn.Parameter(
-        shift_matrices, requires_grad=False
-    )
-
-    identity = torch.eye(BLOCK_SIZE, dtype=conv_weight.dtype)
-    decode_matrices = []
-    for lag in range(1, linear_attn.conv_kernel_size):
-        selector = torch.zeros(BLOCK_SIZE, 1, dtype=conv_weight.dtype)
-        selector[-lag, 0] = 1
-        decode_matrices.append(selector)
-    shift_state = torch.roll(identity, -1, dims=1)
-    shift_state[0, -1] = 0
-    append_token = torch.zeros(BLOCK_SIZE, BLOCK_SIZE, dtype=conv_weight.dtype)
-    append_token[0, -1] = 1
-    decode_matrices.extend((shift_state, append_token))
-    linear_attn._spyre_conv_decode_matrices_cpu = tuple(decode_matrices)
     linear_attn._spyre_a_log_cpu = (
         linear_attn.A_log.detach().to("cpu", torch.float32).clone().contiguous()
     )
     linear_attn._spyre_dt_bias_cpu = (
         linear_attn.dt_bias.detach().to("cpu", torch.float32).clone().contiguous()
     )
-    linear_attn.conv1d = nn.Identity()
+    linear_attn._modules["conv1d"] = nn.Identity()
 
 
 def _setup_qwen3_5_text_decoder(
