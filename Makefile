@@ -63,6 +63,9 @@ JUNIT_XML ?=
 # it in one shot (ingest_xml.py globs non-recursively).
 RESULTS_DIR ?= .
 
+# Benchmark-definition wrappers (bench-validate, bench-plan, bench-run, ...); see benchmarks/README.md.
+include mk/bench.mk
+
 ifneq ($(MODEL_KEY),)
 K_ARGS := -k "$(MODEL_KEY)"
 else
@@ -345,7 +348,8 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	                      done ;; \
 	    model_support)    $(MAKE) model-support-tests RESULTS_DIR="$(RESULTS_DIR)" || rc=1 ;; \
 	    edge_cases)       mkdir -p "$(RESULTS_DIR)/junit-edge-cases" && $(MAKE) edge-cases-tests        JUNIT_XML="$(RESULTS_DIR)/junit-edge-cases/junit-edge-cases.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" EDGE_CASE_FILE="$(EDGE_CASE_FILE)" || rc=1 ;; \
-	    perf)             $(MAKE) perf-tests RESULTS_DIR="$(RESULTS_DIR)" MODEL_PATH="$$model_path" PERF_REPORT=combined || rc=1 ;; \
+	    perf)             if [ "$(BENCH_MODE)" != replace ]; then $(MAKE) perf-tests RESULTS_DIR="$(RESULTS_DIR)" MODEL_PATH="$$model_path" PERF_REPORT=combined || rc=1; fi; \
+	                      if [ "$(BENCH_MODE)" != off ]; then $(MAKE) bench-perf RESULTS_DIR="$(RESULTS_DIR)" MODEL_PATH="$$model_path" || { echo "bench-perf failed" >&2; [ "$(BENCH_MODE)" = side-by-side ] && [ "$(BENCH_REQUIRED)" != 1 ] || rc=1; }; fi ;; \
 	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare model_components embed_compare sentence_transformers_multimodal vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare structured_decision_compare model_module model_support edge_cases perf"; rc=1 ;; \
 	  esac; \
 	done; \

@@ -1,0 +1,50 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/torch-spyre/torch-spyre/main/extensions/spyre-bench/spyre_bench/core/schemas/resources.schema.json
+# evals/ sample slot-14 on the Spyre adapter, recorded as a score. Greedy decoding, so no seed in identity. Judges nothing.
+apiVersion: bench/v1alpha1
+kind: Benchmark
+metadata: {name: eval-slot-14-qwen3-0.6b, description: "slot-14 accuracy of Qwen3-0.6B through the hf_qwen3 adapter"}
+spec:
+  type: quality
+  level: service
+  tier: extended
+  system: {type: llm/hf-transformers, backend: spyre}
+  est_hours: 0.5
+  workload:
+    type: llm/lm-eval
+    inputs: [{name: tasks, dataset: slot-14, subset: first-50, expect: {records: 50}}]
+    eval: {task: slot-14, num_fewshot: 0, limit: 50}
+  metrics:
+    required: [llm.eval.exact_match]
+    headline: [llm.eval.exact_match]
+  run:
+    cache: warm
+    repeats: 1
+    timeout: 90m
+    command:
+      - python3
+      - benchmarks/tools/run_eval_case.py
+      - --task
+      - slot-14
+      - --case
+      - "{case}"
+      - --model
+      - Qwen/Qwen3-0.6B
+      - --repeat-dir
+      - "{repeat_dir}"
+      - --raw-dir
+      - "{raw_dir}"
+  identity:
+    mode: ingest
+    profile: generic
+    name: eval_slot-14_qwen3-0.6b_l50
+    discriminators:
+      - {key: dataset, value: slot-14}
+      - {key: harness, value: hf-adapters-evals}
+      - {key: model, value: Qwen/Qwen3-0.6B}
+      - {key: num_fewshot, value: 0}
+      - {key: num_questions, value: 50}
+      - {key: record_type, value: quality}
+      - {key: task, value: slot-14}
+  variants:
+    - name: eval_slot-14_qwen3-0.6b_l50
+      system: {type: llm/hf-transformers, backend: spyre, token: qwen3-0.6b, model: qwen3-0.6b, precision: fp16}

@@ -1,0 +1,6 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/torch-spyre/torch-spyre/main/extensions/spyre-bench/spyre_bench/core/schemas/resources.schema.json
+apiVersion: bench/v1alpha1
+kind: Model
+metadata: {name: qwen3-0.6b}
+spec:
+  assets: [{role: weights, asset: qwen3-0.6b-weights}]

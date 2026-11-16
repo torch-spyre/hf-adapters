@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/torch-spyre/torch-spyre/main/extensions/spyre-bench/spyre_bench/core/schemas/resources.schema.json
+apiVersion: bench/v1alpha1
+kind: Dataset
+metadata: {name: slot-12, description: "eval questions; scored in file order"}
+spec: {asset: slot-12-files, role: eval, subsets: {first-50: {limit: 50, order: sequential}}}
+---
+apiVersion: bench/v1alpha1
+kind: Dataset
+metadata: {name: slot-14, description: "eval questions; scored in file order"}
+spec: {asset: slot-14-files, role: eval, subsets: {first-50: {limit: 50, order: sequential}}}
