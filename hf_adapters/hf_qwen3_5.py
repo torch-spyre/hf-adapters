@@ -177,27 +177,42 @@ def _make_attention_block(layer, q_proj, gate_proj, head_dim):
     )
 
 
-def _causal_conv_prefill(x, conv_state, taps, shift_matrices):
+def _causal_conv_prefill(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    taps: nn.ParameterList | tuple[torch.Tensor, ...],
+    shift_matrices: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Depthwise causal convolution over one fixed, stick-sized prefill chunk."""
     # The history boundary is stick-aligned. A single 128x64 matmul per lag avoids
     # the partial-stick slices and output-stack mutations rejected by Spyre layout
     # propagation, as well as adding matmuls with incompatible element arrangements.
-    history = torch.cat((conv_state, x), dim=-1)
-    output = x * taps[-1]
-    for lag in range(len(taps) - 1):
-        shifted = torch.matmul(history, shift_matrices[lag])
-        output = output + shifted * taps[-2 - lag]
-    return F.silu(output), x
+    history = torch.cat((conv_state, x), dim=-1).float()
+    # Match conv1d's accumulation and its cast before the SiLU activation.
+    # Rounding every individual product/sum perturbs the recurrent cache.
+    output = torch.zeros_like(x, dtype=torch.float32)
+    for lag in reversed(range(len(taps) - 1)):
+        shifted = torch.matmul(history, shift_matrices[lag].float())
+        output = output + shifted * taps[-2 - lag].float()
+    output = output + x.float() * taps[-1].float()
+    return F.silu(output.to(x.dtype)), x
 
 
-def _causal_conv_decode(x, conv_state, taps, decode_matrices):
+def _causal_conv_decode(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    taps: tuple[torch.Tensor, ...],
+    decode_matrices: tuple[torch.Tensor, ...],
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Update the convolution state using only stick-aligned operands."""
     x_stick = F.pad(x, (0, BLOCK_SIZE - x.shape[-1]))
-    output = x_stick * taps[-1]
-    for lag in range(1, len(taps)):
-        output = output + (conv_state @ decode_matrices[lag - 1]) * taps[-1 - lag]
+    output = torch.zeros_like(x_stick, dtype=torch.float32)
+    for lag in reversed(range(1, len(taps))):
+        shifted = conv_state.float() @ decode_matrices[lag - 1].float()
+        output = output + shifted * taps[-1 - lag].float()
+    output = output + x_stick.float() * taps[-1].float()
     new_state = conv_state @ decode_matrices[-2] + x_stick @ decode_matrices[-1]
-    return F.silu(output[..., : x.shape[-1]]), new_state
+    return F.silu(output[..., : x.shape[-1]].to(x.dtype)), new_state
 
 
 def _delta_recurrence(

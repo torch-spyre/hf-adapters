@@ -36,6 +36,8 @@ leader, and verifies that a model without an expert mesh keeps local routing.
 The hybrid attention test compares the CPU delta-rule output and fp32 recurrent
 cache against Transformers for fp16, bf16, and fp32 inputs. Q/K normalization
 stays in fp32, matching the upstream recurrence's precision boundary.
+The causal-convolution regression checks prefill and decode against `conv1d`,
+including its fp32 accumulation, tap order, and cast before SiLU.
 
 ## Two-card Spyre regressions
 

@@ -9,7 +9,59 @@ import torch.nn.functional as F
 from transformers.models.qwen3_5 import modeling_qwen3_5 as dense
 from transformers.models.qwen3_5_moe import modeling_qwen3_5_moe as moe
 
-from hf_adapters.hf_qwen3_5 import _delta_recurrence, _linear_normalize_inputs
+from hf_adapters.hf_qwen3_5 import (
+    _causal_conv_decode,
+    _causal_conv_prefill,
+    _delta_recurrence,
+    _linear_normalize_inputs,
+    _prepare_linear_attention_constants,
+)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("tokens", [1, 64])
+def test_causal_convolution_matches_hf(dtype: torch.dtype, tokens: int) -> None:
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(772)
+        layer = dense.Qwen3_5GatedDeltaNet(
+            dense.Qwen3_5TextConfig(
+                hidden_size=256,
+                linear_num_key_heads=1,
+                linear_num_value_heads=1,
+                linear_key_head_dim=128,
+                linear_value_head_dim=128,
+            ),
+            layer_idx=0,
+        ).to(dtype)
+        channels = layer.conv1d.weight.shape[0]
+        x = torch.randn(2, channels, tokens, dtype=dtype) * 0.1
+        state = torch.randn(2, channels, 64, dtype=dtype) * 0.1
+    with torch.no_grad():
+        expected = F.silu(
+            F.conv1d(
+                torch.cat((state[..., -(layer.conv_kernel_size - 1) :], x), dim=-1),
+                layer.conv1d.weight,
+                groups=channels,
+            )
+        )
+        _prepare_linear_attention_constants(layer)
+        if tokens == 1:
+            actual, actual_state = _causal_conv_decode(
+                x,
+                state,
+                layer._spyre_conv_taps_cpu,
+                layer._spyre_conv_decode_matrices_cpu,
+            )
+        else:
+            actual, actual_state = _causal_conv_prefill(
+                x,
+                state,
+                layer._spyre_conv_taps,
+                layer._spyre_conv_shift_matrices,
+            )
+    expected_state = torch.cat((state, x), dim=-1)[..., -64:]
+    torch.testing.assert_close(actual_state, expected_state, atol=0, rtol=0)
+    torch.testing.assert_close(actual, expected, atol=1e-7, rtol=1e-5)
 
 
 @pytest.mark.parametrize("family", ["dense", "moe"])
