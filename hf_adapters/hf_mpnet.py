@@ -29,9 +29,9 @@ Differences from BERT (``hf_bert``) honored here:
   ``output`` submodule).
 - Relative position bias: ``encoder.relative_attention_bias`` produces an
   additive ``[1, n_heads, L, L]`` tensor (T5-style log-bucket scheme) that
-  must be added to attention scores in every layer. We fold it into the
-  additive ``attn_mask`` once per forward — SDPA accepts the same shape — so
-  the compiled block stays signature-compatible with the BERT path.
+  must be added to attention scores in every layer. Standalone execution folds
+  it into ``attn_mask``. External execution binds a shared, model-owned bias
+  module so the runtime can slice it per request group inside compiled attention.
 - Q·K^T uses ``1/sqrt(head_dim)`` scaling (no ``pad_attention_heads_simple``
   needed: ``all-mpnet-base-v2`` has ``head_dim=64`` already).
 """
@@ -46,16 +46,19 @@ from hf_adapters.hf_common import (
     fairseq_position_ids,
     get_backbone,
     make_encoder_block,
+    validate_external_encoder,
 )
 
 
-def _make_compiled_encoder_block(layer):
+def _make_compiled_encoder_block(
+    layer, runtime=None, layer_idx=None, position_bias=None
+):
     """Resolve MPNet's module layout and hand off to ``make_encoder_block``.
 
     MPNet groups attention under ``attention.attn.{q,k,v,o}`` with the post-
     attention LN at ``attention.LayerNorm`` (no ``output`` submodule). The
-    relative position bias is folded into ``attn_mask`` by the caller (see
-    ``_run_backbone_forward``), so the compiled body is identical to BERT's.
+    relative position bias is folded into ``attn_mask`` by the standalone caller
+    or supplied by the external attention runtime.
     """
     attn = layer.attention.attn
     return make_encoder_block(
@@ -71,6 +74,9 @@ def _make_compiled_encoder_block(layer):
         out_ln=layer.output.LayerNorm,
         num_heads=attn.num_attention_heads,
         head_dim=attn.attention_head_size,
+        runtime=runtime,
+        layer_idx=layer_idx,
+        position_bias=position_bias,
     )
 
 
@@ -106,7 +112,9 @@ def _relative_position_bucket(
     return ret
 
 
-def _compute_position_bias(backbone, qlen: int, num_buckets: int = 32) -> torch.Tensor:
+def _compute_position_bias(
+    backbone, qlen: int, num_buckets: int | None = None, *, device=None
+) -> torch.Tensor:
     """Build the additive position-bias tensor for a sequence of length ``qlen``.
 
     Mirrors ``MPNetEncoder.compute_position_bias`` but runs the bucket math
@@ -118,6 +126,8 @@ def _compute_position_bias(backbone, qlen: int, num_buckets: int = 32) -> torch.
     bias table is tiny (``[num_buckets, n_heads]``) so indexing a CPU copy
     of the weights is negligible per forward.
     """
+    if num_buckets is None:
+        num_buckets = backbone.encoder.relative_attention_bias.num_embeddings
     context_position = torch.arange(qlen, dtype=torch.long)[:, None]
     memory_position = torch.arange(qlen, dtype=torch.long)[None, :]
     relative_position = memory_position - context_position
@@ -126,7 +136,22 @@ def _compute_position_bias(backbone, qlen: int, num_buckets: int = 32) -> torch.
     bias_weight_cpu = backbone.encoder.relative_attention_bias.weight.detach().to("cpu")
     values: torch.Tensor = bias_weight_cpu[rp_bucket]  # [qlen, qlen, n_heads]
     bias = values.permute(2, 0, 1).unsqueeze(0).contiguous()  # [1, n_heads, q, q]
-    return bias.to(DEVICE)
+    return bias.to(DEVICE if device is None else device)
+
+
+class _PrecomputedPositionBias(torch.nn.Module):
+    """Shared learned bias; the runtime slices it to each request group's extent."""
+
+    def __init__(self, backbone, max_model_len):
+        super().__init__()
+        extent = ((max_model_len + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
+        bias = _compute_position_bias(backbone, extent, device="cpu")
+        self.register_buffer(
+            "bias", bias.to(next(backbone.parameters()).dtype), persistent=False
+        )
+
+    def forward(self):
+        return self.bias
 
 
 def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_ids):
@@ -146,15 +171,22 @@ def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_
     backbone = get_backbone(model)
     emb = backbone.embeddings
 
-    pos_ids = fairseq_position_ids(input_ids, emb.padding_idx)
+    if attn_mask is None and token_type_ids is not None:
+        raise ValueError("MPNet does not accept token_type_ids")
+    pos_ids = (
+        position_ids
+        if attn_mask is None
+        else fairseq_position_ids(input_ids, emb.padding_idx)
+    )
 
     h = emb.word_embeddings(input_ids) + emb.position_embeddings(pos_ids)
     h = emb.LayerNorm(h)
     h = h.clone() if h.device.type == "spyre" else h
 
-    qlen = input_ids.shape[1]
-    pos_bias = _compute_position_bias(backbone, qlen).to(attn_mask.dtype)
-    attn_mask = attn_mask + pos_bias
+    if attn_mask is not None:
+        qlen = input_ids.shape[1]
+        pos_bias = _compute_position_bias(backbone, qlen).to(attn_mask.dtype)
+        attn_mask = attn_mask + pos_bias
 
     for compiled_block in model._spyre_compiled_blocks:
         h = compiled_block(h, attn_mask)
@@ -166,7 +198,7 @@ def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_
 _is_encoder_only = True
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model, *, runtime=None):
     """Apply Spyre adaptations to an MPNet encoder model in-place.
 
     Walks ``model.encoder.layer``, builds a compiled encoder block for each
@@ -176,6 +208,7 @@ def prepare_for_spyre(model):
     ``head_dim``, add a pad pass here using ``_pad_proj_*`` from
     ``hf_common`` against the ``layer.attention.attn.{q,k,v,o}`` modules.
     """
+    validate_external_encoder(model, runtime)
     backbone = get_backbone(model)
     cfg = model.config
     orig_head_dim = (
@@ -191,6 +224,11 @@ def prepare_for_spyre(model):
     if hasattr(model, "lm_head"):
         model._spyre_cpu_submodules = ["lm_head"]
 
+    position_bias = None
+    if runtime is not None:
+        position_bias = _PrecomputedPositionBias(backbone, runtime.max_model_len)
+        model._spyre_position_bias = position_bias
     model._spyre_compiled_blocks = [
-        _make_compiled_encoder_block(layer) for layer in backbone.encoder.layer
+        _make_compiled_encoder_block(layer, runtime, index, position_bias)
+        for index, layer in enumerate(backbone.encoder.layer)
     ]

@@ -20,9 +20,8 @@ distilbert/distilbert-base-uncased-finetuned-sst-2-english).
 
 Key differences from BERT (``hf_bert``) handled here:
 
-- **Backbone path**: ``model.distilbert`` (not ``model.bert``). ``get_backbone``
-  does not recognise this attribute, so ``_run_backbone_forward`` accesses the
-  backbone directly.
+- **Backbone path**: ``model.distilbert`` (not ``model.bert``), resolved through
+  HF's ``base_model`` property for task wrappers and bare backbones alike.
 - **Layer list**: ``backbone.transformer.layer`` (not ``backbone.encoder.layer``).
 - **Attention module names**: ``layer.attention.{q_lin, k_lin, v_lin, out_lin}``
   (BERT uses ``attention.self.{query, key, value}`` + ``attention.output.dense``).
@@ -32,7 +31,8 @@ Key differences from BERT (``hf_bert``) handled here:
   ``layer.intermediate.dense`` / ``layer.output.dense``).
 - **Post-FFN LayerNorm**: ``layer.output_layer_norm`` (not ``layer.output.LayerNorm``).
 - **No token_type_ids**: DistilBERT has no token-type embedding table; the
-  ``token_type_ids`` argument from ``prefill_encoder`` is ignored.
+  ``token_type_ids`` argument from ``prefill_encoder`` is ignored; external
+  execution rejects it.
 
 Usage::
 
@@ -60,10 +60,11 @@ from hf_adapters.hf_common import (
     _pad_proj_output_simple,
     get_backbone,
     make_encoder_block,
+    validate_external_encoder,
 )
 
 
-def _make_compiled_encoder_block(layer):
+def _make_compiled_encoder_block(layer, runtime=None, layer_idx=None):
     """Resolve DistilBERT's module layout and hand off to ``make_encoder_block``.
 
     DistilBERT's ``TransformerBlock`` has a flat attention submodule
@@ -86,6 +87,8 @@ def _make_compiled_encoder_block(layer):
         out_ln=layer.output_layer_norm,
         num_heads=attn.n_heads,
         head_dim=attn.attention_head_size,
+        runtime=runtime,
+        layer_idx=layer_idx,
     )
 
 
@@ -101,6 +104,8 @@ def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_
     The parameter is retained so ``prefill_encoder`` can dispatch through the
     same callable shape as BERT/XLM-R.
     """
+    if attn_mask is None and token_type_ids is not None:
+        raise ValueError("DistilBERT does not accept token_type_ids")
     backbone = get_backbone(model)
     emb = backbone.embeddings
     h = emb.word_embeddings(input_ids) + emb.position_embeddings(position_ids)
@@ -141,7 +146,7 @@ class _DistilBertClassifierHead(nn.Module):
         return result
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model, *, runtime=None):
     """Apply Spyre adaptations to a DistilBERT encoder model in-place.
 
     Pads attention heads up to a Spyre stick boundary when ``head_dim`` is below
@@ -156,6 +161,7 @@ def prepare_for_spyre(model):
     ``classifier(hidden_states)`` call-site that
     ``prefill_sequence_classification`` expects.
     """
+    validate_external_encoder(model, runtime)
     backbone = get_backbone(model)
     cfg = model.config
     orig_head_dim = cfg.dim // cfg.n_heads
@@ -206,5 +212,6 @@ def prepare_for_spyre(model):
         model._spyre_cpu_submodules = cpu_submodules
 
     model._spyre_compiled_blocks = [
-        _make_compiled_encoder_block(layer) for layer in backbone.transformer.layer
+        _make_compiled_encoder_block(layer, runtime, index)
+        for index, layer in enumerate(backbone.transformer.layer)
     ]

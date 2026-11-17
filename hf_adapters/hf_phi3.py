@@ -34,19 +34,18 @@ Usage::
     outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
+    DenseAttention,
     PrecomputedRotaryEmbedding,
     _pad_proj_input_simple,
     _pad_proj_output_simple,
     apply_rope_matmul,
+    compile_block,
     embed_text_tokens,
     get_backbone,
-    kv_cache_update,
     pad_qk_proj_for_rope,
     permute_proj_for_rope,
     prepare_lm_head_for_spyre,
@@ -87,7 +86,9 @@ def _split_fused_qkv(attn, num_q, num_kv, head_dim):
 # ---------------------------------------------------------------------------
 
 
-def _make_compiled_block(layer, q_proj, k_proj, v_proj, gate_proj, up_proj, head_dim):
+def _make_compiled_block(
+    layer, q_proj, k_proj, v_proj, gate_proj, up_proj, head_dim, runtime=None
+):
     """Compiled block for Phi-3. Full head_dim RoPE via identity-padded freqs."""
     input_ln = layer.input_layernorm
     post_attn_ln = layer.post_attention_layernorm
@@ -95,6 +96,11 @@ def _make_compiled_block(layer, q_proj, k_proj, v_proj, gate_proj, up_proj, head
     act_fn = layer.mlp.activation_fn
     o_proj = layer.self_attn.o_proj
     scaling = layer.self_attn.scaling
+    attention = (
+        DenseAttention(scaling)
+        if runtime is None
+        else runtime.attention(layer.self_attn, head_size=head_dim)
+    )
 
     def block_forward(
         hidden_states,
@@ -118,22 +124,8 @@ def _make_compiled_block(layer, q_proj, k_proj, v_proj, gate_proj, up_proj, head
         q = apply_rope_matmul(q, selected_freqs)
         k = apply_rope_matmul(k, selected_freqs)
 
-        key_cache, value_cache = kv_cache_update(
-            k,
-            v,
-            key_cache,
-            value_cache,
-            cache_index,
-        )
-
-        attn_out = F.scaled_dot_product_attention(
-            q,
-            key_cache,
-            value_cache,
-            attn_mask=attn_mask,
-            dropout_p=0.0,
-            scale=scaling,
-            enable_gqa=True,
+        attn_out, key_cache, value_cache = attention(
+            q, k, v, attn_mask, key_cache, value_cache, cache_index
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
         attn_out = o_proj(attn_out)
@@ -148,7 +140,7 @@ def _make_compiled_block(layer, q_proj, k_proj, v_proj, gate_proj, up_proj, head
 
         return h, key_cache, value_cache
 
-    return torch.compile(block_forward, dynamic=False)
+    return compile_block(block_forward, runtime)
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +198,7 @@ def _run_forward(
     return run_lm_head(model, h)
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model, *, runtime=None):
     """Apply Spyre adaptations to Phi-3 model in-place."""
     cfg = model.config
     hd = cfg.hidden_size // cfg.num_attention_heads
@@ -230,7 +222,8 @@ def prepare_for_spyre(model):
         get_backbone(model).rotary_emb, padded_head_dim=work_hd
     )
 
-    prepare_lm_head_for_spyre(model)
+    if runtime is None:
+        prepare_lm_head_for_spyre(model)
 
     num_q = cfg.num_attention_heads
     num_kv = cfg.num_key_value_heads
@@ -272,7 +265,7 @@ def prepare_for_spyre(model):
         model._spyre_up_projs.append(up)
 
     model._spyre_compiled_blocks = [
-        _make_compiled_block(layer, qp, kp, vp, gp, up, work_hd)
+        _make_compiled_block(layer, qp, kp, vp, gp, up, work_hd, runtime)
         for layer, qp, kp, vp, gp, up in zip(
             get_backbone(model).layers,
             model._spyre_q_projs,
@@ -282,4 +275,4 @@ def prepare_for_spyre(model):
             model._spyre_up_projs,
         )
     ]
-    model._spyre_compiled_norm = torch.compile(get_backbone(model).norm, dynamic=False)
+    model._spyre_compiled_norm = compile_block(get_backbone(model).norm, runtime)

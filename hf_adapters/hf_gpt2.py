@@ -97,7 +97,7 @@ def _split_c_attn(c_attn, embed_dim):
     return _mk(0), _mk(embed_dim), _mk(2 * embed_dim)
 
 
-def _make_compiled_block(layer):
+def _make_compiled_block(layer, runtime=None):
     """Resolve GPT-2's module layout and hand off to ``make_decoder_block``.
 
     GPT-2 is pre-norm MHA with learned absolute positions (no RoPE), so the
@@ -123,8 +123,10 @@ def _make_compiled_block(layer):
         ffn_ln=layer.ln_2,
         num_heads=attn.num_heads,
         head_dim=attn.head_dim,
-        scale=attn.head_dim**-0.5,
+        scale=attn.scaling,
         pre_ln=True,
+        attention=None if runtime is None else runtime.attention(attn),
+        runtime=runtime,
     )
 
 
@@ -190,7 +192,7 @@ def _run_forward(
     return run_lm_head(model, h)
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model, *, runtime=None):
     """Apply Spyre adaptations to a GPT-2 model in-place.
 
     Rewrites every ``Conv1D`` to ``nn.Linear`` (splitting the fused ``c_attn``
@@ -199,13 +201,20 @@ def prepare_for_spyre(model):
     positions.
     """
     cfg = model.config
+    if cfg.add_cross_attention:
+        raise ValueError("GPT-2 adapter execution does not support cross attention")
+    if cfg.reorder_and_upcast_attn:
+        raise ValueError(
+            "GPT-2 adapter execution does not support reordered upcast attention"
+        )
     bb = get_backbone(model)
     embed_dim = cfg.n_embd
 
     # Patch the MLP activation (gelu_new / NewGELUActivation) to drop torch.pow
     # on Spyre. Patch the actual instantiated class so we follow whichever GELU
     # variant the config selected (gpt2 default is gelu_new).
-    patch_new_gelu(type(bb.h[0].mlp.act))
+    if cfg.activation_function in ("gelu_new", "gelu_fast", "gelu_pytorch_tanh"):
+        patch_new_gelu(type(bb.h[0].mlp.act))
 
     for layer in bb.h:
         attn = layer.attn
@@ -215,9 +224,10 @@ def prepare_for_spyre(model):
         layer.mlp.c_proj = _conv1d_to_linear(layer.mlp.c_proj)
 
     vocab_size = model.config.vocab_size
-    prepare_lm_head_for_spyre(
-        model, logits_processor=lambda logits: logits[..., :vocab_size]
-    )
+    if runtime is None:
+        prepare_lm_head_for_spyre(
+            model, logits_processor=lambda logits: logits[..., :vocab_size]
+        )
 
     # GPT-2 is MHA (kv heads == attention heads) and its config uses n_head /
     # n_embd rather than the standard num_key_value_heads / head_dim that
@@ -229,4 +239,6 @@ def prepare_for_spyre(model):
         (num_heads, head_dim, head_dim) for _ in range(cfg.n_layer)
     ]
 
-    model._spyre_compiled_blocks = [_make_compiled_block(layer) for layer in bb.h]
+    model._spyre_compiled_blocks = [
+        _make_compiled_block(layer, runtime) for layer in bb.h
+    ]
