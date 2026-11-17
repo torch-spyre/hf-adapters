@@ -20,10 +20,9 @@ distilbert/distilbert-base-uncased-finetuned-sst-2-english).
 
 Key differences from BERT (``hf_bert``) handled here:
 
-- **Backbone path**: ``model.distilbert`` on task wrappers, the model itself
-  for a bare ``DistilBertModel``. ``get_backbone`` resolves both through
-  ``base_model_prefix``; note the bare model's ``.transformer`` is its layer
-  stack, not a backbone.
+- **Backbone path**: ``model.distilbert`` (not ``model.bert``). ``get_backbone``
+  does not recognise this attribute, so ``_run_backbone_forward`` accesses the
+  backbone directly.
 - **Layer list**: ``backbone.transformer.layer`` (not ``backbone.encoder.layer``).
 - **Attention module names**: ``layer.attention.{q_lin, k_lin, v_lin, out_lin}``
   (BERT uses ``attention.self.{query, key, value}`` + ``attention.output.dense``).
@@ -54,7 +53,6 @@ Usage::
 
 import torch
 import torch.nn as nn
-from transformers import DistilBertModel
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
@@ -103,7 +101,7 @@ def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_
     The parameter is retained so ``prefill_encoder`` can dispatch through the
     same callable shape as BERT/XLM-R.
     """
-    backbone: DistilBertModel = get_backbone(model)
+    backbone = get_backbone(model)
     emb = backbone.embeddings
     h = emb.word_embeddings(input_ids) + emb.position_embeddings(position_ids)
     h = emb.LayerNorm(h)
@@ -158,7 +156,7 @@ def prepare_for_spyre(model):
     ``classifier(hidden_states)`` call-site that
     ``prefill_sequence_classification`` expects.
     """
-    backbone: DistilBertModel = get_backbone(model)
+    backbone = get_backbone(model)
     cfg = model.config
     orig_head_dim = cfg.dim // cfg.n_heads
     stick_aligned_head_dim = (
