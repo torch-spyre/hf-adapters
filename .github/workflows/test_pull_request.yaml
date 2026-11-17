@@ -93,7 +93,8 @@ jobs:
   # ---------------------------------------------------------------------------
   run-tests:
     # Skip entirely once auto_merge is enabled on the PR -- native GHA checks aren't required there; run-spyre-unit-tests below still reports green since "skipped" isn't a failure.
-    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.auto_merge != null) }}
+    # Repo variable GHA_TESTS_ON_AUTO_MERGE=true keeps the suite running on auto-merge PRs too.
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.auto_merge != null && vars.GHA_TESTS_ON_AUTO_MERGE != 'true') }}
     uses: ./.github/workflows/_test_matrix.yaml
     # Reusable workflows get no secrets unless passed; without this HF_TOKEN resolves to "" in every test job.
     secrets: inherit
@@ -122,3 +123,62 @@ jobs:
             exit 1
           fi
           echo "All test suites passed."
+
+  # Reads the variables once, so the gate's name and steps below cannot disagree if they are flipped mid-run.
+  decide-spyre-test:
+    name: Decide whether GHA owns the check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    outputs:
+      owns: ${{ steps.v.outputs.owns }}
+    steps:
+      - id: v
+        env:
+          OWNS: ${{ vars.GHA_FULL_MERGE_QUEUE_TESTS == 'true' && github.event_name == 'pull_request' && (github.event.pull_request.auto_merge == null || vars.GHA_TESTS_ON_AUTO_MERGE == 'true') }}
+        run: echo "owns=${OWNS}" >> "$GITHUB_OUTPUT"
+
+  # Posts the required "Spyre Test (amd64)" context on PRs where GHA ran the suite and owns the
+  # check; the name only matches then, so a skipped run can never satisfy it.
+  spyre-test-amd64:
+    name: ${{ needs.decide-spyre-test.outputs.owns == 'true' && 'Spyre Test (amd64)' || 'gha-pr-spyre-test (inactive)' }}
+    runs-on: ubuntu-latest
+    needs: [decide-spyre-test, run-tests]
+    if: always() && github.event_name == 'pull_request'
+    steps:
+      # Fork PR runs cannot read repo variables, so the owns decision above is false for them. spyre_test_status.yaml
+      # runs in the base repo, applies the variables there and posts the PR-head status from this verdict.
+      - name: Record the suite verdict
+        if: always()
+        continue-on-error: true
+        env:
+          RUN_TESTS: ${{ needs.run-tests.result }}
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          case "$RUN_TESTS" in
+            success) verdict=success ;;
+            skipped) verdict=skipped ;;
+            *) verdict=failure ;;
+          esac
+          echo "verdict=${verdict}"
+          printf '%s %s' "$verdict" "$ATTEMPT" > verdict.txt
+      - name: Upload the suite verdict
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: spyre-test-verdict
+          path: verdict.txt
+          retention-days: 1
+          overwrite: true
+      - name: GHA does not own this check here
+        if: ${{ needs.decide-spyre-test.outputs.owns != 'true' }}
+        run: echo "Jenkins owns the Spyre Test (amd64) check for this PR."
+      - name: Check all suites passed
+        if: ${{ needs.decide-spyre-test.outputs.owns == 'true' }}
+        run: |-
+          if ${{ needs.run-tests.result == 'success' }}; then
+            echo "All test suites passed."
+            exit 0
+          fi
+          echo "Test suites failed, were cancelled, or did not run."
+          exit 1
