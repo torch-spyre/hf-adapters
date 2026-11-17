@@ -35,7 +35,8 @@ directory of ``.jpg`` files to test others as well. Weights are resolved by
 ultralytics (downloaded on first use) unless ``YOLO_WEIGHTS_DIR`` points at a
 directory that already holds them.
 
-Requires ``ultralytics`` and ``opencv``. Do not run with ``SENCORES=1``: a
+Requires the ``yolo`` extra (``ultralytics``, ``opencv-python-headless``). Not
+run in CI yet. Do not run with ``SENCORES=1``: a
 torch-spyre single-core LX-planning bug silently corrupts results.
 
 Usage (on Spyre pod)::

@@ -19,8 +19,12 @@ dependencies = [
 
 [project.optional-dependencies]
 laya = ["laya>=0.3.28,<0.4"]
-# YOLO.detect() (serve.py) imports ultralytics lazily.
-yolo = ["ultralytics"]
+# hf_adapters/ultralytics_yolo.py and YOLO.detect() (serve.py) import ultralytics;
+# tests/spyre/test_e2e_yolo_compare_spyre.py also imports cv2. Verified with
+# ultralytics 8.4.173 and 8.4.201, opencv-python-headless 5.0.0.93. Headless, not
+# opencv-python: see override-dependencies under [tool.uv].
+yolo = ["ultralytics>=8.4.173,<8.5", "opencv-python-headless>=5.0,<6"]
+# The YOLO e2e test is not in CI yet, so these are not in the `test` group.
 
 [build-system]
 requires = ["hatchling", "hatch-vcs", "setuptools_scm>=10"]
@@ -120,8 +124,15 @@ markers = [
     "slow: deselected by default; opt in with --run-slow",
 ]
 
+[tool.uv]
+# ultralytics requires opencv-python, the GUI build of OpenCV, whose cv2 needs X11
+# libraries (libxcb.so.1) that the Spyre images don't ship, so `import cv2` (and with it
+# `import ultralytics`) fails there. Drop it (this marker is never true) and let the
+# `yolo` extra install opencv-python-headless, which provides the same cv2.
+override-dependencies = ["opencv-python; sys_platform == 'never'"]
+
 [tool.uv.sources]
-torch-spyre = { git = "https://github.com/torch-spyre/torch-spyre", rev = "main" }
+torch-spyre ={ git = "https://github.com/torch-spyre/torch-spyre", rev = "main" }
 oot-framework = { git = "https://github.com/torch-spyre/torch-spyre", subdirectory = "tests/oot_framework", rev = "main" }
 # torch resolves to the +cpu build (via torch-spyre's index). torchvision must
 # come from the SAME PyTorch CPU index or PyPI hands us a CUDA-built wheel whose
