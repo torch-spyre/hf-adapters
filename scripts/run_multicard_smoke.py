@@ -90,6 +90,11 @@ in unspecified order, which may have contributed to the ``corrupted
 double-linked list`` / SIGABRT after the RESULTS SUMMARY. That has not been
 proven, so if a SIGABRT (exit 134) follows ``Status: PASS``, treat it as a
 teardown problem, not a model failure.
+
+If the exit barrier fails (a peer rank is gone), the script skips both
+``destroy_process_group()`` and interpreter teardown and exits via
+``os._exit()`` with the verdict's exit code, since either could hang in
+``finalize_library()``'s own barrier.
 """
 
 import argparse
@@ -350,13 +355,21 @@ def main(argv: list[str] | None = None) -> None:
             sys.stdout.write(f"\n[rank {local_rank}] exit barrier skipped: {e}\n")
             sys.stdout.flush()
 
+    # If the exit barrier failed, a peer is likely gone. Both an explicit
+    # destroy_process_group() and normal interpreter teardown (which releases the
+    # backend and runs its destructor -> finalize_library(), with its own
+    # barrier) could then hang until torchrun kills the rank. Flush and bypass
+    # interpreter teardown entirely, preserving the verdict's exit code.
+    if not barrier_ok:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1 if failed else 0)
+
     # destroy_process_group() -> SpyreCCLBackend::shutdown() ->
     # spyre_comms::finalize_library() (once torch-spyre#6009 lands). Must run
     # before interpreter teardown so the Spyre runtime is released in order.
     # Best effort: a teardown error must not turn the verdict into a traceback.
-    # Skipped if the exit barrier failed, since a peer is likely gone and
-    # finalize_library()'s own barrier could hang until torchrun kills the rank.
-    if barrier_ok and dist.is_available() and dist.is_initialized():
+    if dist.is_available() and dist.is_initialized():
         try:
             dist.destroy_process_group()
         except Exception as e:  # pragma: no cover - teardown best effort
