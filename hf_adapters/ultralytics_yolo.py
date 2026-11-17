@@ -402,6 +402,11 @@ def patch_proto_upsample_on_cpu(*heads):
             head.proto.upsample = _ConvTransposeOnCPU(cpu_convt)
 
 
+def _is_cpu(device):
+    """True for any CPU device spelling: ``"cpu"``, ``"cpu:0"``, ``torch.device("cpu")``."""
+    return torch.device(device).type == "cpu"
+
+
 def prepare_input(x, device="spyre"):
     """Move a CPU image batch to ``device`` in the dtype ``load_model`` expects.
 
@@ -411,7 +416,7 @@ def prepare_input(x, device="spyre"):
     element arrangement the compiled stem conv reads permuted. On CPU the input
     stays fp32, matching the unpatched reference model.
     """
-    if str(device) == "cpu":
+    if _is_cpu(device):
         return x.float().cpu()
     return x.half().to(device)
 
@@ -444,7 +449,7 @@ def load_model(weights="yolov5nu.pt", device="spyre"):
     # @torch._dynamo.disable wrapper on a CPU instance first would register that
     # disabled code object in Dynamo's cache before the Spyre instance is traced,
     # perturbing how the Spyre graph breaks. Keep the CPU reference pristine.
-    if str(device) == "cpu":
+    if _is_cpu(device):
         return m.to(device)
 
     # Segment heads: keep an fp32 CPU copy of proto.upsample (ConvTranspose2d)
