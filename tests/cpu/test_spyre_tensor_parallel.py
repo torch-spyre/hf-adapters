@@ -158,8 +158,8 @@ def test_vocab_parallel_embedding_preserves_custom_forward_and_uneven_range(
 def test_resolve_tp_plan_forwards_trust_remote_code(monkeypatch):
     seen = {}
 
-    def from_pretrained(model_path, *, trust_remote_code):
-        seen["args"] = (model_path, trust_remote_code)
+    def from_pretrained(model_path, *, subfolder, trust_remote_code):
+        seen["args"] = (model_path, subfolder, trust_remote_code)
         return SimpleNamespace()
 
     class AutoModel:
@@ -182,7 +182,7 @@ def test_resolve_tp_plan_forwards_trust_remote_code(monkeypatch):
         trust_remote_code=True,
     )
 
-    assert seen["args"] == ("custom/model", True)
+    assert seen["args"] == ("custom/model", "", True)
 
 
 def test_shared_tp_lm_head_uses_pre_padding_shard_shape(monkeypatch):
