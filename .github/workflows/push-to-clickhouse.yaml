@@ -38,13 +38,22 @@
 # (cancel-in-progress below makes that routine), the terminal verdict rows it
 # already wrote stay — they are terminal properties of the checkpoint, so a
 # re-run simply overwrites them with the same values.
+#
+# Weekly cutoff (issue #745): Monday 09:00 America/New_York. Workers stop at
+# 08:40 so they can flush and link results before the cutoff. A separate run
+# of THIS workflow requests cancellation at 08:55, allowing GitHub's five-minute
+# cancellation window to finish by 09:00. It also cancels queued shards.
+# GitHub schedules can be delayed, so this is not a strict wall-clock guarantee.
 # =============================================================================
 name: push-to-clickhouse
+run-name: ${{ github.event.schedule == '55 8 * * 1' && 'Weekly scan deadline' || 'Weekly model scan' }}
 
 on:
   schedule:
     # Saturday 22:00 UTC
     - cron: "0 22 * * 6"
+    - cron: "55 8 * * 1"
+      timezone: America/New_York
   workflow_dispatch:
     inputs:
       top_k_downloads:
@@ -90,7 +99,8 @@ concurrency:
   # whatever's still running for that SAME branch, without touching a run
   # in progress on a different ref (e.g. a PR-branch test push won't cancel
   # the real production scan running against main).
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # The cancellation run must not supersede the scan before its own job runs.
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event.schedule == '55 8 * * 1' && '-deadline' || '' }}
   cancel-in-progress: true
 
 permissions:
@@ -143,6 +153,71 @@ env:
   UV_NO_SYNC: "1"
 
 jobs:
+  cancel-weekly-scan:
+    name: Cancel the scheduled weekly scan
+    if: github.event_name == 'schedule' && github.event.schedule == '55 8 * * 1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Cancel unfinished scheduled scans
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # createdAt stays unchanged on reruns. Re-running an old cancellation
+          # job must not cancel a newer week's scan.
+          CREATED_AT=$(gh run view "$GITHUB_RUN_ID" --json createdAt --jq .createdAt)
+          RUNS=$(gh run list --workflow push-to-clickhouse.yaml --event schedule \
+            --limit 100 --json databaseId,status,displayTitle,createdAt)
+          RUN_IDS=$(jq -r --argjson self "$GITHUB_RUN_ID" --arg created "$CREATED_AT" '
+            .[] | select(.databaseId != $self and .status != "completed"
+              and .displayTitle != "Weekly scan deadline" and .createdAt <= $created)
+            | .databaseId' <<< "$RUNS")
+          echo "## Weekly scan deadline: Monday 09:00 New York" >> "$GITHUB_STEP_SUMMARY"
+          # One failure must not stop the loop: every later run would keep
+          # holding cards. Retry briefly, carry on, and fail the job at the end.
+          FAILED=""
+          for RUN_ID in $RUN_IDS; do
+            RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN_ID"
+            RESULT=failed
+            for ATTEMPT in 1 2 3; do
+              if gh run cancel "$RUN_ID"; then
+                RESULT=requested
+                break
+              fi
+              # A scan may finish between listing it and requesting cancellation.
+              if [[ $(gh run view "$RUN_ID" --json status --jq .status || true) == "completed" ]]; then
+                RESULT=completed
+                break
+              fi
+              if (( ATTEMPT < 3 )); then sleep 10; fi
+            done
+            case "$RESULT" in
+              requested)
+                echo "::warning title=Weekly scan deadline::Requested cancellation of run $RUN_ID"
+                echo "- Requested cancellation: [$RUN_ID]($RUN_URL)" >> "$GITHUB_STEP_SUMMARY" ;;
+              completed)
+                echo "- Already finished: [$RUN_ID]($RUN_URL)" >> "$GITHUB_STEP_SUMMARY" ;;
+              *)
+                echo "::error title=Weekly scan deadline::Could not cancel run $RUN_ID"
+                echo "- **Could not cancel**: [$RUN_ID]($RUN_URL)" >> "$GITHUB_STEP_SUMMARY"
+                FAILED="$FAILED $RUN_ID" ;;
+            esac
+          done
+          if [[ -z "$RUN_IDS" ]]; then
+            echo "No unfinished scheduled scans." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -n "$FAILED" ]]; then
+            echo "::error title=Weekly scan deadline::Runs still holding cards:$FAILED"
+            exit 1
+          fi
+
   # ---------------------------------------------------------------------------
   # Fetch the weekly list once per mode, filter it, and shard the survivors for
   # the parallel matrix job below. No Spyre hardware is needed because the
@@ -153,6 +228,7 @@ jobs:
   # ---------------------------------------------------------------------------
   generate-matrix:
     name: Generate weekly shards
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 22 * * 6'
     runs-on:
       - x86_64
       - spyre_pf_x0
@@ -163,6 +239,9 @@ jobs:
     # slow. At the old top_k=10000, 30 min wasn't enough; at 1000+1000 it is far
     # shorter, but the headroom is kept for manual runs with larger counts.
     timeout-minutes: 120
+    permissions:
+      actions: read
+      contents: read
     # Overrides the workflow-level default of /home/senuser (test_daily.yaml's
     # own generate-matrix job does the same) — that path only exists on the
     # Spyre-pod runner image, not on ubuntu-latest.
@@ -174,6 +253,7 @@ jobs:
       matrix_x2: ${{ steps.generate.outputs.matrix_x2 }}
       matrix_x4: ${{ steps.generate.outputs.matrix_x4 }}
       snapshot_date: ${{ steps.generate.outputs.snapshot_date }}
+      deadline: ${{ steps.deadline.outputs.deadline }}
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       # CLICKHOUSE_* are inherited from the workflow-level env block. This job
@@ -189,6 +269,45 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Anchor the cutoff to the original run, including on delayed starts and
+      # reruns. Manual scans retain their existing unlimited window.
+      - name: Compute scan deadline
+        id: deadline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, time, timedelta, timezone
+          from urllib.request import Request, urlopen
+          from zoneinfo import ZoneInfo
+
+          deadline: datetime | None = None
+          summary = "Manual scan: no deadline.\n"
+          if os.environ["GITHUB_EVENT_NAME"] == "schedule":
+              request = Request(
+                  f"{os.environ['GITHUB_API_URL']}/repos/{os.environ['GITHUB_REPOSITORY']}"
+                  f"/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+                  headers={"Authorization": f"Bearer {os.environ['GH_TOKEN']}"},
+              )
+              with urlopen(request, timeout=30) as response:
+                  created_at: str = json.load(response)["created_at"]
+              started = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+              local = started.astimezone(ZoneInfo("America/New_York"))
+              saturday = local.date() - timedelta(days=(local.weekday() - 5) % 7)
+              cutoff = datetime.combine(saturday + timedelta(days=2), time(9), local.tzinfo)
+              deadline = (cutoff - timedelta(minutes=20)).astimezone(timezone.utc)
+              summary = f"Stop workers: {deadline.isoformat()}\n\nFleet cutoff: {cutoff.isoformat()}\n"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"deadline={deadline.isoformat() if deadline else ''}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
+              output.write(f"## Weekly scan deadline\n\n{summary}")
+          print(summary)
+          if deadline is not None and deadline <= datetime.now(timezone.utc):
+              raise SystemExit("::error::This scheduled scan has already reached its deadline.")
+          PY
 
       - name: Check Python
         run: |
@@ -351,11 +470,12 @@ jobs:
   # /home/senuser/torch-spyre (see the comment on that job). This job runs on the
   # scan runners' combo (spyre_pf_x1 / image_torch_spyre), where the baked
   # checkout -- and its origin remote, the only place the torch-spyre URL exists
-  # -- is present. It runs in parallel with generate-matrix and needs no
-  # HF/ClickHouse credentials.
+  # -- is present. Waiting for generate-matrix also skips this card job for
+  # cancellation-only runs and scheduled reruns whose deadline has passed.
   # ---------------------------------------------------------------------------
   resolve-torch-spyre:
     name: Resolve torch-spyre revision
+    needs: generate-matrix
     runs-on: [x86_64, spyre_pf_x1, linux, image_torch_spyre]
     timeout-minutes: 15
     outputs:
@@ -515,6 +635,9 @@ jobs:
           PY
 
       - name: Run weekly ${{ matrix.mode }} model scan (shard ${{ matrix.shard_index }})
+        env:
+          # Issue #745: weekly_test.py stops cleanly at this time (empty = none).
+          DEADLINE: ${{ needs.generate-matrix.outputs.deadline }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -522,7 +645,8 @@ jobs:
           uv run python tests/spyre/weekly_generation/weekly_test.py \
             --mode ${{ matrix.mode }} \
             --model-list-file shards/${{ matrix.shard_file }} \
-            --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }}
+            --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }} \
+            ${DEADLINE:+--deadline "$DEADLINE"}
           echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
 
       - name: Link this shard's verdicts to its image
@@ -636,6 +760,9 @@ jobs:
           PY
 
       - name: Run weekly ${{ matrix.mode }} model scan (shard ${{ matrix.shard_index }})
+        env:
+          # Issue #745: weekly_test.py stops cleanly at this time (empty = none).
+          DEADLINE: ${{ needs.generate-matrix.outputs.deadline }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -643,7 +770,8 @@ jobs:
           uv run python tests/spyre/weekly_generation/weekly_test.py \
             --mode ${{ matrix.mode }} \
             --model-list-file shards/${{ matrix.shard_file }} \
-            --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }}
+            --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }} \
+            ${DEADLINE:+--deadline "$DEADLINE"}
           echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
 
       - name: Link this shard's verdicts to its image
@@ -757,6 +885,9 @@ jobs:
           PY
 
       - name: Run weekly ${{ matrix.mode }} model scan (shard ${{ matrix.shard_index }})
+        env:
+          # Issue #745: weekly_test.py stops cleanly at this time (empty = none).
+          DEADLINE: ${{ needs.generate-matrix.outputs.deadline }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
@@ -764,7 +895,8 @@ jobs:
           uv run python tests/spyre/weekly_generation/weekly_test.py \
             --mode ${{ matrix.mode }} \
             --model-list-file shards/${{ matrix.shard_file }} \
-            --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }}
+            --snapshot-date ${{ needs.generate-matrix.outputs.snapshot_date }} \
+            ${DEADLINE:+--deadline "$DEADLINE"}
           echo "weekly ${{ matrix.mode }} shard ${{ matrix.shard_index }} scan done"
 
       - name: Link this shard's verdicts to its image

@@ -29,13 +29,20 @@ from transformers.core_model_loading import build_glob_alternation
 from transformers.integrations.tensor_parallel import (
     ALL_PARALLEL_STYLES,
     ColwiseParallel,
-    EmbeddingParallel,
     PackedColwiseParallel,
     ReplicatedWithGradAllReduce,
     RowwiseParallel,
     TensorParallelLayer,
     replace_layer_number_by_wildcard,
 )
+
+try:
+    from transformers.integrations.tensor_parallel import EmbeddingParallel
+except ImportError:
+
+    class EmbeddingParallel(TensorParallelLayer):  # type: ignore[no-redef]
+        pass
+
 
 SPYRE_COLWISE = "spyre_colwise"
 SPYRE_COLWISE_GATHER_OUTPUT = "spyre_colwise_gather_output"
@@ -107,7 +114,11 @@ class SpyreColwiseGatherOutputParallel(SpyreColwiseParallel):
     """State-preserving variant for HF's ``colwise_gather_output`` style."""
 
     def __init__(self, **kwargs):
-        super().__init__(gather_output=True, **kwargs)
+        try:
+            super().__init__(gather_output=True, **kwargs)
+        except TypeError:
+            super().__init__(**kwargs)
+            self.gather_output = True
 
 
 class SpyreRowwiseParallel(RowwiseParallel):
@@ -136,7 +147,11 @@ class SpyreRowwiseSplitInputParallel(SpyreRowwiseParallel):
     """State-preserving variant for HF's ``rowwise_split_input`` style."""
 
     def __init__(self, **kwargs):
-        super().__init__(split_input=True, **kwargs)
+        try:
+            super().__init__(split_input=True, **kwargs)
+        except TypeError:
+            super().__init__(**kwargs)
+            self.split_input = True
 
 
 class _SpyreEmbeddingParallel(EmbeddingParallel):
@@ -151,7 +166,11 @@ class SpyreEmbeddingRowwiseParallel(_SpyreEmbeddingParallel):
     """Vocab-sharded embedding with host-side ID masking for Spyre."""
 
     def __init__(self, **kwargs):
-        super().__init__(embedding_dim_sharding=0, **kwargs)
+        try:
+            super().__init__(embedding_dim_sharding=0, **kwargs)
+        except TypeError:
+            super().__init__(**kwargs)
+            self.embedding_dim_sharding = 0
 
     def _prepare_input_fn(self, mod, inputs, *, vocab_start, vocab_end):
         input_tensor = inputs[0] if inputs else inputs
@@ -209,7 +228,11 @@ class SpyreEmbeddingColwiseParallel(_SpyreEmbeddingParallel):
     """Hidden-dimension-sharded embedding with a fixed dim-1 policy."""
 
     def __init__(self, **kwargs):
-        super().__init__(embedding_dim_sharding=1, **kwargs)
+        try:
+            super().__init__(embedding_dim_sharding=1, **kwargs)
+        except TypeError:
+            super().__init__(**kwargs)
+            self.embedding_dim_sharding = 1
 
 
 class SpyreReplicatedInferenceParallel(ReplicatedWithGradAllReduce):
