@@ -575,6 +575,12 @@ EMBEDDING_MODELS = {
         "adapter": "hf_xlm_roberta.py",
         "size": "0.1B",
     },
+    "sentence_camembert_base": {
+        "name": "sentence-camembert-base",
+        "path": "dangvantuan/sentence-camembert-base",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.1b",
+    },
     # hf_mpnet.py
     "mpnet": {
         "name": "all-mpnet-base-v2",

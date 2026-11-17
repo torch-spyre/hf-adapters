@@ -57,6 +57,7 @@ from transformers import (
     AutoModelForSequenceClassification,
     AutoModelForTokenClassification,
     BertConfig,
+    CamembertConfig,
     CLIPConfig,
     DistilBertConfig,
     Gemma2Config,
@@ -206,6 +207,9 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     Qwen3_5MoeConfig: hf_qwen3_5_moe,
     Qwen3_5MoeTextConfig: hf_qwen3_5_moe,
     RobertaConfig: hf_xlm_roberta,
+    # CamembertModel subclasses RobertaModel unchanged (same layers, weight
+    # names and fairseq-style position ids), so the RoBERTa adapter applies as-is.
+    CamembertConfig: hf_xlm_roberta,
     SiglipConfig: hf_siglip,
     SmolLM3Config: hf_smollm3,
     XLMRobertaConfig: hf_xlm_roberta,
