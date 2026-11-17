@@ -32,15 +32,25 @@ What this adapter handles:
     image [1, 3, 640, 640]
       → CSP-Darknet backbone + PAN neck                     (Spyre, compiled)
           except: SPPF max-pools + concat, nn.Upsample      (CPU, graph break)
+          graph break after each C3 / C2f / Concat cat      (Spyre, both sides)
       → Detect head per-scale convolutions (cv2 / cv3)      (Spyre, compiled)
       → per-scale flatten + concat, box decode, DFL         (CPU)
       → [1, 84, 8400]
 
-Needs only one torch-spyre patch: "route non-stick-aligned conv reshape through
-CPU fallback" (the conv decomposition's final reshape). Max-pool, upsample and
-the head flatten are handled here instead of as compiler fallbacks.
+Runs on stock torch-spyre ``main`` with no torch-spyre patch (verified at
+``bf9a90b9``). Its conv decomposition runs fully on device, with no CPU
+fallback. Max-pool, upsample and the head flatten are handled here instead of
+as compiler fallbacks.
 
 Spyre adaptations:
+- **Channel concat feeding a conv** (``patch_cat_graph_break``): C3, C2f and
+  ``Concat`` end the compiled graph right after their ``torch.cat``, so the conv
+  that reads the concat starts the next graph and reads it as a graph input.
+  torch-spyre's restickify padding pass fails (``assert len(syms) == 1`` in
+  ``_pad_restickify_input``) when a 1x1 conv reads a ``cat`` built in the same
+  graph and the width is not a multiple of 64 (YOLO's 160/80/40/20). A conv
+  that reads a graph input compiles. The concat and the conv both stay on
+  device, so no CPU round trip is added.
 - **SPPF max-pools** (``patch_sppf_pool_on_cpu``) and **nearest upsample**
   (``patch_upsample_on_cpu``) run on CPU behind graph breaks: Spyre has neither
   op, and Inductor's decompositions (masked max reduction, ``index_expr``
@@ -94,7 +104,8 @@ import types
 
 import torch
 from ultralytics import YOLO
-from ultralytics.nn.modules.block import SPPF
+from ultralytics.nn.modules.block import C3, SPPF, C2f
+from ultralytics.nn.modules.conv import Concat
 from ultralytics.nn.modules.head import Detect
 
 
@@ -306,6 +317,55 @@ def patch_upsample_on_cpu(model):
         mod.forward = types.MethodType(_forward, mod)
 
 
+def _cat_then_graph_break(tensors, dim):
+    """``torch.cat`` on device, then end the compiled graph.
+
+    The conv that reads the result starts the next graph, so it reads the concat
+    as a graph input instead of as a ``cat`` buffer of its own graph (see
+    ``patch_cat_graph_break``).
+    """
+    y = torch.cat(tensors, dim)
+    torch._dynamo.graph_break()
+    return y
+
+
+def _c3_forward(self, x):
+    return self.cv3(_cat_then_graph_break((self.m(self.cv1(x)), self.cv2(x)), 1))
+
+
+def _c2f_forward(self, x):
+    y = list(self.cv1(x).chunk(2, 1))
+    y.extend(m(y[-1]) for m in self.m)
+    return self.cv2(_cat_then_graph_break(y, 1))
+
+
+def _concat_forward(self, x):
+    return _cat_then_graph_break(x, self.d)
+
+
+def patch_cat_graph_break(model):
+    """Put a graph break after every channel concat that feeds a conv.
+
+    torch-spyre's restickify padding pass asserts (``assert len(syms) == 1`` in
+    ``_pad_restickify_input``) when a 1x1 conv reads a ``cat`` built in the same
+    compiled graph and the width is not a multiple of 64. Every C3 / C2f block
+    (``cv3`` / ``cv2`` read the block's own concat) and every neck ``Concat`` (the
+    next block's ``cv1`` / ``cv2`` read it) hits this. A conv that reads a graph
+    input compiles, so each patched ``forward`` mirrors stock ultralytics and ends
+    the graph right after the ``torch.cat``. Nothing moves to CPU.
+
+    ``forward`` is rebound on the instance. Subclasses that keep the stock forward
+    (``C3k2`` of ``C2f``; ``C3x`` / ``C3Ghost`` of ``C3``) are patched too; a
+    subclass that overrides ``forward`` is left unchanged.
+    """
+    patched = ((C2f, _c2f_forward), (C3, _c3_forward), (Concat, _concat_forward))
+    for mod in model.modules():
+        for base, forward in patched:
+            if isinstance(mod, base) and type(mod).forward is base.forward:
+                mod.forward = types.MethodType(forward, mod)
+                break
+
+
 class _ConvTransposeOnCPU(torch.nn.Module):
     """Runs a ``ConvTranspose2d`` on CPU in fp32 behind a Dynamo graph break.
 
@@ -420,5 +480,6 @@ def load_model(weights="yolov5nu.pt", device="spyre"):
     patch_proto_upsample_on_cpu(*cpu_convts)
     patch_sppf_pool_on_cpu(m)
     patch_upsample_on_cpu(m)
+    patch_cat_graph_break(m)
 
     return m
