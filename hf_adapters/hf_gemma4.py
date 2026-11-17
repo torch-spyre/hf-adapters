@@ -103,6 +103,7 @@ from hf_adapters.hf_common import (
     kv_cache_update,
     optional_spyre_config_patch,
     prepare_lm_head_for_spyre,
+    query_validity_mask,
     run_lm_head,
     text_config,
 )
@@ -269,10 +270,9 @@ def _query_row_mask(h, attn_mask):
     K/V they write in the following layer) neutral throughout the decoder.
     Valid query rows always contain at least one zero-valued, attendable entry.
 
-    A chunked causal mask's builder can derive row validity directly from its
-    padding boundary. Other masks use a CPU boolean reduction. Only the small
-    resulting multiplier needs to move to ``h``'s device for the chunked path;
-    Spyre's compiled backend rejects on-device boolean reductions.
+    A chunked causal mask's builder derives row validity from its padding
+    boundary without reading the full mask. Other masks use a compiled device
+    comparison and reduction.
     """
     # attn_mask: [B, 1, S, cache_len]. Allowed entries are exactly zero;
     # disallowed entries use the finite value returned by _mask_fill_value.
@@ -282,8 +282,7 @@ def _query_row_mask(h, attn_mask):
             attn_mask._spyre_chunked_prefill_query_start
         ).to(h.dtype)
     else:
-        am = attn_mask.to("cpu")
-        live_rows = (am == 0).any(dim=-1).any(dim=1).to(h.dtype)  # [B, S]
+        live_rows = query_validity_mask(attn_mask).to(h.dtype)
     return live_rows.to(h.device)[:, :, None]
 
 
