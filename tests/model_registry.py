@@ -519,6 +519,12 @@ EMBEDDING_MODELS = {
         "adapter": "hf_bert.py",
         "size": "0.02b",
     },
+    "distilbert_embed": {
+        "name": "DistilBERT ArguAna GPL",
+        "path": "GPL/arguana-msmarco-distilbert-gpl",
+        "adapter": "hf_distilbert.py",
+        "size": "0.066b",
+    },
     # hf_modernbert.py
     "modernbert": {
         "name": "ModernBERT-embed-base",
