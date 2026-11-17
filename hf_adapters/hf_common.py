@@ -714,36 +714,61 @@ def to_default_device_layout(hidden_states: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def get_backbone(model):
+# Fallback wrapper attributes for models that declare no ``base_model_prefix``
+# (plain ``nn.Module`` objects, or remote-code ``PreTrainedModel`` subclasses
+# that leave it at the empty default).
+_BACKBONE_ATTR_FALLBACKS: tuple[str, ...] = (
+    "model",
+    "gpt_neox",
+    "bert",
+    "distilbert",
+    "mpnet",
+    "roberta",
+    "transformer",
+)
+
+
+def get_backbone(model: nn.Module) -> Any:
     """Return the transformer backbone of an HF model or task wrapper object.
 
     Task-specific auto classes (e.g., ``AutoModelForCausalLM``) return a wrapper
     containing a backbone and one or more task heads, while the generic AutoModel
-    class may return the backbone directly. Search the supported wrapper attributes
-    and return the first non-``None`` module. If none is present, treat ``model``
-    itself as the backbone.
+    class may return the backbone directly.
+
+    HF models declare where their backbone lives via ``base_model_prefix``
+    (``"model"``, ``"distilbert"``, ``"transformer"``, ...). A wrapper holds the
+    backbone at that attribute; a bare backbone does not have it and is its own
+    backbone. This mirrors HF's ``PreTrainedModel.base_model`` and, unlike
+    guessing by attribute name, does not mistake a bare model's internal
+    submodule for a backbone (a bare ``DistilBertModel`` has a ``.transformer``
+    layer stack, which a name search would confuse with GPT-2's
+    ``model.transformer``).
+
+    Models with no ``base_model_prefix`` fall back to searching
+    ``_BACKBONE_ATTR_FALLBACKS`` and returning the first non-``None`` module, or
+    ``model`` itself if none is present.
 
     Multimodal causal-LM wrappers (e.g. Gemma 4's
     ``Gemma4ForConditionalGeneration``) contain an additional nested
     ``language_model`` level beneath that first module. Descend into it when
     present.
+
+    Returns ``Any``: backbones are heterogeneous HF classes, and callers read
+    architecture-specific attributes (``layers``, ``embed_tokens``, ...).
     """
-    inner = next(
-        (
-            backbone
-            for name in (
-                "model",
-                "gpt_neox",
-                "bert",
-                "distilbert",
-                "mpnet",
-                "roberta",
-                "transformer",
-            )
-            if (backbone := getattr(model, name, None)) is not None
-        ),
-        model,
-    )
+    prefix: str = getattr(model, "base_model_prefix", "") or ""
+    inner: nn.Module
+    if prefix:
+        inner = getattr(model, prefix, None) or model
+    else:
+        inner = next(
+            (
+                backbone
+                for name in _BACKBONE_ATTR_FALLBACKS
+                if (backbone := getattr(model, name, None)) is not None
+            ),
+            model,
+        )
     return getattr(inner, "language_model", inner)
 
 

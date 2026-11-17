@@ -17,9 +17,11 @@ Offline regression test for DistilBERT backbone resolution.
 
 A bare ``DistilBertModel`` (what ``AutoModel`` returns for DistilBERT embedding
 checkpoints) has a ``.transformer`` attribute that is its layer stack, not a
-backbone. ``hf_common.get_backbone`` matches that attribute name, so the adapter
-used to resolve the layer stack as the backbone and ``prepare_for_spyre`` raised
-``AttributeError: 'Transformer' object has no attribute 'transformer'``.
+backbone. ``hf_common.get_backbone`` used to search wrapper attributes by name,
+matched ``transformer`` (meant for GPT-2), resolved the layer stack as the
+backbone, and ``prepare_for_spyre`` raised
+``AttributeError: 'Transformer' object has no attribute 'transformer'``. It now
+resolves the backbone through ``base_model_prefix``.
 
 Uses a tiny randomly initialised config, so nothing is downloaded.
 """
@@ -66,7 +68,7 @@ def test_backbone_is_the_distilbert_model(
         model if backbone_attr is None else getattr(model, backbone_attr)
     )
 
-    assert hf_distilbert._get_distilbert_backbone(model) is expected
+    assert hf_common.get_backbone(model) is expected
 
 
 def test_bare_model_prefill_matches_hf() -> None:
