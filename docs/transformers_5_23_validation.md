@@ -110,17 +110,5 @@ projections, with corresponding local head counts, KV caches, and head padding.
 These tests do not cover every registered production checkpoint, the complete
 OOT matrix, or four-card Spyre execution. Two-card Gemma 3 covers grouped KV
 with one KV head; TP4 with two KV heads shared by rank pairs is covered on CPU
-only. Vocab-parallel embedding stages integer
-masking on CPU at every call, including decode. Measure that cost on the target
-hardware with the same environment as above:
-
-```bash
-python -m torch.distributed.run --standalone --nproc-per-node=2 \
-  scripts/benchmark_tp_embedding.py --iterations=100
-```
-
-The benchmark reports per-rank full-call and pre-staged compiled-body latency
-for batch sizes one/two and sequence lengths one/64. Each call copies its output
-to CPU to synchronize. Compilation and warmup are excluded. The delta includes
-host masking, input transfers, and Python dispatch; it is not a pure DMA
-measurement or an end-to-end model throughput result.
+only. Vocab-parallel embedding stages integer masking on CPU at every call,
+including decode.
