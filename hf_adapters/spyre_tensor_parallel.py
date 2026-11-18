@@ -21,12 +21,10 @@ CPU-to-device copy with torch-spyre's layout-aware DMA helpers.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import replace
 from datetime import timedelta
-from functools import lru_cache
 from types import MethodType
 from typing import Any, Literal
 
@@ -603,7 +601,6 @@ def spyre_tp_loading() -> Iterator[None]:
     original_wrap = core_model_loading._dtensor_from_local_like
     original_resolve = mixin.DistributedMixin._resolve_parallel_plans
     original_validate = mixin.DistributedMixin._validate_parallel_plan
-    original_lookup = mixin._get_parameter_plan
     original_device = core_model_loading.get_device
     original_initialize = utils._ensure_torch_distributed
     # HF annotates missing_keys as list[str] but passes/operates on a set.
@@ -757,17 +754,6 @@ def spyre_tp_loading() -> Iterator[None]:
             model, missing_keys - loaded_aliases, device_map, device_mesh, hf_quantizer
         )
 
-    def exact_first(
-        parameter_name: str, plan: dict[str, str], is_weight: bool = True
-    ) -> str | None:
-        if parameter_name in plan:
-            return plan[parameter_name]
-        if is_weight and "." in parameter_name:
-            parent = parameter_name.rsplit(".", 1)[0]
-            if parent in plan:
-                return plan[parent]
-        return original_lookup(parameter_name, plan, is_weight=is_weight)
-
     def validate_plan(
         model: PreTrainedModel,
         plan: dict[str, str],
@@ -810,7 +796,9 @@ def spyre_tp_loading() -> Iterator[None]:
                     f"TP plan keys match no model modules or parameters: {unknown}"
                 )
             for name, _ in model.named_parameters():
-                style = _STYLE_INSTANCES.get(exact_first(name, plan) or "")
+                style = _STYLE_INSTANCES.get(
+                    _get_spyre_parameter_plan(name, plan) or ""
+                )
                 if style is not None and style.copy_kind == "cpu":
                     staged_parameters.add(name)
             model._tp_plan = dict(plan)
@@ -835,7 +823,7 @@ def spyre_tp_loading() -> Iterator[None]:
         (core_model_loading, "DtensorShardOperation", shard_operation),
         (core_model_loading, "_dtensor_from_local_like", local_parameter),
         (core_model_loading, "get_device", parameter_device),
-        (mixin, "_get_parameter_plan", exact_first),
+        (mixin, "_get_parameter_plan", _get_spyre_parameter_plan),
         (mixin.DistributedMixin, "_resolve_parallel_plans", resolve_plans),
         (mixin.DistributedMixin, "_validate_parallel_plan", validate_plan),
         (PreTrainedModel, "_move_missing_keys_from_meta_to_device", move_missing),
@@ -909,19 +897,29 @@ def register_spyre_tp_styles() -> None:
         ALL_PARALLEL_STYLES.register(name, style)  # type: ignore[arg-type]
 
 
-@lru_cache(maxsize=512)
-def _plan_pattern(key: str) -> re.Pattern[str]:
-    """Compile a TP glob; dots and other non-wildcard characters are literal."""
-    return re.compile(re.escape(key).replace(r"\*", ".*"))
+def _get_spyre_parameter_plan(
+    parameter_name: str, plan: Mapping[str, str], is_weight: bool = True
+) -> str | None:
+    """Look up exact rules before HF's numeric-component wildcard rules."""
+    if parameter_name in plan:
+        return plan[parameter_name]
+    if is_weight and "." in parameter_name:
+        parent = parameter_name.rsplit(".", 1)[0]
+        if parent in plan:
+            return plan[parent]
+
+    generic_name = replace_layer_number_by_wildcard(parameter_name)
+    if generic_name in plan:
+        return plan[generic_name]
+    if is_weight and "." in generic_name:
+        parent = generic_name.rsplit(".", 1)[0]
+        if parent in plan:
+            return plan[parent]
+    return None
 
 
 def _matches_plan(parameter_name: str, plan: Mapping[str, str]) -> bool:
-    parent = parameter_name.rpartition(".")[0]
-    return any(
-        _plan_pattern(key).fullmatch(parameter_name)
-        or _plan_pattern(key).fullmatch(parent)
-        for key in plan
-    )
+    return _get_spyre_parameter_plan(parameter_name, plan) is not None
 
 
 def grouped_kv_projection_modules(

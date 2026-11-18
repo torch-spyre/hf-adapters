@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -152,12 +152,42 @@ def test_reassemble_dim0_all_gather_removes_per_rank_padding():
     assert torch.equal(result, torch.tensor([[[10, 11, 12, 20, 21]]]))
 
 
-def test_plan_matching_uses_transformers_glob_semantics():
+def test_plan_matching_uses_transformers_numeric_wildcards() -> None:
     plan = {"model.layers.*.self_attn.q_proj": "colwise"}
 
     assert _matches_plan("model.layers.3.self_attn.q_proj.weight", plan)
     assert not _matches_plan("model.layers.3.self_attn.k_proj.weight", plan)
     assert not _matches_plan("model.layers.3.self_attn.q_proj.weight", {})
+
+
+@pytest.mark.parametrize(
+    ("name", "key", "matched"),
+    [
+        ("model.layers.1.blocks.2.mlp.weight", "model.layers.*.mlp", False),
+        ("model.layers.decoder.mlp.weight", "model.layers.*.mlp", False),
+        ("model.layers.layer1.mlp.weight", "model.layers.*.mlp", False),
+        ("model.layers.1.mlp.weight", "model.layers.*.mlp", True),
+        ("model.layers.1.mlp.weight", "model.layers.*.mlp.weight", True),
+        (
+            "model.layers.1.blocks.2.mlp.weight",
+            "model.layers.*.blocks.*.mlp",
+            True,
+        ),
+        ("model.layers.1.mlp.weight", "model.layers.*.m*", False),
+        ("weight", "weight", True),
+    ],
+)
+def test_plan_matching_agrees_with_hf_numeric_wildcards(
+    name: str, key: str, matched: bool
+) -> None:
+    from transformers.distributed import mixin
+
+    plan = {key: SPYRE_COLWISE}
+    expected = SPYRE_COLWISE if matched else None
+    assert mixin._get_parameter_plan(name, plan) == expected
+    assert _matches_plan(name, MappingProxyType(plan)) is matched
+    with spyre_tp_loading():
+        assert mixin._get_parameter_plan(name, plan) == expected
 
 
 @pytest.mark.parametrize(
@@ -408,6 +438,41 @@ def test_prepare_spyre_tp_plan_translates_and_covers_placement():
     assert result["lm_head"] == SPYRE_REPLICATED_LINEAR
 
 
+@pytest.mark.parametrize(
+    ("module_cls", "sharded_style", "fallback_style"),
+    [
+        (nn.Linear, SPYRE_COLWISE, SPYRE_REPLICATED_LINEAR),
+        (nn.Embedding, SPYRE_EMBEDDING_ROWWISE, SPYRE_REPLICATED_EMBEDDING),
+    ],
+)
+def test_prepare_spyre_tp_plan_covers_nested_weight_modules(
+    module_cls: type[nn.Linear] | type[nn.Embedding],
+    sharded_style: str,
+    fallback_style: str,
+) -> None:
+    from transformers.distributed import mixin
+
+    model = nn.Module()
+    model.model = nn.Module()
+    model.model.layers = nn.ModuleList([nn.Module(), nn.Module()])
+    layer: nn.Module = model.model.layers[1]
+    layer.mlp = module_cls(4, 4)
+    layer.blocks = nn.ModuleList([nn.Module(), nn.Module(), nn.Module()])
+    layer.blocks[2].mlp = module_cls(4, 4)
+
+    # The rule legitimately covers the direct module, but not the nested one.
+    plan = prepare_spyre_tp_plan(model, {"model.layers.*.mlp": sharded_style})
+    assert plan["model.layers.*.mlp"] == sharded_style
+    assert plan["model.layers.*.blocks.*.mlp"] == fallback_style
+    with spyre_tp_loading():
+        expanded: dict[str, str] = mixin.DistributedMixin._expand_parallel_plan(
+            model, plan
+        )
+    for suffix in ("", ".weight"):
+        assert expanded["model.layers.1.mlp" + suffix] == sharded_style
+        assert expanded["model.layers.1.blocks.2.mlp" + suffix] == fallback_style
+
+
 def test_embedding_styles_reconstruct_with_their_registered_dimension() -> None:
     prepare_spyre_tp_plan(_ToyModel(), {})
 
@@ -596,19 +661,40 @@ def test_gemma4_vlm_forwards_text_policies_and_replicates_vision_encoder():
     )
 
 
-def test_exact_tp_plan_entry_precedes_transformers_wildcard_lookup() -> None:
+def test_spyre_tp_plan_lookup_precedence() -> None:
     from transformers.distributed import mixin
 
     parameter = "model.layers.5.self_attn.k_proj.weight"
-    plan = {
-        "model.layers.*.self_attn.k_proj": SPYRE_COLWISE,
+    rules = {
+        parameter: SPYRE_CPU_REPLICATED,
         "model.layers.5.self_attn.k_proj": SPYRE_REPLICATED_LINEAR,
+        "model.layers.*.self_attn.k_proj.weight": SPYRE_COLWISE,
+        "model.layers.*.self_attn.k_proj": SPYRE_ROWWISE,
     }
 
-    assert mixin._get_parameter_plan(parameter, plan) == SPYRE_COLWISE
+    assert mixin._get_parameter_plan(parameter, rules) == SPYRE_COLWISE
+    plan = dict(rules)
     with spyre_tp_loading():
-        assert mixin._get_parameter_plan(parameter, plan) == SPYRE_REPLICATED_LINEAR
-    assert mixin._get_parameter_plan(parameter, plan) == SPYRE_COLWISE
+        for key, style in rules.items():
+            assert mixin._get_parameter_plan(parameter, plan) == style
+            assert _matches_plan(parameter, MappingProxyType(plan))
+            del plan[key]
+        assert mixin._get_parameter_plan(parameter, plan) is None
+        assert not _matches_plan(parameter, plan)
+    assert mixin._get_parameter_plan(parameter, rules) == SPYRE_COLWISE
+
+
+@pytest.mark.parametrize(
+    "parent", ["model.layers.5.self_attn", "model.layers.*.self_attn"]
+)
+def test_spyre_tp_module_lookup_does_not_inherit_parent_rule(parent: str) -> None:
+    from transformers.distributed import mixin
+
+    module = "model.layers.5.self_attn.k_proj"
+    plan = {parent: SPYRE_COLWISE}
+    with spyre_tp_loading():
+        assert mixin._get_parameter_plan(module, plan, is_weight=False) is None
+        assert mixin._get_parameter_plan(module, plan, is_weight=True) == SPYRE_COLWISE
 
 
 def test_single_stick_vocabulary_shard_needs_no_prime_factor() -> None:
