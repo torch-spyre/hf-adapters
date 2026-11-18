@@ -1,6 +1,10 @@
 name: Daily Granite prefill benchmark
 
 on:
+  # Temporary trigger to test this workflow before merging it into main.
+  push:
+    branches:
+      - codex/daily-granite-prefill
   schedule:
     # Daily at 03:17 UTC, using hf-adapters' default branch.
     - cron: "17 3 * * *"
