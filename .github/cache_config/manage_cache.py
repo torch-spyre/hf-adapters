@@ -28,20 +28,46 @@ from typing import Any
 import yaml
 from huggingface_hub import hf_hub_download, snapshot_download
 
-MODEL_REGISTRY_PATH = (
-    Path(__file__).resolve().parents[2] / "tests" / "model_registry.py"
-)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MODEL_REGISTRY_PATH = REPO_ROOT / "tests" / "model_registry.py"
 DEFAULT_CACHE_CONFIG_PATH = (
     Path(__file__).resolve().parent / "hf_models_and_datasets.yaml"
 )
+EXCLUDE_FILE_PATH = REPO_ROOT / "tests" / "model_lists" / "exclude.yaml"
 # Matches every `"path": "org/repo"` entry across the registry's model dicts.
 _PATH_ENTRY_RE = re.compile(r'"path":\s*"([^"]+)"')
 
 
-def _registry_model_paths() -> list[str]:
-    """Every HF repo referenced by tests/model_registry.py, so the cache can't drift from what CI actually tests."""
+def _load_excluded_paths() -> frozenset[str]:
+    """Load globally excluded model paths ('models' section) from tests/model_lists/exclude.yaml.
+
+    This script only runs on the x86 CI/CD cluster, so arch-specific sections
+    (e.g. 'ppc64le_models') are intentionally ignored here.
+    """
+    if not EXCLUDE_FILE_PATH.is_file():
+        raise FileNotFoundError(f"Missing exclusions file: {EXCLUDE_FILE_PATH}")
+    with open(EXCLUDE_FILE_PATH, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"{EXCLUDE_FILE_PATH} did not parse to a mapping")
+
+    if "models" in data:
+        val = data["models"]
+        if not (isinstance(val, list) and all(isinstance(x, str) for x in val)):
+            raise ValueError(
+                f"{EXCLUDE_FILE_PATH} 'models' section must be a list of strings (got {type(val).__name__})"
+            )
+    return frozenset(data.get("models") or [])
+
+
+def _registry_model_paths(
+    excluded: set[str] | frozenset[str] | None = None,
+) -> list[str]:
+    """Every HF repo referenced by tests/model_registry.py, minus globally excluded models."""
     text = MODEL_REGISTRY_PATH.read_text(encoding="utf-8")
-    return sorted(set(_PATH_ENTRY_RE.findall(text)))
+    paths = set(_PATH_ENTRY_RE.findall(text))
+    excluded_set = set(_load_excluded_paths()) if excluded is None else set(excluded)
+    return sorted(paths - excluded_set)
 
 
 def _read_config(config_file: str | Path) -> dict[str, Any]:
@@ -61,12 +87,19 @@ def _config_extra_models(config_file: str | Path) -> list[str]:
     return models
 
 
+def build_download_list(extra_models: list[str] | None = None) -> list[str]:
+    """Assemble and return the final filtered list of models to download."""
+    excluded = set(_load_excluded_paths())
+    extra = set(extra_models or [])
+    return sorted((set(_registry_model_paths(excluded=excluded)) | extra) - excluded)
+
+
 def cache_warmed_model_paths(
     config_file: str | Path = DEFAULT_CACHE_CONFIG_PATH,
 ) -> list[str]:
-    """Every repo this job keeps warm: the registry plus the config's extra models."""
+    """Every repo this job keeps warm; weekly_test.py never deletes their weights."""
     extra_models = _config_extra_models(config_file)
-    return sorted(set(_registry_model_paths()) | set(extra_models))
+    return build_download_list(extra_models=extra_models)
 
 
 def cache_warmed_dataset_files(
