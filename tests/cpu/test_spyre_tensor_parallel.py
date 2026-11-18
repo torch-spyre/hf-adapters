@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from datetime import timedelta
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
@@ -103,9 +102,7 @@ def test_public_loader_initializes_spyre_tp_before_loading(
         is tp_plan_model
     )
     if should_initialize:
-        initialize.assert_called_once_with(
-            backend="cpu:gloo,spyre:spyreccl", timeout=timedelta(hours=2)
-        )
+        initialize.assert_called_once_with(backend="cpu:gloo,spyre:spyreccl")
         assert [entry[0] for entry in calls.mock_calls] == ["initialize", "load"]
     else:
         initialize.assert_not_called()

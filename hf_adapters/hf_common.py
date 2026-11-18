@@ -29,7 +29,6 @@ import time
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import timedelta
 from types import MethodType, ModuleType
 from typing import Any, Callable, Iterator, Optional
 
@@ -2693,9 +2692,7 @@ def load_model_common(
         ):
             # HF reuses an existing group and binds LOCAL_RANK when creating
             # its mesh. Omit device_id: SpyreCCL cannot split communicators.
-            dist.init_process_group(
-                backend="cpu:gloo,spyre:spyreccl", timeout=timedelta(hours=2)
-            )
+            dist.init_process_group(backend="cpu:gloo,spyre:spyreccl")
         with _without_spyre_allocator_warmup(), spyre_tp_loading():
             model = auto_model_cls.from_pretrained(
                 model_path,
