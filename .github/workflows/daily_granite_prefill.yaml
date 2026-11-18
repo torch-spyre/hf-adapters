@@ -30,7 +30,7 @@ env:
 
 jobs:
   prefill:
-    name: Granite 4.0 1B prefill
+    name: Granite 4.1 8B prefill
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -85,6 +85,6 @@ jobs:
           # The suite starts a Bash launcher. Inherit errexit so worker failures
           # fail this job even on images whose launcher does not set -e itself.
           export SHELLOPTS
-          python run_benchmark.py --hf-only --hf-model "ibm-granite/granite-4.0-1b" --hf-mode prefill
+          python run_benchmark.py --hf-only --hf-model "ibm-granite/granite-4.1-8b" --hf-mode prefill
           test -s docs/report_hf.txt
           cat docs/report_hf.txt

@@ -417,7 +417,7 @@ spyre-perf-suite source already present at `/home/senuser/spyre-perf-suite` in
 the runner image and runs:
 
 ```bash
-python run_benchmark.py --hf-only --hf-model "ibm-granite/granite-4.0-1b" --hf-mode prefill
+python run_benchmark.py --hf-only --hf-model "ibm-granite/granite-4.1-8b" --hf-mode prefill
 ```
 
 The suite's default configuration is batch size 1, prompt length 512, and one
