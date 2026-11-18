@@ -80,10 +80,9 @@ text smoke tests do not establish reference-logit parity.
 
 ## CI and coverage limits
 
-`_test_matrix.yaml` runs the CPU command in `cpu-tp-tests` and the hardware
-command in `spyre-tp-regression-tests` for regression, trunk, unit, and explicit
-multicard-smoke runs. Both feed the existing merge-gating result job. Per-rank
-hardware logs and CPU JUnit results are uploaded as artifacts.
+The commands above are available for manual regression testing. These suites
+are not added to `_test_matrix.yaml` or its merge-gating result job; this change
+does not add tests to the automatically triggered PR CI suite.
 
 The loader rejects missing or mismatched Spyre-planned checkpoint weights,
 excluding legitimate tied aliases, before HF can allocate generic device
