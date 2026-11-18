@@ -134,6 +134,7 @@ oot = ["oot-framework"]
 # Keep the Spyre runtime and benchmark source supplied by the runner image.
 perf = [
     "protobuf",
+    "PyYAML",
     "requests",
 ]
 dev = [
