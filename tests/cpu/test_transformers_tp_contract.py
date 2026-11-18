@@ -12,7 +12,7 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import _StridedShard
 from transformers import core_model_loading, modeling_utils
-from transformers.distributed import mixin, parallel_utils, tensor_parallel, utils
+from transformers.distributed import mixin, parallel_utils, tensor_parallel
 
 
 @pytest.mark.parametrize(
@@ -35,7 +35,6 @@ from transformers.distributed import mixin, parallel_utils, tensor_parallel, uti
             ("self", "plan", "supported_styles", "plan_name", "names"),
         ),
         (tensor_parallel.apply_tensor_parallelism, ("model", "tp_mesh", "tp_plan")),
-        (utils._ensure_torch_distributed, ("device_type",)),
         (
             modeling_utils.PreTrainedModel._move_missing_keys_from_meta_to_device,
             ("self", "missing_keys", "device_map", "device_mesh", "hf_quantizer"),

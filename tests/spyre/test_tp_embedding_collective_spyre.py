@@ -48,10 +48,8 @@ class _WorldMesh:
         return dist.get_rank()
 
 
+@pytest.mark.usefixtures("spyre_tp_group")
 def test_mask_on_host_then_compile_embedding_and_reduce_on_device() -> None:
-    if not dist.is_initialized():
-        dist.init_process_group("cpu:gloo,spyre:spyreccl")
-
     rank = dist.get_rank()
     device = torch.device("spyre", rank)
     local_vocab = 512
@@ -81,4 +79,3 @@ def test_mask_on_host_then_compile_embedding_and_reduce_on_device() -> None:
     torch.testing.assert_close(reduced.cpu(), expected, rtol=0, atol=0)
 
     dist.barrier()
-    dist.destroy_process_group()

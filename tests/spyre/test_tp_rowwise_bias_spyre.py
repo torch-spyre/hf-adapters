@@ -21,9 +21,8 @@ if int(os.environ.get("WORLD_SIZE", "1")) != 2:
     pytest.skip("requires a two-rank torchrun", allow_module_level=True)
 
 
+@pytest.mark.usefixtures("spyre_tp_group")
 def test_compiled_rowwise_bias_prefill_and_decode() -> None:
-    if not dist.is_initialized():
-        dist.init_process_group("cpu:gloo,spyre:spyreccl")
     rank = dist.get_rank()
     device = torch.device("spyre", rank)
     mesh = dist.init_device_mesh("spyre", (2,), mesh_dim_names=("tp",))

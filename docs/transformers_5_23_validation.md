@@ -34,18 +34,23 @@ plans, including exact overrides and parameter sharding before module hooks.
 ## Two-card Spyre regressions
 
 Use an environment with torch-spyre and the pinned project dependencies.
-Keep the checkpoint-loading file first: its first case tests automatic process
-group initialization before any compiled collectives run.
+Run the initialization test in its own fresh `torchrun`: it verifies that the
+public loader creates the process group, then exercises CPU synchronization
+and compiled Spyre generation. The remaining tests share a session-scoped group
+and can run in any file order; the command below runs the collectives first.
 
 ```bash
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 export SPYRE_DEVICES=0,1 COLL_ALLREDUCE_ALGO=PairwisePow2
 export HF_DEACTIVATE_ASYNC_LOAD=1 HF_HUB_OFFLINE=1
 python -m torch.distributed.run --standalone --nproc-per-node=2 \
-  --max-restarts=0 --log-dir=tp-logs --tee=3 -m pytest \
-  tests/spyre/test_tp_transformers_loading_spyre.py \
+  --max-restarts=0 --log-dir=tp-logs/initialization --tee=3 -m pytest \
+  tests/spyre/test_tp_initialization_spyre.py -sv --tb=short
+python -m torch.distributed.run --standalone --nproc-per-node=2 \
+  --max-restarts=0 --log-dir=tp-logs/shared --tee=3 -m pytest \
+  tests/spyre/test_tp_embedding_collective_spyre.py \
   tests/spyre/test_tp_rowwise_bias_spyre.py \
-  tests/spyre/test_tp_embedding_collective_spyre.py -sv --tb=short
+  tests/spyre/test_tp_transformers_loading_spyre.py -sv --tb=short
 ```
 
 The fourteen small-checkpoint cases use fp16, two input sequences, and three generated
@@ -80,6 +85,9 @@ The loader rejects missing or mismatched Spyre-planned checkpoint weights,
 excluding legitimate tied aliases, before HF can allocate generic device
 buffers. Its scoped patches affect the process: independent HF model loads
 must be serialized while `spyre_tp_loading()` is active.
+The public loader initializes Spyre TP groups with `cpu:gloo,spyre:spyreccl`
+before calling HF and reuses groups that already exist. Process-group setup
+does not patch Transformers' private initialization helper.
 
 `save_pretrained()` is explicitly unsupported on Spyre TP models, including
 before adapter preparation and when requesting a distributed checkpoint. HF

@@ -39,6 +39,7 @@ class _TPNumericalMismatchError(AssertionError):
     """Only numerical parity failures qualify for the tracked MoE xfails."""
 
 
+@pytest.mark.usefixtures("spyre_tp_group")
 @pytest.mark.parametrize(
     "family",
     [
@@ -175,20 +176,15 @@ def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
             state.pop(omitted_alias)
             save_file(state, os.path.join(path, "model.safetensors"))
 
-    # Start with independent seeded checkpoints so the public loader can create
-    # the first group. Once it exists, HF saves only on rank zero: share that
-    # checkpoint without destroying/reinitializing torchrun's rendezvous group.
+    # The session fixture owns the group. HF saves only on rank zero, so share
+    # its checkpoint and keep it alive until every rank has finished loading.
     with tempfile.TemporaryDirectory(prefix=f"hf-tp-{family}-") as local_checkpoint:
-        checkpoint = local_checkpoint
-        if dist.is_initialized():
-            paths = [local_checkpoint]
-            dist.broadcast_object_list(paths, src=0)
-            checkpoint = paths[0]
-            if dist.get_rank() == 0:
-                save_checkpoint(checkpoint)
-            dist.barrier()
-        else:
+        paths = [local_checkpoint]
+        dist.broadcast_object_list(paths, src=0)
+        checkpoint = paths[0]
+        if dist.get_rank() == 0:
             save_checkpoint(checkpoint)
+        dist.barrier()
         model = AutoSpyreModelForCausalLM.from_pretrained(
             checkpoint,
             dtype=torch.float16,

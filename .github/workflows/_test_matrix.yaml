@@ -995,7 +995,7 @@ jobs:
           repository: ${{ inputs.repository }}
           torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
           prebaked_image: ${{ inputs.prebaked_image }}
-      - name: Run compiled checkpoint, bias, and embedding regressions
+      - name: Run TP initialization and compiled regressions
         env:
           SPYRE_DEVICES: "0,1"
           COLL_ALLREDUCE_ALGO: "PairwisePow2"
@@ -1009,10 +1009,14 @@ jobs:
           source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
           run_teed uv run --active --no-sync torchrun \
             --standalone --nproc-per-node=2 --max-restarts=0 \
-            --log-dir=tp-logs --tee=3 -m pytest \
-            tests/spyre/test_tp_transformers_loading_spyre.py \
+            --log-dir=tp-logs/initialization --tee=3 -m pytest \
+            tests/spyre/test_tp_initialization_spyre.py -sv --tb=short
+          run_teed uv run --active --no-sync torchrun \
+            --standalone --nproc-per-node=2 --max-restarts=0 \
+            --log-dir=tp-logs/shared --tee=3 -m pytest \
+            tests/spyre/test_tp_embedding_collective_spyre.py \
             tests/spyre/test_tp_rowwise_bias_spyre.py \
-            tests/spyre/test_tp_embedding_collective_spyre.py -sv --tb=short
+            tests/spyre/test_tp_transformers_loading_spyre.py -sv --tb=short
       - name: Upload per-rank TP logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -24,7 +24,6 @@ from __future__ import annotations
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import replace
-from datetime import timedelta
 from types import MethodType
 from typing import Any, Literal
 
@@ -595,14 +594,13 @@ def spyre_tp_loading() -> Iterator[None]:
     independent from_pretrained calls.
     """
     from transformers import core_model_loading
-    from transformers.distributed import mixin, utils
+    from transformers.distributed import mixin
 
     original_shard = core_model_loading.DtensorShardOperation
     original_wrap = core_model_loading._dtensor_from_local_like
     original_resolve = mixin.DistributedMixin._resolve_parallel_plans
     original_validate = mixin.DistributedMixin._validate_parallel_plan
     original_device = core_model_loading.get_device
-    original_initialize = utils._ensure_torch_distributed
     # HF annotates missing_keys as list[str] but passes/operates on a set.
     original_move_missing: Callable[..., None] = (
         PreTrainedModel._move_missing_keys_from_meta_to_device
@@ -625,19 +623,6 @@ def spyre_tp_loading() -> Iterator[None]:
             if copy_kind is not None and prefix + name in state:
                 setattr(state[prefix + name], "_spyre_copy_kind", copy_kind)
                 setattr(state[prefix + name], "_spyre_param_name", prefix + name)
-
-    def initialize_distributed(device_type: str | None = None) -> None:
-        if device_type is None:
-            device_type = torch._C._get_accelerator().type
-        if device_type != "spyre":
-            original_initialize(device_type)
-        elif not torch.distributed.is_initialized():
-            # HF's backend map omits Spyre. Do not pass device_id here: that
-            # makes DeviceMesh use split_group, unsupported by SpyreCCL.
-            # HF binds LOCAL_RANK when it constructs the mesh afterward.
-            torch.distributed.init_process_group(
-                backend="cpu:gloo,spyre:spyreccl", timeout=timedelta(hours=2)
-            )
 
     def parameter_device(
         device_map: dict[str, Any] | None,
@@ -819,7 +804,6 @@ def spyre_tp_loading() -> Iterator[None]:
         return original_resolve(model, distributed_config)
 
     replacements: tuple[tuple[object, str, Any], ...] = (
-        (utils, "_ensure_torch_distributed", initialize_distributed),
         (core_model_loading, "DtensorShardOperation", shard_operation),
         (core_model_loading, "_dtensor_from_local_like", local_parameter),
         (core_model_loading, "get_device", parameter_device),

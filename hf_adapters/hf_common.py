@@ -29,6 +29,7 @@ import time
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import timedelta
 from types import MethodType, ModuleType
 from typing import Any, Callable, Iterator, Optional
 
@@ -2585,7 +2586,7 @@ def _resolve_tp_plan(
     return plan, cfg
 
 
-def _resolve_tp_size():
+def _resolve_tp_size() -> int:
     """Resolve and validate the TP degree required by ``DistributedConfig``."""
     world_size = os.getenv("WORLD_SIZE")
     if world_size is None:
@@ -2666,6 +2667,7 @@ def load_model_common(
             _kwargs["trust_remote_code"] = trust_remote_code
         model = module.load_hf_model(model_path, dtype, **_kwargs)
     elif tp_plan is not None:
+        import torch.distributed as dist
         from transformers.distributed import DistributedConfig
 
         subfolder = model_subfolder(model_path)
@@ -2677,12 +2679,23 @@ def load_model_common(
             trust_remote_code=trust_remote_code,
             subfolder=subfolder,
         )
+        tp_size = _resolve_tp_size()
         distributed_config = DistributedConfig(
-            tp_size=_resolve_tp_size(),
+            tp_size=tp_size,
             tp_plan=resolved_tp_plan,
         )
         from hf_adapters.spyre_tensor_parallel import spyre_tp_loading
 
+        if (
+            tp_size > 1
+            and DEVICE.split(":")[0] == "spyre"
+            and not dist.is_initialized()
+        ):
+            # HF reuses an existing group and binds LOCAL_RANK when creating
+            # its mesh. Omit device_id: SpyreCCL cannot split communicators.
+            dist.init_process_group(
+                backend="cpu:gloo,spyre:spyreccl", timeout=timedelta(hours=2)
+            )
         with _without_spyre_allocator_warmup(), spyre_tp_loading():
             model = auto_model_cls.from_pretrained(
                 model_path,

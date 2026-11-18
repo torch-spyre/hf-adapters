@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from types import MappingProxyType, SimpleNamespace
+from datetime import timedelta
+from types import MappingProxyType, ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -52,38 +53,89 @@ from hf_adapters.spyre_tensor_parallel import (
 )
 
 
-def test_spyre_loader_initializes_cpu_and_device_backends(
+@pytest.mark.parametrize(
+    ("device", "world_size", "tp_plan", "initialized", "should_initialize"),
+    [
+        ("spyre:1", 2, "auto", False, True),
+        ("spyre:1", 2, {}, False, True),
+        ("spyre:1", 2, "auto", True, False),
+        ("spyre:1", 2, {}, True, False),
+        ("spyre:0", 1, "auto", False, False),
+        ("spyre:0", 2, None, False, False),
+        ("cpu", 2, "auto", False, False),
+        ("cpu", 2, "auto", True, False),
+    ],
+)
+def test_public_loader_initializes_spyre_tp_before_loading(
+    device: str,
+    world_size: int,
+    tp_plan: str | dict[str, str] | None,
+    initialized: bool,
+    should_initialize: bool,
+    tp_plan_model: PreTrainedModel,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from transformers.distributed import utils
+    from hf_adapters import _model_loading, hf_common
 
-    original = utils._ensure_torch_distributed
-    monkeypatch.setenv("RANK", "1")
-    monkeypatch.setenv("LOCAL_RANK", "1")
+    monkeypatch.setattr(hf_common, "DEVICE", device)
+    monkeypatch.setenv("WORLD_SIZE", str(world_size))
+    monkeypatch.setattr(_model_loading, "model_subfolder", Mock(return_value=""))
+    monkeypatch.setattr(
+        hf_common,
+        "_resolve_tp_plan",
+        Mock(return_value=({"lm_head": SPYRE_REPLICATED_LINEAR}, tp_plan_model.config)),
+    )
+    monkeypatch.setattr(
+        torch.distributed, "is_initialized", Mock(return_value=initialized)
+    )
+    initialize = Mock()
+    monkeypatch.setattr(torch.distributed, "init_process_group", initialize)
+    loader = Mock()
+    loader.from_pretrained.return_value = tp_plan_model
+    calls = Mock()
+    calls.attach_mock(initialize, "initialize")
+    calls.attach_mock(loader.from_pretrained, "load")
+
+    assert (
+        hf_common.load_model_common(
+            "checkpoint", None, auto_model_cls=loader, tp_plan=tp_plan
+        )
+        is tp_plan_model
+    )
+    if should_initialize:
+        initialize.assert_called_once_with(
+            backend="cpu:gloo,spyre:spyreccl", timeout=timedelta(hours=2)
+        )
+        assert [entry[0] for entry in calls.mock_calls] == ["initialize", "load"]
+    else:
+        initialize.assert_not_called()
+        loader.from_pretrained.assert_called_once()
+
+
+def test_custom_loader_keeps_ownership_of_distributed_initialization(
+    tp_plan_model: PreTrainedModel,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hf_adapters import hf_common
+
+    monkeypatch.setattr(hf_common, "DEVICE", "spyre:0")
     monkeypatch.setenv("WORLD_SIZE", "2")
     monkeypatch.setattr(torch.distributed, "is_initialized", Mock(return_value=False))
     initialize = Mock()
     monkeypatch.setattr(torch.distributed, "init_process_group", initialize)
+    adapter = ModuleType("custom_adapter")
 
-    with spyre_tp_loading():
-        utils._ensure_torch_distributed("spyre")
+    def load_hf_model(
+        model_path: str, dtype: torch.dtype, tp_plan: str | dict[str, str] | None = None
+    ) -> PreTrainedModel:
+        assert tp_plan == "auto"
+        return tp_plan_model
 
-    initialize.assert_called_once()
-    assert initialize.call_args.kwargs["backend"] == "cpu:gloo,spyre:spyreccl"
-    assert initialize.call_args.kwargs.get("device_id") is None
-    assert utils._ensure_torch_distributed is original
-
-
-def test_spyre_loader_keeps_existing_process_group(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from transformers.distributed import utils
-
-    monkeypatch.setattr(torch.distributed, "is_initialized", Mock(return_value=True))
-    initialize = Mock()
-    monkeypatch.setattr(torch.distributed, "init_process_group", initialize)
-    with spyre_tp_loading():
-        utils._ensure_torch_distributed("spyre")
+    adapter.load_hf_model = load_hf_model
+    assert (
+        hf_common.load_model_common("checkpoint", adapter, tp_plan="auto")
+        is tp_plan_model
+    )
     initialize.assert_not_called()
 
 
@@ -706,7 +758,7 @@ def test_tp_loader_hooks_restore(fail: bool) -> None:
     from contextlib import nullcontext
 
     from transformers import PreTrainedModel, core_model_loading
-    from transformers.distributed import mixin, utils
+    from transformers.distributed import mixin
 
     originals = (
         core_model_loading.DtensorShardOperation,
@@ -715,7 +767,6 @@ def test_tp_loader_hooks_restore(fail: bool) -> None:
         mixin._get_parameter_plan,
         mixin.DistributedMixin._resolve_parallel_plans,
         mixin.DistributedMixin._validate_parallel_plan,
-        utils._ensure_torch_distributed,
         PreTrainedModel._move_missing_keys_from_meta_to_device,
     )
     with (
@@ -733,7 +784,6 @@ def test_tp_loader_hooks_restore(fail: bool) -> None:
         mixin._get_parameter_plan,
         mixin.DistributedMixin._resolve_parallel_plans,
         mixin.DistributedMixin._validate_parallel_plan,
-        utils._ensure_torch_distributed,
         PreTrainedModel._move_missing_keys_from_meta_to_device,
     )
 
