@@ -1502,8 +1502,8 @@ def patch_new_gelu(gelu_cls):
 
 
 def _largest_prime_factor(n: int) -> int:
-    """Largest prime factor of ``n`` (n >= 2). Used to bound the lm_head span."""
-    return int(max(factorint(n)))
+    """Largest prime factor, or 1 for a single stick, for the LM-head span."""
+    return int(max(factorint(n), default=1))
 
 
 # Spyre per-core EAR (effective address range) limit for one tensor: 256 MB.
@@ -2618,7 +2618,7 @@ def _resolve_tp_plan(
     return plan, cfg
 
 
-def _resolve_tp_size():
+def _resolve_tp_size() -> int:
     """Resolve and validate the TP degree required by ``DistributedConfig``."""
     world_size = os.getenv("WORLD_SIZE")
     if world_size is None:
@@ -2651,40 +2651,6 @@ def _without_spyre_allocator_warmup():
         yield
     finally:
         modeling_utils.caching_allocator_warmup = original
-
-
-@contextmanager
-def _prefer_exact_tp_plan_entries():
-    """Honor exact per-layer TP entries before Transformers' wildcard lookup.
-
-    Transformers documents exact TP rules, but its current lookup immediately
-    replaces every numeric layer index with ``*``. That makes a generic rule
-    win even when an exact override is present. Gemma 4 needs exact overrides
-    for only the full-attention K/V projections whose KV-head count is smaller
-    than the TP degree.
-    """
-    from transformers import modeling_utils
-    from transformers.integrations import tensor_parallel
-
-    original = tensor_parallel._get_parameter_tp_plan
-
-    def exact_first(parameter_name, tp_plan, is_weight=True):
-        if parameter_name in tp_plan:
-            return tp_plan[parameter_name]
-        if is_weight and "." in parameter_name:
-            module_name = parameter_name.rsplit(".", 1)[0]
-            if module_name in tp_plan:
-                return tp_plan[module_name]
-        return original(parameter_name, tp_plan, is_weight=is_weight)
-
-    original_modeling_lookup = modeling_utils._get_parameter_tp_plan
-    tensor_parallel._get_parameter_tp_plan = exact_first
-    modeling_utils._get_parameter_tp_plan = exact_first
-    try:
-        yield
-    finally:
-        tensor_parallel._get_parameter_tp_plan = original
-        modeling_utils._get_parameter_tp_plan = original_modeling_lookup
 
 
 def load_model_common(
@@ -2733,6 +2699,7 @@ def load_model_common(
             _kwargs["trust_remote_code"] = trust_remote_code
         model = module.load_hf_model(model_path, dtype, **_kwargs)
     elif tp_plan is not None:
+        import torch.distributed as dist
         from transformers.distributed import DistributedConfig
 
         subfolder = model_subfolder(model_path)
@@ -2744,11 +2711,22 @@ def load_model_common(
             trust_remote_code=trust_remote_code,
             subfolder=subfolder,
         )
+        tp_size = _resolve_tp_size()
         distributed_config = DistributedConfig(
-            tp_size=_resolve_tp_size(),
+            tp_size=tp_size,
             tp_plan=resolved_tp_plan,
         )
-        with _without_spyre_allocator_warmup(), _prefer_exact_tp_plan_entries():
+        from hf_adapters.spyre_tensor_parallel import spyre_tp_loading
+
+        if (
+            tp_size > 1
+            and DEVICE.split(":")[0] == "spyre"
+            and not dist.is_initialized()
+        ):
+            # HF reuses an existing group and binds LOCAL_RANK when creating
+            # its mesh. Omit device_id: SpyreCCL cannot split communicators.
+            dist.init_process_group(backend="cpu:gloo,spyre:spyreccl")
+        with _without_spyre_allocator_warmup(), spyre_tp_loading():
             model = auto_model_cls.from_pretrained(
                 model_path,
                 subfolder=subfolder,
