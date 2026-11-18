@@ -67,7 +67,8 @@ on:
           alias-resolution layer. "unit" runs every suite except smoke (load,
           token_compare, model_components, embed_compare, sentence_transformers_multimodal, vlm, reranker_compare,
           masked_lm_compare, question_answering_compare,
-          token_classification_compare, structured_decision_compare, yolo_compare, model_module);
+          token_classification_compare, structured_decision_compare, decision_compare,
+          yolo_compare, model_module);
           "integration" runs token_compare and model_components;
           "regression"/"trunk" (default: regression) run the
           standard Spyre suite set. "perf" runs only spyre-perf-tests, over the `models` list.
@@ -460,6 +461,7 @@ jobs:
       seq_classification_matrix: ${{ steps.generate.outputs.seq_classification_matrix }}
       token_classification_matrix: ${{ steps.generate.outputs.token_classification_matrix }}
       structured_decision_matrix: ${{ steps.generate.outputs.structured_decision_matrix }}
+      decision_matrix: ${{ steps.generate.outputs.decision_matrix }}
       perf_matrix: ${{ steps.generate.outputs.perf_matrix }}
     defaults:
       run:
@@ -1976,6 +1978,71 @@ jobs:
           job_key: structured_decision
           payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
 
+  spyre-decision-compare-tests:
+    name: Spyre decision compare (${{ matrix.model_key }})
+    needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
+    # Suite key: "decision_compare". Part of the "unit" coarse tier.
+    if: ${{ always() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' decision_compare ')) }}
+    continue-on-error: true
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.decision_matrix) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        id: build
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          prebaked_image: ${{ inputs.prebaked_image }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
+
+      - name: Run decision compare for ${{ matrix.model_key }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          make decision-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-decision-compare-${{ matrix.model_key }}.xml
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-decision-compare-${{ env.SAFE_MODEL_KEY }}
+          path: junit-decision-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
+
+      - name: Save suite descriptor for pod-level retry
+        if: failure()
+        uses: ./.github/actions/save-failed-suite-descriptor
+        with:
+          job_key: decision
+          payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
+
   spyre-yolo-compare-tests:
     name: Spyre YOLO compare (${{ matrix.model_key }})
     needs: [resolve-test-type, resolve-torch-spyre]
@@ -2426,6 +2493,7 @@ jobs:
       - spyre-seq-classification-compare-tests
       - spyre-token-classification-compare-tests
       - spyre-structured-decision-compare-tests
+      - spyre-decision-compare-tests
       - spyre-yolo-compare-tests
       - spyre-edge-cases-tests
       - spyre-model-module-tests
@@ -2463,6 +2531,8 @@ jobs:
       has_failed_token_classification: ${{ steps.collect.outputs.has_failed_token_classification }}
       matrix_structured_decision: ${{ steps.collect.outputs.matrix_structured_decision }}
       has_failed_structured_decision: ${{ steps.collect.outputs.has_failed_structured_decision }}
+      matrix_decision: ${{ steps.collect.outputs.matrix_decision }}
+      has_failed_decision: ${{ steps.collect.outputs.has_failed_decision }}
       matrix_yolo_compare: ${{ steps.collect.outputs.matrix_yolo_compare }}
       has_failed_yolo_compare: ${{ steps.collect.outputs.has_failed_yolo_compare }}
       matrix_edge_cases: ${{ steps.collect.outputs.matrix_edge_cases }}
@@ -2509,7 +2579,7 @@ jobs:
           keys = [
               "load", "smoke", "multicard_smoke", "token_compare", "model_components",
               "embed_compare", "vlm", "sentence_transformers_multimodal", "reranker", "masked_lm", "qa",
-              "seq_classification", "token_classification", "structured_decision",
+              "seq_classification", "token_classification", "structured_decision", "decision",
               "yolo_compare", "edge_cases", "model_module",
           ]
           grouped = {key: [] for key in keys}
@@ -3623,6 +3693,69 @@ jobs:
           retention-days: 14
           overwrite: true
 
+  spyre-decision-compare-tests-retry:
+    name: Spyre decision compare (${{ matrix.model_key }}) (pod-level retry)
+    needs: [collect-failed-suites, resolve-torch-spyre]
+    if: ${{ always() && needs.collect-failed-suites.outputs.has_failed_decision == 'true' }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.collect-failed-suites.outputs.matrix_decision) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .github/actions
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        id: build
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          prebaked_image: ${{ inputs.prebaked_image }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
+
+      - name: Run decision compare for ${{ matrix.model_key }} (pod-level retry)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          make decision-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-decision-compare-${{ matrix.model_key }}.xml
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-decision-compare-${{ env.SAFE_MODEL_KEY }}
+          report: junit-decision-compare-${{ matrix.model_key }}.xml
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-decision-compare-${{ env.SAFE_MODEL_KEY }}
+          path: junit-decision-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
+          overwrite: true
+
   spyre-yolo-compare-tests-retry:
     name: Spyre YOLO compare (${{ matrix.model_key }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
@@ -3883,6 +4016,7 @@ jobs:
       - spyre-seq-classification-compare-tests-retry
       - spyre-token-classification-compare-tests-retry
       - spyre-structured-decision-compare-tests-retry
+      - spyre-decision-compare-tests-retry
       - spyre-yolo-compare-tests-retry
       - spyre-edge-cases-tests-retry
       - spyre-model-module-tests-retry
@@ -3915,6 +4049,7 @@ jobs:
                  (needs.collect-failed-suites.outputs.has_failed_seq_classification == 'true' && needs.spyre-seq-classification-compare-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_token_classification == 'true' && needs.spyre-token-classification-compare-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_structured_decision == 'true' && needs.spyre-structured-decision-compare-tests-retry.result != 'success') ||
+                 (needs.collect-failed-suites.outputs.has_failed_decision == 'true' && needs.spyre-decision-compare-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_yolo_compare == 'true' && needs.spyre-yolo-compare-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_edge_cases == 'true' && needs.spyre-edge-cases-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_model_module == 'true' && needs.spyre-model-module-tests-retry.result != 'success') }}; then

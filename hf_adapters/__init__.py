@@ -32,6 +32,7 @@ from hf_adapters.auto_spyre_model import (
     AutoSpyreModelForQuestionAnswering,
     AutoSpyreModelForSequenceClassification,
     AutoSpyreModelForTokenClassification,
+    prepare_for_spyre,
 )
 from hf_adapters.hf_common import encode_prompts
 
@@ -45,4 +46,5 @@ __all__ = [
     "AutoSpyreModelForSequenceClassification",
     "AutoSpyreModelForTokenClassification",
     "encode_prompts",
+    "prepare_for_spyre",
 ]

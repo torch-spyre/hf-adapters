@@ -18,7 +18,8 @@ from `transformers`.
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
 **multimodal embedding** (CLIP and SigLIP text/image vectors),
 **sequence classification** (sentiment / text categorisation), **structured
-decisions** (variable options plus action selection), **token classification**
+decisions** (variable options plus action selection), Transformers **decision
+models** (`AutoModelForDecision`), **token classification**
 (NER/POS), **vision-language** (image→text), and
 **speculative-decoding drafter** models — from
 Llama / Qwen / Granite / Mistral / Phi / Gemma / OLMo / GPT decoders to BERT /
@@ -248,6 +249,42 @@ labels = [model.config.id2label[i] for i in label_ids[0].tolist()]
 print(list(zip(tokenizer.convert_ids_to_tokens(batch["input_ids"][0]), labels)))
 ```
 
+## Decision Models
+
+Transformers decision models (`AutoModelForDecision`, e.g. the d3 and
+pplx-decider readouts) answer typed `choice` / `score` / `noul` questions with a
+probability per option from one forward pass. Spyre has no `pipeline`
+integration, so load the model with stock Transformers, prepare it in place with
+`prepare_for_spyre`, and score through the model's own `decide`. The text decoder
+runs on Spyre; the decision head and `decide` post-processing stay on CPU:
+
+```python
+from transformers import AutoModelForDecision, AutoTokenizer
+from hf_adapters import prepare_for_spyre
+
+model_path = "vllm-sr/d3-nano"
+model = AutoModelForDecision.from_pretrained(model_path)
+prepare_for_spyre(model)
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+request = {
+    "state": "The production API is down and customers cannot log in.",
+    "questions": {
+        "department": {
+            "type": "choice",
+            "instructions": "Which team should handle this?",
+            "criteria": {"billing": "payments", "technical": "bugs and outages"},
+        },
+        "urgent": {"type": "noul", "instructions": "Is this urgent?"},
+    },
+}
+answers = {}
+for inputs, questions in model.decision_config.prepare_inputs(request, tokenizer):
+    scores = model.decide(**inputs, decision_questions=questions)
+    answers |= {q.name: q.answer(s.softmax(-1).tolist()) for q, s in zip(questions, scores)}
+print(answers["department"]["choice"])  # → 'technical'
+```
+
 ## Multimodal Models (image → text)
 
 For vision-language models, use `AutoSpyreModelForImageTextToText`. It loads the
@@ -302,7 +339,7 @@ README.md
 ARCHITECTURE.md                        Detailed status, architecture docs
 
 hf_adapters/
-├── auto_spyre_model.py        Unified auto-loading interface (AutoSpyreModel, AutoSpyreModelForCausalLM)
+├── auto_spyre_model.py        Unified auto-loading interface (AutoSpyreModel*, prepare_for_spyre)
 ├── hf_common.py               Shared utilities: RoPE precomputation,
 │                               RMSNorm patching, LM head padding,
 │                               head-dim padding, mask builders,

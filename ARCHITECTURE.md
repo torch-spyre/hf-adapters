@@ -247,6 +247,28 @@ valid-option logit cosine is ≥ 0.998. **Spyre Runs** = the structured-decision
 requires valid-option logit cosine ≥ 0.98 plus exact option/action argmax, and
 covers sequential inputs and parallel option masks with repeated-call stability.
 
+### Decision Models (`AutoModelForDecision`)
+
+Transformers decision models (`XxxForDecision`) read a decision head from a
+backbone's hidden states at the `marks` of each question. Spyre has no `pipeline`
+integration: load with `AutoModelForDecision`, call
+`hf_adapters.prepare_for_spyre(model)`, and score with the model's own `decide`.
+The backbone's text decoder runs on Spyre through its existing adapter as one
+right-padded prefill (bidirectional when the checkpoint sets
+`attention_mode: noncausal_full_attention`); the decision head, the unused vision
+tower, and `decide` post-processing stay stock HF on CPU. Backbones are listed in
+`DECISION_CONFIG_TO_ADAPTER_MODULE_MAPPING`; text requests only.
+
+| Model | Backbone (model\_type) | head\_dim | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
+|-------|-----------|---------|--------------|-------------|---------------|-----------|
+| d3 nano (`vllm-sr/d3-nano`) | Qwen3.5 2B (qwen3\_5), bidirectional readout | 256 | Yes | Yes | Yes | Yes |
+
+**CPU Accurate** = per-question option argmax matches stock HF `decide` and option
+score cosine is ≥ 0.999 with option probabilities within 0.01
+(`test_decision_cpu_accuracy.py`). **Spyre Runs** = via
+`test_e2e_decision_compare_spyre.py`; exact option argmax, score cosine ≥ 0.99, option
+probabilities within 0.05 of the CPU reference, and repeated-call stability.
+
 ### Token Classification (NER)
 
 Encoder models fine-tuned for token-level label prediction (NER, POS, chunking).
@@ -294,9 +316,9 @@ all pass that check.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 45 adapters · 70 verified checkpoints · 10K+ compatible models.
-The 70 verified rows are 40 generative + 13 embedding + 2 multimodal-embedding + 2 seq-classification +
-2 token-classification + 3 structured-decision + 7 vision-language + 1 speculative-decoding drafter (see
+**Coverage:** 45 adapters · 71 verified checkpoints · 10K+ compatible models.
+The 71 verified rows are 40 generative + 13 embedding + 2 multimodal-embedding + 2 seq-classification +
+2 token-classification + 3 structured-decision + 1 decision + 7 vision-language + 1 speculative-decoding drafter (see
 the Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are bare vision-tower components
 used by VLM adapters and are not included in the adapter count. The three DSpark
 speculative-decoding drafter adapters and the XPress drafter adapter are included
