@@ -16,6 +16,7 @@ import torch.distributed as dist
 from safetensors import safe_open
 from safetensors.torch import save_file
 from torch import nn
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate
 from transformers import (
     AutoModelForCausalLM,
@@ -38,6 +39,9 @@ from transformers import (
 )
 from transformers.distributed import DistributedConfig
 from transformers.distributed.tensor_parallel import apply_tensor_parallelism
+from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+    Qwen3_5MoeSparseMoeBlock,
+)
 
 # Install the same CPU adapter environment as the parent pytest process.
 import tests.conftest  # noqa: F401, E402
@@ -71,12 +75,78 @@ _device_route = hf_qwen3_5_moe._route_decode_on_cpu
 
 
 def _cpu_route(
-    x: torch.Tensor, mlp: nn.Module, top_k: int, stick_size: int
+    x: torch.Tensor, mlp: Qwen3_5MoeSparseMoeBlock, top_k: int, stick_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     weights, indices = _device_route(x, mlp, top_k, stick_size)
     # Spyre's keep_by_index accepts float32-transported indices; CPU's tensor
     # indexing requires integers. Preserve their exact values in this emulator.
     return weights, indices.to(torch.int64)
+
+
+def check_qwen_moe_routing(mesh: DeviceMesh) -> None:
+    """Near-tied local scores must not mix different experts' TP shards."""
+    config = Qwen3_5MoeTextConfig(
+        hidden_size=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=4,
+        shared_expert_intermediate_size=4,
+    )
+    for dtype in (torch.float32, torch.float16, torch.bfloat16):
+        mlp = Qwen3_5MoeSparseMoeBlock(config).to(dtype)
+        mlp.gate.weight.copy_(torch.eye(4, dtype=dtype))
+        source_x = torch.tensor([[0.0, 0.001, -0.001, 1.0]], dtype=dtype)
+        other_x = torch.tensor([[0.0, -0.001, 0.001, 1.125]], dtype=dtype)
+        local_x = source_x if mesh.get_local_rank() == 0 else other_x
+        # A model without a TP mesh remains independent even when distributed
+        # has been initialized elsewhere in the application.
+        _, local_weights, local_indices = mlp.gate(local_x)
+        weights, indices = hf_qwen3_5_moe._route_on_cpu(local_x, mlp, 2)
+        torch.testing.assert_close(weights, local_weights, rtol=0, atol=0)
+        torch.testing.assert_close(indices, local_indices, rtol=0, atol=0)
+        _, source_weights, source_indices = mlp.gate(source_x)
+        if mesh.get_local_rank() != 0:
+            assert not torch.equal(local_indices, source_indices)
+            assert not torch.equal(local_weights, source_weights)
+
+        setattr(mlp.experts, "_hf_device_mesh", mesh)
+        for token_count in (1, 6):
+            x = local_x.expand(token_count, -1).contiguous()
+            expected_weights = source_weights.expand(token_count, -1)
+            expected_indices = source_indices.expand(token_count, -1)
+            weights, indices = _device_route(x, mlp, 2, 64)
+            torch.testing.assert_close(
+                weights,
+                expected_weights[..., None].expand(-1, -1, 64),
+                rtol=0,
+                atol=0,
+            )
+            torch.testing.assert_close(
+                indices,
+                expected_indices.float()[..., None].expand(-1, -1, 64),
+                rtol=0,
+                atol=0,
+            )
+            routing = hf_qwen3_5_moe._moe_prefill_routing(x, mlp, 2)
+            expected_routing = torch.zeros(token_count, 4, dtype=dtype).scatter(
+                -1, expected_indices, expected_weights
+            )
+            torch.testing.assert_close(routing, expected_routing, rtol=0, atol=0)
+
+
+def check_qwen_moe_routing_groups(world_size: int, rank: int) -> None:
+    mesh = dist.init_device_mesh("cpu", (world_size,), mesh_dim_names=("tp",))
+    check_qwen_moe_routing(mesh)
+    # Exercise a nonzero global source and a group smaller than WORLD. TP2
+    # additionally checks the one-rank-mesh path; TP4 checks a real broadcast.
+    ranks = list(range(1, world_size, 2))
+    subgroup = dist.new_group(ranks, backend="gloo")
+    if rank in ranks:
+        try:
+            check_qwen_moe_routing(DeviceMesh.from_group(subgroup, "cpu"))
+        finally:
+            dist.destroy_process_group(subgroup)
+    dist.barrier()
 
 
 def check_styles(root: Path, world_size: int, rank: int) -> None:
@@ -591,6 +661,7 @@ def main() -> None:
             check_models(root, world_size, rank)
             check_tied_checkpoint_aliases(world_size)
             check_incomplete_checkpoints(root, rank)
+            check_qwen_moe_routing_groups(world_size, rank)
         print(
             f"TP{world_size} rank {rank}: all loading, placement and numerical checks passed",
             flush=True,

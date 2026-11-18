@@ -28,7 +28,11 @@ from transformers import (
     Qwen3Config,
     Qwen3ForCausalLM,
 )
+from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+    Qwen3_5MoeSparseMoeBlock,
+)
 
+from hf_adapters import hf_qwen3_5_moe
 from hf_adapters.auto_spyre_model import AutoSpyreModelForCausalLM
 
 if int(os.environ.get("WORLD_SIZE", "1")) < 2:
@@ -63,17 +67,12 @@ class _TPNumericalMismatchError(AssertionError):
             ),
         ),
         "qwen3_5_hybrid",
-        pytest.param(
-            "qwen3_5_moe_hybrid",
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=_TPNumericalMismatchError,
-                reason="Rank-dependent MoE routing: https://github.com/torch-spyre/hf-adapters/issues/772",
-            ),
-        ),
+        "qwen3_5_moe_hybrid",
     ],
 )
-def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
+def test_tp_checkpoint_and_compiled_generation(
+    family: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     torch.set_num_threads(2)
     torch.random.default_generator.manual_seed(522)
     omitted_alias: str | None = {
@@ -193,8 +192,32 @@ def test_tp_checkpoint_and_compiled_generation(family: str) -> None:
         dist.barrier()  # All ranks must finish reading before rank zero cleans up.
     assert dist.is_initialized()
     assert not any(isinstance(param, DTensor) for param in model.parameters())
+    route_token_counts: list[int] = []
+    if base_family == "qwen3_5_moe":
+        route_on_cpu = hf_qwen3_5_moe._route_on_cpu
+
+        def checked_routing(
+            x: torch.Tensor, mlp: Qwen3_5MoeSparseMoeBlock, top_k: int
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            weights, indices = route_on_cpu(x, mlp, top_k)
+            group: dist.ProcessGroup = mlp.experts._hf_device_mesh.get_group()
+            for value in (indices, weights):
+                gathered = [
+                    torch.empty_like(value) for _ in range(dist.get_world_size(group))
+                ]
+                dist.all_gather(gathered, value, group=group)
+                for other in gathered:
+                    torch.testing.assert_close(value, other, rtol=0, atol=0)
+            route_token_counts.append(x.shape[0])
+            return weights, indices
+
+        monkeypatch.setattr(hf_qwen3_5_moe, "_route_on_cpu", checked_routing)
     with torch.no_grad():
         actual = model.generate(ids, **kwargs)
+    if base_family == "qwen3_5_moe":
+        # Check every routing decision, including both prefill and decode.
+        assert any(count > ids.shape[0] for count in route_token_counts)
+        assert ids.shape[0] in route_token_counts
     for got in actual.logits:
         assert torch.isfinite(got.cpu()).all()
     try:
