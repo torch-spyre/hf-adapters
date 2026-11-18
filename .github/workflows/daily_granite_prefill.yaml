@@ -127,6 +127,11 @@ jobs:
           # The suite starts a Bash launcher. Inherit errexit so worker failures
           # fail this job even on images whose launcher does not set -e itself.
           export SHELLOPTS
-          python run_benchmark.py --hf-only --hf-model "$HF_MODEL" --hf-mode prefill
+          python run_benchmark.py --hf-only --hf-model "$HF_MODEL" --hf-mode prefill 2>&1 | tee benchmark.log
           test -s docs/report_hf.txt
           cat docs/report_hf.txt
+          python "$CLONED_HF_ADAPTERS_DIR/.github/scripts/summarize_prefill.py" \
+            --model "$HF_MODEL" \
+            --report docs/report_hf.txt \
+            --log benchmark.log \
+            --summary-file "$GITHUB_STEP_SUMMARY"

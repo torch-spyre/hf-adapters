@@ -427,7 +427,10 @@ python run_benchmark.py --hf-only --hf-model "$HF_MODEL" --hf-mode prefill
 The suite's default configuration is batch size 1, prompt length 512, and one
 new token, measured for both the full model and one block. Output goes into a
 fresh temporary directory; the benchmark output and generated `report_hf.txt`
-are printed in each model's job log. This workflow does not upload artifacts or
+are printed in each model's job log. Each job ends with a Markdown table comparing
+full-model and one-block timings in milliseconds, including model loading and
+warmup as separate, excluded setup timings. The same tables are rendered on the
+GitHub Actions run summary page. This workflow does not upload artifacts or
 ingest results into ClickHouse. The workflow filename remains
 `daily_granite_prefill.yaml` for existing CLI invocations.
 
