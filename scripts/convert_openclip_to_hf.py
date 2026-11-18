@@ -13,355 +13,438 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Convert an OpenCLIP safetensors checkpoint to HuggingFace CLIPModel format.
+"""Convert an OpenCLIP checkpoint to a ready-to-serve HuggingFace CLIPModel dir.
 
-Why: ``hf_adapters.hf_clip`` loads HF ``CLIPModel`` checkpoints. Some CLIP
-models (e.g. ``Marqo/marqo-fashionCLIP``) ship OpenCLIP-format weights
-instead, which ``hf_clip`` cannot load directly. This script converts them
-offline, so the adapter needs no ``open_clip`` dependency.
+Why: ``hf_adapters.hf_clip`` and vLLM (``spyre-inference``) load HF ``CLIPModel``
+checkpoints. Some CLIP models (e.g. ``Marqo/marqo-fashionCLIP``) ship OpenCLIP
+weights instead. This script converts them offline, so neither runtime needs
+``open_clip``.
 
-What it does:
-  * renames OpenCLIP keys to HF ``CLIPModel`` keys,
-  * splits each fused ``attn.in_proj_{weight,bias}`` into ``q/k/v_proj``,
-  * transposes BOTH ``visual.proj`` and ``text_projection`` (OpenCLIP computes
-    ``x @ proj``; HF ``nn.Linear`` computes ``x @ W.T``),
-  * writes ``model.safetensors`` + ``config.json`` to ``--output``.
+The output directory is self-contained and works with ``CLIPModel.from_pretrained``
+(hf-adapters) and ``vllm`` (``runner="pooling"``) without further steps:
 
-Usage (CPU only, no GPU/Spyre needed)::
+  * ``model.safetensors``      renamed weights, fused QKV split, projections
+                               transposed (OpenCLIP computes ``x @ proj``, HF
+                               ``nn.Linear`` computes ``x @ W.T``)
+  * ``config.json``            with ``"architectures": ["CLIPModel"]``
+  * tokenizer + ``preprocessor_config.json`` (copied from ``--processor-source``)
+
+Everything that depends on the model is inferred from the checkpoint: the key
+prefix (``model.`` or none), the number of layers per tower, the hidden / MLP
+sizes, the patch and image size. Attention head counts come from
+``open_clip_config.json`` next to the weights (``text_cfg.heads``,
+``vision_cfg.heads`` or ``vision_cfg.head_width``) or from ``--text-heads`` /
+``--vision-heads``. Without either, open_clip's default ``head_width`` of 64 is
+assumed and a warning is printed. The script fails instead of writing a
+truncated or mislabelled model when keys are missing or left over.
+
+Usage (CPU only, no Spyre needed)::
 
     python scripts/convert_openclip_to_hf.py \\
         --input  /path/to/openclip/snapshot_dir \\
         --output /path/to/hf_output_dir
 
-``--input`` must contain ``model.safetensors``. Options:
-  --text-layers / --vision-layers  transformer depth (default 12 / 12).
-  --quick-gelu                     use QuickGELU. Default is plain GELU, which is
-                                   what LAION / Marqo OpenCLIP models use. Pass
-                                   this only for OpenAI-style CLIP weights.
+``--input`` is a directory containing ``open_clip_model.safetensors`` or
+``model.safetensors``, or the path of such a file.
 
-After conversion, load with::
-
-    from hf_adapters.hf_clip import load_hf_model
-    model = load_hf_model("/path/to/hf_output_dir")
+Options:
+  --text-heads / --vision-heads  override the head counts.
+  --quick-gelu                   use QuickGELU (OpenAI CLIP). Default is plain GELU
+                                 (LAION / Marqo), unless ``open_clip_config.json``
+                                 sets ``quick_gelu``.
+  --processor-source             tokenizer + image processor to copy into the
+                                 output (default ``openai/clip-vit-base-patch16``;
+                                 same BPE vocab, mean and std as Marqo B/16).
+                                 Verify this for a different model family.
+  --no-processor                 skip the tokenizer / preprocessor files.
 
 Always validate a new conversion against the native OpenCLIP model with
 ``scripts/verify_clip_conversion.py`` (expect cosine ~1.0 on CPU fp32).
-
-Assumptions / limitations:
-  * Source keys must carry the ``model.`` prefix (as in the Marqo
-    ``trust_remote_code`` wrapper checkpoints). Plain ``open_clip`` checkpoints
-    without that prefix are not handled.
-  * head_dim is assumed to be 64 (ViT-B style); ``num_attention_heads`` in the
-    generated config is ``hidden_size // 64``.
-  * No tokenizer or image preprocessor is written. Use the ones from
-    ``openai/clip-vit-base-patch16`` (same BPE vocab, mean and std) when the
-    source model follows the OpenAI CLIP recipe.
 """
+
+from __future__ import annotations
 
 import argparse
 import json
 import math
-import os
-import struct
+import re
+import sys
+from collections.abc import Iterable
+from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Minimal safetensors reader/writer (no external deps beyond stdlib + numpy)
-# ---------------------------------------------------------------------------
-import numpy as np
+import torch
+from safetensors.torch import load_file, save_file
 
-_DTYPE_MAP = {
-    "F32": (np.float32, 4),
-    "F16": (np.float16, 2),
-    "BF16": (None, 2),  # handled specially
-    "I64": (np.int64, 8),
-    "I32": (np.int32, 4),
-    "I16": (np.int16, 2),
-    "I8": (np.int8, 1),
-    "U8": (np.uint8, 1),
+SOURCE_FILES: tuple[str, ...] = ("open_clip_model.safetensors", "model.safetensors")
+DEFAULT_HEAD_WIDTH = 64
+DEFAULT_PROCESSOR_SOURCE = "openai/clip-vit-base-patch16"
+
+# OpenCLIP residual-block suffix -> HF CLIP encoder-layer suffix. Same for both towers.
+BLOCK_RENAMES: dict[str, str] = {
+    "ln_1.weight": "layer_norm1.weight",
+    "ln_1.bias": "layer_norm1.bias",
+    "ln_2.weight": "layer_norm2.weight",
+    "ln_2.bias": "layer_norm2.bias",
+    "attn.out_proj.weight": "self_attn.out_proj.weight",
+    "attn.out_proj.bias": "self_attn.out_proj.bias",
+    "mlp.c_fc.weight": "mlp.fc1.weight",
+    "mlp.c_fc.bias": "mlp.fc1.bias",
+    "mlp.c_proj.weight": "mlp.fc2.weight",
+    "mlp.c_proj.bias": "mlp.fc2.bias",
+}
+
+# Tower-independent tensors (names without the optional ``model.`` prefix).
+GLOBAL_RENAMES: dict[str, str] = {
+    "token_embedding.weight": "text_model.embeddings.token_embedding.weight",
+    "positional_embedding": "text_model.embeddings.position_embedding.weight",
+    "ln_final.weight": "text_model.final_layer_norm.weight",
+    "ln_final.bias": "text_model.final_layer_norm.bias",
+    "logit_scale": "logit_scale",
+    "visual.conv1.weight": "vision_model.embeddings.patch_embedding.weight",
+    "visual.class_embedding": "vision_model.embeddings.class_embedding",
+    "visual.positional_embedding": "vision_model.embeddings.position_embedding.weight",
+    "visual.ln_pre.weight": "vision_model.pre_layrnorm.weight",
+    "visual.ln_pre.bias": "vision_model.pre_layrnorm.bias",
+    "visual.ln_post.weight": "vision_model.post_layernorm.weight",
+    "visual.ln_post.bias": "vision_model.post_layernorm.bias",
+}
+
+# OpenCLIP projection name -> HF Linear weight name (both are transposed).
+PROJECTION_RENAMES: dict[str, str] = {
+    "visual.proj": "visual_projection.weight",
+    "text_projection": "text_projection.weight",
 }
 
 
-def _read_safetensors(path):
-    """Return (metadata_dict, {key: numpy_array}) from a safetensors file."""
-    with open(path, "rb") as f:
-        raw = f.read()
-
-    header_len = struct.unpack_from("<Q", raw, 0)[0]
-    header = json.loads(raw[8 : 8 + header_len])
-    data_offset = 8 + header_len
-
-    metadata = header.pop("__metadata__", {})
-    tensors = {}
-    for key, info in header.items():
-        dtype_str = info["dtype"]
-        shape = info["shape"]
-        start, end = info["data_offsets"]
-        blob = raw[data_offset + start : data_offset + end]
-
-        if dtype_str == "BF16":
-            # numpy has no bfloat16; load as uint16 and reinterpret later
-            arr = np.frombuffer(blob, dtype=np.uint16).reshape(shape)
-        else:
-            np_dtype, _ = _DTYPE_MAP[dtype_str]
-            arr = np.frombuffer(blob, dtype=np_dtype).reshape(shape)
-
-        tensors[key] = (dtype_str, arr)
-
-    return metadata, tensors
+class ConversionError(Exception):
+    """The checkpoint cannot be converted faithfully."""
 
 
-def _write_safetensors(path, tensors):
-    """Write {key: (dtype_str, numpy_array)} to a safetensors file."""
-    # Build contiguous byte blobs and header
-    header = {}
-    blobs = []
-    offset = 0
-    for key in sorted(tensors.keys()):
-        dtype_str, arr = tensors[key]
-        blob = arr.tobytes()
-        header[key] = {
-            "dtype": dtype_str,
-            "shape": list(arr.shape),
-            "data_offsets": [offset, offset + len(blob)],
-        }
-        blobs.append(blob)
-        offset += len(blob)
-
-    header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
-    # safetensors requires header length to be 8-byte aligned
-    pad = (8 - (len(header_bytes) % 8)) % 8
-    header_bytes += b" " * pad
-
-    with open(path, "wb") as f:
-        f.write(struct.pack("<Q", len(header_bytes)))
-        f.write(header_bytes)
-        for blob in blobs:
-            f.write(blob)
+def resolve_source(path: Path) -> Path:
+    """Return the safetensors file to convert from a file or snapshot directory."""
+    if path.is_file():
+        return path
+    for name in SOURCE_FILES:
+        if (path / name).is_file():
+            return path / name
+    raise ConversionError(f"no {' or '.join(SOURCE_FILES)} found in {path}")
 
 
-# ---------------------------------------------------------------------------
-# Key remapping tables
-# ---------------------------------------------------------------------------
+def detect_prefix(keys: Iterable[str]) -> str:
+    """Return ``"model."`` (wrapper checkpoints) or ``""`` (plain OpenCLIP)."""
+    keyset = set(keys)
+    for prefix in ("", "model."):
+        if f"{prefix}token_embedding.weight" in keyset:
+            return prefix
+    raise ConversionError(
+        "not an OpenCLIP checkpoint: 'token_embedding.weight' (with or without a "
+        "'model.' prefix) not found. Is this already an HF CLIP checkpoint?"
+    )
 
 
-def _text_remap(n):
-    return {
-        f"model.transformer.resblocks.{n}.ln_1.weight": f"text_model.encoder.layers.{n}.layer_norm1.weight",
-        f"model.transformer.resblocks.{n}.ln_1.bias": f"text_model.encoder.layers.{n}.layer_norm1.bias",
-        f"model.transformer.resblocks.{n}.ln_2.weight": f"text_model.encoder.layers.{n}.layer_norm2.weight",
-        f"model.transformer.resblocks.{n}.ln_2.bias": f"text_model.encoder.layers.{n}.layer_norm2.bias",
-        f"model.transformer.resblocks.{n}.attn.out_proj.weight": f"text_model.encoder.layers.{n}.self_attn.out_proj.weight",
-        f"model.transformer.resblocks.{n}.attn.out_proj.bias": f"text_model.encoder.layers.{n}.self_attn.out_proj.bias",
-        f"model.transformer.resblocks.{n}.mlp.c_fc.weight": f"text_model.encoder.layers.{n}.mlp.fc1.weight",
-        f"model.transformer.resblocks.{n}.mlp.c_fc.bias": f"text_model.encoder.layers.{n}.mlp.fc1.bias",
-        f"model.transformer.resblocks.{n}.mlp.c_proj.weight": f"text_model.encoder.layers.{n}.mlp.fc2.weight",
-        f"model.transformer.resblocks.{n}.mlp.c_proj.bias": f"text_model.encoder.layers.{n}.mlp.fc2.bias",
-    }
+def count_layers(keys: Iterable[str], base: str) -> int:
+    """Number of ``<base>.resblocks.N`` layers, which must be contiguous from 0."""
+    pattern = re.compile(re.escape(base) + r"\.resblocks\.(\d+)\.")
+    indices = {int(m.group(1)) for k in keys if (m := pattern.match(k))}
+    if not indices:
+        raise ConversionError(f"no '{base}.resblocks.N.*' keys found in checkpoint")
+    count = max(indices) + 1
+    missing = sorted(set(range(count)) - indices)
+    if missing:
+        raise ConversionError(f"'{base}.resblocks' is missing layers {missing}")
+    return count
 
 
-def _vision_remap(n):
-    return {
-        f"model.visual.transformer.resblocks.{n}.ln_1.weight": f"vision_model.encoder.layers.{n}.layer_norm1.weight",
-        f"model.visual.transformer.resblocks.{n}.ln_1.bias": f"vision_model.encoder.layers.{n}.layer_norm1.bias",
-        f"model.visual.transformer.resblocks.{n}.ln_2.weight": f"vision_model.encoder.layers.{n}.layer_norm2.weight",
-        f"model.visual.transformer.resblocks.{n}.ln_2.bias": f"vision_model.encoder.layers.{n}.layer_norm2.bias",
-        f"model.visual.transformer.resblocks.{n}.attn.out_proj.weight": f"vision_model.encoder.layers.{n}.self_attn.out_proj.weight",
-        f"model.visual.transformer.resblocks.{n}.attn.out_proj.bias": f"vision_model.encoder.layers.{n}.self_attn.out_proj.bias",
-        f"model.visual.transformer.resblocks.{n}.mlp.c_fc.weight": f"vision_model.encoder.layers.{n}.mlp.fc1.weight",
-        f"model.visual.transformer.resblocks.{n}.mlp.c_fc.bias": f"vision_model.encoder.layers.{n}.mlp.fc1.bias",
-        f"model.visual.transformer.resblocks.{n}.mlp.c_proj.weight": f"vision_model.encoder.layers.{n}.mlp.fc2.weight",
-        f"model.visual.transformer.resblocks.{n}.mlp.c_proj.bias": f"vision_model.encoder.layers.{n}.mlp.fc2.bias",
-    }
+def take(
+    src: dict[str, torch.Tensor], consumed: set[str], key: str, hint: str
+) -> torch.Tensor:
+    """Fetch ``key`` from the checkpoint and mark it consumed, or fail clearly."""
+    if key not in src:
+        raise ConversionError(f"key '{key}' not found in checkpoint ({hint})")
+    consumed.add(key)
+    return src[key]
 
 
-_SCALAR_REMAP = {
-    "model.token_embedding.weight": "text_model.embeddings.token_embedding.weight",
-    "model.positional_embedding": "text_model.embeddings.position_embedding.weight",
-    "model.ln_final.weight": "text_model.final_layer_norm.weight",
-    "model.ln_final.bias": "text_model.final_layer_norm.bias",
-    "model.logit_scale": "logit_scale",
-    "model.visual.conv1.weight": "vision_model.embeddings.patch_embedding.weight",
-    "model.visual.class_embedding": "vision_model.embeddings.class_embedding",
-    "model.visual.positional_embedding": "vision_model.embeddings.position_embedding.weight",
-    "model.visual.ln_pre.weight": "vision_model.pre_layrnorm.weight",
-    "model.visual.ln_pre.bias": "vision_model.pre_layrnorm.bias",
-    "model.visual.ln_post.weight": "vision_model.post_layernorm.weight",
-    "model.visual.ln_post.bias": "vision_model.post_layernorm.bias",
-}
+def convert_tower(
+    src: dict[str, torch.Tensor],
+    consumed: set[str],
+    out: dict[str, torch.Tensor],
+    src_base: str,
+    hf_base: str,
+    num_layers: int,
+) -> None:
+    """Rename one tower's residual blocks and split each fused QKV projection."""
+    for n in range(num_layers):
+        s = f"{src_base}.resblocks.{n}"
+        h = f"{hf_base}.encoder.layers.{n}"
+        hint = f"{src_base} layer {n}; check the key prefix and layer count"
+        for src_suffix, hf_suffix in BLOCK_RENAMES.items():
+            out[f"{h}.{hf_suffix}"] = take(src, consumed, f"{s}.{src_suffix}", hint)
+        for kind in ("weight", "bias"):
+            fused = take(src, consumed, f"{s}.attn.in_proj_{kind}", hint)
+            if fused.shape[0] % 3:
+                raise ConversionError(
+                    f"'{s}.attn.in_proj_{kind}' dim 0 ({fused.shape[0]}) is not "
+                    "divisible by 3, so it is not a fused QKV tensor"
+                )
+            for name, part in zip("qkv", fused.chunk(3, dim=0)):
+                out[f"{h}.self_attn.{name}_proj.{kind}"] = part.contiguous().clone()
 
 
-# ---------------------------------------------------------------------------
-# Main conversion
-# ---------------------------------------------------------------------------
+def load_open_clip_config(src_file: Path) -> dict[str, object]:
+    """Return ``model_cfg`` from ``open_clip_config.json`` beside the weights, or {}."""
+    cfg_path = src_file.parent / "open_clip_config.json"
+    if not cfg_path.is_file():
+        return {}
+    model_cfg = json.loads(cfg_path.read_text()).get("model_cfg", {})
+    return model_cfg if isinstance(model_cfg, dict) else {}
 
 
-def convert(input_dir, output_dir, text_layers, vision_layers, quick_gelu=False):
-    src_path = os.path.join(input_dir, "model.safetensors")
-    print(f"Reading {src_path} ...")
-    _, src = _read_safetensors(src_path)
-    print(f"  {len(src)} source keys")
+def infer_heads(
+    tower: str,
+    hidden: int,
+    cli_heads: int | None,
+    cfg: dict[str, object],
+) -> int:
+    """Attention heads for ``tower`` ("text" or "vision"), never silently guessed.
 
-    out = {}
-    remap = {}
+    Order: CLI flag, ``open_clip_config.json`` (``heads`` or ``head_width``), then
+    open_clip's own default head width of 64 (noted when the config file exists,
+    warned about when there is no config at all).
+    """
+    tower_cfg = cfg.get(f"{tower}_cfg")
+    heads = cli_heads
+    source = "command line"
+    if heads is None and isinstance(tower_cfg, dict):
+        if isinstance(tower_cfg.get("heads"), int):
+            heads, source = tower_cfg["heads"], "open_clip_config.json heads"
+        elif isinstance(tower_cfg.get("head_width"), int):
+            head_width = tower_cfg["head_width"]
+            heads, source = hidden // head_width, "open_clip_config.json head_width"
+    if heads is None:
+        heads = hidden // DEFAULT_HEAD_WIDTH
+        source = f"open_clip default head_width {DEFAULT_HEAD_WIDTH}"
+        if not isinstance(tower_cfg, dict):
+            print(
+                f"  WARNING: no open_clip_config.json and no --{tower}-heads; "
+                f"assuming head_width {DEFAULT_HEAD_WIDTH} -> {heads} heads. "
+                "Wrong for other head widths; embeddings would be silently wrong."
+            )
+    if heads <= 0 or hidden % heads:
+        raise ConversionError(
+            f"{tower} hidden size {hidden} is not divisible by {heads} heads "
+            f"(from {source}); pass --{tower}-heads"
+        )
+    print(
+        f"  {tower}: hidden {hidden}, {heads} heads, head_dim {hidden // heads} ({source})"
+    )
+    return heads
 
-    # Per-layer renames for text and vision towers
-    for n in range(text_layers):
-        remap.update(_text_remap(n))
-    for n in range(vision_layers):
-        remap.update(_vision_remap(n))
-    remap.update(_SCALAR_REMAP)
 
-    consumed = set()
-
-    # 1. Direct renames
-    for src_key, hf_key in remap.items():
-        if src_key not in src:
-            print(f"  WARNING: expected key not found in checkpoint: {src_key}")
-            continue
-        out[hf_key] = src[src_key]
-        consumed.add(src_key)
-
-    # 2. Fused QKV split — text tower
-    for n in range(text_layers):
-        for proj_key, q_key, k_key, v_key in [
-            (
-                f"model.transformer.resblocks.{n}.attn.in_proj_weight",
-                f"text_model.encoder.layers.{n}.self_attn.q_proj.weight",
-                f"text_model.encoder.layers.{n}.self_attn.k_proj.weight",
-                f"text_model.encoder.layers.{n}.self_attn.v_proj.weight",
-            ),
-            (
-                f"model.transformer.resblocks.{n}.attn.in_proj_bias",
-                f"text_model.encoder.layers.{n}.self_attn.q_proj.bias",
-                f"text_model.encoder.layers.{n}.self_attn.k_proj.bias",
-                f"text_model.encoder.layers.{n}.self_attn.v_proj.bias",
-            ),
-        ]:
-            dtype_str, arr = src[proj_key]
-            chunk = arr.shape[0] // 3
-            q, k, v = arr[:chunk], arr[chunk : 2 * chunk], arr[2 * chunk :]
-            out[q_key] = (dtype_str, q.copy())
-            out[k_key] = (dtype_str, k.copy())
-            out[v_key] = (dtype_str, v.copy())
-            consumed.add(proj_key)
-
-    # 3. Fused QKV split — vision tower
-    for n in range(vision_layers):
-        for proj_key, q_key, k_key, v_key in [
-            (
-                f"model.visual.transformer.resblocks.{n}.attn.in_proj_weight",
-                f"vision_model.encoder.layers.{n}.self_attn.q_proj.weight",
-                f"vision_model.encoder.layers.{n}.self_attn.k_proj.weight",
-                f"vision_model.encoder.layers.{n}.self_attn.v_proj.weight",
-            ),
-            (
-                f"model.visual.transformer.resblocks.{n}.attn.in_proj_bias",
-                f"vision_model.encoder.layers.{n}.self_attn.q_proj.bias",
-                f"vision_model.encoder.layers.{n}.self_attn.k_proj.bias",
-                f"vision_model.encoder.layers.{n}.self_attn.v_proj.bias",
-            ),
-        ]:
-            dtype_str, arr = src[proj_key]
-            chunk = arr.shape[0] // 3
-            q, k, v = arr[:chunk], arr[chunk : 2 * chunk], arr[2 * chunk :]
-            out[q_key] = (dtype_str, q.copy())
-            out[k_key] = (dtype_str, k.copy())
-            out[v_key] = (dtype_str, v.copy())
-            consumed.add(proj_key)
-
-    # 4. Projections: OpenCLIP computes ``x @ proj`` with proj stored [in, out];
-    #    HF nn.Linear computes ``x @ W.T`` with W stored [out, in]. Both must be
-    #    transposed (text_projection is square, so a shape check won't catch it).
-    for src_key, hf_key in (
-        ("model.visual.proj", "visual_projection.weight"),
-        ("model.text_projection", "text_projection.weight"),
-    ):
-        if src_key in src:
-            dtype_str, arr = src[src_key]
-            out[hf_key] = (dtype_str, arr.T.copy())
-            consumed.add(src_key)
-
-    # Report any unconsumed keys (should be none)
-    leftover = set(src.keys()) - consumed
-    if leftover:
-        print(f"  WARNING: {len(leftover)} unconsumed source keys:")
-        for k in sorted(leftover):
-            print(f"    {k}")
-
-    os.makedirs(output_dir, exist_ok=True)
-    out_path = os.path.join(output_dir, "model.safetensors")
-    print(f"Writing {out_path} ({len(out)} keys) ...")
-    _write_safetensors(out_path, out)
-
-    # Infer config dims from checkpoint shapes
-    text_hidden = src["model.token_embedding.weight"][1].shape[1]
-    text_inter = src["model.transformer.resblocks.0.mlp.c_fc.weight"][1].shape[0]
-    # in_proj_weight shape [3*hidden, hidden]; head_dim = 64 for ViT-B/16
-    text_heads = text_hidden // 64
-
-    vision_hidden = src["model.visual.conv1.weight"][1].shape[0]
-    vision_inter = src["model.visual.transformer.resblocks.0.mlp.c_fc.weight"][1].shape[
-        0
-    ]
-    patch_size = src["model.visual.conv1.weight"][1].shape[2]
-    num_pos = src["model.visual.positional_embedding"][1].shape[0]  # 197 = 1 + 14*14
-    image_size = int(math.sqrt(num_pos - 1)) * patch_size
-    vision_heads = vision_hidden // 64
-
-    hidden_act = "quick_gelu" if quick_gelu else "gelu"
-    text_vocab = src["model.token_embedding.weight"][1].shape[0]
-    text_seq_len = src["model.positional_embedding"][1].shape[0]
-
+def build_config(
+    src: dict[str, torch.Tensor],
+    cfg: dict[str, object],
+    text_layers: int,
+    vision_layers: int,
+    text_heads: int | None,
+    vision_heads: int | None,
+    quick_gelu: bool,
+) -> dict[str, object]:
+    """HF ``CLIPConfig`` dict from tensor shapes (``src`` has no ``model.`` prefix)."""
+    text_hidden = src["token_embedding.weight"].shape[1]
+    vision_hidden = src["visual.conv1.weight"].shape[0]
+    patch_size = src["visual.conv1.weight"].shape[2]
+    grid = math.isqrt(src["visual.positional_embedding"].shape[0] - 1)
+    if grid * grid != src["visual.positional_embedding"].shape[0] - 1:
+        raise ConversionError(
+            "visual.positional_embedding length is not 1 + a square number"
+        )
+    use_quick_gelu = quick_gelu or bool(cfg.get("quick_gelu", False))
+    hidden_act = "quick_gelu" if use_quick_gelu else "gelu"
+    print(f"  activation: {hidden_act}")
     config = {
+        "architectures": ["CLIPModel"],
         "model_type": "clip",
+        "projection_dim": src["text_projection"].shape[1],
         "text_config": {
             "model_type": "clip_text_model",
             "hidden_size": text_hidden,
-            "intermediate_size": text_inter,
+            "intermediate_size": src["transformer.resblocks.0.mlp.c_fc.weight"].shape[
+                0
+            ],
             "num_hidden_layers": text_layers,
-            "num_attention_heads": text_heads,
-            "vocab_size": text_vocab,
-            "max_position_embeddings": text_seq_len,
+            "num_attention_heads": infer_heads("text", text_hidden, text_heads, cfg),
+            "vocab_size": src["token_embedding.weight"].shape[0],
+            "max_position_embeddings": src["positional_embedding"].shape[0],
+            # OpenCLIP pools the text at the highest token id (the EOT token);
+            # HF pools at the first eos_token_id, whose default only matches a
+            # 49408-entry vocab.
+            "eos_token_id": src["token_embedding.weight"].shape[0] - 1,
             "hidden_act": hidden_act,
         },
         "vision_config": {
             "model_type": "clip_vision_model",
             "hidden_size": vision_hidden,
-            "intermediate_size": vision_inter,
+            "intermediate_size": src[
+                "visual.transformer.resblocks.0.mlp.c_fc.weight"
+            ].shape[0],
             "num_hidden_layers": vision_layers,
-            "num_attention_heads": vision_heads,
-            "image_size": image_size,
+            "num_attention_heads": infer_heads(
+                "vision", vision_hidden, vision_heads, cfg
+            ),
+            "image_size": grid * patch_size,
             "patch_size": patch_size,
             "hidden_act": hidden_act,
         },
-        "projection_dim": src["model.text_projection"][1].shape[1],
     }
+    if src["visual.proj"].shape[1] != config["projection_dim"]:
+        raise ConversionError(
+            f"visual.proj output dim {src['visual.proj'].shape[1]} != "
+            f"text_projection output dim {config['projection_dim']}"
+        )
+    return config
 
-    cfg_path = os.path.join(output_dir, "config.json")
-    with open(cfg_path, "w") as f:
-        json.dump(config, f, indent=2)
-    print(f"Wrote {cfg_path}")
-    print("Done.")
+
+def check_against_hf(config: dict[str, object], out: dict[str, torch.Tensor]) -> None:
+    """Fail if the converted tensors do not match what HF ``CLIPModel`` expects."""
+    from transformers import CLIPConfig, CLIPModel
+
+    with torch.device("meta"):
+        expected = {
+            k: tuple(v.shape)
+            for k, v in CLIPModel(CLIPConfig(**config)).state_dict().items()
+            if not k.endswith("position_ids")
+        }
+    actual = {k: tuple(v.shape) for k, v in out.items()}
+    problems = [f"missing {k}" for k in sorted(expected.keys() - actual.keys())]
+    problems += [f"unexpected {k}" for k in sorted(actual.keys() - expected.keys())]
+    problems += [
+        f"shape {k}: got {actual[k]}, HF expects {expected[k]}"
+        for k in sorted(expected.keys() & actual.keys())
+        if expected[k] != actual[k]
+    ]
+    if problems:
+        raise ConversionError(
+            "converted weights do not match HF CLIPModel:\n  " + "\n  ".join(problems)
+        )
 
 
-if __name__ == "__main__":
+def write_processor(source: str, output: Path) -> None:
+    """Copy the tokenizer and image preprocessor files vLLM / HF need."""
+    from transformers import CLIPImageProcessor, CLIPTokenizerFast
+
+    CLIPTokenizerFast.from_pretrained(source).save_pretrained(output)
+    CLIPImageProcessor.from_pretrained(source).save_pretrained(output)
+
+
+def convert(
+    input_path: Path,
+    output_dir: Path,
+    text_heads: int | None = None,
+    vision_heads: int | None = None,
+    quick_gelu: bool = False,
+    processor_source: str | None = DEFAULT_PROCESSOR_SOURCE,
+) -> None:
+    src_file = resolve_source(input_path)
+    print(f"Reading {src_file} ...")
+    raw = load_file(str(src_file))
+    prefix = detect_prefix(raw)
+    src = {k.removeprefix(prefix): v for k, v in raw.items()}
+    print(f"  {len(src)} tensors, key prefix {prefix!r}")
+
+    text_layers = count_layers(src, "transformer")
+    vision_layers = count_layers(src, "visual.transformer")
+    print(f"  layers: text {text_layers}, vision {vision_layers}")
+
+    consumed: set[str] = set()
+    out: dict[str, torch.Tensor] = {}
+    hint = "is this an OpenCLIP checkpoint?"
+    for src_key, hf_key in GLOBAL_RENAMES.items():
+        out[hf_key] = take(src, consumed, src_key, hint)
+    for src_key, hf_key in PROJECTION_RENAMES.items():
+        # Both are transposed. text_projection is square, so no shape check
+        # would catch a missing transpose.
+        out[hf_key] = take(src, consumed, src_key, hint).t().contiguous()
+    convert_tower(src, consumed, out, "transformer", "text_model", text_layers)
+    convert_tower(
+        src, consumed, out, "visual.transformer", "vision_model", vision_layers
+    )
+
+    leftover = sorted(src.keys() - consumed)
+    if leftover:
+        raise ConversionError(
+            f"{len(leftover)} checkpoint tensors were not converted (unsupported "
+            "architecture?):\n  " + "\n  ".join(leftover)
+        )
+
+    config = build_config(
+        src,
+        load_open_clip_config(src_file),
+        text_layers,
+        vision_layers,
+        text_heads,
+        vision_heads,
+        quick_gelu,
+    )
+    check_against_hf(config, out)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    weights_path = output_dir / "model.safetensors"
+    print(f"Writing {weights_path} ({len(out)} tensors) ...")
+    save_file(out, str(weights_path), metadata={"format": "pt"})
+    (output_dir / "config.json").write_text(json.dumps(config, indent=2) + "\n")
+    if processor_source:
+        print(f"Writing tokenizer + preprocessor from {processor_source} ...")
+        write_processor(processor_source, output_dir)
+    print(f"Done: {output_dir}")
+
+
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument(
-        "--input", required=True, help="Directory containing source model.safetensors"
+        "--input",
+        required=True,
+        type=Path,
+        help="Directory with open_clip_model.safetensors / model.safetensors, or the file",
     )
     ap.add_argument(
-        "--output", required=True, help="Output directory for converted checkpoint"
+        "--output", required=True, type=Path, help="Output directory (created)"
     )
-    ap.add_argument("--text-layers", type=int, default=12)
-    ap.add_argument("--vision-layers", type=int, default=12)
+    ap.add_argument("--text-heads", type=int, help="Text tower attention heads")
+    ap.add_argument("--vision-heads", type=int, help="Vision tower attention heads")
     ap.add_argument(
         "--quick-gelu",
         action="store_true",
         help="Use QuickGELU (OpenAI CLIP). Default is GELU (LAION/Marqo).",
     )
-    args = ap.parse_args()
-    convert(
-        args.input, args.output, args.text_layers, args.vision_layers, args.quick_gelu
+    ap.add_argument(
+        "--processor-source",
+        default=DEFAULT_PROCESSOR_SOURCE,
+        help="Hub id or path to copy the tokenizer + image processor from "
+        f"(default {DEFAULT_PROCESSOR_SOURCE})",
     )
+    ap.add_argument(
+        "--no-processor",
+        action="store_true",
+        help="Do not write tokenizer / preprocessor files",
+    )
+    args = ap.parse_args(argv)
+    try:
+        convert(
+            args.input,
+            args.output,
+            args.text_heads,
+            args.vision_heads,
+            args.quick_gelu,
+            None if args.no_processor else args.processor_source,
+        )
+    except ConversionError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

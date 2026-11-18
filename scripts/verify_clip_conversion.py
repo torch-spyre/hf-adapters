@@ -60,13 +60,18 @@ shows whether the conversion itself is correct, which separates a bad
 conversion from a Spyre problem.
 """
 
+from __future__ import annotations
+
 import argparse
-import glob
-import os
+import sys
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 from PIL import Image
+from transformers import CLIPModel
+
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 
 DEFAULT_LABELS = [
     "a black suit",
@@ -78,31 +83,41 @@ DEFAULT_LABELS = [
 ]
 
 
-def _emb(out):
-    return out.pooler_output if hasattr(out, "pooler_output") else out
+def _emb(out: torch.Tensor | object) -> torch.Tensor:
+    pooled = getattr(out, "pooler_output", out)
+    assert isinstance(pooled, torch.Tensor)
+    return pooled
 
 
-def main():
+def find_images(directory: Path) -> list[Path]:
+    """Image files in ``directory`` (case-insensitive extensions), sorted."""
+    if not directory.is_dir():
+        raise SystemExit(f"ERROR: --images {directory} is not a directory")
+    paths = sorted(p for p in directory.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
+    if not paths:
+        raise SystemExit(
+            f"ERROR: no {'/'.join(sorted(IMAGE_SUFFIXES))} files in {directory}"
+        )
+    return paths
+
+
+def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--openclip-model", default="hf-hub:Marqo/marqo-fashionCLIP")
     ap.add_argument("--converted", required=True)
-    ap.add_argument("--images", required=True, help="Directory of .png/.jpg images")
+    ap.add_argument(
+        "--images", required=True, type=Path, help="Directory of .png/.jpg images"
+    )
     ap.add_argument("--labels", nargs="+", default=DEFAULT_LABELS)
     ap.add_argument("--spyre", action="store_true")
     args = ap.parse_args()
 
+    paths = find_images(args.images)
+    names = [p.name for p in paths]
+
     import open_clip
-
-    import hf_adapters.hf_clip as hf_clip
-
-    paths = sorted(
-        p
-        for ext in ("png", "jpg", "jpeg")
-        for p in glob.glob(os.path.join(args.images, f"*.{ext}"))
-    )
-    names = [os.path.basename(p) for p in paths]
 
     # Ground truth: native OpenCLIP, same tokenizer + preprocessing for both.
     ref, _, preprocess = open_clip.create_model_and_transforms(args.openclip_model)
@@ -114,8 +129,10 @@ def main():
         ref_i = F.normalize(ref.encode_image(pix).float(), dim=-1)
 
     dtype = torch.float16 if args.spyre else torch.float32
-    model = hf_clip.load_hf_model(args.converted, dtype=dtype)
+    model = CLIPModel.from_pretrained(args.converted, dtype=dtype, device_map="cpu")
+    model.eval()
     if args.spyre:
+        import hf_adapters.hf_clip as hf_clip
         from hf_adapters.hf_common import move_model_to_spyre
 
         move_model_to_spyre(model, hf_clip, dtype)
@@ -138,7 +155,8 @@ def main():
         h = (hf_i[k] @ hf_t.T).argmax().item()
         sim = (hf_i[k] @ hf_t.T)[h].item()
         print(f"  {name:<22} {args.labels[r]:<18} {args.labels[h]:<18} {sim:.3f}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
