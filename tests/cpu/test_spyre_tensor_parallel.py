@@ -18,6 +18,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 import torch.nn as nn
+from transformers import PreTrainedModel
 from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
 
 from hf_adapters import hf_gemma4, hf_gemma4_mm, hf_gemma4_moe
@@ -614,7 +615,10 @@ def test_single_stick_vocabulary_shard_needs_no_prime_factor() -> None:
     assert padded_vocab_size(33, 256, 4) == 64
 
 
-def test_tp_loader_hooks_restore_after_failure() -> None:
+@pytest.mark.parametrize("fail", [False, True])
+def test_tp_loader_hooks_restore(fail: bool) -> None:
+    from contextlib import nullcontext
+
     from transformers import PreTrainedModel, core_model_loading
     from transformers.distributed import mixin, utils
 
@@ -624,18 +628,25 @@ def test_tp_loader_hooks_restore_after_failure() -> None:
         core_model_loading.get_device,
         mixin._get_parameter_plan,
         mixin.DistributedMixin._resolve_parallel_plans,
+        mixin.DistributedMixin._validate_parallel_plan,
         utils._ensure_torch_distributed,
         PreTrainedModel._move_missing_keys_from_meta_to_device,
     )
-    with pytest.raises(RuntimeError, match="checkpoint failure"):
+    with (
+        pytest.raises(RuntimeError, match="checkpoint failure")
+        if fail
+        else nullcontext()
+    ):
         with spyre_tp_loading():
-            raise RuntimeError("checkpoint failure")
+            if fail:
+                raise RuntimeError("checkpoint failure")
     assert originals == (
         core_model_loading.DtensorShardOperation,
         core_model_loading._dtensor_from_local_like,
         core_model_loading.get_device,
         mixin._get_parameter_plan,
         mixin.DistributedMixin._resolve_parallel_plans,
+        mixin.DistributedMixin._validate_parallel_plan,
         utils._ensure_torch_distributed,
         PreTrainedModel._move_missing_keys_from_meta_to_device,
     )
@@ -700,6 +711,27 @@ def test_missing_tied_group_requires_a_materialized_member(
     assert all(model.get_parameter(f"{name}.weight") is loaded for name in names)
 
 
+@pytest.fixture
+def tp_plan_model() -> PreTrainedModel:
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+
+    with torch.device("meta"):
+        model = Qwen3ForCausalLM(
+            Qwen3Config(
+                vocab_size=128,
+                hidden_size=128,
+                intermediate_size=256,
+                num_hidden_layers=2,
+                num_attention_heads=2,
+                num_key_value_heads=2,
+                head_dim=64,
+            )
+        )
+    # HF defaults may name optional branches absent from a particular config.
+    model._tp_plan["model.layers.*.optional_proj"] = "colwise"
+    return model
+
+
 @pytest.mark.parametrize(
     ("key", "accepted"),
     [
@@ -708,30 +740,23 @@ def test_missing_tied_group_requires_a_materialized_member(
         ("model.layers.*.self_attn.q_proj", True),
         ("model.layers.*.self_attn.q_proj.weight", True),
         ("model.layers.*.optional_proj", True),
+        ("model.layers.*.undeclared_proj", False),
+        ("model.layers.9.self_attn.q_proj", False),
         ("vision.model.layers.0.self_attn.q_proj", False),
         ("model.layers.*.self_attn.q_*", False),
     ],
 )
 def test_tp_plan_validation_accepts_only_resolvable_or_declared_keys(
-    key: str, accepted: bool
+    key: str,
+    accepted: bool,
+    tp_plan_model: PreTrainedModel,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from transformers import Qwen3Config, Qwen3ForCausalLM
-    from transformers.distributed import DistributedConfig
+    from transformers.distributed import DistributedConfig, mixin
 
-    with torch.device("meta"):
-        model = Qwen3ForCausalLM(
-            Qwen3Config(
-                vocab_size=128,
-                hidden_size=128,
-                intermediate_size=256,
-                num_hidden_layers=1,
-                num_attention_heads=2,
-                num_key_value_heads=2,
-                head_dim=64,
-            )
-        )
-    # HF defaults may name optional branches absent from a particular config.
-    model._tp_plan["model.layers.*.optional_proj"] = "colwise"
+    model = tp_plan_model
+    warning = Mock()
+    monkeypatch.setattr(mixin.logger, "warning", warning)
     plan = prepare_spyre_tp_plan(model, {key: "colwise"})
     config = DistributedConfig(tp_size=2, tp_plan=plan)
 
@@ -741,6 +766,7 @@ def test_tp_plan_validation_accepts_only_resolvable_or_declared_keys(
                 model._resolve_parallel_plans(config)
             return
         resolved, ep_plan, fsdp_plan = model._resolve_parallel_plans(config)
+        warning.assert_not_called()
         assert not ep_plan
         assert not fsdp_plan
         assert all("*" not in name for name in resolved)
@@ -755,6 +781,120 @@ def test_tp_plan_validation_accepts_only_resolvable_or_declared_keys(
             if not key.endswith(".weight"):
                 assert resolved[module] == SPYRE_COLWISE
                 assert list(resolved).index(parameter) < list(resolved).index(module)
+
+
+@pytest.mark.parametrize("suffix", ["", ".weight"])
+def test_tp_plan_validation_preserves_exact_override(
+    suffix: str, tp_plan_model: PreTrainedModel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from transformers.distributed import DistributedConfig, mixin
+
+    warning = Mock()
+    monkeypatch.setattr(mixin.logger, "warning", warning)
+    module = "model.layers.0.self_attn.q_proj"
+    plan = prepare_spyre_tp_plan(
+        tp_plan_model,
+        {
+            "model.layers.*.self_attn.q_proj": "colwise",
+            module + suffix: SPYRE_REPLICATED_LINEAR,
+        },
+    )
+    with spyre_tp_loading():
+        resolved, _, _ = tp_plan_model._resolve_parallel_plans(
+            DistributedConfig(tp_size=2, tp_plan=plan)
+        )
+    warning.assert_not_called()
+    assert resolved[module + ".weight"] == SPYRE_REPLICATED_LINEAR
+    assert resolved["model.layers.1.self_attn.q_proj.weight"] == SPYRE_COLWISE
+    assert tp_plan_model.tp_plan[module + suffix] == SPYRE_REPLICATED_LINEAR
+
+
+@pytest.mark.parametrize(
+    "key", ["model.layers.0.self_attn.q_proj", "model.layers.*.optional_proj"]
+)
+def test_tp_plan_validation_rejects_unsupported_styles(
+    key: str, tp_plan_model: PreTrainedModel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from transformers.distributed import DistributedConfig, mixin
+
+    warning = Mock()
+    monkeypatch.setattr(mixin.logger, "warning", warning)
+    plan = prepare_spyre_tp_plan(tp_plan_model, {key: "spyre_unknown_style"})
+    with spyre_tp_loading():
+        with pytest.raises(ValueError, match="Unsupported `tp_plan` styles"):
+            tp_plan_model._resolve_parallel_plans(
+                DistributedConfig(tp_size=2, tp_plan=plan)
+            )
+        # A failed resolution must also discard its accepted-name exemption.
+        tp_plan_model._validate_parallel_plan(
+            {key: SPYRE_COLWISE}, ALL_PARALLEL_STYLES, "tp_plan"
+        )
+        warning.assert_called_once()
+        assert key in warning.call_args.args[0]
+
+
+@pytest.mark.parametrize(
+    ("plan_name", "style"),
+    [("ep_plan", "grouped_gemm"), ("fsdp_plan", "free_full_weight")],
+)
+def test_tp_plan_validation_keeps_ep_and_fsdp_diagnostics(
+    plan_name: str,
+    style: str,
+    tp_plan_model: PreTrainedModel,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from transformers.distributed import DistributedConfig, mixin
+
+    warning = Mock()
+    monkeypatch.setattr(mixin.logger, "warning", warning)
+    optional = "model.layers.*.optional_proj"
+    setattr(tp_plan_model, f"_{plan_name}", {optional: style})
+    plan = prepare_spyre_tp_plan(tp_plan_model, {optional: "colwise"})
+    with spyre_tp_loading():
+        tp_plan_model._resolve_parallel_plans(
+            DistributedConfig(
+                tp_size=2,
+                tp_plan=plan,
+                ep_size=2 if plan_name == "ep_plan" else 1,
+                fsdp_size=2 if plan_name == "fsdp_plan" else 1,
+            )
+        )
+    warning.assert_called_once()
+    message: str = warning.call_args.args[0]
+    assert f"`{plan_name}` rules" in message and optional in message
+
+
+def test_tp_plan_validation_keeps_unrelated_diagnostics(
+    tp_plan_model: PreTrainedModel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from transformers.distributed import DistributedConfig, mixin
+
+    warning = Mock()
+    monkeypatch.setattr(mixin.logger, "warning", warning)
+    exact = "model.layers.0.self_attn.q_proj"
+    optional = "model.layers.*.optional_proj"
+    plan = prepare_spyre_tp_plan(tp_plan_model, {exact: "colwise", optional: "colwise"})
+    original_validate = mixin.DistributedMixin._validate_parallel_plan
+
+    with spyre_tp_loading():
+        tp_plan_model._resolve_parallel_plans(
+            DistributedConfig(tp_size=2, tp_plan=plan)
+        )
+        warning.assert_not_called()
+        # Once resolution ends, even this model gets the upstream diagnostics.
+        tp_plan_model._validate_parallel_plan(plan, ALL_PARALLEL_STYLES, "tp_plan")
+        warning.assert_called_once()
+        message: str = warning.call_args.args[0]
+        assert exact in message and optional in message
+
+        warning.reset_mock()
+        tp_plan_model._resolve_parallel_plans(
+            DistributedConfig(tp_size=2, tp_plan={exact: "colwise"})
+        )
+        warning.assert_called_once()
+        assert exact in warning.call_args.args[0]
+
+    assert mixin.DistributedMixin._validate_parallel_plan is original_validate
 
 
 def test_cpu_staging_survives_converter_final_device_lookup() -> None:

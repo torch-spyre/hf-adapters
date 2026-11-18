@@ -4,6 +4,7 @@
 """Exercise the real Transformers checkpoint loader across Gloo processes."""
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -37,6 +38,12 @@ def test_distributed_checkpoint_loading(tmp_path: Path, world_size: int) -> None
         timeout=240,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    assert not re.search(
+        r"`tp_plan` rules .* match nothing .* and will not be applied\.",
+        result.stdout + result.stderr,
+    ), (
+        result.stdout + result.stderr
+    )
     for rank in range(world_size):
         assert (
             f"TP{world_size} rank {rank}: all loading, placement and numerical checks passed"

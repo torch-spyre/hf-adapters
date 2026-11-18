@@ -30,6 +30,10 @@ from transformers.distributed import mixin, parallel_utils, tensor_parallel, uti
             ("self", "distributed_config"),
         ),
         (mixin.DistributedMixin._expand_parallel_plan, ("self", "plan")),
+        (
+            mixin.DistributedMixin._validate_parallel_plan,
+            ("self", "plan", "supported_styles", "plan_name", "names"),
+        ),
         (tensor_parallel.apply_tensor_parallelism, ("model", "tp_mesh", "tp_plan")),
         (utils._ensure_torch_distributed, ("device_type",)),
         (

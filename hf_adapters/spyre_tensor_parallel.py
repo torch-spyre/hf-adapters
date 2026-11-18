@@ -22,7 +22,7 @@ CPU-to-device copy with torch-spyre's layout-aware DMA helpers.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import replace
 from datetime import timedelta
@@ -602,6 +602,7 @@ def spyre_tp_loading() -> Iterator[None]:
     original_shard = core_model_loading.DtensorShardOperation
     original_wrap = core_model_loading._dtensor_from_local_like
     original_resolve = mixin.DistributedMixin._resolve_parallel_plans
+    original_validate = mixin.DistributedMixin._validate_parallel_plan
     original_lookup = mixin._get_parameter_plan
     original_device = core_model_loading.get_device
     original_initialize = utils._ensure_torch_distributed
@@ -610,6 +611,7 @@ def spyre_tp_loading() -> Iterator[None]:
         PreTrainedModel._move_missing_keys_from_meta_to_device
     )
     staged_parameters: set[str] = set()
+    validation_names: dict[PreTrainedModel, set[str]] = {}
     cleanup = ExitStack()
 
     def preserve_placement_tags(
@@ -766,6 +768,19 @@ def spyre_tp_loading() -> Iterator[None]:
                 return plan[parent]
         return original_lookup(parameter_name, plan, is_weight=is_weight)
 
+    def validate_plan(
+        model: PreTrainedModel,
+        plan: dict[str, str],
+        supported_styles: Collection[str],
+        plan_name: str,
+        names: set[str] | None = None,
+    ) -> None:
+        if plan_name == "tp_plan" and model in validation_names:
+            # HF passes only wildcarded names. Include our exact overrides and
+            # declared optional defaults without bypassing its style checks.
+            names = (names or set()) | validation_names[model]
+        original_validate(model, plan, supported_styles, plan_name, names)
+
     def resolve_plans(
         model: PreTrainedModel, distributed_config: DistributedConfig
     ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
@@ -806,7 +821,13 @@ def spyre_tp_loading() -> Iterator[None]:
             setattr(model, "save_pretrained", MethodType(_reject_local_tp_save, model))
             handle = model.register_state_dict_post_hook(preserve_placement_tags)
             cleanup.callback(handle.remove)
-            return original_resolve(model, replace(distributed_config, tp_plan=None))
+            validation_names[model] = known_names
+            try:
+                return original_resolve(
+                    model, replace(distributed_config, tp_plan=None)
+                )
+            finally:
+                del validation_names[model]
         return original_resolve(model, distributed_config)
 
     replacements: tuple[tuple[object, str, Any], ...] = (
@@ -816,6 +837,7 @@ def spyre_tp_loading() -> Iterator[None]:
         (core_model_loading, "get_device", parameter_device),
         (mixin, "_get_parameter_plan", exact_first),
         (mixin.DistributedMixin, "_resolve_parallel_plans", resolve_plans),
+        (mixin.DistributedMixin, "_validate_parallel_plan", validate_plan),
         (PreTrainedModel, "_move_missing_keys_from_meta_to_device", move_missing),
     )
     with cleanup:
