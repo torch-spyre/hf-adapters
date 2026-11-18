@@ -87,7 +87,7 @@ def test_vision_rope_preserves_stock_bfloat16_rounding() -> None:
     rotary = MuseGlimmerVisionRotaryEmbedding(cfg)
     q = torch.randn(1, 7, 2, 96).to(torch.bfloat16)
     positions = torch.tensor([[0, 0], [0, 1], [1, 0], [3, 7], [9, 2], [5, 8], [20, 30]])
-    cos, sin = rotary(q, (positions.flip(-1) + 1).unsqueeze(0))
+    cos, sin = rotary(q, positions.flip(-1) + 1)
     expected, _ = apply_rotary_pos_emb_vision(q, q, cos, sin)
     zeros = torch.zeros(1, 7, 2, 16, dtype=q.dtype)
     padded_q = torch.cat((q[..., :48], zeros, q[..., 48:], zeros), dim=-1)
