@@ -19,6 +19,9 @@ Qwen3 differences from Granite:
 - Q/K RMSNorm applied before RoPE
 - No embedding/residual/logits multipliers
 - Standard head_dim**-0.5 scaling
+- head_dim < 128 (e.g. the many sub-0.5B Qwen3 fine-tunes with head_dim=64) is
+  zero-padded to a stick-aligned size; the per-head Q/K norms are swapped for
+  ``PaddedHeadRMSNorm`` so they still normalise over the original head_dim
 
 Usage::
 
@@ -33,13 +36,17 @@ Usage::
 
 import torch
 import torch.nn.functional as F
+from transformers import PreTrainedModel
 
 from hf_adapters.hf_common import (
+    PaddedHeadRMSNorm,
     PrecomputedRotaryEmbedding,
     apply_rope_matmul,
     get_backbone,
     kv_cache_update,
+    pad_attention_heads,
     prepare_lm_head_for_spyre,
+    rope_padded_head_dim,
     standard_gqa_backbone_forward,
     standard_gqa_forward,
 )
@@ -115,11 +122,50 @@ _run_forward = standard_gqa_forward
 _run_backbone_forward = standard_gqa_backbone_forward
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model: PreTrainedModel) -> None:
     """Apply Spyre adaptations to Qwen3 model in-place."""
-    model._spyre_rope = PrecomputedRotaryEmbedding(get_backbone(model).rotary_emb)
+    cfg = model.config
+    backbone = get_backbone(model)
+    original_head_dim: int = (
+        getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
+    )
+    padded_head_dim: int = rope_padded_head_dim(original_head_dim)
+    needs_padding: bool = padded_head_dim != original_head_dim
+    if needs_padding:
+        # head_dim / 2 must fill a whole stick for the RoPE matmul, and the
+        # per-head Q/K RMSNorm over a 64-wide dim fails to lower otherwise.
+        pad_attention_heads(
+            model,
+            backbone.layers,
+            original_head_dim,
+            padded_head_dim,
+            cfg.num_attention_heads,
+            cfg.num_key_value_heads,
+        )
+        for layer in backbone.layers:
+            attn = layer.self_attn
+            attn.q_norm = PaddedHeadRMSNorm(
+                attn.q_norm, original_head_dim, padded_head_dim
+            )
+            attn.k_norm = PaddedHeadRMSNorm(
+                attn.k_norm, original_head_dim, padded_head_dim
+            )
+    setattr(
+        model,
+        "_spyre_rope",
+        PrecomputedRotaryEmbedding(
+            backbone.rotary_emb,
+            padded_head_dim=padded_head_dim if needs_padding else None,
+        ),
+    )
     prepare_lm_head_for_spyre(model)
-    model._spyre_compiled_blocks = [
-        _make_compiled_block(layer) for layer in get_backbone(model).layers
-    ]
-    model._spyre_compiled_norm = torch.compile(get_backbone(model).norm, dynamic=False)
+    setattr(
+        model,
+        "_spyre_compiled_blocks",
+        [_make_compiled_block(layer) for layer in backbone.layers],
+    )
+    setattr(
+        model,
+        "_spyre_compiled_norm",
+        torch.compile(backbone.norm, dynamic=False),
+    )

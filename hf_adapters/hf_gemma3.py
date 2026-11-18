@@ -650,6 +650,11 @@ def prepare_for_spyre(model):
         model._spyre_swa_mode = "anchored"
     if getattr(cfg, "use_bidirectional_attention", False):
         model._spyre_swa_mode = None
+    # Some Gemma-3 fine-tunes declare only full_attention layers (e.g.
+    # att/OTel-LLM-8.3B-IT); with no sliding layer there is no ring buffer to
+    # anchor, and the anchored path would look one up and fail.
+    if "sliding_attention" not in cfg.layer_types:
+        model._spyre_swa_mode = None
     swa_mode = model._spyre_swa_mode
     if swa_mode == "anchored":
         model._spyre_cache_allocator = allocate_swa_caches

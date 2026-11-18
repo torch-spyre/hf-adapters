@@ -174,6 +174,32 @@ def _causal_conv_decode(x, conv_state, taps, decode_matrices):
     return F.silu(output[..., : x.shape[-1]]), new_state
 
 
+def _conv_decode_constants(
+    linear_attn: nn.Module, dtype: torch.dtype
+) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
+    """CPU conv taps/decode matrices in the activation dtype, cast once per dtype.
+
+    ``prepare_for_spyre`` builds these from the checkpoint's conv weight before
+    ``move_model_to_spyre`` casts the model. Being plain tensor attributes (kept
+    on CPU on purpose), they skip that cast, so a float32 checkpoint run in fp16
+    would otherwise hit a Half/float matmul mismatch in decode.
+    """
+    cache: dict[
+        torch.dtype, tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]
+    ] = linear_attn.__dict__.setdefault("_spyre_conv_decode_by_dtype", {})
+    if dtype not in cache:
+        # Plain (unregistered) attributes live in __dict__, not in Module state.
+        taps: tuple[torch.Tensor, ...] = linear_attn.__dict__["_spyre_conv_taps_cpu"]
+        matrices: tuple[torch.Tensor, ...] = linear_attn.__dict__[
+            "_spyre_conv_decode_matrices_cpu"
+        ]
+        cache[dtype] = (
+            tuple(t.to(dtype) for t in taps),
+            tuple(m.to(dtype) for m in matrices),
+        )
+    return cache[dtype]
+
+
 def _delta_recurrence(
     query, key, value, a, beta, recurrent_state, a_log_cpu, dt_bias_cpu
 ):
@@ -300,11 +326,13 @@ def _make_linear_attention_block(layer):
         return conv_output
 
     def conv_decode(mixed_qkv, conv_state):
+        x_cpu: torch.Tensor = mixed_qkv.to("cpu")
+        taps, decode_matrices = _conv_decode_constants(linear_attn, x_cpu.dtype)
         output, new_state = _causal_conv_decode(
-            mixed_qkv.to("cpu"),
-            conv_state.to("cpu"),
-            linear_attn._spyre_conv_taps_cpu,
-            linear_attn._spyre_conv_decode_matrices_cpu,
+            x_cpu,
+            conv_state.to("cpu", x_cpu.dtype),
+            taps,
+            decode_matrices,
         )
         return output, new_state.to(conv_state.device, conv_state.dtype)
 
