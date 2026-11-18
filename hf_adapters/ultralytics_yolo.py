@@ -260,6 +260,8 @@ def patch_detect_flatten_on_cpu(*detects):
             }
             return _orig(self, _to_cpu_f32(x), **proxies)
 
+        # Not @torch._dynamo.disable: the head conv cells run here and must stay
+        # in the compiled Spyre graph. Only _flatten_cpu (view + cat) is a graph break.
         def _forward_head(self, x, **heads):
             outs = {
                 k: None if h is None else [h[i](x[i]) for i in range(self.nl)]
