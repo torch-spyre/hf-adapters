@@ -404,6 +404,28 @@ steps. The VLM lane instead asserts a per-step logit cosine floor because its
 open-ended caption prompts can produce near-tied top-1 candidates (see
 [ARCHITECTURE.md](ARCHITECTURE.md#vision-language-imagetext)).
 
+### Daily Granite prefill benchmark
+
+The [Daily Granite prefill benchmark](.github/workflows/daily_granite_prefill.yaml)
+runs every day at **03:17 UTC** on the existing `image_torch_spyre` single-card
+runners. It can also be started with **Run workflow** in GitHub Actions. The
+schedule becomes active after the workflow is merged into `main`.
+
+The job installs this hf-adapters checkout and the `perf` dependency group from
+`uv.lock`, preserving the image's PyTorch and torch-spyre builds. It uses the
+spyre-perf-suite source already present at `/home/senuser/spyre-perf-suite` in
+the runner image and runs:
+
+```bash
+python run_benchmark.py --hf-only --hf-model "ibm-granite/granite-4.0-1b" --hf-mode prefill
+```
+
+The suite's default configuration is batch size 1, prompt length 512, and one
+new token, measured for both the full model and one block. Output goes into a
+fresh temporary directory; the benchmark output and generated `report_hf.txt`
+are printed in the job log. This workflow does not upload artifacts or ingest
+results into ClickHouse.
+
 ## Development
 
 ### Pre-commit Hooks
