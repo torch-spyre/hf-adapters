@@ -30,6 +30,10 @@ Separate tests check repeated fullgraph compilation with rowwise bias, private
 upstream API signatures, rotary configuration, and vision parity. Plan-resolution
 checks cover Transformers 5.23's model methods and concrete module/parameter
 plans, including exact overrides and parameter sharding before module hooks.
+Grouped KV uses a replicated placeholder on the existing one-dimensional mesh;
+the Spyre loader reads each rank's whole-head slice without creating extra
+process groups. Tests check shared rank pairs, uneven slices, and unchanged
+process-group counts during placement and loading.
 
 ## Two-card Spyre regressions
 
@@ -95,9 +99,19 @@ before adapter preparation and when requesting a distributed checkpoint. HF
 write incomplete weights. The guard raises before creating output files. Load
 the original checkpoint without Spyre TP when a complete checkpoint is needed.
 Phi-3 padding requires each output-projection shard to contain whole heads.
+Phi-3 keeps fused QKV and gate/up checkpoint weights replicated on CPU until
+preparation, which creates full Q/K/V and gate/up projections on every rank.
+Their device weight memory and computation, attention, and KV caches therefore
+do not shrink as TP size increases. Within each decoder layer, only `o_proj`
+and `down_proj` benefit from sharding. This policy preserves correctness but
+limits TP memory savings and speedup. Efficient Phi-3 TP is follow-up work:
+split fused checkpoint weights into per-rank colwise Q/K/V and gate/up
+projections, with corresponding local head counts, KV caches, and head padding.
 
 These tests do not cover every registered production checkpoint, the complete
-OOT matrix, or four-card Spyre execution. Vocab-parallel embedding stages integer
+OOT matrix, or four-card Spyre execution. Two-card Gemma 3 covers grouped KV
+with one KV head; TP4 with two KV heads shared by rank pairs is covered on CPU
+only. Vocab-parallel embedding stages integer
 masking on CPU at every call, including decode. Measure that cost on the target
 hardware with the same environment as above:
 

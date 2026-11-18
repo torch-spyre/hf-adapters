@@ -14,9 +14,9 @@
 
 """Spyre placement policies for Hugging Face tensor-parallel loading.
 
-Transformers' TP loader owns checkpoint slicing and module hooks.  These
-styles keep those responsibilities in Transformers while replacing the final
-CPU-to-device copy with torch-spyre's layout-aware DMA helpers.
+Transformers' TP loader owns ordinary checkpoint slicing and module hooks.
+These styles add grouped KV slicing without extra process groups and replace
+the final CPU-to-device copy with torch-spyre's layout-aware DMA helpers.
 """
 
 from __future__ import annotations
@@ -118,12 +118,17 @@ def _copy_embedding(
 
 
 class SpyreShardOperation(DtensorShardOperation):
-    """Use HF's shard-on-read algorithm, then select the Spyre DMA layout."""
+    """Slice grouped KV locally or use HF shard-on-read, then select DMA layout."""
 
     def __init__(self, param: DTensor) -> None:
         self.copy_kind: _CopyKind = getattr(param, "_spyre_copy_kind", "default")
         self.param_name: str = getattr(param, "_spyre_param_name", "<unnamed>")
-        self.param_shape = param.shape
+        self.param_shape: torch.Size = getattr(
+            param, "_spyre_global_shape", param.shape
+        )
+        self.grouped_num_shards: int | None = getattr(
+            param, "_spyre_grouped_num_shards", None
+        )
         # Upstream's constructor indexes axis 0 even for replicated scalars.
         if param.ndim != 0:
             super().__init__(param)
@@ -151,6 +156,34 @@ class SpyreShardOperation(DtensorShardOperation):
         shard: torch.Tensor | None
         if len(shape) == 0:
             shard = source[...].to(device="cpu", dtype=dtype)
+        elif self.grouped_num_shards is not None:
+            # Adjacent Q ranks share a whole KV head. The tagged global shape
+            # validates the checkpoint; only this rank's local slice is read.
+            shard_rank = self.device_mesh.get_local_rank() // (
+                self.device_mesh.size() // self.grouped_num_shards
+            )
+            dim = max(0, self.param_ndim - 2)
+            slices = [slice(None)] * len(shape)
+            if tensor_idx is not None and len(shape) == self.param_ndim - 1:
+                # As in HF, a converter may provide one leading-axis piece.
+                if dim == 0:
+                    size, offset = Shard.local_shard_size_and_offset(
+                        self.param_shape[0], self.grouped_num_shards, shard_rank
+                    )
+                    if not offset <= tensor_idx % self.param_shape[0] < offset + size:
+                        return None
+                else:
+                    dim -= 1
+                    size, offset = Shard.local_shard_size_and_offset(
+                        shape[dim], self.grouped_num_shards, shard_rank
+                    )
+                    slices[dim] = slice(offset, offset + size)
+            else:
+                size, offset = Shard.local_shard_size_and_offset(
+                    shape[dim], self.grouped_num_shards, shard_rank
+                )
+                slices[dim] = slice(offset, offset + size)
+            shard = source[tuple(slices)].to(device="cpu", dtype=dtype)
         elif any(isinstance(p, _StridedShard) for p in self.placements):
             # HF's per-expert path drops the packed split factor. A
             # converter may also supply gate/up separately instead of a fused
@@ -461,27 +494,9 @@ class SpyreReplicatedEmbeddingParallel(SpyreReplicatedInferenceParallel):
     style_name = SPYRE_REPLICATED_EMBEDDING
 
 
-def _grouped_mesh(mesh: DeviceMesh, num_shards: int) -> DeviceMesh:
-    if mesh.size() % num_shards:
-        raise ValueError(
-            f"TP size {mesh.size()} is not divisible by {num_shards} grouped-colwise shards"
-        )
-    # Keep children with their owning mesh, not in a process-global cache that
-    # would retain every mesh/process group after the caller releases it.
-    grouped: dict[int, DeviceMesh] | None = getattr(mesh, "_spyre_grouped_meshes", None)
-    if grouped is None:
-        grouped = {}
-        setattr(mesh, "_spyre_grouped_meshes", grouped)
-    if num_shards not in grouped:
-        grouped[num_shards] = mesh._unflatten(
-            0,
-            (num_shards, mesh.size() // num_shards),
-            (f"spyre_shard_{num_shards}", f"spyre_replica_{num_shards}"),
-        )
-    return grouped[num_shards]
-
-
 class SpyreGroupedColwiseParallel(_SpyreLocalParallel):
+    """Describe grouped slicing without allocating subgroup communicators."""
+
     copy_kind: _CopyKind = "linear"
     num_shards = 1
 
@@ -489,15 +504,28 @@ class SpyreGroupedColwiseParallel(_SpyreLocalParallel):
         value = module._parameters.get(param)
         if value is None:
             return
-        grouped_mesh = _grouped_mesh(mesh, self.num_shards)
-        placement = Replicate() if value.ndim == 0 else Shard(max(0, value.ndim - 2))
+        if mesh.size() % self.num_shards:
+            raise ValueError(
+                f"TP size {mesh.size()} is not divisible by {self.num_shards} grouped-colwise shards"
+            )
+        local_value: torch.Tensor = value
+        if value.ndim:
+            dim = max(0, value.ndim - 2)
+            size, offset = Shard.local_shard_size_and_offset(
+                value.shape[dim],
+                self.num_shards,
+                mesh.get_local_rank() // (mesh.size() // self.num_shards),
+            )
+            local_value = value.narrow(dim, offset, size)
+        # HF validates loaded values against the placeholder's local shape.
+        # Keep the full checkpoint shape separately for shard-on-read checks.
         placeholder = nn.Parameter(
-            distribute_tensor(
-                value, grouped_mesh, [placement, Replicate()], src_data_rank=None
-            ),
+            distribute_tensor(local_value, mesh, [Replicate()], src_data_rank=None),
             requires_grad=value.requires_grad,
         )
         setattr(placeholder, "_spyre_copy_kind", self.copy_kind)
+        setattr(placeholder, "_spyre_grouped_num_shards", self.num_shards)
+        setattr(placeholder, "_spyre_global_shape", value.shape)
         module._parameters[param] = placeholder
         setattr(module, "_hf_device_mesh", mesh)
         setattr(module, "_hf_tp_plan", self.style_name)
@@ -583,8 +611,9 @@ def _reject_local_tp_save(model: nn.Module, *args: Any, **kwargs: Any) -> None:
 def spyre_tp_loading() -> Iterator[None]:
     """Bridge HF's DTensor loader to Spyre's local-parameter compiled adapters.
 
-    Only placeholders tagged by our styles take this path. HF retains ownership
-    of shard-on-read, weight conversion, shape validation and missing-key checks.
+    Only placeholders tagged by our styles take this path. HF retains ordinary
+    shard-on-read, weight conversion, shape validation and missing-key checks;
+    SpyreShardOperation calculates grouped KV slices without extra subgroups.
     Rewrapping a loaded shard as a DTensor would hide its device layout and make
     adapter padding operate on the global shape, so retain the local tensor.
 
@@ -623,6 +652,15 @@ def spyre_tp_loading() -> Iterator[None]:
             if copy_kind is not None and prefix + name in state:
                 setattr(state[prefix + name], "_spyre_copy_kind", copy_kind)
                 setattr(state[prefix + name], "_spyre_param_name", prefix + name)
+                num_shards: int | None = getattr(
+                    parameter, "_spyre_grouped_num_shards", None
+                )
+                if num_shards is not None:
+                    setattr(
+                        state[prefix + name], "_spyre_grouped_num_shards", num_shards
+                    )
+                    global_shape: torch.Size = getattr(parameter, "_spyre_global_shape")
+                    setattr(state[prefix + name], "_spyre_global_shape", global_shape)
 
     def parameter_device(
         device_map: dict[str, Any] | None,

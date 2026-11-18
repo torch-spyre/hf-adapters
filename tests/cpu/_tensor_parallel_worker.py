@@ -16,7 +16,7 @@ import torch.distributed as dist
 from safetensors import safe_open
 from safetensors.torch import save_file
 from torch import nn
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Replicate
 from transformers import (
     AutoModelForCausalLM,
     Gemma3ForCausalLM,
@@ -85,7 +85,12 @@ def check_styles(root: Path, world_size: int, rank: int) -> None:
     with torch.device("meta"):
         model.col = nn.Linear(8, 11)
         model.row = nn.Linear(8, 11)
-        model.grouped = nn.Linear(8, 8)
+        model.grouped = nn.Linear(8, 7)
+        model.grouped.bound = nn.Parameter(torch.empty(()))
+        model.grouped_replicated = nn.Linear(8, 7)
+        model.grouped_full = nn.Linear(8, 7)
+        model.grouped_experts = nn.Module()
+        model.grouped_experts.weight = nn.Parameter(torch.empty(2, 7, 8))
         model.embed = nn.Embedding(11, 8, padding_idx=10)
         model.hidden_embed = nn.Embedding(11, 11)
         model.experts = nn.Module()
@@ -99,6 +104,12 @@ def check_styles(root: Path, world_size: int, rank: int) -> None:
         / 100
         for name, param in model.named_parameters()
     }
+    grouped_num_shards = {
+        "grouped": 2,
+        "grouped_replicated": 1,
+        "grouped_full": world_size,
+        "grouped_experts": 2,
+    }
     plan = prepare_spyre_tp_plan(
         model,
         {
@@ -111,20 +122,57 @@ def check_styles(root: Path, world_size: int, rank: int) -> None:
             "scalar": "colwise",
         },
         cpu_staged_modules=("experts.gate_up_proj", "experts.down_proj"),
-        grouped_colwise_modules={"grouped": 2},
+        grouped_colwise_modules=grouped_num_shards,
     )
+    group_count = dist.get_pg_count()
     with spyre_tp_loading():
         resolved, _, _ = model._resolve_parallel_plans(
             DistributedConfig(tp_size=world_size, tp_plan=plan)
         )
         apply_tensor_parallelism(model, mesh, resolved)
-    for name, placeholder in list(model.named_parameters()):
+        # HF loads from detached state_dict views; grouped metadata must survive.
+        loading_state: dict[str, torch.Tensor] = model.state_dict()
+    assert dist.get_pg_count() == group_count
+    for name, placeholder in loading_state.items():
         assert isinstance(placeholder, DTensor), name
         op = SpyreShardOperation(placeholder)
         shard = op.shard_tensor(full[name], device="cpu", dtype=torch.float32)
         assert shard is not None
-        if name.startswith("grouped"):
-            expected = full[name].chunk(2, dim=0)[rank // (world_size // 2)]
+        parent, _, param = name.rpartition(".")
+        if parent in grouped_num_shards:
+            assert placeholder.device_mesh is mesh
+            assert placeholder.placements == (Replicate(),)
+            num_shards = grouped_num_shards[parent]
+            shard_rank = rank // (world_size // num_shards)
+            expected = (
+                full[name].chunk(num_shards, dim=max(0, full[name].ndim - 2))[
+                    shard_rank
+                ]
+                if full[name].ndim
+                else full[name]
+            )
+            assert placeholder.shape == expected.shape
+            if name == "grouped_experts.weight":
+                for expert in range(2):
+                    torch.testing.assert_close(
+                        op.shard_tensor(
+                            full[name][expert], tensor_idx=expert, device="cpu"
+                        ),
+                        expected[expert],
+                    )
+            elif name == "grouped.weight":
+                # A converter supplying individual rows skips rows owned elsewhere.
+                owned_rows = torch.arange(7).chunk(num_shards)[shard_rank].tolist()
+                for row in range(7):
+                    converted = op.shard_tensor(
+                        full[name][row], tensor_idx=row, device="cpu"
+                    )
+                    if row in owned_rows:
+                        torch.testing.assert_close(converted, full[name][row])
+                    else:
+                        assert converted is None
+                with pytest.raises(ValueError, match="checkpoint shape"):
+                    op.shard_tensor(full[name][:-1], device="cpu")
         elif name == "experts.gate_up_proj":
             expected = torch.cat(
                 [
@@ -157,17 +205,25 @@ def check_styles(root: Path, world_size: int, rank: int) -> None:
             torch.testing.assert_close(
                 op.shard_tensor(handle.get_slice("weight"), device="cpu"), expected
             )
-        if name == "col.weight":
+        if name in ("col.weight", "grouped.weight"):
             # Clipped-linear converters reuse a matrix operation for scalar state.
             torch.testing.assert_close(
                 op.shard_tensor(torch.tensor(3.0), device="cpu"), torch.tensor(3.0)
             )
-        parent, _, param = name.rpartition(".")
         model.get_submodule(parent)._parameters[param] = nn.Parameter(
             shard, requires_grad=False
         )
+    assert dist.get_pg_count() == group_count
 
     inputs = torch.randn(2, 3, 8)
+    for name, num_shards in grouped_num_shards.items():
+        module = model.get_submodule(name)
+        if isinstance(module, nn.Linear):
+            expected_output = torch.nn.functional.linear(
+                inputs, full[f"{name}.weight"], full[f"{name}.bias"]
+            ).chunk(num_shards, dim=-1)[rank // (world_size // num_shards)]
+            assert module.out_features == expected_output.shape[-1]
+            torch.testing.assert_close(module(inputs), expected_output)
     torch.testing.assert_close(
         model.col(inputs),
         torch.nn.functional.linear(inputs, full["col.weight"], full["col.bias"]),

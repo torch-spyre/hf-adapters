@@ -9,7 +9,6 @@ from typing import Any
 
 import pytest
 import torch
-from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import _StridedShard
 from transformers import core_model_loading, modeling_utils
 from transformers.distributed import mixin, parallel_utils, tensor_parallel
@@ -38,10 +37,6 @@ from transformers.distributed import mixin, parallel_utils, tensor_parallel
         (
             modeling_utils.PreTrainedModel._move_missing_keys_from_meta_to_device,
             ("self", "missing_keys", "device_map", "device_mesh", "hf_quantizer"),
-        ),
-        (
-            DeviceMesh._unflatten,
-            ("self", "dim", "mesh_sizes", "mesh_dim_names", "backend_override"),
         ),
         (_StridedShard, ("dim", "split_factor", "sf")),
     ],

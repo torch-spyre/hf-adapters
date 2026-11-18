@@ -72,6 +72,13 @@ def spyre_tp_cpu_replicated_modules(model: nn.Module, tp_size: int) -> set[str]:
     adapter instead splits their weights during preparation, bypassing the
     gather hooks. Keep those weights replicated on CPU until preparation;
     o_proj and down_proj retain HF's rowwise split-input placement.
+
+    Preparation creates full Q/K/V and gate/up projections on every rank, so
+    their device weight memory and computation do not shrink with TP size.
+    Attention and KV caches are also replicated. Within each decoder layer,
+    only o_proj and down_proj benefit from sharding. Efficient Phi-3 TP needs
+    a follow-up that splits fused checkpoint weights into per-rank colwise
+    Q/K/V and gate/up projections and adjusts local head counts and caches.
     """
     del tp_size
     return {
