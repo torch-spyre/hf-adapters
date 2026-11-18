@@ -24,7 +24,6 @@ Mirrors the same pattern used by ``tests/spyre/edge_cases/conftest.py``.
 import os
 import sys
 from collections.abc import Iterator
-from datetime import timedelta
 
 import pytest
 
@@ -43,9 +42,7 @@ def spyre_tp_group() -> Iterator[None]:
         pytest.skip("requires at least two torchrun ranks")
     owns_group = not dist.is_initialized()
     if owns_group:
-        dist.init_process_group(
-            backend="cpu:gloo,spyre:spyreccl", timeout=timedelta(hours=2)
-        )
+        dist.init_process_group(backend="cpu:gloo,spyre:spyreccl")
     try:
         yield
     finally:
