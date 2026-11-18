@@ -32,6 +32,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 
+# Needed by the retained manual TP tests, which are not part of PR CI.
 @pytest.fixture(scope="session")
 def spyre_tp_group() -> Iterator[None]:
     """Share one process group across the TP parity and collective tests."""
