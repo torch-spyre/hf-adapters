@@ -1,6 +1,6 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-45-blue)
+![adapters](https://img.shields.io/badge/adapters-46-blue)
 ![compatible](https://img.shields.io/badge/compatible_models-10K%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -13,7 +13,7 @@ from `transformers`.
 
 ## Supported Models
 
-**45 adapters · 10K+ compatible models**
+**46 adapters · 10K+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
 **multimodal embedding** (CLIP and SigLIP text/image vectors),
@@ -251,38 +251,27 @@ print(list(zip(tokenizer.convert_ids_to_tokens(batch["input_ids"][0]), labels)))
 
 ## Decision Models
 
-Transformers decision models (`AutoModelForDecision`, e.g. the d3 and
-pplx-decider readouts) answer typed `choice` / `score` / `noul` questions with a
-probability per option from one forward pass. Spyre has no `pipeline`
-integration, so load the model with stock Transformers, prepare it in place with
-`prepare_for_spyre`, and score through the model's own `decide`. The text decoder
-runs on Spyre; the decision head and `decide` post-processing stay on CPU:
+Use `AutoSpyreModelForDecision` for Transformers decision models
+(`AutoModelForDecision`), which answer typed `choice` / `score` / `noul`
+questions with a probability per option. Score through the model's own
+`decide`, as with stock Hugging Face; the text decoder and the decision head run
+on Spyre:
 
 ```python
-from transformers import AutoModelForDecision, AutoTokenizer
-from hf_adapters import prepare_for_spyre
+from transformers import AutoTokenizer
+from hf_adapters import AutoSpyreModelForDecision
 
 model_path = "vllm-sr/d3-nano"
-model = AutoModelForDecision.from_pretrained(model_path)
-prepare_for_spyre(model)
 tokenizer = AutoTokenizer.from_pretrained(model_path)
-
+model = AutoSpyreModelForDecision.from_pretrained(model_path)
 request = {
     "state": "The production API is down and customers cannot log in.",
-    "questions": {
-        "department": {
-            "type": "choice",
-            "instructions": "Which team should handle this?",
-            "criteria": {"billing": "payments", "technical": "bugs and outages"},
-        },
-        "urgent": {"type": "noul", "instructions": "Is this urgent?"},
-    },
+    "questions": {"urgent": {"type": "noul", "instructions": "Is this urgent?"}},
 }
-answers = {}
 for inputs, questions in model.decision_config.prepare_inputs(request, tokenizer):
     scores = model.decide(**inputs, decision_questions=questions)
-    answers |= {q.name: q.answer(s.softmax(-1).tolist()) for q, s in zip(questions, scores)}
-print(answers["department"]["choice"])  # → 'technical'
+    for question, score in zip(questions, scores):
+        print(question.name, question.answer(score.softmax(-1).tolist()))
 ```
 
 ## Multimodal Models (image → text)
@@ -339,7 +328,7 @@ README.md
 ARCHITECTURE.md                        Detailed status, architecture docs
 
 hf_adapters/
-├── auto_spyre_model.py        Unified auto-loading interface (AutoSpyreModel*, prepare_for_spyre)
+├── auto_spyre_model.py        Unified auto-loading interface (AutoSpyreModel, AutoSpyreModelForCausalLM)
 ├── hf_common.py               Shared utilities: RoPE precomputation,
 │                               RMSNorm patching, LM head padding,
 │                               head-dim padding, mask builders,

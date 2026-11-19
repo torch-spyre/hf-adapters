@@ -687,14 +687,13 @@ STRUCTURED_DECISION_MODELS = {
 }
 
 
-# Transformers decision models (``AutoModelForDecision``), prepared in place with
-# ``hf_adapters.prepare_for_spyre`` and scored through ``model.decide``. The
-# adapter is the one of the decision backbone.
+# Transformers decision models (``AutoModelForDecision``), loaded with
+# ``AutoSpyreModelForDecision`` and scored through ``model.decide``.
 DECISION_MODELS = {
     "d3_nano": {
         "name": "d3 nano",
         "path": "vllm-sr/d3-nano",
-        "adapter": "hf_qwen3_5.py",
+        "adapter": "hf_qwen3_5_decision.py",
         "size": "2b",
     },
 }

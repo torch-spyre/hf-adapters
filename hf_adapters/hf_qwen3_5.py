@@ -354,6 +354,60 @@ def _padding_mask(attention_mask, sequence_length, cache_index):
     return (diagonal == 0).to(dtype=attention_mask.dtype, device=attention_mask.device)
 
 
+def _run_full_attention_layer(
+    compiled_block,
+    hidden_states,
+    selected_freqs,
+    attn_mask,
+    key_caches,
+    value_caches,
+    index,
+    cache_index,
+    *,
+    decode,
+):
+    """Run one gated full-attention layer, updating its KV cache in the lists."""
+    if len(compiled_block) == 2:
+        # The MoE sibling shares this runner and retains its fused
+        # attention-plus-experts protocol.
+        block = compiled_block[1] if decode else compiled_block[0]
+        hidden_states, key_caches[index], value_caches[index] = block(
+            hidden_states,
+            selected_freqs,
+            attn_mask,
+            key_caches[index],
+            value_caches[index],
+            cache_index,
+        )
+        return hidden_states
+    (
+        project_prefill,
+        project_decode,
+        cache_prefill,
+        cache_decode,
+        attention_prefill,
+        attention_decode,
+        finish_prefill,
+        finish_decode,
+    ) = compiled_block
+    project = project_decode if decode else project_prefill
+    update_cache = cache_decode if decode else cache_prefill
+    attention = attention_decode if decode else attention_prefill
+    finish = finish_decode if decode else finish_prefill
+    residual, query, key, value, gate = project(hidden_states, selected_freqs)
+    key_caches[index], value_caches[index] = update_cache(
+        key,
+        value,
+        key_caches[index],
+        value_caches[index],
+        cache_index,
+    )
+    attention_output = attention(
+        query, key_caches[index], value_caches[index], attn_mask
+    )
+    return finish(residual, attention_output, gate)
+
+
 def _run_backbone_forward(
     model,
     input_ids,
@@ -372,140 +426,78 @@ def _run_backbone_forward(
     for index, layer_type in enumerate(text_config(model.config).layer_types):
         compiled_block = model._spyre_compiled_blocks[index]
         if layer_type == "full_attention":
-            if len(compiled_block) == 2:
-                # The MoE sibling shares this runner and retains its fused
-                # attention-plus-experts protocol.
-                block = compiled_block[1] if decode else compiled_block[0]
-                hidden_states, key_caches[index], value_caches[index] = block(
-                    hidden_states,
-                    selected_freqs,
-                    attn_mask,
-                    key_caches[index],
-                    value_caches[index],
-                    cache_index,
-                )
-                continue
+            hidden_states = _run_full_attention_layer(
+                compiled_block,
+                hidden_states,
+                selected_freqs,
+                attn_mask,
+                key_caches,
+                value_caches,
+                index,
+                cache_index,
+                decode=decode,
+            )
+        else:
             (
-                project_prefill,
-                project_decode,
-                cache_prefill,
-                cache_decode,
-                attention_prefill,
-                attention_decode,
-                finish_prefill,
-                finish_decode,
+                hidden_prefill,
+                hidden_decode,
+                values_prefill,
+                values_decode,
+                conv_prefill,
+                conv_decode,
+                split_prefill,
+                split_decode,
+                normalize_prefill,
+                normalize_decode,
+                norm_prefill,
+                norm_decode,
+                output_prefill,
+                output_decode,
+                prefill_ffn,
+                decode_ffn,
             ) = compiled_block
-            project = project_decode if decode else project_prefill
-            update_cache = cache_decode if decode else cache_prefill
-            attention = attention_decode if decode else attention_prefill
-            finish = finish_decode if decode else finish_prefill
-            residual, query, key, value, gate = project(hidden_states, selected_freqs)
-            key_caches[index], value_caches[index] = update_cache(
+            project_hidden = hidden_decode if decode else hidden_prefill
+            project_values = values_decode if decode else values_prefill
+            conv = conv_decode if decode else conv_prefill
+            split_inputs = split_decode if decode else split_prefill
+            normalize_inputs = normalize_decode if decode else normalize_prefill
+            finish_norm = norm_decode if decode else norm_prefill
+            finish_projection = output_decode if decode else output_prefill
+            ffn = decode_ffn if decode else prefill_ffn
+            conv_state = key_caches[index]
+            recurrent_state = value_caches[index]
+            residual = hidden_states
+            h = project_hidden(hidden_states, padding_mask)
+            mixed_qkv, z, beta, a = project_values(h)
+            if decode:
+                conv_output_cpu, new_conv_state = conv(mixed_qkv, conv_state)
+            else:
+                conv_output = conv(mixed_qkv, conv_state)
+                conv_output_cpu = conv_output.to("cpu")
+                new_conv_state = mixed_qkv
+            query, key, value = split_inputs(conv_output_cpu)
+            query, key, value = normalize_inputs(query, key, value)
+            linear_attn = backbone.layers[index].linear_attn
+            core_output, new_recurrent_state = _delta_recurrence(
+                query,
                 key,
                 value,
-                key_caches[index],
-                value_caches[index],
-                cache_index,
+                a,
+                beta,
+                recurrent_state,
+                linear_attn._spyre_a_log_cpu,
+                linear_attn._spyre_dt_bias_cpu,
             )
-            attention_output = attention(
-                query, key_caches[index], value_caches[index], attn_mask
-            )
-            hidden_states = finish(residual, attention_output, gate)
-        else:
-            linear_attn = backbone.layers[index].linear_attn
-            # The convolution graphs consume one stick-sized chunk. A longer
-            # one-shot prefill (e.g. a bidirectional decision readout, whose
-            # full-attention layers must see the whole prompt at once) steps
-            # through the same chunk graphs, carrying the recurrent state.
-            chunk_size = hidden_states.shape[1] if decode else BLOCK_SIZE
-            chunk_outputs = [
-                _run_linear_attention_layer(
-                    compiled_block,
-                    linear_attn,
-                    hidden_states[:, start : start + chunk_size],
-                    padding_mask[:, start : start + chunk_size],
-                    key_caches[index],
-                    value_caches[index],
-                    decode=decode,
-                )
-                for start in range(0, hidden_states.shape[1], chunk_size)
-            ]
-            hidden_states = (
-                chunk_outputs[0]
-                if len(chunk_outputs) == 1
-                else torch.cat(chunk_outputs, dim=1)
-            )
+            core_output = finish_norm(z, core_output.to(z.device, z.dtype))
+            hidden_states = finish_projection(residual, core_output)
+            hidden_states = ffn(hidden_states)
+            # Keep mutation outside the compiled graph. Generic chunked prefill
+            # passes a shallow cache-list copy, so replacing its entries would not
+            # seed the original state tensors later consumed by decode.
+            conv_state.copy_(new_conv_state)
+            recurrent_state.copy_(new_recurrent_state)
 
     return model._spyre_compiled_norm(hidden_states)
-
-
-def _run_linear_attention_layer(
-    compiled_block,
-    linear_attn,
-    hidden_states,
-    padding_mask,
-    conv_state,
-    recurrent_state,
-    *,
-    decode,
-):
-    """Run one Gated DeltaNet layer over a decode token or one prefill chunk."""
-    (
-        hidden_prefill,
-        hidden_decode,
-        values_prefill,
-        values_decode,
-        conv_prefill,
-        conv_decode,
-        split_prefill,
-        split_decode,
-        normalize_prefill,
-        normalize_decode,
-        norm_prefill,
-        norm_decode,
-        output_prefill,
-        output_decode,
-        prefill_ffn,
-        decode_ffn,
-    ) = compiled_block
-    project_hidden = hidden_decode if decode else hidden_prefill
-    project_values = values_decode if decode else values_prefill
-    conv = conv_decode if decode else conv_prefill
-    split_inputs = split_decode if decode else split_prefill
-    normalize_inputs = normalize_decode if decode else normalize_prefill
-    finish_norm = norm_decode if decode else norm_prefill
-    finish_projection = output_decode if decode else output_prefill
-    ffn = decode_ffn if decode else prefill_ffn
-    residual = hidden_states
-    h = project_hidden(hidden_states, padding_mask)
-    mixed_qkv, z, beta, a = project_values(h)
-    if decode:
-        conv_output_cpu, new_conv_state = conv(mixed_qkv, conv_state)
-    else:
-        conv_output = conv(mixed_qkv, conv_state)
-        conv_output_cpu = conv_output.to("cpu")
-        new_conv_state = mixed_qkv
-    query, key, value = split_inputs(conv_output_cpu)
-    query, key, value = normalize_inputs(query, key, value)
-    core_output, new_recurrent_state = _delta_recurrence(
-        query,
-        key,
-        value,
-        a,
-        beta,
-        recurrent_state,
-        linear_attn._spyre_a_log_cpu,
-        linear_attn._spyre_dt_bias_cpu,
-    )
-    core_output = finish_norm(z, core_output.to(z.device, z.dtype))
-    hidden_states = finish_projection(residual, core_output)
-    hidden_states = ffn(hidden_states)
-    # Keep mutation outside the compiled graph. Generic chunked prefill
-    # passes a shallow cache-list copy, so replacing its entries would not
-    # seed the original state tensors later consumed by decode.
-    conv_state.copy_(new_conv_state)
-    recurrent_state.copy_(new_recurrent_state)
-    return hidden_states
 
 
 def _run_forward(

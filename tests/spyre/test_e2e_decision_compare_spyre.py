@@ -15,7 +15,8 @@
 """Spyre comparison for Transformers decision models (``AutoModelForDecision``).
 
 The stock CPU ``decide`` is the reference. The prepared model runs its text
-decoder on Spyre and keeps the decision head and post-processing on CPU.
+decoder (including the Gated DeltaNet core) and its decision head on Spyre;
+``decide``'s bookkeeping (marks, logits processors) stays on CPU.
 """
 
 import pytest
@@ -25,7 +26,7 @@ from _decision_helpers import decide_request
 from model_registry import DECISION_PATHS
 from transformers import AutoModelForDecision, AutoTokenizer
 
-from hf_adapters import prepare_for_spyre
+from hf_adapters import AutoSpyreModelForDecision
 from hf_adapters.auto_spyre_model import dtype_for_model_path
 
 pytestmark = pytest.mark.model_harness("decision")
@@ -44,17 +45,18 @@ def _assert_module_device(module, expected):
 def test_e2e_decision_compare_spyre(model_path):
     dtype = dtype_for_model_path(model_path, target_device="spyre")
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForDecision.from_pretrained(model_path, dtype=dtype)
-    ref_scores, ref_answers, _ = decide_request(model, tokenizer)
+    ref_model = AutoModelForDecision.from_pretrained(model_path, dtype=dtype)
+    ref_scores, ref_answers, _ = decide_request(ref_model, tokenizer)
+    del ref_model
 
-    prepare_for_spyre(model)
+    model = AutoSpyreModelForDecision.from_pretrained(model_path)
     scores, answers, _ = decide_request(model, tokenizer)
     repeat_scores, repeat_answers, _ = decide_request(model, tokenizer)
 
     backbone = model.base_model
     _assert_module_device(backbone.language_model, "spyre")
+    _assert_module_device(model.proj, "spyre")
     _assert_module_device(backbone.visual, "cpu")
-    _assert_module_device(model.proj, "cpu")
 
     assert len(scores) == len(ref_scores)
     for score, ref_score, repeat_score in zip(scores, ref_scores, repeat_scores):

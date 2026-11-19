@@ -51,6 +51,7 @@ from transformers import (
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
+    AutoModelForDecision,
     AutoModelForImageTextToText,
     AutoModelForMaskedLM,
     AutoModelForQuestionAnswering,
@@ -97,7 +98,6 @@ from transformers import (
     XLMRobertaConfig,
 )
 from transformers.configuration_utils import PretrainedConfig
-from transformers.decision.modeling_utils import DecisionMixin
 from transformers.generation import GenerateDecoderOnlyOutput
 from transformers.modeling_outputs import (
     BaseModelOutput,
@@ -153,6 +153,7 @@ from hf_adapters import (
     hf_qwen2,
     hf_qwen3,
     hf_qwen3_5,
+    hf_qwen3_5_decision,
     hf_qwen3_5_moe,
     hf_siglip,
     hf_smollm3,
@@ -166,7 +167,6 @@ from hf_adapters.hf_common import (
     SpyreUnsupportedModelError,
     assert_spyre_dimensions,
     get_backbone,
-    get_model_dtype,
     load_model_common,
     move_model_to_spyre,
     prefill_embed,
@@ -266,12 +266,11 @@ TOKEN_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     RobertaConfig: hf_xlm_roberta,
 }
 
-# Decision mapping — used by ``prepare_for_spyre``. Keyed by the config of the
-# decision model's backbone (``model.base_model.config``, the ``text_config`` of
-# its ``XxxForDecision`` config). The adapter prepares that backbone's text
-# decoder; the decision head and ``decide`` post-processing stay stock HF.
+# Decision mapping — used by ``AutoSpyreModelForDecision``. Decision checkpoints
+# that ship their head next to the backbone weights carry the backbone's config;
+# the decision adapter prepares that backbone for hidden-state readouts.
 DECISION_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
-    Qwen3_5Config: hf_qwen3_5,
+    Qwen3_5Config: hf_qwen3_5_decision,
 }
 
 
@@ -355,19 +354,7 @@ def resolve_adapter_module(
     )
     if model_config is None:
         raise SpyreNoAdapterError(f"Could not load config for {model_name_or_path}")
-    return resolve_adapter_module_for_config(
-        model_config, model_name=str(model_name_or_path), mapping=mapping
-    )
 
-
-def resolve_adapter_module_for_config(
-    model_config: PretrainedConfig,
-    model_name: str,
-    mapping: dict[
-        type[PretrainedConfig], ModuleType
-    ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
-) -> ModuleType:
-    """Select the adapter for an already-loaded config and check its dimensions."""
     # Architecture-name dispatch first: DSpark drafters share their base model's
     # config class but carry a distinct ``*DSparkModel`` architecture, so route on
     # the architecture name before falling through to config-class dispatch.
@@ -379,7 +366,8 @@ def resolve_adapter_module_for_config(
     else:
         if type(model_config) not in mapping:
             raise SpyreNoAdapterError(
-                f"Model {model_name} of type {type(model_config)} is not supported"
+                f"Model {model_name_or_path} of type {type(model_config)} "
+                "is not supported"
             )
 
         adapter_module = mapping[type(model_config)]
@@ -392,7 +380,7 @@ def resolve_adapter_module_for_config(
 
     assert_spyre_dimensions(
         model_config,
-        model_name=model_name,
+        model_name=str(model_name_or_path),
         config_names=getattr(adapter_module, "SPYRE_DIMENSION_CONFIGS", ()),
         padded_dimensions=getattr(adapter_module, "SPYRE_PADDED_DIMENSIONS", ()),
     )
@@ -887,6 +875,91 @@ class AutoSpyreModelForTokenClassification(AutoSpyreModel):
         return model
 
 
+class AutoSpyreModelForDecision(AutoSpyreModel):
+    """Load a decision model with its text decoder and decision head on Spyre.
+
+    Loads via ``AutoModelForDecision``; score with the model's own ``decide``,
+    as with stock Hugging Face. The backbone ``forward`` runs one right-padded
+    readout prefill on Spyre and returns ``last_hidden_state`` on CPU, where
+    ``decide`` reads the rows at the question marks. Text requests only.
+
+    Example::
+
+        model = AutoSpyreModelForDecision.from_pretrained("vllm-sr/d3-nano")
+        tokenizer = AutoTokenizer.from_pretrained("vllm-sr/d3-nano")
+        for inputs, questions in model.decision_config.prepare_inputs(
+            request, tokenizer
+        ):
+            scores = model.decide(**inputs, decision_questions=questions)
+    """
+
+    _auto_model_cls = AutoModelForDecision  # type: ignore[assignment]
+    _module_mapping: dict[type[PretrainedConfig], ModuleType] = (
+        DECISION_CONFIG_TO_ADAPTER_MODULE_MAPPING
+    )
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_name_or_path: Union[str, os.PathLike[str]],
+        dtype: torch.dtype | None = None,
+        tp_plan: Optional[Union[dict, str]] = None,
+        trust_remote_code: bool | None = None,
+    ) -> PreTrainedModel:
+        if tp_plan is not None:
+            raise SpyreUnsupportedFeatureError(
+                "Tensor parallelism is not currently supported for decision models"
+            )
+        module: ModuleType = resolve_adapter_module(
+            model_name_or_path,
+            mapping=cls._module_mapping,
+            trust_remote_code=trust_remote_code,
+        )
+        model: PreTrainedModel = super().from_pretrained(
+            model_name_or_path,
+            dtype=dtype,
+            trust_remote_code=trust_remote_code,
+        )
+        text_decoder: PreTrainedModel = get_backbone(model)
+
+        def backbone_forward(
+            self: PreTrainedModel,
+            input_ids: torch.Tensor | None = None,
+            attention_mask: torch.Tensor | None = None,
+            inputs_embeds: torch.Tensor | None = None,
+            use_cache: bool | None = None,
+            **kwargs: Any,
+        ) -> BaseModelOutput:
+            if kwargs:
+                raise SpyreUnsupportedFeatureError(
+                    f"Unsupported decision inputs on Spyre: {sorted(kwargs)}"
+                )
+            if inputs_embeds is not None:
+                raise SpyreUnsupportedFeatureError(
+                    "inputs_embeds is not currently supported on Spyre"
+                )
+            if input_ids is None:
+                raise ValueError("input_ids must be provided")
+            if use_cache:
+                raise SpyreUnsupportedFeatureError(
+                    "Decision readouts do not keep a KV cache"
+                )
+            input_ids = input_ids.to("cpu")
+            if attention_mask is None:
+                attention_mask = torch.ones_like(input_ids)
+            hidden_states = prefill_embed(
+                module._run_backbone_forward,
+                text_decoder,
+                input_ids,
+                attention_mask.to("cpu"),
+            )
+            return BaseModelOutput(last_hidden_state=hidden_states.to("cpu"))
+
+        backbone = model.base_model
+        backbone.forward = MethodType(backbone_forward, backbone)  # type: ignore[method-assign]
+        return model
+
+
 def _run_vlm_text_forward(
     module: ModuleType,
     model: PreTrainedModel,
@@ -1016,93 +1089,3 @@ class AutoSpyreModelForImageTextToText(AutoSpyreModel):
 
         model.generate = MethodType(model_generate, model)  # type: ignore[assignment]
         return model
-
-
-def prepare_for_spyre(model: PreTrainedModel) -> PreTrainedModel:
-    """Prepare a loaded Hugging Face decision model for Spyre in place.
-
-    Spyre has no ``pipeline`` integration, so decision models
-    (``AutoModelForDecision``) are used through their own ``decide`` method::
-
-        from transformers import AutoModelForDecision, AutoTokenizer
-
-        from hf_adapters import prepare_for_spyre
-
-        model = AutoModelForDecision.from_pretrained("vllm-sr/d3-nano")
-        prepare_for_spyre(model)
-        tokenizer = AutoTokenizer.from_pretrained("vllm-sr/d3-nano")
-        for inputs, questions in model.decision_config.prepare_inputs(
-            request, tokenizer
-        ):
-            scores = model.decide(**inputs, decision_questions=questions)
-
-    The text decoder of the decision backbone is compiled and moved to Spyre,
-    and the backbone ``forward`` runs it as one right-padded prefill that
-    returns ``last_hidden_state`` on CPU. Everything ``decide`` does around that
-    call (reading the marks, the decision head, logits processors) stays stock
-    Hugging Face code on CPU, as do the unused vision tower and the head
-    weights. Only text requests are supported.
-
-    Args:
-        model: An ``XxxForDecision`` model loaded on CPU, whose backbone config
-            appears in ``DECISION_CONFIG_TO_ADAPTER_MODULE_MAPPING``.
-
-    Returns:
-        The same ``model``, prepared in place.
-    """
-    if not isinstance(model, DecisionMixin):
-        raise SpyreUnsupportedModelError(
-            "prepare_for_spyre supports decision models (AutoModelForDecision); "
-            "load other tasks with the AutoSpyreModelFor* classes"
-        )
-    backbone = model.base_model
-    if not isinstance(backbone, PreTrainedModel) or backbone is model:
-        raise SpyreUnsupportedModelError(
-            f"{type(model).__name__} has no pretrained backbone to prepare"
-        )
-    module = resolve_adapter_module_for_config(
-        backbone.config,
-        model_name=model.name_or_path or type(model).__name__,
-        mapping=DECISION_CONFIG_TO_ADAPTER_MODULE_MAPPING,
-    )
-    text_decoder: PreTrainedModel = get_backbone(backbone)
-    dtype = get_model_dtype(text_decoder)
-    if dtype == torch.float32 and str(hf_common.DEVICE).split(":", 1)[0] == "spyre":
-        dtype = torch.float16
-    move_model_to_spyre(text_decoder, module, dtype)
-
-    def backbone_forward(
-        self: PreTrainedModel,
-        input_ids: torch.Tensor | None = None,
-        attention_mask: torch.Tensor | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        use_cache: bool | None = None,
-        **kwargs: Any,
-    ) -> BaseModelOutput:
-        if inputs_embeds is not None:
-            raise SpyreUnsupportedFeatureError(
-                "inputs_embeds is not currently supported on Spyre"
-            )
-        if input_ids is None:
-            raise ValueError("input_ids must be provided")
-        if use_cache:
-            raise SpyreUnsupportedFeatureError(
-                "Decision readouts do not keep a KV cache on Spyre"
-            )
-        if kwargs:
-            raise SpyreUnsupportedFeatureError(
-                f"Unsupported decision inputs on Spyre: {sorted(kwargs)}"
-            )
-        input_ids = input_ids.to("cpu")
-        attention_mask = (
-            torch.ones_like(input_ids)
-            if attention_mask is None
-            else attention_mask.to("cpu")
-        )
-        hidden_states = prefill_embed(
-            module._run_backbone_forward, text_decoder, input_ids, attention_mask
-        )
-        return BaseModelOutput(last_hidden_state=hidden_states.to("cpu"))
-
-    backbone.forward = MethodType(backbone_forward, backbone)  # type: ignore[method-assign]
-    return model

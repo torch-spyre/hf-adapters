@@ -27,12 +27,12 @@ except ImportError:
 from hf_adapters.auto_spyre_model import (
     AutoSpyreModel,
     AutoSpyreModelForCausalLM,
+    AutoSpyreModelForDecision,
     AutoSpyreModelForImageTextToText,
     AutoSpyreModelForMaskedLM,
     AutoSpyreModelForQuestionAnswering,
     AutoSpyreModelForSequenceClassification,
     AutoSpyreModelForTokenClassification,
-    prepare_for_spyre,
 )
 from hf_adapters.hf_common import encode_prompts
 
@@ -40,11 +40,11 @@ __all__ = [
     "__version__",
     "AutoSpyreModel",
     "AutoSpyreModelForCausalLM",
+    "AutoSpyreModelForDecision",
     "AutoSpyreModelForImageTextToText",
     "AutoSpyreModelForMaskedLM",
     "AutoSpyreModelForQuestionAnswering",
     "AutoSpyreModelForSequenceClassification",
     "AutoSpyreModelForTokenClassification",
     "encode_prompts",
-    "prepare_for_spyre",
 ]

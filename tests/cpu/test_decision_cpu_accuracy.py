@@ -14,11 +14,12 @@
 
 """CPU accuracy test for Transformers decision models (``AutoModelForDecision``).
 
-Scores one request with stock ``model.decide`` as the reference, then prepares
-a fresh copy with ``prepare_for_spyre`` (compiled blocks unwrapped so they run on
-CPU) and scores it again through the same ``decide``. The prompts are longer
-than one stick, so the Qwen3.5 linear-attention layers step through several
-prefill chunks inside the one-shot readout.
+Scores one request with stock ``model.decide`` as the reference, then loads the
+model with ``AutoSpyreModelForDecision`` (compiled blocks unwrapped so they run
+on CPU) and scores it through the same ``decide``. Both run in fp32, so the
+comparison checks the Spyre-form DeltaNet core rather than bf16 rounding order.
+The prompts are longer than one stick, so the readout steps through several
+DeltaNet chunks.
 """
 
 import gc
@@ -30,7 +31,7 @@ import torch.nn.functional as F
 from _decision_helpers import decide_request
 from transformers import AutoModelForDecision, AutoTokenizer
 
-from hf_adapters.hf_common import BLOCK_SIZE, SpyreUnsupportedModelError
+from hf_adapters.hf_common import BLOCK_SIZE
 from tests.cpu.conftest import _unwrap_compiled_blocks
 from tests.model_registry import DECISION_PATHS
 
@@ -43,17 +44,17 @@ PROB_ATOL: float = 0.01
 @pytest.mark.parametrize("model_path", DECISION_PATHS, ids=DECISION_PATHS)
 def test_decision_cpu_accuracy(model_path: str) -> None:
     auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
-    dtype = auto_spyre_model.dtype_for_model_path(model_path, target_device="cpu")
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-    ref_model = AutoModelForDecision.from_pretrained(model_path, dtype=dtype)
+    ref_model = AutoModelForDecision.from_pretrained(model_path, dtype=torch.float32)
     ref_scores, ref_answers, prompt_lengths = decide_request(ref_model, tokenizer)
     del ref_model
     gc.collect()
     assert max(prompt_lengths) > BLOCK_SIZE
 
-    model = AutoModelForDecision.from_pretrained(model_path, dtype=dtype)
-    assert auto_spyre_model.prepare_for_spyre(model) is model
+    model = auto_spyre_model.AutoSpyreModelForDecision.from_pretrained(
+        model_path, dtype=torch.float32
+    )
     _unwrap_compiled_blocks(model)
     scores, answers, _ = decide_request(model, tokenizer)
     repeat_scores, _, _ = decide_request(model, tokenizer)
@@ -71,9 +72,3 @@ def test_decision_cpu_accuracy(model_path: str) -> None:
     assert answers.keys() == ref_answers.keys()
     for name, ref_answer in ref_answers.items():
         assert answers[name]["type"] == ref_answer["type"]
-
-
-def test_prepare_for_spyre_rejects_non_decision_models() -> None:
-    auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
-    with pytest.raises(SpyreUnsupportedModelError, match="AutoModelForDecision"):
-        auto_spyre_model.prepare_for_spyre(torch.nn.Linear(2, 2))
