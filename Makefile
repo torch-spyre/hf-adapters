@@ -78,7 +78,7 @@ endif
 .PHONY: help test tests model-support-tests adapter-coverage-tests smoke-tests load-tests \
         token-compare-tests embed-compare-tests sentence_transformers_multimodal_tests vlm-tests reranker-tests model-module-tests \
         masked-lm-compare-tests question-answering-compare-tests seq-classification-compare-tests \
-        token-classification-compare-tests structured-decision-compare-tests yolo-compare-tests model-components-tests edge-cases-tests perf-tests
+        token-classification-compare-tests structured-decision-compare-tests decision-compare-tests yolo-compare-tests model-components-tests edge-cases-tests perf-tests
 
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-24s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -161,6 +161,9 @@ token-classification-compare-tests: ## Run token-classification compare tests (s
 
 structured-decision-compare-tests: ## Run structured-decision compare tests (suite key: structured_decision_compare)
 	$(PYTEST) $(PYTEST_ARGS) --suite structured_decision_compare tests/spyre/test_e2e_structured_decision_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+
+decision-compare-tests: ## Run Transformers decision-model compare tests (suite key: decision_compare)
+	$(PYTEST) $(PYTEST_ARGS) --suite decision_compare tests/spyre/test_e2e_decision_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 # Ultralytics YOLO CPU-vs-Spyre detection/segmentation compare. Not a transformers model, so
 # it has no model registry entry and no --model-path axis; MODEL_KEY (-k) picks a checkpoint
@@ -316,8 +319,8 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	  fi; \
 	fi; \
 	case " $$resolved " in \
-	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare model_components embed_compare sentence_transformers_multimodal vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare structured_decision_compare yolo_compare model_module" ;; \
-	  *" unit "*) suites="adapter_coverage load token_compare embed_compare sentence_transformers_multimodal vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare structured_decision_compare yolo_compare model_module" ;; \
+	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare model_components embed_compare sentence_transformers_multimodal vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare structured_decision_compare decision_compare yolo_compare model_module" ;; \
+	  *" unit "*) suites="adapter_coverage load token_compare embed_compare sentence_transformers_multimodal vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare structured_decision_compare decision_compare yolo_compare model_module" ;; \
 	  " integration ") suites="token_compare" ;; \
 	  " perf ") suites="perf" ;; \
 	  " token_compare ") echo "TEST_TYPE=token_compare is not a valid tier -- use TEST_TYPE=integration to run integration coverage, or include 'token_compare' in a multi-suite combo (e.g. TEST_TYPE=\"token_compare load\")."; exit 1 ;; \
@@ -342,6 +345,7 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	    seq_classification_compare) mkdir -p "$(RESULTS_DIR)/junit-seq-classification-compare" && $(MAKE) seq-classification-compare-tests JUNIT_XML="$(RESULTS_DIR)/junit-seq-classification-compare/junit-seq-classification-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    token_classification_compare) mkdir -p "$(RESULTS_DIR)/junit-token-classification-compare" && $(MAKE) token-classification-compare-tests JUNIT_XML="$(RESULTS_DIR)/junit-token-classification-compare/junit-token-classification-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    structured_decision_compare) mkdir -p "$(RESULTS_DIR)/junit-structured-decision-compare" && $(MAKE) structured-decision-compare-tests JUNIT_XML="$(RESULTS_DIR)/junit-structured-decision-compare/junit-structured-decision-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
+	    decision_compare) mkdir -p "$(RESULTS_DIR)/junit-decision-compare" && $(MAKE) decision-compare-tests JUNIT_XML="$(RESULTS_DIR)/junit-decision-compare/junit-decision-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    yolo_compare)     mkdir -p "$(RESULTS_DIR)/junit-yolo-compare" && $(MAKE) yolo-compare-tests      JUNIT_XML="$(RESULTS_DIR)/junit-yolo-compare/junit-yolo-compare.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
 	    model_module)     $(MAKE) model-module-tests      JUNIT_XML=1 RESULTS_DIR="$(RESULTS_DIR)" MODULE_CONFIG="$(MODULE_CONFIG)" || rc=1; \
 	                      for f in "$(RESULTS_DIR)"/model-module-*.xml; do \
@@ -353,7 +357,7 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	    model_support)    $(MAKE) model-support-tests RESULTS_DIR="$(RESULTS_DIR)" || rc=1 ;; \
 	    edge_cases)       mkdir -p "$(RESULTS_DIR)/junit-edge-cases" && $(MAKE) edge-cases-tests        JUNIT_XML="$(RESULTS_DIR)/junit-edge-cases/junit-edge-cases.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" EDGE_CASE_FILE="$(EDGE_CASE_FILE)" || rc=1 ;; \
 	    perf)             $(MAKE) perf-tests RESULTS_DIR="$(RESULTS_DIR)" MODEL_PATH="$$model_path" PERF_REPORT=combined || rc=1 ;; \
-	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare model_components embed_compare sentence_transformers_multimodal vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare structured_decision_compare yolo_compare model_module model_support edge_cases perf"; rc=1 ;; \
+	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare model_components embed_compare sentence_transformers_multimodal vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare structured_decision_compare decision_compare yolo_compare model_module model_support edge_cases perf"; rc=1 ;; \
 	  esac; \
 	done; \
 	exit $$rc
