@@ -2,6 +2,7 @@ name: Test matrix (reusable)
 
 # ---------------------------------------------------------------------------
 # Reusable workflow — not triggered directly.
+#
 # Called by test_pull_request.yaml and integration-tests.yaml.
 #
 # All differences between callers are expressed as inputs:
