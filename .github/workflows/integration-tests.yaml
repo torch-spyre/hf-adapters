@@ -66,6 +66,11 @@ on:
         required: false
         type: string
         default: ''
+      torch_spyre_ref:
+        description: Branch, tag, or SHA of torch-spyre to pin and test (empty = origin/main). Ignored when prebaked_image is true.
+        required: false
+        type: string
+        default: ''
       prebaked_image:
         description: When true, skip resolve-torch-spyre and use the runner image's torch-spyre as-is.
         required: false
@@ -180,16 +185,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Show trigger info
+        env:
+          TRIGGERING_REPO: ${{ inputs.triggering_repo || '(not specified)' }}
+          TRIGGERING_SHA: ${{ inputs.triggering_sha || '(not specified)' }}
+          PR_URL_HASH: ${{ inputs.pr_url_hash || '(not specified)' }}
+          HF_ADAPTERS_REF: ${{ inputs.ref || github.sha }}
+          TORCH_SPYRE_REF: ${{ inputs.torch_spyre_ref || '(none)' }}
         run: |
           {
             echo "## Integration test triggered by upstream change"
             echo ""
             echo "| Field | Value |"
             echo "|---|---|"
-            echo "| Upstream repo   | ${{ inputs.triggering_repo || '(not specified)' }} |"
-            echo "| Upstream commit | ${{ inputs.triggering_sha || '(not specified)' }} |"
-            echo "| PR URL hash     | ${{ inputs.pr_url_hash || '(not specified)' }} |"
-            echo "| hf-adapters ref | ${{ inputs.ref || github.sha }} |"
+            echo "| Upstream repo   | ${TRIGGERING_REPO} |"
+            echo "| Upstream commit | ${TRIGGERING_SHA} |"
+            echo "| PR URL hash     | ${PR_URL_HASH} |"
+            echo "| hf-adapters ref | ${HF_ADAPTERS_REF} |"
+            echo "| torch-spyre ref | ${TORCH_SPYRE_REF} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # push-test-results-to-clickhouse.yaml ALREADY looks for this artifact (see its
@@ -301,6 +313,7 @@ jobs:
       models: ${{ (inputs.models != '' && inputs.models) || needs.resolve-models.outputs.models || '' }}
       # Caller's choice: true for a per-PR/ephemeral image already baked with the exact torch-spyre under test;default false pins origin/main like every other caller.
       prebaked_image: ${{ inputs.prebaked_image }}
+      torch_spyre_ref: ${{ inputs.torch_spyre_ref }}
 
   # ----------------------------------------------------------------------------------
   # Fan-in gate job so callers can poll a single stable job name for pass/fail.

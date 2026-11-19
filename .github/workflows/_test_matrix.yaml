@@ -65,9 +65,9 @@ on:
           Which Spyre suites to run: smoke | unit | integration | regression |
           trunk. These tier names are literal, first-class values -- no
           alias-resolution layer. "unit" runs every suite except smoke (load,
-          token_compare, model_components, embed_compare, clip, multimodal_embed_compare, vlm, reranker_compare,
+          token_compare, model_components, embed_compare, sentence_transformers_multimodal, vlm, reranker_compare,
           masked_lm_compare, question_answering_compare,
-          token_classification_compare, structured_decision_compare, model_module);
+          token_classification_compare, structured_decision_compare, yolo_compare, model_module);
           "integration" runs token_compare and model_components;
           "regression"/"trunk" (default: regression) run the
           standard Spyre suite set. "perf" runs only spyre-perf-tests, over the `models` list.
@@ -144,6 +144,13 @@ on:
         required: false
         type: boolean
         default: false
+      torch_spyre_ref:
+        description: >-
+          Branch, tag or SHA of torch-spyre that resolve-torch-spyre pins for every job, instead
+          of origin/main. Empty keeps origin/main. Ignored when prebaked_image is true.
+        required: false
+        type: string
+        default: ''
 
 permissions:
   # Needed by collect-failed-suites to list/download failed-suite-* artifacts via the REST API; reusable workflows can only narrow the caller's permissions, so callers must grant this too.
@@ -282,20 +289,27 @@ jobs:
     outputs:
       torch_spyre_sha: ${{ steps.resolve.outputs.torch_spyre_sha }}
     steps:
-      - name: Resolve origin/main to a pinned SHA
+      - name: Resolve torch-spyre to a pinned SHA
         id: resolve
         working-directory: /home/senuser/torch-spyre
+        env:
+          TORCH_SPYRE_REF: ${{ inputs.torch_spyre_ref }}
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           git config --global --add safe.directory '*'
-          git fetch --force origin
-          SHA="$(git rev-parse origin/main)"
+          if [[ -n "${TORCH_SPYRE_REF}" ]]; then
+            git fetch --force origin "${TORCH_SPYRE_REF}"
+            SHA="$(git rev-parse 'FETCH_HEAD^{commit}')"
+          else
+            git fetch --force origin
+            SHA="$(git rev-parse origin/main)"
+          fi
           if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "resolve-torch-spyre: origin/main did not resolve to a 40-char SHA (got '$SHA')" >&2
+            echo "resolve-torch-spyre: '${TORCH_SPYRE_REF:-origin/main}' did not resolve to a 40-char SHA (got '$SHA')" >&2
             exit 1
           fi
-          echo "Resolved torch-spyre origin/main -> ${SHA}"
+          echo "Resolved torch-spyre ${TORCH_SPYRE_REF:-origin/main} -> ${SHA}"
           echo "torch_spyre_sha=${SHA}" >> "$GITHUB_OUTPUT"
 
       # Prime the run's torch-spyre wheel cache (see
@@ -438,8 +452,7 @@ jobs:
       multicard_smoke_matrix: ${{ steps.generate.outputs.multicard_smoke_matrix }}
       embed_matrix: ${{ steps.generate.outputs.embed_matrix }}
       vision_matrix: ${{ steps.generate.outputs.vision_matrix }}
-      clip_matrix: ${{ steps.generate.outputs.clip_matrix }}
-      multimodal_embed_compare_matrix: ${{ steps.generate.outputs.multimodal_embed_compare_matrix }}
+      multimodal_embed_matrix: ${{ steps.generate.outputs.multimodal_embed_matrix }}
       masked_lm_matrix: ${{ steps.generate.outputs.masked_lm_matrix }}
       question_answering_matrix: ${{ steps.generate.outputs.question_answering_matrix }}
       combined_matrix: ${{ steps.generate.outputs.combined_matrix }}
@@ -1337,13 +1350,13 @@ jobs:
           job_key: vlm
           payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
 
-  spyre-clip-e2e-tests:
-    name: Spyre CLIP e2e (${{ matrix.model_key }})
+  spyre-sentence-transformers-multimodal-tests:
+    name: Spyre SentenceTransformers multimodal integration (${{ matrix.model_key }})
     needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
-    # Suite key: "clip". Part of the "unit" coarse tier.
+    # Suite key: "sentence_transformers_multimodal". Part of the "unit" coarse tier.
     # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
     # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' clip ')) }}
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' sentence_transformers_multimodal ')) }}
     continue-on-error: true
     runs-on:
       - x86_64
@@ -1354,8 +1367,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Dynamic matrix: CLIP (kind="clip") models from tests/model_registry.py
-        model_key: ${{ fromJSON(needs.generate-matrix.outputs.clip_matrix) }}
+        # All MULTIMODAL_EMBEDDING_MODELS: SentenceTransformers integration.
+        model_key: ${{ fromJSON(needs.generate-matrix.outputs.multimodal_embed_matrix) }}
 
     steps:
       - name: Checkout composite actions
@@ -1391,7 +1404,7 @@ jobs:
           pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
           hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
-      - name: Run test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }}
+      - name: Run test_sentence_transformers_multimodal_spyre.py for ${{ matrix.model_key }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -1401,106 +1414,23 @@ jobs:
           cd "$CLONED_HF_ADAPTERS_DIR"
           # shellcheck source=.github/scripts/run-with-pod-stdout.sh
           source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
-          echo "Running test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }}..."
-          run_teed make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
+          echo "Running test_sentence_transformers_multimodal_spyre.py for ${{ matrix.model_key }}..."
+          run_teed make sentence_transformers_multimodal_tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-sentence-transformers-multimodal-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-clip-${{ env.SAFE_MODEL_KEY }}
-          path: junit-clip-${{ matrix.model_key }}.xml
+          name: junit-sentence-transformers-multimodal-${{ env.SAFE_MODEL_KEY }}
+          path: junit-sentence-transformers-multimodal-${{ matrix.model_key }}.xml
           retention-days: 14
 
       - name: Save suite descriptor for pod-level retry
         if: failure()
         uses: ./.github/actions/save-failed-suite-descriptor
         with:
-          job_key: clip
-          payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
-
-  spyre-multimodal-embed-e2e-tests:
-    name: Spyre multimodal embedding e2e (${{ matrix.model_key }})
-    needs: [generate-matrix, resolve-test-type, resolve-torch-spyre]
-    # Suite key: "multimodal_embed_compare". Part of the "unit" coarse tier.
-    # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
-    # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
-    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' multimodal_embed_compare ')) }}
-    continue-on-error: true
-    runs-on:
-      - x86_64
-      - spyre_pf_x1
-      - linux
-      - ${{ inputs.image_label }}
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        # Dynamic matrix: multimodal embedding models from tests/model_registry.py
-        model_key: ${{ fromJSON(needs.generate-matrix.outputs.multimodal_embed_compare_matrix) }}
-
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
-          # build-hf-adapters from this checkout before it wipes the workspace.
-          sparse-checkout: |
-            .github/actions
-            .github/scripts/run-with-pod-stdout.sh
-          sparse-checkout-cone-mode: false
-
-      - uses: ./.github/actions/build-hf-adapters
-        id: build
-        with:
-          uv_groups: "dev spyre test"
-          ref: ${{ inputs.ref }}
-          repository: ${{ inputs.repository }}
-          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
-          # On the integration path (prebaked_image=true) this is empty and
-          # ignored: build-hf-adapters installs no torch-spyre and uses the one
-          # baked into the image venv instead.
-          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
-          prebaked_image: ${{ inputs.prebaked_image }}
-
-      - name: Gather runner info
-        uses: ./.github/actions/gather-runner-info
-        with:
-          verbose: 'true'
-          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
-          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
-          # both SHAs in the run summary (issue #449).
-          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
-          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
-
-      - name: Run test_e2e_multimodal_embed_compare_spyre.py for ${{ matrix.model_key }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
-          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
-          echo "Running test_e2e_multimodal_embed_compare_spyre.py for ${{ matrix.model_key }}..."
-          run_teed make multimodal-embed-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-multimodal-embed-${{ matrix.model_key }}.xml
-          echo "tests done"
-
-      - name: Upload JUnit results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: junit-multimodal-embed-${{ env.SAFE_MODEL_KEY }}
-          path: junit-multimodal-embed-${{ matrix.model_key }}.xml
-          retention-days: 14
-
-      - name: Save suite descriptor for pod-level retry
-        if: failure()
-        uses: ./.github/actions/save-failed-suite-descriptor
-        with:
-          job_key: multimodal_embed_compare
+          job_key: sentence_transformers_multimodal
           payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
 
   # ---------------------------------------------------------------------------
@@ -2046,6 +1976,92 @@ jobs:
           job_key: structured_decision
           payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
 
+  spyre-yolo-compare-tests:
+    name: Spyre YOLO compare (${{ matrix.model_key }})
+    needs: [resolve-test-type, resolve-torch-spyre]
+    # Suite key: "yolo_compare". Part of the "unit" coarse tier. Ultralytics YOLO is not a
+    # transformers model, so the matrix is not generated from the model registry: one leg
+    # per checkpoint, selected by its test id (MODEL_KEY -> pytest -k). ultralytics and
+    # opencv-python-headless come from the `test` group.
+    # resolve-torch-spyre guard: run on pin-success OR pin-skipped (prebaked),
+    # not pin-failure (issue #449); see spyre-load-tests for the full rationale.
+    if: ${{ !cancelled() && (needs.resolve-torch-spyre.result == 'success' || needs.resolve-torch-spyre.result == 'skipped') && !inputs.skip_tests && !inputs.edge_cases_only && (needs.resolve-test-type.outputs.test_type == 'regression' || needs.resolve-test-type.outputs.test_type == 'trunk' || needs.resolve-test-type.outputs.test_type == 'unit' || contains(format(' {0} ', needs.resolve-test-type.outputs.test_type), ' yolo_compare ')) }}
+    # Don't let one failed leg fail this job outright -- spyre-tests-result decides pass/fail after the pod-level retry gets a shot on a fresh pod.
+    continue-on-error: true
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        model_key: [yolov5nu, yolov8n-seg]
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        id: build
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          # On the integration path (prebaked_image=true) this is empty and
+          # ignored: build-hf-adapters installs no torch-spyre and uses the one
+          # baked into the image venv instead.
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          prebaked_image: ${{ inputs.prebaked_image }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
+
+      - name: Run YOLO compare for ${{ matrix.model_key }}
+        run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          # Ultralytics weights are downloaded on first use into the persistent storage
+          # volume, so later runs (and the retry) load them from there.
+          export YOLO_WEIGHTS_DIR="$STORAGE_1_DIR/.cache/ultralytics"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
+          run_teed make yolo-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_KEY="${{ matrix.model_key }}" JUNIT_XML=junit-yolo-compare-${{ matrix.model_key }}.xml
+          echo "tests done"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-yolo-compare-${{ env.SAFE_MODEL_KEY }}
+          path: junit-yolo-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
+
+      - name: Save suite descriptor for pod-level retry
+        if: failure()
+        uses: ./.github/actions/save-failed-suite-descriptor
+        with:
+          job_key: yolo_compare
+          payload: '{"model_key": ${{ toJSON(matrix.model_key) }}}'
+
   # ---------------------------------------------------------------------------
   # Edge-case suite (daily-only).
   #
@@ -2403,14 +2419,14 @@ jobs:
       - spyre-model-components-tests
       - spyre-embed-compare-tests
       - spyre-vlm-e2e-tests
-      - spyre-clip-e2e-tests
-      - spyre-multimodal-embed-e2e-tests
+      - spyre-sentence-transformers-multimodal-tests
       - spyre-reranker-compare-tests
       - spyre-masked-lm-compare-tests
       - spyre-question-answering-compare-tests
       - spyre-seq-classification-compare-tests
       - spyre-token-classification-compare-tests
       - spyre-structured-decision-compare-tests
+      - spyre-yolo-compare-tests
       - spyre-edge-cases-tests
       - spyre-model-module-tests
     if: always()
@@ -2433,10 +2449,8 @@ jobs:
       has_failed_embed_compare: ${{ steps.collect.outputs.has_failed_embed_compare }}
       matrix_vlm: ${{ steps.collect.outputs.matrix_vlm }}
       has_failed_vlm: ${{ steps.collect.outputs.has_failed_vlm }}
-      matrix_clip: ${{ steps.collect.outputs.matrix_clip }}
-      has_failed_clip: ${{ steps.collect.outputs.has_failed_clip }}
-      matrix_multimodal_embed_compare: ${{ steps.collect.outputs.matrix_multimodal_embed_compare }}
-      has_failed_multimodal_embed_compare: ${{ steps.collect.outputs.has_failed_multimodal_embed_compare }}
+      matrix_sentence_transformers_multimodal: ${{ steps.collect.outputs.matrix_sentence_transformers_multimodal }}
+      has_failed_sentence_transformers_multimodal: ${{ steps.collect.outputs.has_failed_sentence_transformers_multimodal }}
       matrix_reranker: ${{ steps.collect.outputs.matrix_reranker }}
       has_failed_reranker: ${{ steps.collect.outputs.has_failed_reranker }}
       matrix_masked_lm: ${{ steps.collect.outputs.matrix_masked_lm }}
@@ -2449,6 +2463,8 @@ jobs:
       has_failed_token_classification: ${{ steps.collect.outputs.has_failed_token_classification }}
       matrix_structured_decision: ${{ steps.collect.outputs.matrix_structured_decision }}
       has_failed_structured_decision: ${{ steps.collect.outputs.has_failed_structured_decision }}
+      matrix_yolo_compare: ${{ steps.collect.outputs.matrix_yolo_compare }}
+      has_failed_yolo_compare: ${{ steps.collect.outputs.has_failed_yolo_compare }}
       matrix_edge_cases: ${{ steps.collect.outputs.matrix_edge_cases }}
       has_failed_edge_cases: ${{ steps.collect.outputs.has_failed_edge_cases }}
       matrix_model_module: ${{ steps.collect.outputs.matrix_model_module }}
@@ -2492,9 +2508,9 @@ jobs:
           # One key per spyre-*-tests job above -- must match the "job_key" each job's "Save suite descriptor" step stamps into suite.json.
           keys = [
               "load", "smoke", "multicard_smoke", "token_compare", "model_components",
-              "embed_compare", "vlm", "clip", "multimodal_embed_compare", "reranker", "masked_lm", "qa",
+              "embed_compare", "vlm", "sentence_transformers_multimodal", "reranker", "masked_lm", "qa",
               "seq_classification", "token_classification", "structured_decision",
-              "edge_cases", "model_module",
+              "yolo_compare", "edge_cases", "model_module",
           ]
           grouped = {key: [] for key in keys}
           for path in sorted(glob.glob("failed_suites/*/suite.json")):
@@ -3078,13 +3094,13 @@ jobs:
           retention-days: 14
           overwrite: true
 
-  spyre-clip-e2e-tests-retry:
-    name: Spyre CLIP e2e (${{ matrix.model_key }}) (pod-level retry)
+  spyre-sentence-transformers-multimodal-tests-retry:
+    name: Spyre SentenceTransformers multimodal integration (${{ matrix.model_key }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
     # Fail-closed on pin failure is emergent, not gated here: if resolve-torch-spyre
-    # failed, every primary suite skipped, so nothing ran, so has_failed_clip
+    # failed, every primary suite skipped, so nothing ran, so has_failed_sentence_transformers_multimodal
     # is false and this retry never fires. See spyre-load-tests-retry for the full note.
-    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_clip == 'true' }}
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_sentence_transformers_multimodal == 'true' }}
     runs-on:
       - x86_64
       - spyre_pf_x1
@@ -3093,7 +3109,7 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.collect-failed-suites.outputs.matrix_clip) }}
+      matrix: ${{ fromJSON(needs.collect-failed-suites.outputs.matrix_sentence_transformers_multimodal) }}
 
     steps:
       - name: Checkout composite actions
@@ -3129,7 +3145,7 @@ jobs:
           pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
           hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
 
-      - name: Run test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)
+      - name: Run test_sentence_transformers_multimodal_spyre.py for ${{ matrix.model_key }} (pod-level retry)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -3139,104 +3155,23 @@ jobs:
           cd "$CLONED_HF_ADAPTERS_DIR"
           # shellcheck source=.github/scripts/run-with-pod-stdout.sh
           source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
-          echo "Running test_e2e_clip_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          run_teed make clip-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-clip-${{ matrix.model_key }}.xml
+          echo "Running test_sentence_transformers_multimodal_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
+          run_teed make sentence_transformers_multimodal_tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-sentence-transformers-multimodal-${{ matrix.model_key }}.xml
           echo "tests done"
 
       - name: Mark the retry's report with the first attempt's failures
         if: always()
         uses: ./.github/actions/mark-retried-report
         with:
-          artifact_name: junit-clip-${{ env.SAFE_MODEL_KEY }}
-          report: junit-clip-${{ matrix.model_key }}.xml
+          artifact_name: junit-sentence-transformers-multimodal-${{ env.SAFE_MODEL_KEY }}
+          report: junit-sentence-transformers-multimodal-${{ matrix.model_key }}.xml
 
       - name: Upload JUnit results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-clip-${{ env.SAFE_MODEL_KEY }}
-          path: junit-clip-${{ matrix.model_key }}.xml
-          retention-days: 14
-          overwrite: true
-
-  spyre-multimodal-embed-e2e-tests-retry:
-    name: Spyre multimodal embedding e2e (${{ matrix.model_key }}) (pod-level retry)
-    needs: [collect-failed-suites, resolve-torch-spyre]
-    # Fail-closed on pin failure is emergent, not gated here: if resolve-torch-spyre
-    # failed, every primary suite skipped, so nothing ran, so has_failed_multimodal_embed_compare
-    # is false and this retry never fires. See spyre-load-tests-retry for the full note.
-    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_multimodal_embed_compare == 'true' }}
-    runs-on:
-      - x86_64
-      - spyre_pf_x1
-      - linux
-      - ${{ inputs.image_label }}
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.collect-failed-suites.outputs.matrix_multimodal_embed_compare) }}
-
-    steps:
-      - name: Checkout composite actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
-          # build-hf-adapters from this checkout before it wipes the workspace.
-          sparse-checkout: |
-            .github/actions
-            .github/scripts/run-with-pod-stdout.sh
-          sparse-checkout-cone-mode: false
-
-      - uses: ./.github/actions/build-hf-adapters
-        id: build
-        with:
-          uv_groups: "dev spyre test"
-          ref: ${{ inputs.ref }}
-          repository: ${{ inputs.repository }}
-          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
-          # On the integration path (prebaked_image=true) this is empty and
-          # ignored: build-hf-adapters installs no torch-spyre and uses the one
-          # baked into the image venv instead.
-          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
-          prebaked_image: ${{ inputs.prebaked_image }}
-
-      - name: Gather runner info
-        uses: ./.github/actions/gather-runner-info
-        with:
-          verbose: 'true'
-          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
-          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
-          # both SHAs in the run summary (issue #449).
-          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
-          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
-
-      - name: Run test_e2e_multimodal_embed_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
-          source "$HOME/.bashrc"
-          source /etc/profile.d/ibm-aiu-setup.sh
-          cd "$CLONED_HF_ADAPTERS_DIR"
-          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
-          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
-          echo "Running test_e2e_multimodal_embed_compare_spyre.py for ${{ matrix.model_key }} (pod-level retry)..."
-          run_teed make multimodal-embed-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_PATH="${{ matrix.model_key }}" JUNIT_XML=junit-multimodal-embed-${{ matrix.model_key }}.xml
-          echo "tests done"
-
-      - name: Mark the retry's report with the first attempt's failures
-        if: always()
-        uses: ./.github/actions/mark-retried-report
-        with:
-          artifact_name: junit-multimodal-embed-${{ env.SAFE_MODEL_KEY }}
-          report: junit-multimodal-embed-${{ matrix.model_key }}.xml
-
-      - name: Upload JUnit results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: junit-multimodal-embed-${{ env.SAFE_MODEL_KEY }}
-          path: junit-multimodal-embed-${{ matrix.model_key }}.xml
+          name: junit-sentence-transformers-multimodal-${{ env.SAFE_MODEL_KEY }}
+          path: junit-sentence-transformers-multimodal-${{ matrix.model_key }}.xml
           retention-days: 14
           overwrite: true
 
@@ -3688,6 +3623,86 @@ jobs:
           retention-days: 14
           overwrite: true
 
+  spyre-yolo-compare-tests-retry:
+    name: Spyre YOLO compare (${{ matrix.model_key }}) (pod-level retry)
+    needs: [collect-failed-suites, resolve-torch-spyre]
+    # Fail-closed on pin failure is emergent, not gated here; see spyre-load-tests-retry.
+    if: ${{ !cancelled() && needs.collect-failed-suites.outputs.has_failed_yolo_compare == 'true' }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.image_label }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.collect-failed-suites.outputs.matrix_yolo_compare) }}
+
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # The helper is sourced via $POD_STDOUT_HELPER, stashed by
+          # build-hf-adapters from this checkout before it wipes the workspace.
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        id: build
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          repository: ${{ inputs.repository }}
+          # Pin torch-spyre to the SHA resolved once for this run (issue #449).
+          # On the integration path (prebaked_image=true) this is empty and
+          # ignored: build-hf-adapters installs no torch-spyre and uses the one
+          # baked into the image venv instead.
+          torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          prebaked_image: ${{ inputs.prebaked_image }}
+
+      - name: Gather runner info
+        uses: ./.github/actions/gather-runner-info
+        with:
+          verbose: 'true'
+          runner_labels: ${{ format('["x86_64","spyre_pf_x1","linux","{0}"]', inputs.image_label) }}
+          # Assert this job's torch-spyre HEAD == the run's pinned SHA and report
+          # both SHAs in the run summary (issue #449).
+          pinned_torch_spyre_sha: ${{ needs.resolve-torch-spyre.outputs.torch_spyre_sha }}
+          hf_adapters_sha: ${{ steps.build.outputs.target_sha }}
+
+      - name: Run YOLO compare for ${{ matrix.model_key }} (pod-level retry)
+        run: |
+          echo "SAFE_MODEL_KEY=$(echo '${{ matrix.model_key }}' | tr '/' '-')" >> "$GITHUB_ENV"
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          # Ultralytics weights are downloaded on first use into the persistent storage
+          # volume, so later runs (and the retry) load them from there.
+          export YOLO_WEIGHTS_DIR="$STORAGE_1_DIR/.cache/ultralytics"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
+          run_teed make yolo-compare-tests PYTEST_ARGS='${{ inputs.extra_test_flags }}' MODEL_KEY="${{ matrix.model_key }}" JUNIT_XML=junit-yolo-compare-${{ matrix.model_key }}.xml
+          echo "tests done"
+
+      - name: Mark the retry's report with the first attempt's failures
+        if: always()
+        uses: ./.github/actions/mark-retried-report
+        with:
+          artifact_name: junit-yolo-compare-${{ env.SAFE_MODEL_KEY }}
+          report: junit-yolo-compare-${{ matrix.model_key }}.xml
+
+      # overwrite: true replaces the first attempt's report (same name); its failures survive as result.prior_* marks.
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-yolo-compare-${{ env.SAFE_MODEL_KEY }}
+          path: junit-yolo-compare-${{ matrix.model_key }}.xml
+          retention-days: 14
+          overwrite: true
+
   spyre-edge-cases-tests-retry:
     name: Spyre edge case ${{ matrix.test_file }} (${{ matrix.model_key }}) (pod-level retry)
     needs: [collect-failed-suites, resolve-torch-spyre]
@@ -3861,14 +3876,14 @@ jobs:
       - spyre-model-components-tests-retry
       - spyre-embed-compare-tests-retry
       - spyre-vlm-e2e-tests-retry
-      - spyre-clip-e2e-tests-retry
-      - spyre-multimodal-embed-e2e-tests-retry
+      - spyre-sentence-transformers-multimodal-tests-retry
       - spyre-reranker-compare-tests-retry
       - spyre-masked-lm-compare-tests-retry
       - spyre-question-answering-compare-tests-retry
       - spyre-seq-classification-compare-tests-retry
       - spyre-token-classification-compare-tests-retry
       - spyre-structured-decision-compare-tests-retry
+      - spyre-yolo-compare-tests-retry
       - spyre-edge-cases-tests-retry
       - spyre-model-module-tests-retry
     if: always()
@@ -3893,14 +3908,14 @@ jobs:
                  (needs.collect-failed-suites.outputs.has_failed_model_components == 'true' && needs.spyre-model-components-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_embed_compare == 'true' && needs.spyre-embed-compare-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_vlm == 'true' && needs.spyre-vlm-e2e-tests-retry.result != 'success') ||
-                 (needs.collect-failed-suites.outputs.has_failed_clip == 'true' && needs.spyre-clip-e2e-tests-retry.result != 'success') ||
-                 (needs.collect-failed-suites.outputs.has_failed_multimodal_embed_compare == 'true' && needs.spyre-multimodal-embed-e2e-tests-retry.result != 'success') ||
+                 (needs.collect-failed-suites.outputs.has_failed_sentence_transformers_multimodal == 'true' && needs.spyre-sentence-transformers-multimodal-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_reranker == 'true' && needs.spyre-reranker-compare-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_masked_lm == 'true' && needs.spyre-masked-lm-compare-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_qa == 'true' && needs.spyre-question-answering-compare-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_seq_classification == 'true' && needs.spyre-seq-classification-compare-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_token_classification == 'true' && needs.spyre-token-classification-compare-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_structured_decision == 'true' && needs.spyre-structured-decision-compare-tests-retry.result != 'success') ||
+                 (needs.collect-failed-suites.outputs.has_failed_yolo_compare == 'true' && needs.spyre-yolo-compare-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_edge_cases == 'true' && needs.spyre-edge-cases-tests-retry.result != 'success') ||
                  (needs.collect-failed-suites.outputs.has_failed_model_module == 'true' && needs.spyre-model-module-tests-retry.result != 'success') }}; then
             echo "One or more suites still failed after pod-level retry (or a needed retry never ran)."
