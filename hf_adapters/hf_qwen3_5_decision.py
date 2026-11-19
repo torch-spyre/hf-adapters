@@ -23,7 +23,7 @@ A readout returns the hidden state of every prompt token, and checkpoints such a
 d3 read it bidirectionally, so the full-attention layers attend over the whole
 prompt at once. The Gated DeltaNet layers step through the prompt one
 stick-sized chunk at a time, with their convolution, gates and delta rule on
-Spyre (:mod:`hf_adapters.gdn_spyre`) and their recurrent state resident on the
+Spyre (:mod:`hf_adapters._qwen3_5_gdn`) and their recurrent state resident on the
 card. The linear decision head runs on Spyre as well; the vision tower, unused by
 text requests, stays on CPU. Generation is not part of this adapter: causal
 Qwen3.5 language models keep using ``hf_qwen3_5``.
@@ -36,9 +36,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from hf_adapters import gdn_spyre, hf_common
+from hf_adapters import _qwen3_5_gdn, hf_common
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
+    SpyreUnsupportedModelError,
     embed_text_tokens,
     get_backbone,
     prebuild_rope_cache,
@@ -58,6 +59,23 @@ from hf_adapters.hf_qwen3_5 import (
 )
 
 
+def _check_linear_attention_supported(linear_attn):
+    """Fail fast on DeltaNet layers the Spyre path cannot represent faithfully."""
+    for name in ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "conv1d"):
+        if getattr(linear_attn, name).bias is not None:
+            raise SpyreUnsupportedModelError(
+                f"Qwen3.5 decision adapter: linear_attn.{name} has a bias, which "
+                "the Spyre DeltaNet path does not apply"
+            )
+    for name in ("head_k_dim", "head_v_dim"):
+        dim = getattr(linear_attn, name)
+        if dim % BLOCK_SIZE:
+            raise SpyreUnsupportedModelError(
+                f"Qwen3.5 decision adapter: {name}={dim} is not a multiple of "
+                f"the {BLOCK_SIZE}-element Spyre stick"
+            )
+
+
 def _make_linear_attention_block(layer):
     """Compile one Gated DeltaNet layer whose core runs on Spyre.
 
@@ -67,17 +85,18 @@ def _make_linear_attention_block(layer):
     the accelerator twice.
     """
     linear_attn = layer.linear_attn
+    _check_linear_attention_supported(linear_attn)
     input_norm = layer.input_layernorm
     post_attention_norm = layer.post_attention_layernorm
     mlp = layer.mlp
-    linear_attn._spyre_gdn = gdn_spyre.prepare_gdn_constants(
+    linear_attn._spyre_gdn = _qwen3_5_gdn.prepare_gdn_constants(
         linear_attn, hf_common.DEVICE
     )
     linear_attn._spyre_gdn_selectors = {}
     qkvz_weight = torch.cat(
         (linear_attn.in_proj_qkv.weight.detach(), linear_attn.in_proj_z.weight.detach())
     )
-    ba_weight = gdn_spyre.pad_ba_weight(
+    ba_weight = _qwen3_5_gdn.pad_ba_weight(
         linear_attn.in_proj_b.weight.detach(), linear_attn.in_proj_a.weight.detach()
     )
     linear_attn._spyre_in_proj_qkvz = nn.Linear(
@@ -95,7 +114,7 @@ def _make_linear_attention_block(layer):
 
     def project(hidden_states, padding_mask):
         h = _rms_norm(hidden_states, input_norm) * padding_mask[:, :, None]
-        core_dtype = gdn_spyre.core_dtype(h.dtype)
+        core_dtype = _qwen3_5_gdn.core_dtype(h.dtype)
         return (
             linear_attn._spyre_in_proj_qkvz(h).to(core_dtype),
             linear_attn._spyre_in_proj_ba(h).to(core_dtype),
@@ -112,7 +131,7 @@ def _make_linear_attention_block(layer):
     return (
         torch.compile(project, dynamic=False),
         # One code object for every layer: same shapes, per-layer tensor inputs.
-        torch.compile(gdn_spyre.gdn_token_graph, dynamic=False, fullgraph=True),
+        torch.compile(_qwen3_5_gdn.gdn_token_graph, dynamic=False, fullgraph=True),
         torch.compile(finish_projection, dynamic=False),
         torch.compile(ffn_forward, dynamic=False),
     )
@@ -123,7 +142,7 @@ def _token_selectors(linear_attn, sequence_length, dtype, device):
     cache = linear_attn._spyre_gdn_selectors
     key = (sequence_length, dtype, str(device))
     if key not in cache:
-        cache[key] = gdn_spyre.token_selectors(sequence_length, dtype, device)
+        cache[key] = _qwen3_5_gdn.token_selectors(sequence_length, dtype, device)
     return cache[key]
 
 
@@ -226,7 +245,7 @@ def _allocate_caches(model, batch_size, max_cache_len, dtype, device):
             batch_size,
             constants.kernel_size - 1,
             constants.conv_dim,
-            dtype=gdn_spyre.core_dtype(dtype),
+            dtype=_qwen3_5_gdn.core_dtype(dtype),
             device=device,
         )
         # The fp32 recurrent state as fp16 (hi, lo) rows.
@@ -304,7 +323,7 @@ def prepare_for_spyre(model):
         if head is backbone:
             continue
         if not isinstance(head, nn.Linear):
-            raise ValueError(
+            raise SpyreUnsupportedModelError(
                 f"{type(model).__name__} has a decision head that is not a linear layer"
             )
         _prepare_head_for_spyre(head)

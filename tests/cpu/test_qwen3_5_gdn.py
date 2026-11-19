@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The Spyre-form Gated DeltaNet layer (``gdn_spyre``) against stock HF in fp32.
+"""The Spyre-form Gated DeltaNet layer (``_qwen3_5_gdn``) against stock HF in fp32.
 
 A random Qwen3.5 linear-attention layer runs through
 ``hf_qwen3_5_decision._run_linear_attention_chunk`` (compiled graphs replaced by
@@ -29,13 +29,27 @@ from transformers import Qwen3_5TextConfig
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5DecoderLayer
 
 from hf_adapters import hf_qwen3_5_decision
-from hf_adapters.hf_common import BLOCK_SIZE
+from hf_adapters.hf_common import BLOCK_SIZE, SpyreUnsupportedModelError
 
 SINGLE_TOKENS = 3
 
 
 def _eager(function: Any, **kwargs: Any) -> Any:
     return function
+
+
+def _config(num_key_heads: int = 2, head_dim: int = 128) -> Qwen3_5TextConfig:
+    return Qwen3_5TextConfig(
+        hidden_size=256,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        layer_types=["linear_attention"],
+        linear_num_key_heads=num_key_heads,
+        linear_num_value_heads=4,
+        linear_key_head_dim=head_dim,
+        linear_value_head_dim=head_dim,
+        linear_conv_kernel_dim=4,
+    )
 
 
 @pytest.mark.parametrize("num_key_heads", [2, 4])
@@ -45,17 +59,7 @@ def test_spyre_linear_attention_matches_hf(
 ) -> None:
     monkeypatch.setattr(torch, "compile", _eager)
     torch.random.default_generator.manual_seed(794)
-    config = Qwen3_5TextConfig(
-        hidden_size=256,
-        intermediate_size=256,
-        num_hidden_layers=1,
-        layer_types=["linear_attention"],
-        linear_num_key_heads=num_key_heads,
-        linear_num_value_heads=4,
-        linear_key_head_dim=128,
-        linear_value_head_dim=128,
-        linear_conv_kernel_dim=4,
-    )
+    config = _config(num_key_heads)
     reference = Qwen3_5DecoderLayer(config, layer_idx=0).eval()
     for name, parameter in reference.named_parameters():
         if name.endswith(("A_log", "dt_bias")) or "norm" in name:
@@ -93,3 +97,19 @@ def test_spyre_linear_attention_matches_hf(
     actual = torch.cat(outputs, dim=1)
 
     torch.testing.assert_close(actual, expected, atol=2e-4, rtol=2e-4)
+
+
+def test_spyre_linear_attention_rejects_bias() -> None:
+    layer = Qwen3_5DecoderLayer(_config(), layer_idx=0)
+    projection = layer.linear_attn.in_proj_z
+    layer.linear_attn.in_proj_z = torch.nn.Linear(
+        projection.in_features, projection.out_features, bias=True
+    )
+    with pytest.raises(SpyreUnsupportedModelError, match="in_proj_z has a bias"):
+        hf_qwen3_5_decision._make_linear_attention_block(layer)
+
+
+def test_spyre_linear_attention_rejects_partial_stick_heads() -> None:
+    layer = Qwen3_5DecoderLayer(_config(head_dim=96), layer_idx=0)
+    with pytest.raises(SpyreUnsupportedModelError, match="head_k_dim=96"):
+        hf_qwen3_5_decision._make_linear_attention_block(layer)
