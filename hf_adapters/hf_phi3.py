@@ -35,6 +35,7 @@ Usage::
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -122,7 +123,7 @@ def _validate_tp_intermediate(intermediate_size, tp_size):
         )
 
 
-def spyre_tp_cpu_replicated_modules(model, tp_size):
+def spyre_tp_cpu_replicated_modules(model: Any, tp_size: int) -> set[str]:
     """Load the fused projections whole on CPU for per-rank slicing."""
     cfg = model.config
     _validate_tp_heads(cfg.num_attention_heads, cfg.num_key_value_heads, tp_size)
@@ -334,7 +335,7 @@ def _run_forward(
     return run_lm_head(model, h)
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model: Any) -> None:
     """Apply Spyre adaptations to Phi-3 model in-place."""
     cfg = model.config
     hd = cfg.hidden_size // cfg.num_attention_heads
@@ -370,7 +371,7 @@ def prepare_for_spyre(model):
     # apply_rope_matmul pairs (j, j+head_dim//2). Permute Q/K weights so
     # both agree. Q·K^T dot product is invariant under same permutation.
     # Computed on the original head_dim; stick padding (below) happens after.
-    prf = getattr(cfg, "partial_rotary_factor", 1.0)
+    prf = (cfg.rope_parameters or {}).get("partial_rotary_factor", 1.0)
     rope_dim = int(prf * hd)
     rope_perm = rope_dim_permutation(hd, rope_dim) if rope_dim != hd else None
 

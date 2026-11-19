@@ -36,8 +36,8 @@ Spyre adaptations:
 - ``head_dim`` (Pixtral default: 64) is equal to one stick so the
   ``D/2 = 32 < 64`` sub-stick rule requires padding to 128.  Q/K/V/O
   projections are zero-padded with the SDPA scale held at ``1/sqrt(64)``.
-- The 2D RoPE uses a pre-computed ``[max_patches, head_dim]`` ``inv_freq``
-  table. Instead of the stock ``rotate_half`` (which slices along the head
+- The 2D RoPE uses axial inverse frequencies and row/column coordinates.
+  Instead of the stock ``rotate_half`` (which slices along the head
   dim and fails on Spyre), we pre-build ``[P, 2, 2, D/2]`` rotation matrices
   in ``_build_pixtral_rope_matrices`` and apply them via ``apply_rope_matmul``
   — the same approach used by the text-decoder adapters.
@@ -55,6 +55,8 @@ Usage::
 """
 
 import math
+from collections.abc import Callable
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -125,59 +127,33 @@ def _pad_pixtral_heads(layers, num_heads, orig_head_dim, padded_head_dim):
         )
 
 
-def _pixtral_position_ids(h_patches, w_patches, max_width):
-    """2D mesh-grid position IDs for one Pixtral image.
-
-    Mirrors ``position_ids_in_meshgrid`` from the stock Pixtral code:
-    each patch at grid position ``(r, c)`` gets flat index ``r * max_width + c``.
-
-    Args:
-        h_patches: number of patch rows.
-        w_patches: number of patch columns.
-        max_width: ``config.image_size // config.patch_size`` (the inv_freq table width).
-
-    Returns:
-        1-D int64 tensor of shape ``[h_patches * w_patches]``.
-    """
+def _pixtral_position_ids(h_patches: int, w_patches: int) -> torch.Tensor:
+    """Return row/column coordinates, ``[patches, 2]``, for axial RoPE."""
     rows = torch.arange(h_patches, dtype=torch.long)
     cols = torch.arange(w_patches, dtype=torch.long)
-    # meshgrid: position = row * max_width + col
     grid_r, grid_c = torch.meshgrid(rows, cols, indexing="ij")
-    return (grid_r * max_width + grid_c).flatten()
+    return torch.stack((grid_r.flatten(), grid_c.flatten()), dim=-1)
 
 
 def _build_pixtral_rope_matrices(
-    inv_freq_table, position_ids, head_dim, padded_head_dim, dtype
-):
-    """Convert Pixtral's ``inv_freq`` table to ``[P, 2, 2, D/2]`` rotation matrices.
-
-    Pixtral's ``PixtralRotaryEmbedding`` pre-computes a ``[max_patches_per_side**2,
-    head_dim]`` ``inv_freq`` table indexed by 2D position id.  The stock forward
-    does ``cos/sin → rotate_half`` which slices along head_dim (Spyre-incompatible).
-
-    Here we index the table by the correct 2D mesh-grid ``position_ids`` (one flat
-    index per patch) and build the ``[P, 2, 2, D/2]`` rotation matrices that
-    ``apply_rope_matmul`` expects — identical to ``PrecomputedRotaryEmbedding``
-    but built on-the-fly per image (the shape ``P`` varies per image).
-
-    Args:
-        inv_freq_table: ``[max_patches**2, head_dim]`` pre-computed inv_freq (CPU).
-        position_ids: ``[P]`` int64 tensor of flat 2D mesh-grid indices (CPU).
-        head_dim: original (unpadded) head dim (e.g. 64).
-        padded_head_dim: padded head dim (e.g. 128).
-        dtype: target dtype (fp16).
-
-    Returns:
-        ``[P, 2, 2, padded_head_dim // 2]`` rotation matrices on CPU.
-    """
+    inv_freq: torch.Tensor,
+    position_ids: torch.Tensor,
+    head_dim: int,
+    padded_head_dim: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Build matrix RoPE from HF's axial frequencies, ordered H-W-H-W."""
     rope_half = head_dim // 2
-    freqs = inv_freq_table[position_ids]  # [P, head_dim] — correct 2D-indexed rows
-    # inv_freq_table stores full head_dim columns (doubled: [freqs_h | freqs_w]),
-    # so each column half already encodes one spatial axis.  cos/sin over the
-    # first rope_half columns suffice because both halves are identical for the
-    # rotate_half convention (the table is built as cat(inv, inv)).
-    cos = torch.cos(freqs[:, :rope_half])  # [P, rope_half]
-    sin = torch.sin(freqs[:, :rope_half])  # [P, rope_half]
+    height_freq, width_freq = inv_freq.float().chunk(2)
+    freqs = torch.cat(
+        (
+            position_ids[:, :1].float() * height_freq,
+            position_ids[:, 1:].float() * width_freq,
+        ),
+        dim=-1,
+    )
+    cos = freqs.cos()
+    sin = freqs.sin()
     num_positions = position_ids.shape[0]
     rot = torch.stack([cos, -sin, sin, cos], dim=1).view(num_positions, 2, 2, rope_half)
 
@@ -344,7 +320,7 @@ def _make_compiled_pixtral_block(layer, num_heads, head_dim, scale):
 # ---------------------------------------------------------------------------
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model: Any) -> None:
     """Apply Spyre adaptations to a Pixtral vision tower in-place.
 
     Pads attention heads to a stick boundary (64 → 128), builds the CPU
@@ -380,14 +356,12 @@ def prepare_for_spyre(model):
     # CPU after the device move relocates the tower's params).
     model._spyre_pixtral_patch_embed = _make_patch_embed_fn(tower)
 
-    # Snapshot the 2D RoPE inv_freq table on CPU — used in prefill_vision_tower
+    # Snapshot the axial RoPE frequencies on CPU — used in prefill_vision_tower
     # to build per-image rotation matrices without a forward through the RoPE module.
     inv_freq = tower.patch_positional_embedding.inv_freq.detach().cpu()
     model._spyre_pixtral_inv_freq = inv_freq
     model._spyre_pixtral_orig_head_dim = orig_head_dim
     model._spyre_pixtral_padded_head_dim = head_dim
-    # max_width = max_patches_per_side, needed to build 2D mesh-grid position IDs
-    model._spyre_pixtral_max_width = cfg.image_size // cfg.patch_size
     model._spyre_pixtral_patch_size = cfg.patch_size
 
     # Compile encoder blocks.
@@ -450,7 +424,12 @@ def load_model(model_path, dtype=torch.float16):
     return model
 
 
-def prefill_vision_tower(model, pixel_values, image_sizes, output_hidden_states=False):
+def prefill_vision_tower(
+    model: Any,
+    pixel_values: torch.Tensor,
+    image_sizes: list[tuple[int, int]] | torch.Tensor,
+    output_hidden_states: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
     """Run the prepared Pixtral tower: pixel_values → last_hidden_state.
 
     Args:
@@ -465,32 +444,35 @@ def prefill_vision_tower(model, pixel_values, image_sizes, output_hidden_states=
         ``(last_hidden_state, tuple_of_per_layer_states)`` when
         ``output_hidden_states=True``).
     """
-    inv_freq = model._spyre_pixtral_inv_freq  # [max_patches, head_dim] on CPU
-    orig_head_dim = model._spyre_pixtral_orig_head_dim
-    padded_head_dim = model._spyre_pixtral_padded_head_dim
-    patch_embed_fn = model._spyre_pixtral_patch_embed
-    compiled_blocks = model._spyre_compiled_blocks
+    inv_freq: torch.Tensor = model._spyre_pixtral_inv_freq
+    orig_head_dim: int = model._spyre_pixtral_orig_head_dim
+    padded_head_dim: int = model._spyre_pixtral_padded_head_dim
+    patch_embed_fn: Callable[[torch.Tensor, tuple[int, int]], torch.Tensor] = (
+        model._spyre_pixtral_patch_embed
+    )
+    compiled_blocks: list[
+        Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
+    ] = model._spyre_compiled_blocks
 
     # Step 1: CPU — patch embed each image and collect per-image patch counts
     # and 2D RoPE position ids.
-    all_embeds = []
-    patch_counts = []
-    all_rope = []
+    all_embeds: list[torch.Tensor] = []
+    patch_counts: list[int] = []
+    all_rope: list[torch.Tensor] = []
 
-    max_width = model._spyre_pixtral_max_width
-    patch_size = model._spyre_pixtral_patch_size
+    patch_size: int = model._spyre_pixtral_patch_size
 
-    for i, (pv, isize) in enumerate(zip(pixel_values, image_sizes)):
+    for pv, isize in zip(pixel_values, image_sizes):
+        height, width = (int(dim) for dim in isize)
         pv_single = pv.unsqueeze(0)  # [1, C, H, W]
-        emb = patch_embed_fn(pv_single, isize)  # [1, P, hidden]
+        emb = patch_embed_fn(pv_single, (height, width))  # [1, P, hidden]
         all_embeds.append(emb.squeeze(0))  # [P, hidden]
-        H, W = isize
-        h_patches = H // patch_size
-        w_patches = W // patch_size
+        h_patches = height // patch_size
+        w_patches = width // patch_size
         patch_counts.append(h_patches * w_patches)
 
         # Build correct 2D mesh-grid position IDs for this image
-        position_ids = _pixtral_position_ids(h_patches, w_patches, max_width)
+        position_ids = _pixtral_position_ids(h_patches, w_patches)
 
         # Build 2D RoPE rotation matrices for this image's patches [P, 2, 2, D/2]
         dtype = emb.dtype
@@ -531,7 +513,9 @@ def prefill_vision_tower(model, pixel_values, image_sizes, output_hidden_states=
     rope_mats_all = rope_mats_all.to(DEVICE)
 
     # Step 2: Spyre — run compiled blocks
-    all_hidden_states = (hidden,) if output_hidden_states else None
+    all_hidden_states: tuple[torch.Tensor, ...] = (
+        (hidden,) if output_hidden_states else ()
+    )
     for compiled_block in compiled_blocks:
         hidden = compiled_block(hidden, rope_mats_all, attn_mask)
         if output_hidden_states:

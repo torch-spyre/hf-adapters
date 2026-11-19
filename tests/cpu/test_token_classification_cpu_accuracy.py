@@ -16,8 +16,8 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForTokenClassification, AutoTokenizer
 
+from hf_adapters.auto_spyre_model import dtype_for_model_path
 from tests.conftest import (
-    get_dtype_for_cpu,
     load_ref_model,
     resolve_adapter_module_for_test,
 )
@@ -40,7 +40,9 @@ def test_native_forward(model_path: str, trust_remote_code: bool | None) -> None
     auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
     if trust_remote_code is None:
         trust_remote_code = model_path in REMOTE_CODE_PATHS
-    dtype = get_dtype_for_cpu(model_path)
+    dtype = dtype_for_model_path(
+        model_path, target_device="cpu", trust_remote_code=trust_remote_code
+    )
     adapter_module = resolve_adapter_module_for_test(
         model_path,
         mapping=auto_spyre_model.TOKEN_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING,
