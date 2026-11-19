@@ -24,7 +24,6 @@ laya = ["laya>=0.3.28,<0.4"]
 # ultralytics 8.4.173 and 8.4.201, opencv-python-headless 5.0.0.93. Headless, not
 # opencv-python: see override-dependencies under [tool.uv].
 yolo = ["ultralytics>=8.4.173,<8.5", "opencv-python-headless>=5.0,<6"]
-# The YOLO e2e test is not in CI yet, so these are not in the `test` group.
 
 [build-system]
 requires = ["hatchling", "hatch-vcs", "setuptools_scm>=10"]
@@ -128,7 +127,7 @@ markers = [
 # ultralytics requires opencv-python, the GUI build of OpenCV, whose cv2 needs X11
 # libraries (libxcb.so.1) that the Spyre images don't ship, so `import cv2` (and with it
 # `import ultralytics`) fails there. Drop it (this marker is never true) and let the
-# `yolo` extra install opencv-python-headless, which provides the same cv2.
+# `yolo` extra / `test` group install opencv-python-headless, which provides the same cv2.
 override-dependencies = ["opencv-python; sys_platform == 'never'"]
 
 [tool.uv.sources]
@@ -172,6 +171,11 @@ test = [
     # does not build there (xtensor-stack/xsimd#954).
     "pandas<3.1.0; platform_machine == 's390x'",
     "pandas; platform_machine != 's390x'",
+    # tests/spyre/test_e2e_yolo_compare_spyre.py (same pins as the `yolo` extra). x86_64
+    # only: the YOLO suite runs on x86_64 Spyre runners, and opencv-python-headless
+    # publishes no ppc64le / s390x wheels.
+    "ultralytics>=8.4.173,<8.5; platform_machine == 'x86_64'",
+    "opencv-python-headless>=5.0,<6; platform_machine == 'x86_64'",
 ]
 # evals/{gsm8k,mmlu} import `datasets`. Kept in its own group rather than
 # [project].dependencies: declaring it there pulls pyarrow into the resolution for every

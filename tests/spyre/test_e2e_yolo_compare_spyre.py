@@ -31,17 +31,18 @@ Pass criteria:
 
 Images are the two bundled with the ultralytics package (``bus.jpg``,
 ``zidane.jpg``), so no image download is needed. Set ``YOLO_TEST_IMAGES`` to a
-directory of ``.jpg`` files to test others as well. Weights are resolved by
-ultralytics (downloaded on first use) unless ``YOLO_WEIGHTS_DIR`` points at a
-directory that already holds them.
+directory of ``.jpg`` files to test others as well. Weights are downloaded by
+ultralytics on first use: into ``YOLO_WEIGHTS_DIR`` when it is set (CI points it at
+its persistent cache, so later runs reuse them), else into the working directory.
 
-Requires the ``yolo`` extra (``ultralytics``, ``opencv-python-headless``). Not
-run in CI yet. Do not run with ``SENCORES=1``: a
+Requires the ``yolo`` extra or the ``test`` group (``ultralytics``,
+``opencv-python-headless``). Do not run with ``SENCORES=1``: a
 torch-spyre single-core LX-planning bug silently corrupts results.
 
 Usage (on Spyre pod)::
 
-    pytest -s -vvv tests/spyre/test_e2e_yolo_compare_spyre.py
+    make yolo-compare-tests                      # what CI runs (suite key: yolo_compare)
+    make yolo-compare-tests MODEL_KEY=yolov5nu   # one checkpoint (CI matrix leg)
     pytest -s -vvv tests/spyre/test_e2e_yolo_compare_spyre.py -k seg
 """
 
@@ -87,10 +88,13 @@ def _test_images() -> list[str]:
 
 
 def _weights_path(name: str) -> str:
+    """Path for ``name`` in ``YOLO_WEIGHTS_DIR`` (ultralytics downloads it there if
+    missing), or the bare name (resolved / downloaded in the working directory)."""
     weights_dir = os.environ.get("YOLO_WEIGHTS_DIR")
-    if weights_dir and os.path.exists(os.path.join(weights_dir, name)):
-        return os.path.join(weights_dir, name)
-    return name
+    if not weights_dir:
+        return name
+    os.makedirs(weights_dir, exist_ok=True)
+    return os.path.join(weights_dir, name)
 
 
 def _letterbox(path: str) -> torch.Tensor:
@@ -198,14 +202,12 @@ def _compare_image(ref, ref_masks, dev, dev_masks, names) -> tuple[list[str], di
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "weights", WEIGHTS, ids=[w.removesuffix(".pt") for w in WEIGHTS]
-)
-def test_yolo_compare_spyre(weights: str) -> None:
+@pytest.mark.parametrize("model", WEIGHTS, ids=[w.removesuffix(".pt") for w in WEIGHTS])
+def test_yolo_compare_spyre(model: str) -> None:
     if os.environ.get("SENCORES") == "1":
         pytest.skip("SENCORES=1 hits a torch-spyre LX-planning bug; use >= 2 cores")
 
-    path = _weights_path(weights)
+    path = _weights_path(model)
     cpu_model = load_model(path, device="cpu")
     names = cpu_model.names
     spyre_model = torch.compile(load_model(path, device="spyre"), dynamic=False)
@@ -225,7 +227,7 @@ def test_yolo_compare_spyre(weights: str) -> None:
         problems += [f"{os.path.basename(image)}: {p}" for p in image_problems]
         all_mask_ious += stats["mask_ious"]
         line = (
-            f"[{weights}] {os.path.basename(image)}: cpu={stats['cpu']} "
+            f"[{model}] {os.path.basename(image)}: cpu={stats['cpu']} "
             f"spyre={stats['spyre']} max|dscore|={stats['max_score_diff']:.3f}"
         )
         if ref_proto is not None:
@@ -237,7 +239,7 @@ def test_yolo_compare_spyre(weights: str) -> None:
     if all_mask_ious:
         mean_iou = sum(all_mask_ious) / len(all_mask_ious)
         n = len(all_mask_ious)
-        print(f"[{weights}] mean mask IoU {mean_iou:.4f} over {n} objects")
+        print(f"[{model}] mean mask IoU {mean_iou:.4f} over {n} objects")
         if mean_iou < MIN_MEAN_MASK_IOU:
             problems.append(f"mean mask IoU {mean_iou:.4f} < {MIN_MEAN_MASK_IOU}")
-    assert not problems, f"{weights}: Spyre differs from CPU:\n" + "\n".join(problems)
+    assert not problems, f"{model}: Spyre differs from CPU:\n" + "\n".join(problems)

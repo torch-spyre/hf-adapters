@@ -1182,12 +1182,14 @@ spyre = [
 ]
 test = [
     { name = "laya" },
+    { name = "opencv-python-headless", marker = "platform_machine == 'x86_64'" },
     { name = "pandas" },
     { name = "pillow" },
     { name = "pytest" },
     { name = "pyyaml" },
     { name = "torchvision", version = "0.29.2", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "platform_machine != 's390x' and sys_platform == 'darwin'" },
     { name = "torchvision", version = "0.29.2+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "platform_machine == 's390x' or sys_platform != 'darwin'" },
+    { name = "ultralytics", marker = "platform_machine == 'x86_64'" },
 ]
 
 [package.metadata]
@@ -1227,12 +1229,14 @@ oot = [{ name = "oot-framework", git = "https://github.com/torch-spyre/torch-spy
 spyre = [{ name = "torch-spyre", git = "https://github.com/torch-spyre/torch-spyre?rev=main" }]
 test = [
     { name = "laya", specifier = ">=0.3.28,<0.4" },
+    { name = "opencv-python-headless", marker = "platform_machine == 'x86_64'", specifier = ">=5.0,<6" },
     { name = "pandas", marker = "platform_machine != 's390x'" },
     { name = "pandas", marker = "platform_machine == 's390x'", specifier = "<3.1.0" },
     { name = "pillow" },
     { name = "pytest", specifier = ">=9.0,<9.1" },
     { name = "pyyaml" },
     { name = "torchvision", specifier = "~=0.29.0", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "ultralytics", marker = "platform_machine == 'x86_64'", specifier = ">=8.4.173,<8.5" },
 ]
 
 [[package]]
