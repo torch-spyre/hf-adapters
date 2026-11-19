@@ -1,0 +1,114 @@
+# Transformers 5.23 compatibility checks
+
+This project pins Transformers 5.23.0 and tokenizers 0.23.3. Run the commands
+below from the repository root. Validation results and historical investigations
+belong in [PR #771](https://github.com/torch-spyre/hf-adapters/pull/771), rather
+than in this document.
+
+## CPU regressions
+
+```bash
+uv sync --frozen --no-default-groups --group test
+HF_HUB_OFFLINE=1 OMP_NUM_THREADS=1 uv run --no-sync python -m pytest \
+  tests/cpu/test_tensor_parallel_loading.py \
+  tests/cpu/test_spyre_tensor_parallel.py \
+  tests/cpu/test_transformers_tp_contract.py \
+  tests/cpu/test_rotary_config_compatibility.py \
+  tests/cpu/test_vision_transformers_compatibility.py \
+  tests/cpu/test_muse_glimmer_mm.py -q --tb=short
+```
+
+The loading test launches real Gloo workers at TP2 and TP4, requiring local
+socket access. It covers checkpoint slicing, grouped KV replication, packed
+and separate expert weights, CPU staging, tied embeddings, exact plan overrides,
+incomplete checkpoints, both tied-alias directions, and rejection of unsafe TP
+checkpoint saving. Phi-3 includes 96-wide heads that require padding; Gemma 4
+includes an explicit empty
+(replicated) plan. Native HF forwards and supported CPU adapter paths
+are compared in float32; packed Gemma MoE adapter execution requires Spyre.
+Separate tests check repeated fullgraph compilation with rowwise bias, private
+upstream API signatures, rotary configuration, and vision parity. Plan-resolution
+checks cover Transformers 5.23's model methods and concrete module/parameter
+plans, including exact overrides and parameter sharding before module hooks.
+Grouped KV uses a replicated placeholder on the existing one-dimensional mesh;
+the Spyre loader reads each rank's whole-head slice without creating extra
+process groups. Tests check shared rank pairs, uneven slices, and unchanged
+process-group counts during placement and loading.
+
+## Two-card Spyre regressions
+
+Use an environment with torch-spyre and the pinned project dependencies.
+Run the initialization test in its own fresh `torchrun`: it verifies that the
+public loader creates the process group, then exercises CPU synchronization
+and compiled Spyre generation. The remaining tests share a session-scoped group
+and can run in any file order; the command below runs the collectives first.
+
+```bash
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+export SPYRE_DEVICES=0,1 COLL_ALLREDUCE_ALGO=PairwisePow2
+export HF_DEACTIVATE_ASYNC_LOAD=1 HF_HUB_OFFLINE=1
+python -m torch.distributed.run --standalone --nproc-per-node=2 \
+  --max-restarts=0 --log-dir=tp-logs/initialization --tee=3 -m pytest \
+  tests/spyre/test_tp_initialization_spyre.py -sv --tb=short
+python -m torch.distributed.run --standalone --nproc-per-node=2 \
+  --max-restarts=0 --log-dir=tp-logs/shared --tee=3 -m pytest \
+  tests/spyre/test_tp_embedding_collective_spyre.py \
+  tests/spyre/test_tp_rowwise_bias_spyre.py \
+  tests/spyre/test_tp_transformers_loading_spyre.py -sv --tb=short
+```
+
+The fourteen small-checkpoint cases use fp16, two input sequences, and three generated
+tokens. They require finite logits, exact token agreement, and HF-reference
+logit parity (`atol=0.02`, `rtol=0.02`) on every rank. The biased linear test
+covers repeated compiled prefill and decode; the embedding test checks exact
+collective output.
+
+Tied Qwen3 checkpoints cover both embedding-only and LM-head-only weights.
+CPU checks also cover both directions with uneven vocabulary shards and reject
+tied groups with no usable checkpoint weight.
+
+Two numerical cases remain strict expected failures:
+
+- Hybrid Qwen3.5 MoE rank-dependent expert routing: [#772](https://github.com/torch-spyre/hf-adapters/issues/772).
+- Gemma 4 MoE decode divergence: [#773](https://github.com/torch-spyre/hf-adapters/issues/773).
+
+Only token/logit mismatches qualify for these xfails. Loading, compilation,
+non-finite outputs, and unexpected passes fail the suite. Full-attention
+Qwen3.5 MoE coverage does not establish hybrid MoE correctness; production
+text smoke tests do not establish reference-logit parity.
+[#770](https://github.com/torch-spyre/hf-adapters/issues/770) remains open.
+
+## CI and coverage limits
+
+The commands above are available for manual regression testing. These suites
+are not added to `_test_matrix.yaml` or its merge-gating result job; this change
+does not add tests to the automatically triggered PR CI suite.
+
+The loader rejects missing or mismatched Spyre-planned checkpoint weights,
+excluding legitimate tied aliases, before HF can allocate generic device
+buffers. Its scoped patches affect the process: independent HF model loads
+must be serialized while `spyre_tp_loading()` is active.
+The public loader initializes Spyre TP groups with `cpu:gloo,spyre:spyreccl`
+before calling HF and reuses groups that already exist. Process-group setup
+does not patch Transformers' private initialization helper.
+
+`save_pretrained()` is explicitly unsupported on Spyre TP models, including
+before adapter preparation and when requesting a distributed checkpoint. HF
+5.23 only gathers DTensors; saving our ordinary local parameters would silently
+write incomplete weights. The guard raises before creating output files. Load
+the original checkpoint without Spyre TP when a complete checkpoint is needed.
+Phi-3 padding requires each output-projection shard to contain whole heads.
+Phi-3 keeps fused QKV and gate/up checkpoint weights replicated on CPU until
+preparation, which creates full Q/K/V and gate/up projections on every rank.
+Their device weight memory and computation, attention, and KV caches therefore
+do not shrink as TP size increases. Within each decoder layer, only `o_proj`
+and `down_proj` benefit from sharding. This policy preserves correctness but
+limits TP memory savings and speedup. Efficient Phi-3 TP is follow-up work:
+split fused checkpoint weights into per-rank colwise Q/K/V and gate/up
+projections, with corresponding local head counts, KV caches, and head padding.
+
+These tests do not cover every registered production checkpoint, the complete
+OOT matrix, or four-card Spyre execution. Two-card Gemma 3 covers grouped KV
+with one KV head; TP4 with two KV heads shared by rank pairs is covered on CPU
+only. Vocab-parallel embedding stages integer masking on CPU at every call,
+including decode.
