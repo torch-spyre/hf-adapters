@@ -917,6 +917,7 @@ class AutoSpyreModelForDecision(AutoSpyreModel):
         dtype: torch.dtype | None = None,
         tp_plan: Optional[Union[dict, str]] = None,
         trust_remote_code: bool | None = None,
+        direct_to_device: bool = False,
     ) -> PreTrainedModel:
         if tp_plan is not None:
             raise SpyreUnsupportedFeatureError(
@@ -931,6 +932,7 @@ class AutoSpyreModelForDecision(AutoSpyreModel):
             model_name_or_path,
             dtype=dtype,
             trust_remote_code=trust_remote_code,
+            direct_to_device=direct_to_device,
         )
         text_decoder: PreTrainedModel = get_backbone(model)
 
