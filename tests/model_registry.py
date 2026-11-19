@@ -687,6 +687,18 @@ STRUCTURED_DECISION_MODELS = {
 }
 
 
+# Transformers decision models (``AutoModelForDecision``), loaded with
+# ``AutoSpyreModelForDecision`` and scored through ``model.decide``.
+DECISION_MODELS = {
+    "d3_nano": {
+        "name": "d3 nano",
+        "path": "vllm-sr/d3-nano",
+        "adapter": "hf_qwen3_5_decision.py",
+        "size": "2b",
+    },
+}
+
+
 # Vision models. ``kind="tower"`` adapters are encoder-only; ``kind="vlm"`` adapters
 # are full multimodal models with a causal text decoder, RoPE, KV caches, and ``generate``.
 VISION_MODELS = {
@@ -1000,6 +1012,9 @@ STRUCTURED_DECISION_PATHS: list[str] = _exclude(
         STRUCTURED_DECISION_MODELS, include_gated=_include_gated_flag
     )
 )
+DECISION_PATHS: list[str] = _exclude(
+    _select_representative_paths(DECISION_MODELS, include_gated=_include_gated_flag)
+)
 VISION_PATHS: list[str] = _exclude(
     _select_representative_paths(
         VISION_MODELS,
@@ -1047,6 +1062,7 @@ REMOTE_CODE_PATHS: frozenset[str] = frozenset(
         QUESTION_ANSWERING_MODELS,
         TOKEN_CLASSIFICATION_MODELS,
         STRUCTURED_DECISION_MODELS,
+        DECISION_MODELS,
         VISION_MODELS,
         MULTIMODAL_EMBEDDING_MODELS,
     )
@@ -1091,6 +1107,9 @@ ALL_TOKEN_CLASSIFICATION_PATHS: list[str] = _exclude(
 )
 ALL_STRUCTURED_DECISION_PATHS: list[str] = _exclude(
     _all_paths(STRUCTURED_DECISION_MODELS, include_gated=_include_gated_flag)
+)
+ALL_DECISION_PATHS: list[str] = _exclude(
+    _all_paths(DECISION_MODELS, include_gated=_include_gated_flag)
 )
 ALL_VISION_PATHS: list[str] = _exclude(
     _all_paths(
