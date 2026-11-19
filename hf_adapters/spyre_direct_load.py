@@ -83,10 +83,10 @@ Relationship to tensor parallel
 -------------------------------
 The TP path already loads shard-by-shard with the right layouts via the styles
 in ``spyre_tensor_parallel.py``, so it gains nothing here. This module stays
-out of its way: ``set_param_for_module`` receives a non-``None``
-``distributed_operation`` under TP and the wrapper hands those straight to
-Transformers. ``load_model_common`` additionally refuses to combine
-``direct_to_device=True`` with ``tp_plan``.
+out of its way: since Transformers 5.23 a TP style is applied to the tensor
+before ``set_param_for_module`` is reached, so the funnel this module patches
+is not where sharding is decided, and ``load_model_common`` refuses to combine
+``direct_to_device=True`` with ``tp_plan`` outright.
 
 Status
 ------
@@ -317,14 +317,11 @@ def _resolve_target_module(model, target_name):
         return None, param_name
 
 
-def _should_place(
-    target_name, param_value, distributed_operation, hf_quantizer, host_prefixes
-):
+def _should_place(target_name, param_value, hf_quantizer, host_prefixes):
     """Decide whether this wrapper owns the placement of one tensor.
 
     Declines, leaving Transformers' own behaviour untouched, when:
 
-    * a ``distributed_operation`` is attached, i.e. a TP style owns it;
     * a quantizer owns it, since its packed representation is not ours to
       re-lay-out;
     * the value is not a plain tensor (``DTensor`` and friends);
@@ -332,7 +329,7 @@ def _should_place(
       trip, which for fp16 is also lossy (DLFLOAT16 on the device);
     * the adapter asked for that module to stay on the host.
     """
-    if distributed_operation is not None or hf_quantizer is not None:
+    if hf_quantizer is not None:
         return False
     if type(param_value) is not torch.Tensor and not isinstance(
         param_value, nn.Parameter
@@ -551,7 +548,6 @@ def _spyre_set_param_for_module(
     target_name,
     param_value,
     loading_info,
-    distributed_operation,
     hf_quantizer,
     *args,
     **kwargs,
@@ -574,7 +570,6 @@ def _spyre_set_param_for_module(
             target_name,
             value,
             loading_info,
-            distributed_operation,
             hf_quantizer,
             *args,
             **kwargs,
@@ -589,7 +584,6 @@ def _spyre_set_param_for_module(
         _should_place(
             target_name,
             param_value,
-            distributed_operation,
             hf_quantizer,
             block.host_prefixes,
         )

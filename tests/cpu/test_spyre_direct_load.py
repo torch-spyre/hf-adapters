@@ -150,7 +150,6 @@ def test_integer_buffer_keeps_its_dtype(record_copies):
 @pytest.mark.parametrize(
     "kwargs, reason",
     [
-        ({"distributed_operation": object()}, "a TP style owns the placement"),
         ({"hf_quantizer": object()}, "a quantizer owns the placement"),
         ({"param_value": torch.zeros(4, device="meta")}, "not on the host"),
     ],
@@ -159,7 +158,6 @@ def test_should_place_declines(kwargs, reason):
     args = {
         "target_name": "model.layers.0.q_proj.weight",
         "param_value": torch.zeros(4),
-        "distributed_operation": None,
         "hf_quantizer": None,
         "host_prefixes": (),
     }
@@ -171,7 +169,6 @@ def test_should_place_accepts_a_plain_host_tensor():
     assert _should_place(
         target_name="model.layers.0.q_proj.weight",
         param_value=torch.zeros(4),
-        distributed_operation=None,
         hf_quantizer=None,
         host_prefixes=(),
     )
@@ -388,7 +385,7 @@ def test_placement_wrapper_routes_by_target_module(record_copies, monkeypatch):
             ("lm_head.weight", torch.randn(64, 16)),
         ]:
             core_model_loading.set_param_for_module(
-                model, target_name, tensor, None, None, None
+                model, target_name, tensor, None, None
             )
 
     helpers = [name for name, _shape, _dtype in record_copies]
@@ -466,7 +463,6 @@ def test_each_thread_keeps_its_own_device(monkeypatch):
                 torch.randn(32, 16),
                 None,
                 None,
-                None,
             )
 
     threads = [
@@ -503,7 +499,6 @@ def test_a_thread_outside_any_block_is_passed_through(monkeypatch):
                 model,
                 "model.layers.0.q_proj.weight",
                 torch.randn(32, 16),
-                None,
                 None,
                 None,
             )
@@ -648,18 +643,15 @@ def test_no_fake_safetensors_custom_device_registry_is_installed():
             )
 
 
-def test_a_tp_owned_tensor_passes_through_the_installed_wrapper(
+def test_a_quantized_tensor_passes_through_the_installed_wrapper(
     record_copies, monkeypatch
 ):
-    """The TP path must be untouched even with a placement block active.
+    """A tensor a quantizer owns must reach Transformers exactly as it arrived.
 
     ``load_model_common`` refuses ``direct_to_device`` together with
-    ``tp_plan``, but the TP branch reaches ``from_pretrained`` via
-    ``distributed_config=`` and Transformers then builds a ``device_map`` of its
-    own. The guarantee that matters is therefore at the funnel, not the call
-    site: a tensor carrying a ``distributed_operation`` reaches Transformers
-    exactly as it arrived, so the Spyre TP styles keep doing their own
-    shard-by-shard placement.
+    ``tp_plan``, and since Transformers 5.23 a TP style is applied before this
+    funnel is reached, so a quantizer is the remaining owner the wrapper has to
+    decline for: its packed representation is not ours to re-lay-out.
     """
     model = _ToyModel()
     forwarded = []
@@ -669,23 +661,22 @@ def test_a_tp_owned_tensor_passes_through_the_installed_wrapper(
 
     monkeypatch.setattr(core_model_loading, "set_param_for_module", _fake_original)
 
-    shard = torch.randn(32, 16)
+    packed = torch.randn(32, 16)
     # ``device`` is immaterial here -- the tensor must not be touched at all --
     # and "cpu" keeps this runnable without torch_spyre's PrivateUse1 rename.
     with spyre_direct_placement(device="cpu", dtype=torch.float16):
         core_model_loading.set_param_for_module(
             model,
             "model.layers.0.q_proj.weight",
-            shard,
+            packed,
             None,
-            object(),  # a TP style owns this tensor
-            None,
+            object(),  # a quantizer owns this tensor
         )
 
-    assert record_copies == [], "a TP-owned tensor must not be re-laid-out here"
+    assert record_copies == [], "a quantizer-owned tensor must not be re-laid-out here"
     (_target_name, passed), *rest = forwarded
     assert not rest
-    assert passed is shard, "the tensor must reach Transformers unchanged"
+    assert passed is packed, "the tensor must reach Transformers unchanged"
 
 
 # ── against a real from_pretrained ─────────────────────────────────────
@@ -713,7 +704,7 @@ def tiny_checkpoint(tmp_path_factory):
 def test_the_wrapper_binds_the_real_set_param_for_module_signature():
     """Pin the signature the wrapper forwards positionally.
 
-    ``_spyre_set_param_for_module`` takes six positional parameters and passes
+    ``_spyre_set_param_for_module`` takes five positional parameters and passes
     them straight through. If Transformers reorders or renames them, that
     forwarding silently hands arguments to the wrong parameters, so assert the
     order here rather than discovering it in a model's weights.
@@ -725,7 +716,6 @@ def test_the_wrapper_binds_the_real_set_param_for_module_signature():
         "target_name",
         "param_value",
         "loading_info",
-        "distributed_operation",
         "hf_quantizer",
     ]
     actual = list(inspect.signature(core_model_loading.set_param_for_module).parameters)
@@ -741,7 +731,7 @@ def test_a_real_load_routes_every_parameter_and_preserves_values(
     """Drive a genuine ``from_pretrained`` through the placement block.
 
     Every other test here calls the wrapper directly, which leaves the
-    assumption that Transformers invokes it with six positional arguments
+    assumption that Transformers invokes it with five positional arguments
     unexercised — the same gap that was called out on torch-spyre#4906. This
     runs the real loader, so the routing, the signature binding and the fact
     that the settings are visible from the thread that calls the funnel are all
@@ -1070,7 +1060,7 @@ def test_a_wrapper_looked_up_before_the_last_block_exits_still_installs():
     assert core_model_loading.set_param_for_module is not looked_up
 
     value = torch.full((32, 16), 3.0)
-    looked_up(model, "model.layers.0.q_proj.weight", value, info, None, None)
+    looked_up(model, "model.layers.0.q_proj.weight", value, info, None)
 
     assert torch.equal(model.model.layers[0].q_proj.weight, value)
 
