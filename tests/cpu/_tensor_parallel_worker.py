@@ -367,7 +367,10 @@ def check_models(root: Path, world_size: int, rank: int) -> None:
         if family == "phi3_padded":
             projection = spyre.model.layers[0].self_attn.o_proj
             assert projection.weight.shape == (384, 512 // world_size)
-            assert projection._hf_tp_plan == "spyre_rowwise_split_input"
+            # Preparation keeps only this rank's heads, so the whole fused
+            # weights are dropped and o_proj reduces inside the compiled block.
+            assert spyre.model.layers[0].self_attn.qkv_proj is None
+            assert spyre.model.layers[0].mlp.gate_up_proj is None
         expected_generation = reference.generate(
             ids,
             max_new_tokens=3,
