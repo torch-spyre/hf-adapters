@@ -2653,6 +2653,63 @@ def _without_spyre_allocator_warmup():
         modeling_utils.caching_allocator_warmup = original
 
 
+@contextmanager
+def _maybe_direct_placement(adapter_module, dtype, requested):
+    """Enable direct-to-device placement when the adapter has opted in.
+
+    Yields the placement block, or ``None`` when the load is staged.
+
+    A request for an adapter that has not opted in warns and loads the ordinary
+    CPU-staged way rather than failing: the opt-in tracks whether that
+    adapter's ``prepare_for_spyre`` has been verified against weights that are
+    already on the device, so silently honoring it would trade a slower load
+    for wrong results.
+    """
+    from hf_adapters.spyre_direct_load import (
+        _host_filter,
+        _host_module_prefixes,
+        default_upload_threads,
+        spyre_direct_placement,
+        supports_direct_load,
+    )
+
+    if not requested:
+        yield None
+        return
+    if not supports_direct_load(adapter_module):
+        warnings.warn(
+            f"direct_to_device=True ignored: {adapter_module.__name__} has not "
+            "set SPYRE_SUPPORTS_DIRECT_LOAD. Loading via the host instead.",
+            stacklevel=3,
+        )
+        yield None
+        return
+
+    with (
+        # Harmless on the CPU device map, but keeps the direct path safe if the
+        # warmup ever learns to size itself from the eventual placement.
+        _without_spyre_allocator_warmup(),
+        spyre_direct_placement(
+            device=DEVICE,
+            dtype=dtype,
+            host_modules=_host_module_prefixes(adapter_module),
+            host_filter=_host_filter(adapter_module),
+            upload_threads=default_upload_threads(DEVICE),
+        ) as block,
+    ):
+        yield block
+    if block is not None and block.placed == 0:
+        # The load went through, so the model is correct, but it was staged on
+        # the host: Transformers never called the funnel this patch replaces.
+        warnings.warn(
+            "direct_to_device=True had no effect: no weight reached the "
+            "direct-placement funnel, so the model was loaded via the host. "
+            "Check that this Transformers version still installs weights "
+            "through core_model_loading.set_param_for_module.",
+            stacklevel=3,
+        )
+
+
 def load_model_common(
     model_path: str | os.PathLike[str],
     module: ModuleType | None,
@@ -2660,6 +2717,7 @@ def load_model_common(
     auto_model_cls: Any = None,
     tp_plan: dict[str, str] | str | None = None,
     trust_remote_code: bool | None = None,
+    direct_to_device: bool = False,
 ) -> PreTrainedModel:
     """Load an HF model.
 
@@ -2677,8 +2735,33 @@ def load_model_common(
         trust_remote_code: Passed through to the adapter's ``load_hf_model`` (or
             to HF's ``from_pretrained``) so checkpoints shipping custom modeling
             code load only when the caller explicitly opts in.
+        direct_to_device: Transfer each weight to Spyre as it is materialized
+            instead of staging converted copies of the whole model on the host
+            (see ``spyre_direct_load``). Caps peak *anonymous* host memory at
+            what waits for the upload threads (about 1 GiB) plus whatever the
+            adapter holds back, by also turning off Transformers' checkpoint
+            read-ahead for the duration of the load. The saving is for dtype-converting loads (e.g. fp16 from a
+            bf16 checkpoint); when the load dtype matches the checkpoint the
+            staged path already mmap's and anonymous memory is similar. Opt-in,
+            and only honored by adapters that set
+            ``SPYRE_SUPPORTS_DIRECT_LOAD``; an adapter with its own
+            ``load_hf_model`` loads the staged way, with a warning. Not
+            available with ``tp_plan``: the TP styles already load
+            shard-by-shard onto the device. After a direct load the model's
+            ``_spyre_direct_placed`` is the number of tensors placed.
+
+    Raises:
+        ValueError: If ``direct_to_device`` is combined with ``tp_plan``.
     """
     from hf_adapters._model_loading import model_subfolder
+
+    if direct_to_device and tp_plan is not None:
+        raise ValueError(
+            "direct_to_device is not supported with tp_plan: the Spyre TP "
+            "styles already slice checkpoints straight onto the device, so "
+            "placing whole tensors first would cost device memory and a "
+            "lossy fp16 round trip"
+        )
 
     if auto_model_cls is None:
         from transformers import AutoModel
@@ -2687,6 +2770,13 @@ def load_model_common(
 
     model: PreTrainedModel
     if module is not None and hasattr(module, "load_hf_model"):
+        if direct_to_device:
+            warnings.warn(
+                f"direct_to_device=True ignored: {module.__name__} loads through "
+                "its own load_hf_model. Loading via the host instead.",
+                stacklevel=2,
+            )
+
         # _sig was already inspected above (for the tp_plan support check).
         # Re-inspect here to determine which optional kwargs this loader accepts.
         import inspect as _inspect
@@ -2736,13 +2826,22 @@ def load_model_common(
                 trust_remote_code=trust_remote_code,
             )
     else:
-        model = auto_model_cls.from_pretrained(
-            model_path,
-            subfolder=model_subfolder(model_path),
-            dtype=dtype,
-            device_map="cpu",
-            trust_remote_code=trust_remote_code,
-        )
+        with _maybe_direct_placement(module, dtype, direct_to_device) as placement:
+            # device_map stays "cpu": Transformers keeps the checkpoint slices
+            # lazy on the host and the direct-placement wrapper transfers each
+            # parameter at its final name. Asking HF for device_map="spyre"
+            # instead would pick layouts from pre-conversion checkpoint keys,
+            # turn itself off for adapters with host-resident submodules, and
+            # run caching_allocator_warmup for the whole rank at once.
+            model = auto_model_cls.from_pretrained(
+                model_path,
+                subfolder=model_subfolder(model_path),
+                dtype=dtype,
+                device_map="cpu",
+                trust_remote_code=trust_remote_code,
+            )
+        if placement is not None:
+            model._spyre_direct_placed = placement.placed
 
     model.eval()
     model.requires_grad_(False)
@@ -4142,6 +4241,46 @@ def encoder_backbone_forward(model, input_ids, attn_mask, position_ids, token_ty
     return h
 
 
+def rope_padded_head_dim(cfg) -> int | None:
+    """Head dim ``prepare_rope_and_heads`` pads attention to, or ``None`` if it won't.
+
+    The RoPE reshape ``[B, L, H, 2, D/2]`` requires ``D/2 >= BLOCK_SIZE``, so the
+    head dim is rounded up to the next multiple of ``2 * BLOCK_SIZE``.
+    """
+    orig_head_dim = (
+        getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
+    )
+    stick_aligned_head_dim = (
+        (orig_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)
+    ) * (2 * BLOCK_SIZE)
+    return stick_aligned_head_dim if stick_aligned_head_dim > orig_head_dim else None
+
+
+_PADDED_ATTENTION_PROJECTIONS = frozenset({"q_proj", "k_proj", "v_proj", "o_proj"})
+
+
+def padded_attention_stays_on_host(model, target_name) -> bool:
+    """Direct-load host rule for adapters whose prep runs ``pad_attention_heads``.
+
+    ``pad_attention_heads`` rebuilds ``self_attn.{q,k,v,o}_proj`` on the host.
+    A projection already on the device is first read back with
+    ``proj.to("cpu")``, which is lossy for fp16 (DLFLOAT16 on the device), and
+    the padded result is then transferred a second time by the final model move.
+    Keeping these weights on the host avoids both. Adapters that call
+    ``prepare_rope_and_heads`` expose this as ``spyre_direct_stays_on_host``.
+    """
+    if rope_padded_head_dim(text_config(model.config)) is None:
+        return False
+    parts = target_name.split(".")
+    try:
+        attn_at = parts.index("self_attn")
+    except ValueError:
+        return False
+    return (
+        attn_at + 1 < len(parts) and parts[attn_at + 1] in _PADDED_ATTENTION_PROJECTIONS
+    )
+
+
 def prepare_rope_and_heads(model):
     cfg = text_config(model.config)
     orig_head_dim = (
@@ -4162,14 +4301,8 @@ def prepare_rope_and_heads(model):
         )
     model._spyre_decode_mask_num_heads = local_query_heads
 
-    # RoPE reshape [B,L,H,2,D/2] requires D/2 >= BLOCK_SIZE.
-    # Compute minimum stick-aligned head_dim: round up to next multiple of 2*BLOCK_SIZE.
-    padded_head_dim = None
-    stick_aligned_head_dim = (
-        (orig_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)
-    ) * (2 * BLOCK_SIZE)
-    if stick_aligned_head_dim > orig_head_dim:
-        padded_head_dim = stick_aligned_head_dim
+    padded_head_dim = rope_padded_head_dim(cfg)
+    if padded_head_dim is not None:
         pad_attention_heads(
             model,
             get_backbone(model).layers,
