@@ -75,6 +75,7 @@ SUITE_TIERS: dict[str, tuple[str, ...]] = {
     "token_classification_compare": ("regression", "trunk", "unit"),
     "token_compare": ("integration", "regression", "trunk", "unit"),
     "vlm": ("regression", "trunk", "unit"),
+    "yolo_compare": ("regression", "trunk", "unit"),
 }
 
 # Parametrize argnames whose value names the model under test. `model_path` covers almost
