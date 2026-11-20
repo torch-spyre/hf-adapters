@@ -65,42 +65,55 @@ __all__ = [
 ]
 
 
-def _router_probs(x, weight, scale, root_size, eps):
+def _router_scores(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor | float,
+    root_size: float,
+    eps: float,
+) -> torch.Tensor:
     x = _gemma4_rms_norm(x, None, eps)
-    return torch.softmax(F.linear(x * scale * root_size, weight), dim=-1)
+    # HF selects from fp32 softmax probabilities. Selecting directly from the
+    # scores preserves that ordering without rounding nearby probabilities to
+    # the same fp16 value (or requiring Spyre's unsupported fp32 top-k layout).
+    return F.linear(x * scale * root_size, weight)
 
 
 def _compiled_moe_loop_region(
-    x_router,
-    x_expert,
-    router_proj_w,
-    router_scale,
-    router_scalar_root_size,
-    per_expert_scale_stick,
-    gate_dev,
-    up_dev,
-    down_dev,
-    top_k,
-    tile,
-    stick_size,
-    eps,
-    decode_chunks=1,
-    chunk_scale=None,
-    chunk_offsets=None,
-):
+    x_router: torch.Tensor,
+    x_expert: torch.Tensor,
+    router_proj_w: torch.Tensor,
+    router_scale: torch.Tensor | float,
+    router_scalar_root_size: float,
+    per_expert_scale_stick: torch.Tensor,
+    gate_dev: torch.Tensor,
+    up_dev: torch.Tensor,
+    down_dev: torch.Tensor,
+    top_k: int,
+    tile: int,
+    stick_size: int,
+    eps: float,
+    decode_chunks: int = 1,
+    chunk_scale: torch.Tensor | None = None,
+    chunk_offsets: torch.Tensor | None = None,
+) -> torch.Tensor:
     """Run routed decode on single-token slices; gather cannot lower packed top-k rows."""
 
-    def decode_token(router_input, expert_input):
-        probs = _router_probs(
+    def decode_token(
+        router_input: torch.Tensor, expert_input: torch.Tensor
+    ) -> torch.Tensor:
+        scores = _router_scores(
             router_input,
             router_proj_w,
             router_scale,
             router_scalar_root_size,
             eps,
         )
-        weights, expert_indices = moe_topk(probs, top_k)
-        weights = weights / weights.sum(-1, keepdim=True)
-        return moe_decode_selected_experts(
+        selected_scores, expert_indices = moe_topk(scores, top_k)
+        # softmax over the selected scores equals HF's selected probabilities
+        # divided by their sum; rounding now cannot change the selected set.
+        weights = torch.softmax(selected_scores, dim=-1)
+        output: torch.Tensor = moe_decode_selected_experts(
             expert_input,
             weights,
             expert_indices,
@@ -116,6 +129,7 @@ def _compiled_moe_loop_region(
             chunk_scale=chunk_scale,
             chunk_offsets=chunk_offsets,
         )
+        return output
 
     if x_router.shape[0] == 1:
         return decode_token(x_router, x_expert)
@@ -133,27 +147,27 @@ def _compiled_moe_loop_region(
 
 
 def _moe_route_persistent_packed(
-    x_router,
-    router_proj_w,
-    router_scale,
-    router_scalar_root_size,
-    per_expert_scale,
-    top_k,
-    stick_size,
-    eps,
-    route_identity,
-):
+    x_router: torch.Tensor,
+    router_proj_w: torch.Tensor,
+    router_scale: torch.Tensor | float,
+    router_scalar_root_size: float,
+    per_expert_scale: torch.Tensor,
+    top_k: int,
+    stick_size: int,
+    eps: float,
+    route_identity: torch.Tensor,
+) -> torch.Tensor:
     """Compute packed prefill routing weights on device."""
-    probs = _router_probs(
+    scores = _router_scores(
         x_router,
         router_proj_w,
         router_scale,
         router_scalar_root_size,
         eps,
     )
-    _, selected = moe_topk(probs, top_k)
-    weights = torch.ops.spyre.keep_by_index(probs, selected, -1, 0.0)
-    weights = weights / weights.sum(-1, keepdim=True)
+    _, selected = moe_topk(scores, top_k)
+    selected_scores = torch.ops.spyre.keep_by_index(scores, selected, -1, float("-inf"))
+    weights = torch.softmax(selected_scores, dim=-1)
     weights = weights * per_expert_scale
 
     # ReLU materializes the expansion; the identity BMM puts it on a stick.
