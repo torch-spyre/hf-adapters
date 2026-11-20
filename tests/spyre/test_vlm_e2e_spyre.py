@@ -21,7 +21,8 @@ compares the adapter (Spyre) against stock HF (CPU) **token-by-token over prefil
 + N decode steps**. The hard assertion is a per-step logit-vector cosine floor;
 per-step top-1 agreement is printed for visibility but not asserted (see below).
 This is the same spirit as ``test_e2e_token_compare_spyre`` for causal LMs, which
-likewise compares per-step logits — but it asserts the cosine rather than top-1.
+likewise compares per-step logits — but this test asserts only the cosine, while
+the causal test also asserts top-1.
 
   test_vlm_generate_spyre[<key>]
     Builds image+prompt with the processor, runs stock greedy on CPU capturing
@@ -43,8 +44,8 @@ top-1 alone is too brittle here: when the next-token distribution has two near-t
 candidates (within fp16 rounding), the tiny substrate difference can flip the
 argmax while cosine stays ~0.9999 — benign rounding on a numerically arbitrary
 winner, not a regression. Open-ended caption prompts hit such near-ties readily
-(the sharp text prompts ``test_e2e_token_compare_spyre`` uses do not, which is why
-it can assert top-1). So we assert the cosine and report top-1.
+(``test_e2e_token_compare_spyre`` still asserts top-1, and its Gemma 4 12B-it
+prefill is one such near-tie: see #494). So we assert the cosine and report top-1.
 
 Parametrized off ``VISION_MODELS``; selects ``kind="vlm"`` entries.
 
