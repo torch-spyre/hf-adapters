@@ -1247,6 +1247,57 @@ def pad_qk_proj_for_rope(proj, n_heads, orig_head_dim, padded_head_dim):
     return new_proj
 
 
+class PaddedHeadRMSNorm(nn.Module):
+    """Per-head RMSNorm over a head zero-padded by ``pad_attention_heads``.
+
+    Q/K heads are padded half-wise (``[x1, 0, x2, 0]``) for the RoPE ``[2, D/2]``
+    reshape, so the norm weight is laid out the same way, and the variance is
+    divided by the *original* head_dim so the zero padding does not shrink it.
+    Used by adapters with per-head Q/K norms (Qwen3 ``q_norm``/``k_norm``, LFM2
+    ``q_layernorm``/``k_layernorm``).
+    """
+
+    def __init__(self, norm: nn.Module, original_dim: int, padded_dim: int) -> None:
+        super().__init__()
+        source_weight = norm.weight
+        variance_epsilon = norm.variance_epsilon
+        if not isinstance(source_weight, torch.Tensor) or not isinstance(
+            variance_epsilon, float
+        ):
+            raise TypeError(
+                f"{type(norm).__name__} is not an RMSNorm with a weight tensor "
+                "and a float variance_epsilon"
+            )
+        half: int = original_dim // 2
+        padded_half: int = padded_dim // 2
+        weight: torch.Tensor = torch.zeros(padded_dim, dtype=source_weight.dtype)
+        weight[:half] = source_weight[:half]
+        weight[padded_half : padded_half + half] = source_weight[half:]
+        self.weight = nn.Parameter(weight, requires_grad=False)
+        self.original_dim: int = original_dim
+        self.variance_epsilon: float = variance_epsilon
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        input_dtype: torch.dtype = hidden_states.dtype
+        if hidden_states.device.type == "spyre":
+            variance = (hidden_states * hidden_states).sum(-1, keepdim=True)
+            variance = variance / self.original_dim
+            hidden_states = hidden_states * torch.rsqrt(
+                variance + self.variance_epsilon
+            )
+        else:
+            h = hidden_states.float()
+            variance = (h * h).sum(-1, keepdim=True) / self.original_dim
+            hidden_states = h * torch.rsqrt(variance + self.variance_epsilon)
+            hidden_states = hidden_states.to(input_dtype)
+        return self.weight * hidden_states
+
+
+def rope_padded_head_dim(head_dim: int) -> int:
+    """Round ``head_dim`` up so ``head_dim / 2`` is a whole number of sticks."""
+    return ((head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)) * (2 * BLOCK_SIZE)
+
+
 def pad_attention_heads(
     model, layers, orig_head_dim, padded_head_dim, num_heads, num_kv_heads
 ):

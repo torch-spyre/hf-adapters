@@ -26,6 +26,7 @@ import torch.nn.functional as F
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
+    PaddedHeadRMSNorm,
     PrecomputedRotaryEmbedding,
     allocate_kv_cache_tensor,
     apply_rope_matmul,
@@ -34,38 +35,9 @@ from hf_adapters.hf_common import (
     kv_cache_update,
     pad_attention_heads,
     prepare_lm_head_for_spyre,
+    rope_padded_head_dim,
     run_lm_head,
 )
-
-
-class _PaddedHeadRMSNorm(nn.Module):
-    """RMSNorm a zero-padded head using the original active dimension."""
-
-    def __init__(self, norm, original_dim, padded_dim):
-        super().__init__()
-        half = original_dim // 2
-        padded_half = padded_dim // 2
-        weight = torch.zeros(padded_dim, dtype=norm.weight.dtype)
-        weight[:half] = norm.weight[:half]
-        weight[padded_half : padded_half + half] = norm.weight[half:]
-        self.weight = nn.Parameter(weight, requires_grad=False)
-        self.original_dim = original_dim
-        self.variance_epsilon = norm.variance_epsilon
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        if hidden_states.device.type == "spyre":
-            variance = (hidden_states * hidden_states).sum(-1, keepdim=True)
-            variance = variance / self.original_dim
-            hidden_states = hidden_states * torch.rsqrt(
-                variance + self.variance_epsilon
-            )
-        else:
-            h = hidden_states.float()
-            variance = (h * h).sum(-1, keepdim=True) / self.original_dim
-            hidden_states = h * torch.rsqrt(variance + self.variance_epsilon)
-            hidden_states = hidden_states.to(input_dtype)
-        return self.weight * hidden_states
 
 
 def _causal_depthwise_conv(
@@ -391,9 +363,7 @@ def prepare_for_spyre(model):
         cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads
     )
     attention_layers = [layer for layer in backbone.layers if layer.is_attention_layer]
-    padded_head_dim = ((original_head_dim + 2 * BLOCK_SIZE - 1) // (2 * BLOCK_SIZE)) * (
-        2 * BLOCK_SIZE
-    )
+    padded_head_dim = rope_padded_head_dim(original_head_dim)
     if padded_head_dim != original_head_dim:
         for layer in attention_layers:
             layer.self_attn.o_proj = layer.self_attn.out_proj
@@ -419,10 +389,10 @@ def prepare_for_spyre(model):
             if not layer.is_attention_layer:
                 continue
             attn = layer.self_attn
-            attn.q_layernorm = _PaddedHeadRMSNorm(
+            attn.q_layernorm = PaddedHeadRMSNorm(
                 attn.q_layernorm, original_head_dim, padded_head_dim
             )
-            attn.k_layernorm = _PaddedHeadRMSNorm(
+            attn.k_layernorm = PaddedHeadRMSNorm(
                 attn.k_layernorm, original_head_dim, padded_head_dim
             )
 
