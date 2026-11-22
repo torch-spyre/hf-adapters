@@ -192,6 +192,7 @@ def test_fullgraph_capture(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.slow
+@pytest.mark.model_harness("multimodal_embedding")
 @pytest.mark.parametrize("model_path", ["google/embeddinggemma-2"])
 def test_sentence_transformers_checkpoint(
     monkeypatch: pytest.MonkeyPatch, model_path: str

@@ -802,7 +802,6 @@ MULTIMODAL_EMBEDDING_MODELS: dict[str, dict[str, Any]] = {
         "kind": "multimodal_embedding",
         "dtype": "bfloat16",
         "size": "0.74b",
-        "gated": True,
     },
     "clip_vit_b_32": {
         "name": "clip-ViT-B-32",
