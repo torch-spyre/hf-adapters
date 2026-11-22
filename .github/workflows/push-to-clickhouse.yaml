@@ -256,6 +256,8 @@ jobs:
       deadline: ${{ steps.deadline.outputs.deadline }}
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      # Slow discovery's per-model requests; HTTP 429 retries handle quota resets.
+      HF_CATALOG_MAX_WORKERS: "2"
       # CLICKHOUSE_* are inherited from the workflow-level env block. This job
       # needs them because it writes the terminal verdict rows for the models it
       # filters out.
