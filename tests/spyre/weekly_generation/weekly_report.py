@@ -24,8 +24,11 @@ Usage::
     python tests/spyre/weekly_generation/weekly_report.py \\
         --mode generative --cluster-method exact
 
-Credentials are read from .env (CLICKHOUSE_HOST / CLICKHOUSE_PASS etc.) exactly
-as the rest of the weekly pipeline does — see clickhouse_db.py.
+Credentials are read from .env (CLICKHOUSE_HOST / CLICKHOUSE_PASS etc.) — see
+clickhouse_db.py. NOTE: this reads the legacy v1 ``{generative,embedding}_model_spyre_support``
+tables, which the weekly scan no longer writes: it reports on FROZEN data ending with the
+last snapshot written before the v2-only switch. New snapshots are in spyre_v2
+``capability_runs`` (test_type model_support).
 """
 
 from __future__ import annotations

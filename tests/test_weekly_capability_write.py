@@ -72,9 +72,11 @@ class _Client:
     def __init__(self, recorded=()):
         self.recorded = list(recorded)
         self.params: list[dict] = []
+        self.sqls: list[str] = []
 
     def query(self, sql, parameters):
         self.params.append(parameters)
+        self.sqls.append(sql)
         return types.SimpleNamespace(result_rows=[(m,) for m in self.recorded])
 
 
@@ -197,3 +199,48 @@ def test_the_dedup_query_is_chunked(inserted):
     rows = [_row(model_name=f"org/m{i}") for i in range(1201)]
     assert write(rows, client, "spyre_v2") == 2402
     assert [len(p["subjects"]) for p in client.params] == [500, 500, 201]
+
+
+def test_a_missing_model_type_matches_the_skip_set():
+    client = _Client()
+    recorded_for_snapshot(client, "spyre_v2", "2026-11-21", "generative")
+    # Rows written before model_type was a prop still count as recorded.
+    assert "IN ({model_type:String}, '')" in client.sqls[0]
+
+
+def test_hardware_failures_are_judged_on_the_latest_spyre_verdict():
+    client = _Client(recorded=["org/a"])
+    got = recorded_for_snapshot(
+        client, "spyre_v2", "2026-11-21", "generative", fail_reason="hardware_exception"
+    )
+    assert got == {"org/a"}
+    sql = client.sqls[0]
+    assert "r.backend = 'spyre'" in sql
+    assert "HAVING argMax(r.fail_reason, r.ts) = {fail_reason:String}" in sql
+    assert client.params[0]["fail_reason"] == "hardware_exception"
+
+
+def test_a_partial_drop_is_logged(inserted, capsys):
+    write([_row(model_name="org/a"), _row(model_name="org/b")], _Client(["org/a"]), "d")
+    assert "skipped 1 model(s)" in capsys.readouterr().out
+
+
+def test_a_failing_close_does_not_replace_the_body_error():
+    from tests.spyre.weekly_generation.sink.result_sink import ResultSink
+
+    class _Sink(ResultSink):
+        def _insert_entry(self, **_k):
+            pass
+
+        def get_models_at_snapshot_date(self, *, snapshot_date):
+            return set()
+
+        def close(self):
+            raise ConnectionError("close failed")
+
+    with pytest.raises(ValueError, match="body"):
+        with _Sink():
+            raise ValueError("body")
+    with pytest.raises(ConnectionError):
+        with _Sink():
+            pass

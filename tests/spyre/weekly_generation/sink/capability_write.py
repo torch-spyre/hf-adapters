@@ -160,12 +160,16 @@ def recorded_for_snapshot(
     model_type: str,
     fail_reason: str = "",
 ) -> set[str]:
-    """Models with a verdict for a snapshot date and model type, optionally only failing with
-    *fail_reason*."""
+    """Models with a verdict for a snapshot date and model type.
+
+    Rows written before ``model_type`` became a prop carry none, so a missing one matches.
+    With *fail_reason*, only models whose LATEST spyre verdict failed with it: one that
+    failed once and passed on a later run is not returned.
+    """
     sql = (
         _SUBJECTS_RECORDED_SQL
         + "AND r.props['snapshot_date'] = {snapshot_date:String} "
-        "AND r.props['model_type'] = {model_type:String}"
+        "AND r.props['model_type'] IN ({model_type:String}, '')"
     )
     parameters = {
         "db": db,
@@ -175,7 +179,10 @@ def recorded_for_snapshot(
         "model_type": model_type,
     }
     if fail_reason:
-        sql += " AND r.fail_reason = {fail_reason:String}"
+        sql += (
+            " AND r.backend = 'spyre' GROUP BY c.subject"
+            " HAVING argMax(r.fail_reason, r.ts) = {fail_reason:String}"
+        )
         parameters["fail_reason"] = fail_reason
     return {row[0] for row in client.query(sql, parameters=parameters).result_rows}
 
@@ -210,6 +217,10 @@ def write(
     models = sorted({str(r.get("model_name") or "") for r in rows} - {""})
     seen = recorded_in_run(client, db, run_id, shard, models) if models else set()
     fresh = [r for r in rows if str(r.get("model_name") or "") not in seen]
+    if len(fresh) < len(rows):
+        print(
+            f"  v2: skipped {len(rows) - len(fresh)} model(s) this run and shard already recorded."
+        )
     if not fresh:
         print(
             f"  v2: run {run_id} shard {shard or '<none>'} already recorded this batch -- skipping."

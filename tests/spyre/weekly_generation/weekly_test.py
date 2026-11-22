@@ -21,7 +21,7 @@ happen in the worker.
 ``--mode`` is parsed into a ``ModelType``, which selects the per-process batch
 size, the model class loaded in ``_load_on_cpu``, the verification pipeline in
 ``eval_model`` (token-compare for generative, cosine-compare for embedding), and
-which ClickHouse table the sink reads and writes. With ``--fetch`` it also picks
+which model_type the sink records and skips on. With ``--fetch`` it also picks
 the catalog to fetch.
 
 Process model
@@ -59,8 +59,8 @@ One row is recorded per model handled, so a run's row count never silently
 disagrees with its input. Nothing is filtered at write time — a row reaching the
 sink is one the caller decided to record, and dropping it there would leave a run
 with fewer rows than the models it handled and no accounting for the difference.
-Same-day duplicates are collapsed on merge by
-``ReplacingMergeTree(snapshot_date)``.
+A model this run and shard already recorded is skipped by the v2 dedup in
+``capability_write``.
 """
 
 import argparse
