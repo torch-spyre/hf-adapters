@@ -324,10 +324,12 @@ def test_non_remote_code_failures_are_not_reclassified(
     "network_error",
     [
         httpx.ConnectError("Connection reset"),
+        httpx.ReadError("Connection reset while reading"),
+        httpx.WriteError("Connection reset while writing"),
         httpx.ReadTimeout("Read timed out"),
         httpx.RemoteProtocolError("Server disconnected"),
     ],
-    ids=["connect", "timeout", "protocol"],
+    ids=["connect", "read", "write", "timeout", "protocol"],
 )
 def test_network_errors_are_retried(
     monkeypatch: pytest.MonkeyPatch,
@@ -352,15 +354,22 @@ def test_network_errors_are_retried(
 
 
 @pytest.mark.parametrize("kind", ["generative", "embedding"])
+@pytest.mark.parametrize(
+    "network_error_type", [httpx.ConnectError, httpx.ReadError, httpx.WriteError]
+)
 def test_persistent_network_errors_fail_visibly(
-    monkeypatch: pytest.MonkeyPatch, kind: str, waits: list[float]
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    network_error_type: type[httpx.NetworkError],
+    waits: list[float],
 ) -> None:
-    error: OSError = _wrapped_network_error()
+    error: OSError = _wrapped_network_error(network_error_type("Connection reset"))
     request = Mock(side_effect=error)
     monkeypatch.setattr(catalog.AutoConfig, "from_pretrained", request)
 
     with pytest.raises(
-        catalog.HubRetryExhaustedError, match="ConnectError after 5 attempts"
+        catalog.HubRetryExhaustedError,
+        match=f"{network_error_type.__name__} after 5 attempts",
     ) as caught:
         _build_catalog(kind)
 

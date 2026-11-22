@@ -115,10 +115,10 @@ def catalog_max_workers() -> int:
 
 # Throttling and gateway failures can recover; other HTTP errors are not retried.
 _TRANSIENT_HTTP_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
-# Connection drops and timeouts can recover too. huggingface_hub chains these
-# under LocalEntryNotFoundError, which Transformers wraps again in an OSError.
+# Match the Hub client's transient network failures, including read/write drops.
+# These may be chained under LocalEntryNotFoundError or wrapped in an OSError.
 _TRANSIENT_NETWORK_ERRORS: tuple[type[httpx.TransportError], ...] = (
-    httpx.ConnectError,
+    httpx.NetworkError,
     httpx.TimeoutException,
     httpx.RemoteProtocolError,
 )
