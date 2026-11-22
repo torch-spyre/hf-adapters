@@ -12,15 +12,18 @@ import logging
 import os
 import re
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Literal, TypeVar
 
 from huggingface_hub.errors import HfHubHTTPError
 from huggingface_hub.hf_api import ExpandModelProperty_T, ModelInfo
+from huggingface_hub.utils import RateLimitInfo, parse_ratelimit_headers
 from tqdm import tqdm
-from transformers import AutoConfig
+from transformers import AutoConfig, PretrainedConfig
 
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
@@ -109,49 +112,106 @@ def catalog_max_workers() -> int:
     return value
 
 
-# HF-API gateway 5xx statuses. Anything outside this set (400/401/403/404/...)
-# is a permanent failure and must not be retried.
-_TRANSIENT_HTTP_STATUSES: frozenset[int] = frozenset({500, 502, 503, 504})
+# Throttling and gateway failures can recover; other HTTP errors are not retried.
+_TRANSIENT_HTTP_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 _MAX_FETCH_ATTEMPTS: int = 5
 _MAX_BACKOFF_SECONDS: float = 60.0
+# Without usable response headers, wait a full HF quota window before retrying.
+_RATE_LIMIT_FALLBACK_SECONDS: float = 300.0
+_RATE_LIMIT_BUFFER_SECONDS: float = 1.0
 
 _T = TypeVar("_T")
+
+
+class HubRetryExhaustedError(RuntimeError):
+    """Discovery cannot continue without silently losing models or metadata."""
+
+
+def _hub_http_error(error: BaseException) -> HfHubHTTPError | None:
+    """Find HTTP failures that Transformers may wrap in an OSError."""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, HfHubHTTPError):
+            return current
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _rate_limit_delay(error: HfHubHTTPError) -> float:
+    """Honor both server hints without applying the short gateway-backoff cap."""
+    delays: list[float] = []
+    if error.response is not None:
+        headers: Mapping[str, str] = error.response.headers
+        retry_after: str = headers.get("Retry-After", "").strip()
+        if retry_after.isdigit():
+            delays.append(float(retry_after))
+        elif retry_after:
+            try:
+                retry_at: datetime = parsedate_to_datetime(retry_after)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                delays.append(max(0.0, retry_at.timestamp() - time.time()))
+            except (TypeError, ValueError, OverflowError):
+                pass
+
+        rate_limit: RateLimitInfo | None = parse_ratelimit_headers(headers)
+        if rate_limit is not None and rate_limit.remaining == 0:
+            delays.append(float(rate_limit.reset_in_seconds))
+
+    return (
+        max(delays, default=_RATE_LIMIT_FALLBACK_SECONDS) + _RATE_LIMIT_BUFFER_SECONDS
+    )
+
+
+def _retry_hub_call(call: Callable[[], _T], description: str) -> _T:
+    """Retry throttling and gateway errors, including wrapped config failures.
+
+    Exhaustion has a distinct exception so model-level guards cannot turn a
+    temporary Hub outage into rejected models or missing config metadata.
+    """
+    for attempt in range(1, _MAX_FETCH_ATTEMPTS + 1):
+        try:
+            return call()
+        except Exception as error:
+            http_error: HfHubHTTPError | None = _hub_http_error(error)
+            status: int | None = (
+                http_error.response.status_code
+                if http_error is not None and http_error.response is not None
+                else None
+            )
+            if http_error is None or status not in _TRANSIENT_HTTP_STATUSES:
+                raise
+            if attempt == _MAX_FETCH_ATTEMPTS:
+                raise HubRetryExhaustedError(
+                    f"{description}: HF API returned {status} after {attempt} attempts"
+                ) from error
+            backoff: float = (
+                _rate_limit_delay(http_error)
+                if status == 429
+                else min(_MAX_BACKOFF_SECONDS, 2.0**attempt)
+            )
+            print(
+                f"    {description}: HF API returned {status} "
+                f"(attempt {attempt}/{_MAX_FETCH_ATTEMPTS}); "
+                f"retrying in {backoff:.1f}s...",
+                flush=True,
+            )
+            time.sleep(backoff)
+    raise AssertionError("HF retry loop requires at least one attempt")
 
 
 def with_transient_retry(
     call: Callable[[], Iterator[_T] | Iterable[_T]],
     description: str,
 ) -> list[_T]:
-    """Materialize an HF paginated call, retrying transient 5xx failures.
+    """Materialize an HF listing, retrying HTTP 429 and transient 5xx failures.
 
-    *call* is expected to return an iterable of ``ModelInfo`` (or similar)
-    from a ``huggingface_hub`` API method. It is fully consumed into a list
-    on each attempt because the pagination endpoint's failure mode is a
-    mid-stream 504, and there is no way to resume — the whole traversal has
-    to restart. Transient statuses (500/502/503/504) trigger up to
-    ``_MAX_FETCH_ATTEMPTS`` retries with exponential backoff capped at
-    ``_MAX_BACKOFF_SECONDS``; any other error propagates immediately.
+    Consume the iterable inside the retry boundary so a failure on a later page
+    restarts the traversal without returning partial or duplicate results.
     """
-    last_error: HfHubHTTPError | None = None
-    for attempt in range(1, _MAX_FETCH_ATTEMPTS + 1):
-        try:
-            return list(call())
-        except HfHubHTTPError as e:
-            status: int | None = (
-                e.response.status_code if e.response is not None else None
-            )
-            if status not in _TRANSIENT_HTTP_STATUSES:
-                raise
-            last_error = e
-            backoff: float = min(_MAX_BACKOFF_SECONDS, 2.0**attempt)
-            print(
-                f"    {description}: HF API returned {status} "
-                f"(attempt {attempt}/{_MAX_FETCH_ATTEMPTS}); "
-                f"retrying in {backoff:.0f}s..."
-            )
-            time.sleep(backoff)
-    assert last_error is not None
-    raise last_error
+    return _retry_hub_call(lambda: list(call()), description)
 
 
 MOE_MODEL_TYPES: set[str] = {
@@ -237,17 +297,22 @@ def is_baseline_keep(model: ModelInfo) -> tuple[bool, str]:
 
 
 def _guarded(fn: Callable[[], bool], name: str) -> tuple[bool, str]:
-    """Call fn(); return (result, "") on success or (False, "exception during <name>") on error."""
+    """Return model-level failure details; propagate exhausted Hub retries."""
     try:
         return fn(), ""
+    except HubRetryExhaustedError:
+        raise
     except Exception:
         return False, f"exception during {name}"
 
 
 def contains_remote_code(model: ModelInfo) -> bool:
-    """Return False if the model requires trust_remote_code=True to load its config."""
+    """Check whether config loading fails with remote code disabled."""
     try:
-        AutoConfig.from_pretrained(model.id, trust_remote_code=False)
+        _retry_hub_call(
+            lambda: AutoConfig.from_pretrained(model.id, trust_remote_code=False),
+            description=f"config[{model.id}]",
+        )
         return False
     except (ValueError, OSError):
         return True
@@ -348,10 +413,15 @@ def get_param_count(model: ModelInfo) -> int | None:
 
 def get_config_type(model_id: str, token: str | bool) -> str | None:
     try:
-        model_config = AutoConfig.from_pretrained(
-            model_id, token=token, trust_remote_code=False
+        model_config: PretrainedConfig = _retry_hub_call(
+            lambda: AutoConfig.from_pretrained(
+                model_id, token=token, trust_remote_code=False
+            ),
+            description=f"config[{model_id}]",
         )
         return type(model_config).__name__
+    except HubRetryExhaustedError:
+        raise
     except Exception:
         return None
 
@@ -409,6 +479,8 @@ def build_catalog(
     def _safe_filter(model: ModelInfo) -> tuple[bool, str]:
         try:
             return filter_fn(model)
+        except HubRetryExhaustedError:
+            raise
         except Exception:
             return False, "_safe_filter raised an exception"
 
@@ -425,15 +497,20 @@ def build_catalog(
 
     t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        keep_flags: list[tuple[bool, str]] = list(
-            tqdm(
-                ex.map(_safe_filter, candidates),
-                total=len(candidates),
-                desc="Filtering candidates",
-                miniters=1000,
-                mininterval=10,
+        try:
+            keep_flags: list[tuple[bool, str]] = list(
+                tqdm(
+                    ex.map(_safe_filter, candidates),
+                    total=len(candidates),
+                    desc="Filtering candidates",
+                    miniters=1000,
+                    mininterval=10,
+                )
             )
-        )
+        except HubRetryExhaustedError:
+            # Do not spend another retry budget on every queued candidate.
+            ex.shutdown(wait=False, cancel_futures=True)
+            raise
     models: list[ModelInfo] = [
         m for m, (keep, _) in zip(candidates, keep_flags) if keep
     ]
@@ -472,15 +549,19 @@ def build_catalog(
 
     t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        config_classes: list[str | None] = list(
-            tqdm(
-                ex.map(lambda m: get_config_type(m.id, token), models),
-                total=len(models),
-                desc="Fetching config classes",
-                miniters=1000,
-                mininterval=10,
+        try:
+            config_classes: list[str | None] = list(
+                tqdm(
+                    ex.map(lambda m: get_config_type(m.id, token), models),
+                    total=len(models),
+                    desc="Fetching config classes",
+                    miniters=1000,
+                    mininterval=10,
+                )
             )
-        )
+        except HubRetryExhaustedError:
+            ex.shutdown(wait=False, cancel_futures=True)
+            raise
     timings["config classes (AutoConfig)"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
