@@ -25,6 +25,7 @@ weekly:
   - mistralai/Ministral-3-8B-Instruct-2512
   - allenai/OLMo-1B-hf
   - allenai/OLMo-2-0425-1B
+  - allenai/Olmo-3-7B-Instruct
   - allenai/OLMoE-1B-7B-0924
   - unsloth/gemma-2-2b-it
   - unsloth/gemma-3-1b-it
