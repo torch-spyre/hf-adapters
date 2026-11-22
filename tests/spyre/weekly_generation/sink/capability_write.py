@@ -123,24 +123,34 @@ _SUBJECTS_RECORDED_SQL = (
 )
 
 
+_SUBJECT_CHUNK = 500
+
+
 def recorded_in_run(
     client: Any, db: str, run_id: str, shard: str, subjects: list[str]
 ) -> set[str]:
-    """The *subjects* this run and shard already wrote."""
-    result = client.query(
-        _SUBJECTS_RECORDED_SQL
-        + "AND r.run_id = {run_id:UUID} AND r.props['shard'] = {shard:String} "
-        "AND c.subject IN {subjects:Array(String)}",
-        parameters={
-            "db": db,
-            "component": COMPONENT,
-            "tt": TEST_TYPE,
-            "run_id": run_id,
-            "shard": shard,
-            "subjects": subjects,
-        },
-    )
-    return {row[0] for row in result.result_rows}
+    """The *subjects* this run and shard already wrote.
+
+    Queried in chunks: the prefilter flushes every filtered model at once, and a bound array
+    travels in the request URL.
+    """
+    found: set[str] = set()
+    for i in range(0, len(subjects), _SUBJECT_CHUNK):
+        result = client.query(
+            _SUBJECTS_RECORDED_SQL
+            + "AND r.run_id = {run_id:UUID} AND r.props['shard'] = {shard:String} "
+            "AND c.subject IN {subjects:Array(String)}",
+            parameters={
+                "db": db,
+                "component": COMPONENT,
+                "tt": TEST_TYPE,
+                "run_id": run_id,
+                "shard": shard,
+                "subjects": subjects[i : i + _SUBJECT_CHUNK],
+            },
+        )
+        found.update(row[0] for row in result.result_rows)
+    return found
 
 
 def recorded_for_snapshot(

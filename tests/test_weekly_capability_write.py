@@ -190,3 +190,10 @@ def test_sink_refuses_an_unset_database_or_missing_tables(inserted, monkeypatch)
         _sink(monkeypatch, db="")
     with pytest.raises(RuntimeError, match="capability tables"):
         _sink(monkeypatch, present=False)
+
+
+def test_the_dedup_query_is_chunked(inserted):
+    client = _Client()
+    rows = [_row(model_name=f"org/m{i}") for i in range(1201)]
+    assert write(rows, client, "spyre_v2") == 2402
+    assert [len(p["subjects"]) for p in client.params] == [500, 500, 201]
