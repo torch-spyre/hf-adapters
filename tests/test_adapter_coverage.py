@@ -239,10 +239,14 @@ def test_vlm_adapters_implement_generation_hooks():
         )
 
 
-def test_standard_gqa_adapters_prepare_lm_head():
+def test_standard_gqa_adapters_prepare_lm_head() -> None:
     """Every adapter using the shared causal forward must install its LM head."""
     adapter_dir = Path(__file__).parent.parent / "hf_adapters"
-    valid_setup_calls = {"prepare_lm_head_for_spyre", "prepare_standard_gqa"}
+    valid_setup_calls: set[str] = {
+        "prepare_lm_head_for_spyre",
+        "prepare_standard_gqa",
+        "prepare_olmo_common",
+    }
 
     for adapter_path in adapter_dir.glob("hf_*.py"):
         tree = ast.parse(adapter_path.read_text())
@@ -259,7 +263,7 @@ def test_standard_gqa_adapters_prepare_lm_head():
         if not uses_standard_forward:
             continue
 
-        prepare = next(
+        prepare: ast.FunctionDef | None = next(
             (
                 node
                 for node in tree.body
@@ -269,7 +273,7 @@ def test_standard_gqa_adapters_prepare_lm_head():
             None,
         )
         assert prepare is not None, f"{adapter_path.name} has no prepare_for_spyre"
-        calls = {
+        calls: set[str] = {
             node.func.id
             for node in ast.walk(prepare)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)

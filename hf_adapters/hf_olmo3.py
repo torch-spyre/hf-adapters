@@ -22,7 +22,7 @@ OLMo 3 is OLMo 2 plus interleaved sliding-window attention:
 
 - **Block** — identical to OLMo 2: post-norm (``post_attention_layernorm`` /
   ``post_feedforward_layernorm`` before the residual add) and Q/K RMSNorm on the
-  flattened projections. The OLMo 2 compiled block is reused unchanged; the
+  flattened projections. The shared OLMo 2/3 compiled block is reused; the
   attention mask is a block input, so the same block serves both layer types.
 - **Layer types** — ``config.layer_types`` mixes ``sliding_attention`` and
   ``full_attention`` (3:1 on the 7B, ``sliding_window=4096``). Sliding layers
@@ -54,6 +54,7 @@ import torch
 from torch import nn
 from transformers import PreTrainedModel
 
+from hf_adapters._olmo_common import CompiledBlock, prepare_olmo_common
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     InvFreqShim,
@@ -61,18 +62,12 @@ from hf_adapters.hf_common import (
     add_causal_sliding_window_band,
     embed_text_tokens,
     get_backbone,
-    prepare_lm_head_for_spyre,
-    prepare_rope_and_heads,
     run_lm_head,
     text_config,
 )
-from hf_adapters.hf_olmo2 import _make_compiled_block
 
 _FULL_ATTENTION: str = "full_attention"
 _SLIDING_ATTENTION: str = "sliding_attention"
-
-# (hidden, freqs, mask, key_cache, value_cache, cache_index) -> (hidden, k, v)
-CompiledBlock = Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
 
 
 @dataclass(frozen=True)
@@ -88,13 +83,6 @@ def _olmo3_state(model: nn.Module) -> _Olmo3State:
     if not isinstance(state, _Olmo3State):
         raise RuntimeError("hf_olmo3.prepare_for_spyre(model) has not been called")
     return state
-
-
-def _module_attr(module: nn.Module, name: str) -> nn.Module:
-    value: object = getattr(module, name)
-    if not isinstance(value, nn.Module):
-        raise TypeError(f"expected {type(module).__name__}.{name} to be a Module")
-    return value
 
 
 def _layer_masks(
@@ -205,7 +193,7 @@ def prepare_for_spyre(model: PreTrainedModel) -> None:
     """Apply Spyre adaptations to an OLMo 3 model in-place."""
     cfg = text_config(model.config)
     backbone: nn.Module = get_backbone(model)
-    layers: nn.Module = _module_attr(backbone, "layers")
+    layers: nn.Module = backbone.get_submodule("layers")
     if not isinstance(layers, nn.ModuleList):
         raise TypeError("expected the OLMo 3 backbone layers to be an nn.ModuleList")
     num_layers: int = len(layers)
@@ -242,10 +230,10 @@ def prepare_for_spyre(model: PreTrainedModel) -> None:
 
     setattr(model, "_spyre_olmo3", _Olmo3State(layer_types, sliding_window))
 
-    # Validates head counts and records the decode-mask head count; its single
-    # rotary is then replaced by one per layer type (no head padding, see above).
-    prepare_rope_and_heads(model)
-    rotary: nn.Module = _module_attr(backbone, "rotary_emb")
+    # Prepare the shared post-norm blocks and heads, then replace the single
+    # rotary with one per layer type (no head padding, see above).
+    prepare_olmo_common(model)
+    rotary: nn.Module = backbone.get_submodule("rotary_emb")
     ropes: dict[str, PrecomputedRotaryEmbedding] = {
         layer_type: PrecomputedRotaryEmbedding(
             InvFreqShim(
@@ -259,11 +247,3 @@ def prepare_for_spyre(model: PreTrainedModel) -> None:
     # overwrite a child module with a dict, so unregister it first.
     delattr(model, "_spyre_rope")
     setattr(model, "_spyre_rope", ropes)
-
-    prepare_lm_head_for_spyre(model)
-    blocks: list[CompiledBlock] = [_make_compiled_block(layer) for layer in layers]
-    setattr(model, "_spyre_compiled_blocks", blocks)
-    norm: Callable[[torch.Tensor], torch.Tensor] = torch.compile(
-        _module_attr(backbone, "norm"), dynamic=False
-    )
-    setattr(model, "_spyre_compiled_norm", norm)
