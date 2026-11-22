@@ -136,8 +136,8 @@ def _create_fetch(ranking: Ranking) -> Callable[[HfApi, int], list[ModelInfo]]:
         sorted by *ranking* descending. Over-fetched (x2) to absorb the noise +
         rerankers + GGUF/MLX entries removed by the filter.
 
-        Each per-tag call is wrapped in ``with_transient_retry`` so a mid-fetch
-        504 from the HF gateway does not abort the run.
+        Each per-tag call is wrapped in ``with_transient_retry`` so throttling
+        or a transient gateway error does not immediately abort the run.
         """
         print(f"{ts()} Fetching top {limit} text-embedding models by {ranking}...")
         per_tag_limit: int = int(limit * 2)
