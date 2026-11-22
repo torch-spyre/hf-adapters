@@ -82,7 +82,7 @@ def main() -> None:
     for a in artifacts:
         print(f"Downloading: {a['name']} (id={a['id']})")
         # Per-artifact subdirectory: two suites can both produce e.g. "Qwen3-0.6B.xml", and
-        # ingest_xml_hf_adapters.py globs --xml-dir recursively, keyed on the relative path.
+        # flatten_xml_artifacts.py later keys each file on its artifact subdirectory.
         dest = args.out_dir / a["name"]
         if not fetch(
             args.repo, a, args.out_dir / f"{a['name']}.zip", dest, args.attempts
