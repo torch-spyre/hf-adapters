@@ -36,6 +36,9 @@ Dual encoders exposing ``get_text_features`` and ``get_image_features`` keep
 their native HF forwards and pooling. ST dispatches directly to these feature
 methods, whose Spyre adapters already return CPU embeddings.
 
+Multimodal encoders such as EmbeddingGemma 2 opt into retaining their native
+forward too, with the same CPU handoff to ST pooling as text-only encoders.
+
 The backbone runs on Spyre; ST's Pooling and Normalize run on the host (they are
 dynamic-shaped pointwise ops that do not compile on Spyre). Two pieces arrange
 that with an honest ``model.device`` (Spyre):
@@ -52,6 +55,7 @@ All downstream ST modules (``Pooling``, ``Normalize``, ``model.encode()``,
 """
 
 import types
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -114,7 +118,10 @@ def _spyre_load_model(
         model_name_or_path, trust_remote_code=trust_remote_code
     )
 
-    run_backbone_forward = adapter_module._run_backbone_forward
+    preserve_forward: bool = getattr(adapter_module, "_preserve_native_forward", False)
+    run_backbone_forward: Callable[..., torch.Tensor] | None = (
+        None if preserve_forward else adapter_module._run_backbone_forward
+    )
 
     # Route to the right prefill driver. Encoder-only adapters set
     # _is_encoder_only = True; decoder adapters leave it absent.
@@ -128,6 +135,7 @@ def _spyre_load_model(
             attention_mask: torch.Tensor | None = None,
             **kwargs: Any,
         ) -> BaseModelOutput:
+            assert run_backbone_forward is not None
             token_type_ids = kwargs.get("token_type_ids", None)
             # ST places features on ``model.device`` (Spyre); the prefill drivers
             # build their CPU-side auxiliary tensors from these inputs (e.g.
@@ -150,13 +158,15 @@ def _spyre_load_model(
             attention_mask: torch.Tensor | None = None,
             **kwargs: Any,
         ) -> BaseModelOutput:
+            assert run_backbone_forward is not None
             # See the encoder branch: prefill drivers require CPU inputs.
             h = prefill_embed(
                 run_backbone_forward, self, _to_cpu(input_ids), _to_cpu(attention_mask)
             )
             return BaseModelOutput(last_hidden_state=h)
 
-    model.forward = types.MethodType(_spyre_forward, model)
+    if not preserve_forward:
+        model.forward = types.MethodType(_spyre_forward, model)
 
     # Run ST's Pooling and Normalize (both dynamic-shaped pointwise ops that do
     # not compile on Spyre) on the host. ``self`` is the ST ``Transformer``

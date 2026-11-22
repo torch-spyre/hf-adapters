@@ -795,6 +795,15 @@ VISION_MODELS = {
 
 
 MULTIMODAL_EMBEDDING_MODELS: dict[str, dict[str, Any]] = {
+    "embeddinggemma2": {
+        "name": "EmbeddingGemma 2",
+        "path": "google/embeddinggemma-2",
+        "adapter": "hf_embeddinggemma2.py",
+        "kind": "multimodal_embedding",
+        "dtype": "bfloat16",
+        "size": "0.74b",
+        "gated": True,
+    },
     "clip_vit_b_32": {
         "name": "clip-ViT-B-32",
         "path": "sentence-transformers/clip-ViT-B-32",

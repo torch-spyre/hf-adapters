@@ -166,6 +166,25 @@ list (`make sentence_transformers_multimodal_tests`, CI suite key:
 |-------|-----------|------------------------|-----------------|--------|
 | sentence-transformers/clip-ViT-B-32 | clip | 64 / 64 | 512 | Verified: text and single-image scenarios |
 | google/siglip2-giant-opt-patch16-384 | siglip | 72→128 / 96→128 | 1536 | Verified: text and single-image scenarios |
+| google/embeddinggemma-2 | embedding\_gemma2 | 256 (local), 512 (global) / 64→128 | 768 | CPU parity tested; Spyre validation pending |
+
+`hf_embeddinggemma2.py` preserves the stock multimodal forward, including
+interleaved text, images, video frames, and audio. The bidirectional text
+transformer and Gemma 4 vision transformer compile for Spyre; token lookup,
+media scattering, vision pooling, the audio encoder, and SentenceTransformers
+pooling/normalization run on CPU. The text path uses the shared matrix RoPE,
+inclusive sliding-window mask, Gemma 4 RMSNorm reduction, GELU, and PLE slice
+helpers. Its projection-only PLE and fp32 RMSNorm weight multiplication follow
+EmbeddingGemma 2 rather than Gemma 4's token-identity PLE and norm rounding.
+
+Load it with `SentenceTransformer("google/embeddinggemma-2", backend="spyre")`
+after importing `hf_adapters.st_backend`, or use `AutoSpyreModel` with an
+`AutoProcessor`. The default is **bfloat16**; explicitly requesting float16
+raises an error because the checkpoint's activations overflow. SentenceTransformers
+retains the checkpoint's mean pooling and normalization, including its prompt
+and truncation options. Intermediate hidden-state/attention outputs and custom
+4D text masks are not supported. Hardware validation is pending and this row is
+not included in the verified checkpoint count.
 
 Multi-image batches remain excluded from the suite pending
 [#747](https://github.com/torch-spyre/hf-adapters/issues/747).
@@ -311,7 +330,7 @@ all pass that check.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 46 adapters · 71 verified checkpoints · 10K+ compatible models.
+**Coverage:** 47 adapters · 71 verified checkpoints · 10K+ compatible models.
 The 71 verified rows are 40 generative + 13 embedding + 2 multimodal-embedding + 2 seq-classification +
 2 token-classification + 3 structured-decision + 1 decision + 7 vision-language + 1 speculative-decoding drafter (see
 the Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are bare vision-tower components
@@ -370,6 +389,7 @@ pattern, norms, and weight layout.
 | hf\_siglip\_vision.py | SigLIP vision tower | 1 | SigLIP towers of other VLMs (extracted as a bare `SiglipVisionModel`) |
 | hf\_clip.py | clip (text/image embeddings) | 1 | sentence-transformers/clip-ViT-B-32; other CLIP ViT dual encoders (openai/clip-vit-base-patch32/16, clip-ViT-B-16, clip-ViT-L-14) |
 | hf\_siglip.py | siglip (text/image embeddings) | 1 | Other fixed-resolution SigLIP / SigLIP2 dual encoders |
+| hf\_embeddinggemma2.py | embedding\_gemma2 / embedding\_gemma2\_text | 0 (Spyre pending) | EmbeddingGemma 2, with CPU audio and shared Gemma 4 vision execution |
 | hf\_mistral3\_vision\_mm.py | mistral3 (multimodal) | 2 | Mistral-Small-3.1/3.2 Vision; Ministral-3-14B-Instruct-2512 (ministral3 text backbone, bf16) |
 | hf\_pixtral\_vision.py | Pixtral vision tower | 1 | Pixtral towers of Mistral3 Vision checkpoints |
 | hf\_bert.py | bert | 3 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants, BERT NER/POS/chunking fine-tunes |

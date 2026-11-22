@@ -60,6 +60,8 @@ from transformers import (
     BertConfig,
     CLIPConfig,
     DistilBertConfig,
+    EmbeddingGemma2Config,
+    EmbeddingGemma2TextConfig,
     Gemma2Config,
     Gemma3Config,
     Gemma3TextConfig,
@@ -122,6 +124,7 @@ from hf_adapters import (
     hf_dspark_gemma4,
     hf_dspark_granite,
     hf_dspark_qwen3,
+    hf_embeddinggemma2,
     hf_gemma2,
     hf_gemma3,
     hf_gemma4,
@@ -176,6 +179,8 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     BertConfig: hf_bert,
     CLIPConfig: hf_clip,
     DiffusionGemmaConfig: hf_diffusion_gemma,
+    EmbeddingGemma2Config: hf_embeddinggemma2,
+    EmbeddingGemma2TextConfig: hf_embeddinggemma2,
     DistilBertConfig: hf_distilbert,
     Gemma2Config: hf_gemma2,
     Gemma3Config: hf_gemma3,
@@ -283,6 +288,7 @@ class ModelDTypePolicy:
 MODEL_DTYPE_POLICIES: dict[str, ModelDTypePolicy] = {
     "convaiinnovations/laya": ModelDTypePolicy(dtype=torch.float16),
     "google/embeddinggemma-300m": ModelDTypePolicy(dtype=torch.bfloat16),
+    "google/embeddinggemma-2": ModelDTypePolicy(dtype=torch.bfloat16),
     "ibm-granite/granite-4.0-1b-base": ModelDTypePolicy(cpu_dtype=torch.float32),
     "ibm-granite/granite-4.0-1b": ModelDTypePolicy(cpu_dtype=torch.float32),
 }

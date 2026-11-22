@@ -4667,17 +4667,22 @@ def patch_pre_ln_encoder_forward(
     setattr(encoder, "forward", MethodType(encoder_forward, encoder))
 
 
-def patch_cpu_inputs(module: torch.nn.Module, input_names: tuple[str, ...]) -> None:
+def patch_cpu_inputs(
+    module: torch.nn.Module,
+    input_names: tuple[str, ...],
+    *,
+    method_name: str = "forward",
+) -> None:
     """Keep named tensor inputs on CPU before HF embeddings/mask construction.
 
-    Names follow the original forward's positional argument order. Other
+    Names follow the selected method's positional argument order. Other
     arguments, including interpolation and output flags, pass through unchanged.
     """
-    original_forward = module.forward
+    original_forward: Callable[..., Any] = getattr(module, method_name)
 
-    @functools.wraps(type(module).forward)
+    @functools.wraps(getattr(type(module), method_name))
     def forward(self: torch.nn.Module, *args: Any, **kwargs: Any) -> Any:
-        cpu_args = tuple(
+        cpu_args: tuple[Any, ...] = tuple(
             (
                 value.cpu()
                 if index < len(input_names) and isinstance(value, torch.Tensor)
@@ -4685,7 +4690,7 @@ def patch_cpu_inputs(module: torch.nn.Module, input_names: tuple[str, ...]) -> N
             )
             for index, value in enumerate(args)
         )
-        cpu_kwargs = {
+        cpu_kwargs: dict[str, Any] = {
             name: (
                 value.cpu()
                 if name in input_names and isinstance(value, torch.Tensor)
@@ -4695,7 +4700,7 @@ def patch_cpu_inputs(module: torch.nn.Module, input_names: tuple[str, ...]) -> N
         }
         return original_forward(*cpu_args, **cpu_kwargs)
 
-    module.forward = MethodType(forward, module)
+    setattr(module, method_name, MethodType(forward, module))
 
 
 # ---------------------------------------------------------------------------

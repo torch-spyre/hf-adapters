@@ -50,9 +50,12 @@ def test_sentence_transformers_multimodal_backend(model_path: str) -> None:
     image = _load_sample_image()
     with bounded_cpu_threads(), torch.inference_mode():
         cpu_model = SentenceTransformer(model_path, device="cpu")
-        # Use each model's configured text length for both execution paths.
-        context_length: int = (
-            cpu_model[0].config.get_text_config().max_position_embeddings
+        # Preserve CLIP/SigLIP's fixed pooling lengths, while bounding models
+        # with long contexts (EmbeddingGemma 2 advertises 262K RoPE positions).
+        context_length: int = min(
+            cpu_model.max_seq_length,
+            cpu_model[0].config.get_text_config().max_position_embeddings,
+            128,
         )
         text_kwargs = {
             "processing_kwargs": {
