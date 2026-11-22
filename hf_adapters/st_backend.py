@@ -264,7 +264,7 @@ def _spyre_forward(self, input, **kwargs):
     return _original_forward(self, input, **kwargs)
 
 
-def register():
+def register() -> None:
     """Monkey-patch ST to add ``backend="spyre"`` support.
 
     Patches ``Transformer._load_model`` (to load/prepare the Spyre backbone) and
@@ -274,7 +274,7 @@ def register():
     from sentence_transformers import SentenceTransformer
     from sentence_transformers.base.modules.transformer import Transformer
 
-    global _original_load_model, _original_init, _original_forward
+    global _original_load_model, _original_init, _original_forward, _original_device
 
     if getattr(Transformer, "_spyre_patched", False):
         return
@@ -288,11 +288,32 @@ def register():
     _original_forward = SentenceTransformer.forward
     SentenceTransformer.forward = _spyre_forward
 
+    _original_device = SentenceTransformer.device
+    SentenceTransformer.device = property(_spyre_device)
+
     Transformer._spyre_patched = True
+
+
+def _spyre_device(self: Any) -> torch.device:
+    """Report the resident compute device for a model with CPU helper modules.
+
+    HF's default device comes from its first parameter, which may be a CPU
+    embedding. ST uses this property to place the whole model before every
+    encode; choosing that CPU parameter would move the compiled blocks off Spyre.
+    """
+    if getattr(self, "_spyre_backend", False):
+        for parameter in self.parameters():
+            if parameter.device.type == "spyre":
+                device: torch.device = parameter.device
+                return device
+    assert _original_device is not None and _original_device.fget is not None
+    device = _original_device.fget(self)
+    return device
 
 
 # Register immediately on import.
 _original_load_model = None
 _original_init = None
 _original_forward = None
+_original_device: property | None = None
 register()
