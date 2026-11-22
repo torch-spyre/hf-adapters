@@ -27,6 +27,7 @@ except ImportError:
 from hf_adapters.auto_spyre_model import (
     AutoSpyreModel,
     AutoSpyreModelForCausalLM,
+    AutoSpyreModelForDecision,
     AutoSpyreModelForImageTextToText,
     AutoSpyreModelForMaskedLM,
     AutoSpyreModelForQuestionAnswering,
@@ -39,6 +40,7 @@ __all__ = [
     "__version__",
     "AutoSpyreModel",
     "AutoSpyreModelForCausalLM",
+    "AutoSpyreModelForDecision",
     "AutoSpyreModelForImageTextToText",
     "AutoSpyreModelForMaskedLM",
     "AutoSpyreModelForQuestionAnswering",
