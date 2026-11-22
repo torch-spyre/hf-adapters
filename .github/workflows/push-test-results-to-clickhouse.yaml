@@ -230,8 +230,9 @@ jobs:
           platform: x86_64
           component: hf-adapters
           schema: v2
+          strict: 'true'
           clickhouse-host: ${{ secrets.CLICKHOUSE_V2_HOST || secrets.CLICKHOUSE_HOST }}
-          clickhouse-port: ${{ secrets.CLICKHOUSE_V2_PORT || secrets.CLICKHOUSE_PORT }}
+          clickhouse-port: ${{ fromJSON(secrets.CLICKHOUSE_V2_HOST != '' && toJSON(secrets.CLICKHOUSE_V2_PORT) || toJSON(secrets.CLICKHOUSE_PORT)) }}
           clickhouse-user: ${{ secrets.CLICKHOUSE_V2_USER }}
           clickhouse-pass: ${{ secrets.CLICKHOUSE_V2_PASSWORD }}
           # The connection's default database is v2 too, so nothing resolves against legacy `spyre`.

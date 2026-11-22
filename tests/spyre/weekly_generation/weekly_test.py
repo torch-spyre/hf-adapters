@@ -671,7 +671,15 @@ def main(
     except KeyboardInterrupt:
         print(f"\n{ts()} Interrupted — results so far are saved; rerun to resume.")
     finally:
-        sink.close()
+        # A close failure must not replace the error already unwinding (a failed flush,
+        # the hardware abort); with no error in flight it still propagates.
+        in_flight = sys.exc_info()[1]
+        try:
+            sink.close()
+        except Exception as close_exc:  # noqa: BLE001
+            if in_flight is None:
+                raise
+            print(f"{ts()} [warn] sink close failed while unwinding: {close_exc!r}")
         if write_to_csv:
             # Report the file actually written, not the bare --write-to-csv
             # argument — the factory suffixes it with the model type.

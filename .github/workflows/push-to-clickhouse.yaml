@@ -135,14 +135,15 @@ env:
   # carry CLICKHOUSE_V2_USER/_PASSWORD, and CLICKHOUSE_DB is the v2 database too so no
   # statement can resolve against the legacy one. Host/port use the optional HA endpoint
   # (CLICKHOUSE_V2_HOST/_PORT) and fall back to the legacy host. The prod group never falls
-  # back to the shared org login. A dev run uses the *_DEV group only; its login falls back to
-  # CLICKHOUSE_USER_DEV/_PASS_DEV, which are dev-instance credentials. fromJSON(toJSON(...))
+  # back to the shared org login. A dev run uses the *_DEV group only, as one unit: the V2 dev
+  # login (CLICKHOUSE_V2_USER_DEV set) or the legacy dev login, never a mix. Host and port are
+  # paired the same way (CLICKHOUSE_V2_HOST set takes its own port). fromJSON(toJSON(...))
   # keeps an empty selected secret empty instead of falling through to the other group.
   CLICKHOUSE_TARGET: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && 'dev' || 'prod' }}
-  CLICKHOUSE_HOST: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && toJSON(secrets.CLICKHOUSE_V2_HOST_DEV || secrets.CLICKHOUSE_HOST_DEV) || toJSON(secrets.CLICKHOUSE_V2_HOST || secrets.CLICKHOUSE_HOST)) }}
-  CLICKHOUSE_PORT: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && toJSON(secrets.CLICKHOUSE_V2_PORT_DEV || secrets.CLICKHOUSE_PORT_DEV) || toJSON(secrets.CLICKHOUSE_V2_PORT || secrets.CLICKHOUSE_PORT)) }}
-  CLICKHOUSE_USER: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && toJSON(secrets.CLICKHOUSE_V2_USER_DEV || secrets.CLICKHOUSE_USER_DEV) || toJSON(secrets.CLICKHOUSE_V2_USER)) }}
-  CLICKHOUSE_PASS: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && toJSON(secrets.CLICKHOUSE_V2_PASSWORD_DEV || secrets.CLICKHOUSE_PASS_DEV) || toJSON(secrets.CLICKHOUSE_V2_PASSWORD)) }}
+  CLICKHOUSE_HOST: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && ((secrets.CLICKHOUSE_V2_USER_DEV != '') && toJSON(secrets.CLICKHOUSE_V2_HOST_DEV || secrets.CLICKHOUSE_HOST_DEV) || toJSON(secrets.CLICKHOUSE_HOST_DEV)) || (secrets.CLICKHOUSE_V2_HOST != '' && toJSON(secrets.CLICKHOUSE_V2_HOST) || toJSON(secrets.CLICKHOUSE_HOST))) }}
+  CLICKHOUSE_PORT: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && ((secrets.CLICKHOUSE_V2_USER_DEV != '') && (secrets.CLICKHOUSE_V2_HOST_DEV != '' && toJSON(secrets.CLICKHOUSE_V2_PORT_DEV) || toJSON(secrets.CLICKHOUSE_PORT_DEV)) || toJSON(secrets.CLICKHOUSE_PORT_DEV)) || (secrets.CLICKHOUSE_V2_HOST != '' && toJSON(secrets.CLICKHOUSE_V2_PORT) || toJSON(secrets.CLICKHOUSE_PORT))) }}
+  CLICKHOUSE_USER: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && ((secrets.CLICKHOUSE_V2_USER_DEV != '') && toJSON(secrets.CLICKHOUSE_V2_USER_DEV) || toJSON(secrets.CLICKHOUSE_USER_DEV)) || toJSON(secrets.CLICKHOUSE_V2_USER)) }}
+  CLICKHOUSE_PASS: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && ((secrets.CLICKHOUSE_V2_USER_DEV != '') && toJSON(secrets.CLICKHOUSE_V2_PASSWORD_DEV) || toJSON(secrets.CLICKHOUSE_PASS_DEV)) || toJSON(secrets.CLICKHOUSE_V2_PASSWORD)) }}
   CLICKHOUSE_DB: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && toJSON(secrets.CLICKHOUSE_DB_V2_DEV) || toJSON(secrets.CLICKHOUSE_DB_V2)) }}
   CLICKHOUSE_DB_V2: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && toJSON(secrets.CLICKHOUSE_DB_V2_DEV) || toJSON(secrets.CLICKHOUSE_DB_V2)) }}
 
