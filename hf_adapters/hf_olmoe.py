@@ -24,13 +24,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import hf_adapters.hf_common as hf_common
+from hf_adapters._olmo_common import qk_norm_attention, require_unpadded_head_dim
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     SpyreUnsupportedFeatureError,
-    SpyreUnsupportedModelError,
-    apply_rope_matmul,
     get_backbone,
-    kv_cache_update,
     moe_decode_selected_experts,
     moe_prefill_all_experts,
     moe_topk,
@@ -126,38 +124,22 @@ class OlmoeAttention(nn.Module):
 
     def forward(
         self,
-        hidden_states,
-        selected_freqs,
-        attn_mask,
-        key_cache,
-        value_cache,
-        cache_index,
-    ):
-        bsz, seq_len, _ = hidden_states.shape
-        q = self.q_norm(self.q_proj(hidden_states))
-        k = self.k_norm(self.k_proj(hidden_states))
-        v = self.v_proj(hidden_states)
-
-        q = q.view(bsz, seq_len, -1, self.head_dim).transpose(1, 2)
-        k = k.view(bsz, seq_len, -1, self.head_dim).transpose(1, 2)
-        v = v.view(bsz, seq_len, -1, self.head_dim).transpose(1, 2)
-        q = apply_rope_matmul(q, selected_freqs)
-        k = apply_rope_matmul(k, selected_freqs)
-
-        key_cache, value_cache = kv_cache_update(
-            k, v, key_cache, value_cache, cache_index
-        )
-        attn_out = F.scaled_dot_product_attention(
-            q,
+        hidden_states: torch.Tensor,
+        selected_freqs: torch.Tensor,
+        attn_mask: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        cache_index: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return qk_norm_attention(
+            self,
+            hidden_states,
+            selected_freqs,
+            attn_mask,
             key_cache,
             value_cache,
-            attn_mask=attn_mask,
-            dropout_p=0.0,
-            scale=self.scaling,
-            enable_gqa=True,
+            cache_index,
         )
-        attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
-        return self.o_proj(attn_out), key_cache, value_cache
 
 
 class OlmoeMoEBlock(nn.Module):
@@ -306,9 +288,6 @@ def prepare_for_spyre(model):
     """Prepare an OLMoE causal LM for Spyre in place."""
     backbone = get_backbone(model)
     cfg = model.config
-    head_dim = (
-        getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
-    )
     if cfg.hidden_act != "silu":
         raise SpyreUnsupportedFeatureError(
             f"OLMoE activation {cfg.hidden_act!r} is not supported; expected 'silu'"
@@ -319,12 +298,7 @@ def prepare_for_spyre(model):
         raise SpyreUnsupportedFeatureError(
             "OLMoE sliding-window attention is not supported"
         )
-    if head_dim % (2 * BLOCK_SIZE) != 0:
-        raise SpyreUnsupportedModelError(
-            "OLMoE head padding is not supported because Q/K RMSNorm spans the "
-            f"native projections; head_dim must be a multiple of {2 * BLOCK_SIZE}, "
-            f"got head_dim={head_dim}"
-        )
+    require_unpadded_head_dim(model, "OLMoE")
 
     prepare_rope_and_heads(model)
     prepare_lm_head_for_spyre(model)

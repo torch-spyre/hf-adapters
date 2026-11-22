@@ -44,4 +44,4 @@ _run_backbone_forward = standard_gqa_backbone_forward
 
 def prepare_for_spyre(model: PreTrainedModel) -> None:
     """Apply Spyre adaptations to OLMo2 model in-place."""
-    prepare_olmo_common(model)
+    prepare_olmo_common(model, "OLMo 2")

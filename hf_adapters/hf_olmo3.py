@@ -56,7 +56,6 @@ from transformers import PreTrainedModel
 
 from hf_adapters._olmo_common import CompiledBlock, prepare_olmo_common
 from hf_adapters.hf_common import (
-    BLOCK_SIZE,
     InvFreqShim,
     PrecomputedRotaryEmbedding,
     add_causal_sliding_window_band,
@@ -215,24 +214,11 @@ def prepare_for_spyre(model: PreTrainedModel) -> None:
             "OLMo 3 config has sliding_attention layers but no sliding_window"
         )
 
-    head_dim: int = (
-        getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
-    )
-    if head_dim % (2 * BLOCK_SIZE) != 0:
-        # prepare_rope_and_heads would zero-pad Q/K to a stick multiple, but
-        # OLMo's Q/K RMSNorm runs over the flattened projection, so padding
-        # changes its variance and silently corrupts attention.
-        raise ValueError(
-            f"OLMo 3 head_dim={head_dim} is not a multiple of {2 * BLOCK_SIZE}; "
-            "a padded variant is not implemented (Q/K RMSNorm is over the "
-            "flattened projection)."
-        )
-
+    # Prepare the shared post-norm blocks and heads (this also rejects
+    # head_dims that would need padding), then replace the single rotary with
+    # one per layer type.
+    prepare_olmo_common(model, "OLMo 3")
     setattr(model, "_spyre_olmo3", _Olmo3State(layer_types, sliding_window))
-
-    # Prepare the shared post-norm blocks and heads, then replace the single
-    # rotary with one per layer type (no head padding, see above).
-    prepare_olmo_common(model)
     rotary: nn.Module = backbone.get_submodule("rotary_emb")
     ropes: dict[str, PrecomputedRotaryEmbedding] = {
         layer_type: PrecomputedRotaryEmbedding(
