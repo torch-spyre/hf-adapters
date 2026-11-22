@@ -1,21 +1,10 @@
-"""The schema-v2 write path for the weekly scan: capabilities + capability_runs.
+"""The weekly scan's write path: schema-v2 ``capabilities`` + ``capability_runs``.
 
-Kept apart from ``clickhouse_sink`` because it is a different GENERATION of the schema,
-not a second table: v1's ``{embedding,generative}_model_spyre_support`` encode the model
-type in the table NAME and carry one row per model with three ``verified_on_*`` booleans,
-while v2 has one table pair for every product and one row per (model, backend). The v1
-writer stays untouched and authoritative until v1 is retired.
-
-WHAT THIS FIXES. ``verified_on_cpu/gpu/spyre`` are three columns that cannot be grouped,
-filtered or joined as one axis, so "which models work on spyre but not cpu" needs three
-predicates over a wide row rather than one GROUP BY. v2 makes the backend a VALUE, the same
-way ``benchmark_runs.backend`` already does, so a capability verdict and a performance
-measurement of the same model segment alike.
-
-A re-scan is also kept rather than overwritten: v1 is
-``ReplacingMergeTree(snapshot_date) ORDER BY (model_name, snapshot_date)``, so scanning the
-same model twice on one day collapses to the last write and the earlier verdict is gone.
-``capability_runs`` keys on ``run_id``, so both survive and are attributable.
+One row per (model, backend) with the backend as a VALUE, so "which models work on spyre but
+not cpu" is one GROUP BY. The scan's v1 ``{embedding,generative}_model_spyre_support`` tables
+are no longer written from CI. Rows keep the Hub catalog facts (model type, snapshot date,
+downloads, family, ...) as props, and a re-scan is kept rather than overwritten: rows key on
+``run_id``, so both survive and are attributable.
 
 IDENTITY. ``run_id`` is derived, never minted, from the GHA run coordinate -- so all shards
 of one weekly scan share it with nothing threaded between them, and "this scan" is a
@@ -24,12 +13,15 @@ shards per tier, each its own process with its own client, so each stamps ``prop
 and the dedup guard scopes on it: keyed on the run alone, the first shard to flush would make
 every other shard look already-ingested and its verdicts would be dropped with no error.
 
+DEDUP. A flush may be retried (and a job re-run) under the same run_id and shard, so ``write``
+drops the models of a batch that this run and shard already recorded. A whole-shard guard would
+instead drop every batch after a shard's first.
+
 INSTALLED PER JOB, NOT DECLARED IN ``pyproject.toml``. ``build-hf-adapters`` runs
 ``uv sync --frozen``, so a manifest entry would need a lock entry and would pin the library to
 a locked commit -- a fix there would then need an hf-adapters re-lock to take effect. The
 workflow installs it as a step instead (see ``CH_INGEST_LIB``), which is also how
-spyre-inference's ingest gets it. The import is therefore INSIDE ``write()`` and the caller
-treats an ImportError like any other v2 failure: the scan logs it and keeps its v1 rows.
+spyre-inference's ingest gets it. The import is therefore INSIDE the functions that need it.
 """
 
 from __future__ import annotations
@@ -69,13 +61,12 @@ def _shard_of(model_list_file: str | None) -> str:
 
 
 def capability_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One v2 result per (model, backend) from the v1 per-model rows.
+    """One v2 result per (model, backend) from the per-model rows.
 
-    UNROLLS the tested ``verified_on_*`` booleans (see ``_BACKENDS``), which is a real
-    row-count change: ~195k v1 rows become ~390k. That is the point -- a backend that is a
+    UNROLLS the tested ``verified_on_*`` booleans (see ``_BACKENDS``): a backend that is a
     value can be grouped and joined, and the three-column shape cannot.
 
-    ``fail_reason`` carries v1's ``failure_category`` (a closed 13-value vocabulary worth
+    ``fail_reason`` carries the row's ``failure_category`` (a closed 13-value vocabulary worth
     grouping by) and is stamped only on a FAILING backend: the category describes why the
     model did not work, so copying it onto a backend that passed would make a successful
     verdict look explained by a failure.
@@ -91,6 +82,7 @@ def capability_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         props = {
             k: str(v)
             for k, v in (
+                ("model_type", r.get("model_type")),
                 ("snapshot_date", r.get("snapshot_date")),
                 ("added_date", r.get("added_date")),
                 ("config_class", r.get("config_class")),
@@ -124,53 +116,105 @@ def capability_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def write(rows: list[dict[str, Any]], model_list_file: str | None = None) -> int:
-    """Dual-write the buffered v1 rows as v2 capability rows. Returns rows written.
+_SUBJECTS_RECORDED_SQL = (
+    "SELECT DISTINCT c.subject FROM {db:Identifier}.capability_runs AS r "
+    "INNER JOIN {db:Identifier}.capabilities AS c ON c.capability_id = r.capability_id "
+    "WHERE r.component = {component:String} AND r.test_type = {tt:String} "
+)
 
-    A no-op returning 0 when the v2 database is unset or its tables are absent, so a
-    deployment that has not created them yet is not an error. Every failure is swallowed by
-    the caller: a v2 problem must never cost the v1 rows this run exists to produce.
+
+def recorded_in_run(
+    client: Any, db: str, run_id: str, shard: str, subjects: list[str]
+) -> set[str]:
+    """The *subjects* this run and shard already wrote."""
+    result = client.query(
+        _SUBJECTS_RECORDED_SQL
+        + "AND r.run_id = {run_id:UUID} AND r.props['shard'] = {shard:String} "
+        "AND c.subject IN {subjects:Array(String)}",
+        parameters={
+            "db": db,
+            "component": COMPONENT,
+            "tt": TEST_TYPE,
+            "run_id": run_id,
+            "shard": shard,
+            "subjects": subjects,
+        },
+    )
+    return {row[0] for row in result.result_rows}
+
+
+def recorded_for_snapshot(
+    client: Any,
+    db: str,
+    snapshot_date: str,
+    model_type: str,
+    fail_reason: str = "",
+) -> set[str]:
+    """Models with a verdict for a snapshot date and model type, optionally only failing with
+    *fail_reason*."""
+    sql = (
+        _SUBJECTS_RECORDED_SQL
+        + "AND r.props['snapshot_date'] = {snapshot_date:String} "
+        "AND r.props['model_type'] = {model_type:String}"
+    )
+    parameters = {
+        "db": db,
+        "component": COMPONENT,
+        "tt": TEST_TYPE,
+        "snapshot_date": snapshot_date,
+        "model_type": model_type,
+    }
+    if fail_reason:
+        sql += " AND r.fail_reason = {fail_reason:String}"
+        parameters["fail_reason"] = fail_reason
+    return {row[0] for row in client.query(sql, parameters=parameters).result_rows}
+
+
+def write(
+    rows: list[dict[str, Any]],
+    client: Any,
+    db: str,
+    model_list_file: str | None = None,
+) -> int:
+    """Write the buffered rows as v2 capability rows. Returns rows written.
+
+    The scan's only write path, so a problem raises rather than being swallowed: a run that
+    cannot record its verdicts must fail. Models this run and shard already wrote are skipped.
     """
     if not rows:
         return 0
 
-    from spyre_clickhouse_ingest import (
-        capabilities_already_ingested,
-        get_client,
-        insert_capabilities,
-        run_id_of,
-        tables_present,
-        target_database,
-    )
-    from spyre_clickhouse_ingest.schema import CAPABILITIES, CAPABILITY_RUNS
-
-    db = target_database()
-    if not db:
-        return 0
+    from spyre_clickhouse_ingest import insert_capabilities, run_id_of
 
     gha_run_id = os.environ.get("GITHUB_RUN_ID", "")
     if not gha_run_id:
-        print("  v2: no GITHUB_RUN_ID -- run_id is not derivable, skipping v2 write.")
-        return 0
+        raise RuntimeError(
+            "GITHUB_RUN_ID is unset, so the v2 run_id cannot be derived; "
+            "outside CI use --write-to-csv."
+        )
     run_id = run_id_of("gha", gha_run_id, ARCH, TEST_TYPE)
     if not run_id:
-        return 0
-
-    client = get_client()
-    if not tables_present(client, db, (CAPABILITIES, CAPABILITY_RUNS)):
-        print(f"  v2: {db} has no capability tables -- skipping v2 write.")
-        return 0
+        raise RuntimeError(f"no v2 run_id derivable from GITHUB_RUN_ID={gha_run_id!r}")
 
     shard = _shard_of(model_list_file)
-    if capabilities_already_ingested(client, db, run_id, COMPONENT, TEST_TYPE, shard):
+    models = sorted({str(r.get("model_name") or "") for r in rows} - {""})
+    seen = recorded_in_run(client, db, run_id, shard, models) if models else set()
+    fresh = [r for r in rows if str(r.get("model_name") or "") not in seen]
+    if not fresh:
         print(
-            f"  v2: run {run_id} shard {shard or '<none>'} already ingested -- skipping."
+            f"  v2: run {run_id} shard {shard or '<none>'} already recorded this batch -- skipping."
         )
         return 0
 
-    results = capability_results(rows)
     n = insert_capabilities(
-        client, db, COMPONENT, run_id, TEST_TYPE, results, arch=ARCH, shard=shard
+        client,
+        db,
+        COMPONENT,
+        run_id,
+        TEST_TYPE,
+        capability_results(fresh),
+        arch=ARCH,
+        shard=shard,
     )
     print(
         f"  v2: wrote {n} capability row(s) to {db} (run {run_id}, shard {shard or '<none>'})."

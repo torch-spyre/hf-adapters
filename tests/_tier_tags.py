@@ -122,7 +122,7 @@ def result_tags(suite: str, params) -> list[tuple[str, str]]:
     """The (name, value) JUnit property pairs for one test case.
 
     Emitted as `<property name="tag" value="namespace__value"/>`, the shape the ClickHouse
-    ingest reads (see .github/scripts/ingest_xml_hf_adapters.py extract_properties).
+    ingest reads.
     """
     tags: list[tuple[str, str]] = [("tag", platform_tag())]
     model = model_tag(params)

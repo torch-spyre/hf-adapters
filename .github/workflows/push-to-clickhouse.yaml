@@ -131,16 +131,20 @@ env:
   # the manual "Run workflow" form), so the scheduled weekly scan falls through
   # to prod, while a manual run defaults to dev and must opt in to prod.
   # ---------------------------------------------------------------------------
+  # Everything here is the schema-v2 database and the repo's scoped login: CLICKHOUSE_USER/_PASS
+  # carry CLICKHOUSE_V2_USER/_PASSWORD, and CLICKHOUSE_DB is the v2 database too so no
+  # statement can resolve against the legacy one. Host/port use the optional HA endpoint
+  # (CLICKHOUSE_V2_HOST/_PORT) and fall back to the legacy host. The prod group never falls
+  # back to the shared org login. A dev run uses the *_DEV group only; its login falls back to
+  # CLICKHOUSE_USER_DEV/_PASS_DEV, which are dev-instance credentials. fromJSON(toJSON(...))
+  # keeps an empty selected secret empty instead of falling through to the other group.
   CLICKHOUSE_TARGET: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && 'dev' || 'prod' }}
-  CLICKHOUSE_HOST: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_HOST_DEV || secrets.CLICKHOUSE_HOST }}
-  CLICKHOUSE_PORT: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_PORT_DEV || secrets.CLICKHOUSE_PORT }}
-  CLICKHOUSE_USER: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_USER_DEV || secrets.CLICKHOUSE_USER }}
-  CLICKHOUSE_PASS: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_PASS_DEV || secrets.CLICKHOUSE_PASS }}
-  CLICKHOUSE_DB: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_DB_DEV || secrets.CLICKHOUSE_DB }}
-  # The schema-v2 database, which the scan dual-writes capability rows to alongside every v1
-  # insert. Unset is a no-op, not a failure: v1 is what this scan exists to produce, so a
-  # deployment without v2 tables writes v1 exactly as before. v1 and v2 never share a database.
-  CLICKHOUSE_DB_V2: ${{ (github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && secrets.CLICKHOUSE_DB_V2_DEV || secrets.CLICKHOUSE_DB_V2 }}
+  CLICKHOUSE_HOST: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && toJSON(secrets.CLICKHOUSE_V2_HOST_DEV || secrets.CLICKHOUSE_HOST_DEV) || toJSON(secrets.CLICKHOUSE_V2_HOST || secrets.CLICKHOUSE_HOST)) }}
+  CLICKHOUSE_PORT: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && toJSON(secrets.CLICKHOUSE_V2_PORT_DEV || secrets.CLICKHOUSE_PORT_DEV) || toJSON(secrets.CLICKHOUSE_V2_PORT || secrets.CLICKHOUSE_PORT)) }}
+  CLICKHOUSE_USER: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && toJSON(secrets.CLICKHOUSE_V2_USER_DEV || secrets.CLICKHOUSE_USER_DEV) || toJSON(secrets.CLICKHOUSE_V2_USER)) }}
+  CLICKHOUSE_PASS: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && toJSON(secrets.CLICKHOUSE_V2_PASSWORD_DEV || secrets.CLICKHOUSE_PASS_DEV) || toJSON(secrets.CLICKHOUSE_V2_PASSWORD)) }}
+  CLICKHOUSE_DB: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && toJSON(secrets.CLICKHOUSE_DB_V2_DEV) || toJSON(secrets.CLICKHOUSE_DB_V2)) }}
+  CLICKHOUSE_DB_V2: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.clickhouse_db == 'dev') && toJSON(secrets.CLICKHOUSE_DB_V2_DEV) || toJSON(secrets.CLICKHOUSE_DB_V2)) }}
 
   # The shared schema-v2 write path, installed per job rather than declared in pyproject.toml:
   # build-hf-adapters runs `uv sync --frozen`, which would both require a lock entry and pin the
@@ -383,7 +387,7 @@ jobs:
           source .venv/bin/activate
           echo "ClickHouse target: $CLICKHOUSE_TARGET"
           MISSING=0
-          for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
+          for VAR in CLICKHOUSE_HOST CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
             VAL="${!VAR}"
             if [[ -n "$VAL" ]]; then
               echo "$VAR: set (${#VAL} chars)"
@@ -392,15 +396,11 @@ jobs:
               MISSING=1
             fi
           done
-          # A `dev` run whose *_DEV secret is empty would NOT fail here: GitHub's
-          # `cond && secrets.X_DEV || secrets.X` is value-returning, not boolean,
-          # so an empty/missing _DEV secret silently falls through to the PROD
-          # value — i.e. a run asked to target dev would write to production, and
-          # the length check above would look perfectly healthy. Fail loudly
-          # instead of clobbering prod.
-          if [[ "$CLICKHOUSE_TARGET" == "dev" && "$MISSING" == "1" ]]; then
-            echo "::error::CLICKHOUSE_TARGET=dev but a CLICKHOUSE_*_DEV secret is missing;" \
-                 "refusing to run rather than risk falling back to the prod instance."
+          # Fail rather than connect with a partial login; the selected group never falls back
+          # to the other one (see the env block), so a missing secret is a real misconfiguration.
+          if [[ "$MISSING" == "1" ]]; then
+            echo "::error::A required ClickHouse v2 secret is missing for target $CLICKHOUSE_TARGET" \
+                 "(CLICKHOUSE_V2_USER, CLICKHOUSE_V2_PASSWORD, CLICKHOUSE_DB_V2 and a host)."
             exit 1
           fi
           python - <<'PY'
@@ -412,7 +412,7 @@ jobs:
               port=int(os.environ.get("CLICKHOUSE_PORT", 443)),
               user=os.environ.get("CLICKHOUSE_USER", "default"),
               password=os.environ["CLICKHOUSE_PASS"],
-              database=os.environ.get("CLICKHOUSE_DB", "spyre"),
+              database=os.environ["CLICKHOUSE_DB"],
               secure=True,
           )
           client.command("SELECT 1")
@@ -597,7 +597,7 @@ jobs:
         run: |
           echo "ClickHouse target: $CLICKHOUSE_TARGET"
           MISSING=0
-          for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
+          for VAR in CLICKHOUSE_HOST CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
             VAL="${!VAR}"
             if [[ -n "$VAL" ]]; then
               echo "$VAR: set (${#VAL} chars)"
@@ -606,15 +606,11 @@ jobs:
               MISSING=1
             fi
           done
-          # A `dev` run whose *_DEV secret is empty would NOT fail here: GitHub's
-          # `cond && secrets.X_DEV || secrets.X` is value-returning, not boolean,
-          # so an empty/missing _DEV secret silently falls through to the PROD
-          # value — i.e. a run asked to target dev would write to production, and
-          # the length check above would look perfectly healthy. Fail loudly
-          # instead of clobbering prod.
-          if [[ "$CLICKHOUSE_TARGET" == "dev" && "$MISSING" == "1" ]]; then
-            echo "::error::CLICKHOUSE_TARGET=dev but a CLICKHOUSE_*_DEV secret is missing;" \
-                 "refusing to run rather than risk falling back to the prod instance."
+          # Fail rather than connect with a partial login; the selected group never falls back
+          # to the other one (see the env block), so a missing secret is a real misconfiguration.
+          if [[ "$MISSING" == "1" ]]; then
+            echo "::error::A required ClickHouse v2 secret is missing for target $CLICKHOUSE_TARGET" \
+                 "(CLICKHOUSE_V2_USER, CLICKHOUSE_V2_PASSWORD, CLICKHOUSE_DB_V2 and a host)."
             exit 1
           fi
           cd "$CLONED_HF_ADAPTERS_DIR"
@@ -627,7 +623,7 @@ jobs:
               port=int(os.environ.get("CLICKHOUSE_PORT", 443)),
               user=os.environ.get("CLICKHOUSE_USER", "default"),
               password=os.environ["CLICKHOUSE_PASS"],
-              database=os.environ.get("CLICKHOUSE_DB", "spyre"),
+              database=os.environ["CLICKHOUSE_DB"],
               secure=True,
           )
           client.command("SELECT 1")
@@ -722,7 +718,7 @@ jobs:
         run: |
           echo "ClickHouse target: $CLICKHOUSE_TARGET"
           MISSING=0
-          for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
+          for VAR in CLICKHOUSE_HOST CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
             VAL="${!VAR}"
             if [[ -n "$VAL" ]]; then
               echo "$VAR: set (${#VAL} chars)"
@@ -731,15 +727,11 @@ jobs:
               MISSING=1
             fi
           done
-          # A `dev` run whose *_DEV secret is empty would NOT fail here: GitHub's
-          # `cond && secrets.X_DEV || secrets.X` is value-returning, not boolean,
-          # so an empty/missing _DEV secret silently falls through to the PROD
-          # value — i.e. a run asked to target dev would write to production, and
-          # the length check above would look perfectly healthy. Fail loudly
-          # instead of clobbering prod.
-          if [[ "$CLICKHOUSE_TARGET" == "dev" && "$MISSING" == "1" ]]; then
-            echo "::error::CLICKHOUSE_TARGET=dev but a CLICKHOUSE_*_DEV secret is missing;" \
-                 "refusing to run rather than risk falling back to the prod instance."
+          # Fail rather than connect with a partial login; the selected group never falls back
+          # to the other one (see the env block), so a missing secret is a real misconfiguration.
+          if [[ "$MISSING" == "1" ]]; then
+            echo "::error::A required ClickHouse v2 secret is missing for target $CLICKHOUSE_TARGET" \
+                 "(CLICKHOUSE_V2_USER, CLICKHOUSE_V2_PASSWORD, CLICKHOUSE_DB_V2 and a host)."
             exit 1
           fi
           cd "$CLONED_HF_ADAPTERS_DIR"
@@ -752,7 +744,7 @@ jobs:
               port=int(os.environ.get("CLICKHOUSE_PORT", 443)),
               user=os.environ.get("CLICKHOUSE_USER", "default"),
               password=os.environ["CLICKHOUSE_PASS"],
-              database=os.environ.get("CLICKHOUSE_DB", "spyre"),
+              database=os.environ["CLICKHOUSE_DB"],
               secure=True,
           )
           client.command("SELECT 1")
@@ -847,7 +839,7 @@ jobs:
         run: |
           echo "ClickHouse target: $CLICKHOUSE_TARGET"
           MISSING=0
-          for VAR in CLICKHOUSE_HOST CLICKHOUSE_PORT CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
+          for VAR in CLICKHOUSE_HOST CLICKHOUSE_USER CLICKHOUSE_PASS CLICKHOUSE_DB; do
             VAL="${!VAR}"
             if [[ -n "$VAL" ]]; then
               echo "$VAR: set (${#VAL} chars)"
@@ -856,15 +848,11 @@ jobs:
               MISSING=1
             fi
           done
-          # A `dev` run whose *_DEV secret is empty would NOT fail here: GitHub's
-          # `cond && secrets.X_DEV || secrets.X` is value-returning, not boolean,
-          # so an empty/missing _DEV secret silently falls through to the PROD
-          # value — i.e. a run asked to target dev would write to production, and
-          # the length check above would look perfectly healthy. Fail loudly
-          # instead of clobbering prod.
-          if [[ "$CLICKHOUSE_TARGET" == "dev" && "$MISSING" == "1" ]]; then
-            echo "::error::CLICKHOUSE_TARGET=dev but a CLICKHOUSE_*_DEV secret is missing;" \
-                 "refusing to run rather than risk falling back to the prod instance."
+          # Fail rather than connect with a partial login; the selected group never falls back
+          # to the other one (see the env block), so a missing secret is a real misconfiguration.
+          if [[ "$MISSING" == "1" ]]; then
+            echo "::error::A required ClickHouse v2 secret is missing for target $CLICKHOUSE_TARGET" \
+                 "(CLICKHOUSE_V2_USER, CLICKHOUSE_V2_PASSWORD, CLICKHOUSE_DB_V2 and a host)."
             exit 1
           fi
           cd "$CLONED_HF_ADAPTERS_DIR"
@@ -877,7 +865,7 @@ jobs:
               port=int(os.environ.get("CLICKHOUSE_PORT", 443)),
               user=os.environ.get("CLICKHOUSE_USER", "default"),
               password=os.environ["CLICKHOUSE_PASS"],
-              database=os.environ.get("CLICKHOUSE_DB", "spyre"),
+              database=os.environ["CLICKHOUSE_DB"],
               secure=True,
           )
           client.command("SELECT 1")
