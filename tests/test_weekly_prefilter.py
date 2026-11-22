@@ -19,6 +19,7 @@ import importlib.util
 import inspect
 from datetime import date
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -28,6 +29,9 @@ from tests.spyre.weekly_generation.failure_categories import (
 )
 from tests.spyre.weekly_generation.model_prefilter import prefilter_models
 from tests.spyre.weekly_generation.model_type import ModelType
+
+if TYPE_CHECKING:
+    from tests.spyre.weekly_generation.sink.result_sink import ResultSink
 
 # The concrete sinks pull in clickhouse_connect transitively; the pre-filter and
 # its stub sink must not. Gating at class level (rather than importing
@@ -776,7 +780,7 @@ class TestCuratedKeeperWiring:
             assert api.sorts and set(api.sorts) == {ranking}
 
 
-def _fake_sink_cls():
+def _fake_sink_cls() -> type[ResultSink]:
     """Build a minimal concrete ResultSink subclass, importing the base lazily.
 
     ``add_entry``'s behaviour lives entirely in the base class, so testing it
@@ -791,8 +795,11 @@ def _fake_sink_cls():
         def __init__(self) -> None:
             self.written: list[str] = []
 
-        def _insert_entry(self, *, model_name, **_rest) -> None:
+        def _insert_entry(self, *, model_name: str, **_rest: object) -> None:
             self.written.append(model_name)
+
+        def get_models_at_snapshot_date(self, *, snapshot_date: date) -> set[str]:
+            raise AssertionError("Writing a result must not query existing models")
 
     return _FakeSink
 
@@ -875,7 +882,7 @@ class TestSinkConstructors:
             (
                 "tests.spyre.weekly_generation.sink.clickhouse_sink",
                 "ClickHouseResultSink",
-                ["model_type"],
+                ["model_type", "model_list_file"],
             ),
         ],
     )
@@ -972,7 +979,9 @@ class TestSinkFactory:
             "v-embedding.csv",
         }
 
-    def test_no_csv_path_builds_the_clickhouse_sink(self, monkeypatch) -> None:
+    def test_no_csv_path_builds_the_clickhouse_sink(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Without --write-to-csv the factory must reach for ClickHouse.
 
         The constructor is stubbed out: instantiating the real one would connect
@@ -987,7 +996,9 @@ class TestSinkFactory:
         seen: dict = {}
 
         class _FakeClickHouseSink:
-            def __init__(self, *, model_type) -> None:
+            def __init__(
+                self, *, model_type: ModelType, model_list_file: str | None = None
+            ) -> None:
                 seen["model_type"] = model_type
 
         monkeypatch.setattr(ch_module, "ClickHouseResultSink", _FakeClickHouseSink)

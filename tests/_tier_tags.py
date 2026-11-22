@@ -63,6 +63,7 @@ import re
 #   model_support    -- explicitly selected by suite key; no tier includes the Hub scan.
 SUITE_TIERS: dict[str, tuple[str, ...]] = {
     "sentence_transformers_multimodal": ("regression", "trunk", "unit"),
+    "decision_compare": ("regression", "trunk", "unit"),
     "embed_compare": ("regression", "trunk", "unit"),
     "load": ("regression", "trunk", "unit"),
     "masked_lm_compare": ("regression", "trunk", "unit"),
@@ -75,6 +76,7 @@ SUITE_TIERS: dict[str, tuple[str, ...]] = {
     "token_classification_compare": ("regression", "trunk", "unit"),
     "token_compare": ("integration", "regression", "trunk", "unit"),
     "vlm": ("regression", "trunk", "unit"),
+    "yolo_compare": ("regression", "trunk", "unit"),
 }
 
 # Parametrize argnames whose value names the model under test. `model_path` covers almost

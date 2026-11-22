@@ -1,0 +1,78 @@
+name: spyre_test_comment
+
+# `/spyre-test` on a PR reruns that PR head's test_pull_request run, so the required "Spyre Test (amd64)"
+# check is re-posted by the run that owns it. Runs from the default branch; no PR code executes here.
+# A rerun replays the original event payload and merge ref: it does not pick up a moved base. Inert unless
+# GHA_FULL_MERGE_QUEUE_TESTS is "true" (otherwise Jenkins owns the check).
+run-name: spyre-test-comment
+
+on:
+  issue_comment:
+    types: [created]
+
+# Only trusted commands share a group, so no other comment can displace a pending /spyre-test.
+concurrency:
+  group: ${{ github.workflow }}-${{ (startsWith(github.event.comment.body, '/spyre-test') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) && github.event.issue.number || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  rerun:
+    name: Rerun PR tests
+    if: >-
+      vars.GHA_FULL_MERGE_QUEUE_TESTS == 'true' &&
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, '/spyre-test') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENTER: ${{ github.event.comment.user.login }}
+          BODY: ${{ github.event.comment.body }}
+          TESTS_ON_AUTO_MERGE: ${{ vars.GHA_TESTS_ON_AUTO_MERGE }}
+        run: |
+          set -euo pipefail
+          react() { gh api "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" -f content="$1" --silent || echo "::warning::could not add ${1} reaction"; }
+          refuse() { echo "::error::$1"; react confused; exit 1; }
+
+          first=${BODY%%$'\n'*}
+          first=${first%$'\r'}
+          case "$first" in "/spyre-test"|"/spyre-test "*) ;; *) echo "not a /spyre-test command"; exit 0 ;; esac
+          [ "$first" = "/spyre-test" ] || echo "::notice::arguments are ignored; the full suite is rerun"
+
+          # author_association also covers org members without write access to this repo.
+          perm=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${COMMENTER}/permission" --jq .permission || echo none)
+          case "$perm" in admin|maintain|write) ;; *) refuse "${COMMENTER} lacks write access" ;; esac
+
+          pr=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '"\(.head.sha) \(.state) \(.auto_merge != null)"')
+          read -r sha state auto <<< "$pr"
+          [ "$state" = open ] || refuse "PR #${PR_NUMBER} is ${state}"
+          # The rerun replays the original payload, so an auto-merge PR may still skip run-tests; only a push fixes that.
+          result=rocket
+          if [ "$auto" = true ] && [ "$TESTS_ON_AUTO_MERGE" != true ]; then
+            echo "::warning::auto-merge is enabled; the rerun may skip the suite and post no check. Push a commit for a fresh run."
+            result=eyes
+          fi
+
+          run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow test_pull_request.yaml \
+            --event pull_request --commit "$sha" --limit 1 --json databaseId,status,conclusion \
+            --jq '.[] | "\(.databaseId) \(.status) \(.conclusion)"')
+          [ -n "$run" ] || refuse "no test_pull_request run for ${sha}; push a commit or reopen the PR"
+          read -r id status conclusion <<< "$run"
+          [ "$conclusion" != action_required ] || refuse "run ${id} awaits approval for a first-time contributor; approve it in the Actions tab"
+          if [ "$status" != completed ]; then
+            echo "::warning::run ${id} is ${status}; nothing to rerun"
+            react eyes
+            exit 0
+          fi
+          gh run rerun "$id" --repo "$GITHUB_REPOSITORY"
+          react "$result"
+          echo "reran ${id} for ${sha} (PR #${PR_NUMBER})"

@@ -279,6 +279,7 @@ def _moe_decode_weight_view(pool, chunks, *, down=False):
             [size[0], size[1], free // stick, stick],
             [stride[0], stride[1], stick, 1],
             get_device_dtype(pool.dtype),
+            valid_elements={(0,): size[0], (1,): size[1], (2, 3): free},
         )
         # The persistent gate/up pools must sit in gather order: contract is
         # outer to the free-dim sticks, so chunking it preserves flat order.
@@ -287,6 +288,7 @@ def _moe_decode_weight_view(pool, chunks, *, down=False):
                 [experts, contract, free // stick, stick],
                 [contract * free, free, stick, 1],
                 get_device_dtype(pool.dtype),
+                valid_elements={(0,): experts, (1,): contract, (2, 3): free},
             )
         )
     return reinterpret_tensor_with_layout(pool, size, stride, 0, layout)
@@ -717,36 +719,61 @@ def to_default_device_layout(hidden_states: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def get_backbone(model):
+# Fallback wrapper attributes for models that declare no ``base_model_prefix``
+# (plain ``nn.Module`` objects, or remote-code ``PreTrainedModel`` subclasses
+# that leave it at the empty default).
+_BACKBONE_ATTR_FALLBACKS: tuple[str, ...] = (
+    "model",
+    "gpt_neox",
+    "bert",
+    "distilbert",
+    "mpnet",
+    "roberta",
+    "transformer",
+)
+
+
+def get_backbone(model: nn.Module) -> Any:
     """Return the transformer backbone of an HF model or task wrapper object.
 
     Task-specific auto classes (e.g., ``AutoModelForCausalLM``) return a wrapper
     containing a backbone and one or more task heads, while the generic AutoModel
-    class may return the backbone directly. Search the supported wrapper attributes
-    and return the first non-``None`` module. If none is present, treat ``model``
-    itself as the backbone.
+    class may return the backbone directly.
+
+    HF models declare where their backbone lives via ``base_model_prefix``
+    (``"model"``, ``"distilbert"``, ``"transformer"``, ...). A wrapper holds the
+    backbone at that attribute; a bare backbone does not have it and is its own
+    backbone. This mirrors HF's ``PreTrainedModel.base_model`` and, unlike
+    guessing by attribute name, does not mistake a bare model's internal
+    submodule for a backbone (a bare ``DistilBertModel`` has a ``.transformer``
+    layer stack, which a name search would confuse with GPT-2's
+    ``model.transformer``).
+
+    Models with no ``base_model_prefix`` fall back to searching
+    ``_BACKBONE_ATTR_FALLBACKS`` and returning the first non-``None`` module, or
+    ``model`` itself if none is present.
 
     Multimodal causal-LM wrappers (e.g. Gemma 4's
     ``Gemma4ForConditionalGeneration``) contain an additional nested
     ``language_model`` level beneath that first module. Descend into it when
     present.
+
+    Returns ``Any``: backbones are heterogeneous HF classes, and callers read
+    architecture-specific attributes (``layers``, ``embed_tokens``, ...).
     """
-    inner = next(
-        (
-            backbone
-            for name in (
-                "model",
-                "gpt_neox",
-                "bert",
-                "distilbert",
-                "mpnet",
-                "roberta",
-                "transformer",
-            )
-            if (backbone := getattr(model, name, None)) is not None
-        ),
-        model,
-    )
+    prefix: str = getattr(model, "base_model_prefix", "") or ""
+    inner: nn.Module
+    if prefix:
+        inner = getattr(model, prefix, None) or model
+    else:
+        inner = next(
+            (
+                backbone
+                for name in _BACKBONE_ATTR_FALLBACKS
+                if (backbone := getattr(model, name, None)) is not None
+            ),
+            model,
+        )
     return getattr(inner, "language_model", inner)
 
 
@@ -1475,8 +1502,8 @@ def patch_new_gelu(gelu_cls):
 
 
 def _largest_prime_factor(n: int) -> int:
-    """Largest prime factor of ``n`` (n >= 2). Used to bound the lm_head span."""
-    return int(max(factorint(n)))
+    """Largest prime factor, or 1 for a single stick, for the LM-head span."""
+    return int(max(factorint(n), default=1))
 
 
 # Spyre per-core EAR (effective address range) limit for one tensor: 256 MB.
@@ -2358,6 +2385,12 @@ def _cache_position_first_stl(batch_size, num_kv_heads, max_cache_len, head_dim,
             1,  # elems per stick
         ],
         device_dtype=get_device_dtype(dtype),
+        valid_elements={
+            (0,): max_cache_len,
+            (1,): num_kv_heads,
+            (2, 4): head_dim,
+            (3,): batch_size,
+        },
     )
 
 
@@ -2585,7 +2618,7 @@ def _resolve_tp_plan(
     return plan, cfg
 
 
-def _resolve_tp_size():
+def _resolve_tp_size() -> int:
     """Resolve and validate the TP degree required by ``DistributedConfig``."""
     world_size = os.getenv("WORLD_SIZE")
     if world_size is None:
@@ -2618,40 +2651,6 @@ def _without_spyre_allocator_warmup():
         yield
     finally:
         modeling_utils.caching_allocator_warmup = original
-
-
-@contextmanager
-def _prefer_exact_tp_plan_entries():
-    """Honor exact per-layer TP entries before Transformers' wildcard lookup.
-
-    Transformers documents exact TP rules, but its current lookup immediately
-    replaces every numeric layer index with ``*``. That makes a generic rule
-    win even when an exact override is present. Gemma 4 needs exact overrides
-    for only the full-attention K/V projections whose KV-head count is smaller
-    than the TP degree.
-    """
-    from transformers import modeling_utils
-    from transformers.integrations import tensor_parallel
-
-    original = tensor_parallel._get_parameter_tp_plan
-
-    def exact_first(parameter_name, tp_plan, is_weight=True):
-        if parameter_name in tp_plan:
-            return tp_plan[parameter_name]
-        if is_weight and "." in parameter_name:
-            module_name = parameter_name.rsplit(".", 1)[0]
-            if module_name in tp_plan:
-                return tp_plan[module_name]
-        return original(parameter_name, tp_plan, is_weight=is_weight)
-
-    original_modeling_lookup = modeling_utils._get_parameter_tp_plan
-    tensor_parallel._get_parameter_tp_plan = exact_first
-    modeling_utils._get_parameter_tp_plan = exact_first
-    try:
-        yield
-    finally:
-        tensor_parallel._get_parameter_tp_plan = original
-        modeling_utils._get_parameter_tp_plan = original_modeling_lookup
 
 
 def load_model_common(
@@ -2700,6 +2699,7 @@ def load_model_common(
             _kwargs["trust_remote_code"] = trust_remote_code
         model = module.load_hf_model(model_path, dtype, **_kwargs)
     elif tp_plan is not None:
+        import torch.distributed as dist
         from transformers.distributed import DistributedConfig
 
         subfolder = model_subfolder(model_path)
@@ -2711,11 +2711,22 @@ def load_model_common(
             trust_remote_code=trust_remote_code,
             subfolder=subfolder,
         )
+        tp_size = _resolve_tp_size()
         distributed_config = DistributedConfig(
-            tp_size=_resolve_tp_size(),
+            tp_size=tp_size,
             tp_plan=resolved_tp_plan,
         )
-        with _without_spyre_allocator_warmup(), _prefer_exact_tp_plan_entries():
+        from hf_adapters.spyre_tensor_parallel import spyre_tp_loading
+
+        if (
+            tp_size > 1
+            and DEVICE.split(":")[0] == "spyre"
+            and not dist.is_initialized()
+        ):
+            # HF reuses an existing group and binds LOCAL_RANK when creating
+            # its mesh. Omit device_id: SpyreCCL cannot split communicators.
+            dist.init_process_group(backend="cpu:gloo,spyre:spyreccl")
+        with _without_spyre_allocator_warmup(), spyre_tp_loading():
             model = auto_model_cls.from_pretrained(
                 model_path,
                 subfolder=subfolder,
