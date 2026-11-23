@@ -230,6 +230,9 @@ def _text_forward(
     valid = F.pad(valid, (0, pad), value=False)
     mask = torch.zeros((batch, 1, padded_length, padded_length), dtype=hidden.dtype)
     mask.masked_fill_(~valid[:, None, None, :], -torch.inf)
+    # A padding query outside the sliding window of every real token must
+    # still have a finite softmax. Only that query may attend to its own key.
+    mask.diagonal(dim1=-2, dim2=-1).masked_fill_(~valid[:, None, :], 0.0)
     masks: dict[str, torch.Tensor] = {
         "full_attention": mask.to(DEVICE),
         "sliding_attention": add_sliding_window_band(
@@ -264,7 +267,10 @@ def _text_forward(
         self, "_spyre_compiled_norm"
     )
     hidden = self.embedding_projection(final_norm(hidden).cpu()[:, :length])
-    if not kwargs.get("return_dict", self.config.return_dict):
+    return_dict: bool | None = kwargs.get("return_dict")
+    if return_dict is None:
+        return_dict = self.config.return_dict
+    if not return_dict:
         return (hidden,)
     return BaseModelOutput(last_hidden_state=hidden)
 
@@ -308,7 +314,10 @@ def prepare_for_spyre(model: EmbeddingGemma2Model | EmbeddingGemma2TextModel) ->
                 hidden: torch.Tensor = hf_gemma4_vision.prefill_vision_tower(
                     model, pixel_values, pixel_position_ids, tower=self
                 )
-                if not kwargs.get("return_dict", self.config.return_dict):
+                return_dict: bool | None = kwargs.get("return_dict")
+                if return_dict is None:
+                    return_dict = self.config.return_dict
+                if not return_dict:
                     return (hidden,)
                 return BaseModelOutputWithPooling(last_hidden_state=hidden)
 
@@ -327,30 +336,19 @@ def prepare_for_spyre(model: EmbeddingGemma2Model | EmbeddingGemma2TextModel) ->
             )
         if model.audio_tower is not None:
             cpu_modules.extend(["audio_tower", "embed_audio"])
-        patch_cpu_inputs(
-            model,
-            (
-                "input_ids",
-                "pixel_values",
-                "pixel_values_videos",
-                "input_features",
-                "attention_mask",
-                "input_features_mask",
-                "position_ids",
-                "inputs_embeds",
-                "image_position_ids",
-                "video_position_ids",
-                "num_frames_per_video",
-            ),
-        )
-        for method_name, names in (
-            ("get_image_features", ("pixel_values", "image_position_ids")),
-            (
-                "get_video_features",
-                ("pixel_values_videos", "video_position_ids", "num_frames_per_video"),
-            ),
-            ("get_audio_features", ("input_features", "input_features_mask")),
+        patch_cpu_inputs(model)
+        for method_name in (
+            "get_image_features",
+            "get_video_features",
+            "get_audio_features",
         ):
-            patch_cpu_inputs(model, names, method_name=method_name)
+            patch_cpu_inputs(model, method_name=method_name)
     setattr(model, "_spyre_cpu_submodules", cpu_modules)
+    # Opt in to ST device selection from a compute weight, since the first
+    # parameter belongs to the CPU token embeddings. No parameter scan needed.
+    setattr(
+        model,
+        "_spyre_device_parameter_name",
+        prefix + "layers.0.self_attn.q_proj.weight",
+    )
     setattr(model, "_spyre_embeddinggemma2_prepared", True)

@@ -4669,14 +4669,15 @@ def patch_pre_ln_encoder_forward(
 
 def patch_cpu_inputs(
     module: torch.nn.Module,
-    input_names: tuple[str, ...],
+    input_names: tuple[str, ...] | None = None,
     *,
     method_name: str = "forward",
 ) -> None:
-    """Keep named tensor inputs on CPU before HF embeddings/mask construction.
+    """Keep tensor inputs on CPU before HF embeddings/mask construction.
 
-    Names follow the selected method's positional argument order. Other
-    arguments, including interpolation and output flags, pass through unchanged.
+    If names are provided, they follow the selected method's positional argument
+    order and restrict which tensors move. Otherwise, move every direct tensor
+    argument. Non-tensor arguments, including output flags, pass through unchanged.
     """
     original_forward: Callable[..., Any] = getattr(module, method_name)
 
@@ -4685,7 +4686,8 @@ def patch_cpu_inputs(
         cpu_args: tuple[Any, ...] = tuple(
             (
                 value.cpu()
-                if index < len(input_names) and isinstance(value, torch.Tensor)
+                if (input_names is None or index < len(input_names))
+                and isinstance(value, torch.Tensor)
                 else value
             )
             for index, value in enumerate(args)
@@ -4693,7 +4695,8 @@ def patch_cpu_inputs(
         cpu_kwargs: dict[str, Any] = {
             name: (
                 value.cpu()
-                if name in input_names and isinstance(value, torch.Tensor)
+                if (input_names is None or name in input_names)
+                and isinstance(value, torch.Tensor)
                 else value
             )
             for name, value in kwargs.items()

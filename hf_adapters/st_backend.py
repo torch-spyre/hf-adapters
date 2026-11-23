@@ -295,17 +295,20 @@ def register() -> None:
 
 
 def _spyre_device(self: Any) -> torch.device:
-    """Report the resident compute device for a model with CPU helper modules.
+    """Report the compute device only for adapters that explicitly opt in.
 
     HF's default device comes from its first parameter, which may be a CPU
     embedding. ST uses this property to place the whole model before every
     encode; choosing that CPU parameter would move the compiled blocks off Spyre.
     """
     if getattr(self, "_spyre_backend", False):
-        for parameter in self.parameters():
-            if parameter.device.type == "spyre":
-                device: torch.device = parameter.device
-                return device
+        hf_model = self.transformers_model
+        parameter_name: str | None = getattr(
+            hf_model, "_spyre_device_parameter_name", None
+        )
+        if parameter_name is not None:
+            device: torch.device = hf_model.get_parameter(parameter_name).device
+            return device
     assert _original_device is not None and _original_device.fget is not None
     device = _original_device.fget(self)
     return device

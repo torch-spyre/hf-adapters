@@ -3,10 +3,13 @@
 
 """Offline parity with stock Transformers, including interleaved media."""
 
+from collections.abc import Iterator
+from types import MethodType
 from typing import Any
 
 import pytest
 import torch
+import torch.nn.functional as F
 from transformers import (
     EmbeddingGemma2Config,
     EmbeddingGemma2Model,
@@ -42,6 +45,21 @@ def _text_config() -> EmbeddingGemma2TextConfig:
     )
 
 
+def _vision_config() -> Gemma4VisionConfig:
+    return Gemma4VisionConfig(
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        head_dim=64,
+        patch_size=2,
+        pooling_kernel_size=2,
+        position_embedding_size=32,
+        standardize=False,
+    )
+
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("use_embeds", [False, True])
 def test_text_parity(
@@ -73,6 +91,9 @@ def test_text_parity(
     assert actual.shape == (2, 9, 192)
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(tuple_output[0], actual)
+    # Padding queries may attend to their own diagonal to keep softmax finite;
+    # their discarded outputs need not match HF's safe-SDPA padding outputs.
+    actual, expected = actual[mask.bool()], expected[mask.bool()]
     if dtype == torch.float32:
         torch.testing.assert_close(actual, expected, atol=3e-5, rtol=3e-5)
     else:
@@ -82,27 +103,190 @@ def test_text_parity(
         assert cosine.min() > 0.999
 
 
+def _plain_softmax_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_mask: torch.Tensor,
+    *,
+    is_causal: bool,
+    scale: float,
+    enable_gqa: bool,
+) -> torch.Tensor:
+    """Expose all-masked rows instead of relying on CPU SDPA's safe softmax."""
+    assert not is_causal
+    if enable_gqa:
+        repeats = query.shape[1] // key.shape[1]
+        key = key.repeat_interleave(repeats, dim=1)
+        value = value.repeat_interleave(repeats, dim=1)
+    scores = query @ key.transpose(-2, -1) * scale + attn_mask
+    return scores.softmax(dim=-1) @ value
+
+
+@pytest.mark.parametrize("padding_side", ["left", "right"])
+def test_mixed_lengths_with_unsafe_softmax(
+    monkeypatch: pytest.MonkeyPatch, padding_side: str
+) -> None:
+    monkeypatch.setattr(torch, "compile", _eager)
+    torch.manual_seed(42)
+    config = _text_config()
+    config.sliding_window = 512
+    model = EmbeddingGemma2TextModel(config).eval()
+    ids = torch.randint(3, 100, (2, 1200))
+    mask = torch.ones_like(ids, dtype=torch.bool)
+    mask[1] = False
+    mask[1, :10] = padding_side == "right"
+    mask[1, -10:] = padding_side == "left"
+    positions = torch.arange(ids.shape[1])[None].expand_as(ids)
+    with torch.inference_mode():
+        # Reference forwards must precede adapter preparation.
+        expected: list[torch.Tensor] = [
+            model(
+                ids[row, mask[row]][None],
+                position_ids=positions[row, mask[row]][None],
+            ).last_hidden_state[0]
+            for row in range(ids.shape[0])
+        ]
+        monkeypatch.setattr(F, "scaled_dot_product_attention", _plain_softmax_attention)
+        hf_embeddinggemma2.prepare_for_spyre(model)
+        actual: torch.Tensor = model(
+            ids, attention_mask=mask, position_ids=positions
+        ).last_hidden_state
+    assert torch.isfinite(actual).all()
+    for row, reference in enumerate(expected):
+        torch.testing.assert_close(
+            actual[row, mask[row]], reference, atol=3e-5, rtol=3e-5
+        )
+
+
+@pytest.mark.parametrize("tower_name", ["text", "vision"])
+@pytest.mark.parametrize("config_return_dict", [True, False])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({}, id="omitted"),
+        pytest.param({"return_dict": None}, id="none"),
+        pytest.param({"return_dict": True}, id="true"),
+        pytest.param({"return_dict": False}, id="false"),
+    ],
+)
+def test_return_dict_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    tower_name: str,
+    config_return_dict: bool,
+    kwargs: dict[str, bool | None],
+) -> None:
+    monkeypatch.setattr(torch, "compile", _eager)
+    model = EmbeddingGemma2Model(
+        EmbeddingGemma2Config(
+            text_config=_text_config(),
+            vision_config=_vision_config(),
+            audio_config=None,
+        )
+    ).eval()
+    tower: torch.nn.Module
+    inputs: dict[str, torch.Tensor]
+    if tower_name == "text":
+        tower = model.language_model
+        inputs = {"input_ids": torch.tensor([[3, 4, 5]])}
+    else:
+        tower = model.vision_tower
+        inputs = {
+            "pixel_values": torch.randn(1, 16, 12),
+            "pixel_position_ids": torch.cartesian_prod(
+                torch.arange(4), torch.arange(4)
+            )[None],
+        }
+    tower.config.return_dict = config_return_dict
+    hf_embeddinggemma2.prepare_for_spyre(model)
+    with torch.inference_mode():
+        result = tower(**inputs, **kwargs)
+    requested = kwargs.get("return_dict")
+    expected_dict = config_return_dict if requested is None else requested
+    assert isinstance(result, tuple) is not expected_dict
+    hidden: torch.Tensor = result.last_hidden_state if expected_dict else result[0]
+    assert torch.isfinite(hidden).all()
+
+
+@pytest.mark.parametrize("backend_enabled", [False, True])
+@pytest.mark.parametrize("opt_in", [False, True])
+def test_sentence_transformers_device_opt_in(
+    monkeypatch: pytest.MonkeyPatch, backend_enabled: bool, opt_in: bool
+) -> None:
+    from sentence_transformers import SentenceTransformer
+
+    import hf_adapters.st_backend  # noqa: F401
+
+    monkeypatch.setattr(torch, "compile", _eager)
+    backbone = EmbeddingGemma2TextModel(_text_config()).eval()
+    model = SentenceTransformer(modules=[backbone], device="cpu")
+    setattr(model, "_spyre_backend", backend_enabled)
+    if opt_in:
+        hf_embeddinggemma2.prepare_for_spyre(backbone)
+    # Simulate mixed CPU/accelerator placement without requiring hardware.
+    projection: torch.nn.Linear = backbone.layers[0].self_attn.q_proj
+    projection.to("meta")
+
+    def forbid_parameter_scan(
+        *args: Any, **kwargs: Any
+    ) -> Iterator[torch.nn.Parameter]:
+        raise AssertionError("Device selection must not scan ST parameters")
+
+    monkeypatch.setattr(model, "parameters", forbid_parameter_scan)
+    assert model.device == torch.device("meta" if backend_enabled and opt_in else "cpu")
+    # The override follows current placement rather than caching a stale device.
+    projection.to_empty(device="cpu")
+    assert model.device == torch.device("cpu")
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ["forward", "get_image_features", "get_video_features", "get_audio_features"],
+)
+def test_cpu_frontend_moves_unknown_tensor_inputs(
+    monkeypatch: pytest.MonkeyPatch, method_name: str
+) -> None:
+    monkeypatch.setattr(torch, "compile", _eager)
+    model = EmbeddingGemma2Model(
+        EmbeddingGemma2Config(
+            text_config=_text_config(), vision_config=None, audio_config=None
+        )
+    ).eval()
+
+    def capture(
+        self: EmbeddingGemma2Model, *args: Any, **kwargs: Any
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        return args, kwargs
+
+    def simulated_cpu_copy(self: torch.Tensor) -> torch.Tensor:
+        assert self.device.type == "meta"
+        return torch.zeros(self.shape, dtype=self.dtype)
+
+    monkeypatch.setattr(model, method_name, MethodType(capture, model))
+    hf_embeddinggemma2.prepare_for_spyre(model)
+    monkeypatch.setattr(torch.Tensor, "cpu", simulated_cpu_copy)
+    tokens = torch.empty((1, 3), dtype=torch.int64, device="meta")
+    args, kwargs = getattr(model, method_name)(
+        tokens,
+        tokens,
+        token_type_ids=tokens,
+        mm_token_type_ids=tokens,
+        return_dict=None,
+    )
+    for tensor in (*args, kwargs["token_type_ids"], kwargs["mm_token_type_ids"]):
+        assert tensor.device.type == "cpu"
+    assert kwargs["return_dict"] is None
+
+
 @pytest.mark.parametrize("modality", ["image", "video"])
 def test_interleaved_vision_parity(
     monkeypatch: pytest.MonkeyPatch, modality: str
 ) -> None:
     monkeypatch.setattr(torch, "compile", _eager)
     torch.manual_seed(42)
-    vision = Gemma4VisionConfig(
-        hidden_size=128,
-        intermediate_size=256,
-        num_hidden_layers=2,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        head_dim=64,
-        patch_size=2,
-        pooling_kernel_size=2,
-        position_embedding_size=32,
-        standardize=False,
-    )
     config = EmbeddingGemma2Config(
         text_config=_text_config(),
-        vision_config=vision,
+        vision_config=_vision_config(),
         audio_config=None,
         image_token_id=125,
         video_token_id=126,

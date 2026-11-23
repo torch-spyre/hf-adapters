@@ -21,6 +21,7 @@ checks caption ranking and image/text cosine scores against the CPU reference.
 """
 
 import gc
+from typing import Any
 
 import pytest
 import torch
@@ -73,6 +74,24 @@ def test_sentence_transformers_multimodal_backend(model_path: str) -> None:
             "image": cpu_model.encode(image, convert_to_tensor=True).cpu(),
             "image_list": cpu_model.encode([image], convert_to_tensor=True).cpu(),
         }
+        mixed_length_prompts: list[str] = []
+        mixed_text_kwargs: dict[str, Any] = {
+            "batch_size": 2,
+            "processing_kwargs": {
+                "text": {
+                    "padding": "max_length",
+                    "truncation": True,
+                    "max_length": 1200,
+                }
+            },
+        }
+        if cpu_model[0].config.model_type == "embedding_gemma2":
+            # The short row has padding queries farther than sliding_window
+            # from every real key. They must not generate NaNs in later layers.
+            mixed_length_prompts = ["The cat sits on the mat. " * 200, "A cat."]
+            reference["mixed_length_text"] = cpu_model.encode(
+                mixed_length_prompts, convert_to_tensor=True, **mixed_text_kwargs
+            ).cpu()
         # Preparing Spyre may patch classes; finish the reference first.
         del cpu_model
         gc.collect()
@@ -92,6 +111,10 @@ def test_sentence_transformers_multimodal_backend(model_path: str) -> None:
             "image": model.encode(image, convert_to_tensor=True).cpu(),
             "image_list": model.encode([image], convert_to_tensor=True).cpu(),
         }
+        if mixed_length_prompts:
+            actual["mixed_length_text"] = model.encode(
+                mixed_length_prompts, convert_to_tensor=True, **mixed_text_kwargs
+            ).cpu()
         for name, expected in reference.items():
             value = actual[name]
             assert value.shape == expected.shape
