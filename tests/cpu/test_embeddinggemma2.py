@@ -513,6 +513,25 @@ def test_reject_fp16() -> None:
         hf_embeddinggemma2.prepare_for_spyre(model)
 
 
+@pytest.mark.parametrize("rope_type", ["dynamic", "longrope"])
+def test_reject_sequence_length_dependent_rope(rope_type: str) -> None:
+    config: EmbeddingGemma2TextConfig = _text_config()
+    rope: dict[str, object] = {"rope_type": rope_type, "rope_theta": 1000000.0}
+    if rope_type == "dynamic":
+        rope["factor"] = 2.0
+    else:
+        half: int = config.per_layer_config["full_attention"].head_dim // 2
+        rope.update(
+            short_factor=[1.0] * half,
+            long_factor=[2.0] * half,
+            original_max_position_embeddings=config.max_position_embeddings // 2,
+        )
+    config.rope_parameters["full_attention"] = rope
+    model = EmbeddingGemma2TextModel(config).to(torch.bfloat16)
+    with pytest.raises(SpyreUnsupportedModelError, match=f"full_attention={rope_type}"):
+        hf_embeddinggemma2.prepare_for_spyre(model)
+
+
 def test_audio_cpu_tower_parity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(torch, "compile", _eager)
     torch.manual_seed(42)

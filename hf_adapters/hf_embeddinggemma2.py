@@ -149,6 +149,20 @@ def _prepare_text(model: EmbeddingGemma2TextModel) -> None:
             )
     if config.hidden_activation != "gelu_pytorch_tanh":
         raise SpyreUnsupportedModelError("EmbeddingGemma 2 requires gelu_pytorch_tanh")
+    # PrecomputedRotaryEmbedding freezes the init-time inv_freq, so RoPE types
+    # that HF recomputes per sequence length (see dynamic_rope_update) would
+    # silently diverge past the original context length.
+    rope_types: dict[str, str] = model.rotary_emb.rope_type
+    dynamic: list[str] = sorted(
+        f"{layer_type}={rope_type}"
+        for layer_type, rope_type in rope_types.items()
+        if "dynamic" in rope_type or rope_type == "longrope"
+    )
+    if dynamic:
+        raise SpyreUnsupportedModelError(
+            "EmbeddingGemma 2 does not support sequence-length-dependent RoPE "
+            f"({', '.join(dynamic)})"
+        )
     ropes: dict[str, PrecomputedRotaryEmbedding] = {}
     for layer_type in model.unique_layer_types:
         ropes[layer_type] = PrecomputedRotaryEmbedding(
