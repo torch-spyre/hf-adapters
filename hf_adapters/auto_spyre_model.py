@@ -288,7 +288,6 @@ class ModelDTypePolicy:
 MODEL_DTYPE_POLICIES: dict[str, ModelDTypePolicy] = {
     "convaiinnovations/laya": ModelDTypePolicy(dtype=torch.float16),
     "google/embeddinggemma-300m": ModelDTypePolicy(dtype=torch.bfloat16),
-    "google/embeddinggemma-2": ModelDTypePolicy(dtype=torch.bfloat16),
     "ibm-granite/granite-4.0-1b-base": ModelDTypePolicy(cpu_dtype=torch.float32),
     "ibm-granite/granite-4.0-1b": ModelDTypePolicy(cpu_dtype=torch.float32),
 }
@@ -336,11 +335,17 @@ def dtype_for_model_path(
             model_name_or_path, trust_remote_code=trust_remote_code
         )
         text_config = getattr(config, "text_config", None)
-        dtype = (
-            getattr(text_config, "dtype", None)
-            or getattr(config, "dtype", None)
-            or torch.float16
-        )
+        if getattr(config, "model_type", None) in {
+            "embedding_gemma2",
+            "embedding_gemma2_text",
+        }:
+            dtype = torch.bfloat16
+        else:
+            dtype = (
+                getattr(text_config, "dtype", None)
+                or getattr(config, "dtype", None)
+                or torch.float16
+            )
 
     if dtype == torch.float32 and device_str == "spyre":
         dtype = torch.float16

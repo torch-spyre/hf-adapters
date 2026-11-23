@@ -25,9 +25,11 @@ from contextlib import nullcontext
 from itertools import chain
 from typing import Any
 
+import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
+from numpy.typing import NDArray
 from sentence_transformers import SentenceTransformer
 
 # Register the public SentenceTransformers backend.
@@ -37,6 +39,7 @@ from tests._multimodal_embedding_helpers import (
     TEXT_PROMPTS,
     bounded_cpu_threads,
     forbid_model_device_moves,
+    synthetic_audio_inputs,
 )
 from tests._vision_helpers import _load_sample_image
 from tests.model_registry import MULTIMODAL_EMBED_PATHS
@@ -81,6 +84,9 @@ def test_sentence_transformers_multimodal_backend(model_path: str) -> None:
             "image_list": cpu_model.encode([image], convert_to_tensor=True).cpu(),
         }
         mixed_length_prompts: list[str] = []
+        audio_inputs: list[NDArray[np.float32]] = []
+        audio_kwargs: dict[str, Any] = {}
+        reference_buffers: dict[str, torch.Tensor] = {}
         mixed_text_kwargs: dict[str, Any] = {
             "batch_size": 2,
             "processing_kwargs": {
@@ -98,6 +104,18 @@ def test_sentence_transformers_multimodal_backend(model_path: str) -> None:
             reference["mixed_length_text"] = cpu_model.encode(
                 mixed_length_prompts, convert_to_tensor=True, **mixed_text_kwargs
             ).cpu()
+            sampling_rate: int = cpu_model[0].processor.feature_extractor.sampling_rate
+            audio_inputs = synthetic_audio_inputs(sampling_rate)
+            audio_kwargs = {
+                "processing_kwargs": {"audio": {"sampling_rate": sampling_rate}}
+            }
+            reference["audio"] = cpu_model.encode(
+                audio_inputs, batch_size=2, convert_to_tensor=True, **audio_kwargs
+            ).cpu()
+            reference_buffers = {
+                name: buffer.clone()
+                for name, buffer in cpu_model[0].auto_model.named_buffers()
+            }
         # Preparing Spyre may patch classes; finish the reference first.
         del cpu_model
         gc.collect()
@@ -121,6 +139,15 @@ def test_sentence_transformers_multimodal_backend(model_path: str) -> None:
                     tensor.device.type == "cpu"
                     for tensor in chain(module.parameters(), module.buffers())
                 ), f"{name} was not restored to CPU during initialization"
+                for buffer_name, buffer in module.named_buffers():
+                    full_name = f"{name}.{buffer_name}"
+                    torch.testing.assert_close(
+                        buffer,
+                        reference_buffers[full_name],
+                        rtol=0,
+                        atol=0,
+                        msg=f"CPU helper buffer {full_name} changed during loading",
+                    )
         with forbid_model_device_moves(model) if preserve_placement else nullcontext():
             actual: dict[str, torch.Tensor] = {
                 "text": model.encode(
@@ -132,6 +159,10 @@ def test_sentence_transformers_multimodal_backend(model_path: str) -> None:
             if mixed_length_prompts:
                 actual["mixed_length_text"] = model.encode(
                     mixed_length_prompts, convert_to_tensor=True, **mixed_text_kwargs
+                ).cpu()
+            if audio_inputs:
+                actual["audio"] = model.encode(
+                    audio_inputs, batch_size=2, convert_to_tensor=True, **audio_kwargs
                 ).cpu()
         if preserve_placement:
             print("No model parameter/buffer device transfers during repeated encodes.")

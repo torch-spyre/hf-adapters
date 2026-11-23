@@ -2749,24 +2749,63 @@ def load_model_common(
     return model
 
 
-def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
+@contextmanager
+def cpu_submodules_on_host(
+    model: torch.nn.Module,
+    dtype: torch.dtype | None = None,
+    *,
+    submodule_paths: tuple[str, ...] | None = None,
+    preserve_buffers: bool = True,
+) -> Iterator[None]:
+    """Exclude host helpers from model moves and preserve their buffer values.
+
+    Weights may adopt the requested dtype on CPU. Retaining the original buffer
+    tensors also retains precision, integer/bool dtypes, and persistence flags.
+    """
+    paths: tuple[str, ...] = (
+        tuple(getattr(model, "_spyre_cpu_submodules", ()))
+        if submodule_paths is None
+        else submodule_paths
+    )
+    saved: list[tuple[torch.nn.Module, str, torch.nn.Module]] = []
+    buffers: list[tuple[torch.nn.Module, str, torch.Tensor]] = []
+    for path in paths:
+        parent_path, _, attr = path.rpartition(".")
+        parent: torch.nn.Module = (
+            model.get_submodule(parent_path) if parent_path else model
+        )
+        submod: torch.nn.Module = model.get_submodule(path)
+        saved.append((parent, attr, submod))
+        if preserve_buffers:
+            for owner in submod.modules():
+                for name, buffer in owner.named_buffers(recurse=False):
+                    buffers.append((owner, name, buffer.cpu()))
+    for parent, attr, _ in saved:
+        setattr(parent, attr, torch.nn.Module())
+    try:
+        yield
+    finally:
+        for parent, attr, submod in saved:
+            setattr(parent, attr, submod)
+        try:
+            for _, _, submod in saved:
+                submod.to(device="cpu", dtype=dtype)
+        finally:
+            for owner, name, buffer in buffers:
+                owner._buffers[name] = buffer
+
+
+def move_model_to_spyre(
+    model: PreTrainedModel, module: ModuleType, dtype: torch.dtype
+) -> None:
     untie_embedding_and_lm_head(model)
     module.prepare_for_spyre(model)
-    cpu_submodules = getattr(model, "_spyre_cpu_submodules", [])
-    saved_cpu_modules = {}
-    for path in cpu_submodules:
-        parent_path, _, attr = path.rpartition(".")
-        parent = model.get_submodule(parent_path) if parent_path else model
-        saved_cpu_modules[path] = (parent, attr, getattr(parent, attr))
-        setattr(parent, attr, torch.nn.Module())
-
-    _move_to_spyre_with_layout(model, dtype)
-
-    for parent, attr, submod in saved_cpu_modules.values():
-        # Explicitly move to CPU: when DistributedConfig already placed the
-        # model on device before move_model_to_spyre runs, the saved submodule
-        # is on-device too; the restore would leave it on device rather than CPU.
-        setattr(parent, attr, submod.to(device="cpu", dtype=dtype))
+    with cpu_submodules_on_host(
+        model,
+        dtype,
+        preserve_buffers=hasattr(model, "_spyre_device_parameter_name"),
+    ):
+        _move_to_spyre_with_layout(model, dtype)
     print("Model on Spyre ready.")
 
 

@@ -4,6 +4,7 @@
 """Offline parity with stock Transformers, including interleaved media."""
 
 from collections.abc import Iterator
+from pathlib import Path
 from types import MethodType
 from typing import Any
 
@@ -295,7 +296,7 @@ def test_repeated_encode_preserves_mixed_placement(
             assert backbone.layers[0].self_attn.q_proj.weight.device.type == resident
 
 
-def test_init_restores_cpu_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_init_preserves_cpu_helper_buffers(monkeypatch: pytest.MonkeyPatch) -> None:
     from sentence_transformers import SentenceTransformer
 
     import hf_adapters.st_backend  # noqa: F401
@@ -303,13 +304,89 @@ def test_init_restores_cpu_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(torch, "compile", _eager)
     backbone = EmbeddingGemma2TextModel(_text_config()).eval()
     hf_embeddinggemma2.prepare_for_spyre(backbone)
-    # Spyre module transfers can cast index buffers to float. Restoration must
-    # finish during construction, before the first forward is called.
-    backbone.embed_tokens.register_buffer("position_ids", torch.arange(3).float())
-    SentenceTransformer(
-        modules=[_PlacementFrontend(backbone)], backend="spyre", device="cpu"
+    buffers = torch.nn.Module()
+    buffers.register_buffer("mask", torch.tensor([True, False]), persistent=False)
+    buffers.register_buffer("offset", torch.tensor([16777217], dtype=torch.int64))
+    buffers.register_buffer("count", torch.tensor([3], dtype=torch.int32))
+    buffers.register_buffer("scale", torch.tensor([0.1234567]), persistent=False)
+    backbone.embed_tokens.add_module("buffers_to_preserve", buffers)
+    expected: dict[str, torch.Tensor] = {
+        name: buffer.clone() for name, buffer in backbone.embed_tokens.named_buffers()
+    }
+    head = torch.nn.Linear(4, 4)
+    head.register_buffer("scale", torch.tensor(0.1234567))
+    model = SentenceTransformer(
+        modules=[_PlacementFrontend(backbone), head], backend="spyre", device="meta"
     )
-    assert backbone.embed_tokens.position_ids.dtype == torch.long
+    # Meta represents the accelerator: no CPU helper may pass through it.
+    model.to("meta", dtype=torch.bfloat16)
+    assert backbone.layers[0].self_attn.q_proj.weight.device.type == "meta"
+    assert backbone.embed_tokens.weight.device.type == "cpu"
+    assert backbone.embed_tokens.weight.dtype == torch.bfloat16
+    assert head.weight.device.type == "cpu"
+    assert head.weight.dtype == torch.bfloat16
+    torch.testing.assert_close(head.scale, torch.tensor(0.1234567), rtol=0, atol=0)
+    for name, buffer in backbone.embed_tokens.named_buffers():
+        assert buffer.device.type == "cpu"
+        torch.testing.assert_close(buffer, expected[name], rtol=0, atol=0)
+    assert "mask" not in buffers.state_dict()
+    assert "scale" not in buffers.state_dict()
+
+
+def test_shared_load_preserves_cpu_helper_buffers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hf_adapters.hf_common as common
+
+    monkeypatch.setattr(torch, "compile", _eager)
+    model = EmbeddingGemma2TextModel(_text_config()).eval()
+    expected = model.embed_tokens.embed_scale.clone()
+
+    def move_to_meta(model: torch.nn.Module, dtype: torch.dtype) -> None:
+        model.to(device="meta", dtype=dtype)
+
+    monkeypatch.setattr(common, "_move_to_spyre_with_layout", move_to_meta)
+    common.move_model_to_spyre(model, hf_embeddinggemma2, torch.bfloat16)
+    assert model.embed_tokens.weight.device.type == "cpu"
+    assert model.embed_tokens.weight.dtype == torch.bfloat16
+    torch.testing.assert_close(model.embed_tokens.embed_scale, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("composite", [False, True])
+def test_local_fp32_config_defaults_to_bf16(tmp_path: Path, composite: bool) -> None:
+    from hf_adapters.auto_spyre_model import dtype_for_model_path
+
+    text_config = _text_config()
+    text_config.dtype = torch.float32
+    config: EmbeddingGemma2TextConfig | EmbeddingGemma2Config = text_config
+    if composite:
+        config = EmbeddingGemma2Config(
+            text_config=text_config,
+            vision_config=None,
+            audio_config=None,
+            dtype=torch.float32,
+        )
+    config.save_pretrained(tmp_path)
+    assert dtype_for_model_path(tmp_path, "spyre") == torch.bfloat16
+
+
+def test_local_checkpoint_load_honors_dtype_requests(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from hf_adapters.auto_spyre_model import AutoSpyreModel
+
+    monkeypatch.setattr(torch, "compile", _eager)
+    model = EmbeddingGemma2TextModel(_text_config()).eval()
+    model.save_pretrained(tmp_path)
+    default = AutoSpyreModel.from_pretrained(tmp_path)
+    explicit = AutoSpyreModel.from_pretrained(tmp_path, dtype=torch.float32)
+    assert default.dtype == torch.bfloat16
+    assert explicit.dtype == torch.float32
+    with torch.inference_mode():
+        output: torch.Tensor = default(torch.tensor([[3, 4, 5]])).last_hidden_state
+    assert torch.isfinite(output).all()
+    with pytest.raises(SpyreUnsupportedModelError, match="float16 overflows"):
+        AutoSpyreModel.from_pretrained(tmp_path, dtype=torch.float16)
 
 
 @pytest.mark.parametrize("device", ["cpu", "meta:1", "cuda:0"])

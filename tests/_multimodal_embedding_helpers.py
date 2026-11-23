@@ -20,7 +20,9 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from unittest.mock import patch
 
+import numpy as np
 import torch
+from numpy.typing import NDArray
 
 # The cat caption (index 1) must rank first against the sample image.
 TEXT_PROMPTS: list[str] = [
@@ -28,6 +30,16 @@ TEXT_PROMPTS: list[str] = [
     "A cat in the snow",
     "A picture of London at night",
 ]
+
+
+def synthetic_audio_inputs(sampling_rate: int) -> list[NDArray[np.float32]]:
+    """Deterministic waveforms of different lengths, without external fixtures."""
+    times = np.arange(sampling_rate, dtype=np.float32) / sampling_rate
+    first = 0.1 * np.sin(2 * np.pi * 220 * times) + 0.05 * np.sin(
+        2 * np.pi * 440 * times
+    )
+    second = 0.1 * np.sin(2 * np.pi * 330 * times[: sampling_rate // 2])
+    return [first.astype(np.float32), second.astype(np.float32)]
 
 
 @contextmanager

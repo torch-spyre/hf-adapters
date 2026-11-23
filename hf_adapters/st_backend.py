@@ -62,7 +62,7 @@ from transformers import PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import BaseModelOutput
 
 from hf_adapters.auto_spyre_model import AutoSpyreModel, resolve_adapter_module
-from hf_adapters.hf_common import prefill_embed, prefill_encoder
+from hf_adapters.hf_common import cpu_submodules_on_host, prefill_embed, prefill_encoder
 
 
 def _to_cpu(t):
@@ -229,6 +229,7 @@ def _restore_cpu_submodule(submod: torch.nn.Module) -> None:
 
 def _restore_cpu_modules(self: Any) -> None:
     """Pin ST heads and adapter-declared helper modules to the host."""
+    preserve_buffers: bool = _spyre_compute_device(self) is not None
     for module in list(self.children())[1:]:
         module.to("cpu")
     # ST Transformer and CLIP wrappers use different backbone attributes.
@@ -240,7 +241,11 @@ def _restore_cpu_modules(self: Any) -> None:
         if hf_model is not None:
             for submod_name in getattr(hf_model, "_spyre_cpu_submodules", []):
                 try:
-                    _restore_cpu_submodule(hf_model.get_submodule(submod_name))
+                    submod: torch.nn.Module = hf_model.get_submodule(submod_name)
+                    if preserve_buffers:
+                        submod.to("cpu")
+                    else:
+                        _restore_cpu_submodule(submod)
                 except AttributeError:
                     pass
 
@@ -269,6 +274,7 @@ def register() -> None:
 
     global _original_load_model, _original_init, _original_forward, _original_device
     global _original_resolve_inference_device
+    global _original_to
 
     if getattr(Transformer, "_spyre_patched", False):
         return
@@ -287,6 +293,9 @@ def register() -> None:
 
     _original_resolve_inference_device = SentenceTransformer._resolve_inference_device
     SentenceTransformer._resolve_inference_device = _spyre_resolve_inference_device
+
+    _original_to = SentenceTransformer.to
+    SentenceTransformer.to = _spyre_to
 
     Transformer._spyre_patched = True
 
@@ -312,6 +321,28 @@ def _spyre_device(self: Any) -> torch.device:
     assert _original_device is not None and _original_device.fget is not None
     original_device: torch.device = _original_device.fget(self)
     return original_device
+
+
+def _spyre_to(self: Any, *args: Any, **kwargs: Any) -> Any:
+    """Keep opted-in CPU helpers off the accelerator during ST initialization.
+
+    Also protect ST's host pooling/projection modules. Weight dtype requests
+    still apply to those helpers, while their buffers retain their HF values.
+    """
+    assert _original_to is not None
+    if _spyre_compute_device(self) is None:
+        return _original_to(self, *args, **kwargs)
+    hf_model: PreTrainedModel = self.transformers_model
+    backbone_path: str = next(
+        name for name, module in self.named_modules() if module is hf_model
+    )
+    cpu_paths: tuple[str, ...] = tuple(getattr(hf_model, "_spyre_cpu_submodules", ()))
+    paths: tuple[str, ...] = tuple(
+        f"{backbone_path}.{name}" for name in cpu_paths
+    ) + tuple(name for name, _ in list(self.named_children())[1:])
+    dtype: torch.dtype | None = torch._C._nn._parse_to(*args, **kwargs)[1]
+    with cpu_submodules_on_host(self, dtype, submodule_paths=paths):
+        return _original_to(self, *args, **kwargs)
 
 
 def _spyre_resolve_inference_device(
@@ -346,4 +377,5 @@ _original_init = None
 _original_forward = None
 _original_device: property | None = None
 _original_resolve_inference_device: Callable[..., torch.device] | None = None
+_original_to: Callable[..., Any] | None = None
 register()
