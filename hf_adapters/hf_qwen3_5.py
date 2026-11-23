@@ -20,6 +20,8 @@ latter has independent convolution and recurrent states, so this adapter uses
 heterogeneous entries in the generic generation cache lists.
 """
 
+from typing import Any
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -38,6 +40,22 @@ from hf_adapters.hf_common import (
     run_lm_head,
     text_config,
 )
+
+
+def spyre_tp_replicated_linear_modules(model: nn.Module, tp_size: int) -> set[str]:
+    """Keep DeltaNet's small scalar gates off the sub-stick all-gather path.
+
+    Each gate emits one scalar per value head. Splitting those few rows across
+    ranks requires sub-stick copies during batched decode, unsupported by
+    Spyre. The much larger QKV, Z, and output projections remain sharded.
+    """
+    del tp_size
+    return {
+        name
+        for name, module in model.named_modules()
+        if isinstance(module, nn.Linear)
+        and name.endswith((".linear_attn.in_proj_a", ".linear_attn.in_proj_b"))
+    }
 
 
 def _rms_norm(x, norm):
@@ -336,6 +354,60 @@ def _padding_mask(attention_mask, sequence_length, cache_index):
     return (diagonal == 0).to(dtype=attention_mask.dtype, device=attention_mask.device)
 
 
+def _run_full_attention_layer(
+    compiled_block,
+    hidden_states,
+    selected_freqs,
+    attn_mask,
+    key_caches,
+    value_caches,
+    index,
+    cache_index,
+    *,
+    decode,
+):
+    """Run one gated full-attention layer, updating its KV cache in the lists."""
+    if len(compiled_block) == 2:
+        # The MoE sibling shares this runner and retains its fused
+        # attention-plus-experts protocol.
+        block = compiled_block[1] if decode else compiled_block[0]
+        hidden_states, key_caches[index], value_caches[index] = block(
+            hidden_states,
+            selected_freqs,
+            attn_mask,
+            key_caches[index],
+            value_caches[index],
+            cache_index,
+        )
+        return hidden_states
+    (
+        project_prefill,
+        project_decode,
+        cache_prefill,
+        cache_decode,
+        attention_prefill,
+        attention_decode,
+        finish_prefill,
+        finish_decode,
+    ) = compiled_block
+    project = project_decode if decode else project_prefill
+    update_cache = cache_decode if decode else cache_prefill
+    attention = attention_decode if decode else attention_prefill
+    finish = finish_decode if decode else finish_prefill
+    residual, query, key, value, gate = project(hidden_states, selected_freqs)
+    key_caches[index], value_caches[index] = update_cache(
+        key,
+        value,
+        key_caches[index],
+        value_caches[index],
+        cache_index,
+    )
+    attention_output = attention(
+        query, key_caches[index], value_caches[index], attn_mask
+    )
+    return finish(residual, attention_output, gate)
+
+
 def _run_backbone_forward(
     model,
     input_ids,
@@ -354,45 +426,17 @@ def _run_backbone_forward(
     for index, layer_type in enumerate(text_config(model.config).layer_types):
         compiled_block = model._spyre_compiled_blocks[index]
         if layer_type == "full_attention":
-            if len(compiled_block) == 2:
-                # The MoE sibling shares this runner and retains its fused
-                # attention-plus-experts protocol.
-                block = compiled_block[1] if decode else compiled_block[0]
-                hidden_states, key_caches[index], value_caches[index] = block(
-                    hidden_states,
-                    selected_freqs,
-                    attn_mask,
-                    key_caches[index],
-                    value_caches[index],
-                    cache_index,
-                )
-                continue
-            (
-                project_prefill,
-                project_decode,
-                cache_prefill,
-                cache_decode,
-                attention_prefill,
-                attention_decode,
-                finish_prefill,
-                finish_decode,
-            ) = compiled_block
-            project = project_decode if decode else project_prefill
-            update_cache = cache_decode if decode else cache_prefill
-            attention = attention_decode if decode else attention_prefill
-            finish = finish_decode if decode else finish_prefill
-            residual, query, key, value, gate = project(hidden_states, selected_freqs)
-            key_caches[index], value_caches[index] = update_cache(
-                key,
-                value,
-                key_caches[index],
-                value_caches[index],
+            hidden_states = _run_full_attention_layer(
+                compiled_block,
+                hidden_states,
+                selected_freqs,
+                attn_mask,
+                key_caches,
+                value_caches,
+                index,
                 cache_index,
+                decode=decode,
             )
-            attention_output = attention(
-                query, key_caches[index], value_caches[index], attn_mask
-            )
-            hidden_states = finish(residual, attention_output, gate)
         else:
             (
                 hidden_prefill,
@@ -581,7 +625,9 @@ def _prepare_linear_attention_constants(linear_attn):
     linear_attn.conv1d = nn.Identity()
 
 
-def _setup_qwen3_5_text_decoder(model):
+def _setup_qwen3_5_text_decoder(
+    model: Any,
+) -> tuple[Any, nn.Module, torch.Tensor | None]:
     """Prepare shared Qwen3.5 state, leaving block construction to the caller."""
     cfg = text_config(model.config)
     backbone = get_backbone(model)
@@ -609,7 +655,9 @@ def _setup_qwen3_5_text_decoder(model):
             f"Qwen3.5 head_dim={cfg.head_dim} is too small for Spyre RoPE; head padding is not implemented"
         )
 
-    rope_dim = int(cfg.partial_rotary_factor * cfg.head_dim)
+    rope_dim = int(
+        (cfg.rope_parameters or {}).get("partial_rotary_factor", 1.0) * cfg.head_dim
+    )
     if rope_dim % 2:
         raise ValueError(f"Qwen3.5 rotary dimension must be even, got {rope_dim}")
     non_rotary_dim = cfg.head_dim - rope_dim
@@ -627,9 +675,12 @@ def _setup_qwen3_5_text_decoder(model):
     prepare_lm_head_for_spyre(model)
     model._spyre_q_projs = nn.ModuleList()
     model._spyre_gate_projs = nn.ModuleList()
-    model._spyre_compiled_norm = torch.compile(
-        lambda hidden_states: _rms_norm(hidden_states, backbone.norm), dynamic=False
-    )
+
+    def final_norm(hidden_states: torch.Tensor) -> torch.Tensor:
+        output: torch.Tensor = _rms_norm(hidden_states, backbone.norm)
+        return output
+
+    model._spyre_compiled_norm = torch.compile(final_norm, dynamic=False)
 
     rope_permutation = (
         rope_dim_permutation(cfg.head_dim, rope_dim)

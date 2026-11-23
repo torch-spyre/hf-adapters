@@ -8,9 +8,9 @@ name: test_daily
 #                    (spyre-model-module-tests, one leg per
 #                     tests/configs/module_tests/*.yaml)
 #
-# Module-test results are ingested into ClickHouse by the ingest-module-logs
-# job in push-test-results-to-clickhouse.yaml, which fires on test_daily
-# completion via workflow_run.
+# Module-test results are ingested into ClickHouse (schema v2) by
+# push-test-results-to-clickhouse.yaml, which fires on test_daily completion
+# via workflow_run.
 # ---------------------------------------------------------------------------
 on:
   schedule:

@@ -191,14 +191,14 @@ def prepare_for_spyre(model):
             model.pre_classifier, model.classifier
         )
 
+    # Task heads run on device so only their logits leave it; the MLM head is
+    # the exception, as its vocab-wide logits outgrow the hidden state.
     cpu_submodules = [
         name
         for name in (
-            "classifier",
             "vocab_transform",
             "vocab_layer_norm",
             "vocab_projector",
-            "qa_outputs",
         )
         if hasattr(model, name)
     ]

@@ -48,15 +48,16 @@ Usage::
     last_hidden = prefill_vision_tower(model, pixel_values)
 """
 
+from collections.abc import Callable
+from typing import Any
+
 import torch
 import torch.nn.functional as F
+from transformers import SiglipVisionConfig, SiglipVisionModel
 
 from hf_adapters.hf_common import (
-    BLOCK_SIZE,
-    make_vision_encoder_block,
-    pad_attention_heads_linear,
-    pad_encoder_mlp,
     prefill_vision,
+    prepare_pre_ln_encoder,
     vision_backbone_forward,
 )
 
@@ -64,7 +65,7 @@ _run_backbone_forward = vision_backbone_forward
 _is_vision_tower = True
 
 
-def _get_vision_tower(model):
+def _get_vision_tower(model: Any) -> SiglipVisionModel:
     """Return the ``SiglipVisionModel`` regardless of how it was loaded.
 
     Accepts the bare tower (``SiglipVisionModel`` — has ``encoder`` directly) or
@@ -72,7 +73,8 @@ def _get_vision_tower(model):
     ``model.model.vision_tower``.
     """
     if hasattr(model, "encoder") and hasattr(model, "embeddings"):
-        return model
+        if isinstance(model, SiglipVisionModel):
+            return model
     for attr_path in ("vision_tower", "model.vision_tower"):
         obj = model
         ok = True
@@ -82,12 +84,12 @@ def _get_vision_tower(model):
             else:
                 ok = False
                 break
-        if ok and obj is not None:
+        if ok and isinstance(obj, SiglipVisionModel):
             return obj
     raise ValueError(f"Could not locate a SigLIP vision tower on {type(model)}")
 
 
-def _get_inner(tower):
+def _get_inner(tower: SiglipVisionModel) -> SiglipVisionModel:
     """Resolve the module holding ``embeddings``/``encoder``/``post_layernorm``.
 
     In transformers 5.x ``SiglipVisionModel`` holds these directly; older
@@ -95,10 +97,13 @@ def _get_inner(tower):
     """
     if hasattr(tower, "encoder") and hasattr(tower, "embeddings"):
         return tower
-    return getattr(tower, "vision_model", tower)
+    inner: SiglipVisionModel = getattr(tower, "vision_model", tower)
+    return inner
 
 
-def _make_patch_embed(inner):
+def _make_patch_embed(
+    inner: SiglipVisionModel,
+) -> Callable[[torch.Tensor], torch.Tensor]:
     """Build a CPU callable: pixel_values [B,C,H,W] -> patch_embeds [B,P,hidden].
 
     Wraps the tower's own ``embeddings`` (Conv2d + position table). Runs on CPU;
@@ -122,9 +127,11 @@ def _make_patch_embed(inner):
     pos_embed = emb.position_embedding.weight.detach().cpu()
     pos_ids = emb.position_ids.detach().cpu()
 
-    def patch_embed(pixel_values):
+    def patch_embed(pixel_values: torch.Tensor) -> torch.Tensor:
         pv = pixel_values.to(weight.dtype).cpu()
-        patches = F.conv2d(pv, weight, bias, stride=stride, padding=padding)
+        patches: torch.Tensor = F.conv2d(
+            pv, weight, bias, stride=stride, padding=padding
+        )
         patches = patches.flatten(2).transpose(1, 2)  # [B, P, hidden]
         patches = patches + pos_embed[pos_ids]
         return patches
@@ -132,62 +139,18 @@ def _make_patch_embed(inner):
     return patch_embed
 
 
-def prepare_for_spyre(model):
-    """Apply Spyre adaptations to a SigLIP vision tower in-place.
-
-    Pads attention heads and MLP intermediate dim to stick boundaries, builds
-    the CPU patch-embed closure and the compiled pre-LN encoder blocks, and
-    stashes the tower's final LayerNorm. After this the tower runs via
-    ``prefill_vision`` / ``vision_backbone_forward``.
-    """
-    tower = _get_vision_tower(model)
-    inner = _get_inner(tower)
-    cfg = inner.config
-
-    num_heads = cfg.num_attention_heads
-    orig_head_dim = cfg.hidden_size // num_heads
-    scale = orig_head_dim**-0.5
-
-    layers = inner.encoder.layers
-
-    padded_head_dim = ((orig_head_dim + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
-    if padded_head_dim > orig_head_dim:
-        pad_attention_heads_linear(
-            model,
-            (layer.self_attn for layer in layers),
-            orig_head_dim,
-            padded_head_dim,
-            num_heads,
-        )
-    head_dim = padded_head_dim
-
-    # SigLIP's intermediate_size (e.g. 4304) is often not stick-aligned; the
-    # Spyre compiler can't lower the fc2 matmul over a misaligned K dim. Zero-pad
-    # the FFN intermediate to a stick boundary (bit-exact — see pad_encoder_mlp).
-    orig_inter = cfg.intermediate_size
-    padded_inter = ((orig_inter + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
-    if padded_inter > orig_inter:
-        pad_encoder_mlp(layers, orig_inter, padded_inter)
-
+def prepare_for_spyre(model: Any) -> None:
+    """Pad and compile a vision tower and capture its CPU patch embedding."""
+    tower: SiglipVisionModel = _get_vision_tower(model)
+    inner: SiglipVisionModel = _get_inner(tower)
     model._spyre_patch_embed = _make_patch_embed(inner)
     model._spyre_post_layernorm = inner.post_layernorm
-    model._spyre_compiled_blocks = [
-        make_vision_encoder_block(
-            q_proj=layer.self_attn.q_proj,
-            k_proj=layer.self_attn.k_proj,
-            v_proj=layer.self_attn.v_proj,
-            o_proj=layer.self_attn.out_proj,
-            layer_norm1=layer.layer_norm1,
-            layer_norm2=layer.layer_norm2,
-            ffn_in=layer.mlp.fc1,
-            act=layer.mlp.activation_fn,
-            ffn_out=layer.mlp.fc2,
-            num_heads=num_heads,
-            head_dim=head_dim,
-            scale=scale,
-        )
-        for layer in layers
-    ]
+    cfg = inner.config
+    if not isinstance(cfg, SiglipVisionConfig):
+        raise TypeError(f"Expected SiglipVisionConfig, got {type(cfg).__name__}")
+    model._spyre_compiled_blocks, model._spyre_head_dim = prepare_pre_ln_encoder(
+        inner.encoder, cfg
+    )
 
 
 def load_hf_model(model_path, dtype=torch.float16, trust_remote_code=None):

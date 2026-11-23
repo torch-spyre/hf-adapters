@@ -1,0 +1,41 @@
+name: Link a weekly-scan shard to its image
+description: >-
+  Call with if: always() after a scan shard. Derives the artifact this pod ran (its image plus
+  the pinned hf-adapters/torch-spyre) and gives the scan's capability verdicts their
+  artifact_results leg (sink/artifact_link.py --per-shard). Never fails the job.
+
+inputs:
+  torch_spyre_sha:
+    description: The torch-spyre revision the scan pinned (resolve-torch-spyre's output).
+    required: true
+  scan_date:
+    description: The scan's snapshot date (generate-matrix's output), which dates its weekly tag.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # The script, not the derive-gha-artifact-id action: that action uploads a fixed-name
+    # artifact, which every shard after the first would collide on. Same tokens as link-artifact.
+    - name: Write the shard's artifact leg
+      continue-on-error: true
+      shell: bash
+      env:
+        TS_DIR: /home/senuser/torch-spyre
+        TORCH_SPYRE_SHA: ${{ inputs.torch_spyre_sha }}
+        SCAN_DATE: ${{ inputs.scan_date }}
+        REC_FILE: ${{ runner.temp }}/scan-artifact-id.txt
+      run: |
+        python3 "${TS_DIR}/.github/scripts/derive_artifact_id.py" \
+          --component hf-adapters --arch x86_64 \
+          --installed "hf-adapters@${GITHUB_SHA:0:12} torch-spyre@${TORCH_SPYRE_SHA:0:12}" \
+          --library-dir "${TS_DIR}/extensions/clickhouse-ingest" \
+          --output-file "${REC_FILE}"
+        REC="$(tr -d '[:space:]' < "${REC_FILE}" 2>/dev/null || true)"
+        if [ -z "${REC}" ]; then
+          echo "no artifact id derivable on this pod -- the final link-artifact job covers it."
+          exit 0
+        fi
+        cd "$CLONED_HF_ADAPTERS_DIR"
+        uv run python -m tests.spyre.weekly_generation.sink.artifact_link \
+          --artifact-id "${REC}" --per-shard

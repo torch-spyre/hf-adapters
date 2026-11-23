@@ -31,6 +31,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests._tier_tags import platform_tag
+
 _TEST_FILE = re.compile(r"(^|/)test_modules(_custom)?(__oot_wrapper)?\.py$")
 _TEST_NAME = re.compile(
     r"^(test_forward|test_eager_vs_compile|test_layout_stride|test_with_cpu|test_\w+?)"
@@ -146,11 +148,15 @@ def pytest_runtest_call(item: pytest.Item):
 def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
     # The teardown report copies item.user_properties, and junitxml writes it.
     if call.when == "teardown" and _is_module_test(item):
-        item.user_properties.extend(
-            capability_properties(
-                item.name,
-                os.environ.get("PYTORCH_TEST_CONFIG", ""),
-                item.stash.get(_FALLBACKS, []),
-            )
+        props = capability_properties(
+            item.name,
+            os.environ.get("PYTORCH_TEST_CONFIG", ""),
+            item.stash.get(_FALLBACKS, []),
         )
+        # The ingest reads a verdict's arch from this tag; --suite may not have stamped it.
+        if props and not any(
+            v.startswith("platform__") for _, v in item.user_properties
+        ):
+            props.append(("tag", platform_tag()))
+        item.user_properties.extend(props)
     yield
