@@ -291,8 +291,15 @@ def register() -> None:
     _original_device = SentenceTransformer.device
     SentenceTransformer.device = property(_spyre_device)
 
-    _original_resolve_inference_device = SentenceTransformer._resolve_inference_device
-    SentenceTransformer._resolve_inference_device = _spyre_resolve_inference_device
+    # Only SentenceTransformers >= 6.2 has this hook. Older releases still work
+    # for every adapter except those opting into mixed CPU/Spyre placement,
+    # which _spyre_compute_device rejects with a clear error.
+    resolve_inference_device: Callable[..., torch.device] | None = getattr(
+        SentenceTransformer, "_resolve_inference_device", None
+    )
+    if resolve_inference_device is not None:
+        _original_resolve_inference_device = resolve_inference_device
+        SentenceTransformer._resolve_inference_device = _spyre_resolve_inference_device
 
     _original_to = SentenceTransformer.to
     SentenceTransformer.to = _spyre_to
@@ -308,6 +315,12 @@ def _spyre_compute_device(self: Any) -> torch.device | None:
             hf_model, "_spyre_device_parameter_name", None
         )
         if hf_model is not None and parameter_name is not None:
+            if _original_resolve_inference_device is None:
+                raise RuntimeError(
+                    f"{type(hf_model).__name__} keeps some modules on CPU and needs "
+                    "sentence-transformers>=6.2.0 for its Spyre placement; "
+                    "upgrade sentence-transformers."
+                )
             device: torch.device = hf_model.get_parameter(parameter_name).device
             return device
     return None

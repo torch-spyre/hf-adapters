@@ -430,6 +430,32 @@ def test_inference_placement_without_opt_in_uses_st(
     assert all(parameter.device.type == "meta" for parameter in model.parameters())
 
 
+@pytest.mark.parametrize("opt_in", [False, True])
+def test_mixed_placement_without_st_inference_hook(
+    monkeypatch: pytest.MonkeyPatch, opt_in: bool
+) -> None:
+    """SentenceTransformers < 6.2 lacks _resolve_inference_device: only opted-in
+    adapters need it, so the others still load and the opted-in fail clearly."""
+    from sentence_transformers import SentenceTransformer
+
+    import hf_adapters.st_backend as st_backend
+
+    monkeypatch.setattr(torch, "compile", _eager)
+    monkeypatch.setattr(st_backend, "_original_resolve_inference_device", None)
+    backbone = EmbeddingGemma2TextModel(_text_config()).eval()
+    if opt_in:
+        hf_embeddinggemma2.prepare_for_spyre(backbone)
+        with pytest.raises(RuntimeError, match=r"sentence-transformers>=6\.2\.0"):
+            SentenceTransformer(
+                modules=[_PlacementFrontend(backbone)], backend="spyre", device="cpu"
+            )
+    else:
+        model = SentenceTransformer(
+            modules=[_PlacementFrontend(backbone)], backend="spyre", device="cpu"
+        )
+        assert model.device == torch.device("cpu")
+
+
 @pytest.mark.parametrize(
     "method_name",
     ["forward", "get_image_features", "get_video_features", "get_audio_features"],
