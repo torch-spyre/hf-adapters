@@ -353,18 +353,18 @@ def test_shared_load_preserves_cpu_helper_buffers(
 
 
 @pytest.mark.parametrize("composite", [False, True])
-def test_local_fp32_config_defaults_to_bf16(tmp_path: Path, composite: bool) -> None:
+def test_local_bf16_config_resolves_to_bf16(tmp_path: Path, composite: bool) -> None:
     from hf_adapters.auto_spyre_model import dtype_for_model_path
 
     text_config = _text_config()
-    text_config.dtype = torch.float32
+    text_config.dtype = torch.bfloat16
     config: EmbeddingGemma2TextConfig | EmbeddingGemma2Config = text_config
     if composite:
         config = EmbeddingGemma2Config(
             text_config=text_config,
             vision_config=None,
             audio_config=None,
-            dtype=torch.float32,
+            dtype=torch.bfloat16,
         )
     config.save_pretrained(tmp_path)
     assert dtype_for_model_path(tmp_path, "spyre") == torch.bfloat16
@@ -376,7 +376,7 @@ def test_local_checkpoint_load_honors_dtype_requests(
     from hf_adapters.auto_spyre_model import AutoSpyreModel
 
     monkeypatch.setattr(torch, "compile", _eager)
-    model = EmbeddingGemma2TextModel(_text_config()).eval()
+    model = EmbeddingGemma2TextModel(_text_config()).to(torch.bfloat16).eval()
     model.save_pretrained(tmp_path)
     default = AutoSpyreModel.from_pretrained(tmp_path)
     explicit = AutoSpyreModel.from_pretrained(tmp_path, dtype=torch.float32)

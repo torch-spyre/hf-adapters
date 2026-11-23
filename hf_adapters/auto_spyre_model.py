@@ -335,17 +335,11 @@ def dtype_for_model_path(
             model_name_or_path, trust_remote_code=trust_remote_code
         )
         text_config = getattr(config, "text_config", None)
-        if getattr(config, "model_type", None) in {
-            "embedding_gemma2",
-            "embedding_gemma2_text",
-        }:
-            dtype = torch.bfloat16
-        else:
-            dtype = (
-                getattr(text_config, "dtype", None)
-                or getattr(config, "dtype", None)
-                or torch.float16
-            )
+        dtype = (
+            getattr(text_config, "dtype", None)
+            or getattr(config, "dtype", None)
+            or torch.float16
+        )
 
     if dtype == torch.float32 and device_str == "spyre":
         dtype = torch.float16
