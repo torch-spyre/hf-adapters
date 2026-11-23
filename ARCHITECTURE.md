@@ -160,13 +160,14 @@ encoders for text/image retrieval and similarity scoring. Both belong to
 `test_sentence_transformers_multimodal_spyre.py`, which compares SentenceTransformers
 `encode()` on CPU against `backend="spyre"` for text, a single image, and an image
 list (`make sentence_transformers_multimodal_tests`, CI suite key:
-`sentence_transformers_multimodal`).
+`sentence_transformers_multimodal`). EmbeddingGemma 2 also exercises mixed-length
+text batches and audio waveforms of different lengths.
 
 | Model | model\_type | Text / vision head\_dim | Embedding width | Status |
 |-------|-----------|------------------------|-----------------|--------|
 | sentence-transformers/clip-ViT-B-32 | clip | 64 / 64 | 512 | Verified: text and single-image scenarios |
 | google/siglip2-giant-opt-patch16-384 | siglip | 72→128 / 96→128 | 1536 | Verified: text and single-image scenarios |
-| google/embeddinggemma-2 | embedding\_gemma2 | 256 (local), 512 (global) / 64→128 | 768 | Verified: text and single-image scenarios (bf16) |
+| google/embeddinggemma-2 | embedding\_gemma2 | 256 (local), 512 (global) / 64→128 | 768 | Verified: text, image, and audio embedding scenarios (bf16) |
 
 `hf_embeddinggemma2.py` preserves the stock multimodal forward, including
 interleaved text, images, video frames, and audio. The bidirectional text
@@ -179,13 +180,20 @@ EmbeddingGemma 2 rather than Gemma 4's token-identity PLE and norm rounding.
 
 Load it with `SentenceTransformer("google/embeddinggemma-2", backend="spyre")`
 after importing `hf_adapters.st_backend`, or use `AutoSpyreModel` with an
-`AutoProcessor`. The default is **bfloat16**; explicitly requesting float16
+`AutoProcessor`. The default is **bfloat16**, selected by model type for hub IDs,
+local checkpoints, and fine-tunes; explicitly requesting float16
 raises an error because the checkpoint's activations overflow. SentenceTransformers
 retains the checkpoint's mean pooling and normalization, including its prompt
-and truncation options. Intermediate hidden-state/attention outputs and custom
-4D text masks are not supported. The [Spyre comparison](https://github.com/torch-spyre/hf-adapters/actions/runs/45036545326/job/137267304586)
-passes with minimum cosine similarity 0.999958 for text and 0.999943 for images,
-and preserves the CPU caption ranking. Video and audio parity are tested on CPU.
+and truncation options. CPU helper modules are excluded from accelerator moves
+during loading and ST initialization; their buffer dtypes and values are preserved.
+The ST integration requires SentenceTransformers 6.2.0 or newer and retains mixed
+placement during repeated encodes. Intermediate hidden-state/attention outputs
+and custom 4D text masks are not supported. The [Spyre comparison](https://github.com/torch-spyre/hf-adapters/actions/runs/45159143413/job/137641206135)
+passes with minimum cosine similarity 0.999961 for text, 0.999937 for images,
+0.999955 for mixed-length text, and 0.999667 for audio. It verifies exact CPU
+helper buffer preservation, no parameter/buffer device transfers during encodes,
+and matching CPU caption ranking. The audio encoder stays on CPU while its
+outputs feed the Spyre text transformer. Interleaved video parity is tested on CPU.
 
 Multi-image batches remain excluded from the suite pending
 [#747](https://github.com/torch-spyre/hf-adapters/issues/747).
