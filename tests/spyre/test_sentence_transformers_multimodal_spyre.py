@@ -97,13 +97,18 @@ def test_sentence_transformers_multimodal_backend(model_path: str) -> None:
                 }
             },
         }
-        if cpu_model[0].config.model_type == "embedding_gemma2":
+        sliding_window: int | None = getattr(
+            cpu_model[0].config.get_text_config(), "sliding_window", None
+        )
+        if sliding_window:
             # The short row has padding queries farther than sliding_window
             # from every real key. They must not generate NaNs in later layers.
             mixed_length_prompts = ["The cat sits on the mat. " * 200, "A cat."]
             reference["mixed_length_text"] = cpu_model.encode(
                 mixed_length_prompts, convert_to_tensor=True, **mixed_text_kwargs
             ).cpu()
+        # ST infers modalities from the processor: a feature extractor means audio.
+        if cpu_model.supports("audio"):
             sampling_rate: int = cpu_model[0].processor.feature_extractor.sampling_rate
             audio_inputs = synthetic_audio_inputs(sampling_rate)
             audio_kwargs = {
@@ -112,10 +117,12 @@ def test_sentence_transformers_multimodal_backend(model_path: str) -> None:
             reference["audio"] = cpu_model.encode(
                 audio_inputs, batch_size=2, convert_to_tensor=True, **audio_kwargs
             ).cpu()
-            reference_buffers = {
-                name: buffer.clone()
-                for name, buffer in cpu_model[0].auto_model.named_buffers()
-            }
+        # Compared after loading only for adapters that pin CPU helpers, which is
+        # known once the Spyre model is prepared; snapshot unconditionally.
+        reference_buffers = {
+            name: buffer.clone()
+            for name, buffer in cpu_model[0].auto_model.named_buffers()
+        }
         # Preparing Spyre may patch classes; finish the reference first.
         del cpu_model
         gc.collect()
