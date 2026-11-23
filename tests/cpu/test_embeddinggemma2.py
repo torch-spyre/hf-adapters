@@ -21,6 +21,7 @@ from transformers import (
 
 from hf_adapters import hf_embeddinggemma2
 from hf_adapters.hf_common import SpyreUnsupportedModelError
+from tests._multimodal_embedding_helpers import forbid_model_device_moves
 
 
 def _eager(function: Any, **kwargs: Any) -> Any:
@@ -237,6 +238,119 @@ def test_sentence_transformers_device_opt_in(
     # The override follows current placement rather than caching a stale device.
     projection.to_empty(device="cpu")
     assert model.device == torch.device("cpu")
+
+
+class _PlacementFrontend(torch.nn.Module):
+    """Exercise real ST encode routing with simulated accelerator weights."""
+
+    def __init__(
+        self: "_PlacementFrontend", backbone: EmbeddingGemma2TextModel
+    ) -> None:
+        super().__init__()
+        self.auto_model = backbone
+
+    def tokenize(
+        self: "_PlacementFrontend", texts: list[str], **kwargs: Any
+    ) -> dict[str, torch.Tensor]:
+        return {"input_ids": torch.ones((len(texts), 2), dtype=torch.long)}
+
+    def forward(
+        self: "_PlacementFrontend", features: dict[str, torch.Tensor], **kwargs: Any
+    ) -> dict[str, torch.Tensor]:
+        # Meta stands in for Spyre in this placement test; numerical parity is
+        # tested separately. The real adapter also returns embeddings on CPU.
+        return {"sentence_embedding": torch.ones((features["input_ids"].shape[0], 4))}
+
+
+@pytest.mark.parametrize(
+    "resident,device",
+    [
+        ("meta", None),
+        ("meta", "meta"),
+        ("meta", torch.device("meta")),
+        ("cpu", "cpu:0"),
+    ],
+)
+def test_repeated_encode_preserves_mixed_placement(
+    monkeypatch: pytest.MonkeyPatch, resident: str, device: str | torch.device | None
+) -> None:
+    from sentence_transformers import SentenceTransformer
+
+    import hf_adapters.st_backend  # noqa: F401
+
+    monkeypatch.setattr(torch, "compile", _eager)
+    backbone = EmbeddingGemma2TextModel(_text_config()).eval()
+    hf_embeddinggemma2.prepare_for_spyre(backbone)
+    model = SentenceTransformer(
+        modules=[_PlacementFrontend(backbone)], backend="spyre", device="cpu"
+    )
+    backbone.layers.to(resident)
+    with forbid_model_device_moves(model):
+        for _ in range(2):
+            output: torch.Tensor = model.encode(
+                ["hello", "world"], device=device, convert_to_tensor=True
+            )
+            torch.testing.assert_close(output, torch.ones((2, 4)))
+            assert backbone.embed_tokens.weight.device.type == "cpu"
+            assert backbone.layers[0].self_attn.q_proj.weight.device.type == resident
+
+
+def test_init_restores_cpu_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sentence_transformers import SentenceTransformer
+
+    import hf_adapters.st_backend  # noqa: F401
+
+    monkeypatch.setattr(torch, "compile", _eager)
+    backbone = EmbeddingGemma2TextModel(_text_config()).eval()
+    hf_embeddinggemma2.prepare_for_spyre(backbone)
+    # Spyre module transfers can cast index buffers to float. Restoration must
+    # finish during construction, before the first forward is called.
+    backbone.embed_tokens.register_buffer("position_ids", torch.arange(3).float())
+    SentenceTransformer(
+        modules=[_PlacementFrontend(backbone)], backend="spyre", device="cpu"
+    )
+    assert backbone.embed_tokens.position_ids.dtype == torch.long
+
+
+@pytest.mark.parametrize("device", ["cpu", "meta:1", "cuda:0"])
+def test_encode_rejects_conflicting_device(
+    monkeypatch: pytest.MonkeyPatch, device: str
+) -> None:
+    from sentence_transformers import SentenceTransformer
+
+    import hf_adapters.st_backend  # noqa: F401
+
+    monkeypatch.setattr(torch, "compile", _eager)
+    backbone = EmbeddingGemma2TextModel(_text_config()).eval()
+    hf_embeddinggemma2.prepare_for_spyre(backbone)
+    model = SentenceTransformer(
+        modules=[_PlacementFrontend(backbone)], backend="spyre", device="cpu"
+    )
+    backbone.layers.to("meta")
+    with (
+        forbid_model_device_moves(model),
+        pytest.raises(ValueError, match="cannot relocate"),
+    ):
+        model.encode(["hello"], device=device)
+
+
+@pytest.mark.parametrize("backend_enabled,opt_in", [(False, True), (True, False)])
+def test_inference_placement_without_opt_in_uses_st(
+    monkeypatch: pytest.MonkeyPatch, backend_enabled: bool, opt_in: bool
+) -> None:
+    from sentence_transformers import SentenceTransformer
+
+    import hf_adapters.st_backend  # noqa: F401
+
+    monkeypatch.setattr(torch, "compile", _eager)
+    backbone = EmbeddingGemma2TextModel(_text_config()).eval()
+    if opt_in:
+        hf_embeddinggemma2.prepare_for_spyre(backbone)
+    model = SentenceTransformer(modules=[_PlacementFrontend(backbone)], device="cpu")
+    setattr(model, "_spyre_backend", backend_enabled)
+    # Stock ST must still honor relocation for models outside the opt-in.
+    assert model._resolve_inference_device("meta") == torch.device("meta")
+    assert all(parameter.device.type == "meta" for parameter in model.parameters())
 
 
 @pytest.mark.parametrize(

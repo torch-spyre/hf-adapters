@@ -344,8 +344,8 @@ def prepare_for_spyre(model: EmbeddingGemma2Model | EmbeddingGemma2TextModel) ->
         ):
             patch_cpu_inputs(model, method_name=method_name)
     setattr(model, "_spyre_cpu_submodules", cpu_modules)
-    # Opt in to ST device selection from a compute weight, since the first
-    # parameter belongs to the CPU token embeddings. No parameter scan needed.
+    # Opt in to ST device selection from a compute weight and preservation of
+    # mixed placement: the first parameter belongs to the CPU token embeddings.
     setattr(
         model,
         "_spyre_device_parameter_name",

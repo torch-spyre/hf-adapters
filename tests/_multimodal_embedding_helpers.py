@@ -16,8 +16,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from unittest.mock import patch
 
 import torch
 
@@ -37,3 +38,36 @@ def bounded_cpu_threads() -> Iterator[None]:
         yield
     finally:
         torch.set_num_threads(previous)
+
+
+@contextmanager
+def forbid_model_device_moves(model: torch.nn.Module) -> Iterator[None]:
+    """Reject even temporary parameter/buffer relocation during encode calls.
+
+    Guard module conversions rather than Tensor.to so activation transfers and
+    compiled tensor operations remain unmodified.
+    """
+    watched: set[torch.nn.Module] = set(model.modules())
+    original_apply = torch.nn.Module._apply
+
+    def guarded_apply(
+        module: torch.nn.Module,
+        fn: Callable[[torch.Tensor], torch.Tensor],
+        recurse: bool = True,
+    ) -> torch.nn.Module:
+        if module not in watched:
+            return original_apply(module, fn, recurse=recurse)
+
+        def check_device(tensor: torch.Tensor) -> torch.Tensor:
+            previous: torch.device = tensor.device
+            result = fn(tensor)
+            assert result.device == previous, (
+                f"{type(module).__name__} moved a model tensor "
+                f"from {previous} to {result.device} during inference"
+            )
+            return result
+
+        return original_apply(module, check_device, recurse=recurse)
+
+    with patch.object(torch.nn.Module, "_apply", guarded_apply):
+        yield

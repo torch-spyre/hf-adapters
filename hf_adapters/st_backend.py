@@ -15,10 +15,8 @@
 """sentence-transformers ``backend="spyre"`` support.
 
 Importing this module registers a ``"spyre"`` backend with
-``sentence_transformers`` by monkey-patching two methods:
-``sentence_transformers.base.modules.transformer.Transformer._load_model`` and
-``sentence_transformers.SentenceTransformer.__init__``. After import, the
-standard ST API works unchanged::
+``sentence_transformers`` by patching model loading, CPU handoff, and device
+placement. After import, the standard ST API works unchanged::
 
     import hf_adapters.st_backend
     from sentence_transformers import SentenceTransformer
@@ -50,8 +48,9 @@ that with an honest ``model.device`` (Spyre):
   output ``features`` dict back to CPU before the downstream pooling modules read
   it, and moves the (Spyre-placed) inputs to CPU for the prefill drivers.
 
-All downstream ST modules (``Pooling``, ``Normalize``, ``model.encode()``,
-``model.similarity()``) run entirely unchanged.
+Adapters declaring a resident compute parameter also opt into preserving their
+mixed CPU/Spyre placement during inference. ST's uniform-device check must not
+copy their CPU helpers to Spyre before each encode.
 """
 
 import types
@@ -189,7 +188,7 @@ def _spyre_load_model(
     return model
 
 
-def _spyre_init(self, *args, **kwargs):
+def _spyre_init(self: Any, *args: Any, **kwargs: Any) -> None:
     """``SentenceTransformer.__init__`` wrapper that defaults the device to Spyre.
 
     ``BaseModel.__init__`` resolves an unset ``device`` via ``get_device_name()``
@@ -200,10 +199,13 @@ def _spyre_init(self, *args, **kwargs):
     self._spyre_backend = kwargs.get("backend") == "spyre"
     if self._spyre_backend and kwargs.get("device") is None:
         kwargs["device"] = "spyre"
-    return _original_init(self, *args, **kwargs)
+    assert _original_init is not None
+    _original_init(self, *args, **kwargs)
+    if _spyre_compute_device(self) is not None:
+        _restore_cpu_modules(self)
 
 
-def _restore_cpu_submodule(submod):
+def _restore_cpu_submodule(submod: torch.nn.Module) -> None:
     """Move a sub-module back to CPU and restore any integer buffers corrupted by Spyre.
 
     Moving a module to Spyre casts all buffers to the model's float dtype —
@@ -219,48 +221,39 @@ def _restore_cpu_submodule(submod):
             # Split the path so we target the right sub-module.
             parts = name.rsplit(".", 1)
             if len(parts) == 2:
-                owner = submod.get_submodule(parts[0])
+                owner: torch.nn.Module = submod.get_submodule(parts[0])
                 owner.register_buffer(parts[1], buf.to(torch.long))
             else:
                 submod.register_buffer(name, buf.to(torch.long))
 
 
-def _spyre_forward(self, input, **kwargs):
-    """Some models have extra post-backbone heads with weights, for instance a
-    ``Dense`` projection. ``self.to("spyre")`` moves *every* module to Spyre, but
-    those heads operate on outputs that ``_cpu_pooling_forward`` moves to CPU.
+def _restore_cpu_modules(self: Any) -> None:
+    """Pin ST heads and adapter-declared helper modules to the host."""
+    for module in list(self.children())[1:]:
+        module.to("cpu")
+    # ST Transformer and CLIP wrappers use different backbone attributes.
+    backbone_wrapper: torch.nn.Module | None = next(iter(self.children()), None)
+    if backbone_wrapper is not None:
+        hf_model: torch.nn.Module | None = getattr(
+            backbone_wrapper, "auto_model", None
+        ) or getattr(backbone_wrapper, "model", None)
+        if hf_model is not None:
+            for submod_name in getattr(hf_model, "_spyre_cpu_submodules", []):
+                try:
+                    _restore_cpu_submodule(hf_model.get_submodule(submod_name))
+                except AttributeError:
+                    pass
 
-    Moving them at init is not enough: ``SentenceTransformer.encode`` re-issues
-    ``self.to(self.device)`` at the top of every call, silently pulling the
-    heads back onto Spyre before the forward pass. So we move the non-backbone
-    modules (``self[1:]``; the backbone is ``self[0]``) in each call.
 
-    For CLIP (and similar models with ``_spyre_cpu_submodules``): the backbone
-    is ``self[0]``, but it contains sub-modules (e.g. ``vision_model.embeddings``,
-    ``text_model.embeddings``) that must stay on CPU because Spyre cannot run
-    their integer-index operations (``nn.Embedding`` on ``position_ids``).
-    ``encode`` re-issues ``self.to("spyre")`` before every forward pass, pulling
-    those sub-modules back to Spyre. Re-move them to CPU here and restore any
-    integer buffer dtypes that Spyre corrupted to the model's float dtype.
+def _spyre_forward(self: Any, input: dict[str, Any], **kwargs: Any) -> Any:
+    """Keep host helpers usable after explicit moves or ST's default placement.
+
+    For adapters preserving mixed placement these CPU moves are no-ops during
+    normal inference. Other adapters retain their existing CPU restoration.
     """
     if getattr(self, "_spyre_backend", False):
-        for module in list(self.children())[1:]:
-            module.to("cpu")
-        # Re-pin CPU sub-modules inside the backbone (e.g. CLIP embeddings).
-        # self[0] is the ST module wrapping the HF model. Depending on the ST
-        # module type the HF model is stored as ``auto_model`` (ST Transformer)
-        # or ``model`` (ST CLIPModel). Check both.
-        backbone_wrapper = next(iter(self.children()), None)
-        if backbone_wrapper is not None:
-            hf_model = getattr(backbone_wrapper, "auto_model", None) or getattr(
-                backbone_wrapper, "model", None
-            )
-            if hf_model is not None:
-                for submod_name in getattr(hf_model, "_spyre_cpu_submodules", []):
-                    try:
-                        _restore_cpu_submodule(hf_model.get_submodule(submod_name))
-                    except AttributeError:
-                        pass
+        _restore_cpu_modules(self)
+    assert _original_forward is not None
     return _original_forward(self, input, **kwargs)
 
 
@@ -275,6 +268,7 @@ def register() -> None:
     from sentence_transformers.base.modules.transformer import Transformer
 
     global _original_load_model, _original_init, _original_forward, _original_device
+    global _original_resolve_inference_device
 
     if getattr(Transformer, "_spyre_patched", False):
         return
@@ -291,27 +285,59 @@ def register() -> None:
     _original_device = SentenceTransformer.device
     SentenceTransformer.device = property(_spyre_device)
 
+    _original_resolve_inference_device = SentenceTransformer._resolve_inference_device
+    SentenceTransformer._resolve_inference_device = _spyre_resolve_inference_device
+
     Transformer._spyre_patched = True
 
 
-def _spyre_device(self: Any) -> torch.device:
-    """Report the compute device only for adapters that explicitly opt in.
-
-    HF's default device comes from its first parameter, which may be a CPU
-    embedding. ST uses this property to place the whole model before every
-    encode; choosing that CPU parameter would move the compiled blocks off Spyre.
-    """
+def _spyre_compute_device(self: Any) -> torch.device | None:
+    """Get the resident device for adapters opting into mixed placement."""
     if getattr(self, "_spyre_backend", False):
-        hf_model = self.transformers_model
+        hf_model: PreTrainedModel | None = self.transformers_model
         parameter_name: str | None = getattr(
             hf_model, "_spyre_device_parameter_name", None
         )
-        if parameter_name is not None:
+        if hf_model is not None and parameter_name is not None:
             device: torch.device = hf_model.get_parameter(parameter_name).device
             return device
+    return None
+
+
+def _spyre_device(self: Any) -> torch.device:
+    """Report the compute device only for adapters that explicitly opt in."""
+    device: torch.device | None = _spyre_compute_device(self)
+    if device is not None:
+        return device
     assert _original_device is not None and _original_device.fget is not None
-    device = _original_device.fget(self)
-    return device
+    original_device: torch.device = _original_device.fget(self)
+    return original_device
+
+
+def _spyre_resolve_inference_device(
+    self: Any, device: int | str | torch.device | None
+) -> torch.device:
+    """Resolve input placement without moving a deliberately split model."""
+    resident_device: torch.device | None = _spyre_compute_device(self)
+    if resident_device is None:
+        assert _original_resolve_inference_device is not None
+        resolved: torch.device = _original_resolve_inference_device(self, device)
+        return resolved
+    if device is not None:
+        # Do not allocate a dummy tensor to canonicalize the device: zero-length
+        # tensors are unsafe on Spyre. An unindexed device means the resident one.
+        requested = torch.device(device)
+        if requested.type != resident_device.type or (
+            requested.index is not None
+            and requested.type != "cpu"
+            and requested.index != resident_device.index
+        ):
+            raise ValueError(
+                f"encode(device={device!r}) cannot relocate this Spyre adapter; "
+                f"its compute weights are on {resident_device}. "
+                "Use the resident device or omit device."
+            )
+    return resident_device
 
 
 # Register immediately on import.
@@ -319,4 +345,5 @@ _original_load_model = None
 _original_init = None
 _original_forward = None
 _original_device: property | None = None
+_original_resolve_inference_device: Callable[..., torch.device] | None = None
 register()

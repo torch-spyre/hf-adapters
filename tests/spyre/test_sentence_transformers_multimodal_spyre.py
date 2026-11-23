@@ -21,6 +21,8 @@ checks caption ranking and image/text cosine scores against the CPU reference.
 """
 
 import gc
+from contextlib import nullcontext
+from itertools import chain
 from typing import Any
 
 import pytest
@@ -31,7 +33,11 @@ from sentence_transformers import SentenceTransformer
 # Register the public SentenceTransformers backend.
 import hf_adapters.st_backend  # noqa: F401
 from hf_adapters.auto_spyre_model import dtype_for_model_path
-from tests._multimodal_embedding_helpers import TEXT_PROMPTS, bounded_cpu_threads
+from tests._multimodal_embedding_helpers import (
+    TEXT_PROMPTS,
+    bounded_cpu_threads,
+    forbid_model_device_moves,
+)
 from tests._vision_helpers import _load_sample_image
 from tests.model_registry import MULTIMODAL_EMBED_PATHS
 
@@ -104,17 +110,31 @@ def test_sentence_transformers_multimodal_backend(model_path: str) -> None:
         assert (
             spyre_dtype == expected_dtype
         ), f"Spyre dtype: expected {expected_dtype}, got {spyre_dtype}"
-        actual: dict[str, torch.Tensor] = {
-            "text": model.encode(
-                TEXT_PROMPTS, convert_to_tensor=True, **text_kwargs
-            ).cpu(),
-            "image": model.encode(image, convert_to_tensor=True).cpu(),
-            "image_list": model.encode([image], convert_to_tensor=True).cpu(),
-        }
-        if mixed_length_prompts:
-            actual["mixed_length_text"] = model.encode(
-                mixed_length_prompts, convert_to_tensor=True, **mixed_text_kwargs
-            ).cpu()
+        backbone: torch.nn.Module = model[0].auto_model
+        preserve_placement = hasattr(backbone, "_spyre_device_parameter_name")
+        if preserve_placement:
+            # CPU helpers must be restored before the first encode, not just
+            # afterward. Then guard against temporary round trips on every call.
+            for name in backbone._spyre_cpu_submodules:
+                module: torch.nn.Module = backbone.get_submodule(name)
+                assert all(
+                    tensor.device.type == "cpu"
+                    for tensor in chain(module.parameters(), module.buffers())
+                ), f"{name} was not restored to CPU during initialization"
+        with forbid_model_device_moves(model) if preserve_placement else nullcontext():
+            actual: dict[str, torch.Tensor] = {
+                "text": model.encode(
+                    TEXT_PROMPTS, convert_to_tensor=True, **text_kwargs
+                ).cpu(),
+                "image": model.encode(image, convert_to_tensor=True).cpu(),
+                "image_list": model.encode([image], convert_to_tensor=True).cpu(),
+            }
+            if mixed_length_prompts:
+                actual["mixed_length_text"] = model.encode(
+                    mixed_length_prompts, convert_to_tensor=True, **mixed_text_kwargs
+                ).cpu()
+        if preserve_placement:
+            print("No model parameter/buffer device transfers during repeated encodes.")
         for name, expected in reference.items():
             value = actual[name]
             assert value.shape == expected.shape
