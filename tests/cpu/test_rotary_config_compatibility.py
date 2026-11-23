@@ -68,3 +68,55 @@ def test_partial_rotary_generation(
     torch.testing.assert_close(actual.sequences, expected.sequences)
     for got, want in zip(actual.logits, expected.logits, strict=True):
         torch.testing.assert_close(got, want, atol=2e-5, rtol=2e-4)
+
+
+class _PerTypeRotary(torch.nn.Module):
+    """Rotary module with Gemma-style ``<layer_type>_inv_freq`` buffers."""
+
+    def __init__(self, rope_type: str | dict[str, str]) -> None:
+        super().__init__()
+        self.rope_type: str | dict[str, str] = rope_type
+        self.register_buffer("sliding_attention_inv_freq", torch.ones(64))
+        self.register_buffer("full_attention_inv_freq", torch.full((64,), 0.5))
+        self.sliding_attention_attention_scaling: float = 1.0
+        self.full_attention_attention_scaling: float = 2.0
+
+
+def test_build_layer_type_ropes_reads_per_type_buffers() -> None:
+    from hf_adapters.hf_common import PrecomputedRotaryEmbedding, build_layer_type_ropes
+
+    rotary = _PerTypeRotary(
+        {"sliding_attention": "default", "full_attention": "proportional"}
+    )
+    ropes: dict[str, PrecomputedRotaryEmbedding] = build_layer_type_ropes(
+        rotary,
+        ["sliding_attention", "full_attention", "sliding_attention"],
+        "Test",
+    )
+    assert set(ropes) == {"sliding_attention", "full_attention"}
+    full: torch.nn.Module = ropes["full_attention"].original
+    torch.testing.assert_close(full.inv_freq, rotary.full_attention_inv_freq)
+    assert full.attention_scaling == 2.0
+
+
+@pytest.mark.parametrize(
+    "rope_type,expected",
+    [
+        (
+            {"sliding_attention": "default", "full_attention": "dynamic"},
+            "full_attention=dynamic",
+        ),
+        (
+            {"sliding_attention": "longrope", "full_attention": "default"},
+            "sliding_attention=longrope",
+        ),
+        ("dynamic", r"\(dynamic\)"),
+    ],
+)
+def test_reject_dynamic_rope(rope_type: str | dict[str, str], expected: str) -> None:
+    from hf_adapters.hf_common import SpyreUnsupportedModelError, build_layer_type_ropes
+
+    with pytest.raises(SpyreUnsupportedModelError, match=expected):
+        build_layer_type_ropes(
+            _PerTypeRotary(rope_type), ["sliding_attention", "full_attention"], "Test"
+        )

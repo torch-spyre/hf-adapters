@@ -48,12 +48,12 @@ from hf_adapters import hf_gemma4_vision
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
     DEVICE,
-    InvFreqShim,
     PrecomputedRotaryEmbedding,
     SpyreUnsupportedFeatureError,
     SpyreUnsupportedModelError,
     add_sliding_window_band,
     apply_rope_matmul,
+    build_layer_type_ropes,
     patch_cpu_inputs,
 )
 from hf_adapters.hf_gemma4 import (
@@ -149,29 +149,11 @@ def _prepare_text(model: EmbeddingGemma2TextModel) -> None:
             )
     if config.hidden_activation != "gelu_pytorch_tanh":
         raise SpyreUnsupportedModelError("EmbeddingGemma 2 requires gelu_pytorch_tanh")
-    # PrecomputedRotaryEmbedding freezes the init-time inv_freq, so RoPE types
-    # that HF recomputes per sequence length (see dynamic_rope_update) would
-    # silently diverge past the original context length.
-    rope_types: dict[str, str] = model.rotary_emb.rope_type
-    dynamic: list[str] = sorted(
-        f"{layer_type}={rope_type}"
-        for layer_type, rope_type in rope_types.items()
-        if "dynamic" in rope_type or rope_type == "longrope"
+    ropes: dict[str, PrecomputedRotaryEmbedding] = build_layer_type_ropes(
+        model.rotary_emb, model.unique_layer_types, "EmbeddingGemma 2"
     )
-    if dynamic:
-        raise SpyreUnsupportedModelError(
-            "EmbeddingGemma 2 does not support sequence-length-dependent RoPE "
-            f"({', '.join(dynamic)})"
-        )
-    ropes: dict[str, PrecomputedRotaryEmbedding] = {}
-    for layer_type in model.unique_layer_types:
-        ropes[layer_type] = PrecomputedRotaryEmbedding(
-            InvFreqShim(
-                getattr(model.rotary_emb, f"{layer_type}_inv_freq"),
-                getattr(model.rotary_emb, f"{layer_type}_attention_scaling"),
-            )
-        )
-        ropes[layer_type].set_dtype(model.dtype)
+    for rope in ropes.values():
+        rope.set_dtype(model.dtype)
     setattr(model, "_spyre_rope", ropes)
     blocks: list[CompiledBlock] = [_make_compiled_block(layer) for layer in layers]
     setattr(model, "_spyre_compiled_blocks", blocks)

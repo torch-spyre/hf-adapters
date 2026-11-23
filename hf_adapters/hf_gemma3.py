@@ -71,11 +71,11 @@ import torch
 import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
-    InvFreqShim,
     PrecomputedRotaryEmbedding,
     _projection_head_count,
     add_causal_sliding_window_band,
     apply_rope_matmul,
+    build_layer_type_ropes,
     embed_text_tokens,
     get_backbone,
     kv_cache_update,
@@ -619,14 +619,9 @@ def prepare_for_spyre(model):
 
     # One PrecomputedRotaryEmbedding per layer type, reading the model's per-type
     # inv_freq + attention_scaling buffers via a shim.
-    rope = backbone.rotary_emb
-    model._spyre_rope = {}
-    for layer_type in set(cfg.layer_types):
-        inv_freq = getattr(rope, f"{layer_type}_inv_freq")
-        scaling = getattr(rope, f"{layer_type}_attention_scaling")
-        model._spyre_rope[layer_type] = PrecomputedRotaryEmbedding(
-            InvFreqShim(inv_freq, scaling)
-        )
+    model._spyre_rope = build_layer_type_ropes(
+        backbone.rotary_emb, cfg.layer_types, "Gemma 3"
+    )
 
     # final_logit_softcapping is None on published Gemma 3 (dropped from Gemma
     # 2); apply it defensively if a checkpoint sets it.

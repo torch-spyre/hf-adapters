@@ -30,7 +30,7 @@ import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import MethodType, ModuleType
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 import torch
 import torch.nn as nn
@@ -1024,6 +1024,52 @@ class InvFreqShim(nn.Module):
         super().__init__()
         self.register_buffer("inv_freq", inv_freq.clone(), persistent=False)
         self.attention_scaling = attention_scaling
+
+
+def reject_dynamic_rope(rotary_emb: nn.Module, model_name: str) -> None:
+    """Raise if ``rotary_emb`` recomputes its frequencies per sequence length.
+
+    ``PrecomputedRotaryEmbedding`` freezes the init-time ``inv_freq``. HF's
+    ``dynamic_rope_update`` recomputes it in ``forward`` for ``*dynamic*`` and
+    ``longrope`` RoPE types, so the frozen copy would silently diverge past the
+    original context length. ``rope_type`` is a string, or a dict keyed by layer
+    type for models with per-type RoPE (Gemma 3/4).
+    """
+    rope_type: str | dict[str, str] = getattr(rotary_emb, "rope_type", "default")
+    rope_types: dict[str, str] = (
+        rope_type if isinstance(rope_type, dict) else {"": rope_type}
+    )
+    dynamic: list[str] = sorted(
+        f"{layer_type}={kind}" if layer_type else kind
+        for layer_type, kind in rope_types.items()
+        if "dynamic" in kind or kind == "longrope"
+    )
+    if dynamic:
+        raise SpyreUnsupportedModelError(
+            f"{model_name} does not support sequence-length-dependent RoPE "
+            f"({', '.join(dynamic)})"
+        )
+
+
+def build_layer_type_ropes(
+    rotary_emb: nn.Module, layer_types: Iterable[str], model_name: str
+) -> dict[str, PrecomputedRotaryEmbedding]:
+    """One ``PrecomputedRotaryEmbedding`` per layer type.
+
+    For rotary modules that store ``<layer_type>_inv_freq`` and
+    ``<layer_type>_attention_scaling`` per attention type (Gemma 3/4 and their
+    derivatives) instead of a single ``inv_freq``. Rejects dynamic RoPE first
+    (see ``reject_dynamic_rope``), since the result freezes the frequencies.
+    """
+    reject_dynamic_rope(rotary_emb, model_name)
+    ropes: dict[str, PrecomputedRotaryEmbedding] = {}
+    for layer_type in sorted(set(layer_types)):
+        inv_freq: torch.Tensor = getattr(rotary_emb, f"{layer_type}_inv_freq")
+        scaling: float = float(
+            getattr(rotary_emb, f"{layer_type}_attention_scaling", 1.0)
+        )
+        ropes[layer_type] = PrecomputedRotaryEmbedding(InvFreqShim(inv_freq, scaling))
+    return ropes
 
 
 def apply_rope_matmul(x, selected_freqs):
