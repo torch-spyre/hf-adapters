@@ -21,6 +21,7 @@ Per-model adapters import from this module and provide only model-specific
 compiled block functions.
 """
 
+import functools
 import math
 import os
 import sys
@@ -28,6 +29,7 @@ import time
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
+from types import MethodType, ModuleType
 from typing import Any, Callable, Iterator, Optional
 
 import torch
@@ -37,6 +39,7 @@ from sympy import factorint
 from transformers import GenerationConfig, PretrainedConfig, PreTrainedModel
 from transformers.generation import GenerateDecoderOnlyOutput
 from transformers.generation.streamers import BaseStreamer
+from transformers.modeling_outputs import BaseModelOutput
 
 # Rank-aware device for multi-Spyre (tensor-parallel) runs. torchrun sets
 # LOCAL_RANK before this module is imported, so each process binds to its local
@@ -276,6 +279,7 @@ def _moe_decode_weight_view(pool, chunks, *, down=False):
             [size[0], size[1], free // stick, stick],
             [stride[0], stride[1], stick, 1],
             get_device_dtype(pool.dtype),
+            valid_elements={(0,): size[0], (1,): size[1], (2, 3): free},
         )
         # The persistent gate/up pools must sit in gather order: contract is
         # outer to the free-dim sticks, so chunking it preserves flat order.
@@ -284,6 +288,7 @@ def _moe_decode_weight_view(pool, chunks, *, down=False):
                 [experts, contract, free // stick, stick],
                 [contract * free, free, stick, 1],
                 get_device_dtype(pool.dtype),
+                valid_elements={(0,): experts, (1,): contract, (2, 3): free},
             )
         )
     return reinterpret_tensor_with_layout(pool, size, stride, 0, layout)
@@ -714,36 +719,61 @@ def to_default_device_layout(hidden_states: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def get_backbone(model):
+# Fallback wrapper attributes for models that declare no ``base_model_prefix``
+# (plain ``nn.Module`` objects, or remote-code ``PreTrainedModel`` subclasses
+# that leave it at the empty default).
+_BACKBONE_ATTR_FALLBACKS: tuple[str, ...] = (
+    "model",
+    "gpt_neox",
+    "bert",
+    "distilbert",
+    "mpnet",
+    "roberta",
+    "transformer",
+)
+
+
+def get_backbone(model: nn.Module) -> Any:
     """Return the transformer backbone of an HF model or task wrapper object.
 
     Task-specific auto classes (e.g., ``AutoModelForCausalLM``) return a wrapper
     containing a backbone and one or more task heads, while the generic AutoModel
-    class may return the backbone directly. Search the supported wrapper attributes
-    and return the first non-``None`` module. If none is present, treat ``model``
-    itself as the backbone.
+    class may return the backbone directly.
+
+    HF models declare where their backbone lives via ``base_model_prefix``
+    (``"model"``, ``"distilbert"``, ``"transformer"``, ...). A wrapper holds the
+    backbone at that attribute; a bare backbone does not have it and is its own
+    backbone. This mirrors HF's ``PreTrainedModel.base_model`` and, unlike
+    guessing by attribute name, does not mistake a bare model's internal
+    submodule for a backbone (a bare ``DistilBertModel`` has a ``.transformer``
+    layer stack, which a name search would confuse with GPT-2's
+    ``model.transformer``).
+
+    Models with no ``base_model_prefix`` fall back to searching
+    ``_BACKBONE_ATTR_FALLBACKS`` and returning the first non-``None`` module, or
+    ``model`` itself if none is present.
 
     Multimodal causal-LM wrappers (e.g. Gemma 4's
     ``Gemma4ForConditionalGeneration``) contain an additional nested
     ``language_model`` level beneath that first module. Descend into it when
     present.
+
+    Returns ``Any``: backbones are heterogeneous HF classes, and callers read
+    architecture-specific attributes (``layers``, ``embed_tokens``, ...).
     """
-    inner = next(
-        (
-            backbone
-            for name in (
-                "model",
-                "gpt_neox",
-                "bert",
-                "distilbert",
-                "mpnet",
-                "roberta",
-                "transformer",
-            )
-            if (backbone := getattr(model, name, None)) is not None
-        ),
-        model,
-    )
+    prefix: str = getattr(model, "base_model_prefix", "") or ""
+    inner: nn.Module
+    if prefix:
+        inner = getattr(model, prefix, None) or model
+    else:
+        inner = next(
+            (
+                backbone
+                for name in _BACKBONE_ATTR_FALLBACKS
+                if (backbone := getattr(model, name, None)) is not None
+            ),
+            model,
+        )
     return getattr(inner, "language_model", inner)
 
 
@@ -1472,8 +1502,8 @@ def patch_new_gelu(gelu_cls):
 
 
 def _largest_prime_factor(n: int) -> int:
-    """Largest prime factor of ``n`` (n >= 2). Used to bound the lm_head span."""
-    return int(max(factorint(n)))
+    """Largest prime factor, or 1 for a single stick, for the LM-head span."""
+    return int(max(factorint(n), default=1))
 
 
 # Spyre per-core EAR (effective address range) limit for one tensor: 256 MB.
@@ -2373,6 +2403,12 @@ def _cache_position_first_stl(batch_size, num_kv_heads, max_cache_len, head_dim,
             1,  # elems per stick
         ],
         device_dtype=get_device_dtype(dtype),
+        valid_elements={
+            (0,): max_cache_len,
+            (1,): num_kv_heads,
+            (2, 4): head_dim,
+            (3,): batch_size,
+        },
     )
 
 
@@ -2526,8 +2562,14 @@ def _move_to_spyre_with_layout(model, dtype):
 
 
 def _resolve_tp_plan(
-    model_path, auto_model_cls, tp_plan, adapter_module, trust_remote_code=None
-):
+    model_path: str | os.PathLike[str],
+    auto_model_cls: Any,
+    tp_plan: dict[str, str] | str,
+    adapter_module: ModuleType | None,
+    trust_remote_code: bool | None = None,
+    *,
+    subfolder: str = "",
+) -> tuple[dict[str, str], PretrainedConfig]:
     """Resolve and translate an HF TP plan to Spyre placement styles.
 
     The model is instantiated on ``meta`` both to obtain HF's fully-namespaced
@@ -2540,11 +2582,19 @@ def _resolve_tp_plan(
 
     from hf_adapters.spyre_tensor_parallel import prepare_spyre_tp_plan
 
-    cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
+    # Same subfolder as the weights (load_model_common passes model_subfolder()).
+    cfg: PretrainedConfig = AutoConfig.from_pretrained(
+        model_path, subfolder=subfolder, trust_remote_code=trust_remote_code
+    )
     with torch.device("meta"):
         probe = auto_model_cls.from_config(cfg)
     auto_plan = tp_plan == "auto"
-    plan = dict(probe.tp_plan or {}) if auto_plan else dict(tp_plan)
+    if isinstance(tp_plan, str):
+        if not auto_plan:
+            raise ValueError(f"Expected tp_plan='auto' or a mapping, got {tp_plan!r}")
+        plan: dict[str, str] = dict(probe.tp_plan or {})
+    else:
+        plan = dict(tp_plan)
     replicated_linear_modules = {"lm_head"} if auto_plan else set()
     adapter_replication_policy = getattr(
         adapter_module, "spyre_tp_replicated_linear_modules", None
@@ -2586,7 +2636,7 @@ def _resolve_tp_plan(
     return plan, cfg
 
 
-def _resolve_tp_size():
+def _resolve_tp_size() -> int:
     """Resolve and validate the TP degree required by ``DistributedConfig``."""
     world_size = os.getenv("WORLD_SIZE")
     if world_size is None:
@@ -2621,48 +2671,14 @@ def _without_spyre_allocator_warmup():
         modeling_utils.caching_allocator_warmup = original
 
 
-@contextmanager
-def _prefer_exact_tp_plan_entries():
-    """Honor exact per-layer TP entries before Transformers' wildcard lookup.
-
-    Transformers documents exact TP rules, but its current lookup immediately
-    replaces every numeric layer index with ``*``. That makes a generic rule
-    win even when an exact override is present. Gemma 4 needs exact overrides
-    for only the full-attention K/V projections whose KV-head count is smaller
-    than the TP degree.
-    """
-    from transformers import modeling_utils
-    from transformers.integrations import tensor_parallel
-
-    original = tensor_parallel._get_parameter_tp_plan
-
-    def exact_first(parameter_name, tp_plan, is_weight=True):
-        if parameter_name in tp_plan:
-            return tp_plan[parameter_name]
-        if is_weight and "." in parameter_name:
-            module_name = parameter_name.rsplit(".", 1)[0]
-            if module_name in tp_plan:
-                return tp_plan[module_name]
-        return original(parameter_name, tp_plan, is_weight=is_weight)
-
-    original_modeling_lookup = modeling_utils._get_parameter_tp_plan
-    tensor_parallel._get_parameter_tp_plan = exact_first
-    modeling_utils._get_parameter_tp_plan = exact_first
-    try:
-        yield
-    finally:
-        tensor_parallel._get_parameter_tp_plan = original
-        modeling_utils._get_parameter_tp_plan = original_modeling_lookup
-
-
 def load_model_common(
-    model_path,
-    module,
-    dtype=torch.float16,
-    auto_model_cls=None,
-    tp_plan=None,
-    trust_remote_code=None,
-):
+    model_path: str | os.PathLike[str],
+    module: ModuleType | None,
+    dtype: torch.dtype = torch.float16,
+    auto_model_cls: Any = None,
+    tp_plan: dict[str, str] | str | None = None,
+    trust_remote_code: bool | None = None,
+) -> PreTrainedModel:
     """Load an HF model.
 
     Args:
@@ -2680,40 +2696,58 @@ def load_model_common(
             to HF's ``from_pretrained``) so checkpoints shipping custom modeling
             code load only when the caller explicitly opts in.
     """
+    from hf_adapters._model_loading import model_subfolder
+
     if auto_model_cls is None:
         from transformers import AutoModel
 
         auto_model_cls = AutoModel
 
-    if hasattr(module, "load_hf_model"):
+    model: PreTrainedModel
+    if module is not None and hasattr(module, "load_hf_model"):
         # _sig was already inspected above (for the tp_plan support check).
         # Re-inspect here to determine which optional kwargs this loader accepts.
         import inspect as _inspect
 
         _sig = _inspect.signature(module.load_hf_model)
-        _kwargs: dict = {}
+        _kwargs: dict[str, Any] = {}
         if tp_plan is not None and "tp_plan" in _sig.parameters:
             _kwargs["tp_plan"] = tp_plan
         if "trust_remote_code" in _sig.parameters:
             _kwargs["trust_remote_code"] = trust_remote_code
         model = module.load_hf_model(model_path, dtype, **_kwargs)
     elif tp_plan is not None:
+        import torch.distributed as dist
         from transformers.distributed import DistributedConfig
 
+        subfolder = model_subfolder(model_path)
         resolved_tp_plan, cfg = _resolve_tp_plan(
             model_path,
             auto_model_cls,
             tp_plan,
             adapter_module=module,
             trust_remote_code=trust_remote_code,
+            subfolder=subfolder,
         )
+        tp_size = _resolve_tp_size()
         distributed_config = DistributedConfig(
-            tp_size=_resolve_tp_size(),
+            tp_size=tp_size,
             tp_plan=resolved_tp_plan,
         )
-        with _without_spyre_allocator_warmup(), _prefer_exact_tp_plan_entries():
+        from hf_adapters.spyre_tensor_parallel import spyre_tp_loading
+
+        if (
+            tp_size > 1
+            and DEVICE.split(":")[0] == "spyre"
+            and not dist.is_initialized()
+        ):
+            # HF reuses an existing group and binds LOCAL_RANK when creating
+            # its mesh. Omit device_id: SpyreCCL cannot split communicators.
+            dist.init_process_group(backend="cpu:gloo,spyre:spyreccl")
+        with _without_spyre_allocator_warmup(), spyre_tp_loading():
             model = auto_model_cls.from_pretrained(
                 model_path,
+                subfolder=subfolder,
                 config=cfg,
                 dtype=dtype,
                 distributed_config=distributed_config,
@@ -2722,6 +2756,7 @@ def load_model_common(
     else:
         model = auto_model_cls.from_pretrained(
             model_path,
+            subfolder=model_subfolder(model_path),
             dtype=dtype,
             device_map="cpu",
             trust_remote_code=trust_remote_code,
@@ -4540,6 +4575,153 @@ def prefill_token_classification(
     head_device = next(classifier.parameters()).device
     logits: torch.Tensor = classifier(last_hidden_state.to(head_device))
     return logits.to("cpu")
+
+
+# ---------------------------------------------------------------------------
+# Pre-LN encoder preparation (CLIP / SigLIP text and vision towers)
+# ---------------------------------------------------------------------------
+#
+# Shared by hf_clip, hf_siglip and hf_siglip_vision. Despite the
+# make_vision_encoder_block name, these prepare text towers too: the
+# requirement is the pre-LN layer layout, not the modality.
+
+
+CompiledBlock = Callable[[torch.Tensor, torch.Tensor | None], torch.Tensor]
+
+
+def prepare_pre_ln_encoder(
+    encoder: Any, config: PretrainedConfig
+) -> tuple[list[CompiledBlock], int]:
+    """Pad heads/MLPs and compile pre-LN blocks with the original SDPA scale.
+
+    Callers must pass pre-LN layers (``h += attn(ln1(h)); h += mlp(ln2(h))``)
+    exposing ``self_attn.{q,k,v,out}_proj``, ``layer_norm1``, ``layer_norm2``
+    and ``mlp.{fc1,activation_fn,fc2}``; the layout is not checked here.
+    """
+    num_heads = config.num_attention_heads
+    original_head_dim: int = getattr(config, "head_dim", None) or (
+        config.hidden_size // num_heads
+    )
+    head_dim = ((original_head_dim + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
+    layers: list[Any] = list(encoder.layers)
+
+    if head_dim > original_head_dim:
+        pad_attention_heads_linear(
+            encoder,
+            (layer.self_attn for layer in layers),
+            original_head_dim,
+            head_dim,
+            num_heads,
+        )
+    intermediate_size = config.intermediate_size
+    padded_intermediate = (
+        (intermediate_size + BLOCK_SIZE - 1) // BLOCK_SIZE
+    ) * BLOCK_SIZE
+    if padded_intermediate > intermediate_size:
+        pad_encoder_mlp(layers, intermediate_size, padded_intermediate)
+
+    blocks: list[CompiledBlock] = [
+        make_vision_encoder_block(
+            q_proj=layer.self_attn.q_proj,
+            k_proj=layer.self_attn.k_proj,
+            v_proj=layer.self_attn.v_proj,
+            o_proj=layer.self_attn.out_proj,
+            layer_norm1=layer.layer_norm1,
+            layer_norm2=layer.layer_norm2,
+            ffn_in=layer.mlp.fc1,
+            act=layer.mlp.activation_fn,
+            ffn_out=layer.mlp.fc2,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            scale=original_head_dim**-0.5,
+        )
+        for layer in layers
+    ]
+    return blocks, head_dim
+
+
+def patch_pre_ln_encoder_forward(
+    encoder: nn.Module, blocks: list[CompiledBlock]
+) -> None:
+    """Install a padded block loop, retaining HF's explicit/implicit causal mask."""
+
+    def encoder_forward(
+        self: nn.Module,
+        inputs_embeds: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        **kwargs: Any,
+    ) -> BaseModelOutput:
+        if kwargs.get("output_attentions", False):
+            raise ValueError("Spyre encoder blocks do not return attention weights")
+        if kwargs.get("output_hidden_states", False):
+            raise ValueError(
+                "Spyre encoder blocks do not return intermediate hidden states"
+            )
+        seq_len = inputs_embeds.shape[1]
+        mask = attention_mask.cpu() if attention_mask is not None else None
+        # HF's SDPA path can omit a causal text mask and rely on is_causal.
+        # The compiled block uses is_causal=False, so materialize it here.
+        if mask is None and kwargs.get("is_causal", False):
+            mask = torch.ones((seq_len, seq_len), dtype=torch.bool).tril()[None, None]
+        hidden = inputs_embeds.to(DEVICE)
+        pad_len = (-seq_len) % BLOCK_SIZE
+        if pad_len:
+            hidden = F.pad(hidden, (0, 0, 0, pad_len))
+            if mask is None:
+                mask = torch.ones((1, 1, 1, seq_len), dtype=torch.bool)
+            # Added queries may attend to real keys, avoiding all-masked rows.
+            # Added keys must remain inaccessible to every query.
+            if mask.shape[-2] == seq_len:
+                allowed: bool | float = True if mask.dtype == torch.bool else 0.0
+                mask = F.pad(mask, (0, 0, 0, pad_len), value=allowed)
+            blocked: bool | float = False if mask.dtype == torch.bool else float("-inf")
+            mask = F.pad(mask, (0, pad_len), value=blocked)
+        if mask is not None:
+            mask = mask.to(DEVICE)
+        hidden = hidden.clone()
+        compiled_blocks: list[CompiledBlock] = getattr(self, "_spyre_compiled_blocks")
+        for block in compiled_blocks:
+            hidden = block(hidden, mask)
+            if hidden.device.type == "spyre":
+                hidden = hidden.clone()
+        # Crop on CPU, where HF also performs pooling and final normalization.
+        output = BaseModelOutput()
+        output["last_hidden_state"] = hidden.cpu()[:, :seq_len]
+        return output
+
+    setattr(encoder, "_spyre_compiled_blocks", blocks)
+    setattr(encoder, "forward", MethodType(encoder_forward, encoder))
+
+
+def patch_cpu_inputs(module: torch.nn.Module, input_names: tuple[str, ...]) -> None:
+    """Keep named tensor inputs on CPU before HF embeddings/mask construction.
+
+    Names follow the original forward's positional argument order. Other
+    arguments, including interpolation and output flags, pass through unchanged.
+    """
+    original_forward = module.forward
+
+    @functools.wraps(type(module).forward)
+    def forward(self: torch.nn.Module, *args: Any, **kwargs: Any) -> Any:
+        cpu_args = tuple(
+            (
+                value.cpu()
+                if index < len(input_names) and isinstance(value, torch.Tensor)
+                else value
+            )
+            for index, value in enumerate(args)
+        )
+        cpu_kwargs = {
+            name: (
+                value.cpu()
+                if name in input_names and isinstance(value, torch.Tensor)
+                else value
+            )
+            for name, value in kwargs.items()
+        }
+        return original_forward(*cpu_args, **cpu_kwargs)
+
+    module.forward = MethodType(forward, module)
 
 
 # ---------------------------------------------------------------------------

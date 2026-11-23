@@ -23,7 +23,29 @@ Mirrors the same pattern used by ``tests/spyre/edge_cases/conftest.py``.
 
 import os
 import sys
+from collections.abc import Iterator
+
+import pytest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
+
+
+# Needed by the retained manual TP tests, which are not part of PR CI.
+@pytest.fixture(scope="session")
+def spyre_tp_group() -> Iterator[None]:
+    """Share one process group across the TP parity and collective tests."""
+    import torch.distributed as dist
+    import torch_spyre  # noqa: F401
+
+    if int(os.environ.get("WORLD_SIZE", "1")) < 2:
+        pytest.skip("requires at least two torchrun ranks")
+    owns_group = not dist.is_initialized()
+    if owns_group:
+        dist.init_process_group(backend="cpu:gloo,spyre:spyreccl")
+    try:
+        yield
+    finally:
+        if owns_group and dist.is_initialized():
+            dist.destroy_process_group()

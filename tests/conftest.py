@@ -321,6 +321,7 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
         "seq_classification": model_registry.NON_BLOCKING_SEQUENCE_CLASSIFICATION_MODELS,
         "token_classification": {},
         "structured_decision": {},
+        "decision": {},
     }
     try:
         non_blocking = non_blocking_tables[harness]
@@ -366,7 +367,9 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
     if skip_reason:
         skip_spyre = pytest.mark.skip(reason=skip_reason)
         for item in items:
-            if "spyre" in item.nodeid or item.get_closest_marker("requires_spyre"):
+            if "tests/spyre/" in item.nodeid or item.get_closest_marker(
+                "requires_spyre"
+            ):
                 item.add_marker(skip_spyre)
 
     if not config.getoption("--run-slow"):

@@ -51,7 +51,7 @@ def generate_matrices(
     # larger model sharing an adapter with a smaller default). Adding a new
     # category later just means adding a row here.
     registry = tests.model_registry
-    categories = {
+    categories: dict[str, tuple[list[str], list[str]]] = {
         "causal": (registry.CAUSAL_PATHS, registry.ALL_CAUSAL_PATHS),
         "multicard_smoke": (
             registry.MULTICARD_SMOKE_PATHS,
@@ -59,8 +59,8 @@ def generate_matrices(
         ),
         "embed": (registry.EMBED_PATHS, registry.ALL_EMBED_PATHS),
         "vision": (registry.VISION_PATHS, registry.ALL_VISION_PATHS),
-        "clip": (registry.CLIP_PATHS, registry.ALL_CLIP_PATHS),
-        "multimodal_embed_compare": (
+        # Consumed by the SentenceTransformers multimodal suite.
+        "multimodal_embed": (
             registry.MULTIMODAL_EMBED_PATHS,
             registry.ALL_MULTIMODAL_EMBED_PATHS,
         ),
@@ -82,6 +82,7 @@ def generate_matrices(
             registry.STRUCTURED_DECISION_PATHS,
             registry.ALL_STRUCTURED_DECISION_PATHS,
         ),
+        "decision": (registry.DECISION_PATHS, registry.ALL_DECISION_PATHS),
     }
 
     if only_models:
@@ -137,8 +138,7 @@ def generate_matrices(
         "multicard_smoke": paths["multicard_smoke"],
         "embed": paths["embed"],
         "vision": paths["vision"],
-        "clip": paths["clip"],
-        "multimodal_embed_compare": paths["multimodal_embed_compare"],
+        "multimodal_embed": paths["multimodal_embed"],
         "masked_lm": paths["masked_lm"],
         "question_answering": paths["question_answering"],
         "combined": combined_paths,
@@ -146,6 +146,7 @@ def generate_matrices(
         "seq_classification": paths["seq_classification"],
         "token_classification": paths["token_classification"],
         "structured_decision": paths["structured_decision"],
+        "decision": paths["decision"],
         # Perf only benchmarks an explicit list (tests/model_lists/perf.yaml), never the whole registry.
         "perf": paths["causal"] if only_models else [],
     }
@@ -166,10 +167,7 @@ def format_for_github_actions(matrices: dict[str, list[str]]) -> dict[str, str]:
         "multicard_smoke_matrix": json.dumps(matrices["multicard_smoke"]),
         "embed_matrix": json.dumps(matrices["embed"]),
         "vision_matrix": json.dumps(matrices["vision"]),
-        "clip_matrix": json.dumps(matrices["clip"]),
-        "multimodal_embed_compare_matrix": json.dumps(
-            matrices["multimodal_embed_compare"]
-        ),
+        "multimodal_embed_matrix": json.dumps(matrices["multimodal_embed"]),
         "masked_lm_matrix": json.dumps(matrices["masked_lm"]),
         "question_answering_matrix": json.dumps(matrices["question_answering"]),
         "combined_matrix": json.dumps(matrices["combined"]),
@@ -177,6 +175,7 @@ def format_for_github_actions(matrices: dict[str, list[str]]) -> dict[str, str]:
         "seq_classification_matrix": json.dumps(matrices["seq_classification"]),
         "token_classification_matrix": json.dumps(matrices["token_classification"]),
         "structured_decision_matrix": json.dumps(matrices["structured_decision"]),
+        "decision_matrix": json.dumps(matrices["decision"]),
         "perf_matrix": json.dumps(matrices["perf"]),
     }
 
@@ -254,9 +253,8 @@ def main() -> None:
         f"  Vision models ({len(matrices['vision'])}): {', '.join(matrices['vision'])}"
     )
     print(
-        f"  Multimodal embedding models ({len(matrices['multimodal_embed_compare'])}): {', '.join(matrices['multimodal_embed_compare'])}"
+        f"  Multimodal embedding models ({len(matrices['multimodal_embed'])}): {', '.join(matrices['multimodal_embed'])}"
     )
-    print(f"  CLIP models ({len(matrices['clip'])}): {', '.join(matrices['clip'])}")
     print(
         f"  Masked-LM models ({len(matrices['masked_lm'])}): {', '.join(matrices['masked_lm'])}"
     )
@@ -281,6 +279,10 @@ def main() -> None:
     print(
         f"  Structured-decision models ({len(matrices['structured_decision'])}): "
         f"{', '.join(matrices['structured_decision'])}"
+    )
+    print(
+        f"  Decision models ({len(matrices['decision'])}): "
+        f"{', '.join(matrices['decision'])}"
     )
     print(f"  Perf models ({len(matrices['perf'])}): {', '.join(matrices['perf'])}")
 

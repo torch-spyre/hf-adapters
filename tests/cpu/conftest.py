@@ -134,6 +134,7 @@ def _unwrap_compiled_blocks(model: types.ModuleType) -> None:
             "_spyre_lm_head_forward",
             "_spyre_compiled_norm",
             "_spyre_compiled_marker_selector",
+            "_spyre_compiled_forward",
         ):
             cb = getattr(module, attr, None)
             if cb is None:

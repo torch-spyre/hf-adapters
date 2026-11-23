@@ -519,6 +519,12 @@ EMBEDDING_MODELS = {
         "adapter": "hf_bert.py",
         "size": "0.02b",
     },
+    "distilbert_embed": {
+        "name": "DistilBERT ArguAna GPL",
+        "path": "GPL/arguana-msmarco-distilbert-gpl",
+        "adapter": "hf_distilbert.py",
+        "size": "0.066b",
+    },
     # hf_modernbert.py
     "modernbert": {
         "name": "ModernBERT-embed-base",
@@ -568,6 +574,12 @@ EMBEDDING_MODELS = {
         "path": "ibm-granite/granite-embedding-107m-multilingual",
         "adapter": "hf_xlm_roberta.py",
         "size": "0.1B",
+    },
+    "sentence_camembert_base": {
+        "name": "sentence-camembert-base",
+        "path": "dangvantuan/sentence-camembert-base",
+        "adapter": "hf_xlm_roberta.py",
+        "size": "0.1b",
     },
     # hf_mpnet.py
     "mpnet": {
@@ -681,6 +693,18 @@ STRUCTURED_DECISION_MODELS = {
 }
 
 
+# Transformers decision models (``AutoModelForDecision``), loaded with
+# ``AutoSpyreModelForDecision`` and scored through ``model.decide``.
+DECISION_MODELS = {
+    "d3_nano": {
+        "name": "d3 nano",
+        "path": "vllm-sr/d3-nano",
+        "adapter": "hf_qwen3_5_decision.py",
+        "size": "2b",
+    },
+}
+
+
 # Vision models. ``kind="tower"`` adapters are encoder-only; ``kind="vlm"`` adapters
 # are full multimodal models with a causal text decoder, RoPE, KV caches, and ``generate``.
 VISION_MODELS = {
@@ -773,18 +797,17 @@ VISION_MODELS = {
         "dtype": "bfloat16",
         "size": "30b",
     },
-    # hf_clip.py — CLIP dual-encoder (image + text -> embeddings via ST backend)
-    "clip_vit_b_32": {
-        "name": "clip-ViT-B-32",
-        "path": "sentence-transformers/clip-ViT-B-32",
-        "adapter": "hf_clip.py",
-        "kind": "clip",  # dual-encoder: image or text -> embedding
-        "size": "0.15b",
-    },
 }
 
 
 MULTIMODAL_EMBEDDING_MODELS: dict[str, dict[str, Any]] = {
+    "clip_vit_b_32": {
+        "name": "clip-ViT-B-32",
+        "path": "sentence-transformers/clip-ViT-B-32",
+        "adapter": "hf_clip.py",
+        "kind": "multimodal_embedding",
+        "size": "0.15b",
+    },
     "siglip2_giant_opt_patch16_384": {
         "name": "SigLIP2 giant-opt patch16 384",
         "path": "google/siglip2-giant-opt-patch16-384",
@@ -995,18 +1018,14 @@ STRUCTURED_DECISION_PATHS: list[str] = _exclude(
         STRUCTURED_DECISION_MODELS, include_gated=_include_gated_flag
     )
 )
+DECISION_PATHS: list[str] = _exclude(
+    _select_representative_paths(DECISION_MODELS, include_gated=_include_gated_flag)
+)
 VISION_PATHS: list[str] = _exclude(
     _select_representative_paths(
         VISION_MODELS,
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") == "vlm",
-    )
-)
-CLIP_PATHS: list[str] = _exclude(
-    _select_representative_paths(
-        VISION_MODELS,
-        include_gated=_include_gated_flag,
-        predicate=lambda info: info.get("kind") == "clip",
     )
 )
 
@@ -1049,6 +1068,7 @@ REMOTE_CODE_PATHS: frozenset[str] = frozenset(
         QUESTION_ANSWERING_MODELS,
         TOKEN_CLASSIFICATION_MODELS,
         STRUCTURED_DECISION_MODELS,
+        DECISION_MODELS,
         VISION_MODELS,
         MULTIMODAL_EMBEDDING_MODELS,
     )
@@ -1094,18 +1114,14 @@ ALL_TOKEN_CLASSIFICATION_PATHS: list[str] = _exclude(
 ALL_STRUCTURED_DECISION_PATHS: list[str] = _exclude(
     _all_paths(STRUCTURED_DECISION_MODELS, include_gated=_include_gated_flag)
 )
+ALL_DECISION_PATHS: list[str] = _exclude(
+    _all_paths(DECISION_MODELS, include_gated=_include_gated_flag)
+)
 ALL_VISION_PATHS: list[str] = _exclude(
     _all_paths(
         VISION_MODELS,
         include_gated=_include_gated_flag,
         predicate=lambda info: info.get("kind") == "vlm",
-    )
-)
-ALL_CLIP_PATHS: list[str] = _exclude(
-    _all_paths(
-        VISION_MODELS,
-        include_gated=_include_gated_flag,
-        predicate=lambda info: info.get("kind") == "clip",
     )
 )
 
