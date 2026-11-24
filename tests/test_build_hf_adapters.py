@@ -1,4 +1,4 @@
-"""Exercise the build action's environment selection without Spyre hardware."""
+"""Exercise the build action's environment selection without Spyre hardware or torch."""
 
 from __future__ import annotations
 
@@ -15,6 +15,30 @@ _ACTION = (
     Path(__file__).resolve().parents[1]
     / ".github/actions/build-hf-adapters/action.yaml"
 )
+
+
+# Stand-in for the parts of torch the action's backend probe touches.
+_FAKE_TORCH: str = """\
+import types
+
+_device_types: set[str] = {"cpu"}
+
+
+def device(name: str) -> str:
+    if name not in _device_types:
+        raise RuntimeError(
+            "Expected one of cpu, cuda, ... device type at start of device string: "
+            + name
+        )
+    return name
+
+
+def _rename_privateuse1_backend(name: str) -> None:
+    _device_types.add(name)
+
+
+utils = types.SimpleNamespace(rename_privateuse1_backend=_rename_privateuse1_backend)
+"""
 
 
 def _build_script() -> str:
@@ -41,14 +65,16 @@ def _run_build(
     project_env = tmp_path / ("custom-env" if custom_project_env else ".venv")
     action_path = tmp_path / "action"
     action_path.mkdir()
-    # Each simulated environment uses real CPU PyTorch. Only an installed
-    # backend marker makes a stub torch_spyre, which registers the private-use
-    # device on import, visible to the actual probe.
+    # Each simulated environment has a stand-in torch that, like PyTorch,
+    # rejects "spyre" until a backend registers it, so the test runs without
+    # torch. The stub torch_spyre that registers it on import is importable only
+    # once the environment's backend marker is installed.
     for environment in (image_env, project_env):
         (environment / "bin").mkdir(parents=True)
-        site_packages = environment / "site-packages"
-        site_packages.mkdir()
-        (site_packages / "torch_spyre.py").write_text(
+        (environment / "lib").mkdir()
+        (environment / "lib/torch.py").write_text(_FAKE_TORCH)
+        (environment / "site-packages").mkdir()
+        (environment / "site-packages/torch_spyre.py").write_text(
             'import torch\ntorch.utils.rename_privateuse1_backend("spyre")\n'
         )
         python = environment / "bin/python"
@@ -57,6 +83,7 @@ def _run_build(
             "import sys\n"
             "from pathlib import Path\n"
             "here = Path(__file__).resolve().parent\n"
+            'sys.path.insert(0, str(here.parent / "lib"))\n'
             'if (here / "torch-spyre-installed").exists():\n'
             '    sys.path.insert(0, str(here.parent / "site-packages"))\n'
             "exec(sys.argv[2])\n"
@@ -82,7 +109,6 @@ def _run_build(
         "BROKEN_INSTALL": str(broken_install).lower(),
         "COMMAND_LOG": str(tmp_path / "commands.log"),
         "UV_NO_SYNC": "1",
-        "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
     }
     env.pop("UV_PROJECT_ENVIRONMENT", None)
     if custom_project_env:
