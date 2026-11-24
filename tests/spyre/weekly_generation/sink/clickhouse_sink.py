@@ -1,11 +1,9 @@
 """ClickHouse result sink: the real destination for weekly-scan rows.
 
-The only module in the weekly pipeline that reaches ``clickhouse_connect`` (via
-``clickhouse_db``), which is why it lives apart from the ABC in ``result_sink``:
-``--write-to-csv`` runs must reach that ABC, and the CSV sink, without the driver.
-Note the two imports below are deliberately split — the client and credentials
-come from ``clickhouse_db``, the table shape from the dependency-free
-``table_schema``, so a schema consumer never drags in the driver.
+Writes schema-v2 capability rows only (see ``capability_write``); it never creates or alters a
+table, so the login it runs as needs INSERT and SELECT on the v2 database and nothing more.
+The ingest library is imported inside the methods, so importing this module needs no driver,
+and the CSV path never reaches it.
 """
 
 from __future__ import annotations
@@ -13,81 +11,60 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from tests.spyre.weekly_generation.clickhouse_db import get_client, table_exists
 from tests.spyre.weekly_generation.failure_categories import (
     FAILURE_CATEGORY_HARDWARE_EXCEPTION as _HARDWARE_EXCEPTION_CATEGORY,
 )
 from tests.spyre.weekly_generation.model_type import ModelType
+from tests.spyre.weekly_generation.sink import capability_write
 from tests.spyre.weekly_generation.sink.result_sink import ResultSink
-from tests.spyre.weekly_generation.table_schema import (
-    DATABASE,
-    EMBEDDING_CREATE_TABLE_SQL,
-    EMBEDDING_TABLE_NAME,
-    GENERATIVE_CREATE_TABLE_SQL,
-    GENERATIVE_TABLE_NAME,
-    TABLE_COLUMNS,
-)
+from tests.spyre.weekly_generation.table_schema import TABLE_COLUMNS
 
 
 class ClickHouseResultSink(ResultSink):
-    """Insert rows into ClickHouse.
+    """Insert rows into the v2 capability tables.
 
-    On construction the table is created if it does not already exist.
-
-    Rows are accumulated in ``_pending`` and flushed to ClickHouse in one bulk
-    INSERT on ``close()`` (or ``__exit__``), so N rows cost one round-trip rather
-    than N. ``flush()`` forces that write early, which the weekly driver uses at
-    batch boundaries so a crash loses at most one batch.
+    Rows are accumulated in ``_pending`` and flushed in one bulk INSERT on ``close()`` (or
+    ``__exit__``), so N rows cost one round-trip rather than N. ``flush()`` forces that write
+    early, which the weekly driver uses at batch boundaries so a crash loses at most one batch.
+    A failed flush raises and keeps the rows buffered for the next attempt.
     """
 
     def __init__(
         self, model_type: ModelType, model_list_file: str | None = None
     ) -> None:
+        from spyre_clickhouse_ingest import get_client, tables_present, target_database
+        from spyre_clickhouse_ingest.schema import CAPABILITIES, CAPABILITY_RUNS
+
         self._model_type = model_type
-        # Names this process's slice of a sharded scan, for the v2 dedup scope only. The v1
-        # write does not use it: ReplacingMergeTree(snapshot_date) collapses a duplicate
-        # rather than doubling it, which is why v1 never needed a per-shard key.
+        # Names this process's slice of a sharded scan: the dedup scope.
         self._model_list_file = model_list_file
-        if model_type is ModelType.EMBEDDING:
-            self._table_name = EMBEDDING_TABLE_NAME
-            create_sql = EMBEDDING_CREATE_TABLE_SQL
-        else:
-            self._table_name = GENERATIVE_TABLE_NAME
-            create_sql = GENERATIVE_CREATE_TABLE_SQL
+        self._db = target_database()
+        if not self._db:
+            raise RuntimeError("CLICKHOUSE_DB_V2 is unset: no v2 database to write to.")
         self._client = get_client()
-        if not table_exists(self._client, self._table_name):
-            self._client.command(create_sql)
-            print(f"ClickHouse: table '{self._table_name}' created.\n")
-        else:
-            print(f"ClickHouse: table '{self._table_name}' already exists.\n")
+        if not tables_present(self._client, self._db, (CAPABILITIES, CAPABILITY_RUNS)):
+            raise RuntimeError(
+                f"{self._db} lacks the capability tables; the schema is applied by torch-spyre, not CI."
+            )
+        print(f"ClickHouse: writing {model_type} verdicts to {self._db}.\n")
 
         # Rows waiting to be flushed; each entry is a list matching TABLE_COLUMNS order.
         self._pending: list[list[Any]] = []
 
     def fetch_hw_failure_models(self, snapshot_date: date) -> set[str]:
-        """Model names whose row on *snapshot_date* is a ``hardware_exception``.
+        """Model names whose verdict on *snapshot_date* is a ``hardware_exception``.
 
-        Groundwork for recovery runs: when a scan aborts because the accelerator
-        went away (see ``weekly_test.HardwareExceptionAbortError``), the affected
-        models are the only ones worth re-testing — the failure says nothing about
-        the checkpoint, so every other verdict from that run still stands.
-
-        Not called yet. Nothing upstream exposes a recovery run, so this is
-        reachable only by hand until that is wired up.
+        Groundwork for recovery runs: when a scan aborts because the accelerator went away
+        (see ``weekly_test.HardwareExceptionAbortError``), the affected models are the only
+        ones worth re-testing. Not called yet; reachable only by hand.
         """
-        result = self._client.query(
-            "SELECT DISTINCT model_name "
-            "FROM {db:Identifier}.{tbl:Identifier} "
-            "WHERE snapshot_date = {snapshot_date:Date} "
-            "AND (failure_category = {hw:String})",
-            parameters={
-                "db": DATABASE,
-                "tbl": self._table_name,
-                "snapshot_date": snapshot_date,
-                "hw": _HARDWARE_EXCEPTION_CATEGORY,
-            },
+        return capability_write.recorded_for_snapshot(
+            self._client,
+            self._db,
+            snapshot_date.isoformat(),
+            str(self._model_type),
+            fail_reason=_HARDWARE_EXCEPTION_CATEGORY,
         )
-        return {row[0] for row in result.result_rows}
 
     def _insert_entry(
         self,
@@ -109,10 +86,7 @@ class ClickHouseResultSink(ResultSink):
         error: str | None,
     ) -> None:
         """Buffer the row; the actual INSERT happens in ``close()``."""
-        # failure_category/error are non-nullable in the live table (String/
-        # LowCardinality(String) DEFAULT '') — None must become '' here, or
-        # clickhouse_connect raises DataError on the bulk insert for any
-        # fully-passing row (which always has both fields as None).
+        # None becomes '' so a passing row carries no failure text into fail_reason/props.
         self._pending.append(
             [
                 model_name,
@@ -134,62 +108,35 @@ class ClickHouseResultSink(ResultSink):
         )
 
     def flush(self) -> None:
-        """Flush all buffered rows to ClickHouse in a single bulk INSERT.
+        """Write all buffered rows in one bulk INSERT.
 
-        Safe to call repeatedly; a no-op when the buffer is empty. The driver
-        loop calls this after every batch so a hard parent crash loses at most
-        one batch of rows rather than the entire run.
+        Safe to call repeatedly; a no-op when the buffer is empty. The driver loop calls this
+        after every batch so a hard parent crash loses at most one batch of rows.
         """
         if not self._pending:
             return
         print(f"ClickHouse: flushing {len(self._pending)} buffered row(s)…", flush=True)
-        self._client.insert(
-            self._table_name,
-            self._pending,
-            column_names=list(TABLE_COLUMNS),
+        rows = [
+            {**row, "model_type": str(self._model_type)}
+            for row in capability_write.rows_from_pending(self._pending, TABLE_COLUMNS)
+        ]
+        capability_write.write(
+            rows,
+            self._client,
+            self._db,
+            model_list_file=self._model_list_file,
         )
-        print("ClickHouse: bulk insert complete.")
-        self._write_v2(self._pending)
         self._pending.clear()
 
-    def _write_v2(self, pending: list[list[Any]]) -> None:
-        """Mirror the flushed rows into the schema-v2 capability tables.
-
-        AFTER the v1 insert and inside try/except, deliberately: v1 is what this scan exists to
-        produce, and a v2 problem -- an unreachable database, a table not yet created, a schema
-        change -- must never cost a verdict that took hours of Spyre time to establish.
-        """
-        try:
-            from tests.spyre.weekly_generation.sink import capability_write
-
-            capability_write.write(
-                capability_write.rows_from_pending(pending, TABLE_COLUMNS),
-                model_list_file=self._model_list_file,
-            )
-        except Exception as exc:  # noqa: BLE001 - v2 must never fail the v1 write
-            print(
-                f"  [warn] v2 capability write failed ({exc}); v1 rows are unaffected."
-            )
-
     def get_models_at_snapshot_date(self, *, snapshot_date: date) -> set[str]:
-        """Return every distinct model name recorded for *snapshot_date*.
+        """Return every distinct model name recorded for *snapshot_date* and this model type.
 
-        Queries ``DISTINCT model_name`` from the table so the caller can build
-        a skip-set without knowing the storage backend. Empty names cannot
-        appear (the base class rejects them at ``add_entry`` time), so the
-        result is safe to use directly as a membership set.
+        Lets the caller build a skip-set without knowing the storage backend. Empty names
+        cannot appear (the base class rejects them at ``add_entry`` time).
         """
-        result = self._client.query(
-            "SELECT DISTINCT model_name "
-            "FROM {db:Identifier}.{tbl:Identifier} "
-            "WHERE snapshot_date = {snapshot_date:Date}",
-            parameters={
-                "db": DATABASE,
-                "tbl": self._table_name,
-                "snapshot_date": snapshot_date,
-            },
+        return capability_write.recorded_for_snapshot(
+            self._client, self._db, snapshot_date.isoformat(), str(self._model_type)
         )
-        return {row[0] for row in result.result_rows}
 
     def close(self) -> None:
         """Flush any remaining buffered rows on shutdown."""

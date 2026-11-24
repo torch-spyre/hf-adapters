@@ -25,6 +25,7 @@ from pathlib import Path
 from tests.model_registry import (
     CAUSAL_LM_MODELS,
     CAUSAL_PATHS,
+    DECISION_MODELS,
     EMBEDDING_MODELS,
     MASKED_LM_MODELS,
     MULTIMODAL_EMBEDDING_MODELS,
@@ -136,6 +137,12 @@ def get_registered_adapters() -> set[str]:
 
     # Collect adapters from STRUCTURED_DECISION_MODELS
     for model_info in STRUCTURED_DECISION_MODELS.values():
+        adapter = model_info.get("adapter")
+        if adapter:
+            registered_adapters.add(adapter)
+
+    # Collect adapters from DECISION_MODELS
+    for model_info in DECISION_MODELS.values():
         adapter = model_info.get("adapter")
         if adapter:
             registered_adapters.add(adapter)

@@ -449,6 +449,8 @@ class SpyreEmbeddingRowwiseParallel(_SpyreLocalParallel, EmbeddingParallel):
             input_tensor = inputs[0]
             # Spyre integer masking is host-staged: each call transfers IDs to
             # CPU, then local IDs and the validity mask back to the input device.
+            # The ownership predicate cannot multiply the embedding directly
+            # after a bool-to-fp16/bf16 cast (torch-spyre#2252).
             # This also applies to one-token decode; benchmark the complete
             # embedding call (including these copies), not just its compiled body.
             host = input_tensor.cpu()
