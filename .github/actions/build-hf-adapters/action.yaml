@@ -326,6 +326,6 @@ runs:
         else
           TEST_PYTHON="${UV_PROJECT_ENVIRONMENT:-.venv}/bin/python"
         fi
-        "$TEST_PYTHON" -c 'import torch; print("Spyre backend registered:", torch.device("spyre"))'
-        uv pip show --python "$TEST_PYTHON" torch torch-spyre
-        uv pip freeze --python "$TEST_PYTHON"
+        "$TEST_PYTHON" -c 'import torch, torch_spyre; print("Spyre backend registered:", torch.device("spyre"))'
+        uv pip show --python "$TEST_PYTHON" torch torch-spyre || true
+        uv pip freeze --python "$TEST_PYTHON" || true

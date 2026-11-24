@@ -42,17 +42,23 @@ def _run_build(
     action_path = tmp_path / "action"
     action_path.mkdir()
     # Each simulated environment uses real CPU PyTorch. Only an installed
-    # backend marker registers the private-use device before the actual probe.
+    # backend marker makes a stub torch_spyre, which registers the private-use
+    # device on import, visible to the actual probe.
     for environment in (image_env, project_env):
         (environment / "bin").mkdir(parents=True)
+        site_packages = environment / "site-packages"
+        site_packages.mkdir()
+        (site_packages / "torch_spyre.py").write_text(
+            'import torch\ntorch.utils.rename_privateuse1_backend("spyre")\n'
+        )
         python = environment / "bin/python"
         python.write_text(
             f"#!{sys.executable}\n"
             "import sys\n"
             "from pathlib import Path\n"
-            "import torch\n"
-            'if Path(__file__).with_name("torch-spyre-installed").exists():\n'
-            '    torch.utils.rename_privateuse1_backend("spyre")\n'
+            "here = Path(__file__).resolve().parent\n"
+            'if (here / "torch-spyre-installed").exists():\n'
+            '    sys.path.insert(0, str(here.parent / "site-packages"))\n'
             "exec(sys.argv[2])\n"
         )
         python.chmod(0o755)
@@ -167,5 +173,5 @@ def test_prebaked_mode_preserves_and_checks_image_environment(tmp_path: Path) ->
 def test_missing_project_backend_fails_setup(tmp_path: Path) -> None:
     result = _run_build(tmp_path, broken_install=True)
     assert result.returncode != 0
-    assert "device type at start of device string: spyre" in result.stderr
+    assert "No module named 'torch_spyre'" in result.stderr
     assert "uv pip freeze" not in (tmp_path / "commands.log").read_text()
