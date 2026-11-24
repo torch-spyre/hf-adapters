@@ -112,10 +112,9 @@ import torch.nn.functional as F
 
 from hf_adapters.hf_common import (
     DEVICE,
-    InvFreqShim,
-    PrecomputedRotaryEmbedding,
     add_causal_sliding_window_band,
     apply_rope_matmul,
+    build_layer_type_ropes,
     kv_cache_update,
     pad_lm_head,
     text_config,
@@ -1032,16 +1031,12 @@ def prepare_for_spyre(model):
 
     # 3. Per-type RoPE (Gemma4/DiffusionGemma store per-type inv_freq on the
     #    rotary_emb module as ``<layer_type>_inv_freq`` + ``<layer_type>_attention_scaling``).
-    def _build_rope_dict(rotary_emb):
-        rope_dict = {}
-        for lt in set(layer_types):
-            inv_freq = getattr(rotary_emb, f"{lt}_inv_freq")
-            scaling = float(getattr(rotary_emb, f"{lt}_attention_scaling", 1.0))
-            rope_dict[lt] = PrecomputedRotaryEmbedding(InvFreqShim(inv_freq, scaling))
-        return rope_dict
-
-    model._spyre_enc_rope = _build_rope_dict(enc_text.rotary_emb)
-    model._spyre_dec_rope = _build_rope_dict(dec.rotary_emb)
+    model._spyre_enc_rope = build_layer_type_ropes(
+        enc_text.rotary_emb, layer_types, "DiffusionGemma"
+    )
+    model._spyre_dec_rope = build_layer_type_ropes(
+        dec.rotary_emb, layer_types, "DiffusionGemma"
+    )
 
     # Set freq-cache dtype to match model weights and prebuild the caches on CPU
     # now, before move_model_to_spyre runs.  The common set_rope_dtype /

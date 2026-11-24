@@ -52,9 +52,8 @@ from hf_adapters._dspark_common import (
     snapshot_cpu_fc,
 )
 from hf_adapters.hf_common import (
-    InvFreqShim,
-    PrecomputedRotaryEmbedding,
     apply_rope_matmul,
+    build_layer_type_ropes,
     pad_lm_head,
 )
 from hf_adapters.hf_gemma4 import _patch_gemma4_rmsnorm
@@ -140,16 +139,12 @@ def prepare_for_spyre(model):
     kv_pad = kv_pad_for(CTX_PAD, block_size)
     # Gemma4's rotary registers its freqs per attention type
     # (``full_attention_inv_freq`` / ``full_attention_attention_scaling``) rather
-    # than the bare ``inv_freq`` PrecomputedRotaryEmbedding reads, so wrap those
-    # buffers via InvFreqShim (the hf_gemma4 target-adapter pattern). The drafter
-    # uses a single full-attention rotary for all layers.
-    rope = model.rotary_emb
-    model._spyre_rope = PrecomputedRotaryEmbedding(
-        InvFreqShim(
-            rope.full_attention_inv_freq,
-            float(rope.full_attention_attention_scaling),
-        )
-    )
+    # than the bare ``inv_freq`` PrecomputedRotaryEmbedding reads, so build it
+    # with the per-type helper shared with hf_gemma4. The drafter uses a single
+    # full-attention rotary for all layers.
+    model._spyre_rope = build_layer_type_ropes(
+        model.rotary_emb, ["full_attention"], "DSpark Gemma 4"
+    )["full_attention"]
 
     # Gemma4RMSNorm uses ``.eps`` (not ``variance_epsilon``) and is optionally
     # scale-free — use the Gemma4-specific patch, not the generic one.

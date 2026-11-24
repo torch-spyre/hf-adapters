@@ -93,12 +93,11 @@ import torch.nn.functional as F
 from torch.distributed.device_mesh import DeviceMesh
 
 from hf_adapters.hf_common import (
-    InvFreqShim,
-    PrecomputedRotaryEmbedding,
     SpyreUnsupportedModelError,
     _projection_head_count,
     add_causal_sliding_window_band,
     apply_rope_matmul,
+    build_layer_type_ropes,
     embed_text_tokens,
     get_backbone,
     kv_cache_update,
@@ -1334,14 +1333,9 @@ def _setup_gemma4_text_decoder(model, *, allow_moe=False):
     # One PrecomputedRotaryEmbedding per layer type, reading the model's
     # per-type inv_freq + attention_scaling buffers via a shim. No padding:
     # the global proportional RoPE already encodes its NoPE tail as zero freqs.
-    rope = backbone.rotary_emb
-    model._spyre_rope = {}
-    for layer_type in set(cfg.layer_types):
-        inv_freq = getattr(rope, f"{layer_type}_inv_freq")
-        scaling = getattr(rope, f"{layer_type}_attention_scaling")
-        model._spyre_rope[layer_type] = PrecomputedRotaryEmbedding(
-            InvFreqShim(inv_freq, scaling)
-        )
+    model._spyre_rope = build_layer_type_ropes(
+        backbone.rotary_emb, cfg.layer_types, "Gemma 4"
+    )
 
     cap = cfg.final_logit_softcapping
 

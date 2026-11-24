@@ -21,16 +21,26 @@ checks caption ranking and image/text cosine scores against the CPU reference.
 """
 
 import gc
+from contextlib import nullcontext
+from itertools import chain
+from typing import Any
 
+import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
+from numpy.typing import NDArray
 from sentence_transformers import SentenceTransformer
 
 # Register the public SentenceTransformers backend.
 import hf_adapters.st_backend  # noqa: F401
 from hf_adapters.auto_spyre_model import dtype_for_model_path
-from tests._multimodal_embedding_helpers import TEXT_PROMPTS, bounded_cpu_threads
+from tests._multimodal_embedding_helpers import (
+    TEXT_PROMPTS,
+    bounded_cpu_threads,
+    forbid_model_device_moves,
+    synthetic_audio_inputs,
+)
 from tests._vision_helpers import _load_sample_image
 from tests.model_registry import MULTIMODAL_EMBED_PATHS
 
@@ -50,9 +60,12 @@ def test_sentence_transformers_multimodal_backend(model_path: str) -> None:
     image = _load_sample_image()
     with bounded_cpu_threads(), torch.inference_mode():
         cpu_model = SentenceTransformer(model_path, device="cpu")
-        # Use each model's configured text length for both execution paths.
-        context_length: int = (
-            cpu_model[0].config.get_text_config().max_position_embeddings
+        # Preserve CLIP/SigLIP's fixed pooling lengths, while bounding models
+        # with long contexts (EmbeddingGemma 2 advertises 262K RoPE positions).
+        context_length: int = min(
+            cpu_model.max_seq_length,
+            cpu_model[0].config.get_text_config().max_position_embeddings,
+            128,
         )
         text_kwargs = {
             "processing_kwargs": {
@@ -70,6 +83,46 @@ def test_sentence_transformers_multimodal_backend(model_path: str) -> None:
             "image": cpu_model.encode(image, convert_to_tensor=True).cpu(),
             "image_list": cpu_model.encode([image], convert_to_tensor=True).cpu(),
         }
+        mixed_length_prompts: list[str] = []
+        audio_inputs: list[NDArray[np.float32]] = []
+        audio_kwargs: dict[str, Any] = {}
+        reference_buffers: dict[str, torch.Tensor] = {}
+        mixed_text_kwargs: dict[str, Any] = {
+            "batch_size": 2,
+            "processing_kwargs": {
+                "text": {
+                    "padding": "max_length",
+                    "truncation": True,
+                    "max_length": 1200,
+                }
+            },
+        }
+        sliding_window: int | None = getattr(
+            cpu_model[0].config.get_text_config(), "sliding_window", None
+        )
+        if sliding_window:
+            # The short row has padding queries farther than sliding_window
+            # from every real key. They must not generate NaNs in later layers.
+            mixed_length_prompts = ["The cat sits on the mat. " * 200, "A cat."]
+            reference["mixed_length_text"] = cpu_model.encode(
+                mixed_length_prompts, convert_to_tensor=True, **mixed_text_kwargs
+            ).cpu()
+        # ST infers modalities from the processor: a feature extractor means audio.
+        if cpu_model.supports("audio"):
+            sampling_rate: int = cpu_model[0].processor.feature_extractor.sampling_rate
+            audio_inputs = synthetic_audio_inputs(sampling_rate)
+            audio_kwargs = {
+                "processing_kwargs": {"audio": {"sampling_rate": sampling_rate}}
+            }
+            reference["audio"] = cpu_model.encode(
+                audio_inputs, batch_size=2, convert_to_tensor=True, **audio_kwargs
+            ).cpu()
+        # Compared after loading only for adapters that pin CPU helpers, which is
+        # known once the Spyre model is prepared; snapshot unconditionally.
+        reference_buffers = {
+            name: buffer.clone()
+            for name, buffer in cpu_model[0].auto_model.named_buffers()
+        }
         # Preparing Spyre may patch classes; finish the reference first.
         del cpu_model
         gc.collect()
@@ -82,13 +135,44 @@ def test_sentence_transformers_multimodal_backend(model_path: str) -> None:
         assert (
             spyre_dtype == expected_dtype
         ), f"Spyre dtype: expected {expected_dtype}, got {spyre_dtype}"
-        actual: dict[str, torch.Tensor] = {
-            "text": model.encode(
-                TEXT_PROMPTS, convert_to_tensor=True, **text_kwargs
-            ).cpu(),
-            "image": model.encode(image, convert_to_tensor=True).cpu(),
-            "image_list": model.encode([image], convert_to_tensor=True).cpu(),
-        }
+        backbone: torch.nn.Module = model[0].auto_model
+        preserve_placement = hasattr(backbone, "_spyre_device_parameter_name")
+        if preserve_placement:
+            # CPU helpers must be restored before the first encode, not just
+            # afterward. Then guard against temporary round trips on every call.
+            for name in backbone._spyre_cpu_submodules:
+                module: torch.nn.Module = backbone.get_submodule(name)
+                assert all(
+                    tensor.device.type == "cpu"
+                    for tensor in chain(module.parameters(), module.buffers())
+                ), f"{name} was not restored to CPU during initialization"
+                for buffer_name, buffer in module.named_buffers():
+                    full_name = f"{name}.{buffer_name}"
+                    torch.testing.assert_close(
+                        buffer,
+                        reference_buffers[full_name],
+                        rtol=0,
+                        atol=0,
+                        msg=f"CPU helper buffer {full_name} changed during loading",
+                    )
+        with forbid_model_device_moves(model) if preserve_placement else nullcontext():
+            actual: dict[str, torch.Tensor] = {
+                "text": model.encode(
+                    TEXT_PROMPTS, convert_to_tensor=True, **text_kwargs
+                ).cpu(),
+                "image": model.encode(image, convert_to_tensor=True).cpu(),
+                "image_list": model.encode([image], convert_to_tensor=True).cpu(),
+            }
+            if mixed_length_prompts:
+                actual["mixed_length_text"] = model.encode(
+                    mixed_length_prompts, convert_to_tensor=True, **mixed_text_kwargs
+                ).cpu()
+            if audio_inputs:
+                actual["audio"] = model.encode(
+                    audio_inputs, batch_size=2, convert_to_tensor=True, **audio_kwargs
+                ).cpu()
+        if preserve_placement:
+            print("No model parameter/buffer device transfers during repeated encodes.")
         for name, expected in reference.items():
             value = actual[name]
             assert value.shape == expected.shape

@@ -21,6 +21,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionModel
 
 from hf_adapters.hf_common import (
     BLOCK_SIZE,
@@ -492,8 +493,10 @@ def _build_attention_mask(valid, padded_len, dtype):
     return mask.masked_fill(~key_mask[:, None, None, :], -torch.inf)
 
 
-def prepare_for_spyre(model: Any) -> None:
-    tower = model.model.vision_tower
+def prepare_for_spyre(model: Any, *, tower: Gemma4VisionModel | None = None) -> None:
+    if tower is None:
+        tower = model.model.vision_tower
+    assert tower is not None
     config = tower.config
     layers = tower.encoder.layers
     if config.num_key_value_heads != config.num_attention_heads:
@@ -501,7 +504,7 @@ def prepare_for_spyre(model: Any) -> None:
             "Gemma 4 vision GQA is not supported on Spyre; num_key_value_heads "
             "must equal num_attention_heads."
         )
-    if config.rope_parameters.get("rope_type") != "axial":
+    if (config.rope_parameters or {}).get("rope_type") != "axial":
         raise SpyreUnsupportedFeatureError(
             "Gemma 4 vision supports only axial RoPE on Spyre."
         )
@@ -525,8 +528,16 @@ def prepare_for_spyre(model: Any) -> None:
     )
 
 
-def prefill_vision_tower(model, pixel_values, position_ids):
-    tower = model.model.vision_tower
+def prefill_vision_tower(
+    model: Any,
+    pixel_values: torch.Tensor,
+    position_ids: torch.Tensor,
+    *,
+    tower: Gemma4VisionModel | None = None,
+) -> torch.Tensor:
+    if tower is None:
+        tower = model.model.vision_tower
+    assert tower is not None
     pixel_values = pixel_values.to("cpu")
     position_ids = position_ids.to("cpu")
     padding_positions = (position_ids == -1).all(dim=-1)
@@ -579,4 +590,5 @@ def prefill_vision_tower(model, pixel_values, position_ids):
         hidden_states = (
             hidden_states - model._spyre_gemma4_vision_std_bias.float()
         ) * model._spyre_gemma4_vision_std_scale.float()
-    return hidden_states.to(output_dtype)
+    result: torch.Tensor = hidden_states.to(output_dtype)
+    return result

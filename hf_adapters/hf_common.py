@@ -30,7 +30,7 @@ import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import MethodType, ModuleType
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 import torch
 import torch.nn as nn
@@ -1024,6 +1024,52 @@ class InvFreqShim(nn.Module):
         super().__init__()
         self.register_buffer("inv_freq", inv_freq.clone(), persistent=False)
         self.attention_scaling = attention_scaling
+
+
+def reject_dynamic_rope(rotary_emb: nn.Module, model_name: str) -> None:
+    """Raise if ``rotary_emb`` recomputes its frequencies per sequence length.
+
+    ``PrecomputedRotaryEmbedding`` freezes the init-time ``inv_freq``. HF's
+    ``dynamic_rope_update`` recomputes it in ``forward`` for ``*dynamic*`` and
+    ``longrope`` RoPE types, so the frozen copy would silently diverge past the
+    original context length. ``rope_type`` is a string, or a dict keyed by layer
+    type for models with per-type RoPE (Gemma 3/4).
+    """
+    rope_type: str | dict[str, str] = getattr(rotary_emb, "rope_type", "default")
+    rope_types: dict[str, str] = (
+        rope_type if isinstance(rope_type, dict) else {"": rope_type}
+    )
+    dynamic: list[str] = sorted(
+        f"{layer_type}={kind}" if layer_type else kind
+        for layer_type, kind in rope_types.items()
+        if "dynamic" in kind or kind == "longrope"
+    )
+    if dynamic:
+        raise SpyreUnsupportedModelError(
+            f"{model_name} does not support sequence-length-dependent RoPE "
+            f"({', '.join(dynamic)})"
+        )
+
+
+def build_layer_type_ropes(
+    rotary_emb: nn.Module, layer_types: Iterable[str], model_name: str
+) -> dict[str, PrecomputedRotaryEmbedding]:
+    """One ``PrecomputedRotaryEmbedding`` per layer type.
+
+    For rotary modules that store ``<layer_type>_inv_freq`` and
+    ``<layer_type>_attention_scaling`` per attention type (Gemma 3/4 and their
+    derivatives) instead of a single ``inv_freq``. Rejects dynamic RoPE first
+    (see ``reject_dynamic_rope``), since the result freezes the frequencies.
+    """
+    reject_dynamic_rope(rotary_emb, model_name)
+    ropes: dict[str, PrecomputedRotaryEmbedding] = {}
+    for layer_type in sorted(set(layer_types)):
+        inv_freq: torch.Tensor = getattr(rotary_emb, f"{layer_type}_inv_freq")
+        scaling: float = float(
+            getattr(rotary_emb, f"{layer_type}_attention_scaling", 1.0)
+        )
+        ropes[layer_type] = PrecomputedRotaryEmbedding(InvFreqShim(inv_freq, scaling))
+    return ropes
 
 
 def apply_rope_matmul(x, selected_freqs):
@@ -2767,24 +2813,63 @@ def load_model_common(
     return model
 
 
-def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
+@contextmanager
+def cpu_submodules_on_host(
+    model: torch.nn.Module,
+    dtype: torch.dtype | None = None,
+    *,
+    submodule_paths: tuple[str, ...] | None = None,
+    preserve_buffers: bool = True,
+) -> Iterator[None]:
+    """Exclude host helpers from model moves and preserve their buffer values.
+
+    Weights may adopt the requested dtype on CPU. Retaining the original buffer
+    tensors also retains precision, integer/bool dtypes, and persistence flags.
+    """
+    paths: tuple[str, ...] = (
+        tuple(getattr(model, "_spyre_cpu_submodules", ()))
+        if submodule_paths is None
+        else submodule_paths
+    )
+    saved: list[tuple[torch.nn.Module, str, torch.nn.Module]] = []
+    buffers: list[tuple[torch.nn.Module, str, torch.Tensor]] = []
+    for path in paths:
+        parent_path, _, attr = path.rpartition(".")
+        parent: torch.nn.Module = (
+            model.get_submodule(parent_path) if parent_path else model
+        )
+        submod: torch.nn.Module = model.get_submodule(path)
+        saved.append((parent, attr, submod))
+        if preserve_buffers:
+            for owner in submod.modules():
+                for name, buffer in owner.named_buffers(recurse=False):
+                    buffers.append((owner, name, buffer.cpu()))
+    for parent, attr, _ in saved:
+        setattr(parent, attr, torch.nn.Module())
+    try:
+        yield
+    finally:
+        for parent, attr, submod in saved:
+            setattr(parent, attr, submod)
+        try:
+            for _, _, submod in saved:
+                submod.to(device="cpu", dtype=dtype)
+        finally:
+            for owner, name, buffer in buffers:
+                owner._buffers[name] = buffer
+
+
+def move_model_to_spyre(
+    model: PreTrainedModel, module: ModuleType, dtype: torch.dtype
+) -> None:
     untie_embedding_and_lm_head(model)
     module.prepare_for_spyre(model)
-    cpu_submodules = getattr(model, "_spyre_cpu_submodules", [])
-    saved_cpu_modules = {}
-    for path in cpu_submodules:
-        parent_path, _, attr = path.rpartition(".")
-        parent = model.get_submodule(parent_path) if parent_path else model
-        saved_cpu_modules[path] = (parent, attr, getattr(parent, attr))
-        setattr(parent, attr, torch.nn.Module())
-
-    _move_to_spyre_with_layout(model, dtype)
-
-    for parent, attr, submod in saved_cpu_modules.values():
-        # Explicitly move to CPU: when DistributedConfig already placed the
-        # model on device before move_model_to_spyre runs, the saved submodule
-        # is on-device too; the restore would leave it on device rather than CPU.
-        setattr(parent, attr, submod.to(device="cpu", dtype=dtype))
+    with cpu_submodules_on_host(
+        model,
+        dtype,
+        preserve_buffers=hasattr(model, "_spyre_device_parameter_name"),
+    ):
+        _move_to_spyre_with_layout(model, dtype)
     print("Model on Spyre ready.")
 
 
@@ -4693,35 +4778,43 @@ def patch_pre_ln_encoder_forward(
     setattr(encoder, "forward", MethodType(encoder_forward, encoder))
 
 
-def patch_cpu_inputs(module: torch.nn.Module, input_names: tuple[str, ...]) -> None:
-    """Keep named tensor inputs on CPU before HF embeddings/mask construction.
+def patch_cpu_inputs(
+    module: torch.nn.Module,
+    input_names: tuple[str, ...] | None = None,
+    *,
+    method_name: str = "forward",
+) -> None:
+    """Keep tensor inputs on CPU before HF embeddings/mask construction.
 
-    Names follow the original forward's positional argument order. Other
-    arguments, including interpolation and output flags, pass through unchanged.
+    If names are provided, they follow the selected method's positional argument
+    order and restrict which tensors move. Otherwise, move every direct tensor
+    argument. Non-tensor arguments, including output flags, pass through unchanged.
     """
-    original_forward = module.forward
+    original_forward: Callable[..., Any] = getattr(module, method_name)
 
-    @functools.wraps(type(module).forward)
+    @functools.wraps(getattr(type(module), method_name))
     def forward(self: torch.nn.Module, *args: Any, **kwargs: Any) -> Any:
-        cpu_args = tuple(
+        cpu_args: tuple[Any, ...] = tuple(
             (
                 value.cpu()
-                if index < len(input_names) and isinstance(value, torch.Tensor)
+                if (input_names is None or index < len(input_names))
+                and isinstance(value, torch.Tensor)
                 else value
             )
             for index, value in enumerate(args)
         )
-        cpu_kwargs = {
+        cpu_kwargs: dict[str, Any] = {
             name: (
                 value.cpu()
-                if name in input_names and isinstance(value, torch.Tensor)
+                if (input_names is None or name in input_names)
+                and isinstance(value, torch.Tensor)
                 else value
             )
             for name, value in kwargs.items()
         }
         return original_forward(*cpu_args, **cpu_kwargs)
 
-    module.forward = MethodType(forward, module)
+    setattr(module, method_name, MethodType(forward, module))
 
 
 # ---------------------------------------------------------------------------
