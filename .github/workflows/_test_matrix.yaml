@@ -2324,12 +2324,14 @@ jobs:
           trigger-type: perf
           component: hf-adapters
           platform: x86_64
-          schema: both
-          clickhouse-host: ${{ secrets.CLICKHOUSE_HOST }}
-          clickhouse-port: ${{ secrets.CLICKHOUSE_PORT }}
-          clickhouse-user: ${{ secrets.CLICKHOUSE_USER }}
-          clickhouse-pass: ${{ secrets.CLICKHOUSE_PASS }}
-          clickhouse-db: ${{ secrets.CLICKHOUSE_DB }}
+          schema: v2
+          strict: 'true'
+          # Scoped v2 login; CLICKHOUSE_V2_HOST/_PORT (HA endpoint) are optional and fall back to the legacy host.
+          clickhouse-host: ${{ secrets.CLICKHOUSE_V2_HOST || secrets.CLICKHOUSE_HOST }}
+          clickhouse-port: ${{ fromJSON(secrets.CLICKHOUSE_V2_HOST != '' && toJSON(secrets.CLICKHOUSE_V2_PORT) || toJSON(secrets.CLICKHOUSE_PORT)) }}
+          clickhouse-user: ${{ secrets.CLICKHOUSE_V2_USER }}
+          clickhouse-pass: ${{ secrets.CLICKHOUSE_V2_PASSWORD }}
+          clickhouse-db: ${{ secrets.CLICKHOUSE_DB_V2 }}
           clickhouse-db-v2: ${{ secrets.CLICKHOUSE_DB_V2 }}
 
   spyre-model-module-tests:

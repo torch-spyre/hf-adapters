@@ -121,7 +121,13 @@ class ResultSink(ABC):
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        self.close()
+        # A failing close must not replace the body's exception.
+        try:
+            self.close()
+        except Exception as close_exc:  # noqa: BLE001
+            if exc_type is None:
+                raise
+            print(f"[warn] sink close failed while unwinding: {close_exc!r}")
 
     def flush(self) -> None:
         """Persist any rows buffered in memory. Default is a no-op.

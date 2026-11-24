@@ -143,6 +143,8 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 | BGE-base-en-v1.5 | bert | 64 | Yes | Yes | Yes | Yes |
 | all-MiniLM-L6-v2 | bert | 32→64 | Yes (padded) | Yes | Yes | Yes |
 | BGE-M3 | xlm-roberta | 64 | Yes | Yes | Yes | Yes |
+| sentence-camembert-base | camembert | 64 | Yes | Yes | Yes | Yes |
+| sentence-camembert-large | camembert | 64 | Yes | Yes | Yes | Yes |
 | all-mpnet-base-v2 | mpnet | 64 | Yes | Yes | Yes | Yes |
 | ModernBERT-embed-base | modernbert | 64→128 | Yes (padded) | Yes | Yes | Yes |
 | GTE-ModernBERT-base | modernbert | 64→128 | Yes (padded) | Yes | Yes | Yes |
@@ -403,7 +405,7 @@ pattern, norms, and weight layout.
 | hf\_pixtral\_vision.py | Pixtral vision tower | 1 | Pixtral towers of Mistral3 Vision checkpoints |
 | hf\_bert.py | bert | 3 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants, BERT NER/POS/chunking fine-tunes |
 | hf\_distilbert.py | distilbert | 2 | DistilBERT-base fine-tunes (QA, NER, sentiment, other classifier heads) |
-| hf\_xlm\_roberta.py | xlm-roberta / roberta | 3 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes, RoBERTa NER/QA/classifier fine-tunes |
+| hf\_xlm\_roberta.py | xlm-roberta / roberta / camembert | 3 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes, RoBERTa NER/QA/classifier fine-tunes, CamemBERT sentence-embedding fine-tunes |
 | hf\_mpnet.py | mpnet | 1 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base, all-mpnet-base-v1 |
 | hf\_modernbert.py | modernbert | 3 | answerdotai/ModernBERT-base, answerdotai/ModernBERT-large, other ModernBERT embed/classifier fine-tunes |
 | laya\_backend.py | laya (ModernBERT / mmBERT encoder) | 3 | Root English, bundled typed-decisions, and multilingual checkpoints |
