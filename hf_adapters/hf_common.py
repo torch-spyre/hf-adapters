@@ -1293,6 +1293,25 @@ def pad_attention_heads(
         f"BLOCK_SIZE ({BLOCK_SIZE})"
     )
 
+    from hf_adapters.fp8_linear import FP8Linear
+
+    # The pad helpers assume nn.Linear ([out, in] weight, `.bias`); FP8Linear
+    # stores [in, out] with a per-channel weight_scale.
+    for layer in layers:
+        attn = layer.self_attn
+        fp8_projs = [
+            name
+            for name in ("q_proj", "k_proj", "v_proj", "o_proj")
+            if isinstance(getattr(attn, name, None), FP8Linear)
+        ]
+        if fp8_projs:
+            raise NotImplementedError(
+                f"head_dim padding ({orig_head_dim} -> {padded_head_dim}) is not "
+                f"supported for FP8Linear projections ({', '.join(fp8_projs)}); "
+                "FP8 checkpoints currently require head_dim to be a multiple of "
+                f"{2 * BLOCK_SIZE}"
+            )
+
     def _pad_in_place(proj, pad_fn, n_heads):
         # HF's TP loader may already have placed this shard on Spyre. Copy it
         # once before slicing; the final model move supplies the Linear layout.
@@ -2768,8 +2787,25 @@ def load_model_common(
 
 
 def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
+    from hf_adapters.fp8_linear import FP8_DTYPE, prequantize_fp8_weights
+
     untie_embedding_and_lm_head(model)
     module.prepare_for_spyre(model)
+
+    # Adapters must swap compressed-tensors E4M3 Linears to FP8Linear in
+    # prepare_for_spyre; leftovers would be decompressed lazily on device.
+    unswapped = [
+        name
+        for name, m in model.named_modules()
+        if isinstance(m, torch.nn.Linear) and m.weight.dtype == FP8_DTYPE
+    ]
+    if unswapped:
+        raise NotImplementedError(
+            f"{module.__name__}.prepare_for_spyre left {len(unswapped)} E4M3 "
+            f"nn.Linear(s) unswapped: {', '.join(unswapped[:4])}"
+            f"{', ...' if len(unswapped) > 4 else ''} "
+            "(call swap_linears_to_fp8 for this model family)"
+        )
     cpu_submodules = getattr(model, "_spyre_cpu_submodules", [])
     saved_cpu_modules = {}
     for path in cpu_submodules:
@@ -2785,6 +2821,8 @@ def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
         # model on device before move_model_to_spyre runs, the saved submodule
         # is on-device too; the restore would leave it on device rather than CPU.
         setattr(parent, attr, submod.to(device="cpu", dtype=dtype))
+    # No-op without FP8Linear. Last, so device placement is final.
+    prequantize_fp8_weights(model)
     print("Model on Spyre ready.")
 
 
