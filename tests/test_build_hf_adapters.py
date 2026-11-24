@@ -163,6 +163,11 @@ def test_matching_pin_installs_backend_in_project_environment(
         str(project_env / "bin/python") if custom_project_env else ".venv/bin/python"
     )
     assert f"uv pip show --python {expected_python} torch torch-spyre" in commands
+    assert "SETUP-TIMING phase=ts-pin" in result.stdout
+    assert "status=matched" in result.stdout
+    expected_total: str = "hit" if cached else "off"
+    assert f"status={expected_total}" in result.stdout
+    assert "status=baked" not in result.stdout
 
 
 def test_nonmatching_pin_fetches_and_installs_backend(tmp_path: Path) -> None:
@@ -172,6 +177,7 @@ def test_nonmatching_pin_fetches_and_installs_backend(tmp_path: Path) -> None:
     assert "git fetch --tags --force origin pin" in commands
     assert "git checkout --force pin" in commands
     assert "Spyre backend registered: spyre" in result.stdout
+    assert "status=fetched" in result.stdout
 
 
 def test_unpinned_mode_installs_and_checks_project_backend(tmp_path: Path) -> None:

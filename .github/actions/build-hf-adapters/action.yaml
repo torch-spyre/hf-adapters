@@ -266,6 +266,10 @@ runs:
           # then check it out and re-sync submodules so the working tree matches
           # the pinned commit exactly before `uv add` builds from it.
           # SETUP-TIMING lines feed the CI setup-time parser; timing only.
+          # ts-pin status is `matched` (baked checkout already at the pin, no
+          # fetch) or `fetched`. setup-total status is the wheel-cache result
+          # (hit|miss|off|prime); it was `baked` before issue #803, when a
+          # matching checkout skipped the install entirely.
           setup_t0=$(date +%s.%N)
           setup_timing() { awk -v p="$1" -v a="$2" -v b="$(date +%s.%N)" -v s="$3" \
             'BEGIN { printf "SETUP-TIMING phase=%s seconds=%.1f status=%s\n", p, b - a, s }'; }
@@ -276,7 +280,9 @@ runs:
           BAKED_SHA="$(git rev-parse HEAD)"
           if [[ "$BAKED_SHA" == "$TORCH_SPYRE_SHA" ]]; then
             echo "Baked torch-spyre checkout already at pinned ${TORCH_SPYRE_SHA}; skipping fetch."
+            pin_status=matched
           else
+            pin_status=fetched
             echo "Pinning torch-spyre to ${TORCH_SPYRE_SHA} (baked HEAD ${BAKED_SHA})"
             git fetch --tags --force origin "${TORCH_SPYRE_SHA}" || \
               git fetch --tags --force origin
@@ -285,7 +291,7 @@ runs:
             git submodule update --init --recursive --force
           fi
           git log -1 --oneline
-          setup_timing ts-pin "$setup_t0" ok
+          setup_timing ts-pin "$setup_t0" "$pin_status"
           cd "$CLONED_HF_ADAPTERS_DIR"
           # Same install as the unpinned branch below, at a fixed SHA, except
           # that it skips the `uv lock --upgrade-package torch-spyre` that branch
