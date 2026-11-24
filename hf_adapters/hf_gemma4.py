@@ -90,11 +90,13 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributed.device_mesh import DeviceMesh
 
 from hf_adapters.hf_common import (
     InvFreqShim,
     PrecomputedRotaryEmbedding,
     SpyreUnsupportedModelError,
+    _projection_head_count,
     add_causal_sliding_window_band,
     apply_rope_matmul,
     embed_text_tokens,
@@ -102,12 +104,15 @@ from hf_adapters.hf_common import (
     kv_cache_update,
     optional_spyre_config_patch,
     prepare_lm_head_for_spyre,
+    query_validity_mask,
     run_lm_head,
     text_config,
 )
 from hf_adapters.spyre_tensor_parallel import (
+    SPYRE_REPLICATED,
     SPYRE_REPLICATED_LINEAR,
     SPYRE_ROWWISE,
+    grouped_kv_projection_modules,
     spyre_compiled_all_reduce,
 )
 from hf_adapters.swa_attention import (
@@ -152,22 +157,14 @@ def spyre_tp_grouped_colwise_modules(model, tp_size):
     """
     backbone = _gemma4_backbone(model)
     cfg = text_config(model.config)
-    module_names = {id(module): name for name, module in model.named_modules()}
-    grouped = {}
-
-    for layer, layer_cfg in zip(backbone.layers, cfg.per_layer_config):
-        attn = layer.self_attn
-        head_dim = layer_cfg.head_dim
-        for projection_name in ("k_proj", "v_proj"):
-            projection = getattr(attn, projection_name, None)
-            if projection is None:
-                continue
-            if projection.out_features % (head_dim * tp_size) != 0:
-                num_kv_heads = projection.out_features // head_dim
-                assert tp_size % num_kv_heads == 0
-                grouped[module_names[id(projection)]] = num_kv_heads
-
-    return grouped
+    return grouped_kv_projection_modules(
+        model,
+        (
+            (layer.self_attn, layer_cfg.head_dim)
+            for layer, layer_cfg in zip(backbone.layers, cfg.per_layer_config)
+        ),
+        tp_size,
+    )
 
 
 def _gemma4_rms_norm(hidden_states, weight, eps):
@@ -275,16 +272,19 @@ def _query_row_mask(h, attn_mask):
     K/V they write in the following layer) neutral throughout the decoder.
     Valid query rows always contain at least one zero-valued, attendable entry.
 
-    The fully-masked test is derived on **CPU** (a boolean reduction) and only
-    the resulting float multiplier is moved to ``h``'s device, mirroring
-    ``add_causal_sliding_window_band`` — Spyre's compiled backend rejects
-    on-device boolean reductions. This runs in the eager block driver, outside
-    any compiled region, so it is static and Spyre-safe.
+    A chunked causal mask's builder derives row validity from its padding
+    boundary without reading the full mask. Other masks use a compiled device
+    comparison and reduction.
     """
     # attn_mask: [B, 1, S, cache_len]. Allowed entries are exactly zero;
     # disallowed entries use the finite value returned by _mask_fill_value.
-    am = attn_mask.to("cpu")
-    live_rows = (am == 0).any(dim=-1).any(dim=1).to(h.dtype)  # [B, S]
+    builder = getattr(attn_mask, "_spyre_chunked_prefill_builder", None)
+    if builder is not None:
+        live_rows = builder.live_query_rows(
+            attn_mask._spyre_chunked_prefill_query_start
+        ).to(h.dtype)
+    else:
+        live_rows = query_validity_mask(attn_mask).to(h.dtype)
     return live_rows.to(h.device)[:, :, None]
 
 
@@ -757,7 +757,13 @@ def _make_block_forward(spec):
     return forward
 
 
-def _block_spec(block, layer_type, window_size, swa_mode, swa_is_causal):
+def _block_spec(
+    block: Gemma4Block,
+    layer_type: str,
+    window_size: int,
+    swa_mode: str | None,
+    swa_is_causal: bool,
+) -> _Gemma4BlockSpec:
     kind, attn = _block_kind_and_attention(block)
     if kind == "writer":
         num_kv_heads = attn.num_kv_heads
@@ -817,29 +823,35 @@ def _block_spec(block, layer_type, window_size, swa_mode, swa_is_causal):
     # hooks. The compiled executor uses their weights through F.linear instead,
     # so carry the process-group name into the graph and reduce explicitly.
     rowwise_projections = (attn.o_proj, block.mlp.down_proj)
-    device_meshes = [
+    device_meshes: list[DeviceMesh | None] = [
         getattr(projection, "_hf_device_mesh", None)
         for projection in rowwise_projections
     ]
-    if any(mesh is not None for mesh in device_meshes):
+    plans: list[str | None] = [
+        getattr(projection, "_hf_tp_plan", None) for projection in rowwise_projections
+    ]
+    tp_group_name: str | None
+    if all(plan in (None, SPYRE_REPLICATED, SPYRE_REPLICATED_LINEAR) for plan in plans):
+        # Explicit empty plans still attach a mesh for replicated placement.
+        # These weights are complete; reducing their outputs would scale them
+        # by the TP degree.
+        tp_group_name = None
+    else:
         if any(mesh is None for mesh in device_meshes):
             raise ValueError(
                 "Gemma 4 TP requires both o_proj and down_proj on a device mesh"
             )
-        plans = [
-            getattr(projection, "_hf_tp_plan", None)
-            for projection in rowwise_projections
-        ]
         if any(plan != SPYRE_ROWWISE for plan in plans):
             raise ValueError(
-                "Gemma 4 compiled TP requires rowwise o_proj and down_proj"
+                "Gemma 4 compiled TP requires matching rowwise or replicated "
+                "o_proj and down_proj"
             )
-        group_names = [mesh.get_group().group_name for mesh in device_meshes]
+        group_names = [
+            mesh.get_group().group_name for mesh in device_meshes if mesh is not None
+        ]
         if group_names[0] != group_names[1]:
             raise ValueError("Gemma 4 o_proj and down_proj must use the same TP group")
         tp_group_name = group_names[0]
-    else:
-        tp_group_name = None
 
     # Gemma 4's base TP plan deliberately omits the PLE projections. The
     # adapter's plan completion therefore replicates them, and unlike o_proj
@@ -1300,8 +1312,9 @@ def _setup_gemma4_text_decoder(model, *, allow_moe=False):
         # global config counts; otherwise a 2-way shard producing 2048 Q values
         # is incorrectly viewed as 16 * 256 (=4096) values.
         attn = backbone.layers[i].self_attn
-        assert attn.q_proj.out_features % head_dim == 0
-        num_q_heads = attn.q_proj.out_features // head_dim
+        num_q_heads = _projection_head_count(
+            attn.q_proj, cfg.num_attention_heads, head_dim
+        )
         k_proj = getattr(attn, "k_proj", None)
         if k_proj is None:
             # KV-sharing layers intentionally omit K/V projections. Reuse the
@@ -1310,13 +1323,9 @@ def _setup_gemma4_text_decoder(model, *, allow_moe=False):
             assert producer is not None
             num_kv_heads = kv_shapes[producer][0]
         else:
-            assert k_proj.out_features % head_dim == 0, (
-                f"Gemma 4 layer {i} has a partial KV head after TP: "
-                f"k_proj.out_features={k_proj.out_features}, head_dim={head_dim}, "
-                f"weight.shape={tuple(k_proj.weight.shape)}, "
-                f"tp_plan={getattr(k_proj, '_hf_tp_plan', None)!r}"
+            num_kv_heads = _projection_head_count(
+                k_proj, layer_cfg.num_key_value_heads, head_dim
             )
-            num_kv_heads = k_proj.out_features // head_dim
         num_q_heads_per_layer.append(num_q_heads)
         kv_shapes.append((num_kv_heads, head_dim, head_dim))
         is_kv_eq_v_per_layer.append(attention_k_eq_v and layer_type == "full_attention")

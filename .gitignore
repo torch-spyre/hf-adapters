@@ -251,3 +251,7 @@ torch_compile_debug/
 
 # hatch-vcs generated version file
 hf_adapters/_version.py
+
+# Agents
+/.agents/
+AGENTS.md

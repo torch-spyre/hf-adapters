@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import platform
 import sys
 import types
 import warnings
@@ -51,6 +52,7 @@ from typing import Any, Union
 import pytest
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
+from _pytest.mark.structures import Mark
 from _pytest.nodes import Item
 from _pytest.python import Metafunc
 from transformers import AutoModelForCausalLM, PretrainedConfig
@@ -265,16 +267,16 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
     the user-supplied list so any HF model path can be exercised — including
     ones that are not in ``tests/model_registry.py``.
     """
-    overrides: list[str] = metafunc.config.getoption("--model-path") or []
-    if not overrides:
+    raw_overrides: list[str] = metafunc.config.getoption("--model-path") or []
+    if not raw_overrides:
         return
     if "model_path" not in metafunc.fixturenames:
         return
 
     # Drop the decorator's own parametrize markers for ``model_path`` so pytest
     # doesn't raise "duplicate parametrization" when we call metafunc.parametrize
-    # below. Other parameter names on the same @parametrize marker are preserved.
-    kept: list = []
+    # below. Independent scenario parametrizations are preserved.
+    kept: list[Mark] = []
     for marker in metafunc.definition.iter_markers("parametrize"):
         argnames = marker.args[0] if marker.args else ""
         names = [n.strip() for n in argnames.replace(",", " ").split()]
@@ -290,17 +292,36 @@ def pytest_generate_tests(metafunc: Metafunc) -> None:
     # expected outcomes, so these tables must never be merged.
     import model_registry
 
+    overrides = model_registry._exclude(raw_overrides)
+    if not overrides:
+        # All requested paths are excluded on this architecture. Rather than raising
+        # pytest's empty parameter set error, parametrize with skipped items explaining why.
+        params = [
+            pytest.param(
+                path,
+                marks=pytest.mark.skip(
+                    reason=f"Model path '{path}' is excluded on {platform.machine()} (see tests/model_lists/exclude.yaml)"
+                ),
+            )
+            for path in raw_overrides
+        ]
+        metafunc.parametrize("model_path", params, ids=raw_overrides)
+        return
+
     harness_marker = metafunc.definition.get_closest_marker("model_harness")
     harness = harness_marker.args[0] if harness_marker else None
     non_blocking_tables = {
         "causal": model_registry.NON_BLOCKING_CAUSAL_MODELS,
         "vision": model_registry.NON_BLOCKING_VISION_MODELS,
         "embedding": {},
+        "multimodal_embedding": {},
         "masked_lm": {},
         "question_answering": {},
         "reranker": {},
         "seq_classification": model_registry.NON_BLOCKING_SEQUENCE_CLASSIFICATION_MODELS,
         "token_classification": {},
+        "structured_decision": {},
+        "decision": {},
     }
     try:
         non_blocking = non_blocking_tables[harness]
@@ -346,7 +367,9 @@ def pytest_collection_modifyitems(config: Config, items: list[Item]) -> None:
     if skip_reason:
         skip_spyre = pytest.mark.skip(reason=skip_reason)
         for item in items:
-            if "spyre" in item.nodeid or item.get_closest_marker("requires_spyre"):
+            if "tests/spyre/" in item.nodeid or item.get_closest_marker(
+                "requires_spyre"
+            ):
                 item.add_marker(skip_spyre)
 
     if not config.getoption("--run-slow"):

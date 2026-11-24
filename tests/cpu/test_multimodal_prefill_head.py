@@ -3,47 +3,62 @@
 
 """Exercise every multimodal prefill hook with a real vocabulary projection."""
 
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from typing import Any
+from unittest.mock import Mock
 
 import pytest
 import torch
 
 from hf_adapters import auto_spyre_model, hf_common
 
-VLM_ADAPTERS = sorted(
+
+def _adapter_id(adapter: ModuleType) -> str:
+    return adapter.__name__
+
+
+VLM_ADAPTERS: list[ModuleType] = sorted(
     set(auto_spyre_model.IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING.values()),
-    key=lambda module: module.__name__,
+    key=_adapter_id,
 )
 
 
-@pytest.mark.parametrize("adapter", VLM_ADAPTERS, ids=lambda module: module.__name__)
+@pytest.mark.parametrize("adapter", VLM_ADAPTERS, ids=_adapter_id)
 @pytest.mark.parametrize("batch_size", [1, 2])
 @torch.no_grad()
 def test_multimodal_prefill_projects_only_requested_rows(
-    monkeypatch, adapter, batch_size
-):
+    monkeypatch: pytest.MonkeyPatch, adapter: ModuleType, batch_size: int
+) -> None:
     torch.manual_seed(5)
     ids = torch.arange(1, 9).expand(batch_size, -1).clone()
     hidden = torch.randn(batch_size, ids.shape[1], 64)
     model = torch.nn.Module()
     model.lm_head = torch.nn.Linear(64, 129, bias=False)
     model.config = SimpleNamespace(
-        enable_moe_block=True, use_bidirectional_attention=None
+        enable_moe_block=True,
+        use_bidirectional_attention=None,
+        text_config=SimpleNamespace(vocab_size=129),
     )
     model._spyre_has_ple = False
-    backbone_rows, head_rows = [], []
+    backbone_rows: list[int] = []
+    head_rows: list[int] = []
 
-    def backbone(model, inputs_embeds, *args, **kwargs):
+    def backbone(
+        model: torch.nn.Module,
+        inputs_embeds: torch.Tensor,
+        *args: Any,
+        **kwargs: Any,
+    ) -> torch.Tensor:
         backbone_rows.append(inputs_embeds.shape[1])
         return inputs_embeds * 2
 
-    def head(value):
+    def head(value: torch.Tensor) -> torch.Tensor:
         head_rows.append(value.shape[1])
         # Keep the prepared head's postprocessing in the exercised path.
         return torch.tanh(model.lm_head(value) / 2) * 2
 
     model._spyre_lm_head_forward = head
-    kwargs = dict(
+    kwargs: dict[str, Any] = dict(
         model=model,
         input_ids=ids,
         position_ids=ids - 1,
@@ -51,17 +66,26 @@ def test_multimodal_prefill_projects_only_requested_rows(
         key_caches=[],
         value_caches=[],
         cache_index=torch.arange(8),
+        prefill_context=None,
         pixel_values=None,
     )
     if adapter.__name__.endswith("hf_gemma4_mm"):
-        monkeypatch.setattr(adapter, "_image_features", lambda *args: None)
+        monkeypatch.setattr(adapter, "_image_features", Mock(return_value=None))
         monkeypatch.setattr(
-            adapter, "_embed_and_scatter", lambda *args: (hidden, None, ids)
+            adapter, "_embed_and_scatter", Mock(return_value=(hidden, None, ids))
         )
         monkeypatch.setattr(adapter.hf_gemma4, "_run_blocks_over_embeds", backbone)
         kwargs.update(image_position_ids=None, mm_token_type_ids=torch.zeros_like(ids))
+    elif adapter.__name__.endswith("hf_muse_glimmer_mm"):
+        monkeypatch.setattr(
+            adapter, "_prepare_prefill_inputs", Mock(return_value=hidden)
+        )
+        monkeypatch.setattr(adapter, "_run_backbone_from_embeds", backbone)
+        model.config.image_token_id = 127
+        model.config.video_token_id = 128
+        kwargs["image_grid_thw"] = None
     else:
-        monkeypatch.setattr(adapter, "embed_text_tokens", lambda *args: hidden)
+        monkeypatch.setattr(adapter, "embed_text_tokens", Mock(return_value=hidden))
         mask_shape = (
             (batch_size, 8, 1)
             if adapter.__name__.endswith("hf_granite_vision_mm")
@@ -70,14 +94,14 @@ def test_multimodal_prefill_projects_only_requested_rows(
         monkeypatch.setattr(
             adapter,
             "_vision_mask",
-            lambda *args: torch.zeros(mask_shape, dtype=torch.bool),
+            Mock(return_value=torch.zeros(mask_shape, dtype=torch.bool)),
         )
         feature_fn = (
             "_deepstack_features"
             if adapter.__name__.endswith("hf_granite_vision_mm")
             else "_image_features"
         )
-        monkeypatch.setattr(adapter, feature_fn, lambda *args: None)
+        monkeypatch.setattr(adapter, feature_fn, Mock(return_value=None))
         monkeypatch.setattr(adapter, "_run_text_backbone", backbone)
         kwargs["image_sizes"] = None
 
@@ -90,24 +114,30 @@ def test_multimodal_prefill_projects_only_requested_rows(
     assert head_rows == [8, 1]
 
 
-@pytest.mark.parametrize("adapter", VLM_ADAPTERS, ids=lambda module: module.__name__)
-def test_multimodal_generate_requests_last_token(monkeypatch, adapter):
+@pytest.mark.parametrize("adapter", VLM_ADAPTERS, ids=_adapter_id)
+def test_multimodal_generate_requests_last_token(
+    monkeypatch: pytest.MonkeyPatch, adapter: ModuleType
+) -> None:
     model = SimpleNamespace()
     monkeypatch.setattr(
-        auto_spyre_model, "resolve_adapter_module", lambda *args, **kwargs: adapter
+        auto_spyre_model, "resolve_adapter_module", Mock(return_value=adapter)
     )
     monkeypatch.setattr(
         auto_spyre_model.AutoSpyreModel,
         "from_pretrained",
-        classmethod(lambda cls, *args, **kwargs: model),
+        classmethod(Mock(return_value=model)),
     )
     expected = object()
 
-    def generate(forward, actual_model, ids, **kwargs):
+    def generate(
+        forward: Any, actual_model: Any, ids: torch.Tensor, **kwargs: Any
+    ) -> object:
         assert actual_model is model
-        prefill = kwargs["prefill_fn"]
+        prefill: Any = kwargs["prefill_fn"]
         assert prefill.func is adapter._prefill_forward
         assert prefill.keywords["logits_to_keep"] == 1
+        assert "prefill_inputs_fn" not in kwargs
+        assert "prefill_backbone_fn" not in kwargs
         return expected
 
     monkeypatch.setattr(hf_common, "generate", generate)

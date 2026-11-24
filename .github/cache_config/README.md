@@ -1,4 +1,25 @@
-# VLM reference cache maintenance
+# Shared cache maintenance
+
+## Hugging Face models and image fixtures
+
+The `add_or_remove_artifacts_from_cache` workflow runs nightly at 05:00 UTC
+and supports manual runs. It warms the shared `HF_HOME` at
+`/storage-1/hf-adapters/.cache/huggingface` before offline CI consumes it.
+
+`manage_cache.py` discovers model repositories from `tests/model_registry.py`.
+The `models` list in `hf_models_and_datasets.yaml` adds extra model repositories.
+The separate `datasets` list declares dataset repositories and exact filenames;
+it currently includes the shared cat image used by VLM, CLIP, and SigLIP tests.
+Files use the default Hub revision, matching the test helpers. Each file is downloaded
+and then resolved again with `local_files_only=True`. A failed download or offline
+lookup fails the cache job after the other artifacts have been attempted.
+
+When adding a fixture, run this workflow manually from the reviewed branch
+containing the updated script and configuration, and wait for success before
+rerunning offline CI. Merely adding an image to a test or fixture registry does
+not populate the shared cache. No Spyre card is needed for the cache job.
+
+## VLM reference cache maintenance
 
 The Prune VLM reference cache workflow runs weekly on a runner with the shared
 storage mounted and zero Spyre cards. It removes completed CPU references from

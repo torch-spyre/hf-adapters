@@ -16,11 +16,25 @@ from datetime import date
 
 from tests.spyre.weekly_generation import model_fetcher
 from tests.spyre.weekly_generation.failure_categories import (
+    FAILURE_CATEGORY_ARCH_EXCLUDED,
     FAILURE_CATEGORY_MODEL_TOO_LARGE,
 )
 from tests.spyre.weekly_generation.model_type import ModelType
 from tests.spyre.weekly_generation.sink.result_sink import ResultSink
 from utils.utilities import concat_and_dedup_dicts
+
+
+def _arch_excluded_paths() -> set[str]:
+    """Model ids excluded on this architecture (``tests/model_lists/exclude.yaml``).
+
+    Deferred so importing this module stays cheap; ``model_registry`` reads the
+    exclusion file once at its own import. Ranked top-K selection bypasses the
+    registry lists, so this gate is what keeps arch-excluded models out of the
+    weekly scan regardless of which source proposed them (issue #767).
+    """
+    from tests.model_registry import _EXCLUDED_PATHS
+
+    return _EXCLUDED_PATHS
 
 
 @dataclass(frozen=True)
@@ -105,7 +119,18 @@ def prefilter_models(
     """
     result = PrefilterResult()
 
+    excluded = _arch_excluded_paths()
     for row in models:
+        if row.get("model_id") in excluded:
+            result.skipped.append(
+                SkippedModel(
+                    row=row,
+                    failure_category=FAILURE_CATEGORY_ARCH_EXCLUDED,
+                    reason="excluded on this architecture by tests/model_lists/exclude.yaml",
+                )
+            )
+            continue
+
         params = _parameter_count(row)
         if params is not None and params > max_params:
             result.skipped.append(
@@ -125,11 +150,20 @@ def prefilter_models(
 def fetch_and_filter(
     model_type: ModelType,
     snapshot_date: date,
-    top_k: int,
+    top_k_downloads: int,
+    top_k_trending: int,
     sink: ResultSink,
     max_params: int,
 ) -> list[dict]:
-    """Fetch *model_type*'s top-*top_k* catalog, filter it, record the verdicts.
+    """Fetch *model_type*'s weekly catalog, filter it, record the verdicts.
+
+    The catalog is, deduplicated by ``model_id`` with the first copy winning:
+
+    1. the by-name models -- curated file + model registry (see ``load_by_name``);
+    2. the top *top_k_downloads* by downloads over the last 30 days;
+    3. the top *top_k_trending* by the Hub's trending score.
+
+    A zero *top_k_* skips that ranking.
 
     The one entry point both producers share, which is what keeps "worth handing
     to a Spyre worker" a single definition: ``generate_weekly_shards`` calls it
@@ -146,21 +180,30 @@ def fetch_and_filter(
     left that path writing to a closed file.
 
     Returns:
-        The models to evaluate, in the fetched (downloads-descending) order that
-        the tier router and shard chunker both rely on.
+        The models to evaluate, in the merge order above (each source keeps its
+        own ranking order).
     """
     # Deferred so that importing this module — and running prefilter_models,
     # which is pure — needs neither skip_writer nor anything it pulls in.
     from tests.spyre.weekly_generation.skip_writer import write_skipped_rows
 
-    # obtain the top-k models from hugging face
-    fetched_models: list[dict] = model_fetcher.fetch(model_type=model_type, top_k=top_k)
+    # the by-name models: curated file + model registry
+    by_name_models: list[dict] = model_fetcher.load_by_name(model_type=model_type)
 
-    # obtain the curated models
-    curated_models: list[dict] = model_fetcher.load_curated(model_type=model_type)
+    # the two ranked top-k lists from hugging face
+    by_downloads: list[dict] = model_fetcher.fetch(
+        model_type=model_type, top_k=top_k_downloads, ranking="downloads"
+    )
+    by_trending: list[dict] = model_fetcher.fetch(
+        model_type=model_type, top_k=top_k_trending, ranking="trending_score"
+    )
 
-    # concatenate and dedup while giving precedence to the curated
-    models = concat_and_dedup_dicts(first=curated_models, second=fetched_models)
+    # concatenate and dedup while giving precedence to the by-name rows (they
+    # carry curated=True), then downloads, then trending
+    models: list[dict] = concat_and_dedup_dicts(
+        first=concat_and_dedup_dicts(first=by_name_models, second=by_downloads),
+        second=by_trending,
+    )
 
     # Filter checkpoints known to exceed Spyre's parameter limit.
     result: PrefilterResult = prefilter_models(models, max_params=max_params)

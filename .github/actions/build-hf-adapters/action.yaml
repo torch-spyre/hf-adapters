@@ -31,9 +31,10 @@ inputs:
       identical torch-spyre instead of whatever HEAD each pod's image happened
       to bake in. Empty (default) keeps today's behaviour, so callers that omit
       it are unaffected. Named
-      torch_spyre_sha -- NOT torch_spyre_ref (an unrelated, unused dispatch
-      input elsewhere) and NOT the Checkout step's INPUT_REF (= inputs.ref, the
-      hf-adapters ref) -- so the three never get confused.
+      torch_spyre_sha -- NOT torch_spyre_ref (the caller-facing ref that
+      resolve-torch-spyre turns into this SHA) and NOT the Checkout step's
+      INPUT_REF (= inputs.ref, the hf-adapters ref) -- so the three never get
+      confused.
       Ignored when prebaked_image is 'true' (that path installs no torch-spyre
       at all); a caller should never set both.
     required: false
@@ -265,18 +266,32 @@ runs:
           # then check it out and re-sync submodules so the working tree matches
           # the pinned commit exactly before `uv add` builds from it.
           # SETUP-TIMING lines feed the CI setup-time parser; timing only.
+          # ts-pin status is `matched` (baked checkout already at the pin, no
+          # fetch) or `fetched`. setup-total status is the wheel-cache result
+          # (hit|miss|off|prime); it was `baked` before issue #803, when a
+          # matching checkout skipped the install entirely.
           setup_t0=$(date +%s.%N)
           setup_timing() { awk -v p="$1" -v a="$2" -v b="$(date +%s.%N)" -v s="$3" \
             'BEGIN { printf "SETUP-TIMING phase=%s seconds=%.1f status=%s\n", p, b - a, s }'; }
           cd /home/senuser/torch-spyre
-          echo "Pinning torch-spyre to ${TORCH_SPYRE_SHA}"
-          git fetch --tags --force origin "${TORCH_SPYRE_SHA}" || \
-            git fetch --tags --force origin
-          git checkout --force "${TORCH_SPYRE_SHA}"
-          git submodule sync --recursive
-          git submodule update --init --recursive --force
+          # A matching source checkout needs no fetch. Its installed build may
+          # live in the image venv, while tests use the separate project .venv;
+          # always install into the test environment below (issue #803).
+          BAKED_SHA="$(git rev-parse HEAD)"
+          if [[ "$BAKED_SHA" == "$TORCH_SPYRE_SHA" ]]; then
+            echo "Baked torch-spyre checkout already at pinned ${TORCH_SPYRE_SHA}; skipping fetch."
+            pin_status=matched
+          else
+            pin_status=fetched
+            echo "Pinning torch-spyre to ${TORCH_SPYRE_SHA} (baked HEAD ${BAKED_SHA})"
+            git fetch --tags --force origin "${TORCH_SPYRE_SHA}" || \
+              git fetch --tags --force origin
+            git checkout --force "${TORCH_SPYRE_SHA}"
+            git submodule sync --recursive
+            git submodule update --init --recursive --force
+          fi
           git log -1 --oneline
-          setup_timing ts-pin "$setup_t0" ok
+          setup_timing ts-pin "$setup_t0" "$pin_status"
           cd "$CLONED_HF_ADAPTERS_DIR"
           # Same install as the unpinned branch below, at a fixed SHA, except
           # that it skips the `uv lock --upgrade-package torch-spyre` that branch
@@ -309,13 +324,14 @@ runs:
           uv lock --upgrade-package torch-spyre
           uv sync --frozen --verbose --refresh $GROUP_FLAGS
         fi
-        # Post-install diagnostics. On the prebaked path the relevant
-        # environment is the image's active venv. Non-fatal (|| true): a failed
-        # probe must never fail the build.
+        # Validate the same environment used by tests before any model verdicts
+        # are written. Constructing a device checks registration without opening
+        # the hardware. `uv pip` otherwise inspects the image's active venv.
         if [[ "$PREBAKED_IMAGE" == "true" ]]; then
-          uv pip show torch || true
-          uv pip freeze || true
+          TEST_PYTHON="$VIRTUAL_ENV/bin/python"
         else
-          uv pip show torch
-          uv pip freeze
+          TEST_PYTHON="${UV_PROJECT_ENVIRONMENT:-.venv}/bin/python"
         fi
+        "$TEST_PYTHON" -c 'import torch, torch_spyre; print("Spyre backend registered:", torch.device("spyre"))'
+        uv pip show --python "$TEST_PYTHON" torch torch-spyre || true
+        uv pip freeze --python "$TEST_PYTHON" || true

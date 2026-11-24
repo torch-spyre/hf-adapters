@@ -7,13 +7,23 @@ license = { file = "LICENSE.txt" }
 requires-python = ">=3.11,<3.15"
 dependencies = [
     "torch>=2.0",
-    "transformers==5.15.0",
+    "transformers==5.23.0",
     "mistral-common==1.11.7",
     "sentencepiece",
     "accelerate",
     "sentence_transformers",
     "huggingface_hub>=1.31.0",
+    # serve.py imports numpy directly; declare it rather than rely on transitive installs.
+    "numpy",
 ]
+
+[project.optional-dependencies]
+laya = ["laya>=0.3.28,<0.4"]
+# hf_adapters/ultralytics_yolo.py and YOLO.detect() (serve.py) import ultralytics;
+# tests/spyre/test_e2e_yolo_compare_spyre.py also imports cv2. Verified with
+# ultralytics 8.4.173 and 8.4.201, opencv-python-headless 5.0.0.93. Headless, not
+# opencv-python: see override-dependencies under [tool.uv].
+yolo = ["ultralytics>=8.4.173,<8.5", "opencv-python-headless>=5.0,<6"]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs", "setuptools_scm>=10"]
@@ -70,6 +80,11 @@ ignore_missing_imports = true
 module = "deepspec.*"
 ignore_missing_imports = true
 
+# laya is optional and does not ship a py.typed marker.
+[[tool.mypy.overrides]]
+module = "laya.*"
+ignore_missing_imports = true
+
 # torch-spyre is available on device but not installed in the mypy CI job.
 [[tool.mypy.overrides]]
 module = "torch_spyre.*"
@@ -82,6 +97,12 @@ ignore_missing_imports = true
 module = "sentence_transformers.*"
 ignore_missing_imports = true
 follow_imports = "skip"
+
+# ultralytics backs hf_adapters/ultralytics_yolo.py only. It is not a project
+# dependency (YOLO is not a transformers model), so the mypy job lacks it.
+[[tool.mypy.overrides]]
+module = "ultralytics.*"
+ignore_missing_imports = true
 
 # transformers.models.granite_swa is added in transformers ≥5.15 but may not
 # be present in the installed version used by the mypy job.
@@ -102,8 +123,15 @@ markers = [
     "slow: deselected by default; opt in with --run-slow",
 ]
 
+[tool.uv]
+# ultralytics requires opencv-python, the GUI build of OpenCV, whose cv2 needs X11
+# libraries (libxcb.so.1) that the Spyre images don't ship, so `import cv2` (and with it
+# `import ultralytics`) fails there. Drop it (this marker is never true) and let the
+# `yolo` extra / `test` group install opencv-python-headless, which provides the same cv2.
+override-dependencies = ["opencv-python; sys_platform == 'never'"]
+
 [tool.uv.sources]
-torch-spyre = { git = "https://github.com/torch-spyre/torch-spyre", rev = "main" }
+torch-spyre ={ git = "https://github.com/torch-spyre/torch-spyre", rev = "main" }
 oot-framework = { git = "https://github.com/torch-spyre/torch-spyre", subdirectory = "tests/oot_framework", rev = "main" }
 # torch resolves to the +cpu build (via torch-spyre's index). torchvision must
 # come from the SAME PyTorch CPU index or PyPI hands us a CUDA-built wheel whose
@@ -135,7 +163,24 @@ models-ops = [
 ]
 test = [
     "pytest>=9.0,<9.1",
+    "laya>=0.3.28,<0.4",
     "Pillow",
-    "torchvision~=0.28.0",
+    "torchvision~=0.29.0",
     "PyYAML",
+    # tests/spyre/weekly_generation/snapshot_model_counts.py. <3.1.0 on s390x: its sdist
+    # does not build there (xtensor-stack/xsimd#954).
+    "pandas<3.1.0; platform_machine == 's390x'",
+    "pandas; platform_machine != 's390x'",
+    # tests/spyre/test_e2e_yolo_compare_spyre.py (same pins as the `yolo` extra). x86_64
+    # only: the YOLO suite runs on x86_64 Spyre runners, and opencv-python-headless
+    # publishes no ppc64le / s390x wheels.
+    "ultralytics>=8.4.173,<8.5; platform_machine == 'x86_64'",
+    "opencv-python-headless>=5.0,<6; platform_machine == 'x86_64'",
+]
+# evals/{gsm8k,mmlu} import `datasets`. Kept in its own group rather than
+# [project].dependencies: declaring it there pulls pyarrow into the resolution for every
+# install, and the latest pyarrow publishes no ppc64le or s390x wheel (the image installs a
+# from-source pin on Z and caps <23 on Power, whose devpi 23.0.x link the numpy 1.x ABI).
+evals = [
+    "datasets",
 ]
