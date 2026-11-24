@@ -19,9 +19,8 @@ Per-output-channel weight scale, per-token dynamic activation scale, no bias.
 
 from __future__ import annotations
 
-from typing import cast
-
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 
 FP8_DTYPE = torch.float8_e4m3fn
@@ -71,14 +70,6 @@ class FP8Linear(nn.Module):
             # fresh layout; inherited rank-reducing ancestry otherwise breaks
             # the multi-arg rescale in layout propagation.
             x_scale = torch.ops.spyre.quantscalepertokenfp8(x, FP8_MAX).clone()
-            # clone() gives x_scale a fresh layout; inherited rank-reducing
-            # ancestry (e.g. o_proj's input) otherwise breaks the multi-arg
-            # rescale in layout propagation.
-            # x_scale = (
-            #     (x.abs().amax(dim=-1, keepdim=True) * (1.0 / FP8_MAX))
-            #     .clamp(min=SCALE_CLIP_MIN)
-            #     .clone()
-            # )
             wq = (
                 self.weight
                 if self.prequantized
@@ -93,20 +84,20 @@ class FP8Linear(nn.Module):
             y = y.reshape(out_shape) * x_scale * self.weight_scale
             return y.to(x.dtype)
 
-        # CPU reference path, in fp32: 1 / SCALE_CLIP_MIN overflows fp16, and
-        # fp32 accumulation avoids fp16 overflow.
+        # CPU reference path, in fp32: the reciprocal of a small scale
+        # (SCALE_CLIP_MIN, or a tiny weight_scale) overflows fp16, and fp32
+        # accumulation avoids fp16 overflow.
         xf = x.to(torch.float32)
+        w_scale = self.weight_scale.to(torch.float32)
         x_scale = (xf.abs().amax(dim=-1, keepdim=True) / FP8_MAX).clamp(
             min=SCALE_CLIP_MIN
         )
-        wq = (
-            (self.weight * torch.reciprocal(self.weight_scale))
-            .clamp(-FP8_MAX, FP8_MAX)
-            .to(FP8_DTYPE)
-        )
+        wq = (self.weight.to(torch.float32) / w_scale).clamp(-FP8_MAX, FP8_MAX)
         xq = (xf / x_scale).clamp(-FP8_MAX, FP8_MAX).to(FP8_DTYPE)
-        acc = xq.reshape(-1, xq.shape[-1]).to(torch.float32) @ wq.to(torch.float32)
-        return (acc.reshape(out_shape) * x_scale * self.weight_scale).to(x.dtype)
+        acc = xq.reshape(-1, xq.shape[-1]).to(torch.float32) @ wq.to(FP8_DTYPE).to(
+            torch.float32
+        )
+        return (acc.reshape(out_shape) * x_scale * w_scale).to(x.dtype)
 
     def extra_repr(self) -> str:
         return (
@@ -115,10 +106,73 @@ class FP8Linear(nn.Module):
         )
 
 
-def _dequantize_checkpoint_weight(linear: nn.Linear) -> torch.Tensor:
+def is_compressed_fp8_config(config: object) -> bool:
+    """True for a compressed-tensors checkpoint with 8-bit float weights."""
+    quant = getattr(config, "quantization_config", None)
+    to_dict = getattr(quant, "to_dict", None)
+    if callable(to_dict):  # HF may wrap the dict in a QuantizationConfig
+        quant = to_dict()
+    if not isinstance(quant, dict):
+        return False
+    if quant.get("quant_method") != "compressed-tensors":
+        return False
+    if quant.get("format") != "float-quantized":
+        return False
+    for group in (quant.get("config_groups") or {}).values():
+        weights = group.get("weights") or {}
+        if weights.get("type") == "float" and weights.get("num_bits") == 8:
+            return True
+    return False
+
+
+def _checkpoint_weight_scale(name: str, linear: nn.Linear) -> torch.Tensor:
+    """Checkpoint ``weight_scale`` as fp32 ``[out, 1]``.
+
+    Accepts per-tensor (scalar) and per-channel (``[out]`` / ``[out, 1]``)
+    scales; block- and group-wise scales are rejected rather than broadcast.
+    """
+    scale = getattr(linear, "weight_scale", None)
+    if not isinstance(scale, torch.Tensor):
+        raise ValueError(f"{name}: E4M3 weight has no weight_scale")
+    out_features = linear.out_features
+    if scale.numel() == 1:
+        return scale.to(torch.float32).reshape(1, 1).expand(out_features, 1)
+    if tuple(scale.shape) not in ((out_features,), (out_features, 1)):
+        raise NotImplementedError(
+            f"{name}: unsupported weight_scale shape {tuple(scale.shape)} for "
+            f"weight {tuple(linear.weight.shape)}; only per-tensor and "
+            "per-channel FP8 checkpoints are supported (block/group-wise are not)"
+        )
+    return scale.to(torch.float32).reshape(out_features, 1)
+
+
+def _dequantize_checkpoint_weight(name: str, linear: nn.Linear) -> torch.Tensor:
     """E4M3 ``[out, in]`` * ``weight_scale [out, 1]`` -> fp16 ``[out, in]``."""
-    scale = cast(torch.Tensor, linear.weight_scale).to(torch.float32)
+    scale = _checkpoint_weight_scale(name, linear)
     return (linear.weight.to(torch.float32) * scale).to(torch.float16)
+
+
+def _check_swap_supported(model: nn.Module, targets: list[str]) -> None:
+    """Reject checkpoints the swap would silently mishandle, before mutating."""
+    if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+        # HF's TP loader shards weights and installs hooks before the swap;
+        # replacement modules would not inherit them.
+        raise NotImplementedError(
+            "FP8Linear does not support tensor parallelism; load FP8 "
+            "checkpoints without tp_plan"
+        )
+    # FP8Linear has no bias and excluded layers are rebuilt bias-free.
+    biased = [name for name in targets if model.get_submodule(name).bias is not None]
+    if biased:
+        raise NotImplementedError(
+            f"swap_linears_to_fp8 does not support biased Linears, got "
+            f"{len(biased)}: {', '.join(biased[:4])}"
+            f"{', ...' if len(biased) > 4 else ''} (attention_bias/mlp_bias=True?)"
+        )
+    for name in targets:
+        submodule = model.get_submodule(name)
+        assert isinstance(submodule, nn.Linear)
+        _checkpoint_weight_scale(name, submodule)
 
 
 def swap_linears_to_fp8(
@@ -140,13 +194,15 @@ def swap_linears_to_fp8(
         for name, module in model.named_modules()
         if isinstance(module, nn.Linear) and module.weight.dtype == FP8_DTYPE
     ]
+    if targets:
+        _check_swap_supported(model, targets)
 
     n_swapped = n_excluded = 0
     for name in targets:
         parent_name, _, attr = name.rpartition(".")
         parent = model.get_submodule(parent_name) if parent_name else model
         old = getattr(parent, attr)
-        weight_fp16 = _dequantize_checkpoint_weight(old)  # [out, in]
+        weight_fp16 = _dequantize_checkpoint_weight(name, old)  # [out, in]
 
         # Excluded projections are still dequantized: casting untouched E4M3
         # weights to fp16 later would drop weight_scale.
@@ -161,7 +217,9 @@ def swap_linears_to_fp8(
 
         fp8 = FP8Linear(old.in_features, old.out_features, dtype=dtype)
         fp8.weight.copy_(weight_fp16.t().contiguous())  # -> [in, out]
-        fp8.weight_scale.copy_(old.weight_scale.reshape(-1).to(dtype))
+        fp8.weight_scale.copy_(
+            _checkpoint_weight_scale(name, old).reshape(-1).to(dtype)
+        )
         setattr(parent, attr, fp8)
         n_swapped += 1
 

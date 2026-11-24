@@ -31,6 +31,7 @@ import torch
 from transformers import PreTrainedModel
 
 from hf_adapters.auto_spyre_model import dtype_for_model_path
+from hf_adapters.fp8_linear import is_compressed_fp8_config
 from hf_adapters.hf_common import (
     DEVICE,
     generation_cache_len,
@@ -321,9 +322,13 @@ def _run_model_test(
     # The CPU forward decompresses quantized weights in place, which would make
     # the adapter's FP8 swap a no-op; reload for the Spyre half.
     # TODO: avoid the second load (snapshot quantized weights before the CPU run).
-    if getattr(model.config, "quantization_config", None):
+    if is_compressed_fp8_config(model.config):
         del model
-        model = load_ref_model(model_path=model_path, adapter_mod=adapter)
+        model = load_ref_model(
+            model_path=model_path,
+            adapter_mod=adapter,
+            trust_remote_code=trust_remote_code,
+        )
 
     # Use bf16/fp16 dtype, requested by the registry or based on the model config.
     # (Spyre does not support float32, so float32 entries will use fp16.)
