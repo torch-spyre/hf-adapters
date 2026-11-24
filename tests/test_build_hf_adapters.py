@@ -138,7 +138,7 @@ uv() {
 export -f uv
 """
     return subprocess.run(
-        ["bash", "-euo", "pipefail", "-c", fake_commands + _build_script()],
+        ["bash", "-eo", "pipefail", "-c", fake_commands + _build_script()],
         cwd=tmp_path,
         env=env,
         text=True,
