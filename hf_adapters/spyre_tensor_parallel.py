@@ -117,6 +117,26 @@ def _copy_embedding(
     return _copy_default(shard, device=device, dtype=dtype)
 
 
+def _is_quantized_checkpoint_input(source: Any, dtype: torch.dtype | None) -> bool:
+    """True for raw tensors that a quantizer's load-time converter consumes.
+
+    Blocked-FP8 checkpoints (e.g. Ministral-3) ship ``weight`` as float8 plus
+    ``weight_scale_inv``. HF's ``Fp8Dequantize`` needs these on one device and
+    asks for ``dtype=None`` (keep the checkpoint dtype). They must be sliced on
+    CPU and left there: they have no valid Spyre layout, and the scale grid
+    legitimately differs in shape from the parameter. HF's converter then
+    returns the dequantized weight, which ``model.to(spyre)`` places later.
+    """
+    if dtype is None:
+        return True
+    source_dtype = (
+        str(source.dtype)
+        if isinstance(source, torch.Tensor)
+        else str(source.get_dtype())
+    )
+    return "float8" in source_dtype or source_dtype.startswith("F8")
+
+
 class SpyreShardOperation(DtensorShardOperation):
     """Slice grouped KV locally or use HF shard-on-read, then select DMA layout."""
 
@@ -143,11 +163,19 @@ class SpyreShardOperation(DtensorShardOperation):
         # Weight converters can feed scalar clipping bounds through the same
         # operation as their matrix. Replicate that state on every rank.
         shape = source.shape if isinstance(source, torch.Tensor) else source.get_shape()
+        # Quantized converter inputs (FP8 weight, per-block scales) are dequantized
+        # on CPU by HF; scales legitimately differ in shape from the parameter.
+        quantized_input = _is_quantized_checkpoint_input(source, dtype)
         # Without a converter, the disk tensor must match the global parameter.
         # Checking only the local shard can hide a truncated tensor on all but
         # the final rank. Converters always supply tensor_idx and may legitimately
         # feed smaller pieces (e.g. separate gate/up or per-expert matrices).
-        if len(shape) != 0 and tensor_idx is None and tuple(shape) != self.param_shape:
+        if (
+            len(shape) != 0
+            and tensor_idx is None
+            and not quantized_input
+            and tuple(shape) != self.param_shape
+        ):
             raise ValueError(
                 "Spyre TP requires complete checkpoint weights; "
                 f"{self.param_name}: checkpoint shape {tuple(shape)} "
@@ -222,7 +250,7 @@ class SpyreShardOperation(DtensorShardOperation):
             )
         else:
             shard = super().shard_tensor(source, tensor_idx, device="cpu", dtype=dtype)
-        if shard is None or self.copy_kind == "cpu":
+        if shard is None or self.copy_kind == "cpu" or quantized_input:
             return shard
         if (
             shard.numel() == 0

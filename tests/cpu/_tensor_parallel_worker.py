@@ -172,7 +172,7 @@ def check_styles(root: Path, world_size: int, rank: int) -> None:
                     else:
                         assert converted is None
                 with pytest.raises(ValueError, match="checkpoint shape"):
-                    op.shard_tensor(full[name][:-1], device="cpu")
+                    op.shard_tensor(full[name][:-1], device="cpu", dtype=torch.float32)
         elif name == "experts.gate_up_proj":
             expected = torch.cat(
                 [
@@ -209,6 +209,21 @@ def check_styles(root: Path, world_size: int, rank: int) -> None:
             # Clipped-linear converters reuse a matrix operation for scalar state.
             torch.testing.assert_close(
                 op.shard_tensor(torch.tensor(3.0), device="cpu"), torch.tensor(3.0)
+            )
+        if name == "col.weight":
+            # Blocked-FP8 checkpoints feed HF's dequantizer a float8 weight and a
+            # smaller scale grid; neither is the parameter's shape or layout.
+            fp8_weight = full[name].to(torch.float8_e4m3fn)
+            fp8_shard = op.shard_tensor(fp8_weight, device="cpu", dtype=None)
+            assert fp8_shard is not None
+            assert fp8_shard.dtype == torch.float8_e4m3fn
+            torch.testing.assert_close(
+                fp8_shard.float(), fp8_weight.chunk(world_size, dim=0)[rank].float()
+            )
+            scales = torch.arange(world_size * 2, dtype=torch.float32).reshape(-1, 1)
+            scale_shard = op.shard_tensor(scales, device="cpu", dtype=None)
+            torch.testing.assert_close(
+                scale_shard, scales.chunk(world_size, dim=0)[rank]
             )
         model.get_submodule(parent)._parameters[param] = nn.Parameter(
             shard, requires_grad=False
