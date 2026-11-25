@@ -210,7 +210,10 @@ EmbeddingGemma 2 keep those helpers resident on CPU across repeated ST encodes.
 
 Load with `SentenceTransformer("Qwen/Qwen3-VL-Embedding-2B", backend="spyre")`
 after importing `hf_adapters.st_backend`, or use `AutoSpyreModel` with an
-`AutoProcessor`. SentenceTransformers retains the checkpoint's chat template,
+`AutoProcessor`. Automatic routing is scoped to this exact Hub ID and its
+`Qwen3VLConfig`; generative Qwen3-VL checkpoints retain `SpyreNoAdapterError`
+in the generic and causal-LM auto-model APIs. SentenceTransformers retains the
+checkpoint's chat template,
 instructions, last-token pooling, normalization, and dimension truncation.
 The checkpoint defaults to **bfloat16** and outputs 2048-dimensional vectors.
 SentenceTransformers 6.2.0 or newer is needed for mixed device placement; the

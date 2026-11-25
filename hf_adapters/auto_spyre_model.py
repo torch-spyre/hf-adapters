@@ -96,7 +96,6 @@ from transformers import (
     Qwen3_5TextConfig,
     Qwen3Config,
     Qwen3VLConfig,
-    Qwen3VLTextConfig,
     RobertaConfig,
     SiglipConfig,
     SmolLM3Config,
@@ -215,8 +214,6 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     Phi3Config: hf_phi3,
     Qwen2Config: hf_qwen2,
     Qwen3Config: hf_qwen3,
-    Qwen3VLConfig: hf_qwen3_vl_embedding,
-    Qwen3VLTextConfig: hf_qwen3_vl_embedding,
     Qwen3_5Config: hf_qwen3_5,
     Qwen3_5TextConfig: hf_qwen3_5,
     Qwen3_5MoeConfig: hf_qwen3_5_moe,
@@ -228,6 +225,15 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     SiglipConfig: hf_siglip,
     SmolLM3Config: hf_smollm3,
     XLMRobertaConfig: hf_xlm_roberta,
+}
+
+# Embedding and generative Qwen3-VL checkpoints share both their config class
+# and architecture name. Claim only the verified embedding checkpoint here;
+# this override is consulted only for the default generic-model mapping.
+CHECKPOINT_TO_ADAPTER_MODULE_MAPPING: dict[
+    tuple[str, type[PretrainedConfig]], ModuleType
+] = {
+    ("Qwen/Qwen3-VL-Embedding-2B", Qwen3VLConfig): hf_qwen3_vl_embedding,
 }
 
 # Architecture-name mapping — consulted BEFORE the config-class map. DSpark
@@ -378,13 +384,22 @@ def resolve_adapter_module(
             adapter_module = ARCH_TO_ADAPTER_MODULE_MAPPING[arch]
             break
     else:
-        if type(model_config) not in mapping:
+        checkpoint_module: ModuleType | None = (
+            CHECKPOINT_TO_ADAPTER_MODULE_MAPPING.get(
+                (os.fspath(model_name_or_path), type(model_config))
+            )
+            if mapping is CONFIG_TO_ADAPTER_MODULE_MAPPING
+            else None
+        )
+        if checkpoint_module is not None:
+            adapter_module = checkpoint_module
+        elif type(model_config) not in mapping:
             raise SpyreNoAdapterError(
                 f"Model {model_name_or_path} of type {type(model_config)} "
                 "is not supported"
             )
-
-        adapter_module = mapping[type(model_config)]
+        else:
+            adapter_module = mapping[type(model_config)]
         if adapter_module is hf_gemma4:
             text_cfg: PretrainedConfig = getattr(
                 model_config, "text_config", model_config

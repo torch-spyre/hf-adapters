@@ -16,7 +16,8 @@ from `transformers`.
 **48 adapters · 10K+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
-**multimodal embedding** (CLIP, SigLIP, EmbeddingGemma 2, and Qwen3-VL vectors),
+**multimodal embedding** (CLIP, SigLIP, EmbeddingGemma 2, and
+Qwen3-VL-Embedding-2B vectors),
 **sequence classification** (sentiment / text categorisation), **structured
 decisions** (variable options plus action selection), Transformers **decision
 models** (`AutoModelForDecision`), **token classification**
