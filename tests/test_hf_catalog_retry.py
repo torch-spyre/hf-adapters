@@ -178,6 +178,10 @@ def test_config_lookups_recover_from_wrapped_throttling(
 def test_catalog_keeps_model_after_throttled_config_recovers(
     monkeypatch: pytest.MonkeyPatch, kind: str, waits: list[float]
 ) -> None:
+    monkeypatch.setattr(
+        "utils.fetch_top_embedding_models.validate_embedding_checkpoint",
+        lambda model, token: (True, ""),
+    )
     request = Mock(
         side_effect=[
             _http_error(headers={"Retry-After": "134"}),
