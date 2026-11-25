@@ -68,12 +68,12 @@ import json
 import logging
 import multiprocessing
 import os
-import subprocess
 import sys
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from tests.spyre.weekly_generation.adapter_added_dates import load_added_dates
 from tests.spyre.weekly_generation.failure_categories import (
     FAILURE_CATEGORY_HARDWARE_EXCEPTION,
     FAILURE_CATEGORY_WORKER_CRASHED,
@@ -210,34 +210,14 @@ EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS: int = 90
 def _get_adapter_dates() -> dict[str, str | None]:
     """Map adapter module name (e.g. 'hf_qwen3') -> ISO date it was first added.
 
-    Derived from the git add-date of each hf_adapters/hf_*.py file.
+    Read committed metadata rather than shallow-clone git history (issue #372).
+    Regenerate the map from a full checkout with regenerate_adapter_added_dates.py.
+    Missing or invalid dates stay None; the coverage suite guards completeness.
     """
-    dates: dict[str, str | None] = {}
-    adapter_dir: Path = _REPO_ROOT / "hf_adapters"
-    for f in sorted(adapter_dir.glob("hf_*.py")):
-        module_name: str = f.stem
-        try:
-            out = subprocess.run(
-                [
-                    "git",
-                    "log",
-                    "--diff-filter=A",
-                    "--follow",
-                    "--format=%aI",
-                    "-1",
-                    "--",
-                    str(f.relative_to(_REPO_ROOT)),
-                ],
-                cwd=_REPO_ROOT,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            iso: list[str] = out.stdout.strip().splitlines()
-            dates[module_name] = iso[-1][:10] if iso else None
-        except OSError:
-            dates[module_name] = None
-    return dates
+    return load_added_dates(
+        _REPO_ROOT / "hf_adapters",
+        _REPO_ROOT / "resources" / "adapter_added_dates.json",
+    )
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
