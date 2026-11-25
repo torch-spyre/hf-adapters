@@ -40,7 +40,7 @@ the runtime failure breakdown; MoE models with an adapter are evaluated.
 
 Per-tier shard sizes do NOT need to be small: weekly_test.py already
 re-chunks whatever list it's given into fresh-OS-process batches of
-GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS/EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS
+{GENERATIVE,EMBEDDING,VISION,VISION_TOWER}_NUMBER_OF_MODEL_PER_PROCESS
 regardless of shard size, which is what actually bounds how many models'
 memory can accumulate in one process before a clean restart. A tiny shard
 size buys no extra safety over a large one — it only multiplies GitHub

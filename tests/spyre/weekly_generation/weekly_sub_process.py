@@ -58,7 +58,8 @@ def _process_batch(
 
     Amortizes the per-child fixed cost (spawn + module imports + kernel
     teardown on exit) across the batch; ``weekly_test``'s
-    ``{GENERATIVE,EMBEDDING}_NUMBER_OF_MODEL_PER_PROCESS`` set how many. Puts a
+    ``{GENERATIVE,EMBEDDING,VISION,VISION_TOWER}_NUMBER_OF_MODEL_PER_PROCESS`` set
+    how many. Puts a
     ``list[dict]`` on the queue — one full result dict per row, in the same order
     as *batch*. If a single model errors, its ``error`` field is populated and
     the loop continues to the next model; the child does NOT abort.

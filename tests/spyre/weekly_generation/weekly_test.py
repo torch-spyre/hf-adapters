@@ -205,6 +205,11 @@ for _p in (_SPYRE_TESTS_DIR, _TESTS_DIR, _UTILS_DIR, _REPO_ROOT):
 # driver/state gets into a bad shape mid-batch.
 GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS: int = 10
 EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS: int = 90
+# Vision checks must stay at one checkpoint per process: each runs the stock-HF
+# reference before prepare_for_spyre(), whose class-level patches would otherwise
+# leak into the next checkpoint's stock reference in the same interpreter.
+VISION_NUMBER_OF_MODEL_PER_PROCESS: int = 1
+VISION_TOWER_NUMBER_OF_MODEL_PER_PROCESS: int = 1
 
 
 def _get_adapter_dates() -> dict[str, str | None]:
@@ -400,8 +405,8 @@ def main(
     models_per_process = {
         ModelType.GENERATIVE: GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS,
         ModelType.EMBEDDING: EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS,
-        ModelType.VISION: 1,
-        ModelType.VISION_TOWER: 1,
+        ModelType.VISION: VISION_NUMBER_OF_MODEL_PER_PROCESS,
+        ModelType.VISION_TOWER: VISION_TOWER_NUMBER_OF_MODEL_PER_PROCESS,
     }
 
     adapter_dates: dict[str, str | None] = _get_adapter_dates()
