@@ -95,9 +95,8 @@ help: ## Show this help message
 adapter-coverage-tests: ## Run adapter registry coverage, added-date, and build-action checks (suite key: adapter_coverage)
 	# test_adapter_added_dates.py rides along: both are pure-Python checks over the
 	# adapter files that need only pytest + a git checkout (no torch, no DB, hence
-	# --noconftest). The added-dates git-equality assertion needs full history and
-	# self-skips on a shallow clone, so the CI job that runs this checks out with
-	# fetch-depth: 0 (see _test_matrix.yaml's adapter-coverage job).
+	# --noconftest). Added-date checks validate authoritative metadata without
+	# comparing git dates, so shallow and squash-merged checkouts behave alike.
 	$(PYTEST) -v --noconftest tests/test_adapter_coverage.py tests/test_adapter_added_dates.py tests/test_perf_coverage.py tests/test_build_hf_adapters.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 smoke-tests: ## Run e2e smoke tests (suite key: smoke)

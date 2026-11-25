@@ -106,7 +106,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"\nDone — {len(latest)} unique model_name(s).")
 
     # Weekly-window walk starting 7 days before the earliest adapter add-date.
-    # `added_date` is the git add-date of the model's adapter file, so this is
+    # `added_date` is the model adapter's recorded introduction date, so this is
     # roughly "the first date on which any of the tracked adapters existed,
     # minus one week". Some rows have an empty added_date (models with no
     # adapter yet); skip them to avoid pulling the earliest to "".

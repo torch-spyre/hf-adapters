@@ -211,7 +211,7 @@ def _get_adapter_dates() -> dict[str, str | None]:
     """Map adapter module name (e.g. 'hf_qwen3') -> ISO date it was first added.
 
     Read committed metadata rather than shallow-clone git history (issue #372).
-    Regenerate the map from a full checkout with regenerate_adapter_added_dates.py.
+    Maintain the authoritative map with regenerate_adapter_added_dates.py.
     Missing or invalid dates stay None; the coverage suite guards completeness.
     """
     return load_added_dates(

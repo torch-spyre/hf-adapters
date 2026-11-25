@@ -42,7 +42,7 @@ repos:
         pass_filenames: false
         always_run: false
 
-  # Enforce that resources/adapter_added_dates.json is regenerated whenever an
+  # Validate authoritative resources/adapter_added_dates.json whenever an
   # adapter file changes (issue #372). The script self-scopes to commits that
   # touch an adapter or the JSON, and only checks — never writes.
   - repo: local
