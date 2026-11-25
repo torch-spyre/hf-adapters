@@ -56,6 +56,7 @@ Usage (on Spyre pod)::
 
 import gc
 import os
+import traceback
 import types
 from collections.abc import Callable
 
@@ -90,7 +91,6 @@ from tests._vision_helpers import (
     resolve_model_revision,
     stock_vlm_reference,
 )
-from tests._vision_runtime import ReferenceStage, clear_exception_frames
 from tests.conftest import load_ref_model
 from tests.model_registry import (
     NON_BLOCKING_VISION_MODELS,
@@ -98,6 +98,7 @@ from tests.model_registry import (
     VISION_PATHS,
     xfail_non_blocking,
 )
+from tests.spyre.weekly_generation.failure_categories import ReferenceStage
 
 pytestmark = pytest.mark.model_harness("vision")
 
@@ -224,6 +225,28 @@ def _adapter_teacher_forced_steps(
     return per_step_logits
 
 
+def _clear_exception_frames(error: BaseException) -> None:
+    """Release callee locals while preserving traceback locations and error chains.
+
+    Active frames cannot be cleared; their resource owners still use finally to
+    delete model references. Unwound callees can hold models and device caches,
+    including in chained compiler errors (``__cause__`` / ``__context__``).
+    """
+    pending: list[BaseException] = [error]
+    # Guards against a manually assigned __cause__/__context__ cycle.
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        traceback.clear_frames(current.__traceback__)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+
+
 def run_vlm_compare(
     model_path: str,
     trust_remote_code: bool | None = None,
@@ -292,7 +315,7 @@ def run_vlm_compare(
                 num_compare_steps=NUM_COMPARE_STEPS,
             )
         except BaseException as error:
-            clear_exception_frames(error)
+            _clear_exception_frames(error)
             raise
         finally:
             del ref_model
@@ -403,7 +426,7 @@ def run_vlm_compare(
             )
             assert smoke["status"] == "PASS", smoke
     except BaseException as error:
-        clear_exception_frames(error)
+        _clear_exception_frames(error)
         raise
     finally:
         del model

@@ -18,12 +18,12 @@ import pytest
 import yaml
 from huggingface_hub.hf_api import ModelInfo
 
-from tests._vision_runtime import ReferenceStage
 from tests.model_registry import (
     WEEKLY_SCAN_VISION_PATHS,
     WEEKLY_SCAN_VISION_TOWER_PATHS,
 )
 from tests.spyre.weekly_generation import model_fetcher, weekly_sub_process
+from tests.spyre.weekly_generation.failure_categories import ReferenceStage
 from tests.spyre.weekly_generation.model_prefilter import prefilter_models
 from tests.spyre.weekly_generation.model_type import ModelType, scan_model_types
 from utils import fetch_top_vision_models as vision
