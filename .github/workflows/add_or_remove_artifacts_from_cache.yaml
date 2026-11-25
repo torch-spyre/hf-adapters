@@ -10,6 +10,15 @@ on:
         default: false
 permissions:
   contents: read
+env:
+  UV_NO_SYNC: "1"
+  UV_PROJECT_ENVIRONMENT: /home/senuser/.venv
+  CI: ""
+  CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
+  STORAGE_1_DIR: /storage-1/hf-adapters
+  HF_HOME: /storage-1/hf-adapters/.cache/huggingface
+  HF_HUB_OFFLINE: "1"
+  PYTHONUNBUFFERED: "1"
 jobs:
   probe:
     runs-on: [x86_64, spyre_pf_x1, linux, image_torch_spyre]
