@@ -1,64 +1,31 @@
-name: 'add_or_remove_artifacts_from_cache'
-
+name: Qwen3-VL vision diagnostic
 on:
-  schedule:
-    # Nightly at 05:00 UTC, ahead of test_daily's 06:00 run, to warm models and dataset fixtures.
-    - cron: "0 5 * * *"
   workflow_dispatch:
     inputs:
       cache_config_file:
-        description: 'Path to the models and dataset files YAML configuration'
-        required: true
         type: string
         default: '.github/cache_config/hf_models_and_datasets.yaml'
       force_download:
-        description: 'Force re-download even if files exist?'
-        # set required to true for the JSON payload to never be null
-        required: true
         type: boolean
         default: false
-
-# Prevents multiple runs from updating the same storage simultaneously
-concurrency:
-  group: 'add_or_remove_model_from_cache'
-  # cancel-in-progress: true
-  # queue instead to avoid downloads being cancelled early and inconsistent cache state
-  # queue: single # this is the default anyway https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency#using-concurrency-in-different-scenarios
-
-defaults:
-  run:
-    shell: bash
-
 permissions:
   contents: read
-
 jobs:
-  update_cache:
-    runs-on:
-      - x86_64
-      - spyre_pf_x0
-      - linux
-      - image_torch_spyre # set having 0 spyre cards and pvc mounted
-    timeout-minutes: 720
-    env:
-      # inputs.* is only populated on workflow_dispatch; the schedule trigger falls back to these defaults.
-      CACHE_CONFIG_FILE_PATH: ${{ inputs.cache_config_file || '.github/cache_config/hf_models_and_datasets.yaml' }}
-      FORCE_DOWNLOAD: ${{ inputs.force_download || false }}
-      GITHUB_SHA: ${{ github.sha }}
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      STORAGE_1_DIR: /storage-1/hf-adapters
-      HF_HOME: /storage-1/hf-adapters/.cache/huggingface
-
+  probe:
+    runs-on: [x86_64, spyre_pf_x1, linux, image_torch_spyre]
+    timeout-minutes: 30
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@v4
+      - run: cp .github/scripts/qwen_vl_vision_probe.py /tmp/qwen_vl_vision_probe.py
+      - uses: ./.github/actions/build-hf-adapters
         with:
-          path: 'hf-adapters-repo'
-          fetch-depth: 1
-
-      - name: Run Caching Script
-        working-directory: 'hf-adapters-repo'
+          uv_groups: 'dev spyre test'
+          ref: feat/qwen3-vl-embedding
+          prebaked_image: true
+      - name: Probe vision parity
+        shell: bash
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
-          HF_HUB_OFFLINE=0 uv run --with huggingface-hub python -c 'from huggingface_hub import snapshot_download; print(snapshot_download("Qwen/Qwen3-VL-Embedding-2B", ignore_patterns=["*.pt", "*.bin"]))'
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          PYTHONPATH="$CLONED_HF_ADAPTERS_DIR" python -u /tmp/qwen_vl_vision_probe.py
