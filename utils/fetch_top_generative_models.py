@@ -3,19 +3,22 @@
 import os
 import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Callable
 
 from huggingface_hub import HfApi
 from huggingface_hub.hf_api import ModelInfo
+from transformers import AutoConfig, PretrainedConfig
 
 from utils.fetch_curated_models_metadata import _create_fetch_metadata, keep_all
 from utils.hf_model_catalog import (
     EXPAND_FIELDS,
     RESOURCES_DIR,
+    HubRetryExhaustedError,
     Ranking,
     _guarded,
+    _retry_hub_call,
     build_catalog,
-    contains_remote_code,
     has_loadable_weights,
     is_baseline_keep,
     with_transient_retry,
@@ -47,6 +50,39 @@ def _create_fetch(ranking: Ranking) -> Callable[[HfApi, int], list[ModelInfo]]:
     return _fetch
 
 
+def _keep_generation_config(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
+    """Reject remote-code and encoder-only configs without loading model weights.
+
+    Use the same adapter mappings and encoder-only flag as the causal-LM loader.
+    Do not resolve the adapter through ``resolve_adapter_module`` here: dimension
+    validation and unsupported-adapter verdicts still belong to the worker.
+    """
+    from hf_adapters.auto_spyre_model import (
+        ARCH_TO_ADAPTER_MODULE_MAPPING,
+        CONFIG_TO_ADAPTER_MODULE_MAPPING,
+    )
+
+    try:
+        config: PretrainedConfig = _retry_hub_call(
+            lambda: AutoConfig.from_pretrained(
+                model.id, token=token, trust_remote_code=False
+            ),
+            description=f"config[{model.id}]",
+        )
+    except (ValueError, OSError):
+        return False, "requires trust_remote_code"
+
+    module: ModuleType | None = CONFIG_TO_ADAPTER_MODULE_MAPPING.get(type(config))
+    for architecture in config.architectures or []:
+        if architecture in ARCH_TO_ADAPTER_MODULE_MAPPING:
+            module = ARCH_TO_ADAPTER_MODULE_MAPPING[architecture]
+            break
+
+    if module is not None and getattr(module, "_is_encoder_only", False):
+        return False, "encoder-only architecture does not support generation"
+    return True, ""
+
+
 def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
     """Keep predicate for the generative fetcher.
 
@@ -62,16 +98,11 @@ def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
         return False, "exception during is_baseline_keep"
 
     checks: list[tuple[Callable[[], bool], str, str]] = [
-        (lambda: model.gated, "model.gated", "model is gated"),
+        (lambda: bool(model.gated), "model.gated", "model is gated"),
         (
             lambda: not has_loadable_weights(model),
             "has_loadable_weights",
             "no loadable weights",
-        ),
-        (
-            lambda: contains_remote_code(model),
-            "contains_remote_code",
-            "requires trust_remote_code",
         ),
     ]
     for predicate, name, rejection in checks:
@@ -81,7 +112,14 @@ def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
         if result:
             return False, rejection
 
-    return True, ""
+    # The config lookup also checks remote code, so rejecting encoder-only
+    # adapters does not add a second Hub request per candidate.
+    try:
+        return _keep_generation_config(model, token)
+    except HubRetryExhaustedError:
+        raise
+    except Exception:
+        return False, "exception during generation config"
 
 
 def _fetch_generative_models(

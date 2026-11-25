@@ -10,7 +10,7 @@ import httpx
 import pytest
 from huggingface_hub import HfApi, ModelInfo
 from huggingface_hub.errors import HfHubHTTPError
-from transformers import BertConfig
+from transformers import BertConfig, GPT2Config, PretrainedConfig
 
 from utils import hf_model_catalog as catalog
 from utils.fetch_curated_models_metadata import _create_fetch_metadata
@@ -47,10 +47,10 @@ def _http_error(
     return HfHubHTTPError("Simulated Hub failure", response=response)
 
 
-def _model() -> ModelInfo:
+def _model(model_type: str = "bert") -> ModelInfo:
     return ModelInfo(
         id="org/model",
-        config={"model_type": "bert"},
+        config={"model_type": model_type},
         library_name="sentence-transformers",
         siblings=[{"rfilename": "model.safetensors"}],
     )
@@ -61,7 +61,7 @@ def _build_catalog(kind: str) -> list[dict[str, object]]:
         keep_generative if kind == "generative" else keep_embedding
     )
     return catalog.build_catalog(
-        fetch_fn=lambda limit: [_model()],
+        fetch_fn=lambda limit: [_model("gpt2" if kind == "generative" else "bert")],
         filter_fn=lambda model: keeper(model, False),
         limit=1,
         output_csv=None,
@@ -178,11 +178,12 @@ def test_config_lookups_recover_from_wrapped_throttling(
 def test_catalog_keeps_model_after_throttled_config_recovers(
     monkeypatch: pytest.MonkeyPatch, kind: str, waits: list[float]
 ) -> None:
+    config: PretrainedConfig = GPT2Config() if kind == "generative" else BertConfig()
     request = Mock(
         side_effect=[
             _http_error(headers={"Retry-After": "134"}),
-            BertConfig(),
-            BertConfig(),
+            config,
+            config,
         ]
     )
     monkeypatch.setattr(catalog.AutoConfig, "from_pretrained", request)
@@ -190,7 +191,7 @@ def test_catalog_keeps_model_after_throttled_config_recovers(
     rows: list[dict[str, object]] = _build_catalog(kind)
 
     assert [row["model_id"] for row in rows] == ["org/model"]
-    assert rows[0]["config_class"] == "BertConfig"
+    assert rows[0]["config_class"] == type(config).__name__
     assert waits == [135.0]
 
 
