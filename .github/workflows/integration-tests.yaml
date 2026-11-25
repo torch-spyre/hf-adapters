@@ -103,6 +103,7 @@ on:
         type: choice
         default: integration
         options:
+          - sentence_transformers_multimodal
           - unit
           - integration
           - regression
