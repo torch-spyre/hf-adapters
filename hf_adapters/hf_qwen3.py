@@ -31,8 +31,12 @@ Usage::
     outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
+from collections.abc import Callable
+
 import torch
 import torch.nn.functional as F
+from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer
+from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextDecoderLayer
 
 from hf_adapters.hf_common import (
     PrecomputedRotaryEmbedding,
@@ -44,8 +48,22 @@ from hf_adapters.hf_common import (
     standard_gqa_forward,
 )
 
+Qwen3Block = Callable[
+    [
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ],
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+]
 
-def _make_compiled_block(layer):
+
+def _make_compiled_block(
+    layer: Qwen3DecoderLayer | Qwen3VLTextDecoderLayer,
+) -> Qwen3Block:
     """Compiled block for Qwen3: Q/K norm before RoPE, no multipliers."""
     attn = layer.self_attn
     mlp = layer.mlp
@@ -57,13 +75,13 @@ def _make_compiled_block(layer):
     k_norm = attn.k_norm
 
     def block_forward(
-        hidden_states,
-        selected_freqs,
-        attn_mask,
-        key_cache,
-        value_cache,
-        cache_index,
-    ):
+        hidden_states: torch.Tensor,
+        selected_freqs: torch.Tensor,
+        attn_mask: torch.Tensor,
+        key_cache: torch.Tensor | None,
+        value_cache: torch.Tensor | None,
+        cache_index: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         residual = hidden_states
         h = input_ln(hidden_states)
 
@@ -79,13 +97,15 @@ def _make_compiled_block(layer):
         q = apply_rope_matmul(q, selected_freqs)
         k = apply_rope_matmul(k, selected_freqs)
 
-        key_cache, value_cache = kv_cache_update(
-            k,
-            v,
-            key_cache,
-            value_cache,
-            cache_index,
-        )
+        # Embedding-only prefill uses the same Qwen3 block without allocating
+        # a generation cache. Existing generation callers supply cache_index.
+        if cache_index is None:
+            key_cache, value_cache = k, v
+        else:
+            assert key_cache is not None and value_cache is not None
+            key_cache, value_cache = kv_cache_update(
+                k, v, key_cache, value_cache, cache_index
+            )
 
         attn_out = F.scaled_dot_product_attention(
             q,

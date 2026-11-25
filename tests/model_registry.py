@@ -801,6 +801,14 @@ VISION_MODELS = {
 
 
 MULTIMODAL_EMBEDDING_MODELS: dict[str, dict[str, Any]] = {
+    "qwen3_vl_embedding_2b": {
+        "name": "Qwen3-VL-Embedding-2B",
+        "path": "Qwen/Qwen3-VL-Embedding-2B",
+        "adapter": "hf_qwen3_vl_embedding.py",
+        "kind": "multimodal_embedding",
+        "dtype": "bfloat16",
+        "size": "2b",
+    },
     "embeddinggemma2": {
         "name": "EmbeddingGemma 2",
         "path": "google/embeddinggemma-2",
