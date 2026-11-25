@@ -306,6 +306,12 @@ def test_vlm_generate_spyre(model_path: str, trust_remote_code: bool | None) -> 
     else:
         print(f"  Stock CPU reference generated (cache write failed: {cache_dir})")
 
+    # A malformed reference would make every comparison below meaningless.
+    assert len(ref_logits) == len(ref_tokens) == NUM_COMPARE_STEPS
+    assert all(
+        torch.isfinite(logits).all().item() for logits in ref_logits
+    ), "stock reference contains NaN/Inf logits"
+
     # --- Adapter on Spyre ---
     print("  Loading model for Spyre ...")
     model = AutoSpyreModelForImageTextToText.from_pretrained(
@@ -340,12 +346,17 @@ def test_vlm_generate_spyre(model_path: str, trust_remote_code: bool | None) -> 
     # asserted — a single near-tie (two candidates within fp16 rounding) can flip
     # the argmax while cosine stays ~0.9999, which is benign substrate rounding,
     # not a regression.
+    #
+    # zip() would silently drop missing steps, and NaN logits give a NaN cosine
+    # that never compares below MIN_COSINE, so both are rejected explicitly.
     print("  step      | stock top1          | spyre top1          | match | cosine")
-    low_cosine = []
+    assert len(sp_logits) == len(ref_logits), "missing Spyre comparison steps"
+    low_cosine: list[tuple[str, float]] = []
     n_top1_match = 0
     for step, (rl, sl) in enumerate(zip(ref_logits, sp_logits)):
-        n = min(rl.shape[-1], sl.shape[-1])
-        rl, sl = rl[:n], sl[:n]
+        assert sl.shape[-1] >= rl.shape[-1], "Spyre logits omit vocabulary entries"
+        sl = sl[: rl.shape[-1]]  # Strip only adapter LM-head padding.
+        assert torch.isfinite(sl).all().item(), f"NaN/Inf at comparison step {step}"
         r_top1 = int(rl.argmax())
         s_top1 = int(sl.argmax())
         cosine = F.cosine_similarity(rl, sl, dim=-1).item()
@@ -363,7 +374,7 @@ def test_vlm_generate_spyre(model_path: str, trust_remote_code: bool | None) -> 
     print(f"  stock:   {ref_text!r}")
     print(f"  adapter free-run: {adapter_text!r}")
 
-    assert len(adapter_text) > 0, "adapter generated an empty string"
+    assert len(adapter_text.strip()) > 0, "adapter generated an empty string"
     assert not low_cosine, (
         f"adapter logits drifted below cosine {MIN_COSINE} (teacher-forced) at: "
         + ", ".join(f"{lab}: {c:.6f}" for lab, c in low_cosine)
