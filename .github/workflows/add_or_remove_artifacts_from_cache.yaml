@@ -61,4 +61,4 @@ jobs:
         run: |
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
-          uv run .github/cache_config/manage_cache.py
+          HF_HUB_OFFLINE=0 uv run --with huggingface-hub python -c 'from huggingface_hub import snapshot_download; print(snapshot_download("Qwen/Qwen3-VL-Embedding-2B", ignore_patterns=["*.pt", "*.bin"]))'
