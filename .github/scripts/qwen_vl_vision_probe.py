@@ -63,8 +63,8 @@ def main() -> None:
             rotated_key = apply_rope_matmul(key.float(), rope.float()).to(hidden.dtype)
             attended = F.scaled_dot_product_attention(rotated_query, rotated_key, value, attn_mask=mask, scale=64 ** -0.5)
             contiguous_attended = F.scaled_dot_product_attention(rotated_query.contiguous(), rotated_key.contiguous(), value, attn_mask=mask, scale=64 ** -0.5)
-            scores = rotated_query.float() @ rotated_key.float().transpose(-2, -1) * (64 ** -0.5) + mask.float()
-            manual_attended = scores.softmax(dim=-1).to(value.dtype) @ value
+            scores = rotated_query @ rotated_key.transpose(-2, -1) * (64 ** -0.5) + mask
+            manual_attended = F.softmax(scores, dim=-1, dtype=torch.float32).to(value.dtype) @ value
             return norm, query, key, value, rotated_query, rotated_key, attended, contiguous_attended, manual_attended
 
         hidden = F.pad(inputs[0], (0, 0, 0, 56))[None].to("spyre")
