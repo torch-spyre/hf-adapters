@@ -171,7 +171,7 @@ text/image inputs also exercise that public SentenceTransformers route.
 | sentence-transformers/clip-ViT-B-32 | clip | 64 / 64 | 512 | Verified: text and single-image scenarios |
 | google/siglip2-giant-opt-patch16-384 | siglip | 72→128 / 96→128 | 1536 | Verified: text and single-image scenarios |
 | google/embeddinggemma-2 | embedding\_gemma2 | 256 (local), 512 (global) / 64→128 | 768 | Verified: text, image, and audio embedding scenarios (bf16) |
-| Qwen/Qwen3-VL-Embedding-2B | qwen3\_vl | 128 / 64→128 | 2048 | CPU parity verified; Spyre validation pending (bf16) |
+| Qwen/Qwen3-VL-Embedding-2B | qwen3\_vl | 128 / 64→128 | 2048 | Verified: text, image, and combined text/image scenarios (bf16) |
 
 `hf_embeddinggemma2.py` preserves the stock multimodal forward, including
 interleaved text, images, video frames, and audio. The bidirectional text
@@ -218,7 +218,11 @@ processor also requires torchvision (`uv sync --group test` on the pod).
 Generation caches, intermediate hidden-state/attention outputs, and custom 4D
 text masks are unsupported. Offline tests cover text padding, 2D/3D/4D position
 IDs, packed images/video frames, mixed image/video DeepStack features, full-graph
-capture, and exact CPU helper-buffer preservation.
+capture, and exact CPU helper-buffer preservation. The [Spyre comparison](https://github.com/torch-spyre/hf-adapters/actions/runs/45580443413/job/139089705616)
+passes with minimum cosine 0.999685 for text, 0.999454 for scalar/list images,
+and 0.999400 for combined text/image inputs, with matching caption ranking and
+no model device transfers during repeated encodes. Rotated vision Q/K tensors
+are made contiguous before SDPA, following the Gemma 4 vision executor.
 
 Multi-image batches remain excluded from the suite pending
 [#747](https://github.com/torch-spyre/hf-adapters/issues/747).
