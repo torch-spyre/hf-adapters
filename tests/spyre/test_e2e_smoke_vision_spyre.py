@@ -48,8 +48,10 @@ from typing import Any
 import pytest
 import torch
 
-from hf_adapters import AutoSpyreModelForImageTextToText
-from hf_adapters.auto_spyre_model import dtype_for_model_path
+from hf_adapters.auto_spyre_model import (
+    AutoSpyreModelForImageTextToText,
+    dtype_for_model_path,
+)
 from tests._vision_helpers import build_vlm_batch, load_smoke_test_images
 from tests.model_registry import (
     NON_BLOCKING_VISION_MODELS,
@@ -131,7 +133,10 @@ def _run_single_image(
 
 
 def run_vision_smoke_test(
-    model_path: str, trust_remote_code: bool | None = None
+    model_path: str,
+    trust_remote_code: bool | None = None,
+    *,
+    model: Any | None = None,
 ) -> dict[str, Any]:
     """Load model once, then run all SMOKE_TEST_IMAGES through it in sequence.
 
@@ -149,9 +154,12 @@ def run_vision_smoke_test(
     )
 
     t0 = time.time()
-    model = AutoSpyreModelForImageTextToText.from_pretrained(
-        model_name_or_path=model_path, dtype=dtype, trust_remote_code=trust_remote_code
-    )
+    if model is None:
+        model = AutoSpyreModelForImageTextToText.from_pretrained(
+            model_name_or_path=model_path,
+            dtype=dtype,
+            trust_remote_code=trust_remote_code,
+        )
     load_time = time.time() - t0
     print(f"  Load time: {load_time:.1f}s")
 
@@ -159,7 +167,7 @@ def run_vision_smoke_test(
     smoke_images = load_smoke_test_images()
     print(f"  Running {len(smoke_images)} images through model ...")
 
-    image_results = []
+    image_results: list[dict[str, Any]] = []
     for label, prompt, image in smoke_images:
         print(f"\n  [{label}] prompt: {prompt!r}")
         result = _run_single_image(

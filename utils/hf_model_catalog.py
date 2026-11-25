@@ -35,6 +35,7 @@ RESOURCES_DIR: Path = Path(__file__).resolve().parent.parent / "resources"
 # lines ignored). See load_curated_model_ids().
 CURATED_GENERATIVE_MODELS_FILE: Path = RESOURCES_DIR / "generative_models_curated.txt"
 CURATED_EMBEDDING_MODELS_FILE: Path = RESOURCES_DIR / "embedding_models_curated.txt"
+CURATED_VISION_MODELS_FILE: Path = RESOURCES_DIR / "vision_models_curated.txt"
 
 
 def load_curated_model_ids(path: Path) -> list[str]:
@@ -62,6 +63,10 @@ def load_curated_generative_models() -> list[str]:
 
 def load_curated_embedding_models() -> list[str]:
     return load_curated_model_ids(CURATED_EMBEDDING_MODELS_FILE)
+
+
+def load_curated_vision_models() -> list[str]:
+    return load_curated_model_ids(CURATED_VISION_MODELS_FILE)
 
 
 # Metadata fields requested from list_models/model_info for every fetcher.

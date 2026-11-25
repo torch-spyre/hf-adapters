@@ -57,15 +57,16 @@ Usage (on Spyre pod)::
 import gc
 import os
 import types
+from collections.abc import Callable
 
 import pytest
 import torch
 import torch.nn.functional as F
 from transformers import PreTrainedModel
 
-from hf_adapters import AutoSpyreModelForImageTextToText
 from hf_adapters.auto_spyre_model import (
     IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+    AutoSpyreModelForImageTextToText,
     dtype_for_model_path,
     resolve_adapter_module,
 )
@@ -83,6 +84,7 @@ from hf_adapters.hf_common import (
 )
 from tests._vision_helpers import (
     VLM_REFERENCE_CACHE_ENV,
+    VLMReference,
     build_vlm_batch,
     get_or_create_vlm_reference,
     resolve_model_revision,
@@ -161,9 +163,9 @@ def _adapter_teacher_forced_steps(
     # and ``result`` just grows by one column per step.
     result = padded_ids.clone()
     current_cache_len = padded_len
-    per_step_logits = []
+    per_step_logits: list[torch.Tensor] = []
 
-    def _write_token(tok_id):
+    def _write_token(tok_id: int) -> None:
         nonlocal result
         col = torch.full((batch_size, 1), tok_id, dtype=result.dtype)
         result = torch.cat([result, col], dim=1)
@@ -221,10 +223,14 @@ def _adapter_teacher_forced_steps(
     return per_step_logits
 
 
-@pytest.mark.parametrize(
-    "model_path", xfail_non_blocking(VISION_PATHS, table=NON_BLOCKING_VISION_MODELS)
-)
-def test_vlm_generate_spyre(model_path: str, trust_remote_code: bool | None) -> None:
+def run_vlm_compare(
+    model_path: str,
+    trust_remote_code: bool | None = None,
+    *,
+    on_reference: Callable[[], None] | None = None,
+    include_smoke: bool = False,
+) -> None:
+    """Compare stock and Spyre logits; optionally smoke-test the same loaded VLM."""
     if trust_remote_code is None:
         trust_remote_code = model_path in REMOTE_CODE_PATHS
     adapter = resolve_adapter_module(
@@ -261,7 +267,7 @@ def test_vlm_generate_spyre(model_path: str, trust_remote_code: bool | None) -> 
     model_revision = resolve_model_revision(model_path, trust_remote_code)
     cache_dir = os.environ.get(VLM_REFERENCE_CACHE_ENV) or None
 
-    def _compute_reference():
+    def _compute_reference() -> VLMReference:
         ref_model = load_ref_model(
             model_path=model_path,
             adapter_mod=adapter,
@@ -306,6 +312,13 @@ def test_vlm_generate_spyre(model_path: str, trust_remote_code: bool | None) -> 
     else:
         print(f"  Stock CPU reference generated (cache write failed: {cache_dir})")
 
+    assert len(ref_logits) == len(ref_tokens) == NUM_COMPARE_STEPS
+    assert all(
+        torch.isfinite(logits).all().item() for logits in ref_logits
+    ), "stock reference contains NaN/Inf logits"
+    if on_reference is not None:
+        on_reference()
+
     # --- Adapter on Spyre ---
     print("  Loading model for Spyre ...")
     model = AutoSpyreModelForImageTextToText.from_pretrained(
@@ -330,8 +343,6 @@ def test_vlm_generate_spyre(model_path: str, trust_remote_code: bool | None) -> 
     adapter_text = tokenizer.decode(
         adapter_sequences[0, prompt_len:], skip_special_tokens=True
     )
-    del model
-    gc.collect()
 
     # --- Per-step logit cosine (the assertion) + top-1 agreement (reported) ---
     # Teacher-forced, so every step is a clean same-prefix comparison. The cosine
@@ -341,11 +352,13 @@ def test_vlm_generate_spyre(model_path: str, trust_remote_code: bool | None) -> 
     # the argmax while cosine stays ~0.9999, which is benign substrate rounding,
     # not a regression.
     print("  step      | stock top1          | spyre top1          | match | cosine")
-    low_cosine = []
+    assert len(sp_logits) == len(ref_logits), "missing Spyre comparison steps"
+    low_cosine: list[tuple[str, float]] = []
     n_top1_match = 0
     for step, (rl, sl) in enumerate(zip(ref_logits, sp_logits)):
-        n = min(rl.shape[-1], sl.shape[-1])
-        rl, sl = rl[:n], sl[:n]
+        assert sl.shape[-1] >= rl.shape[-1], "Spyre logits omit vocabulary entries"
+        sl = sl[: rl.shape[-1]]  # Strip only adapter LM-head padding.
+        assert torch.isfinite(sl).all().item(), f"NaN/Inf at comparison step {step}"
         r_top1 = int(rl.argmax())
         s_top1 = int(sl.argmax())
         cosine = F.cosine_similarity(rl, sl, dim=-1).item()
@@ -363,8 +376,25 @@ def test_vlm_generate_spyre(model_path: str, trust_remote_code: bool | None) -> 
     print(f"  stock:   {ref_text!r}")
     print(f"  adapter free-run: {adapter_text!r}")
 
-    assert len(adapter_text) > 0, "adapter generated an empty string"
+    assert len(adapter_text.strip()) > 0, "adapter generated an empty string"
     assert not low_cosine, (
         f"adapter logits drifted below cosine {MIN_COSINE} (teacher-forced) at: "
         + ", ".join(f"{lab}: {c:.6f}" for lab, c in low_cosine)
     )
+
+    if include_smoke:
+        from tests.spyre.test_e2e_smoke_vision_spyre import run_vision_smoke_test
+
+        smoke = run_vision_smoke_test(
+            model_path, trust_remote_code=trust_remote_code, model=model
+        )
+        assert smoke["status"] == "PASS", smoke
+    del model
+    gc.collect()
+
+
+@pytest.mark.parametrize(
+    "model_path", xfail_non_blocking(VISION_PATHS, table=NON_BLOCKING_VISION_MODELS)
+)
+def test_vlm_generate_spyre(model_path: str, trust_remote_code: bool | None) -> None:
+    run_vlm_compare(model_path, trust_remote_code=trust_remote_code)

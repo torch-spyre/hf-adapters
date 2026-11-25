@@ -33,7 +33,7 @@ child only returns plain dicts over a queue.
 
 Flags:
 
-* ``--mode {generative,embedding}``  Required. See above.
+* ``--mode {generative,embedding,vision,vision_tower}`` Required. See above.
 * ``--model-list-file F``            Evaluate this JSON list. Mutually exclusive
   with ``--fetch``; one of the two is required.
 * ``--fetch``                        Fetch and filter here instead.
@@ -244,12 +244,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
-        choices=["embedding", "generative"],
+        choices=[mode.value for mode in ModelType],
         required=True,
         help=(
             "Which model class to evaluate: 'embedding' runs the "
             "embedding load + cosine-compare pipeline; 'generative' runs the "
-            "causal-LM load + token-compare pipeline."
+            "causal-LM load + token-compare pipeline. Vision modes run VLM logits and "
+            "generation checks, or registered tower feature comparison."
         ),
     )
     parser.add_argument(
@@ -323,7 +324,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="YYYY-MM-DD",
         help=(
             "Date to record as the snapshot date for all rows written in this run. "
-            "Use $(date -u +%Y-%m-%d) for today when invoking manually."
+            "Use $(date -u +%%Y-%%m-%%d) for today when invoking manually."
         ),
     )
     parser.add_argument(
@@ -399,6 +400,8 @@ def main(
     models_per_process = {
         ModelType.GENERATIVE: GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS,
         ModelType.EMBEDDING: EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS,
+        ModelType.VISION: 1,
+        ModelType.VISION_TOWER: 1,
     }
 
     adapter_dates: dict[str, str | None] = _get_adapter_dates()

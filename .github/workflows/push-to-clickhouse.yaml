@@ -1,7 +1,7 @@
 # =============================================================================
 # Weekly Spyre model-support scan -> ClickHouse
 #
-# Runs a weekly selection of HuggingFace Hub generative and embedding models
+# Runs a weekly selection of HuggingFace Hub generative, embedding, and vision models
 # through the CPU-load -> Spyre-verify pipeline
 # (tests/spyre/weekly_generation/weekly_test.py) and records the outcome directly
 # in ClickHouse (see result_sink.py), replacing the manual dev-instance upload +
@@ -13,6 +13,9 @@
 #      "likes in the last 30 days" -- `likes` itself is an all-time total),
 #   3. the curated list (resources/<type>_models_curated.txt), and
 #   4. every checkpoint registered for that type in tests/model_registry.py.
+# Vision discovery uses image-text-to-text (50 per ranking on scheduled runs).
+# Registered standalone towers run separately as vision_tower; selecting vision
+# on workflow_dispatch includes both VLM discovery and the registered towers.
 # (1)/(2) are counted after the fetcher's keep() filter; (3)/(4) bypass it and
 # are flagged curated.
 #
@@ -70,13 +73,15 @@ on:
         default: "1000"
       model_type:
         description: >-
-          Model type to scan
+          Model type to scan (vision includes registered standalone towers)
         required: false
         type: choice
         options:
           - all
           - generative
           - embedding
+          - vision
+          - vision_tower
         default: all
       snapshot_date:
         description: >-
@@ -117,6 +122,8 @@ env:
   CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
   STORAGE_1_DIR: /storage-1/hf-adapters
   HF_HOME: /storage-1/hf-adapters/.cache/huggingface
+  # Share the existing revision/input/config-keyed reference cache with VLM CI.
+  HF_ADAPTERS_VLM_REF_CACHE: /storage-1/hf-adapters/.cache/vlm-references
 
   # ---------------------------------------------------------------------------
   # ClickHouse target selection, resolved ONCE here and inherited by every job
@@ -446,6 +453,8 @@ jobs:
           python .github/scripts/generate_weekly_shards.py \
             --top-k-downloads ${{ inputs.top_k_downloads || '1000' }} \
             --top-k-trending ${{ inputs.top_k_trending || '1000' }} \
+            --top-k-vision-downloads ${{ github.event_name == 'workflow_dispatch' && (inputs.top_k_downloads || '1000') || '50' }} \
+            --top-k-vision-trending ${{ github.event_name == 'workflow_dispatch' && (inputs.top_k_trending || '1000') || '50' }} \
             --model-type ${{ github.event_name == 'workflow_dispatch' && (inputs.model_type || 'all') || 'all' }} \
             --snapshot-date "$SNAPSHOT_DATE" \
             --output-dir shards

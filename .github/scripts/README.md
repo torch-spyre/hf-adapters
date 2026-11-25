@@ -83,3 +83,45 @@ No workflow changes needed!
 - torch
 
 These are installed in the `generate-matrix` job before running the script.
+
+## Weekly vision model support
+
+`push-to-clickhouse.yaml` includes `vision` (full image-to-text models) and
+`vision_tower` (registered standalone towers). Selecting `model_type=vision`
+also includes the tower checks. Scheduled runs discover 50 eligible VLMs per
+ranking; manual runs use `top_k_downloads` and `top_k_trending`. The catalog
+merges both rankings, `resources/vision_models_curated.txt`, and every eligible
+registered VLM checkpoint. Ranked discovery uses the Hub's `image-text-to-text`
+tag and expands the candidate pool until the requested post-filter count is
+reached or the ranking is exhausted. Tower discovery is registry-only.
+
+Full VLMs compare stock-HF and Spyre logits through prefill and four
+teacher-forced decode steps (cosine floor 0.99), then generate over the five
+existing sample images with the same Spyre model. Towers compare stock-HF
+features with the compiled adapter, checking shapes, finite values, per-patch
+cosine, and relative L2 error. Each vision evaluation uses a fresh process and
+runs the stock reference before Spyre preparation. Results are written to the
+existing v2 capability tables; tower and VLM results remain distinct even for
+shared checkpoint paths and early worker failures. Existing access, architecture
+exclusion, remote-code, and model-size policies still apply.
+
+To launch a small scan from an implementation branch:
+
+```bash
+gh workflow run push-to-clickhouse.yaml --ref <branch> \
+  -f model_type=vision -f top_k_downloads=10 -f top_k_trending=10 \
+  -f clickhouse_db=dev
+```
+
+For a local catalog/sharding check without database access:
+
+```bash
+python .github/scripts/generate_weekly_shards.py --model-type vision \
+  --top-k-downloads 10 --top-k-trending 10 --snapshot-date 2026-11-25 \
+  --write-to-csv /tmp/vision-verdicts.csv --output-dir /tmp/vision-shards
+```
+
+`--write-to-csv` requires new output files. The workflow shares the VLM CI stock
+reference cache (`HF_ADAPTERS_VLM_REF_CACHE`); its revision/input/config keys
+prevent reuse across incompatible references. Latency is diagnostic, and these
+checks establish adapter parity and runtime support rather than caption quality.

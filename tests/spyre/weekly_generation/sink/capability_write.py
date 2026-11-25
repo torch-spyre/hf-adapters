@@ -99,7 +99,16 @@ def capability_results(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # failed before an adapter was ever selected (worker timeout/crash). Fall back to a
         # literal so the identity is still derivable -- capabilities.name is CHECKed non-empty,
         # so an empty one would be refused and the failure would go unrecorded entirely.
-        adapter = str(r.get("adapter_name") or "").strip() or "unknown"
+        adapter = str(r.get("adapter_name") or "").strip()
+        if not adapter:
+            # A full VLM and its tower can both time out before adapter resolution.
+            # Preserve distinct capability identities even for these early failures.
+            model_type = str(r.get("model_type") or "")
+            adapter = (
+                f"unknown_{model_type}"
+                if model_type in ("vision", "vision_tower")
+                else "unknown"
+            )
         failure_category = str(r.get("failure_category") or "")
         for field, backend in _BACKENDS:
             passed = bool(r.get(field))
