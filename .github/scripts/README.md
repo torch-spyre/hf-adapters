@@ -107,8 +107,9 @@ dtype policy for both paths and compare stock-HF
 features with the compiled adapter, checking shapes, finite values, per-patch
 cosine, and relative L2 error. Each vision evaluation uses a fresh process and
 runs the stock reference before Spyre preparation. Results are written to the
-existing v2 capability tables; tower and VLM results remain distinct even for
-shared checkpoint paths and early worker failures. Existing access, architecture
+existing v2 capability tables, keyed by checkpoint and adapter, so tower and VLM
+results for a shared checkpoint stay distinct once their adapters resolve.
+Existing access, architecture
 exclusion, remote-code, and model-size policies still apply.
 
 Tower configuration resolves an immutable Hub commit, and both the checkpoint

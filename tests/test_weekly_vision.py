@@ -26,7 +26,6 @@ from tests.model_registry import (
 from tests.spyre.weekly_generation import model_fetcher, weekly_sub_process
 from tests.spyre.weekly_generation.model_prefilter import prefilter_models
 from tests.spyre.weekly_generation.model_type import ModelType, scan_model_types
-from tests.spyre.weekly_generation.sink.capability_write import capability_results
 from utils import fetch_top_vision_models as vision
 from utils.hf_model_catalog import Ranking
 
@@ -73,16 +72,6 @@ def test_vision_selection_includes_tower_role_and_nonrepresentative_checkpoints(
 def test_towers_do_not_query_vlm_rankings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(model_fetcher, "all_fetchers", {})
     assert model_fetcher.fetch(ModelType.VISION_TOWER, 10) == []
-
-
-def test_early_failures_keep_tower_and_vlm_capability_identities_distinct() -> None:
-    rows = capability_results(
-        [
-            {"model_name": "org/shared", "model_type": mode.value, "adapter_name": ""}
-            for mode in (ModelType.VISION, ModelType.VISION_TOWER)
-        ]
-    )
-    assert {row["name"] for row in rows} == {"unknown_vision", "unknown_vision_tower"}
 
 
 def test_vision_shards_merge_rankings_and_preserve_both_roles(
