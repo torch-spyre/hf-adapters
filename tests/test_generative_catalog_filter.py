@@ -1,5 +1,7 @@
 """Offline tests for generation discovery; run with ``pytest --noconftest``."""
 
+import json
+from pathlib import Path
 from types import ModuleType
 from unittest.mock import Mock
 
@@ -22,7 +24,10 @@ from utils.hf_model_catalog import Ranking
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hf_adapters import _model_loading
+
     monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr(_model_loading, "cached_file", Mock(return_value=None))
 
     def reject_request(
         self: httpx.Client, request: httpx.Request, **kwargs: object
@@ -71,7 +76,7 @@ def test_encoder_only_configs_are_rejected(
         "encoder-only architecture does not support generation",
     )
     request.assert_called_once_with(
-        "org/model", token="test-token", trust_remote_code=False
+        "org/model", subfolder="", token="test-token", trust_remote_code=False
     )
 
 
@@ -243,3 +248,51 @@ def test_config_metadata_is_not_reused_across_catalog_fetches(
     assert first[0]["config_class"] == "GPT2Config"
     assert second[0]["config_class"] == PretrainedConfig.__name__
     assert request.call_count == 2
+
+
+@pytest.mark.parametrize("nested_encoder", [False, True])
+def test_filter_and_loader_use_the_same_nested_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, nested_encoder: bool
+) -> None:
+    from transformers.utils.hub import cached_file
+
+    from hf_adapters import _model_loading
+    from hf_adapters import auto_spyre_model as auto
+
+    root_config: PretrainedConfig = GPT2Config() if nested_encoder else BertConfig()
+    nested_config: PretrainedConfig = BertConfig() if nested_encoder else GPT2Config()
+    root_config.save_pretrained(tmp_path)
+    nested_config.save_pretrained(tmp_path / "0_Transformer")
+    modules: list[dict[str, object]] = [
+        {
+            "idx": 0,
+            "name": "0",
+            "path": "0_Transformer",
+            "type": "sentence_transformers.models.Transformer",
+        }
+    ]
+    (tmp_path / "modules.json").write_text(json.dumps(modules), encoding="utf-8")
+    monkeypatch.setattr(_model_loading, "cached_file", cached_file)
+
+    expected: ModuleType = auto.hf_bert if nested_encoder else auto.hf_gpt2
+    assert auto.resolve_adapter_module(str(tmp_path)) is expected
+
+    request = Mock(wraps=AutoConfig.from_pretrained)
+    monkeypatch.setattr(generative.AutoConfig, "from_pretrained", request)
+    monkeypatch.setattr(
+        generative.HfApi,
+        "list_models",
+        Mock(return_value=[_model(str(tmp_path), root_config.model_type)]),
+    )
+
+    rows: list[dict[str, object]] = generative.fetch_top_generative_models(limit=1)
+
+    if nested_encoder:
+        assert rows == []
+    else:
+        assert [row["model_id"] for row in rows] == [str(tmp_path)]
+        assert rows[0]["config_class"] == "GPT2Config"
+    # The nested config also supplies enrichment metadata without another load.
+    request.assert_called_once_with(
+        str(tmp_path), subfolder="0_Transformer", token=False, trust_remote_code=False
+    )

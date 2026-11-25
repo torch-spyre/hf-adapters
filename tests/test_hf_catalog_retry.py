@@ -23,9 +23,12 @@ _NOW = datetime(2026, 11, 22, tzinfo=timezone.utc)
 @pytest.fixture(autouse=True)
 def waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """Record delays without sleeping and reject any accidental live HTTP call."""
+    from hf_adapters import _model_loading
+
     delays: list[float] = []
     monkeypatch.setattr(catalog.time, "sleep", delays.append)
     monkeypatch.setattr(catalog.time, "time", lambda: _NOW.timestamp())
+    monkeypatch.setattr(_model_loading, "cached_file", Mock(return_value=None))
 
     def no_network(
         self: httpx.Client, request: httpx.Request, **kwargs: object
@@ -222,6 +225,56 @@ def test_exhaustion_fails_visibly_instead_of_dropping_models(
 
     assert caught.value.__cause__ is error
     assert request.call_count == 5
+    assert waits == ([135.0] * 4 if status == 429 else [2.0, 4.0, 8.0, 16.0])
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_generation_layout_discovery_recovers_and_preserves_config_metadata(
+    monkeypatch: pytest.MonkeyPatch, status: int, waits: list[float]
+) -> None:
+    from hf_adapters import _model_loading
+
+    layout_request = Mock(
+        side_effect=[_http_error(status, {"Retry-After": "134"}), None]
+    )
+    monkeypatch.setattr(_model_loading, "cached_file", layout_request)
+    config_request = Mock(return_value=GPT2Config())
+    monkeypatch.setattr(catalog.AutoConfig, "from_pretrained", config_request)
+    config_types: dict[str, str] = {}
+
+    assert keep_generative(_model("gpt2"), False, config_types=config_types) == (
+        True,
+        "",
+    )
+    assert config_types == {"org/model": "GPT2Config"}
+    assert layout_request.call_count == 2
+    config_request.assert_called_once_with(
+        "org/model", subfolder="", token=False, trust_remote_code=False
+    )
+    assert waits == ([135.0] if status == 429 else [2.0])
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_generation_layout_retry_exhaustion_fails_visibly(
+    monkeypatch: pytest.MonkeyPatch, status: int, waits: list[float]
+) -> None:
+    from hf_adapters import _model_loading
+
+    error = _http_error(status, {"Retry-After": "134"})
+    layout_request = Mock(side_effect=error)
+    monkeypatch.setattr(_model_loading, "cached_file", layout_request)
+    config_request = Mock(return_value=GPT2Config())
+    monkeypatch.setattr(catalog.AutoConfig, "from_pretrained", config_request)
+    config_types: dict[str, str] = {}
+
+    with pytest.raises(
+        catalog.HubRetryExhaustedError, match=f"{status} after 5 attempts"
+    ):
+        keep_generative(_model("gpt2"), False, config_types=config_types)
+
+    assert layout_request.call_count == 5
+    config_request.assert_not_called()
+    assert config_types == {}
     assert waits == ([135.0] * 4 if status == 429 else [2.0, 4.0, 8.0, 16.0])
 
 

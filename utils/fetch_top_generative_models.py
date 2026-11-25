@@ -62,12 +62,16 @@ def _keep_generation_config(
     Do not resolve the adapter through ``resolve_adapter_module`` here: dimension
     validation and unsupported-adapter verdicts still belong to the worker.
     """
+    from hf_adapters._model_loading import model_subfolder
     from hf_adapters.auto_spyre_model import select_adapter_module
 
     try:
         config: PretrainedConfig = _retry_hub_call(
             lambda: AutoConfig.from_pretrained(
-                model.id, token=token, trust_remote_code=False
+                model.id,
+                subfolder=model_subfolder(model.id),
+                token=token,
+                trust_remote_code=False,
             ),
             description=f"config[{model.id}]",
         )
