@@ -83,6 +83,12 @@ def test_sentence_transformers_multimodal_backend(model_path: str) -> None:
             "image": cpu_model.encode(image, convert_to_tensor=True).cpu(),
             "image_list": cpu_model.encode([image], convert_to_tensor=True).cpu(),
         }
+        mixed_inputs: list[dict[str, Any]] = []
+        if cpu_model.supports(("text", "image")):
+            mixed_inputs = [{"text": TEXT_PROMPTS[1], "image": image}]
+            reference["text_image"] = cpu_model.encode(
+                mixed_inputs, convert_to_tensor=True
+            ).cpu()
         mixed_length_prompts: list[str] = []
         audio_inputs: list[NDArray[np.float32]] = []
         audio_kwargs: dict[str, Any] = {}
@@ -163,6 +169,10 @@ def test_sentence_transformers_multimodal_backend(model_path: str) -> None:
                 "image": model.encode(image, convert_to_tensor=True).cpu(),
                 "image_list": model.encode([image], convert_to_tensor=True).cpu(),
             }
+            if mixed_inputs:
+                actual["text_image"] = model.encode(
+                    mixed_inputs, convert_to_tensor=True
+                ).cpu()
             if mixed_length_prompts:
                 actual["mixed_length_text"] = model.encode(
                     mixed_length_prompts, convert_to_tensor=True, **mixed_text_kwargs

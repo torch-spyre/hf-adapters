@@ -163,13 +163,15 @@ encoders for text/image retrieval and similarity scoring. Both belong to
 `encode()` on CPU against `backend="spyre"` for text, a single image, and an image
 list (`make sentence_transformers_multimodal_tests`, CI suite key:
 `sentence_transformers_multimodal`). EmbeddingGemma 2 also exercises mixed-length
-text batches and audio waveforms of different lengths.
+text batches and audio waveforms of different lengths. Models supporting combined
+text/image inputs also exercise that public SentenceTransformers route.
 
 | Model | model\_type | Text / vision head\_dim | Embedding width | Status |
 |-------|-----------|------------------------|-----------------|--------|
 | sentence-transformers/clip-ViT-B-32 | clip | 64 / 64 | 512 | Verified: text and single-image scenarios |
 | google/siglip2-giant-opt-patch16-384 | siglip | 72→128 / 96→128 | 1536 | Verified: text and single-image scenarios |
 | google/embeddinggemma-2 | embedding\_gemma2 | 256 (local), 512 (global) / 64→128 | 768 | Verified: text, image, and audio embedding scenarios (bf16) |
+| Qwen/Qwen3-VL-Embedding-2B | qwen3\_vl | 128 / 64→128 | 2048 | CPU parity verified; Spyre validation pending (bf16) |
 
 `hf_embeddinggemma2.py` preserves the stock multimodal forward, including
 interleaved text, images, video frames, and audio. The bidirectional text
@@ -196,6 +198,27 @@ passes with minimum cosine similarity 0.999961 for text, 0.999937 for images,
 helper buffer preservation, no parameter/buffer device transfers during encodes,
 and matching CPU caption ranking. The audio encoder stays on CPU while its
 outputs feed the Spyre text transformer. Interleaved video parity is tested on CPU.
+
+`hf_qwen3_vl_embedding.py` preserves HF's multimodal frontend, including
+spatial M-RoPE, packed image/video vision attention, and DeepStack injection
+into the first text layers. Text reuses Qwen3's compiled blocks in cache-free
+prefill mode; vision Q/K/V/O reuse the shared head-padding helpers with the
+original attention scale. Both towers use shared matrix RoPE. Token lookup,
+vision Conv3d patch embedding, learned position interpolation, patch mergers,
+and media scattering stay on CPU. The placement and native-forward hooks from
+EmbeddingGemma 2 keep those helpers resident on CPU across repeated ST encodes.
+
+Load with `SentenceTransformer("Qwen/Qwen3-VL-Embedding-2B", backend="spyre")`
+after importing `hf_adapters.st_backend`, or use `AutoSpyreModel` with an
+`AutoProcessor`. SentenceTransformers retains the checkpoint's chat template,
+instructions, last-token pooling, normalization, and dimension truncation.
+The checkpoint defaults to **bfloat16** and outputs 2048-dimensional vectors.
+SentenceTransformers 6.2.0 or newer is needed for mixed device placement; the
+processor also requires torchvision (`uv sync --group test` on the pod).
+Generation caches, intermediate hidden-state/attention outputs, and custom 4D
+text masks are unsupported. Offline tests cover text padding, 2D/3D/4D position
+IDs, packed images/video frames, mixed image/video DeepStack features, full-graph
+capture, and exact CPU helper-buffer preservation.
 
 Multi-image batches remain excluded from the suite pending
 [#747](https://github.com/torch-spyre/hf-adapters/issues/747).
@@ -401,6 +424,7 @@ pattern, norms, and weight layout.
 | hf\_clip.py | clip (text/image embeddings) | 1 | sentence-transformers/clip-ViT-B-32; other CLIP ViT dual encoders (openai/clip-vit-base-patch32/16, clip-ViT-B-16, clip-ViT-L-14) |
 | hf\_siglip.py | siglip (text/image embeddings) | 1 | Other fixed-resolution SigLIP / SigLIP2 dual encoders |
 | hf\_embeddinggemma2.py | embedding\_gemma2 / embedding\_gemma2\_text | 1 | EmbeddingGemma 2, with CPU audio and shared Gemma 4 vision execution |
+| hf\_qwen3\_vl\_embedding.py | qwen3\_vl / qwen3\_vl\_text | 1 | Qwen3-VL-Embedding-2B, with shared Qwen3 text blocks and CPU patch mergers |
 | hf\_mistral3\_vision\_mm.py | mistral3 (multimodal) | 2 | Mistral-Small-3.1/3.2 Vision; Ministral-3-14B-Instruct-2512 (ministral3 text backbone, bf16) |
 | hf\_pixtral\_vision.py | Pixtral vision tower | 1 | Pixtral towers of Mistral3 Vision checkpoints |
 | hf\_bert.py | bert | 3 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants, BERT NER/POS/chunking fine-tunes |
