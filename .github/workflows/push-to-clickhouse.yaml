@@ -13,7 +13,7 @@
 #      "likes in the last 30 days" -- `likes` itself is an all-time total),
 #   3. the curated list (resources/<type>_models_curated.txt), and
 #   4. every checkpoint registered for that type in tests/model_registry.py.
-# Vision discovery uses image-text-to-text (50 per ranking on scheduled runs).
+# Vision discovery ranks the Hub's image-text-to-text models.
 # Registered standalone towers run separately as vision_tower; selecting vision
 # on workflow_dispatch includes both VLM discovery and the registered towers.
 # (1)/(2) are counted after the fetcher's keep() filter; (3)/(4) bypass it and
@@ -453,8 +453,6 @@ jobs:
           python .github/scripts/generate_weekly_shards.py \
             --top-k-downloads ${{ inputs.top_k_downloads || '1000' }} \
             --top-k-trending ${{ inputs.top_k_trending || '1000' }} \
-            --top-k-vision-downloads ${{ github.event_name == 'workflow_dispatch' && (inputs.top_k_downloads || '1000') || '50' }} \
-            --top-k-vision-trending ${{ github.event_name == 'workflow_dispatch' && (inputs.top_k_trending || '1000') || '50' }} \
             --model-type ${{ github.event_name == 'workflow_dispatch' && (inputs.model_type || 'all') || 'all' }} \
             --snapshot-date "$SNAPSHOT_DATE" \
             --output-dir shards

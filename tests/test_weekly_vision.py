@@ -281,7 +281,7 @@ def test_ranked_fetch_expands_until_postfilter_limit(
     assert len(checked) == len(set(checked))
 
 
-def test_workflow_exposes_vision_and_scheduled_ranking_budget() -> None:
+def test_workflow_exposes_vision_with_shared_ranking_budget() -> None:
     path = Path(__file__).parents[1] / ".github/workflows/push-to-clickhouse.yaml"
     workflow: dict[str, Any] = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
     options = workflow["on"]["workflow_dispatch"]["inputs"]["model_type"]["options"]
@@ -291,6 +291,6 @@ def test_workflow_exposes_vision_and_scheduled_ranking_budget() -> None:
         for step in workflow["jobs"]["generate-matrix"]["steps"]
         if step.get("name") == "Generate shards"
     )
-    assert (
-        "--top-k-vision-downloads" in command and "--top-k-vision-trending" in command
-    )
+    # VLMs share the generative/embedding ranking counts; no vision-only override.
+    assert "--top-k-downloads" in command and "--top-k-trending" in command
+    assert "--top-k-vision" not in command

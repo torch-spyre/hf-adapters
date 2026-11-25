@@ -137,8 +137,6 @@ def generate_shards(
     model_types: list[ModelType],
     snapshot_date: date,
     write_to_csv: Path | None = None,
-    top_k_vision_downloads: int | None = None,
-    top_k_vision_trending: int | None = None,
 ) -> list[dict]:
     """Fetch each requested model type's list once, write shard JSON files,
     and return the combined matrix (list of {mode, shard_index, shard_file,
@@ -195,18 +193,8 @@ def generate_shards(
             rows: list[dict] = fetch_and_filter(
                 model_type=model_type,
                 snapshot_date=snapshot_date,
-                top_k_downloads=(
-                    top_k_vision_downloads
-                    if model_type == ModelType.VISION
-                    and top_k_vision_downloads is not None
-                    else top_k_downloads
-                ),
-                top_k_trending=(
-                    top_k_vision_trending
-                    if model_type == ModelType.VISION
-                    and top_k_vision_trending is not None
-                    else top_k_trending
-                ),
+                top_k_downloads=top_k_downloads,
+                top_k_trending=top_k_trending,
                 sink=sink,
                 max_params=max_params,
             )
@@ -281,18 +269,6 @@ def main() -> None:
             "Top models per model type by the Hub's trending score, counted "
             "after the keep() filter (0 skips this ranking)."
         ),
-    )
-    parser.add_argument(
-        "--top-k-vision-downloads",
-        type=int,
-        default=None,
-        help="Override the downloads count for VLMs only.",
-    )
-    parser.add_argument(
-        "--top-k-vision-trending",
-        type=int,
-        default=None,
-        help="Override the trending count for VLMs only.",
     )
     parser.add_argument(
         "--max-params",
@@ -392,8 +368,6 @@ def main() -> None:
     matrix = generate_shards(
         top_k_downloads=args.top_k_downloads,
         top_k_trending=args.top_k_trending,
-        top_k_vision_downloads=args.top_k_vision_downloads,
-        top_k_vision_trending=args.top_k_vision_trending,
         max_params=args.max_params,
         shard_size_generative=args.shard_size_generative,
         shard_size_embedding=args.shard_size_embedding,

@@ -122,7 +122,7 @@ def fetch_curated_vision_models_metadata(
 
 
 if __name__ == "__main__":
-    limit_: int = int(sys.argv[1]) if len(sys.argv) > 1 else 50
+    limit_: int = int(sys.argv[1]) if len(sys.argv) > 1 else 10000
     fetch_top_vision_models(
         limit=limit_, output_csv=RESOURCES_DIR / "top_vision_models.csv"
     )

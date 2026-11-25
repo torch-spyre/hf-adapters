@@ -88,8 +88,8 @@ These are installed in the `generate-matrix` job before running the script.
 
 `push-to-clickhouse.yaml` includes `vision` (full image-to-text models) and
 `vision_tower` (registered standalone towers). Selecting `model_type=vision`
-also includes the tower checks. Scheduled runs discover 50 eligible VLMs per
-ranking; manual runs use `top_k_downloads` and `top_k_trending`. The catalog
+also includes the tower checks. Like generative and embedding models, VLMs use
+`top_k_downloads` and `top_k_trending` (1000 each by default). The catalog
 merges both rankings, `resources/vision_models_curated.txt`, and every eligible
 registered VLM checkpoint. Ranked discovery uses the Hub's `image-text-to-text`
 tag and expands the candidate pool until the requested post-filter count is
