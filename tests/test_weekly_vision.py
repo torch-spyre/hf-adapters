@@ -23,6 +23,7 @@ from tests.model_registry import (
     WEEKLY_SCAN_VISION_TOWER_PATHS,
 )
 from tests.spyre.weekly_generation import model_fetcher, weekly_sub_process
+from tests.spyre.weekly_generation.model_prefilter import prefilter_models
 from tests.spyre.weekly_generation.model_type import ModelType, scan_model_types
 from tests.spyre.weekly_generation.sink.capability_write import capability_results
 from utils import fetch_top_vision_models as vision
@@ -100,11 +101,22 @@ def test_vision_shards_merge_rankings_and_preserve_both_roles(
         calls.append((limit, ranking))
         return metadata(["org/shared", f"org/{ranking}"])
 
+    def tower_metadata(model_ids: list[str]) -> list[dict[str, Any]]:
+        # The enclosing checkpoint exceeds the size ceiling and the x4 threshold.
+        return [
+            {"model_id": model_id, "parameters": 90_000_000_000}
+            for model_id in model_ids
+        ]
+
     monkeypatch.setitem(model_fetcher.all_fetchers, ModelType.VISION, ranked)
     for mode in (ModelType.VISION, ModelType.VISION_TOWER):
         monkeypatch.setitem(model_fetcher.all_curated_loaders, mode, lambda: [])
         monkeypatch.setitem(model_fetcher.all_registry_paths, mode, ["org/shared"])
-        monkeypatch.setitem(model_fetcher.all_metadata_fetchers, mode, metadata)
+        monkeypatch.setitem(
+            model_fetcher.all_metadata_fetchers,
+            mode,
+            tower_metadata if mode == ModelType.VISION_TOWER else metadata,
+        )
     matrix: list[dict[str, Any]] = sharder.generate_shards(
         top_k_downloads=10,
         top_k_trending=10,
@@ -132,6 +144,34 @@ def test_vision_shards_merge_rankings_and_preserve_both_roles(
     ]
     assert rows[ModelType.VISION][0]["curated"] is True
     assert [r["model_id"] for r in rows[ModelType.VISION_TOWER]] == ["org/shared"]
+    assert (
+        next(
+            item["runner"] for item in matrix if item["mode"] == ModelType.VISION_TOWER
+        )
+        == "x1"
+    )
+
+
+def test_tower_size_bypass_preserves_vlm_size_and_architecture_gates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "tests.spyre.weekly_generation.model_prefilter._arch_excluded_paths",
+        lambda: {"org/excluded"},
+    )
+    rows: list[dict[str, Any]] = [
+        {"model_id": "org/huge-vlm", "parameters": 90_000_000_000},
+        {"model_id": "org/excluded", "parameters": 90_000_000_000},
+    ]
+    towers = prefilter_models(rows, max_params=1000, model_type=ModelType.VISION_TOWER)
+    vlms = prefilter_models(rows, max_params=1000, model_type=ModelType.VISION)
+    assert [row["model_id"] for row in towers.keep] == ["org/huge-vlm"]
+    assert [row.failure_category for row in towers.skipped] == ["arch_excluded"]
+    assert not vlms.keep
+    assert [row.failure_category for row in vlms.skipped] == [
+        "model_too_large",
+        "arch_excluded",
+    ]
 
 
 @pytest.mark.parametrize(

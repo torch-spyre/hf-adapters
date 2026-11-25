@@ -20,6 +20,7 @@ from transformers import (
     SiglipVisionModel,
 )
 
+from hf_adapters.auto_spyre_model import dtype_for_model_path
 from hf_adapters.hf_common import DEVICE
 from tests.model_registry import VISION_MODELS
 
@@ -140,7 +141,10 @@ def run_tower_compare(
 ) -> None:
     """Run stock forward before preparation, then the compiled tower on Spyre."""
     adapter = resolve_tower_adapter(model_path)
-    tower = load_stock_tower(model_path, torch.float16)
+    dtype: torch.dtype = dtype_for_model_path(
+        model_path, target_device="spyre", trust_remote_code=False
+    )
+    tower = load_stock_tower(model_path, dtype)
     inputs = tower_inputs(tower)
     with torch.no_grad():
         reference: torch.Tensor = (

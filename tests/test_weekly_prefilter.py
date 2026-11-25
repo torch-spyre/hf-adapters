@@ -127,11 +127,11 @@ class TestPrefilterIsPure:
     no sink at all — and these tests run with no database driver installed.
     """
 
-    def test_takes_no_sink(self) -> None:
+    def test_takes_no_sink(self: TestPrefilterIsPure) -> None:
         """A sink parameter would reintroduce the dependency this split removed."""
         params = inspect.signature(prefilter_models).parameters
         assert "sink" not in params
-        assert set(params) == {"models", "max_params"}
+        assert set(params) == {"models", "max_params", "model_type"}
 
     def test_every_model_lands_in_exactly_one_list(self) -> None:
         rows = [

@@ -94,10 +94,14 @@ merges both rankings, `resources/vision_models_curated.txt`, and every eligible
 registered VLM checkpoint. Ranked discovery uses the Hub's `image-text-to-text`
 tag and expands the candidate pool until the requested post-filter count is
 reached or the ranking is exhausted. Tower discovery is registry-only.
+Tower metadata reports the full checkpoint's parameter count, so tower checks
+bypass the checkpoint-size gate and always use the x1 runner tier. Architecture
+exclusions still apply.
 
 Full VLMs compare stock-HF and Spyre logits through prefill and four
 teacher-forced decode steps (cosine floor 0.99), then generate over the five
-existing sample images with the same Spyre model. Towers compare stock-HF
+existing sample images with the same Spyre model. Towers use the shared checkpoint
+dtype policy for both paths and compare stock-HF
 features with the compiled adapter, checking shapes, finite values, per-patch
 cosine, and relative L2 error. Each vision evaluation uses a fresh process and
 runs the stock reference before Spyre preparation. Results are written to the

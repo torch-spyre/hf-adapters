@@ -103,10 +103,11 @@ def test_stock_tower_loader_extracts_all_weights(
 
 
 @pytest.mark.parametrize("kind", ["siglip", "pixtral", "gemma4"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_weekly_tower_pipeline_matches_stock_on_cpu(
-    monkeypatch: pytest.MonkeyPatch, kind: str
+    monkeypatch: pytest.MonkeyPatch, kind: str, dtype: torch.dtype
 ) -> None:
-    tower = _tiny_tower(kind)
+    tower = _tiny_tower(kind).to(dtype=dtype)
     names = {
         "siglip": "hf_siglip_vision",
         "pixtral": "hf_pixtral_vision",
@@ -119,15 +120,29 @@ def test_weekly_tower_pipeline_matches_stock_on_cpu(
     def eager(function: Any, **kwargs: Any) -> Any:
         return function
 
+    def dtype_policy(
+        model_path: str, *, target_device: str, trust_remote_code: bool
+    ) -> torch.dtype:
+        assert target_device == "spyre" and trust_remote_code is False
+        return dtype
+
+    loaded_dtypes: list[torch.dtype] = []
+
+    def load_stock(model_path: str, dtype: torch.dtype) -> PreTrainedModel:
+        loaded_dtypes.append(dtype)
+        return tower
+
     monkeypatch.setattr(torch, "compile", eager)
     monkeypatch.setattr(vision_tower, "DEVICE", "cpu")
     monkeypatch.setattr(vision_tower, "resolve_tower_adapter", lambda path: adapter)
-    monkeypatch.setattr(vision_tower, "load_stock_tower", lambda path, dtype: tower)
+    monkeypatch.setattr(vision_tower, "dtype_for_model_path", dtype_policy)
+    monkeypatch.setattr(vision_tower, "load_stock_tower", load_stock)
     reference_completed: list[bool] = []
     vision_tower.run_tower_compare(
         "org/test", on_reference=lambda: reference_completed.append(True)
     )
     assert reference_completed == [True]
+    assert loaded_dtypes == [dtype]
 
 
 @pytest.mark.parametrize("corruption", ["nan", "inf", "shape", "scale", "direction"])

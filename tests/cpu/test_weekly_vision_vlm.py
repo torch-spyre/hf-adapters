@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gc
+import weakref
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -13,8 +15,12 @@ from tests.spyre import test_e2e_smoke_vision_spyre as smoke
 from tests.spyre import test_vlm_e2e_spyre as vlm
 
 
+class _WeakModel(SimpleNamespace):
+    __slots__ = ("__weakref__",)
+
+
 @pytest.mark.parametrize(
-    "corruption", [None, "nan", "missing_step", "missing_vocab", "drift"]
+    "corruption", [None, "nan", "missing_step", "missing_vocab", "drift", "empty_text"]
 )
 def test_callable_verifier_checks_logits_before_smoke_and_reuses_model(
     monkeypatch: pytest.MonkeyPatch, corruption: str | None
@@ -36,7 +42,7 @@ def test_callable_verifier_checks_logits_before_smoke_and_reuses_model(
     )
 
     def decode(ids: Any, **kwargs: Any) -> str:
-        return "caption"
+        return "" if corruption == "empty_text" else "caption"
 
     def generate(**kwargs: Any) -> torch.Tensor:
         return torch.tensor([[1, 2, 3, 4, 5]])
@@ -47,7 +53,7 @@ def test_callable_verifier_checks_logits_before_smoke_and_reuses_model(
         "attention_mask": torch.ones(1, 2),
         "pixel_values": torch.zeros(1, 3, 4, 4),
     }
-    model = SimpleNamespace(generate=generate)
+    model = _WeakModel(generate=generate)
     monkeypatch.setattr(
         vlm, "resolve_adapter_module", lambda *a, **kw: ModuleType("adapter")
     )
@@ -79,11 +85,17 @@ def test_callable_verifier_checks_logits_before_smoke_and_reuses_model(
         )
         assert smoke_models == [model]
     else:
-        with pytest.raises(AssertionError):
+        with pytest.raises(AssertionError) as retained_failure:
             vlm.run_vlm_compare(
                 "org/model",
                 include_smoke=True,
                 on_reference=lambda: reference_completed.append(True),
             )
         assert not smoke_models
+        # Keep the failure traceback alive, as pytest does between checkpoints.
+        assert retained_failure.value.__traceback__ is not None
+        model_ref = weakref.ref(model)
+        del model
+        gc.collect()
+        assert model_ref() is None, "failed verifier retained its loaded model"
     assert reference_completed == [True]

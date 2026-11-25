@@ -325,72 +325,78 @@ def run_vlm_compare(
         model_name_or_path=model_path, dtype=dtype, trust_remote_code=trust_remote_code
     )
 
-    # Per-step adapter logits on Spyre, teacher-forced on stock's tokens (so the
-    # comparison is free of greedy-fork drift while still exercising decode).
-    print(f"  Running adapter prefill + {len(ref_tokens) - 1} forced decode steps ...")
-    with torch.no_grad():
-        sp_logits = _adapter_teacher_forced_steps(adapter, model, batch, ref_tokens)
-
-    # Free-run caption — human-eyeball diagnostic + non-degeneracy check only.
-    print("  Running adapter free-run generate (diagnostic) ...")
-    prompt_len = batch["input_ids"].shape[1]
-    with torch.no_grad():
-        adapter_sequences = model.generate(
-            max_new_tokens=MAX_NEW_TOKENS,
-            do_sample=False,
-            **batch,
-        )
-    adapter_text = tokenizer.decode(
-        adapter_sequences[0, prompt_len:], skip_special_tokens=True
-    )
-
-    # --- Per-step logit cosine (the assertion) + top-1 agreement (reported) ---
-    # Teacher-forced, so every step is a clean same-prefix comparison. The cosine
-    # floor is the hard check: a real decode bug (KV-cache, mask, RoPE) tanks the
-    # whole logit vector. Top-1 agreement is printed for visibility but NOT
-    # asserted — a single near-tie (two candidates within fp16 rounding) can flip
-    # the argmax while cosine stays ~0.9999, which is benign substrate rounding,
-    # not a regression.
-    print("  step      | stock top1          | spyre top1          | match | cosine")
-    assert len(sp_logits) == len(ref_logits), "missing Spyre comparison steps"
-    low_cosine: list[tuple[str, float]] = []
-    n_top1_match = 0
-    for step, (rl, sl) in enumerate(zip(ref_logits, sp_logits)):
-        assert sl.shape[-1] >= rl.shape[-1], "Spyre logits omit vocabulary entries"
-        sl = sl[: rl.shape[-1]]  # Strip only adapter LM-head padding.
-        assert torch.isfinite(sl).all().item(), f"NaN/Inf at comparison step {step}"
-        r_top1 = int(rl.argmax())
-        s_top1 = int(sl.argmax())
-        cosine = F.cosine_similarity(rl, sl, dim=-1).item()
-        ok = r_top1 == s_top1
-        n_top1_match += ok
-        label = "prefill" if step == 0 else f"decode-{step}"
+    try:
+        # Per-step adapter logits on Spyre, teacher-forced on stock's tokens (so the
+        # comparison is free of greedy-fork drift while still exercising decode).
         print(
-            f"  {label:>9} | {r_top1:>6} {tokenizer.decode([r_top1])!r:>11} "
-            f"| {s_top1:>6} {tokenizer.decode([s_top1])!r:>11} "
-            f"| {'OK' if ok else 'tie?':>5} | {cosine:.6f}"
+            f"  Running adapter prefill + {len(ref_tokens) - 1} forced decode steps ..."
         )
-        if cosine < MIN_COSINE:
-            low_cosine.append((label, cosine))
-    print(f"  top-1 agreement: {n_top1_match}/{len(ref_logits)} steps (reported)")
-    print(f"  stock:   {ref_text!r}")
-    print(f"  adapter free-run: {adapter_text!r}")
+        with torch.no_grad():
+            sp_logits = _adapter_teacher_forced_steps(adapter, model, batch, ref_tokens)
 
-    assert len(adapter_text.strip()) > 0, "adapter generated an empty string"
-    assert not low_cosine, (
-        f"adapter logits drifted below cosine {MIN_COSINE} (teacher-forced) at: "
-        + ", ".join(f"{lab}: {c:.6f}" for lab, c in low_cosine)
-    )
-
-    if include_smoke:
-        from tests.spyre.test_e2e_smoke_vision_spyre import run_vision_smoke_test
-
-        smoke = run_vision_smoke_test(
-            model_path, trust_remote_code=trust_remote_code, model=model
+        # Free-run caption — human-eyeball diagnostic + non-degeneracy check only.
+        print("  Running adapter free-run generate (diagnostic) ...")
+        prompt_len = batch["input_ids"].shape[1]
+        with torch.no_grad():
+            adapter_sequences = model.generate(
+                max_new_tokens=MAX_NEW_TOKENS,
+                do_sample=False,
+                **batch,
+            )
+        adapter_text = tokenizer.decode(
+            adapter_sequences[0, prompt_len:], skip_special_tokens=True
         )
-        assert smoke["status"] == "PASS", smoke
-    del model
-    gc.collect()
+
+        # --- Per-step logit cosine (the assertion) + top-1 agreement (reported) ---
+        # Teacher-forced, so every step is a clean same-prefix comparison. The cosine
+        # floor is the hard check: a real decode bug (KV-cache, mask, RoPE) tanks the
+        # whole logit vector. Top-1 agreement is printed for visibility but NOT
+        # asserted — a single near-tie (two candidates within fp16 rounding) can flip
+        # the argmax while cosine stays ~0.9999, which is benign substrate rounding,
+        # not a regression.
+        print(
+            "  step      | stock top1          | spyre top1          | match | cosine"
+        )
+        assert len(sp_logits) == len(ref_logits), "missing Spyre comparison steps"
+        low_cosine: list[tuple[str, float]] = []
+        n_top1_match = 0
+        for step, (rl, sl) in enumerate(zip(ref_logits, sp_logits)):
+            assert sl.shape[-1] >= rl.shape[-1], "Spyre logits omit vocabulary entries"
+            sl = sl[: rl.shape[-1]]  # Strip only adapter LM-head padding.
+            assert torch.isfinite(sl).all().item(), f"NaN/Inf at comparison step {step}"
+            r_top1 = int(rl.argmax())
+            s_top1 = int(sl.argmax())
+            cosine = F.cosine_similarity(rl, sl, dim=-1).item()
+            ok = r_top1 == s_top1
+            n_top1_match += ok
+            label = "prefill" if step == 0 else f"decode-{step}"
+            print(
+                f"  {label:>9} | {r_top1:>6} {tokenizer.decode([r_top1])!r:>11} "
+                f"| {s_top1:>6} {tokenizer.decode([s_top1])!r:>11} "
+                f"| {'OK' if ok else 'tie?':>5} | {cosine:.6f}"
+            )
+            if cosine < MIN_COSINE:
+                low_cosine.append((label, cosine))
+        print(f"  top-1 agreement: {n_top1_match}/{len(ref_logits)} steps (reported)")
+        print(f"  stock:   {ref_text!r}")
+        print(f"  adapter free-run: {adapter_text!r}")
+
+        assert len(adapter_text.strip()) > 0, "adapter generated an empty string"
+        assert not low_cosine, (
+            f"adapter logits drifted below cosine {MIN_COSINE} (teacher-forced) at: "
+            + ", ".join(f"{lab}: {c:.6f}" for lab, c in low_cosine)
+        )
+
+        if include_smoke:
+            from tests.spyre.test_e2e_smoke_vision_spyre import run_vision_smoke_test
+
+            smoke = run_vision_smoke_test(
+                model_path, trust_remote_code=trust_remote_code, model=model
+            )
+            assert smoke["status"] == "PASS", smoke
+    finally:
+        del model
+        gc.collect()
 
 
 @pytest.mark.parametrize(

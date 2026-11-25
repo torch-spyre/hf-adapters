@@ -89,9 +89,8 @@ def fetch(
     a shard file and read back by another process.
     """
     if model_type == ModelType.VISION_TOWER:
-        return (
-            []
-        )  # Tower discovery is registry-only; Hub VLM rankings cannot size a tower.
+        # Registry-only: Hub task tags describe the enclosing VLM, not its tower.
+        return []
     if top_k <= 0:
         print(f"{ts()} Skipping {model_type} ranking by {ranking} (top_k={top_k}).")
         return []

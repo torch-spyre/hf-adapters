@@ -98,12 +98,21 @@ def _chunk(rows: list[dict], shard_size: int) -> list[list[dict]]:
     return [rows[i : i + shard_size] for i in range(0, len(rows), shard_size)]
 
 
-def _tier_for(row: dict, x1_max_params: int, x2_max_params: int) -> str:
+def _tier_for(
+    row: dict,
+    x1_max_params: int,
+    x2_max_params: int,
+    *,
+    model_type: ModelType | None = None,
+) -> str:
     """Return "x1"/"x2"/"x4" for *row* by parameter count.
 
     Unknown/non-numeric parameter counts default to "x1" (the smallest,
     least risky tier) rather than being treated as large.
+    Registered towers use x1; their metadata counts the full VLM checkpoint.
     """
+    if model_type == ModelType.VISION_TOWER:
+        return "x1"
     params = row.get("parameters")
     if not isinstance(params, (int, float)):
         return "x1"
@@ -204,7 +213,8 @@ def generate_shards(
 
         by_tier: dict[str, list[dict]] = {"x1": [], "x2": [], "x4": []}
         for row in rows:
-            by_tier[_tier_for(row, x1_max_params, x2_max_params)].append(row)
+            tier = _tier_for(row, x1_max_params, x2_max_params, model_type=model_type)
+            by_tier[tier].append(row)
 
         tier_shard_sizes = {
             "x1": x1_shard_sizes[model_type],
