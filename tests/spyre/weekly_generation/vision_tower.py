@@ -2,6 +2,7 @@
 
 import importlib
 import json
+import re
 from collections.abc import Callable
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -22,6 +23,7 @@ from transformers import (
 
 from hf_adapters.auto_spyre_model import dtype_for_model_path
 from hf_adapters.hf_common import DEVICE
+from tests._vision_runtime import ReferenceStage
 from tests.model_registry import VISION_MODELS
 
 MIN_COSINE = 0.99
@@ -32,7 +34,9 @@ def resolve_tower_adapter(model_path: str) -> ModuleType:
     """Resolve the tower role explicitly, rather than its checkpoint's text adapter."""
     for info in VISION_MODELS.values():
         if info["path"] == model_path and info.get("kind") == "tower":
-            return importlib.import_module(f"hf_adapters.{info['adapter'][:-3]}")
+            return importlib.import_module(
+                f"hf_adapters.{info['adapter'].removesuffix('.py')}"
+            )
     raise ValueError(f"No registered vision tower for {model_path}")
 
 
@@ -43,6 +47,14 @@ def load_stock_tower(model_path: str, dtype: torch.dtype) -> PreTrainedModel:
     full language decoder or all tensors in a shard into host memory.
     """
     config: Any = AutoConfig.from_pretrained(model_path, trust_remote_code=False)
+    revision: object = getattr(config, "_commit_hash", None)
+    if (
+        not isinstance(revision, str)
+        or re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None
+    ):
+        raise ValueError(
+            f"Cannot resolve an immutable checkpoint revision for {model_path}"
+        )
     classes: dict[str, type[PreTrainedModel]] = {
         "siglip_vision_model": SiglipVisionModel,
         "pixtral": PixtralVisionModel,
@@ -54,7 +66,9 @@ def load_stock_tower(model_path: str, dtype: torch.dtype) -> PreTrainedModel:
         tower = tower_cls(config.vision_config)
     expected: set[str] = set(tower.state_dict())
     try:
-        index_path = hf_hub_download(model_path, "model.safetensors.index.json")
+        index_path = hf_hub_download(
+            model_path, "model.safetensors.index.json", revision=revision
+        )
     except EntryNotFoundError:
         shards: list[str] = ["model.safetensors"]
     else:
@@ -76,7 +90,9 @@ def load_stock_tower(model_path: str, dtype: torch.dtype) -> PreTrainedModel:
         "vision_tower.",
     )
     for shard in shards:
-        with safe_open(hf_hub_download(model_path, shard), framework="pt") as tensors:
+        with safe_open(
+            hf_hub_download(model_path, shard, revision=revision), framework="pt"
+        ) as tensors:
             for key in tensors.keys():
                 for prefix in prefixes:
                     name = key.removeprefix(prefix)
@@ -137,7 +153,10 @@ def compare_features(reference: torch.Tensor, actual: torch.Tensor) -> None:
 
 
 def run_tower_compare(
-    model_path: str, *, on_reference: Callable[[], None] | None = None
+    model_path: str,
+    *,
+    on_reference: Callable[[], None] | None = None,
+    on_reference_stage: Callable[[ReferenceStage], None] | None = None,
 ) -> None:
     """Run stock forward before preparation, then the compiled tower on Spyre."""
     adapter = resolve_tower_adapter(model_path)
@@ -145,6 +164,8 @@ def run_tower_compare(
         model_path, target_device="spyre", trust_remote_code=False
     )
     tower = load_stock_tower(model_path, dtype)
+    if on_reference_stage is not None:
+        on_reference_stage("forward")
     inputs = tower_inputs(tower)
     with torch.no_grad():
         reference: torch.Tensor = (

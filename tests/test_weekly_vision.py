@@ -18,6 +18,7 @@ import pytest
 import yaml
 from huggingface_hub.hf_api import ModelInfo
 
+from tests._vision_runtime import ReferenceStage
 from tests.model_registry import (
     WEEKLY_SCAN_VISION_PATHS,
     WEEKLY_SCAN_VISION_TOWER_PATHS,
@@ -175,26 +176,33 @@ def test_tower_size_bypass_preserves_vlm_size_and_architecture_gates(
 
 
 @pytest.mark.parametrize(
-    ("reference_ok", "error", "category"),
+    ("reference_ok", "reference_stage", "error", "category"),
     [
-        (False, ValueError("processor failed"), "cpu_generate_failed"),
-        (True, AssertionError("logits differ"), "verification_failed"),
-        (True, RuntimeError("compile failed"), "test_execution_exception"),
-        (True, RuntimeError("Replace card"), "hardware_exception"),
-        (True, None, None),
+        (False, "load", ValueError("checkpoint failed"), "cpu_load_failed"),
+        (False, "forward", ValueError("processor failed"), "cpu_generate_failed"),
+        (True, "forward", AssertionError("logits differ"), "verification_failed"),
+        (True, "forward", RuntimeError("compile failed"), "test_execution_exception"),
+        (True, "forward", RuntimeError("Replace card"), "hardware_exception"),
+        (True, "forward", None, None),
     ],
 )
 @pytest.mark.parametrize("mode", [ModelType.VISION, ModelType.VISION_TOWER])
 def test_backend_verdicts_preserve_reference_success(
     monkeypatch: pytest.MonkeyPatch,
     reference_ok: bool,
+    reference_stage: ReferenceStage,
     error: Exception | None,
     category: str | None,
     mode: ModelType,
 ) -> None:
     def evaluate(
-        model_path: str, *, on_reference: Callable[[], None], **kwargs: Any
+        model_path: str,
+        *,
+        on_reference: Callable[[], None],
+        on_reference_stage: Callable[[ReferenceStage], None],
+        **kwargs: Any,
     ) -> None:
+        on_reference_stage(reference_stage)
         if reference_ok:
             on_reference()
         if error is not None:

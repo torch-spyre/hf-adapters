@@ -29,6 +29,7 @@ from typing import Any
 
 from huggingface_hub.errors import HfHubHTTPError
 
+from tests._vision_runtime import ReferenceStage
 from tests.spyre.weekly_generation.failure_categories import (
     FAILURE_CATEGORY_CPU_GENERATE_FAILED,
     FAILURE_CATEGORY_CPU_LOAD_FAILED,
@@ -425,6 +426,11 @@ def _eval_vision_model(model_id: str, model_type: ModelType) -> dict[str, Any]:
         "error": "",
         "failure_category": None,
     }
+    reference_stage: ReferenceStage = "load"
+
+    def reference_stage_changed(stage: ReferenceStage) -> None:
+        nonlocal reference_stage
+        reference_stage = stage
 
     def reference_ready() -> None:
         result["load"] = True
@@ -437,12 +443,17 @@ def _eval_vision_model(model_id: str, model_type: ModelType) -> dict[str, Any]:
                 model_id,
                 trust_remote_code=False,
                 on_reference=reference_ready,
+                on_reference_stage=reference_stage_changed,
                 include_smoke=True,
             )
         else:
             from tests.spyre.weekly_generation.vision_tower import run_tower_compare
 
-            run_tower_compare(model_id, on_reference=reference_ready)
+            run_tower_compare(
+                model_id,
+                on_reference=reference_ready,
+                on_reference_stage=reference_stage_changed,
+            )
         result["correct"] = True
     except Exception as error:
         result["error"] = (
@@ -450,7 +461,11 @@ def _eval_vision_model(model_id: str, model_type: ModelType) -> dict[str, Any]:
             f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
         )
         if not result["load"]:
-            category = FAILURE_CATEGORY_CPU_GENERATE_FAILED
+            category = (
+                FAILURE_CATEGORY_CPU_LOAD_FAILED
+                if reference_stage == "load"
+                else FAILURE_CATEGORY_CPU_GENERATE_FAILED
+            )
         elif isinstance(error, AssertionError):
             category = FAILURE_CATEGORY_VERIFICATION_FAILED
         else:

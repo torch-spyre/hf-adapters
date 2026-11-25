@@ -109,6 +109,14 @@ existing v2 capability tables; tower and VLM results remain distinct even for
 shared checkpoint paths and early worker failures. Existing access, architecture
 exclusion, remote-code, and model-size policies still apply.
 
+Tower configuration resolves an immutable Hub commit, and both the checkpoint
+index and weight shards are downloaded at that revision. Reference checkpoint
+loading failures are reported as `cpu_load_failed`; forward and input preparation
+failures are reported as `cpu_generate_failed`. The VLM verifier clears unwound
+exception frames, including chained errors, before releasing models, so retained
+pytest tracebacks do not retain callee-owned models or KV caches. Error messages
+and traceback locations remain available.
+
 To launch a small scan from an implementation branch:
 
 ```bash

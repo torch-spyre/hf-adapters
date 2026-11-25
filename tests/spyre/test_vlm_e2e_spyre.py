@@ -90,6 +90,7 @@ from tests._vision_helpers import (
     resolve_model_revision,
     stock_vlm_reference,
 )
+from tests._vision_runtime import ReferenceStage, clear_exception_frames
 from tests.conftest import load_ref_model
 from tests.model_registry import (
     NON_BLOCKING_VISION_MODELS,
@@ -228,6 +229,7 @@ def run_vlm_compare(
     trust_remote_code: bool | None = None,
     *,
     on_reference: Callable[[], None] | None = None,
+    on_reference_stage: Callable[[ReferenceStage], None] | None = None,
     include_smoke: bool = False,
 ) -> None:
     """Compare stock and Spyre logits; optionally smoke-test the same loaded VLM."""
@@ -242,6 +244,8 @@ def run_vlm_compare(
         model_path, target_device="spyre", trust_remote_code=trust_remote_code
     )
 
+    if on_reference_stage is not None:
+        on_reference_stage("forward")
     processor, batch = build_vlm_batch(
         model_path, PROMPT, trust_remote_code=trust_remote_code
     )
@@ -268,13 +272,18 @@ def run_vlm_compare(
     cache_dir = os.environ.get(VLM_REFERENCE_CACHE_ENV) or None
 
     def _compute_reference() -> VLMReference:
-        ref_model = load_ref_model(
-            model_path=model_path,
-            adapter_mod=adapter,
-            auto_model_cls=AutoModelForImageTextToText,
-            trust_remote_code=trust_remote_code,
-        )
+        ref_model: PreTrainedModel | None = None
         try:
+            if on_reference_stage is not None:
+                on_reference_stage("load")
+            ref_model = load_ref_model(
+                model_path=model_path,
+                adapter_mod=adapter,
+                auto_model_cls=AutoModelForImageTextToText,
+                trust_remote_code=trust_remote_code,
+            )
+            if on_reference_stage is not None:
+                on_reference_stage("forward")
             return stock_vlm_reference(
                 model=ref_model,
                 processor=processor,
@@ -282,6 +291,9 @@ def run_vlm_compare(
                 max_new_tokens=MAX_NEW_TOKENS,
                 num_compare_steps=NUM_COMPARE_STEPS,
             )
+        except BaseException as error:
+            clear_exception_frames(error)
+            raise
         finally:
             del ref_model
             gc.collect()
@@ -312,6 +324,8 @@ def run_vlm_compare(
     else:
         print(f"  Stock CPU reference generated (cache write failed: {cache_dir})")
 
+    if on_reference_stage is not None:
+        on_reference_stage("forward")
     assert len(ref_logits) == len(ref_tokens) == NUM_COMPARE_STEPS
     assert all(
         torch.isfinite(logits).all().item() for logits in ref_logits
@@ -321,11 +335,13 @@ def run_vlm_compare(
 
     # --- Adapter on Spyre ---
     print("  Loading model for Spyre ...")
-    model = AutoSpyreModelForImageTextToText.from_pretrained(
-        model_name_or_path=model_path, dtype=dtype, trust_remote_code=trust_remote_code
-    )
-
+    model: PreTrainedModel | None = None
     try:
+        model = AutoSpyreModelForImageTextToText.from_pretrained(
+            model_name_or_path=model_path,
+            dtype=dtype,
+            trust_remote_code=trust_remote_code,
+        )
         # Per-step adapter logits on Spyre, teacher-forced on stock's tokens (so the
         # comparison is free of greedy-fork drift while still exercising decode).
         print(
@@ -394,6 +410,9 @@ def run_vlm_compare(
                 model_path, trust_remote_code=trust_remote_code, model=model
             )
             assert smoke["status"] == "PASS", smoke
+    except BaseException as error:
+        clear_exception_frames(error)
+        raise
     finally:
         del model
         gc.collect()

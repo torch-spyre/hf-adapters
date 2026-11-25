@@ -78,7 +78,10 @@ def test_stock_tower_loader_extracts_all_weights(
             json.dumps({"weight_map": {name: filename for name in state}})
         )
 
-    def download(model_path: str, name: str) -> str:
+    revisions: list[str] = []
+
+    def download(model_path: str, name: str, *, revision: str) -> str:
+        revisions.append(revision)
         path = tmp_path / name
         if not path.exists():
             from huggingface_hub.errors import EntryNotFoundError
@@ -90,9 +93,12 @@ def test_stock_tower_loader_extracts_all_weights(
     monkeypatch.setattr(
         vision_tower.AutoConfig,
         "from_pretrained",
-        lambda *a, **kw: SimpleNamespace(vision_config=tower.config),
+        lambda *a, **kw: SimpleNamespace(
+            vision_config=tower.config, _commit_hash="a" * 40
+        ),
     )
     actual = vision_tower.load_stock_tower("org/test", torch.float32)
+    assert len(revisions) == 2 and set(revisions) == {"a" * 40}
     for name, expected in tower.state_dict().items():
         torch.testing.assert_close(actual.state_dict()[name], expected, rtol=0, atol=0)
     inputs = vision_tower.tower_inputs(actual)
@@ -143,6 +149,42 @@ def test_weekly_tower_pipeline_matches_stock_on_cpu(
     )
     assert reference_completed == [True]
     assert loaded_dtypes == [dtype]
+
+
+@pytest.mark.parametrize("revision", [None, "main"])
+def test_stock_tower_requires_an_immutable_revision(
+    monkeypatch: pytest.MonkeyPatch, revision: str | None
+) -> None:
+    monkeypatch.setattr(
+        vision_tower.AutoConfig,
+        "from_pretrained",
+        lambda *a, **kw: SimpleNamespace(_commit_hash=revision),
+    )
+    with pytest.raises(ValueError, match="immutable checkpoint revision"):
+        vision_tower.load_stock_tower("org/test", torch.float32)
+
+
+@pytest.mark.parametrize("adapter_name", ["hf_example.py", "hf_example"])
+def test_tower_adapter_suffix_is_optional(
+    monkeypatch: pytest.MonkeyPatch, adapter_name: str
+) -> None:
+    from types import ModuleType
+
+    adapter = ModuleType("hf_adapters.hf_example")
+    imports: list[str] = []
+
+    def import_adapter(name: str) -> ModuleType:
+        imports.append(name)
+        return adapter
+
+    monkeypatch.setattr(
+        vision_tower,
+        "VISION_MODELS",
+        {"example": {"path": "org/test", "kind": "tower", "adapter": adapter_name}},
+    )
+    monkeypatch.setattr(vision_tower.importlib, "import_module", import_adapter)
+    assert vision_tower.resolve_tower_adapter("org/test") is adapter
+    assert imports == ["hf_adapters.hf_example"]
 
 
 @pytest.mark.parametrize("corruption", ["nan", "inf", "shape", "scale", "direction"])
