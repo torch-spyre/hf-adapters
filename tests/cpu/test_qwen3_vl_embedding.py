@@ -274,43 +274,21 @@ def test_sentence_transformers_checkpoint(
     monkeypatch: pytest.MonkeyPatch, model_path: str
 ) -> None:
     """Exercise public ST media processing, last-token pooling, and normalization."""
-    import gc
+    from importlib import import_module
 
-    from PIL import Image
     from sentence_transformers import SentenceTransformer
 
-    import hf_adapters.st_backend  # noqa: F401
-    from tests._multimodal_embedding_helpers import (
-        TEXT_PROMPTS,
-        bounded_cpu_threads,
-        forbid_model_device_moves,
-    )
+    harness = import_module("tests.spyre.test_sentence_transformers_multimodal_spyre")
+
+    def load_on_cpu(*args: Any, **kwargs: Any) -> SentenceTransformer:
+        kwargs["device"] = "cpu"
+        return SentenceTransformer(*args, **kwargs)
 
     monkeypatch.setattr(torch, "compile", _eager)
-    image = Image.new("RGB", (64, 64), color=(150, 80, 35))
-    inputs: list[Any] = TEXT_PROMPTS + [
-        image,
-        {"text": "A colorful picture.", "image": image},
-    ]
-    with bounded_cpu_threads(), torch.inference_mode():
-        model = SentenceTransformer(
-            model_path, device="cpu", model_kwargs={"dtype": torch.bfloat16}
-        )
-        expected = model.encode(inputs, convert_to_tensor=True)
-        del model
-        gc.collect()
-        model = SentenceTransformer(model_path, backend="spyre", device="cpu")
-        assert model[0].auto_model.dtype == torch.bfloat16
-        with forbid_model_device_moves(model):
-            actual = model.encode(inputs, convert_to_tensor=True)
-            repeated = model.encode(inputs[:1], convert_to_tensor=True)
-    assert actual.shape == (5, 2048)
-    assert torch.isfinite(actual).all()
-    assert torch.isfinite(repeated).all()
-    assert F.cosine_similarity(actual.float(), expected.float()).min() > 0.99
-    torch.testing.assert_close(
-        actual.float().norm(dim=-1), torch.ones(5), atol=0.005, rtol=0
-    )
+    monkeypatch.setattr(harness, "SentenceTransformer", load_on_cpu)
+    # Reuse exactly the CLIP/SigLIP/EmbeddingGemma 2 harness, including scalar
+    # and list images, combined inputs, helper buffers, and caption ranking.
+    harness.test_sentence_transformers_multimodal_backend(model_path)
 
 
 def test_cpu_helpers_preserved_during_load(monkeypatch: pytest.MonkeyPatch) -> None:
