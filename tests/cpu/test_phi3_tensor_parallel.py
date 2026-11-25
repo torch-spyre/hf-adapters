@@ -38,6 +38,8 @@ from hf_adapters import hf_phi3
 from hf_adapters.hf_common import allocate_kv_caches, kv_cache_shapes, set_rope_dtype
 from hf_adapters.spyre_tensor_parallel import (
     SPYRE_CPU_REPLICATED,
+    SPYRE_REPLICATED_LINEAR,
+    SPYRE_ROWWISE_SPLIT_INPUT,
     prepare_spyre_tp_plan,
 )
 
@@ -409,6 +411,19 @@ def _as_loaded_on_rank(reference, rank, tp_size):
             proj.weight = nn.Parameter(shard, requires_grad=False)
             proj.in_features = shard.shape[1]
             proj._hf_device_mesh = _FakeMesh(tp_size, rank)
+            proj._hf_tp_plan = SPYRE_ROWWISE_SPLIT_INPUT
+    return model
+
+
+def _tag_output_projections(model, tp_size, rank, o_style, down_style):
+    """Tag o_proj/down_proj as a TP loader would, without changing weights."""
+    for layer in model.model.layers:
+        for proj, style in (
+            (layer.self_attn.o_proj, o_style),
+            (layer.mlp.down_proj, down_style),
+        ):
+            proj._hf_device_mesh = _FakeMesh(tp_size, rank)
+            proj._hf_tp_plan = style
     return model
 
 
@@ -496,3 +511,80 @@ def test_tp1_keeps_stock_modules_and_config_cache_shape(monkeypatch):
     )
     assert not hasattr(model, "_spyre_kv_shapes")
     assert model.model.layers[0].self_attn.qkv_proj is not None
+
+
+# ---------------------------------------------------------------------------
+# Explicit plans: a mesh alone does not mean o_proj/down_proj are sharded.
+# The Spyre replicated styles leave a mesh on the module too (review of #774).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("head_dim", "partial_rotary_factor"),
+    [
+        pytest.param(128, 0.75, id="phi4-partial-rope"),
+        pytest.param(96, 1.0, id="phi35-padded-head"),
+    ],
+)
+def test_replicated_plan_under_mesh_runs_full_model(
+    monkeypatch, head_dim, partial_rotary_factor
+):
+    monkeypatch.setattr(hf_phi3.torch, "compile", lambda fn, **_: fn)
+    monkeypatch.setattr(
+        hf_phi3,
+        "spyre_compiled_all_reduce",
+        lambda *_: pytest.fail("replicated o_proj/down_proj must not all-reduce"),
+    )
+    reference = _tiny_phi3(head_dim, partial_rotary_factor)
+    input_ids = torch.randint(1, 64, (1, 8))
+    with torch.no_grad():
+        expected = reference.model(input_ids).last_hidden_state
+    model = _tag_output_projections(
+        copy.deepcopy(reference),
+        TP_SIZE,
+        1,
+        SPYRE_REPLICATED_LINEAR,
+        SPYRE_REPLICATED_LINEAR,
+    )
+
+    hf_phi3.prepare_for_spyre(model)
+
+    torch.testing.assert_close(
+        _run_prepared(model, input_ids), expected, rtol=1e-5, atol=1e-5
+    )
+    assert not hasattr(model, "_spyre_kv_shapes")
+    assert model.model.layers[0].self_attn.qkv_proj is not None
+
+
+@pytest.mark.parametrize(
+    ("o_style", "down_style"),
+    [
+        pytest.param(
+            SPYRE_ROWWISE_SPLIT_INPUT, SPYRE_REPLICATED_LINEAR, id="attn-sharded"
+        ),
+        pytest.param(
+            SPYRE_REPLICATED_LINEAR, SPYRE_ROWWISE_SPLIT_INPUT, id="mlp-sharded"
+        ),
+    ],
+)
+def test_mixed_attention_mlp_placement_is_rejected(o_style, down_style):
+    model = _tag_output_projections(
+        _tiny_phi3(128, 0.75), TP_SIZE, 0, o_style, down_style
+    )
+    with pytest.raises(ValueError, match="must all be row-sharded or all replicated"):
+        hf_phi3.prepare_for_spyre(model)
+
+
+def test_mixed_placement_across_layers_is_rejected():
+    model = _tag_output_projections(
+        _tiny_phi3(128, 0.75),
+        TP_SIZE,
+        0,
+        SPYRE_ROWWISE_SPLIT_INPUT,
+        SPYRE_ROWWISE_SPLIT_INPUT,
+    )
+    model.model.layers[1].self_attn.o_proj._hf_tp_plan = SPYRE_REPLICATED_LINEAR
+    with pytest.raises(
+        ValueError, match=r"replicated.*: model\.layers\.1\.self_attn\.o_proj$"
+    ):
+        hf_phi3.prepare_for_spyre(model)

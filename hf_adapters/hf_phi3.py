@@ -56,7 +56,12 @@ from hf_adapters.hf_common import (
     rope_dim_permutation,
     run_lm_head,
 )
-from hf_adapters.spyre_tensor_parallel import spyre_compiled_all_reduce
+from hf_adapters.spyre_tensor_parallel import (
+    SPYRE_CPU_ROWWISE,
+    SPYRE_ROWWISE,
+    SPYRE_ROWWISE_SPLIT_INPUT,
+    spyre_compiled_all_reduce,
+)
 
 # ---------------------------------------------------------------------------
 # Weight splitting
@@ -79,6 +84,12 @@ from hf_adapters.spyre_tensor_parallel import spyre_compiled_all_reduce
 
 _FUSED_MODULE_SUFFIXES = (".self_attn.qkv_proj", ".mlp.gate_up_proj")
 
+# Styles that split o_proj/down_proj by input column. Replicated styles also
+# leave a mesh on the module, so the mesh alone does not mean "sharded".
+_ROW_SHARDED_STYLES = frozenset(
+    {SPYRE_ROWWISE, SPYRE_ROWWISE_SPLIT_INPUT, SPYRE_CPU_ROWWISE}
+)
+
 
 @dataclass(frozen=True)
 class _TpPlacement:
@@ -89,12 +100,49 @@ class _TpPlacement:
     group_name: str | None = None
 
 
+def _is_row_sharded(proj: nn.Module) -> bool:
+    """True when the TP loader split ``proj`` by input column across ranks."""
+    mesh = getattr(proj, "_hf_device_mesh", None)
+    return (
+        mesh is not None
+        and mesh.size() > 1
+        and getattr(proj, "_hf_tp_plan", None) in _ROW_SHARDED_STYLES
+    )
+
+
+def _output_projections(model) -> dict[str, nn.Module]:
+    """Every layer's o_proj and down_proj, keyed by module path."""
+    prefix = "model.layers" if hasattr(model, "model") else "layers"
+    projections = {}
+    for i, layer in enumerate(get_backbone(model).layers):
+        projections[f"{prefix}.{i}.self_attn.o_proj"] = layer.self_attn.o_proj
+        projections[f"{prefix}.{i}.mlp.down_proj"] = layer.mlp.down_proj
+    return projections
+
+
 def _tp_placement(model) -> _TpPlacement:
-    """Read the TP position from the mesh Transformers left on ``o_proj``."""
-    o_proj = get_backbone(model).layers[0].self_attn.o_proj
-    mesh = getattr(o_proj, "_hf_device_mesh", None)
-    if mesh is None or mesh.size() == 1:
+    """Read the TP position from how the loader placed o_proj and down_proj.
+
+    Per-rank slicing is only correct when every o_proj and down_proj is
+    row-sharded, so each one reduces this rank's partial sum. When they are
+    all replicated (for example ``tp_plan={}``) every rank runs the full model.
+    A mix would leave some projections with the wrong input width, so it is
+    rejected.
+    """
+    projections = _output_projections(model)
+    sharded = {name: _is_row_sharded(proj) for name, proj in projections.items()}
+    if not any(sharded.values()):
         return _TpPlacement()
+    if not all(sharded.values()):
+        replicated = sorted(
+            name for name, is_sharded in sharded.items() if not is_sharded
+        )
+        raise ValueError(
+            "Phi-3 TP: o_proj and down_proj must all be row-sharded or all "
+            f"replicated, but these are replicated while others are sharded: "
+            f"{', '.join(replicated)}"
+        )
+    mesh = get_backbone(model).layers[0].self_attn.o_proj._hf_device_mesh
     return _TpPlacement(
         rank=mesh.get_local_rank(),
         size=mesh.size(),

@@ -263,14 +263,16 @@ def check_models(root: Path, world_size: int, rank: int) -> None:
         ("gemma4_moe", Gemma4TextConfig, Gemma4ForCausalLM, hf_gemma4_moe, 2),
         ("phi3", Phi3Config, Phi3ForCausalLM, hf_phi3, 4),
         ("phi3_padded", Phi3Config, Phi3ForCausalLM, hf_phi3, 4),
+        ("phi3_replicated", Phi3Config, Phi3ForCausalLM, hf_phi3, 4),
+        ("phi3_padded_replicated", Phi3Config, Phi3ForCausalLM, hf_phi3, 4),
         ("qwen3_5", Qwen3_5TextConfig, Qwen3_5ForCausalLM, hf_qwen3_5, 4),
         ("qwen3_5_moe", Qwen3_5MoeTextConfig, Qwen3_5MoeForCausalLM, hf_qwen3_5_moe, 4),
     ):
+        replicated = family.endswith("_replicated")
+        padded = family.removesuffix("_replicated").endswith("_padded")
         base_family = family.removesuffix("_replicated").removesuffix("_padded")
-        hidden_size = (
-            384 if family == "phi3_padded" else 512 if base_family == "phi3" else 256
-        )
-        tp_plan: str | dict[str, str] = {} if family == "gemma4_replicated" else "auto"
+        hidden_size = 384 if padded else 512 if base_family == "phi3" else 256
+        tp_plan: str | dict[str, str] = {} if replicated else "auto"
         config = config_cls(
             vocab_size=131,
             hidden_size=hidden_size,
@@ -278,7 +280,7 @@ def check_models(root: Path, world_size: int, rank: int) -> None:
             num_hidden_layers=2,
             num_attention_heads=4,
             num_key_value_heads=kv_heads,
-            head_dim=96 if family == "phi3_padded" else 128,
+            head_dim=96 if padded else 128,
             max_position_embeddings=256,
             tie_word_embeddings=False,
             pad_token_id=0,
@@ -371,6 +373,14 @@ def check_models(root: Path, world_size: int, rank: int) -> None:
             # weights are dropped and o_proj reduces inside the compiled block.
             assert spyre.model.layers[0].self_attn.qkv_proj is None
             assert spyre.model.layers[0].mlp.gate_up_proj is None
+        if base_family == "phi3" and replicated:
+            # An explicit empty plan leaves o_proj/down_proj replicated (yet
+            # still on a mesh), so every rank must run the full model.
+            layer = spyre.model.layers[0]
+            assert layer.self_attn.o_proj.weight.shape == (hidden_size, 512)
+            assert layer.mlp.down_proj.weight.shape == (hidden_size, 512)
+            assert layer.self_attn.qkv_proj is not None
+            assert not hasattr(spyre, "_spyre_kv_shapes")
         expected_generation = reference.generate(
             ids,
             max_new_tokens=3,
