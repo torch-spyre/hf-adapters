@@ -62,7 +62,10 @@ def main() -> None:
             rotated_query = apply_rope_matmul(query.float(), rope.float()).to(hidden.dtype)
             rotated_key = apply_rope_matmul(key.float(), rope.float()).to(hidden.dtype)
             attended = F.scaled_dot_product_attention(rotated_query, rotated_key, value, attn_mask=mask, scale=64 ** -0.5)
-            return norm, query, key, value, rotated_query, rotated_key, attended
+            contiguous_attended = F.scaled_dot_product_attention(rotated_query.contiguous(), rotated_key.contiguous(), value, attn_mask=mask, scale=64 ** -0.5)
+            scores = rotated_query.float() @ rotated_key.float().transpose(-2, -1) * (64 ** -0.5) + mask.float()
+            manual_attended = scores.softmax(dim=-1).to(value.dtype) @ value
+            return norm, query, key, value, rotated_query, rotated_key, attended, contiguous_attended, manual_attended
 
         hidden = F.pad(inputs[0], (0, 0, 0, 56))[None].to("spyre")
         rope = F.pad(adapter._rotation_matrices(cos, sin, 128), (0, 0, 0, 0, 0, 0, 0, 56))[None].to("spyre")
@@ -70,8 +73,8 @@ def main() -> None:
         mask[..., :8, :8] = 0
         mask.diagonal(dim1=-2, dim2=-1)[..., 8:] = 0
         actual_components = torch.compile(projections, dynamic=False, fullgraph=True)(hidden, rope, mask.to("spyre"))
-        expectations = [normalized[None], pad_qk(q.transpose(0, 1)[None]), pad_qk(k.transpose(0, 1)[None]), F.pad(v.transpose(0, 1)[None], (0, 64)), pad_qk(rotated_q.transpose(0, 1)[None]), pad_qk(rotated_k.transpose(0, 1)[None]), F.pad(expected_attended, (0, 64))]
-        for name, actual, expected_component in zip(["norm", "q", "k", "v", "rotated_q", "rotated_k", "attention"], actual_components, expectations):
+        expectations = [normalized[None], pad_qk(q.transpose(0, 1)[None]), pad_qk(k.transpose(0, 1)[None]), F.pad(v.transpose(0, 1)[None], (0, 64)), pad_qk(rotated_q.transpose(0, 1)[None]), pad_qk(rotated_k.transpose(0, 1)[None]), F.pad(expected_attended, (0, 64)), F.pad(expected_attended, (0, 64)), F.pad(expected_attended, (0, 64))]
+        for name, actual, expected_component in zip(["norm", "q", "k", "v", "rotated_q", "rotated_k", "attention", "contiguous_attention", "manual_attention"], actual_components, expectations):
             actual = actual.cpu()
             actual = actual[:, :8] if name == "norm" else actual[:, :, :8]
             print(name, "cosine", cosine(actual, expected_component), "max_abs", (actual.float() - expected_component.float()).abs().max().item(), flush=True)
