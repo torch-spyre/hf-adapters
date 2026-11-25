@@ -153,15 +153,18 @@ def run_vision_smoke_test(
         model_path, target_device="spyre", trust_remote_code=trust_remote_code
     )
 
-    t0 = time.time()
+    load_time: float = 0.0
     if model is None:
+        t0 = time.time()
         model = AutoSpyreModelForImageTextToText.from_pretrained(
             model_name_or_path=model_path,
             dtype=dtype,
             trust_remote_code=trust_remote_code,
         )
-    load_time = time.time() - t0
-    print(f"  Load time: {load_time:.1f}s")
+        load_time = time.time() - t0
+        print(f"  Load time: {load_time:.1f}s")
+    else:
+        print("  Reusing the already-loaded Spyre model (no load time).")
 
     # Download all sample images once (cached after first run).
     smoke_images = load_smoke_test_images()
