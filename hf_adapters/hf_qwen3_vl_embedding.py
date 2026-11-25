@@ -274,8 +274,10 @@ def _make_vision_block(layer: Qwen3VLVisionBlock) -> VisionBlock:
             .transpose(1, 2)
         )
         # HF vision RoPE upcasts Q/K before rotation, then restores their dtype.
-        q = apply_rope_matmul(q.float(), rope.float()).to(hidden.dtype)
-        k = apply_rope_matmul(k.float(), rope.float()).to(hidden.dtype)
+        # Match Gemma 4 vision's explicit layout before MHA: matrix RoPE
+        # returns a transposed view, while Spyre SDPA's output follows Q's layout.
+        q = apply_rope_matmul(q.float(), rope.float()).to(hidden.dtype).contiguous()
+        k = apply_rope_matmul(k.float(), rope.float()).to(hidden.dtype).contiguous()
         attended = F.scaled_dot_product_attention(
             q, k, v, attn_mask=mask, scale=attn.scaling
         )
