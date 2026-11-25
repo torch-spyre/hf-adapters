@@ -65,11 +65,16 @@ def _keep_generation_config(
     from hf_adapters._model_loading import model_subfolder
     from hf_adapters.auto_spyre_model import select_adapter_module
 
+    # The listing includes sibling filenames, so ordinary repositories need no
+    # modules.json probe. Missing metadata still falls back to loader discovery.
+    needs_layout_discovery: bool = model.siblings is None or any(
+        sibling.rfilename == "modules.json" for sibling in model.siblings
+    )
     try:
         config: PretrainedConfig = _retry_hub_call(
             lambda: AutoConfig.from_pretrained(
                 model.id,
-                subfolder=model_subfolder(model.id),
+                subfolder=model_subfolder(model.id) if needs_layout_discovery else "",
                 token=token,
                 trust_remote_code=False,
             ),
@@ -124,8 +129,8 @@ def keep(
         if result:
             return False, rejection
 
-    # The config lookup also checks remote code, so rejecting encoder-only
-    # adapters does not add a second Hub request per candidate.
+    # Config loading also checks remote code. Sibling metadata avoids probing
+    # modules.json for ordinary repositories.
     try:
         return _keep_generation_config(model, token, config_types)
     except HubRetryExhaustedError:

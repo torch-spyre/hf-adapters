@@ -37,12 +37,17 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(httpx.Client, "send", reject_request)
 
 
-def _model(model_id: str = "org/model", model_type: str = "gpt2") -> ModelInfo:
+def _model(
+    model_id: str = "org/model", model_type: str = "gpt2", *, has_modules: bool = False
+) -> ModelInfo:
+    siblings: list[dict[str, str]] = [{"rfilename": "model.safetensors"}]
+    if has_modules:
+        siblings.append({"rfilename": "modules.json"})
     return ModelInfo(
         id=model_id,
         config={"model_type": model_type},
         library_name="sentence-transformers",
-        siblings=[{"rfilename": "model.safetensors"}],
+        siblings=siblings,
         downloads=100,
         created_at="2026-01-01T00:00:00.000Z",
     )
@@ -163,6 +168,10 @@ def test_config_errors_remain_model_level_rejections(
 def test_ranked_fetch_excludes_encoders_before_counting_top_k(
     monkeypatch: pytest.MonkeyPatch, ranking: Ranking
 ) -> None:
+    from hf_adapters import _model_loading
+
+    layout_request = Mock(side_effect=AssertionError("Unexpected layout lookup"))
+    monkeypatch.setattr(_model_loading, "cached_file", layout_request)
     models: list[ModelInfo] = [
         _model("org/encoder", "bert"),
         _model("org/decoder-first"),
@@ -188,9 +197,37 @@ def test_ranked_fetch_excludes_encoders_before_counting_top_k(
     ]
     assert [row["rank"] for row in rows] == [1, 2]
     assert listing.call_args.kwargs["sort"] == ranking
+    assert "siblings" in listing.call_args.kwargs["expand"]
     assert [row["config_class"] for row in rows] == ["GPT2Config", "GPT2Config"]
     # Enrichment reuses the config class discovered during filtering.
     assert request.call_count == len(models)
+    # Native repositories need no modules.json probe across all candidates.
+    layout_request.assert_not_called()
+
+
+@pytest.mark.parametrize("missing_siblings", [False, True])
+def test_generation_config_handles_unavailable_and_empty_sibling_metadata(
+    monkeypatch: pytest.MonkeyPatch, missing_siblings: bool
+) -> None:
+    from hf_adapters import _model_loading
+
+    model: ModelInfo = _model()
+    model.siblings = None if missing_siblings else []
+    layout_request = Mock(return_value="0_Transformer")
+    monkeypatch.setattr(_model_loading, "model_subfolder", layout_request)
+    config_request = Mock(return_value=GPT2Config())
+    monkeypatch.setattr(generative.AutoConfig, "from_pretrained", config_request)
+
+    assert generative._keep_generation_config(model, False) == (True, "")
+
+    if missing_siblings:
+        layout_request.assert_called_once_with("org/model")
+    else:
+        layout_request.assert_not_called()
+    expected_subfolder: str = "0_Transformer" if missing_siblings else ""
+    config_request.assert_called_once_with(
+        "org/model", subfolder=expected_subfolder, token=False, trust_remote_code=False
+    )
 
 
 def test_catalog_fetches_only_config_types_missing_from_filter_metadata(
@@ -282,7 +319,11 @@ def test_filter_and_loader_use_the_same_nested_config(
     monkeypatch.setattr(
         generative.HfApi,
         "list_models",
-        Mock(return_value=[_model(str(tmp_path), root_config.model_type)]),
+        Mock(
+            return_value=[
+                _model(str(tmp_path), root_config.model_type, has_modules=True)
+            ]
+        ),
     )
 
     rows: list[dict[str, object]] = generative.fetch_top_generative_models(limit=1)

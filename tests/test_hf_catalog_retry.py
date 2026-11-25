@@ -50,12 +50,15 @@ def _http_error(
     return HfHubHTTPError("Simulated Hub failure", response=response)
 
 
-def _model(model_type: str = "bert") -> ModelInfo:
+def _model(model_type: str = "bert", *, has_modules: bool = False) -> ModelInfo:
+    siblings: list[dict[str, str]] = [{"rfilename": "model.safetensors"}]
+    if has_modules:
+        siblings.append({"rfilename": "modules.json"})
     return ModelInfo(
         id="org/model",
         config={"model_type": model_type},
         library_name="sentence-transformers",
-        siblings=[{"rfilename": "model.safetensors"}],
+        siblings=siblings,
     )
 
 
@@ -242,7 +245,9 @@ def test_generation_layout_discovery_recovers_and_preserves_config_metadata(
     monkeypatch.setattr(catalog.AutoConfig, "from_pretrained", config_request)
     config_types: dict[str, str] = {}
 
-    assert keep_generative(_model("gpt2"), False, config_types=config_types) == (
+    assert keep_generative(
+        _model("gpt2", has_modules=True), False, config_types=config_types
+    ) == (
         True,
         "",
     )
@@ -270,7 +275,9 @@ def test_generation_layout_retry_exhaustion_fails_visibly(
     with pytest.raises(
         catalog.HubRetryExhaustedError, match=f"{status} after 5 attempts"
     ):
-        keep_generative(_model("gpt2"), False, config_types=config_types)
+        keep_generative(
+            _model("gpt2", has_modules=True), False, config_types=config_types
+        )
 
     assert layout_request.call_count == 5
     config_request.assert_not_called()
