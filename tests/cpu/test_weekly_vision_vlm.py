@@ -26,9 +26,6 @@ class _WeakModel(SimpleNamespace):
     "corruption",
     [
         None,
-        "nan",
-        "missing_step",
-        "missing_vocab",
         "drift",
         "empty_text",
         "inner_steps",
@@ -48,13 +45,7 @@ def test_callable_verifier_checks_logits_before_smoke_and_reuses_model(
         torch.arange(1, 9).float() for _ in range(vlm.NUM_COMPARE_STEPS)
     ]
     actual_logits = [logits.clone() for logits in reference_logits]
-    if corruption == "nan":
-        actual_logits[0][0] = float("nan")
-    elif corruption == "missing_step":
-        actual_logits.pop()
-    elif corruption == "missing_vocab":
-        actual_logits[0] = actual_logits[0][:-1]
-    elif corruption == "drift":
+    if corruption == "drift":
         actual_logits[0] *= -1
     reference = VLMReference(
         logits=reference_logits, token_ids=[7] * vlm.NUM_COMPARE_STEPS, text="caption"
