@@ -457,6 +457,7 @@ def build_catalog(
     ) = None,
     allow_millions: bool = False,
     token: str | bool,
+    known_config_types: Mapping[str, str] | None = None,
 ) -> list[dict[str, object]]:
     """Fetch → filter → enrich → return a ranked model catalog as a list of dicts.
 
@@ -470,6 +471,9 @@ def build_catalog(
             value_fn(model, config_class) -> cell. Inserted before config_class.
         allow_millions: pass-through to the size-name extractor.
         token: HF token (or True) for AutoConfig downloads.
+        known_config_types: config class names already loaded by ``filter_fn``,
+            keyed by model id. Read after filtering completes; missing entries
+            still use ``get_config_type`` for enrichment.
 
     Returns:
         List of dicts, one per model, keyed by column name.
@@ -547,12 +551,19 @@ def build_catalog(
     tail_head: list[str] = ["is_custom_code", "config_class", "Year"]
     header: list[str] = base_head + extra_head + tail_head
 
+    def config_type(model: ModelInfo) -> str | None:
+        if known_config_types is not None:
+            known_type: str | None = known_config_types.get(model.id)
+            if known_type is not None:
+                return known_type
+        return get_config_type(model.id, token)
+
     t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         try:
             config_classes: list[str | None] = list(
                 tqdm(
-                    ex.map(lambda m: get_config_type(m.id, token), models),
+                    ex.map(config_type, models),
                     total=len(models),
                     desc="Fetching config classes",
                     miniters=1000,

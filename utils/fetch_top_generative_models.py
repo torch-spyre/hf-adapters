@@ -2,6 +2,7 @@
 
 import os
 import sys
+from functools import partial
 from pathlib import Path
 from types import ModuleType
 from typing import Callable
@@ -50,17 +51,18 @@ def _create_fetch(ranking: Ranking) -> Callable[[HfApi, int], list[ModelInfo]]:
     return _fetch
 
 
-def _keep_generation_config(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
+def _keep_generation_config(
+    model: ModelInfo,
+    token: str | bool,
+    config_types: dict[str, str] | None = None,
+) -> tuple[bool, str]:
     """Reject remote-code and encoder-only configs without loading model weights.
 
-    Use the same adapter mappings and encoder-only flag as the causal-LM loader.
+    Use the same adapter selection and encoder-only flag as the causal-LM loader.
     Do not resolve the adapter through ``resolve_adapter_module`` here: dimension
     validation and unsupported-adapter verdicts still belong to the worker.
     """
-    from hf_adapters.auto_spyre_model import (
-        ARCH_TO_ADAPTER_MODULE_MAPPING,
-        CONFIG_TO_ADAPTER_MODULE_MAPPING,
-    )
+    from hf_adapters.auto_spyre_model import select_adapter_module
 
     try:
         config: PretrainedConfig = _retry_hub_call(
@@ -72,23 +74,29 @@ def _keep_generation_config(model: ModelInfo, token: str | bool) -> tuple[bool, 
     except (ValueError, OSError):
         return False, "requires trust_remote_code"
 
-    module: ModuleType | None = CONFIG_TO_ADAPTER_MODULE_MAPPING.get(type(config))
-    for architecture in config.architectures or []:
-        if architecture in ARCH_TO_ADAPTER_MODULE_MAPPING:
-            module = ARCH_TO_ADAPTER_MODULE_MAPPING[architecture]
-            break
+    if config_types is not None:
+        config_types[model.id] = type(config).__name__
+
+    module: ModuleType | None = select_adapter_module(config)
 
     if module is not None and getattr(module, "_is_encoder_only", False):
         return False, "encoder-only architecture does not support generation"
     return True, ""
 
 
-def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
+def keep(
+    model: ModelInfo,
+    token: str | bool,
+    *,
+    config_types: dict[str, str] | None = None,
+) -> tuple[bool, str]:
     """Keep predicate for the generative fetcher.
 
     Ordering matters: the cheap metadata-only checks run first.
     Returns a (keep, reason) tuple where reason describes why the model was
     rejected (empty string when kept).
+    When provided, ``config_types`` collects loaded config class names for
+    catalog enrichment after filtering has finished.
     """
     try:
         keep_flag, reason = is_baseline_keep(model)
@@ -115,7 +123,7 @@ def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
     # The config lookup also checks remote code, so rejecting encoder-only
     # adapters does not add a second Hub request per candidate.
     try:
-        return _keep_generation_config(model, token)
+        return _keep_generation_config(model, token, config_types)
     except HubRetryExhaustedError:
         raise
     except Exception:
@@ -130,6 +138,11 @@ def _fetch_generative_models(
 ) -> list[dict]:
     token: str | bool = os.environ.get("HF_TOKEN") or False
     api: HfApi = HfApi(token=token)
+    # Per-fetch metadata only: do not retain live configs or cache Hub results
+    # across scans. Curated requests use keep_all and fall back to enrichment.
+    config_types: dict[str, str] = {}
+    if keeper is keep:
+        keeper = partial(keep, config_types=config_types)
     return build_catalog(
         fetch_fn=lambda lim: fetcher(api, lim),
         filter_fn=lambda m: keeper(m, token),
@@ -137,6 +150,7 @@ def _fetch_generative_models(
         output_csv=output_csv,
         label="generative",
         token=token,
+        known_config_types=config_types,
     )
 
 

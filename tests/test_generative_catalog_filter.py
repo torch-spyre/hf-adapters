@@ -6,15 +6,24 @@ from unittest.mock import Mock
 import httpx
 import pytest
 from huggingface_hub import ModelInfo
-from transformers import AutoConfig, BertConfig, GPT2Config, PretrainedConfig
+from transformers import (
+    AutoConfig,
+    BertConfig,
+    Gemma4TextConfig,
+    GPT2Config,
+    PretrainedConfig,
+)
 
 from utils import fetch_top_generative_models as generative
+from utils import hf_model_catalog as catalog
 from utils.fetch_top_embedding_models import keep as keep_embedding
 from utils.hf_model_catalog import Ranking
 
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+
     def reject_request(
         self: httpx.Client, request: httpx.Request, **kwargs: object
     ) -> httpx.Response:
@@ -108,6 +117,25 @@ def test_embedding_scan_still_accepts_encoder_only_models(
     assert keep_embedding(_model(model_type="bert"), False) == (True, "")
 
 
+def test_fetcher_uses_gemma4_variant_selected_by_shared_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hf_adapters import auto_spyre_model as auto
+
+    config = Gemma4TextConfig(enable_moe_block=True)
+    monkeypatch.setattr(
+        generative.AutoConfig, "from_pretrained", Mock(return_value=config)
+    )
+    # A variant's encoder flag must be checked after shared selection, rather
+    # than inspecting only the base adapter in the config-class mapping.
+    monkeypatch.setattr(auto.hf_gemma4_moe, "_is_encoder_only", True, raising=False)
+
+    assert generative.keep(_model(), False) == (
+        False,
+        "encoder-only architecture does not support generation",
+    )
+
+
 @pytest.mark.parametrize(
     ("error", "reason"),
     [
@@ -155,5 +183,63 @@ def test_ranked_fetch_excludes_encoders_before_counting_top_k(
     ]
     assert [row["rank"] for row in rows] == [1, 2]
     assert listing.call_args.kwargs["sort"] == ranking
-    # One config check per candidate, then the existing kept-row enrichment.
-    assert request.call_count == len(models) + len(rows)
+    assert [row["config_class"] for row in rows] == ["GPT2Config", "GPT2Config"]
+    # Enrichment reuses the config class discovered during filtering.
+    assert request.call_count == len(models)
+
+
+def test_catalog_fetches_only_config_types_missing_from_filter_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = Mock(return_value="BertConfig")
+    monkeypatch.setattr(catalog, "get_config_type", request)
+
+    rows: list[dict[str, object]] = catalog.build_catalog(
+        fetch_fn=lambda limit: [_model("org/known"), _model("org/missing", "bert")],
+        filter_fn=lambda model: (True, ""),
+        limit=2,
+        output_csv=None,
+        label="generative",
+        token=False,
+        known_config_types={"org/known": "GPT2Config"},
+    )
+
+    assert [row["config_class"] for row in rows] == ["GPT2Config", "BertConfig"]
+    request.assert_called_once_with("org/missing", False)
+
+
+def test_curated_catalog_still_enriches_without_filtering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        generative.HfApi,
+        "model_info",
+        Mock(return_value=_model("org/encoder", "bert")),
+    )
+    request = Mock(return_value=BertConfig())
+    monkeypatch.setattr(generative.AutoConfig, "from_pretrained", request)
+
+    rows: list[dict[str, object]] = generative.fetch_curated_generative_models_metadata(
+        ["org/encoder"]
+    )
+
+    assert [row["model_id"] for row in rows] == ["org/encoder"]
+    assert rows[0]["config_class"] == "BertConfig"
+    request.assert_called_once_with("org/encoder", token=False, trust_remote_code=False)
+
+
+def test_config_metadata_is_not_reused_across_catalog_fetches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        generative.HfApi, "list_models", Mock(side_effect=lambda **kwargs: [_model()])
+    )
+    request = Mock(side_effect=[GPT2Config(), PretrainedConfig()])
+    monkeypatch.setattr(generative.AutoConfig, "from_pretrained", request)
+
+    first: list[dict[str, object]] = generative.fetch_top_generative_models(limit=1)
+    second: list[dict[str, object]] = generative.fetch_top_generative_models(limit=1)
+
+    assert first[0]["config_class"] == "GPT2Config"
+    assert second[0]["config_class"] == PretrainedConfig.__name__
+    assert request.call_count == 2

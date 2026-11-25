@@ -40,7 +40,7 @@ prefill + single-token decode generation loop.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from types import MethodType, ModuleType
@@ -346,6 +346,33 @@ def dtype_for_model_path(
     return dtype
 
 
+def select_adapter_module(
+    config: PretrainedConfig,
+    mapping: Mapping[
+        type[PretrainedConfig], ModuleType
+    ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
+) -> ModuleType | None:
+    """Select an adapter from an already loaded config, without loading or validation.
+
+    Unknown config classes return None so callers can decide how to handle them.
+    This is shared by the loader and catalog filtering to keep dispatch rules in
+    one place, including architecture overrides and config-dependent variants.
+    """
+    # Architecture-name dispatch first: DSpark drafters share their base model's
+    # config class but carry a distinct ``*DSparkModel`` architecture, so route on
+    # the architecture name before falling through to config-class dispatch.
+    for arch in config.architectures or []:
+        if arch in ARCH_TO_ADAPTER_MODULE_MAPPING:
+            return ARCH_TO_ADAPTER_MODULE_MAPPING[arch]
+
+    adapter_module: ModuleType | None = mapping.get(type(config))
+    if adapter_module is hf_gemma4:
+        text_cfg: PretrainedConfig = getattr(config, "text_config", config)
+        if getattr(text_cfg, "enable_moe_block", False):
+            adapter_module = hf_gemma4_moe
+    return adapter_module
+
+
 def resolve_adapter_module(
     model_name_or_path: Union[str, os.PathLike[str]],
     mapping: dict[
@@ -353,34 +380,17 @@ def resolve_adapter_module(
     ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
     trust_remote_code: bool | None = None,
 ) -> ModuleType:
-    model_config = _load_model_config(
+    model_config: PretrainedConfig | None = _load_model_config(
         model_name_or_path, trust_remote_code=trust_remote_code
     )
     if model_config is None:
         raise SpyreNoAdapterError(f"Could not load config for {model_name_or_path}")
 
-    # Architecture-name dispatch first: DSpark drafters share their base model's
-    # config class but carry a distinct ``*DSparkModel`` architecture, so route on
-    # the architecture name before falling through to config-class dispatch.
-    adapter_module: ModuleType
-    for arch in getattr(model_config, "architectures", None) or []:
-        if arch in ARCH_TO_ADAPTER_MODULE_MAPPING:
-            adapter_module = ARCH_TO_ADAPTER_MODULE_MAPPING[arch]
-            break
-    else:
-        if type(model_config) not in mapping:
-            raise SpyreNoAdapterError(
-                f"Model {model_name_or_path} of type {type(model_config)} "
-                "is not supported"
-            )
-
-        adapter_module = mapping[type(model_config)]
-        if adapter_module is hf_gemma4:
-            text_cfg: PretrainedConfig = getattr(
-                model_config, "text_config", model_config
-            )
-            if getattr(text_cfg, "enable_moe_block", False):
-                adapter_module = hf_gemma4_moe
+    adapter_module: ModuleType | None = select_adapter_module(model_config, mapping)
+    if adapter_module is None:
+        raise SpyreNoAdapterError(
+            f"Model {model_name_or_path} of type {type(model_config)} is not supported"
+        )
 
     assert_spyre_dimensions(
         model_config,
