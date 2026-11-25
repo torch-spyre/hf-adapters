@@ -124,6 +124,7 @@ def test_vision_shards_merge_rankings_and_preserve_both_roles(
         max_params=1000,
         shard_size_generative=250,
         shard_size_embedding=500,
+        shard_size_vision=2,
         x1_max_params=500,
         x2_max_params=800,
         x2_shard_size=100,
@@ -134,10 +135,18 @@ def test_vision_shards_merge_rankings_and_preserve_both_roles(
         write_to_csv=tmp_path / "verdicts.csv",
     )
     assert calls == [(10, "downloads"), (10, "trending_score")]
-    rows = {
-        item["mode"]: json.loads((tmp_path / "shards" / item["shard_file"]).read_text())
+    # shard_size_vision=2 splits the three x1 VLMs into two shards, in order.
+    vision_shards: list[str] = [
+        item["shard_file"]
         for item in matrix
-    }
+        if item["mode"] == ModelType.VISION and item["runner"] == "x1"
+    ]
+    assert vision_shards == ["vision-x1-shard-000.json", "vision-x1-shard-001.json"]
+    rows: dict[str, list[dict[str, Any]]] = {}
+    for item in matrix:
+        rows.setdefault(item["mode"], []).extend(
+            json.loads((tmp_path / "shards" / item["shard_file"]).read_text())
+        )
     assert [r["model_id"] for r in rows[ModelType.VISION]] == [
         "org/shared",
         "org/downloads",

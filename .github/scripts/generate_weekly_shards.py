@@ -54,6 +54,7 @@ Usage (called by the GHA workflow):
         --top-k-trending 1000 \
         --shard-size-generative 250 \
         --shard-size-embedding 500 \
+        --shard-size-vision 25 \
         --x1-max-params 7000000000 \
         --x2-max-params 12000000000 \
         --x2-shard-size 100 \
@@ -129,6 +130,7 @@ def generate_shards(
     max_params: int,
     shard_size_generative: int,
     shard_size_embedding: int,
+    shard_size_vision: int,
     x1_max_params: int,
     x2_max_params: int,
     x2_shard_size: int,
@@ -171,8 +173,8 @@ def generate_shards(
     x1_shard_sizes = {
         ModelType.GENERATIVE: shard_size_generative,
         ModelType.EMBEDDING: shard_size_embedding,
-        ModelType.VISION: 25,
-        ModelType.VISION_TOWER: 25,
+        ModelType.VISION: shard_size_vision,
+        ModelType.VISION_TOWER: shard_size_vision,
     }
 
     matrix: list[dict] = []
@@ -292,6 +294,15 @@ def main() -> None:
         help="Models per embedding shard.",
     )
     parser.add_argument(
+        "--shard-size-vision",
+        type=int,
+        default=25,
+        help=(
+            "Models per vision and vision_tower shard. Small because each vision "
+            "checkpoint runs alone in a fresh worker and is slow to verify."
+        ),
+    )
+    parser.add_argument(
         "--x1-max-params",
         type=int,
         default=7_000_000_000,
@@ -371,6 +382,7 @@ def main() -> None:
         max_params=args.max_params,
         shard_size_generative=args.shard_size_generative,
         shard_size_embedding=args.shard_size_embedding,
+        shard_size_vision=args.shard_size_vision,
         x1_max_params=args.x1_max_params,
         x2_max_params=args.x2_max_params,
         x2_shard_size=args.x2_shard_size,

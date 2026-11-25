@@ -96,7 +96,9 @@ tag and expands the candidate pool until the requested post-filter count is
 reached or the ranking is exhausted. Tower discovery is registry-only.
 Tower metadata reports the full checkpoint's parameter count, so tower checks
 bypass the checkpoint-size gate and always use the x1 runner tier. Architecture
-exclusions still apply.
+exclusions still apply. x1 vision and tower shards hold `--shard-size-vision`
+checkpoints (default 25), smaller than text shards because each vision
+checkpoint runs alone in a fresh worker.
 
 Full VLMs compare stock-HF and Spyre logits through prefill and four
 teacher-forced decode steps (cosine floor 0.99), then generate over the five
