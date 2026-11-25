@@ -198,13 +198,32 @@ def test_safetensors_take_precedence_over_bad_pickle(
     assert fetcher.keep(_model(repository), False) == (True, "")
 
 
-@pytest.mark.parametrize("tag", ["sparse", "sparse-encoder", "splade"])
+@pytest.mark.parametrize("tag", ["sparse-encoder", "splade"])
 def test_sparse_tags_are_filtered(repository: dict[str, bytes], tag: str) -> None:
     repository["model.safetensors"] = b"not inspected"
     assert fetcher.keep(_model(repository, [tag]), False) == (
         False,
         "model is a sparse encoder",
     )
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "sparse",
+        "sparse-pruned",
+        "dataset:org/sparse-training-data",
+        "dataset:org/splade-distillation",
+        "base_model:org/sparse-encoder",
+        "base_model:finetune:org/splade",
+        "license:sparse-license",
+    ],
+)
+def test_dense_models_with_sparse_metadata_tags_are_kept(
+    repository: dict[str, bytes], tag: str
+) -> None:
+    repository["model.safetensors"] = save({"weight": torch.ones(2)})
+    assert fetcher.keep(_model(repository, [tag]), False) == (True, "")
 
 
 @pytest.mark.parametrize("sparse", [False, True])
@@ -241,6 +260,72 @@ def test_checkpoint_hub_outages_are_retried_not_filtered(
     else:
         assert validation.validate_embedding_checkpoint(_model({}), False) == (True, "")
         assert request.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadTimeout("read timed out"),
+        httpx.ConnectError("DNS lookup failed"),
+        httpx.ReadError("connection reset"),
+        OSError("remote filesystem read failed"),
+    ],
+)
+@pytest.mark.parametrize("exhausted", [False, True])
+def test_checkpoint_transport_failures_recover_or_abort_catalog(
+    repository: dict[str, bytes],
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    exhausted: bool,
+) -> None:
+    repository["model.safetensors"] = save({"weight": torch.ones(2)})
+    repository["modules.json"] = b"[]"
+    read_json = Mock(side_effect=error if exhausted else [error, []])
+    monkeypatch.setattr(validation, "_read_json", read_json)
+    delays: list[float] = []
+    monkeypatch.setattr(catalog.time, "sleep", delays.append)
+    monkeypatch.setattr(
+        catalog, "get_config_type", lambda model_id, token: "BertConfig"
+    )
+
+    def build_catalog() -> list[dict[str, object]]:
+        return catalog.build_catalog(
+            fetch_fn=lambda limit: [_model(repository)],
+            filter_fn=lambda model: fetcher.keep(model, False),
+            limit=1,
+            output_csv=None,
+            label="embedding",
+            token=False,
+        )
+
+    if exhausted:
+        with pytest.raises(
+            catalog.HubRetryExhaustedError, match="after 5 attempts"
+        ) as caught:
+            build_catalog()
+        assert caught.value.__cause__ is error
+        assert read_json.call_count == 5
+        assert delays == [2.0, 4.0, 8.0, 16.0]
+    else:
+        assert [row["model_id"] for row in build_catalog()] == ["org/model"]
+        assert read_json.call_count == 2
+        assert delays == [2.0]
+
+
+@pytest.mark.parametrize(
+    "error", [FileNotFoundError("missing shard"), PermissionError("access denied")]
+)
+def test_permanent_checkpoint_io_failures_are_filtered_without_retry(
+    repository: dict[str, bytes], monkeypatch: pytest.MonkeyPatch, error: OSError
+) -> None:
+    repository["modules.json"] = b"[]"
+    repository["model.safetensors"] = save({"weight": torch.ones(2)})
+    read_json = Mock(side_effect=error)
+    monkeypatch.setattr(validation, "_read_json", read_json)
+    kept, reason = fetcher.keep(_model(repository), False)
+    assert not kept
+    assert str(error) in reason
+    assert read_json.call_count == 1
 
 
 def test_ranked_catalog_refills_after_checkpoint_rejection(

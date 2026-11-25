@@ -142,6 +142,7 @@ def validate_embedding_checkpoint(
         return _retry_hub_call(
             lambda: _inspect_checkpoint(model, token),
             description=f"embedding checkpoint[{model.id}]",
+            retry_os_errors=True,
         )
     except HubRetryExhaustedError:
         raise

@@ -131,6 +131,83 @@ def test_gateway_errors_keep_exponential_backoff(
     assert waits == [2.0, 4.0]
 
 
+@pytest.mark.parametrize(
+    "transport_error",
+    [
+        httpx.ConnectError("DNS lookup failed"),
+        httpx.ReadTimeout("read timed out"),
+        httpx.ReadError("connection reset"),
+        ConnectionResetError("connection reset"),
+        TimeoutError("socket timed out"),
+    ],
+)
+@pytest.mark.parametrize("wrapping", ["direct", "cause", "context"])
+def test_transport_errors_recover_with_backoff(
+    transport_error: Exception, wrapping: str, waits: list[float]
+) -> None:
+    error: Exception = transport_error
+    if wrapping != "direct":
+        error = OSError("Hub request failed")
+        if wrapping == "cause":
+            error.__cause__ = transport_error
+        else:
+            error.__context__ = transport_error
+    request = Mock(side_effect=[error, ["org/model"]])
+
+    assert catalog.with_transient_retry(request, "listing") == ["org/model"]
+    assert request.call_count == 2
+    assert waits == [2.0]
+
+
+@pytest.mark.parametrize(
+    "phase", ["listing", "curated", "generative", "embedding", "config_type"]
+)
+def test_transport_exhaustion_propagates_through_discovery(
+    monkeypatch: pytest.MonkeyPatch, phase: str, waits: list[float]
+) -> None:
+    error = httpx.ConnectError("DNS lookup failed")
+    request = Mock(side_effect=error)
+    monkeypatch.setattr(catalog.AutoConfig, "from_pretrained", request)
+    api = HfApi(token=False)
+    monkeypatch.setattr(api, "model_info", request)
+
+    with pytest.raises(
+        catalog.HubRetryExhaustedError, match="after 5 attempts"
+    ) as caught:
+        if phase == "listing":
+            catalog.with_transient_retry(request, "listing")
+        elif phase == "curated":
+            _create_fetch_metadata(["org/model"])(api, 1)
+        elif phase == "config_type":
+            catalog.get_config_type("org/model", False)
+        else:
+            _build_catalog(phase)
+
+    assert caught.value.__cause__ is error
+    assert request.call_count == 5
+    assert waits == [2.0, 4.0, 8.0, 16.0]
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize(
+    "error", [FileNotFoundError("missing shard"), PermissionError("access denied")]
+)
+def test_missing_or_forbidden_remote_files_are_not_retried(
+    error: OSError, wrapped: bool, waits: list[float]
+) -> None:
+    failure: OSError = error
+    if wrapped:
+        failure = OSError("remote file lookup failed")
+        failure.__cause__ = error
+    request = Mock(side_effect=failure)
+
+    with pytest.raises(OSError) as caught:
+        catalog._retry_hub_call(request, "checkpoint", retry_os_errors=True)
+    assert caught.value is failure
+    assert request.call_count == 1
+    assert waits == []
+
+
 @pytest.mark.parametrize("status", [400, 401, 403, 404])
 def test_permanent_listing_errors_are_not_retried(
     status: int, waits: list[float]

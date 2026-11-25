@@ -87,8 +87,10 @@ RERANKER_SUBSTRINGS: list[str] = ["rerank", "cross-encoder", "cross_encoder"]
 
 def _is_sparse_encoder(model: ModelInfo) -> bool:
     """Sparse retrieval models are incompatible with the dense embedding suite."""
-    markers: tuple[str, ...] = ("sparse", "splade")
-    return any(any(marker in tag for marker in markers) for tag in tags(model))
+    # Generic "sparse" also describes pruned dense weights. Namespaced Hub
+    # tags can mention sparse datasets/base models without defining the task.
+    markers: set[str] = {"sparse-encoder", "splade"}
+    return bool(tags(model) & markers)
 
 
 def _has_embedding_signal(model: ModelInfo) -> bool:
