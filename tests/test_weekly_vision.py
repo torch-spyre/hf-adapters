@@ -23,9 +23,9 @@ from tests.model_registry import (
     WEEKLY_SCAN_VISION_TOWER_PATHS,
 )
 from tests.spyre.weekly_generation import model_fetcher, weekly_sub_process
-from tests.spyre.weekly_generation.failure_categories import ReferenceStage
 from tests.spyre.weekly_generation.model_prefilter import prefilter_models
 from tests.spyre.weekly_generation.model_type import ModelType, scan_model_types
+from tests.spyre.weekly_generation.reference_stage import ReferenceStage
 from utils import fetch_top_vision_models as vision
 from utils.hf_model_catalog import Ranking
 

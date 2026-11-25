@@ -11,8 +11,6 @@ The category strings are persisted verbatim in the ClickHouse
 from new ones. Add categories rather than rename them.
 """
 
-from typing import Literal
-
 # Models above this parameter count are rejected before a worker is spawned:
 # they cannot be brought up on Spyre. Producers apply this while building the
 # model list; weekly_test keeps an in-worker backstop for rows whose parameter
@@ -33,7 +31,3 @@ FAILURE_CATEGORY_WORKER_TIMEOUT = "worker_timeout"
 FAILURE_CATEGORY_MOE = "moe"
 FAILURE_CATEGORY_UNSUPPORTED_CHECKPOINT = "unsupported_checkpoint"
 FAILURE_CATEGORY_ARCH_EXCLUDED = "arch_excluded"
-
-# Stock-reference step a vision verifier is in when it fails: "load" maps to
-# FAILURE_CATEGORY_CPU_LOAD_FAILED, "forward" to FAILURE_CATEGORY_CPU_GENERATE_FAILED.
-ReferenceStage = Literal["load", "forward"]

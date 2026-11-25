@@ -24,7 +24,7 @@ from transformers import (
 from hf_adapters.auto_spyre_model import dtype_for_model_path
 from hf_adapters.hf_common import DEVICE
 from tests.model_registry import VISION_MODELS
-from tests.spyre.weekly_generation.failure_categories import ReferenceStage
+from tests.spyre.weekly_generation.reference_stage import ReferenceStage
 
 MIN_COSINE = 0.99
 MAX_RELATIVE_L2 = 0.2

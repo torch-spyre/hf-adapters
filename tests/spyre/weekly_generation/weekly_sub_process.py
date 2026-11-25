@@ -41,9 +41,9 @@ from tests.spyre.weekly_generation.failure_categories import (
     FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION,
     FAILURE_CATEGORY_UNSUPPORTED_CHECKPOINT,
     FAILURE_CATEGORY_VERIFICATION_FAILED,
-    ReferenceStage,
 )
 from tests.spyre.weekly_generation.model_type import ModelType
+from tests.spyre.weekly_generation.reference_stage import ReferenceStage
 from utils.utilities import ts
 
 

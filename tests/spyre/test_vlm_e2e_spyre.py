@@ -98,7 +98,7 @@ from tests.model_registry import (
     VISION_PATHS,
     xfail_non_blocking,
 )
-from tests.spyre.weekly_generation.failure_categories import ReferenceStage
+from tests.spyre.weekly_generation.reference_stage import ReferenceStage
 
 pytestmark = pytest.mark.model_harness("vision")
 
