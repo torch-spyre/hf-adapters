@@ -13,12 +13,12 @@
 # limitations under the License.
 
 """
-E2E token-classification accuracy: stock CPU logits vs Spyre encoder + CPU head.
+E2E token-classification accuracy: stock CPU logits vs Spyre encoder + head.
 
 Mirrors the structure of ``test_e2e_masked_lm_compare_spyre.py`` and
 ``test_e2e_question_answering_compare_spyre.py``: loads the HF model on CPU for
 a reference forward, then loads via ``AutoSpyreModelForTokenClassification``
-(encoder on Spyre, linear classifier head on CPU), and asserts:
+(encoder and linear classifier head on Spyre), and asserts:
 
   - Per-token logit cosine similarity ≥ 0.99 vs CPU reference (all real tokens).
   - Exact label-id match on every real token.

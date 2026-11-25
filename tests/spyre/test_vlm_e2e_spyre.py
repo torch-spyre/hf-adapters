@@ -55,6 +55,7 @@ Usage (on Spyre pod)::
 """
 
 import gc
+import os
 import types
 
 import pytest
@@ -80,7 +81,13 @@ from hf_adapters.hf_common import (
     make_cache_index,
     normalize_generation_inputs,
 )
-from tests._vision_helpers import build_vlm_batch, stock_vlm_generate
+from tests._vision_helpers import (
+    VLM_REFERENCE_CACHE_ENV,
+    build_vlm_batch,
+    get_or_create_vlm_reference,
+    resolve_model_revision,
+    stock_vlm_reference,
+)
 from tests.conftest import load_ref_model
 from tests.model_registry import (
     NON_BLOCKING_VISION_MODELS,
@@ -214,54 +221,6 @@ def _adapter_teacher_forced_steps(
     return per_step_logits
 
 
-def _stock_vlm_greedy_steps(
-    model_path: str,
-    batch: dict[str, torch.Tensor],
-    adapter_mod,
-    num_steps: int,
-    ref_model=None,
-    trust_remote_code: bool | None = None,
-) -> tuple[list[torch.Tensor], list[int]]:
-    """Stock HF per-step greedy logits + token ids over prefill + decode.
-
-    Runs ``AutoModelForImageTextToText.generate`` greedily for ``num_steps``
-    tokens with ``output_logits=True`` and returns ``(logits, token_ids)``:
-
-    - ``logits``: list of ``num_steps`` fp32 ``[vocab]`` tensors — the
-      distribution stock greedily picked each generated token from (step 0 =
-      prefill / first token, step k = after k generated tokens).
-    - ``token_ids``: the ``num_steps`` greedily chosen ids (``logits[i].argmax()``).
-
-    The Spyre e2e test uses ``token_ids`` as the teacher-forcing sequence and
-    ``logits`` as the per-step top-1 reference, so the adapter is compared on the
-    *same* prefix at every step (no greedy-fork amplification).
-
-    Pass ``ref_model`` to reuse an already-loaded stock model.
-    """
-    from transformers import AutoModelForImageTextToText
-
-    if ref_model is None:
-        ref_model = load_ref_model(
-            model_path=model_path,
-            adapter_mod=adapter_mod,
-            auto_model_cls=AutoModelForImageTextToText,
-            trust_remote_code=trust_remote_code,
-        )
-    with torch.no_grad():
-        gen = ref_model.generate(
-            **batch,
-            max_new_tokens=num_steps,
-            do_sample=False,
-            use_cache=True,
-            output_logits=True,
-            return_dict_in_generate=True,
-        )
-    logits = [step[0].float().clone() for step in gen.logits]
-    prompt_len = batch["input_ids"].shape[1]
-    token_ids = gen.sequences[0, prompt_len : prompt_len + num_steps].tolist()
-    return logits, token_ids
-
-
 @pytest.mark.parametrize(
     "model_path", xfail_non_blocking(VISION_PATHS, table=NON_BLOCKING_VISION_MODELS)
 )
@@ -290,36 +249,62 @@ def test_vlm_generate_spyre(model_path: str, trust_remote_code: bool | None) -> 
 
     # --- Stock CPU reference (run first, before prepare_for_spyre patches RMSNorm).
     # Capture stock's per-step greedy logits + token ids (the forcing sequence and
-    # the per-step top-1 reference), plus its free-run caption for an eyeball. Both
-    # ride off a single stock load (freed here) rather than reloading the model. ---
-    print("  Running stock CPU reference (per-step greedy) ...")
+    # the per-step top-1 reference), plus its free-run caption for an eyeball. A
+    # persistent cache avoids loading or running the CPU model after the first
+    # exact model/input/config combination. Even a miss uses only one generation.
+    print("  Loading stock CPU reference ...")
     from transformers import AutoModelForImageTextToText
 
-    ref_model = load_ref_model(
-        model_path=model_path,
-        adapter_mod=adapter,
-        auto_model_cls=AutoModelForImageTextToText,
-        trust_remote_code=trust_remote_code,
+    ref_dtype = dtype_for_model_path(
+        model_path, target_device="cpu", trust_remote_code=trust_remote_code
     )
-    ref_logits, ref_tokens = _stock_vlm_greedy_steps(
+    model_revision = resolve_model_revision(model_path, trust_remote_code)
+    cache_dir = os.environ.get(VLM_REFERENCE_CACHE_ENV) or None
+
+    def _compute_reference():
+        ref_model = load_ref_model(
+            model_path=model_path,
+            adapter_mod=adapter,
+            auto_model_cls=AutoModelForImageTextToText,
+            trust_remote_code=trust_remote_code,
+        )
+        try:
+            return stock_vlm_reference(
+                model=ref_model,
+                processor=processor,
+                batch=batch,
+                max_new_tokens=MAX_NEW_TOKENS,
+                num_compare_steps=NUM_COMPARE_STEPS,
+            )
+        finally:
+            del ref_model
+            gc.collect()
+
+    reference, cache_status = get_or_create_vlm_reference(
+        cache_dir=cache_dir,
         model_path=model_path,
-        batch=batch,
-        num_steps=NUM_COMPARE_STEPS,
-        adapter_mod=adapter,
-        ref_model=ref_model,
+        model_revision=model_revision,
+        model_dtype=ref_dtype,
         trust_remote_code=trust_remote_code,
-    )
-    ref_text = stock_vlm_generate(
-        model_path=model_path,
-        processor=processor,
+        prompt=PROMPT,
         batch=batch,
         max_new_tokens=MAX_NEW_TOKENS,
-        adapter_mod=adapter,
-        ref_model=ref_model,
-        trust_remote_code=trust_remote_code,
+        num_compare_steps=NUM_COMPARE_STEPS,
+        compute=_compute_reference,
     )
-    del ref_model
-    gc.collect()
+    ref_logits = reference.logits
+    ref_tokens = reference.token_ids
+    ref_text = reference.text
+    if cache_status == "hit":
+        print(f"  Stock CPU reference cache hit: {cache_dir}")
+    elif cache_dir is None:
+        print(f"  Stock CPU reference generated ({VLM_REFERENCE_CACHE_ENV} unset)")
+    elif model_revision is None:
+        print("  Stock CPU reference generated (model revision is not immutable)")
+    elif cache_status == "saved":
+        print(f"  Stock CPU reference generated and cached: {cache_dir}")
+    else:
+        print(f"  Stock CPU reference generated (cache write failed: {cache_dir})")
 
     # --- Adapter on Spyre ---
     print("  Loading model for Spyre ...")

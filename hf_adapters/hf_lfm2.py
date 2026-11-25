@@ -29,10 +29,12 @@ from hf_adapters.hf_common import (
     PrecomputedRotaryEmbedding,
     allocate_kv_cache_tensor,
     apply_rope_matmul,
+    embed_text_tokens,
     get_backbone,
     kv_cache_update,
     pad_attention_heads,
     prepare_lm_head_for_spyre,
+    query_validity_mask,
     run_lm_head,
 )
 
@@ -72,6 +74,7 @@ def _causal_depthwise_conv(
     state,
     weights,
     shift_matrices,
+    prefill_masks,
     decode_matrices,
     bias=None,
     decode=None,
@@ -93,6 +96,7 @@ def _causal_depthwise_conv(
                 new_state,
                 weights,
                 shift_matrices,
+                prefill_masks,
                 decode_matrices,
                 bias,
             )
@@ -106,13 +110,7 @@ def _causal_depthwise_conv(
     else:
         if seq_len < state_len:
             hidden_states = F.pad(hidden_states, (state_len - seq_len, 0))
-        positions = torch.arange(state_len)
-        from_state_1 = (positions == 0)[None, None, :].to(
-            dtype=hidden_states.dtype, device=hidden_states.device
-        )
-        from_state_2 = (positions < 2)[None, None, :].to(
-            dtype=hidden_states.dtype, device=hidden_states.device
-        )
+        from_state_1, from_state_2 = prefill_masks
         previous_1 = from_state_1 * (state @ shift_matrices[1]) + (1 - from_state_1) * (
             hidden_states @ shift_matrices[1]
         )
@@ -203,6 +201,16 @@ def _make_conv_block(layer):
             for shift in range(3)
         ]
     )
+    from_state_1 = torch.zeros(1, 1, BLOCK_SIZE, dtype=identity.dtype)
+    from_state_1[..., 0] = 1
+    from_state_2 = torch.zeros_like(from_state_1)
+    from_state_2[..., :2] = 1
+    conv._spyre_prefill_masks = nn.ParameterList(
+        [
+            nn.Parameter(from_state_1, requires_grad=False),
+            nn.Parameter(from_state_2, requires_grad=False),
+        ]
+    )
     select_previous_2 = torch.zeros_like(identity)
     select_previous_2[-2, 0] = 1
     select_previous_1 = torch.zeros_like(identity)
@@ -234,6 +242,7 @@ def _make_conv_block(layer):
             conv_state,
             conv._spyre_weights,
             conv._spyre_shift_matrices,
+            conv._spyre_prefill_masks,
             conv._spyre_decode_matrices,
             conv.conv.bias,
             decode,
@@ -255,14 +264,26 @@ def _make_conv_block(layer):
     )
 
 
+def _pad_decode_validity(mask):
+    # A one-token decode only occupies column zero of the convolution stick.
+    # Avoid F.pad's unaligned slice write, which Spyre cannot lower for B=1.
+    columns = torch.arange(BLOCK_SIZE, dtype=mask.dtype).to(mask.device)
+    return mask * (columns == 0).to(mask.dtype)
+
+
+_compiled_pad_decode_validity = torch.compile(
+    _pad_decode_validity, dynamic=False, fullgraph=True
+)
+
+
 def _padding_mask(attn_mask, seq_len, cache_index):
     """Recover per-query input validity from the additive causal mask."""
-    block_start = int(cache_index[0])
-    rows = torch.arange(seq_len)
-    diagonal = attn_mask.to("cpu")[:, 0, rows, block_start + rows]
-    padding_mask = (diagonal == 0).to(dtype=attn_mask.dtype)
+    padding_mask = query_validity_mask(attn_mask)
     if seq_len == 1:
-        padding_mask = F.pad(padding_mask, (0, BLOCK_SIZE - 1))
+        if padding_mask.device.type == "spyre":
+            padding_mask = _compiled_pad_decode_validity(padding_mask)
+        else:
+            padding_mask = F.pad(padding_mask, (0, BLOCK_SIZE - 1))
     return padding_mask.to(device=DEVICE)
 
 
@@ -275,8 +296,7 @@ def _run_backbone_forward(
     value_caches,
     cache_index,
 ):
-    backbone = get_backbone(model)
-    h = backbone.embed_tokens(input_ids)
+    h = embed_text_tokens(model, input_ids)
     selected_freqs = model._spyre_rope(h, position_ids)
     padding_mask = _padding_mask(attn_mask, h.shape[1], cache_index)
 

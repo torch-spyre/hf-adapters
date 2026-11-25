@@ -27,19 +27,20 @@ def csv_path_for(base: Path, model_type: ModelType) -> Path:
 def create_sink(
     model_type: ModelType,
     write_to_csv: Path | None,
+    model_list_file: Path | None = None,
 ) -> ResultSink:
     """Return the sink for a *model_type* run, keyed on whether a CSV was asked for.
 
-    One sink instance binds one destination — a single ClickHouse table, or a
-    single file — so a run covering both model types needs one per type rather
-    than one overall.
+    One sink instance binds one model type and one destination — ClickHouse or a single
+    file — so a run covering both model types needs one per type rather than one overall.
 
     With *write_to_csv* the verdicts go to a new CSV instead of ClickHouse, which
     needs no credentials. Its path gets a ``-<model_type>`` suffix, since a single
     invocation can cover both types and each needs its own file.
 
-    Otherwise a ``ClickHouseResultSink`` is built, which connects during
-    construction and creates its table if missing.
+    Otherwise a ``ClickHouseResultSink`` is built, which connects during construction and
+    requires the v2 capability tables to exist. *model_list_file* names this process's shard
+    for that sink's dedup scope; the CSV sink ignores it.
     """
     if write_to_csv is not None:
         path = csv_path_for(write_to_csv, model_type)
@@ -52,4 +53,7 @@ def create_sink(
     # with no driver installed at all.
     from tests.spyre.weekly_generation.sink.clickhouse_sink import ClickHouseResultSink
 
-    return ClickHouseResultSink(model_type=model_type)
+    return ClickHouseResultSink(
+        model_type=model_type,
+        model_list_file=str(model_list_file) if model_list_file else None,
+    )

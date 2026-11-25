@@ -28,6 +28,7 @@ import torch
 import torch._inductor.compile_fx
 import yaml
 from dotenv import load_dotenv
+from torch._library.fake_class_registry import FakeScriptObject
 from torch.fx.experimental.symbolic_shapes import has_free_symbols, is_concrete_int
 
 USE_OLDFORMAT = os.getenv("USE_OLDFORMAT", None) is not None
@@ -216,16 +217,41 @@ def sanitize_arg(
 # Op-name prefixes that never denote a tensor operation, so they get no test case.
 # torch.cuda.* are host-side device queries (e.g. get_device_capability(), called
 # from transformers' _can_use_grouped_mm) that return Python values, not tensors.
-_SKIPPED_OP_PREFIXES = ("torch.cuda.",)
+# torch.ops.spyre.*, torch_spyre._monkey_patch.* and torch._C._autograd.* come from
+# torch-spyre's own device-copy / dtype plumbing, not from the model.
+_SKIPPED_OP_PREFIXES = (
+    "torch.cuda.",
+    "torch.ops.spyre.",
+    "torch_spyre._monkey_patch.",
+    "torch._C._autograd.",
+)
+
+# ``_operator`` names that must not be spelled "torch." + name, because the
+# trailing underscore in ``operator.and_`` / ``or_`` is only Python
+# keyword-avoidance ("Same as a & b.") while in torch a trailing ``_`` means
+# in-place. Emitting "torch.and_" for ``a & b`` therefore names the out-of-place
+# capture like the in-place op, and torch-spyre's op registry implements it that
+# way — an in-place write, which cannot express a capture whose operands
+# broadcast. The real torch spellings keep ``_`` meaning in-place; the in-place
+# halves exist only as Tensor methods, so they are spelled that way. See
+# https://github.com/torch-spyre/hf-adapters/issues/546.
+_OPERATOR_OP_NAMES = {
+    "and_": "torch.bitwise_and",  # a & b
+    "or_": "torch.bitwise_or",  # a | b
+    "iand": "torch.Tensor.bitwise_and_",  # a &= b
+    "ior": "torch.Tensor.bitwise_or_",  # a |= b
+}
 
 # Ops whose tensor inputs should use Xavier init when dtype/rank also qualify.
 _XAVIER_OPS = {
+    "torch.sum",
     "torch.conv2d",
     "torch.bmm",
     "torch.matmul",
     "torch._grouped_mm",
     "torch.nn.functional.linear",
     "torch.nn.functional.grouped_mm",
+    "torch.nn.functional.scaled_dot_product_attention",
 }
 _XAVIER_DTYPES = {"torch.float16", "torch.float32", "torch.bfloat16"}
 
@@ -1641,6 +1667,13 @@ class TorchOpCollector:
             # workaround for Gemma3
             TorchOpCollector.log_function[TorchOpCollector.log_mthd]("Case 6")
             shape = stride = storage_offset = dtype = device = None
+        elif isinstance(meta_val, (FakeScriptObject, torch.ScriptObject)):
+            # Opaque graph input with no tensor metadata, e.g. the encoded layer
+            # name vLLM passes to unified_attention_with_output
+            TorchOpCollector.log_function[TorchOpCollector.log_mthd](
+                "Case 6b: opaque script object"
+            )
+            shape = stride = storage_offset = dtype = device = None
         else:
             TorchOpCollector.log_function[TorchOpCollector.log_mthd]("Case 7: unknown")
             raise RuntimeError(f"{type(meta_val)} : {meta_val}")
@@ -1656,6 +1689,12 @@ class TorchOpCollector:
                     f"Function type is _operator: {node.target.__name__}"
                 )
                 target_name = node.target.__name__
+                if target_name in _OPERATOR_OP_NAMES:
+                    op = _OPERATOR_OP_NAMES[target_name]
+                    TorchOpCollector.log_function[TorchOpCollector.log_mthd](
+                        f"Operator {target_name} is spelled {op} in torch"
+                    )
+                    return op
                 if target_name in torch.fx.graph.magic_methods:
                     TorchOpCollector.log_function[TorchOpCollector.log_mthd](
                         f"Operator {target_name} is magic method"
@@ -1823,7 +1862,7 @@ class TorchOpCollector:
             model_, TorchOpCollector.ops_set, TorchOpCollector.print_output
         )
         return TorchOpCollector.orig_compile_fx(
-            model_, example_inputs_, inner_compile, config_patches, decompositions
+            model_, example_inputs_, *args, **kwargs
         )
 
     def __init__(self, print_output=False, print_graph_module=False):
@@ -1855,10 +1894,13 @@ class TorchOpCollector:
     def write_yaml(
         self,
         model_name,
+        *,
         output_dir=".",
         yaml_defaults=None,
-        supress_spyre=False,
-        supported_dtypes=None,
+        supress_spyre=True,
+        batch=None,
+        input_len=None,
+        output_len=None,
     ):
         defaults = {**TorchOpCollector.DEFAULT_YAML_DEFAULTS, **(yaml_defaults or {})}
 
@@ -1924,7 +1966,10 @@ class TorchOpCollector:
             }
             print(f"Total no. of test cases: {len(config['cases'])}")
 
+        params_header = _format_parameters_header(batch, input_len, output_len)
+
         with open(os.path.join(output_dir, model_name + ".yaml"), "w") as f:
+            f.write(params_header)
             yaml.dump(
                 config,
                 f,
@@ -1948,6 +1993,7 @@ class TorchOpCollector:
             else:
                 config["cases"] = _filter_cases(self.test_cases_norm_yaml)
             with open(os.path.join(output_dir, model_name + "_spyre.yaml"), "w") as f:
+                f.write(params_header)
                 yaml.dump(
                     config,
                     f,

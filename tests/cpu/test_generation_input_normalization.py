@@ -16,8 +16,11 @@ import pytest
 import torch
 
 from hf_adapters.hf_common import (
+    _ChunkedPrefillMaskBuilder,
+    _mask_fill_value,
     _materialize_decode_mask_heads,
     _prefill_cache_inputs,
+    add_causal_sliding_window_band,
     build_prefill_mask,
     encode_prompts,
     generation_cache_len,
@@ -65,6 +68,20 @@ def test_encode_prompts_uses_chat_template_by_default():
     assert kwargs["add_generation_prompt"] is True
     assert kwargs["padding_side"] == "left"
     assert tokenizer.pad_token == tokenizer.eos_token
+
+
+def test_encode_prompts_forwards_chat_template_kwargs():
+    tokenizer = _RecordingTokenizer(chat_template="template")
+
+    encode_prompts(
+        tokenizer,
+        "hello",
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    kind, _, kwargs = tokenizer.call
+    assert kind == "chat"
+    assert kwargs["enable_thinking"] is False
 
 
 def test_encode_prompts_can_force_plain_right_padding():
@@ -219,6 +236,116 @@ def test_prefill_mask_matches_normalized_offsets():
         == 0
     ).all()
     assert (mask[0, 0, -1, normalized.padded_len :] < 0).all()
+
+
+@pytest.mark.parametrize("sliding_window", [3, 5, 8])
+def test_chunked_prefill_mask_recurrence_matches_reference(sliding_window):
+    batch_size = 2
+    chunk_size = 4
+    cache_len = 12
+    offsets = torch.tensor([2, 0])
+    builder = _ChunkedPrefillMaskBuilder(
+        batch_size,
+        chunk_size,
+        cache_len,
+        offsets,
+        device="cpu",
+    )
+    fill = _mask_fill_value(torch.float16)
+
+    for query_start in range(0, cache_len, chunk_size):
+        actual = builder.build(query_start)
+        expected = build_prefill_mask(
+            batch_size,
+            chunk_size,
+            cache_len,
+            offsets,
+            query_start=query_start,
+        )
+        assert torch.equal(actual, expected)
+
+        query_coords = (torch.arange(chunk_size)[None, :] + query_start).expand(
+            batch_size, chunk_size
+        )
+        actual_sliding = add_causal_sliding_window_band(
+            actual, query_coords, sliding_window
+        )
+        expected_sliding = expected.clone()
+        for row in range(chunk_size):
+            lower_bound = max(0, query_start + row - sliding_window + 1)
+            expected_sliding[..., row, :lower_bound] = fill
+        assert torch.equal(actual_sliding, expected_sliding)
+
+        # Compact SWA caches expose the same logical mask in physical ring
+        # order. Builder metadata must not bypass that remapping.
+        key_cache_coords = {
+            0: torch.tensor([0, 1, 2, 3, -4, -3, -2, -1]),
+            4: torch.arange(8),
+            8: torch.tensor([8, 9, 10, 11, 4, 5, 6, 7]),
+        }[query_start]
+        actual_ring = add_causal_sliding_window_band(
+            actual,
+            query_coords,
+            sliding_window,
+            key_cache_coords=key_cache_coords,
+        )
+        expected_ring = add_causal_sliding_window_band(
+            expected,
+            query_coords,
+            sliding_window,
+            key_cache_coords=key_cache_coords,
+        )
+        assert torch.equal(actual_ring, expected_ring)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("offsets", [[0, 6], [12, 18], [-2, 3]])
+def test_chunked_query_validity_matches_mask(dtype, offsets):
+    from hf_adapters.hf_gemma4 import _query_row_mask
+
+    offsets = torch.tensor(offsets)
+    builder = _ChunkedPrefillMaskBuilder(2, 4, 12, offsets, dtype=dtype, device="cpu")
+    h = torch.zeros((2, 4, 1), dtype=dtype)
+    for query_start in (0, 4, 8):
+        mask = builder.build(query_start)
+        reference = build_prefill_mask(
+            2, 4, 12, offsets, dtype=dtype, query_start=query_start
+        )
+        expected = (reference == 0).any(dim=-1).any(dim=1)
+        assert torch.equal(builder.live_query_rows(query_start), expected)
+        assert torch.equal(_query_row_mask(h, mask), expected.to(dtype)[:, :, None])
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_chunked_compact_helpers_do_not_read_full_mask(dtype, monkeypatch):
+    from hf_adapters.hf_gemma4 import _query_row_mask
+
+    offsets = torch.tensor([2, 7])
+    builder = _ChunkedPrefillMaskBuilder(2, 4, 16, offsets, dtype=dtype, device="cpu")
+    builder.build(0)
+    builder.build(4)
+    mask = builder.build(8)
+    reference = build_prefill_mask(2, 4, 16, offsets, dtype=dtype, query_start=8)
+    query_coords = torch.tensor([[8, 9, 10, 11], [7, 9, 11, 13]])
+    # Reordered ring columns, an unwritten slot, and an out-of-range slot.
+    keys = torch.tensor([8, 9, 10, 11, 4, 5, -1, 16])
+    expected = add_causal_sliding_window_band(
+        reference, query_coords, 5, key_cache_coords=keys
+    )
+    expected_rows = (reference == 0).any(dim=-1).any(dim=1).to(dtype)
+    original_to = torch.Tensor.to
+
+    def reject_full_mask_copy(self, *args, **kwargs):
+        assert self is not mask, "The full mask must remain on its original device"
+        return original_to(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "to", reject_full_mask_copy)
+    actual = add_causal_sliding_window_band(
+        mask, query_coords, 5, key_cache_coords=keys
+    )
+    assert torch.equal(actual, expected)
+    h = torch.zeros((2, 4, 1), dtype=dtype)
+    assert torch.equal(_query_row_mask(h, mask), expected_rows[:, :, None])
 
 
 def test_token_aligned_inputs_follow_prompt_normalization():

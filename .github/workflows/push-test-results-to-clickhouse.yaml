@@ -1,23 +1,27 @@
 name: push-test-results-to-clickhouse
 
 # Ingests JUnit XML results from hf-adapters' own model-centric e2e suites
-# into ClickHouse via .github/scripts/ingest_xml_hf_adapters.py, writing to
-# hf_test_runs / hf_test_cases / hf_run_properties. Triggered by both
-# workflows that produce those suites:
-#   - test_pull_request.yaml (hf-adapters' PR/trunk workflow)
+# into the schema-v2 database only, through torch-spyre's shared
+# ingest-xml-to-clickhouse action, with the repo's scoped v2 login. Triggered by
+# the workflows that produce those suites:
+#   - test_pull_request.yaml and test_daily.yaml (hf-adapters' PR/trunk/daily workflows)
 #   - integration-tests.yaml (delegates to _test_matrix.yaml, which runs the
 #     same suites -- smoke, load, token_compare, embed_compare, vlm,
 #     model_module -- against upstream-triggered or manually dispatched refs)
 # Also supports manual dispatch for re-ingesting a specific run.
 #
 # NOTE: this filename is deliberately NOT push-to-clickhouse.yaml -- that name
-# is already taken by this repo's unrelated HF-Hub weekly-model-scan cron job,
-# which references the same CLICKHOUSE_* secrets for its own purposes.
+# is already taken by this repo's unrelated HF-Hub weekly-model-scan cron job.
+#
+# Secrets: CLICKHOUSE_V2_USER / CLICKHOUSE_V2_PASSWORD (scoped login),
+# CLICKHOUSE_DB_V2 (database), and optionally CLICKHOUSE_V2_HOST / CLICKHOUSE_V2_PORT
+# (HA endpoint; the host and port fall back to CLICKHOUSE_HOST / CLICKHOUSE_PORT).
 on:
   workflow_run:
     workflows:
       - integration-tests
       - test_pull_request
+      - test_daily
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -26,7 +30,7 @@ on:
         required: false
         default: ''
       workflow_name:
-        description: Workflow name (integration-tests | test_pull_request)
+        description: Workflow name (integration-tests | test_pull_request | test_daily)
         required: false
         default: integration-tests
 
@@ -46,36 +50,14 @@ jobs:
       - x86_64
       - linux
       - image_ingest
-    timeout-minutes: 15
+    # PyPI/GitHub downloads from torch-cicd pods can be slow enough to blow a tighter budget.
+    timeout-minutes: 30
     # Skip if the triggering workflow was cancelled (but ingest failures are fine)
     if: |
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion != 'cancelled'
 
     env:
-      # ---------------------------------------------------------------------------
-      # Set these secrets in your repo / org settings:
-      #   CLICKHOUSE_HOST   e.g. clickhouse.internal.example.com
-      #   CLICKHOUSE_PORT   e.g. 8123  (HTTP interface)
-      #   CLICKHOUSE_USER   e.g. spyre_writer
-      #   CLICKHOUSE_PASS   the password
-      #   CLICKHOUSE_DB     e.g. spyre
-      # ---------------------------------------------------------------------------
-      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
-      CLICKHOUSE_PORT: ${{ secrets.CLICKHOUSE_PORT }}
-      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
-      CLICKHOUSE_PASS: ${{ secrets.CLICKHOUSE_PASS }}
-      CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
-      # Schema-v2 database. Reached by QUALIFYING every v2 statement rather than by a second
-      # connection: test_cases exists in both generations with incompatible shapes, so an
-      # unqualified name would hit the wrong one. Unset/empty makes the v2 write a no-op, so
-      # this is safe before the secret exists.
-      CLICKHOUSE_DB_V2: ${{ secrets.CLICKHOUSE_DB_V2 }}
-      # Dual-write during the migration window: v1 stays authoritative while v2 accumulates
-      # the same runs. No data is ported (v1 rows cannot produce a v2 run_id, the hash inputs
-      # were never recorded per row), so `both` is how v2 gets any history at all.
-      INGEST_SCHEMA: both
-
       # Metadata about the triggering run
       TRIGGERING_RUN_ID: ${{ github.event.workflow_run.id || inputs.gha_run_id }}
       TRIGGERING_WORKFLOW: ${{ github.event.workflow_run.name || inputs.workflow_name }}
@@ -93,31 +75,34 @@ jobs:
     steps:
       # workflow_run always executes this file as it exists on the default
       # branch, so a plain checkout (no ref:) here pulls the canonical copy
-      # of the ingest script regardless of which ref triggered the run.
-      - name: Checkout ingest script
+      # of the ingest scripts regardless of which ref triggered the run.
+      - name: Checkout ingest scripts
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           sparse-checkout: |
-            .github/scripts/ingest_xml_hf_adapters.py
-            # v2_schema.py is imported as a sibling module by the script above, so it must be
-            # checked out too. Listing only the entry point made `import v2_schema` fail at
-            # startup and every ingest run exit 1 -- no rows written, v1 or v2.
-            .github/scripts/v2_schema.py
+            .github/scripts/list_run_artifacts.py
+            .github/scripts/download_xml_artifacts.py
+            .github/scripts/flatten_xml_artifacts.py
           sparse-checkout-cone-mode: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          # Picks the version from checksums bundled in this pin instead of fetching the full
+          # versions manifest, whose download times out from torch-cicd pods.
+          version: latest-known
 
       - name: setup venv
         run: |
-          uv venv
-          source .venv/bin/activate
+          uv venv .venv-ingest
+          source .venv-ingest/bin/activate
           echo "VIRTUAL_ENV $VIRTUAL_ENV"
 
       - name: Install Python dependencies
         run: |
-          source .venv/bin/activate
-          uv pip install requests clickhouse-driver clickhouse-connect lxml regex
+          source .venv-ingest/bin/activate
+          uv pip install requests clickhouse-connect lxml regex \
+            "git+https://github.com/torch-spyre/torch-spyre@main#subdirectory=extensions/clickhouse-ingest"
 
       - name: Install gh CLI
         env:
@@ -164,64 +149,41 @@ jobs:
       # Download every artifact from the triggering run and unzip it — artifact
       # *names* carry no file extension (only the file inside the zip does), so
       # filtering has to happen post-unzip by actual filename, not by artifact name.
-      #
-      # `--paginate` is required: the artifacts endpoint defaults to 30 per
-      # page, and a run with more jobs than that silently lost every artifact
-      # past the first page, with no error — rows just never showed up in
-      # ClickHouse. `--paginate` applies `--jq` per page and concatenates the
-      # filtered results across pages (`gh api` rejects `--slurp` combined
-      # with `--jq`), so the per-artifact objects come out as a JSON stream,
-      # not a single array; python3 slurps that stream into one array below.
+      # Listing is paginated (see list_run_artifacts.py for why that matters).
       # ---------------------------------------------------------------------------
       - name: List artifacts from triggering run
         id: list-artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ARTIFACTS=$(gh api --paginate \
-            "/repos/${{ github.repository }}/actions/runs/${TRIGGERING_RUN_ID}/artifacts?per_page=100" \
-            --jq '.artifacts[] | {id: .id, name: .name}' \
-            | python3 -c "import json,sys; print(json.dumps([json.loads(l) for l in sys.stdin if l.strip()]))")
-          echo "artifacts=$ARTIFACTS" >> "$GITHUB_OUTPUT"
-          echo "Found artifacts:"
-          echo "$ARTIFACTS" | python3 -c "import json,sys; [print(' •', a['name']) for a in json.load(sys.stdin)]"
+          python3 .github/scripts/list_run_artifacts.py --run-id "${TRIGGERING_RUN_ID}"
 
       - name: Download XML artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACTS: ${{ steps.list-artifacts.outputs.artifacts }}
         run: |
-          mkdir -p xml_artifacts
-          export ARTIFACTS='${{ steps.list-artifacts.outputs.artifacts }}'
-          python3 <<'PYEOF'
-          import json, os, subprocess, sys
-          from pathlib import Path
-
-          artifacts = json.loads(os.environ['ARTIFACTS'])
-          repo  = os.environ['GITHUB_REPOSITORY']
-          for a in artifacts:
-              print(f"Downloading: {a['name']} (id={a['id']})")
-              with open(f"xml_artifacts/{a['name']}.zip", "wb") as f:
-                result = subprocess.run([
-                    "gh", "api",
-                    f"/repos/{repo}/actions/artifacts/{a['id']}/zip",
-                ], check=True, env={**os.environ}, capture_output=True)
-                f.write(result.stdout)
-              # Each artifact unzips into its OWN subdirectory (named after
-              # the artifact, which is unique per suite+model) rather than a
-              # shared flat one: a single-file artifact's upload strips its
-              # model-key subdirectory, so two suites can both produce a
-              # "Qwen3-0.6B.xml" and would otherwise clobber each other.
-              # ingest_xml_hf_adapters.py globs --xml-dir recursively and
-              # derives a unique filename from the path relative to it, so
-              # this nesting is exactly what it expects.
-              dest = Path("xml_artifacts") / a["name"]
-              subprocess.run(
-                  ["unzip", "-o", f"xml_artifacts/{a['name']}.zip", "-d", str(dest)],
-                  check=True,
-              )
-          PYEOF
+          python3 .github/scripts/download_xml_artifacts.py --out-dir xml_artifacts
           echo "Downloaded XML files:"
           find xml_artifacts -name "*.xml" 2>/dev/null || echo "(none)"
+
+      # Both ids are one-file artifacts of the triggering run (workflow_run gets no dispatch
+      # inputs). Empty is normal and the ingest derives its own run_id / writes cases only.
+      - name: Recover threaded run_id
+        id: threaded-run-id
+        uses: torch-spyre/torch-spyre/.github/actions/recover-threaded-run-id@main
+        with:
+          triggering-run-id: ${{ env.TRIGGERING_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Recover this run's artifact_id
+        id: leg-artifact-id
+        uses: torch-spyre/torch-spyre/.github/actions/recover-threaded-run-id@main
+        with:
+          triggering-run-id: ${{ env.TRIGGERING_RUN_ID }}
+          artifact-name: artifact-id
+          label: Leg artifact_id
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract suite tier from display title
         id: extract-tier
@@ -237,24 +199,45 @@ jobs:
           echo "Resolved tier: ${TIER:-<none>}"
           echo "tier=${TIER}" >> "${GITHUB_OUTPUT}"
 
-      # ---------------------------------------------------------------------------
-      # Parse each XML file and insert rows into ClickHouse via
-      # ingest_xml_hf_adapters.py (checked out above), into
-      # hf_test_runs / hf_test_cases / hf_run_properties.
-      # ---------------------------------------------------------------------------
-      - name: Ingest XML files into ClickHouse
+      # The shared action's ingest_xml.py globs --xml-dir non-recursively, so the
+      # per-artifact subdirectories are flattened first (see flatten_xml_artifacts.py).
+      - name: Flatten XML artifacts for v2 ingest (non-recursive glob)
         run: |
-          source .venv/bin/activate
-          python3 .github/scripts/ingest_xml_hf_adapters.py \
-            --xml-dir xml_artifacts \
-            --workflow "${TRIGGERING_WORKFLOW}" \
-            --branch   "${TRIGGERING_BRANCH}" \
-            --sha      "${TRIGGERING_SHA}" \
-            --gha-run-id "${TRIGGERING_RUN_ID}" \
-            --triggered-at "${TRIGGERING_AT}" \
-            --pr-number    "${{ steps.resolve-pr.outputs.pr_number }}" \
-            --trigger-type "${{ steps.extract-tier.outputs.tier }}" \
-            --platform "$(uname -m)"
+          python3 .github/scripts/flatten_xml_artifacts.py \
+            --src-dir xml_artifacts --dest-dir xml_artifacts_flat
+          echo "Flattened XML files:"
+          find xml_artifacts_flat -name "*.xml" 2>/dev/null || echo "(none)"
+
+      # The same test_cases/test_case_runs tables torch-spyre writes, via its reusable action.
+      - name: Ingest XML into shared v2 ClickHouse tables
+        uses: torch-spyre/torch-spyre/.github/actions/ingest-xml-to-clickhouse@main
+        with:
+          # Already holds the ingest library, so the action skips a second install.
+          venv: .venv-ingest
+          xml-dir: xml_artifacts_flat
+          workflow: ${{ env.TRIGGERING_WORKFLOW }}
+          branch: ${{ env.TRIGGERING_BRANCH }}
+          sha: ${{ env.TRIGGERING_SHA }}
+          run-id: ${{ steps.threaded-run-id.outputs.run_id }}
+          gha-run-id: ${{ env.TRIGGERING_RUN_ID }}
+          artifact-id: ${{ steps.leg-artifact-id.outputs.value }}
+          repository: ${{ github.repository }}
+          triggered-at: ${{ env.TRIGGERING_AT }}
+          pr-number: ${{ steps.resolve-pr.outputs.pr_number }}
+          # Tags the leg's artifact <repo>@<sha12> (push to main) or <repo>#<pr>[@<sha12>] (PR).
+          ci-event: ${{ env.TRIGGERING_EVENT }}
+          trigger-type: ${{ steps.extract-tier.outputs.tier }}
+          platform: x86_64
+          component: hf-adapters
+          schema: v2
+          strict: 'true'
+          clickhouse-host: ${{ secrets.CLICKHOUSE_V2_HOST || secrets.CLICKHOUSE_HOST }}
+          clickhouse-port: ${{ fromJSON(secrets.CLICKHOUSE_V2_HOST != '' && toJSON(secrets.CLICKHOUSE_V2_PORT) || toJSON(secrets.CLICKHOUSE_PORT)) }}
+          clickhouse-user: ${{ secrets.CLICKHOUSE_V2_USER }}
+          clickhouse-pass: ${{ secrets.CLICKHOUSE_V2_PASSWORD }}
+          # The connection's default database is v2 too, so nothing resolves against legacy `spyre`.
+          clickhouse-db: ${{ secrets.CLICKHOUSE_DB_V2 }}
+          clickhouse-db-v2: ${{ secrets.CLICKHOUSE_DB_V2 }}
 
       - name: Summary
         if: always()

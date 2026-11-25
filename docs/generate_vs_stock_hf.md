@@ -32,7 +32,42 @@ stopping, but diverges from stock HF in several ways worth documenting.
   default of 20 new tokens. `min_new_tokens` suppresses EOS until the minimum
   continuation length is reached.
 
+## Profiling generation
+
+[`scripts/profile_e2e_spyre.py`](../scripts/profile_e2e_spyre.py) uses
+`encode_prompts()` and the shared checkpoint dtype policy. For example:
+
+```bash
+python scripts/profile_e2e_spyre.py --model gemma4_26b_a4b --max-new-tokens 10 --batch 1
+```
+
+Use `--dtype float16` or `--dtype bfloat16` to explicitly override the checkpoint
+policy. For example, to profile Gemma MoE in FP16 with tensor parallelism:
+
+```bash
+SPYRE_DEVICES=0,1 torchrun --nproc-per-node=2 scripts/profile_e2e_spyre.py \
+    --model gemma4_26b_a4b --dtype float16 --max-new-tokens 10 --batch 1
+```
+
+Chat templates supply the instruct model's turn delimiters and generation
+prefix. Gemma 4's direct tokenizer does not add BOS, so a raw prompt can produce
+repetitive output even when stock CPU inference receives the same input.
+Use `--raw-prompt` to explicitly request direct tokenization for experiments.
+`--prompt-tokens` creates a synthetic fixed-length workload by repeating or
+truncating tokenized input, including any chat framing; use the natural prompt
+length when checking response correctness.
+
 ## Internal block alignment
+
+- Autoregressive generation projects only the final prompt token through the
+  vocabulary head. Chunked text prefill runs every chunk through the backbone
+  to populate KV caches, then runs the head once. Multimodal prefill also keeps
+  only the final row for the head. The prepared head still applies model-specific
+  scaling, softcapping, and TP vocabulary gathering. Direct full-forward helpers
+  retain all-token logits by default. Diffusion decoding uses its own loop and
+  needs logits for every canvas position.
+- Attention and KV shapes stay fixed across a prompt's prefill chunks to avoid
+  compiling a different graph for every populated prefix length.
 
 - External left and right padding are both accepted when each row has one
   contiguous valid span. The caller's padding width does not affect KV-cache

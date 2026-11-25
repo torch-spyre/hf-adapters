@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
 """
-Fetch the weekly top-K generative and embedding model lists once, then split
-each into fixed-size shards for parallel GitHub Actions jobs.
+Fetch the weekly generative and embedding model lists once, then split each into
+fixed-size shards for parallel GitHub Actions jobs.
+
+Each model type's list is the deduplicated union of (see ``fetch_and_filter``):
+
+  1. the top --top-k-downloads models by downloads over the last 30 days,
+  2. the top --top-k-trending models by the Hub's trending score,
+  3. the curated file (resources/<type>_models_curated.txt), and
+  4. every checkpoint registered for that type in tests/model_registry.py.
+
+The two ranked counts are taken after the fetcher's keep() predicate; curated and
+registry models bypass it and are flagged curated=True.
 
 Mirrors the pattern in generate_test_matrix.py: this script does the one-time
 fetch/compute step and emits a JSON matrix via GITHUB_OUTPUT for a downstream
@@ -20,17 +30,12 @@ so a model doesn't share a batch with (and inflate the memory footprint
 of) much smaller ones. See push-to-clickhouse.yaml's weekly-model-scan job
 for how `matrix.runner` selects the actual runs-on label.
 
-Each model type's list is PRE-FILTERED before any chunking: models with no
-adapter for their config class, models too large for Spyre, and MoE models are
-all removed here, and a terminal verdict row for each is written straight to
-ClickHouse (so this script needs the CLICKHOUSE_* env vars, or --write-to-csv to
-record them in a file instead).
-
-That ordering is the point. The dropped models cluster heavily — config-class
-families cluster by download count — so filtering inside each worker, as
-weekly_test.py used to, left surviving counts wildly uneven: some CI jobs
-finished in minutes while others ran for hours. Filtering first means a shard's
-size is a count of real evaluations, and shard durations become comparable.
+Each model type's list is PRE-FILTERED before any chunking: models too large for
+Spyre are removed here, and a terminal verdict row for each is written straight
+to ClickHouse (so this script needs the CLICKHOUSE_* env vars, or --write-to-csv
+to record them in a file instead). Adapter resolution and MoE classification
+happen in the worker, so every supported and unsupported model contributes to
+the runtime failure breakdown; MoE models with an adapter are evaluated.
 
 Per-tier shard sizes do NOT need to be small: weekly_test.py already
 re-chunks whatever list it's given into fresh-OS-process batches of
@@ -44,7 +49,8 @@ than they used to.
 
 Usage (called by the GHA workflow):
     python .github/scripts/generate_weekly_shards.py \
-        --top-k 10000 \
+        --top-k-downloads 1000 \
+        --top-k-trending 1000 \
         --shard-size-generative 250 \
         --shard-size-embedding 500 \
         --x1-max-params 7000000000 \
@@ -105,7 +111,8 @@ def _tier_for(row: dict, x1_max_params: int, x2_max_params: int) -> str:
 
 
 def generate_shards(
-    top_k: int,
+    top_k_downloads: int,
+    top_k_trending: int,
     max_params: int,
     shard_size_generative: int,
     shard_size_embedding: int,
@@ -118,7 +125,7 @@ def generate_shards(
     snapshot_date: date,
     write_to_csv: Path | None = None,
 ) -> list[dict]:
-    """Fetch each requested model type's top-K list once, write shard JSON files,
+    """Fetch each requested model type's list once, write shard JSON files,
     and return the combined matrix (list of {mode, shard_index, shard_file,
     runner} dicts).
 
@@ -161,12 +168,18 @@ def generate_shards(
         sink: ResultSink = create_sink(
             model_type=model_type,
             write_to_csv=write_to_csv,
+            # A shard name of its own: this job writes the TERMINAL verdicts (no adapter, too
+            # large, MoE) from a non-Spyre runner, so it is a writer alongside the real shards
+            # under the same run_id and needs its own dedup scope. Shaped like a shard file so
+            # _shard_of's stem logic needs no special case.
+            model_list_file=Path(f"{model_type}-prefilter-shard-000.json"),
         )
         with sink:
             rows: list[dict] = fetch_and_filter(
                 model_type=model_type,
                 snapshot_date=snapshot_date,
-                top_k=top_k,
+                top_k_downloads=top_k_downloads,
+                top_k_trending=top_k_trending,
                 sink=sink,
                 max_params=max_params,
             )
@@ -224,10 +237,22 @@ def write_github_output(outputs: dict[str, str]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--top-k",
+        "--top-k-downloads",
         type=int,
-        default=10000,
-        help="Number of top models to fetch per model type (by downloads).",
+        default=1000,
+        help=(
+            "Top models per model type by downloads over the last 30 days, "
+            "counted after the keep() filter (0 skips this ranking)."
+        ),
+    )
+    parser.add_argument(
+        "--top-k-trending",
+        type=int,
+        default=1000,
+        help=(
+            "Top models per model type by the Hub's trending score, counted "
+            "after the keep() filter (0 skips this ranking)."
+        ),
     )
     parser.add_argument(
         "--max-params",
@@ -327,7 +352,8 @@ def main() -> None:
     print("Snapshot date:", args.snapshot_date)
 
     matrix = generate_shards(
-        top_k=args.top_k,
+        top_k_downloads=args.top_k_downloads,
+        top_k_trending=args.top_k_trending,
         max_params=args.max_params,
         shard_size_generative=args.shard_size_generative,
         shard_size_embedding=args.shard_size_embedding,

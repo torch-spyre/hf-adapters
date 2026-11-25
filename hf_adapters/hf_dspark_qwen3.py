@@ -37,7 +37,11 @@ Usage::
         model, draft_input_ids, target_hidden_states, selected_freqs, ctx_valid_len)
 """
 
-from hf_adapters._dspark_common import prepare_dspark_common, run_draft_block
+from hf_adapters._dspark_common import (
+    kv_pad_for,
+    prepare_dspark_common,
+    run_draft_block,
+)
 
 _run_draft_block = run_draft_block  # reuse the common runner
 # Fixed context / kv widths (stick-aligned). CTX_PAD=56 keeps kv_pad =
@@ -47,6 +51,5 @@ CTX_PAD = 56
 
 def prepare_for_spyre(model):
     """Apply Spyre adaptations to the Qwen3 DSpark drafter in-place."""
-    block_size = int(model.block_size)
-    kv_pad = ((CTX_PAD + block_size + 31) // 32) * 32
+    kv_pad = kv_pad_for(CTX_PAD, int(model.block_size))
     prepare_dspark_common(model, ctx_pad=CTX_PAD, kv_pad=kv_pad, use_qk_norm=True)
