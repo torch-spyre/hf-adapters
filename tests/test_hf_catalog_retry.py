@@ -50,7 +50,7 @@ def _http_error(
 def _model() -> ModelInfo:
     return ModelInfo(
         id="org/model",
-        config={"model_type": "bert"},
+        config={"model_type": "qwen3"},
         library_name="sentence-transformers",
         siblings=[{"rfilename": "model.safetensors"}],
     )

@@ -22,6 +22,22 @@ from utils.hf_model_catalog import (
 )
 from utils.utilities import ts
 
+# Model types whose Spyre adapters declare _is_encoder_only (including vision
+# encoders). Reject them using Hub metadata before any per-model config request.
+_ENCODER_ONLY_MODEL_TYPES: frozenset[str] = frozenset(
+    {
+        "bert",
+        "camembert",
+        "clip",
+        "distilbert",
+        "modernbert",
+        "mpnet",
+        "roberta",
+        "siglip",
+        "xlm-roberta",
+    }
+)
+
 
 def _create_fetch(ranking: Ranking) -> Callable[[HfApi, int], list[ModelInfo]]:
     """Build a ``_fetch``-shaped callable that ranks text-generation models by *ranking*."""
@@ -60,6 +76,9 @@ def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
             return False, reason
     except Exception:
         return False, "exception during is_baseline_keep"
+
+    if (model.config or {}).get("model_type") in _ENCODER_ONLY_MODEL_TYPES:
+        return False, "encoder-only architecture"
 
     checks: list[tuple[Callable[[], bool], str, str]] = [
         (lambda: model.gated, "model.gated", "model is gated"),
