@@ -255,3 +255,6 @@ hf_adapters/_version.py
 # Agents
 /.agents/
 AGENTS.md
+
+# The identity golden table is a definition, not data.
+!benchmarks/ingest-ids.golden.tsv

@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/torch-spyre/torch-spyre/main/extensions/spyre-bench/spyre_bench/core/schemas/resources.schema.json
+# A request, not a placement: the launcher decides where the device comes from.
+apiVersion: bench/v1alpha1
+kind: Environment
+metadata:
+  name: one-device
+  description: One accelerator device; the placer decides where.
+spec:
+  devices:
+    requests:
+      - name: cards
+        device_class: spyre/pf
+        count: 1
+  labels:
+    device.count: 1

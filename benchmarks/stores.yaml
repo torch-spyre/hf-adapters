@@ -1,0 +1,6 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/torch-spyre/torch-spyre/main/extensions/spyre-bench/spyre_bench/core/schemas/resources.schema.json
+# The question files that ship in this repository are read from the checkout; a deployment may name a mirror first.
+apiVersion: bench/v1alpha1
+kind: Store
+metadata: {name: checkout, description: "files tracked in this repository, relative to the checkout root"}
+spec: {type: core/filesystem, path: ., auth: {mode: none}, visibility: public}

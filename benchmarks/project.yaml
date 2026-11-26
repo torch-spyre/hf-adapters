@@ -1,0 +1,23 @@
+apiVersion: bench/v1alpha1
+kind: Project
+metadata: {name: hf-adapters}
+spec:
+  packs: [{name: llm-serving, version: "0.2"}, {name: kernel, version: "0.2"}, {name: spyre, version: "0.2"}]
+  default_suites: [hf-models]
+  visibility: public
+---
+apiVersion: bench/v1alpha1
+kind: Suite
+metadata: {name: hf-models}
+spec: {type: perf}
+---
+apiVersion: bench/v1alpha1
+kind: Suite
+metadata: {name: model-correctness}
+spec: {type: quality}
+---
+apiVersion: bench/v1alpha1
+kind: Selection
+metadata: {name: model-correctness, description: "evals/ question samples scored on the Spyre adapter"}
+spec:
+  cases: [eval_slot-12_qwen3-0.6b_l50, eval_slot-14_qwen3-0.6b_l50]
