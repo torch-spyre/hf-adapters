@@ -1,6 +1,6 @@
 # HF Adapters for Spyre
 
-![adapters](https://img.shields.io/badge/adapters-43-blue)
+![adapters](https://img.shields.io/badge/adapters-46-blue)
 ![compatible](https://img.shields.io/badge/compatible_models-10K%2B-orange)
 
 Minimal runtime patches that make stock [HuggingFace Transformers](https://github.com/huggingface/transformers) models run on [Spyre](https://research.ibm.com/blog/ibm-spyre) accelerators.
@@ -13,16 +13,23 @@ from `transformers`.
 
 ## Supported Models
 
-![adapters](https://img.shields.io/badge/adapters-43-blue)
+**46 adapters · 10K+ compatible models**
 
 Coverage spans **generative** (causal-LM), **embedding** (sentence-transformers),
+**multimodal embedding** (CLIP and SigLIP text/image vectors),
 **sequence classification** (sentiment / text categorisation), **structured
-decisions** (variable options plus action selection), **token classification**
+decisions** (variable options plus action selection), Transformers **decision
+models** (`AutoModelForDecision`), **token classification**
 (NER/POS), **vision-language** (image→text), and
 **speculative-decoding drafter** models — from
 Llama / Qwen / Granite / Mistral / Phi / Gemma / OLMo / GPT decoders to BERT /
 XLM-RoBERTa / MPNet / ModernBERT encoders, the Granite Vision 4.1 (SigLIP tower +
-![adapters](https://img.shields.io/badge/adapters-43-blue)
+Granite text), Mistral3 Vision (Pixtral tower + Mistral text), Gemma 4
+(encoder-free and full-vision), and Muse Glimmer multimodal VLMs, the SigLIP
+dual-encoder for text/image embeddings, plus the DSpark block-propose drafters for
+Qwen 3 / Granite / Gemma 4 and the XPress block-propose drafter (Gemma 4 26B-A4B).
+Laya support uses its optional upstream package to construct the stock decision
+model; hf-adapters patches its encoder, decision transformer, and marker selection.
 
 Each adapter covers all size variants and fine-tuned checkpoints sharing the same
 HuggingFace `model_type`. The **canonical, per-adapter model lists** — verified
@@ -244,6 +251,31 @@ outputs = model(**batch)
 label_ids = outputs.logits.argmax(dim=-1)
 labels = [model.config.id2label[i] for i in label_ids[0].tolist()]
 print(list(zip(tokenizer.convert_ids_to_tokens(batch["input_ids"][0]), labels)))
+```
+
+## Decision Models
+
+Use `AutoSpyreModelForDecision` for Transformers decision models
+(`AutoModelForDecision`), which answer typed `choice` / `score` / `noul`
+questions with a probability per option. Score through the model's own
+`decide`, as with stock Hugging Face; the text decoder and the decision head run
+on Spyre:
+
+```python
+from transformers import AutoTokenizer
+from hf_adapters import AutoSpyreModelForDecision
+
+model_path = "vllm-sr/d3-nano"
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+model = AutoSpyreModelForDecision.from_pretrained(model_path)
+request = {
+    "state": "The production API is down and customers cannot log in.",
+    "questions": {"urgent": {"type": "noul", "instructions": "Is this urgent?"}},
+}
+for inputs, questions in model.decision_config.prepare_inputs(request, tokenizer):
+    scores = model.decide(**inputs, decision_questions=questions)
+    for question, score in zip(questions, scores):
+        print(question.name, question.answer(score.softmax(-1).tolist()))
 ```
 
 ## Multimodal Models (image → text)

@@ -8,23 +8,20 @@ Two ways to say which models to evaluate — exactly one is required::
 
     # Manual: fetch, filter and evaluate in one pass
     python tests/spyre/weekly_generation/weekly_test.py \\
-        --mode embedding --fetch --top-k 200
+        --mode embedding --fetch --top-k-downloads 200 --top-k-trending 200
 
-Either way the same three pre-filters apply — no adapter for the config class,
-too large for Spyre, MoE — and each dropped model gets a terminal row recording
+Either way the same catalog (ranked top-K by downloads and by trending score,
+plus the curated file and the model registry) and the same pre-filter (too
+large for Spyre) apply, and each dropped model gets a terminal row recording
 why. With ``--model-list-file`` that happened upstream in
 ``.github/scripts/generate_weekly_shards.py``; with ``--fetch`` it happens here,
-through the same ``fetch_and_filter``. So everything that reaches the evaluation
-loop needs a Spyre card.
-
-Filtering before the list is sharded is what keeps shard durations comparable:
-the dropped models cluster by download count, so filtering per-shard used to
-leave some CI jobs finishing in minutes and others running for hours.
+through the same ``fetch_and_filter``. Adapter resolution and MoE classification
+happen in the worker.
 
 ``--mode`` is parsed into a ``ModelType``, which selects the per-process batch
 size, the model class loaded in ``_load_on_cpu``, the verification pipeline in
 ``eval_model`` (token-compare for generative, cosine-compare for embedding), and
-which ClickHouse table the sink reads and writes. With ``--fetch`` it also picks
+which model_type the sink records and skips on. With ``--fetch`` it also picks
 the catalog to fetch.
 
 Process model
@@ -40,12 +37,21 @@ Flags:
 * ``--model-list-file F``            Evaluate this JSON list. Mutually exclusive
   with ``--fetch``; one of the two is required.
 * ``--fetch``                        Fetch and filter here instead.
-* ``--top-k N``                      With ``--fetch``: how many to fetch
-  (default: 10000).
+* ``--top-k-downloads N``            With ``--fetch``: top-N by downloads over
+  the last 30 days (default: 1000; 0 skips it).
+* ``--top-k-trending N``             With ``--fetch``: top-N by trending score
+  (default: 1000; 0 skips it).
 * ``--max-params N``                 With ``--fetch``: parameter ceiling.
 * ``--write-to-csv F``               Record results in a new CSV instead of
   ClickHouse, for runs with no database access. Write-only: the file must not
   already exist, and nothing is read back.
+* ``--deadline ISO8601``             Hard wall-clock stop (issue #745). No batch
+  starts at or after it, and a batch still running when it passes is stopped
+  without recording that batch. Workers return results only at batch boundaries,
+  so completed models inside an interrupted batch must be retried too. Rows from
+  earlier batches are kept; the run exits 0 with a warning and job summary.
+  Exception: a GitHub Actions re-run attempt (``GITHUB_RUN_ATTEMPT`` > 1) that
+  starts after the deadline scans nothing, so it exits 1 instead of going green.
 
 Result rows
 -----------
@@ -53,18 +59,19 @@ One row is recorded per model handled, so a run's row count never silently
 disagrees with its input. Nothing is filtered at write time — a row reaching the
 sink is one the caller decided to record, and dropping it there would leave a run
 with fewer rows than the models it handled and no accounting for the difference.
-Same-day duplicates are collapsed on merge by
-``ReplacingMergeTree(snapshot_date)``.
+A model this run and shard already recorded is skipped by the v2 dedup in
+``capability_write``.
 """
 
 import argparse
 import json
 import logging
 import multiprocessing
+import os
 import subprocess
 import sys
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from tests.spyre.weekly_generation.failure_categories import (
@@ -102,6 +109,86 @@ class HardwareExceptionAbortError(RuntimeError):
     ``ClickHouseResultSink.fetch_hw_failure_models`` is for, but nothing calls it
     yet — a recovery run has to be driven by hand until that is wired up.
     """
+
+
+class DeadlineReachedError(RuntimeError):
+    """Raised in main() when the ``--deadline`` passes (issue #745).
+
+    The weekly scan must not hold Spyre cards into the US workweek. Rows written
+    before the deadline are flushed by main()'s ``finally``; the models that were
+    not reached get no row, so a re-run with the same ``--snapshot-date`` picks
+    them up (rows already recorded for that date are skipped).
+    """
+
+
+class DeadlineBeforeStartupError(DeadlineReachedError):
+    """The ``--deadline`` had already passed when main() started: nothing ran.
+
+    Distinguished from a mid-scan stop so ``__main__`` can fail a re-run attempt
+    that would otherwise exit 0 having scanned zero models.
+    """
+
+
+def _parse_deadline(value: str) -> datetime:
+    """Parse a timezone-aware ISO-8601 timestamp (a trailing ``Z`` is accepted)."""
+    parsed: datetime = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise argparse.ArgumentTypeError(
+            f"deadline {value!r} must include a timezone (e.g. 2026-11-09T14:00:00Z)"
+        )
+    return parsed
+
+
+def _seconds_until(deadline: datetime) -> float:
+    """Seconds from now until *deadline* (negative once it has passed)."""
+    return (deadline - datetime.now(timezone.utc)).total_seconds()
+
+
+def _report_deadline_stop(error: DeadlineReachedError) -> None:
+    """Make an expected deadline stop visible in the scan's own job summary."""
+    print(f"::warning title=Weekly scan deadline::{error}")
+    print(f"{ts()} Stopped at deadline ({error}).")
+    summary_path: str | None = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        with Path(summary_path).open("a") as summary:
+            summary.write(
+                f"## Weekly scan stopped at its deadline\n\n{error}\n\n"
+                "Previously flushed batches are preserved. "
+                "The interrupted batch and remaining models have no new verdict.\n"
+            )
+
+
+def _deadline_stop_exit_code(error: DeadlineReachedError) -> int:
+    """Exit status for a deadline stop; reports it either way.
+
+    A deadline stop during the scheduled run is expected and exits 0. A re-run
+    attempt (``GITHUB_RUN_ATTEMPT`` > 1, e.g. "Re-run failed jobs") reuses the
+    original run's deadline; if that had already passed, the shard scanned
+    nothing, and exiting 0 would turn the re-run green. Fail it instead.
+    """
+    _report_deadline_stop(error)
+    run_attempt: int = int(os.environ.get("GITHUB_RUN_ATTEMPT") or 1)
+    if isinstance(error, DeadlineBeforeStartupError) and run_attempt > 1:
+        print(
+            f"::error title=Weekly scan deadline::Re-run attempt {run_attempt} "
+            "started after the weekly deadline; nothing was scanned. Start a "
+            "workflow_dispatch run (no deadline) to fill in these models."
+        )
+        return 1
+    return 0
+
+
+def _stop_worker(proc: multiprocessing.process.BaseProcess) -> None:
+    """Terminate a still-running batch worker, escalating to SIGKILL if needed."""
+    proc.terminate()
+    proc.join(timeout=30)
+    if proc.is_alive():
+        print(
+            f"{ts()}     batch: worker pid={proc.pid} did not "
+            f"exit after SIGTERM — sending SIGKILL"
+        )
+        proc.kill()
+        proc.join(timeout=30)
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -194,19 +281,29 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--fetch",
         action="store_true",
         help=(
-            "Fetch the top --top-k models for --mode, apply the same "
+            "Fetch the --top-k-downloads / --top-k-trending catalog (plus the "
+            "curated and registry models) for --mode, apply the same "
             "pre-filters, record the terminal rows, and evaluate the survivors — "
             "all in one pass. For manual runs where there is no shard file."
         ),
     )
     fetch_opts = parser.add_argument_group("--fetch options")
     fetch_opts.add_argument(
-        "--top-k",
+        "--top-k-downloads",
         type=int,
-        default=10_000,
+        default=1000,
         help=(
-            "With --fetch: how many top models to fetch by downloads "
-            "(default: 10000). Ignored with --model-list-file."
+            "With --fetch: top models by downloads over the last 30 days, "
+            "counted after the keep() filter (default: 1000; 0 skips it)."
+        ),
+    )
+    fetch_opts.add_argument(
+        "--top-k-trending",
+        type=int,
+        default=1000,
+        help=(
+            "With --fetch: top models by the Hub's trending score, counted "
+            "after the keep() filter (default: 1000; 0 skips it)."
         ),
     )
     fetch_opts.add_argument(
@@ -229,10 +326,25 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Use $(date -u +%Y-%m-%d) for today when invoking manually."
         ),
     )
+    parser.add_argument(
+        "--deadline",
+        type=_parse_deadline,
+        default=None,
+        metavar="ISO8601",
+        help=(
+            "Hard wall-clock stop, e.g. 2026-11-09T14:00:00Z. No batch starts "
+            "after it, and a batch still running when it passes is stopped "
+            "without recording its models. Default: no deadline."
+        ),
+    )
     args = parser.parse_args(argv)
     # Reject the silent no-op of passing a fetch tuning flag without --fetch.
     if not args.fetch:
-        for flag, dest in (("--top-k", "top_k"), ("--max-params", "max_params")):
+        for flag, dest in (
+            ("--top-k-downloads", "top_k_downloads"),
+            ("--top-k-trending", "top_k_trending"),
+            ("--max-params", "max_params"),
+        ):
             if getattr(args, dest) != parser.get_default(dest):
                 parser.error(f"{flag} only applies with --fetch")
     return args
@@ -250,9 +362,11 @@ def main(
     model_list_file: Path | None,
     write_to_csv: Path | None,
     fetch: bool,
-    top_k: int,
+    top_k_downloads: int,
+    top_k_trending: int,
     max_params: int,
     snapshot_date: date,
+    deadline: datetime | None = None,
 ) -> None:
     """Evaluate a model list on Spyre, one spawned worker per batch.
 
@@ -263,17 +377,24 @@ def main(
 
     Owns the sink for the whole run: it is created here, written to by both the
     ``--fetch`` pre-filter and the evaluation loop, flushed at each batch
-    boundary, and closed once in the ``finally`` below. ``top_k``/``max_params``
-    apply only under *fetch*.
+    boundary, and closed once in the ``finally`` below. ``top_k_downloads``,
+    ``top_k_trending`` and ``max_params`` apply only under *fetch*.
 
     Raises:
         HardwareExceptionAbortError: a batch reported ``hardware_exception``, so
             the accelerator is unreachable and the remaining batches are skipped.
+        DeadlineReachedError: *deadline* passed before every batch finished.
     """
     from tests.spyre.weekly_generation.sink.result_sink import ResultSink
 
     print(f"{ts()} Starting main.")
     print(f"{ts()} Snapshot date: {snapshot_date}")
+    if deadline is not None:
+        print(f"{ts()} Deadline: {deadline.isoformat()}")
+        if _seconds_until(deadline) <= 0:
+            raise DeadlineBeforeStartupError(
+                f"deadline {deadline.isoformat()} reached before shard startup"
+            )
 
     models_per_process = {
         ModelType.GENERATIVE: GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS,
@@ -303,7 +424,8 @@ def main(
             rows: list[dict] = fetch_and_filter(
                 model_type=model_type,
                 snapshot_date=snapshot_date,
-                top_k=top_k,
+                top_k_downloads=top_k_downloads,
+                top_k_trending=top_k_trending,
                 sink=sink,
                 max_params=max_params,
             )
@@ -336,6 +458,12 @@ def main(
         ctx = multiprocessing.get_context("spawn")
 
         for batch_idx, batch in enumerate(batches, start=1):
+            if deadline is not None and _seconds_until(deadline) <= 0:
+                raise DeadlineReachedError(
+                    f"deadline {deadline.isoformat()} reached before batch "
+                    f"{batch_idx}/{total_batches}; skipped "
+                    f"{total_batches - batch_idx + 1} batch(es)"
+                )
             batch_start = time.monotonic()
             batch_paths = [str(r["model_id"]) for r in batch]
             batch_curated = [r["curated"] for r in batch]
@@ -360,7 +488,39 @@ def main(
             proc.start()
             timeout = _WORKER_TIMEOUT_SECONDS_PER_MODEL * batch_size
 
-            proc.join(timeout=timeout)
+            # Never wait past the deadline: if it arrives first, stop the
+            # worker and record nothing for this batch. Its complete results
+            # are unavailable; a timeout/crash row would be a false verdict.
+            # Decide which limit bounds the join *before* joining, and branch on
+            # that decision afterwards. Re-reading the wall clock after the join
+            # could disagree with it (e.g. an NTP step backwards) and misfile a
+            # deadline stop as worker_timeout — a permanent false verdict, since
+            # a re-run skips every model that already has a row for the date.
+            seconds_left: float | None = (
+                None if deadline is None else max(0.0, _seconds_until(deadline))
+            )
+            deadline_bounds_join: bool = (
+                seconds_left is not None and seconds_left <= timeout
+            )
+            join_timeout: float = (
+                seconds_left
+                if seconds_left is not None and deadline_bounds_join
+                else float(timeout)
+            )
+            proc.join(timeout=join_timeout)
+
+            if proc.is_alive() and deadline is not None and deadline_bounds_join:
+                print(
+                    f"{ts()}     batch: deadline {deadline.isoformat()} reached — "
+                    f"terminating pid={proc.pid}; no rows recorded for its "
+                    f"{len(batch)} model(s)"
+                )
+                _stop_worker(proc)
+                raise DeadlineReachedError(
+                    f"deadline {deadline.isoformat()} reached during batch "
+                    f"{batch_idx}/{total_batches}; skipped "
+                    f"{total_batches - batch_idx + 1} batch(es)"
+                )
 
             # Timeout guard: if the child is still alive after the deadline,
             # kill it, drop any partial results, and synthesise timeout rows
@@ -373,15 +533,7 @@ def main(
                     f"pid={proc.pid} and marking {len(batch)} model(s) as "
                     f"failed with {FAILURE_CATEGORY_WORKER_TIMEOUT}"
                 )
-                proc.terminate()
-                proc.join(timeout=30)
-                if proc.is_alive():
-                    print(
-                        f"{ts()}     batch: worker pid={proc.pid} did not "
-                        f"exit after SIGTERM — sending SIGKILL"
-                    )
-                    proc.kill()
-                    proc.join(timeout=30)
+                _stop_worker(proc)
 
             # Drain the queue. SimpleQueue.get() blocks if empty, so probe
             # first; the child has already exited so a non-empty queue
@@ -519,7 +671,15 @@ def main(
     except KeyboardInterrupt:
         print(f"\n{ts()} Interrupted — results so far are saved; rerun to resume.")
     finally:
-        sink.close()
+        # A close failure must not replace the error already unwinding (a failed flush,
+        # the hardware abort); with no error in flight it still propagates.
+        in_flight = sys.exc_info()[1]
+        try:
+            sink.close()
+        except Exception as close_exc:  # noqa: BLE001
+            if in_flight is None:
+                raise
+            print(f"{ts()} [warn] sink close failed while unwinding: {close_exc!r}")
         if write_to_csv:
             # Report the file actually written, not the bare --write-to-csv
             # argument — the factory suffixes it with the model type.
@@ -545,10 +705,20 @@ if __name__ == "__main__":
             model_list_file=args.model_list_file,
             write_to_csv=args.write_to_csv,
             fetch=args.fetch,
-            top_k=args.top_k,
+            top_k_downloads=args.top_k_downloads,
+            top_k_trending=args.top_k_trending,
             max_params=args.max_params,
             snapshot_date=args.snapshot_date,
+            deadline=args.deadline,
         )
+    except DeadlineReachedError as e:
+        # Expected for the weekly scan (issue #745): exit 0 so the shard is not
+        # reported as a failure — unless this is a re-run attempt that started
+        # after the deadline and scanned nothing. Any sink opened by main() has
+        # been closed.
+        exit_code: int = _deadline_stop_exit_code(e)
+        if exit_code:
+            sys.exit(exit_code)
     except HardwareExceptionAbortError as e:
         # Non-zero exit so CI / GHA scheduled runs can alert. main()'s
         # `finally` has already flushed the sink and cleaned the cache.

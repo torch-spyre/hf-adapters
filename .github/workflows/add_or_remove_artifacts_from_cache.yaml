@@ -2,12 +2,12 @@ name: 'add_or_remove_artifacts_from_cache'
 
 on:
   schedule:
-    # Nightly at 05:00 UTC, ahead of test_daily's 06:00 run, so newly-registered models are cache-warm before CI needs them.
+    # Nightly at 05:00 UTC, ahead of test_daily's 06:00 run, to warm models and dataset fixtures.
     - cron: "0 5 * * *"
   workflow_dispatch:
     inputs:
       cache_config_file:
-        description: 'Path to the models YAML file'
+        description: 'Path to the models and dataset files YAML configuration'
         required: true
         type: string
         default: '.github/cache_config/hf_models_and_datasets.yaml'

@@ -38,7 +38,6 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 
-from hf_adapters.hf_common import encode_prompts
 from tests.conftest import (
     encode_generation_inputs,
     load_ref_model,
@@ -162,7 +161,7 @@ def adapter_greedy_steps(run_forward_fn, model, input_ids, num_decode=NUM_DECODE
 
 
 @pytest.mark.parametrize("model_path", CAUSAL_PATHS, ids=CAUSAL_PATHS)
-def test_auto_loader(model_path, trust_remote_code):
+def test_auto_loader(model_path: str, trust_remote_code: bool | None) -> None:
     auto_spyre_model = sys.modules["hf_adapters.auto_spyre_model"]
     if trust_remote_code is None:
         trust_remote_code = model_path in REMOTE_CODE_PATHS
@@ -170,7 +169,25 @@ def test_auto_loader(model_path, trust_remote_code):
         model_path, trust_remote_code=trust_remote_code
     )
 
-    # Phase 1: auto-loader generate
+    # Run the reference before adapter preparation can patch HF classes.
+    adapter_mod = resolve_adapter_module_for_test(
+        model_path, trust_remote_code=trust_remote_code
+    )
+    hf_model = load_ref_model(
+        model_path, adapter_mod, trust_remote_code=trust_remote_code
+    )
+    encoded = encode_generation_inputs(tokenizer, [PROMPT])
+    with torch.no_grad():
+        hf_out = hf_model.generate(
+            **encoded, max_new_tokens=NUM_DECODE, do_sample=False
+        )
+    hf_text = tokenizer.decode(
+        hf_out[0][encoded["input_ids"].shape[1] :], skip_special_tokens=True
+    )
+    del hf_model
+    gc.collect()
+
+    # Auto-loader generation uses exactly the same tokenized prompt.
     model = auto_spyre_model.AutoSpyreModelForCausalLM.from_pretrained(
         model_path, trust_remote_code=trust_remote_code
     )
@@ -186,24 +203,6 @@ def test_auto_loader(model_path, trust_remote_code):
         skip_special_tokens=True,
     )
     del model
-    gc.collect()
-
-    # Phase 2: HF reference (fresh)
-    adapter_mod = resolve_adapter_module_for_test(
-        model_path, trust_remote_code=trust_remote_code
-    )
-    hf_model = load_ref_model(
-        model_path, adapter_mod, trust_remote_code=trust_remote_code
-    )
-    encoded = encode_prompts(tokenizer, PROMPT)
-    with torch.no_grad():
-        hf_out = hf_model.generate(
-            **encoded, max_new_tokens=NUM_DECODE, do_sample=False
-        )
-    hf_text = tokenizer.decode(
-        hf_out[0][encoded["input_ids"].shape[1] :], skip_special_tokens=True
-    )
-    del hf_model
     gc.collect()
 
     assert (

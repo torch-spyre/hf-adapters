@@ -53,6 +53,8 @@ Verified on CPU to match stock full-deepstack ``model.forward`` (first-token
 logits cosine ≥ 0.999, argmax match) and stock ``model.generate`` (token-exact).
 """
 
+from typing import Any
+
 import torch
 from transformers import PreTrainedModel
 
@@ -95,7 +97,9 @@ def prepare_for_spyre(model):
     model._spyre_compiled_norm = torch.compile(backbone.norm, dynamic=False)
 
 
-def _deepstack_features(model, pixel_values, image_sizes):
+def _deepstack_features(
+    model: Any, pixel_values: torch.Tensor, image_sizes: torch.Tensor
+) -> dict[int, torch.Tensor]:
     """Run the Spyre vision tower once, build ALL deepstack + spatial features.
 
     Reproduces stock ``Granite4VisionModel.get_image_features``, but the vision
@@ -148,23 +152,23 @@ def _deepstack_features(model, pixel_values, image_sizes):
     ]
     select_default = cfg.vision_feature_select_strategy == "default"
 
-    def _project_and_pack(selected_layer_feature, projector):
+    def _project_and_pack(
+        selected_layer_feature: torch.Tensor, projector: torch.nn.Module
+    ) -> torch.Tensor:
         feat = selected_layer_feature.to("cpu")
         if select_default:
             feat = feat[:, 1:]
         projected = projector(feat.to(dtype))
         projected = torch.split(projected, image_num_patches, dim=0)
-        packed, _ = inner.pack_image_features(
+        packed: list[torch.Tensor] = inner.pack_image_features(
             projected,
             image_sizes,
             vision_feature_select_strategy=cfg.vision_feature_select_strategy,
             image_newline=inner.image_newline,
         )
-        if isinstance(packed, (list, tuple)):
-            packed = torch.cat(list(packed), dim=0)
-        return packed
+        return torch.cat(packed, dim=0)
 
-    deepstack = {}
+    deepstack: dict[int, torch.Tensor] = {}
     # Deepstack: each vision layer -> its own projector -> a distinct text layer.
     for proj_idx, (vision_layer, llm_layer) in enumerate(cfg.deepstack_layer_map):
         deepstack[llm_layer] = _project_and_pack(

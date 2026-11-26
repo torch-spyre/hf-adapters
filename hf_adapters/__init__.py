@@ -28,6 +28,7 @@ __all__ = [
     "__version__",
     "AutoSpyreModel",
     "AutoSpyreModelForCausalLM",
+    "AutoSpyreModelForDecision",
     "AutoSpyreModelForImageTextToText",
     "AutoSpyreModelForMaskedLM",
     "AutoSpyreModelForQuestionAnswering",

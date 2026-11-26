@@ -32,7 +32,8 @@ One forward proposes ``block_size - 1`` tokens after an anchor:
    block *causally*; full layers see all context and the whole block
    (speculators ``create_anchor_block_mask_mod``, ``sliding_window_non_causal``
    False). ``norm`` + the target's ``lm_head`` give base logits — unscaled, no
-   softcap, as in training.
+   softcap, as in training. Tied targets (Gemma4) reuse the embedding as the
+   head; untied ones (Qwen3-8B) supply their own ``lm_head``.
 2. **Refiner** (``_xpress_refiner``): ``num_passes`` Jacobi passes, each
    re-feeding the previous pass's argmax as the slot predecessors. With top-C,
    every pass scores only the base logits' top-C candidates.
@@ -50,7 +51,7 @@ positions, re-projected every block (no draft-side KV cache yet), so shapes are
 static and every block compiles once. This is narrower than training: there the
 full-attention layer sees the whole context and the sliding layers see
 ``sliding_window`` (2048) positions. Longer contexts are truncated with a
-warning; pass a larger ``ctx_pad`` to ``prepare_for_spyre`` to keep more.
+warning; pass a larger ``ctx_pad`` to ``load_model`` to keep more.
 
 Usage::
 
@@ -110,6 +111,12 @@ CTX_PAD = 48
 SLIDING = "sliding_attention"
 FULL = "full_attention"
 _SHARED_WITH_TARGET = ("embed_tokens.", "lm_head.")
+
+
+def _check_ctx_pad(ctx_pad: int) -> int:
+    if ctx_pad < 1:
+        raise ValueError(f"ctx_pad must be positive, got {ctx_pad}")
+    return ctx_pad
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +183,8 @@ class XPressDrafter(nn.Module):
         self.layer_types = list(config.layer_types or [FULL] * config.num_hidden_layers)
         self.num_passes = int(getattr(config, "xpress_num_passes", 6))
         self.topc = int(getattr(config, "xpress_topc", 512))
+        # Context window prepare_for_spyre compiles for (see load_model).
+        self.ctx_pad = CTX_PAD
 
         self.embed_tokens = nn.Embedding(config.vocab_size, hidden)
         self.layers = nn.ModuleList(
@@ -216,12 +225,23 @@ def load_drafter_weights(
     model: XPressDrafter,
     weights: Mapping[str, torch.Tensor],
     target_embed_weight: torch.Tensor,
+    target_lm_head_weight: torch.Tensor | None = None,
 ) -> None:
-    """Strictly load a drafter checkpoint plus the target's tied vocab matrix.
+    """Strictly load a drafter checkpoint plus the target's vocab matrices.
 
-    XPress checkpoints omit ``embed_tokens``/``lm_head``: both are the target's
-    (tied) embedding. Works on a ``meta``-built model (``assign=True``).
+    XPress checkpoints omit ``embed_tokens``/``lm_head``: both are the
+    target's. ``target_lm_head_weight`` is the target's own ``lm_head`` when it
+    is untied (e.g. Qwen3-8B); ``None`` means tied, so the embedding serves as
+    the head. The drafter config's ``tie_word_embeddings`` records which, so an
+    untied drafter without a head is rejected. Works on a ``meta``-built model
+    (``assign=True``).
     """
+    if target_lm_head_weight is None and not model.config.tie_word_embeddings:
+        raise ValueError(
+            "Drafter config has tie_word_embeddings=False: pass the target's "
+            "lm_head (target_lm_head_weight=load_target_lm_head(target)) or "
+            "load with target_path"
+        )
     head_prefixes = (PUBLISHED_PREFIX, TRAINING_PREFIX)
     expected = {
         n
@@ -236,16 +256,20 @@ def load_drafter_weights(
             f"unexpected={sorted(unexpected)}"
         )
     shape = (model.config.vocab_size, model.config.hidden_size)
-    if tuple(target_embed_weight.shape) != shape:
-        raise ValueError(
-            f"Target embedding {tuple(target_embed_weight.shape)} != drafter {shape}"
-        )
+    lm_head = (
+        target_lm_head_weight
+        if target_lm_head_weight is not None
+        else target_embed_weight
+    )
+    for name, tensor in (("embedding", target_embed_weight), ("lm_head", lm_head)):
+        if tuple(tensor.shape) != shape:
+            raise ValueError(f"Target {name} {tuple(tensor.shape)} != drafter {shape}")
     head_state = model.xpress_head.checkpoint_state(weights)
     state = {
         **backbone,
         **{f"xpress_head.{k}": v for k, v in head_state.items()},
         "embed_tokens.weight": target_embed_weight,
-        "lm_head.weight": target_embed_weight,
+        "lm_head.weight": lm_head,
     }
     model.load_state_dict(state, strict=True, assign=True)
 
@@ -272,24 +296,56 @@ def _embedding_key(names: list[str]) -> str:
     return keys[0]
 
 
+def _lm_head_key(names: list[str]) -> str | None:
+    """The text decoder's output head among a target's tensors; None if tied."""
+    keys = [n for n in names if n.endswith("lm_head.weight")]
+    if len(keys) > 1:
+        keys = [n for n in keys if "language_model" in n] or keys
+    if len(keys) > 1:
+        raise ValueError(f"Cannot identify the target lm_head among {keys}")
+    return keys[0] if keys else None
+
+
+def _read_target_tensor(
+    target_path: str,
+    revision: str | None,
+    pick_key: Callable[[list[str]], str | None],
+) -> torch.Tensor | None:
+    """Read one tensor of a (possibly sharded) target, fetching only its shard."""
+    root = _local_dir(target_path, revision, ["*.json"])
+    index_path = os.path.join(root, "model.safetensors.index.json")
+    if os.path.exists(index_path):
+        with open(index_path) as f:
+            weight_map = json.load(f)["weight_map"]
+        key = pick_key(list(weight_map))
+        if key is None:
+            return None
+        shard = weight_map[key]
+    else:
+        key, shard = None, "model.safetensors"
+    if not os.path.exists(os.path.join(root, shard)):
+        root = _local_dir(target_path, revision, [shard])  # fetch just this shard
+    with safe_open(os.path.join(root, shard), framework="pt") as f:
+        key = key or pick_key(list(f.keys()))
+        return None if key is None else f.get_tensor(key)
+
+
 def load_target_embedding(
     target_path: str, revision: str | None = None
 ) -> torch.Tensor:
     """Read only the token-embedding tensor of a (possibly sharded) target."""
-    root = _local_dir(target_path, revision, ["*.json"])
-    index_path = os.path.join(root, "model.safetensors.index.json")
-    key = None
-    shard = "model.safetensors"
-    if os.path.exists(index_path):
-        with open(index_path) as f:
-            weight_map = json.load(f)["weight_map"]
-        key = _embedding_key(list(weight_map))
-        shard = weight_map[key]
-    if not os.path.exists(os.path.join(root, shard)):
-        root = _local_dir(target_path, revision, [shard])  # fetch just this shard
-    with safe_open(os.path.join(root, shard), framework="pt") as f:
-        embed: torch.Tensor = f.get_tensor(key or _embedding_key(list(f.keys())))
+    embed = _read_target_tensor(target_path, revision, _embedding_key)
+    if embed is None:  # unreachable: _embedding_key raises instead
+        raise ValueError(f"No token embedding in {target_path}")
     return embed
+
+
+def load_target_lm_head(
+    target_path: str, revision: str | None = None
+) -> torch.Tensor | None:
+    """The target's own ``lm_head`` if its checkpoint stores one (untied, e.g.
+    Qwen3-8B); ``None`` for tied targets, whose embedding is the head."""
+    return _read_target_tensor(target_path, revision, _lm_head_key)
 
 
 def read_checkpoint(
@@ -311,19 +367,24 @@ def build_model(
     weights: Mapping[str, torch.Tensor],
     target_embed_weight: torch.Tensor,
     dtype: torch.dtype = torch.bfloat16,
+    target_lm_head_weight: torch.Tensor | None = None,
+    ctx_pad: int = CTX_PAD,
 ) -> XPressDrafter:
     """A ready (eval, frozen) drafter from already-read checkpoint tensors."""
+    _check_ctx_pad(ctx_pad)
     with torch.device("meta"):
         model = build_drafter(config)
-    load_drafter_weights(model, weights, target_embed_weight)
+    load_drafter_weights(model, weights, target_embed_weight, target_lm_head_weight)
     model = model.to(dtype).eval().requires_grad_(False)
-    # The cast split the shared vocab matrix into two copies; re-tie it (the
-    # Spyre move unties it again, for the device lm_head only).
-    model.lm_head.weight = model.embed_tokens.weight
+    if target_lm_head_weight is None:
+        # The cast split the shared vocab matrix into two copies; re-tie it
+        # (the Spyre move unties it again, for the device lm_head only).
+        model.lm_head.weight = model.embed_tokens.weight
     # Rebuild the rotary after the cast: its buffers were on meta, and a bf16
     # inv_freq skews the relative RoPE angles by ~1e-3 rad per position of key
     # span: negligible at kv_pad 64, radians at the 2048-token training window.
     model.rotary_emb = Qwen3RotaryEmbedding(model.config)
+    model.ctx_pad = ctx_pad
     return model
 
 
@@ -331,17 +392,30 @@ def load_model(
     model_path: str,
     *,
     target_embed_weight: torch.Tensor | None = None,
+    target_lm_head_weight: torch.Tensor | None = None,
     target_path: str | None = None,
     dtype: torch.dtype = torch.bfloat16,
     revision: str | None = None,
+    ctx_pad: int = CTX_PAD,
 ) -> XPressDrafter:
-    """Load an XPress drafter; vocab weights come from the target model."""
-    if target_embed_weight is None:
-        if target_path is None:
-            raise ValueError("Pass target_embed_weight or target_path")
+    """Load an XPress drafter; vocab weights come from the target model.
+
+    With ``target_path`` both the embedding and (for an untied target) the
+    ``lm_head`` are read from the target checkpoint; with explicit tensors,
+    pass ``target_lm_head_weight`` for an untied target. ``ctx_pad`` is the
+    context window ``move_model_to_spyre`` compiles the drafter for.
+    """
+    if target_path is not None:
+        if target_embed_weight is not None or target_lm_head_weight is not None:
+            raise ValueError("Pass target tensors or target_path, not both")
         target_embed_weight = load_target_embedding(target_path)
+        target_lm_head_weight = load_target_lm_head(target_path)
+    elif target_embed_weight is None:
+        raise ValueError("Pass target_embed_weight or target_path")
     config, weights = read_checkpoint(model_path, revision)
-    return build_model(config, weights, target_embed_weight, dtype)
+    return build_model(
+        config, weights, target_embed_weight, dtype, target_lm_head_weight, ctx_pad
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -369,15 +443,30 @@ def _padded_readout(readout: torch.Tensor) -> nn.Linear:
     return linear
 
 
-def prepare_for_spyre(model: XPressDrafter, ctx_pad: int = CTX_PAD) -> None:
+def prepare_for_spyre(model: XPressDrafter, ctx_pad: int | None = None) -> None:
     """Compile the backbone + refiner and mark the CPU-resident modules.
 
     Called by ``hf_common.move_model_to_spyre`` before the device move; the
     modules in ``_spyre_cpu_submodules`` stay on CPU: the gather-only weights,
     and ``fc``/``hidden_norm``, which only run from their CPU snapshot.
+
+    ``ctx_pad`` defaults to ``model.ctx_pad`` (set by ``load_model``), so the
+    mover's argument-free call keeps the requested window. Preparing is done
+    once: a repeat call with the same window is a no-op (rebuilding after the
+    device move would leave a CPU readout and an fp16 RoPE cache behind), and
+    a different window is rejected.
     """
-    if ctx_pad < 1:
-        raise ValueError(f"ctx_pad must be positive, got {ctx_pad}")
+    ctx_pad = _check_ctx_pad(model.ctx_pad if ctx_pad is None else ctx_pad)
+    prepared = getattr(model, "_spyre_xpress", None)
+    if prepared is not None:
+        if prepared["ctx_pad"] != ctx_pad:
+            raise ValueError(
+                f"XPress drafter already prepared with ctx_pad={prepared['ctx_pad']}; "
+                f"choose the window before preparing, e.g. "
+                f"load_model(..., ctx_pad={ctx_pad})"
+            )
+        return
+    model.ctx_pad = ctx_pad
     pad_lm_head(model)
     snapshot_cpu_embeddings(model)
     snapshot_cpu_fc(model)
@@ -392,7 +481,6 @@ def prepare_for_spyre(model: XPressDrafter, ctx_pad: int = CTX_PAD) -> None:
     model.xpress_readout = _padded_readout(model.xpress_head.readout.weight)
 
     kv_pad = kv_pad_for(ctx_pad, model.block_size)
-    model._spyre_xpress = {"ctx_pad": ctx_pad, "kv_pad": kv_pad}
     model._spyre_compiled_blocks = compile_dspark_blocks(
         model, ctx_pad=ctx_pad, kv_pad=kv_pad, use_qk_norm=True
     )
@@ -404,6 +492,8 @@ def prepare_for_spyre(model: XPressDrafter, ctx_pad: int = CTX_PAD) -> None:
         "latent": _compile(head.latent),
         "readout": _compile(model.xpress_readout),
     }
+    # Last: the prepare-once guard keys on it, so a failure above stays retryable.
+    model._spyre_xpress = {"ctx_pad": ctx_pad, "kv_pad": kv_pad}
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +572,7 @@ def _window(ctx_features, ctx_positions, ctx_pad):
         warnings.warn(
             f"XPress context of {ctx_positions.shape[0]} positions truncated to "
             f"the {ctx_pad} most recent (ctx_pad); training attends to more. "
-            "Pass a larger ctx_pad to prepare_for_spyre to keep more.",
+            "Pass a larger ctx_pad to load_model to keep more.",
             stacklevel=3,
         )
     feats = ctx_features[:, -ctx_pad:].to("cpu", torch.float32)

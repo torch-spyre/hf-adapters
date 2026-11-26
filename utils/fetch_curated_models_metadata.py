@@ -17,7 +17,11 @@ from typing import Callable
 
 from huggingface_hub import HfApi, ModelInfo
 
-from utils.hf_model_catalog import EXPAND_FIELDS, with_transient_retry
+from utils.hf_model_catalog import (
+    EXPAND_FIELDS,
+    HubRetryExhaustedError,
+    with_transient_retry,
+)
 from utils.utilities import ts
 
 
@@ -55,6 +59,8 @@ def _create_fetch_metadata(
                         description=f"model_info[{model_id}]",
                     )[0]
                 )
+            except HubRetryExhaustedError:
+                raise
             except Exception as e:
                 print(f"{ts()} WARNING: curated model '{model_id}' skipped — {e}")
         return infos

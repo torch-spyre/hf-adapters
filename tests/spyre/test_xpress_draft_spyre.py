@@ -35,9 +35,12 @@ the backbone isolated, while deliberately broken refiners still reached 8 — no
 threshold separates them. The bias cosine does (see ``MIN_BIAS_COSINE``). The
 real-context acceptance check comes with the target integration (P0/P2).
 
-The target embedding is read from the target checkpoint in the HF cache
-(``load_target_embedding`` reads only its shard), or from the safetensors file
-in ``XPRESS_TARGET_EMBED`` if set.
+The target embedding (and, for an untied target such as Qwen3-8B, its own
+``lm_head``) is read from the target checkpoint in the HF cache
+(``load_target_embedding`` / ``load_target_lm_head`` read only their shards),
+or from the safetensors files in ``XPRESS_TARGET_EMBED`` /
+``XPRESS_TARGET_LM_HEAD`` if set. Both the device model and the fp32 oracle
+use the same matrices, so a wrong head cannot hide behind a matching oracle.
 
 Usage (on Spyre pod)::
 
@@ -67,13 +70,20 @@ CTX_LEN = 40
 ANCHOR_ID = 1000
 
 
-def _target_embedding(module, ckpt: str) -> torch.Tensor:
-    override = os.environ.get("XPRESS_TARGET_EMBED")
-    if override:
-        (tensor,) = load_file(override).values()
-        return tensor
+def _single_tensor(path: str) -> torch.Tensor:
+    (tensor,) = load_file(path).values()
+    return tensor
+
+
+def _target_vocab(module, ckpt: str) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """The target's embedding and its own lm_head (``None`` if tied)."""
+    embed_file = os.environ.get("XPRESS_TARGET_EMBED")
+    if embed_file:
+        head_file = os.environ.get("XPRESS_TARGET_LM_HEAD")
+        head = _single_tensor(head_file) if head_file else None
+        return _single_tensor(embed_file), head
     target = next(i["target"] for i in CAUSAL_LM_MODELS.values() if i["path"] == ckpt)
-    return module.load_target_embedding(target)
+    return module.load_target_embedding(target), module.load_target_lm_head(target)
 
 
 def _context(model, start: int, seed: int = 0):
@@ -132,9 +142,11 @@ def test_xpress_propose_block(ckpt, dtype, start):
     module = resolve_adapter_module(ckpt)
     assert module.__name__.endswith("hf_xpress_qwen3"), module.__name__
 
-    embed = _target_embedding(module, ckpt)
+    embed, lm_head = _target_vocab(module, ckpt)
     config, raw = module.read_checkpoint(ckpt)  # read once, for both models
-    oracle = module.build_model(config, raw, embed, dtype=torch.float32)
+    oracle = module.build_model(
+        config, raw, embed, dtype=torch.float32, target_lm_head_weight=lm_head
+    )
     feats, positions = _context(oracle, start)
     ctx = slice(CTX_LEN - min(CTX_LEN, module.CTX_PAD), CTX_LEN)
     ref_hidden = reference_block_hidden(
@@ -147,7 +159,9 @@ def test_xpress_propose_block(ckpt, dtype, start):
     )[0]
     del oracle
 
-    model = module.build_model(config, raw, embed, dtype=dtype)
+    model = module.build_model(
+        config, raw, embed, dtype=dtype, target_lm_head_weight=lm_head
+    )
     del raw
     hf_common.move_model_to_spyre(model, module, dtype)
 
