@@ -143,6 +143,8 @@ Use `st_backend` for the sentence-transformers API, or call `prefill_embed` / `p
 | BGE-base-en-v1.5 | bert | 64 | Yes | Yes | Yes | Yes |
 | all-MiniLM-L6-v2 | bert | 32→64 | Yes (padded) | Yes | Yes | Yes |
 | BGE-M3 | xlm-roberta | 64 | Yes | Yes | Yes | Yes |
+| sentence-camembert-base | camembert | 64 | Yes | Yes | Yes | Yes |
+| sentence-camembert-large | camembert | 64 | Yes | Yes | Yes | Yes |
 | all-mpnet-base-v2 | mpnet | 64 | Yes | Yes | Yes | Yes |
 | ModernBERT-embed-base | modernbert | 64→128 | Yes (padded) | Yes | Yes | Yes |
 | GTE-ModernBERT-base | modernbert | 64→128 | Yes (padded) | Yes | Yes | Yes |
@@ -247,6 +249,23 @@ valid-option logit cosine is ≥ 0.998. **Spyre Runs** = the structured-decision
 requires valid-option logit cosine ≥ 0.98 plus exact option/action argmax, and
 covers sequential inputs and parallel option masks with repeated-call stability.
 
+### Decision Models
+
+Transformers decision models (`XxxForDecision`) score each question from the
+backbone's hidden states at its marks. Use `AutoSpyreModelForDecision` and the
+model's own `decide`. `hf_qwen3_5_decision.py` runs the Qwen3.5 text decoder as
+one readout prefill: full attention over the whole prompt (bidirectional for d3),
+and the Gated DeltaNet core on Spyre one stick-sized chunk at a time. The decision
+head runs on Spyre; the unused vision tower stays on CPU. Text requests only.
+
+| Model | Backbone | head\_dim | Stick Aligned | CPU Accurate | Spyre Compiles | Spyre Runs |
+|-------|----------|---------|--------------|-------------|---------------|-----------|
+| d3 nano (`vllm-sr/d3-nano`) | Qwen3.5 2B (qwen3\_5) | 256 | Yes | Yes | Yes | Yes |
+
+**CPU Accurate** = option argmax matches stock HF `decide` in fp32, option score
+cosine ≥ 0.999. **Spyre Runs** = option argmax matches the CPU reference, score
+cosine ≥ 0.99, option probabilities within 0.05.
+
 ### Token Classification (NER)
 
 Encoder models fine-tuned for token-level label prediction (NER, POS, chunking).
@@ -294,9 +313,9 @@ all pass that check.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 45 adapters · 70 verified checkpoints · 10K+ compatible models.
-The 70 verified rows are 40 generative + 13 embedding + 2 multimodal-embedding + 2 seq-classification +
-2 token-classification + 3 structured-decision + 7 vision-language + 1 speculative-decoding drafter (see
+**Coverage:** 46 adapters · 71 verified checkpoints · 10K+ compatible models.
+The 71 verified rows are 40 generative + 13 embedding + 2 multimodal-embedding + 2 seq-classification +
+2 token-classification + 3 structured-decision + 1 decision + 7 vision-language + 1 speculative-decoding drafter (see
 the Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are bare vision-tower components
 used by VLM adapters and are not included in the adapter count. The three DSpark
 speculative-decoding drafter adapters and the XPress drafter adapter are included
@@ -322,6 +341,7 @@ pattern, norms, and weight layout.
 | hf\_granite.py | granite | 3 | Granite 3.3 8B/2B Base, Granite 3.2 8B, Granite 3.1 8B/2B, Granite 3.0 8B, Granite Code 8B/3B |
 | hf\_qwen3.py | qwen3 | 2 | Qwen3 1.7B, Qwen3 4B, Qwen3 8B |
 | hf\_qwen3\_5.py | qwen3\_5 / qwen3\_5\_text | 2 | Qwen3.5/3.6/3.8 dense checkpoints with hybrid Gated DeltaNet/full-attention layers; stateful recurrence is CPU-staged between compiled Spyre regions |
+| hf\_qwen3\_5\_decision.py | qwen3\_5 (decision models) | 1 | Qwen3.5-backbone `AutoModelForDecision` readouts (d3 family); Gated DeltaNet core on Spyre |
 | hf\_qwen3\_5\_moe.py | qwen3\_5\_moe / qwen3\_5\_moe\_text | 1 | Qwen3.5/3.6 35B-A3B routed/shared-expert variants |
 | hf\_mistral.py | mistral | 2 | Mistral 7B v0.1/v0.2, Mistral 7B Instruct v0.1–v0.3, Zephyr 7B |
 | hf\_mistral3.py | mistral3 | 2 | Mistral-Small-3.2 24B, Ministral-3 14B (multimodal text decoder) |
@@ -356,7 +376,7 @@ pattern, norms, and weight layout.
 | hf\_pixtral\_vision.py | Pixtral vision tower | 1 | Pixtral towers of Mistral3 Vision checkpoints |
 | hf\_bert.py | bert | 3 | BERT-base, BERT-large, RoBERTa-base/large, other BGE/MiniLM variants, BERT NER/POS/chunking fine-tunes |
 | hf\_distilbert.py | distilbert | 2 | DistilBERT-base fine-tunes (QA, NER, sentiment, other classifier heads) |
-| hf\_xlm\_roberta.py | xlm-roberta / roberta | 3 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes, RoBERTa NER/QA/classifier fine-tunes |
+| hf\_xlm\_roberta.py | xlm-roberta / roberta / camembert | 3 | multilingual-e5-large, paraphrase-multilingual-mpnet-base-v2, other XLM-R fine-tunes, RoBERTa NER/QA/classifier fine-tunes, CamemBERT sentence-embedding fine-tunes |
 | hf\_mpnet.py | mpnet | 1 | multi-qa-mpnet-base-{dot,cos}-v1, paraphrase-mpnet-base-v2, microsoft/mpnet-base, all-mpnet-base-v1 |
 | hf\_modernbert.py | modernbert | 3 | answerdotai/ModernBERT-base, answerdotai/ModernBERT-large, other ModernBERT embed/classifier fine-tunes |
 | laya\_backend.py | laya (ModernBERT / mmBERT encoder) | 3 | Root English, bundled typed-decisions, and multilingual checkpoints |

@@ -36,6 +36,7 @@ from hf_adapters.hf_common import (
     kv_cache_update,
     permute_proj_for_rope,
     prepare_lm_head_for_spyre,
+    query_validity_mask,
     rope_dim_permutation,
     run_lm_head,
     text_config,
@@ -348,10 +349,61 @@ def _make_linear_attention_block(layer):
 
 def _padding_mask(attention_mask, sequence_length, cache_index):
     """Recover the per-token validity mask from the additive causal mask."""
-    block_start = int(cache_index[0].to("cpu"))
-    rows = torch.arange(sequence_length)
-    diagonal = attention_mask.to("cpu")[:, 0, rows, block_start + rows]
-    return (diagonal == 0).to(dtype=attention_mask.dtype, device=attention_mask.device)
+    return query_validity_mask(attention_mask)
+
+
+def _run_full_attention_layer(
+    compiled_block,
+    hidden_states,
+    selected_freqs,
+    attn_mask,
+    key_caches,
+    value_caches,
+    index,
+    cache_index,
+    *,
+    decode,
+):
+    """Run one gated full-attention layer, updating its KV cache in the lists."""
+    if len(compiled_block) == 2:
+        # The MoE sibling shares this runner and retains its fused
+        # attention-plus-experts protocol.
+        block = compiled_block[1] if decode else compiled_block[0]
+        hidden_states, key_caches[index], value_caches[index] = block(
+            hidden_states,
+            selected_freqs,
+            attn_mask,
+            key_caches[index],
+            value_caches[index],
+            cache_index,
+        )
+        return hidden_states
+    (
+        project_prefill,
+        project_decode,
+        cache_prefill,
+        cache_decode,
+        attention_prefill,
+        attention_decode,
+        finish_prefill,
+        finish_decode,
+    ) = compiled_block
+    project = project_decode if decode else project_prefill
+    update_cache = cache_decode if decode else cache_prefill
+    attention = attention_decode if decode else attention_prefill
+    finish = finish_decode if decode else finish_prefill
+    residual, query, key, value, gate = project(hidden_states, selected_freqs)
+    key_caches[index], value_caches[index] = update_cache(
+        key,
+        value,
+        key_caches[index],
+        value_caches[index],
+        cache_index,
+    )
+    attention_output = attention(
+        query, key_caches[index], value_caches[index], attn_mask
+    )
+    return finish(residual, attention_output, gate)
 
 
 def _run_backbone_forward(
@@ -372,45 +424,17 @@ def _run_backbone_forward(
     for index, layer_type in enumerate(text_config(model.config).layer_types):
         compiled_block = model._spyre_compiled_blocks[index]
         if layer_type == "full_attention":
-            if len(compiled_block) == 2:
-                # The MoE sibling shares this runner and retains its fused
-                # attention-plus-experts protocol.
-                block = compiled_block[1] if decode else compiled_block[0]
-                hidden_states, key_caches[index], value_caches[index] = block(
-                    hidden_states,
-                    selected_freqs,
-                    attn_mask,
-                    key_caches[index],
-                    value_caches[index],
-                    cache_index,
-                )
-                continue
-            (
-                project_prefill,
-                project_decode,
-                cache_prefill,
-                cache_decode,
-                attention_prefill,
-                attention_decode,
-                finish_prefill,
-                finish_decode,
-            ) = compiled_block
-            project = project_decode if decode else project_prefill
-            update_cache = cache_decode if decode else cache_prefill
-            attention = attention_decode if decode else attention_prefill
-            finish = finish_decode if decode else finish_prefill
-            residual, query, key, value, gate = project(hidden_states, selected_freqs)
-            key_caches[index], value_caches[index] = update_cache(
-                key,
-                value,
-                key_caches[index],
-                value_caches[index],
+            hidden_states = _run_full_attention_layer(
+                compiled_block,
+                hidden_states,
+                selected_freqs,
+                attn_mask,
+                key_caches,
+                value_caches,
+                index,
                 cache_index,
+                decode=decode,
             )
-            attention_output = attention(
-                query, key_caches[index], value_caches[index], attn_mask
-            )
-            hidden_states = finish(residual, attention_output, gate)
         else:
             (
                 hidden_prefill,

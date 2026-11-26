@@ -1775,6 +1775,24 @@ def _mask_fill_value(dtype):
     return torch.finfo(storage_dtype).min / 2
 
 
+def query_validity_mask(attention_mask):
+    """Return ``[B, Lq]`` validity from a zero/negative additive attention mask.
+
+    A real query in the adapters' causal masks can attend to its own cache
+    slot. Left-padding queries have no zero entry anywhere in their row. This
+    also handles masks with more than one head, without extracting a diagonal
+    or reading cache positions back to the host.
+    """
+    if attention_mask.device.type == "spyre" and not torch.compiler.is_compiling():
+        return _compiled_query_validity_mask(attention_mask)
+    return (attention_mask == 0).any(dim=-1).any(dim=1).to(attention_mask.dtype)
+
+
+_compiled_query_validity_mask = torch.compile(
+    query_validity_mask, dynamic=False, fullgraph=True
+)
+
+
 def build_prefill_mask(
     batch_size,
     padded_len,
@@ -2165,12 +2183,12 @@ def add_causal_sliding_window_band(
     fill value on every key outside ``(q - sliding_window, q]``. Same
     device/dtype as ``mask``.
 
-    Ordinary masks take the CPU fallback below because Spyre's Inductor backend
-    rejects the integer comparisons and bool intermediates used to build the
-    band. Chunked-prefill masks carry a private builder that advances a
-    device-resident sliding state in logical cache order, or reconstructs only
-    the compact ring-cache columns from its causal/padding metadata. Both avoid
-    a full mask round-trip per chunk. All paths avoid
+    Ordinary masks retain the CPU path because combining integer-comparison
+    predicates with the fp16/bf16 base mask still encounters a staggered layout
+    restriction (torch-spyre#2252). Chunked-prefill masks carry a private builder
+    that advances a device-resident sliding state in logical cache order, or
+    reconstructs only compact ring-cache columns from causal/padding metadata.
+    These paths avoid a full mask round-trip per chunk. All paths avoid
     combining two masked cells on-device by addition; ``-inf + -inf`` has been
     observed to produce NaN on Spyre in bf16.
     """
@@ -2767,6 +2785,13 @@ def move_model_to_spyre(model, module, dtype: torch.dtype) -> None:
         # model on device before move_model_to_spyre runs, the saved submodule
         # is on-device too; the restore would leave it on device rather than CPU.
         setattr(parent, attr, submod.to(device="cpu", dtype=dtype))
+
+    # Prevent the HF pipeline from calling model.to("cuda:0") which would
+    # displace Spyre-resident weights.  The pipeline skips its device-move
+    # when hf_device_map is set (mirrors accelerate-loaded model behaviour).
+    if not hasattr(model, "hf_device_map"):
+        model.hf_device_map = {"": DEVICE}
+
     print("Model on Spyre ready.")
 
 
@@ -3909,15 +3934,23 @@ def fairseq_position_ids(input_ids: torch.Tensor, padding_idx: int) -> torch.Ten
     Padding slots map to ``padding_idx``; the attention mask zeros them out
     later, so the embedding picked there is irrelevant.
 
-    Computed on CPU even when ``input_ids`` lives on Spyre: the natural form
-    ``input_ids.ne(padding_idx).int()`` materializes a bool tensor and the
-    Spyre Inductor backend rejects ``bool → int32`` conversions. The CPU
-    round-trip on a ``[B, L]`` int tensor is negligible.
+    Comparisons, prefix sum, and selection stay on the input device when Spyre
+    supports native int32 cumsum.
     """
-    ids_cpu = input_ids.to("cpu")
-    mask = ids_cpu.ne(padding_idx).int()
-    incremental = torch.cumsum(mask, dim=1).type_as(mask) * mask
-    return (incremental.long() + padding_idx).to(DEVICE)
+    if input_ids.device.type == "spyre" and not torch.compiler.is_compiling():
+        return _compiled_fairseq_position_ids(input_ids, padding_idx)
+    is_token = input_ids != padding_idx
+    counts = is_token.to(torch.int32)
+    incremental = torch.cumsum(counts, dim=1, dtype=torch.int32)
+    positions = incremental * counts
+    if input_ids.device.type == "spyre":
+        return positions + padding_idx
+    return (positions.long() + padding_idx).to(DEVICE)
+
+
+_compiled_fairseq_position_ids = torch.compile(
+    fairseq_position_ids, dynamic=False, fullgraph=True
+)
 
 
 def make_encoder_block(
@@ -4404,7 +4437,7 @@ def prefill_encoder(
 
     h = run_encoder_forward_fn(
         model,
-        input_ids.to(DEVICE),
+        input_ids.to(device=DEVICE, dtype=torch.int32),
         mask.to(DEVICE),
         position_ids.to(DEVICE),
         tt_ids.to(DEVICE),
@@ -4444,6 +4477,17 @@ def prefill_masked_lm(
         head = model.lm_head
         head_device = next(head.parameters()).device
         logits = head(last_hidden_state.to(head_device))
+    elif hasattr(model, "vocab_transform") and hasattr(model, "vocab_projector"):
+        # DistilBERT-style head: vocab_transform -> activation -> vocab_layer_norm
+        # -> vocab_projector.  All three submodules are kept on CPU.
+        head_device = next(model.vocab_transform.parameters()).device
+        hidden = last_hidden_state.to(head_device)
+        hidden = model.vocab_transform(hidden)
+        if hasattr(model, "activation"):
+            hidden = model.activation(hidden)
+        if hasattr(model, "vocab_layer_norm"):
+            hidden = model.vocab_layer_norm(hidden)
+        logits = model.vocab_projector(hidden)
     else:
         raise SpyreUnsupportedModelError(
             f"Unsupported masked-LM head layout for {type(model).__name__}"

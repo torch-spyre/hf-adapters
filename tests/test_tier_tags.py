@@ -319,7 +319,7 @@ def test_platform_tag_matches_torch_spyre_normalization(monkeypatch, machine, ex
 
 
 def test_tag_values_match_the_ingest_namespace_form():
-    """`namespace__value`, the shape ingest_xml_hf_adapters.extract_properties reads off
+    """`namespace__value`, the shape the ClickHouse ingest reads off
     `<property name="tag" value="..."/>`."""
     for name, value in result_tags("smoke", {"model_path": "ibm/granite"}):
         assert name == "tag"
