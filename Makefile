@@ -76,14 +76,14 @@ MODEL_PATH_ARGS :=
 endif
 
 .PHONY: help test tests model-support-tests adapter-coverage-tests smoke-tests load-tests \
-        token-compare-tests embed-compare-tests clip-tests multimodal-embed-compare-tests vlm-tests reranker-tests model-module-tests \
+        token-compare-tests embed-compare-tests sentence_transformers_multimodal_tests vlm-tests reranker-tests model-module-tests \
         masked-lm-compare-tests question-answering-compare-tests seq-classification-compare-tests \
-        token-classification-compare-tests structured-decision-compare-tests model-components-tests edge-cases-tests perf-tests
+        token-classification-compare-tests structured-decision-compare-tests decision-compare-tests yolo-compare-tests model-components-tests edge-cases-tests perf-tests
 
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-24s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
-	@echo "Variables: TEST_TYPE=unit|integration|regression|trunk|perf|<space-separated suite keys, e.g. smoke clip multimodal_embed_compare edge_cases model_support> (default regression),"
+	@echo "Variables: TEST_TYPE=unit|integration|regression|trunk|perf|<space-separated suite keys, e.g. smoke sentence_transformers_multimodal edge_cases model_support> (default regression),"
 	@echo "  MODEL_KEY (pytest -k filter, default all), MODEL_PATH (exact model path via --model-path, overrides registry parametrization),"
 	@echo "  PERF_SCHEDULE=nightly|weekly (TEST_TYPE=perf: which perf.yaml section to run, default nightly), PERF_REPORT=split|combined (default '$(PERF_REPORT)'),"
 	@echo "  EDGE_CASE_FILE=<file>.py (edge_cases: one file), MODULE_CONFIG=<file>.yaml (model_module: one config), MODULE_TEST_FILTER (model_module: pytest -k),"
@@ -92,8 +92,8 @@ help: ## Show this help message
 
 # Suite keys, one target each -- same vocabulary and test_types membership as
 # _test_matrix.yaml. Each is independently runnable with its own JUNIT_XML.
-adapter-coverage-tests: ## Run adapter registry coverage check (suite key: adapter_coverage)
-	$(PYTEST) -v --noconftest tests/test_adapter_coverage.py tests/test_perf_coverage.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+adapter-coverage-tests: ## Run adapter registry coverage and build-action checks (suite key: adapter_coverage)
+	$(PYTEST) -v --noconftest tests/test_adapter_coverage.py tests/test_perf_coverage.py tests/test_build_hf_adapters.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 smoke-tests: ## Run e2e smoke tests (suite key: smoke)
 	$(PYTEST) $(PYTEST_ARGS) --suite smoke tests/spyre/test_e2e_smoke_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
@@ -138,11 +138,8 @@ model-components-tests: ## Run model component tests (suite key: model_component
 embed-compare-tests: ## Run embed-compare tests (suite key: embed_compare)
 	$(PYTEST) $(PYTEST_ARGS) --suite embed_compare tests/spyre/test_e2e_embed_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
-multimodal-embed-compare-tests: ## Run multimodal embedding tests (suite key: multimodal_embed_compare)
-	$(PYTEST) $(PYTEST_ARGS) --suite multimodal_embed_compare tests/spyre/test_e2e_multimodal_embed_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
-
-clip-tests: ## Run CLIP e2e tests (suite key: clip)
-	$(PYTEST) $(PYTEST_ARGS) --suite clip tests/spyre/test_e2e_clip_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+sentence_transformers_multimodal_tests: ## Run SentenceTransformers multimodal integration (suite key: sentence_transformers_multimodal)
+	$(PYTEST) $(PYTEST_ARGS) --suite sentence_transformers_multimodal tests/spyre/test_sentence_transformers_multimodal_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 vlm-tests: ## Run VLM e2e tests (suite key: vlm)
 	$(PYTEST) $(PYTEST_ARGS) --suite vlm tests/spyre/test_vlm_e2e_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
@@ -164,6 +161,15 @@ token-classification-compare-tests: ## Run token-classification compare tests (s
 
 structured-decision-compare-tests: ## Run structured-decision compare tests (suite key: structured_decision_compare)
 	$(PYTEST) $(PYTEST_ARGS) --suite structured_decision_compare tests/spyre/test_e2e_structured_decision_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+
+decision-compare-tests: ## Run Transformers decision-model compare tests (suite key: decision_compare)
+	$(PYTEST) $(PYTEST_ARGS) --suite decision_compare tests/spyre/test_e2e_decision_compare_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+
+# Ultralytics YOLO CPU-vs-Spyre detection/segmentation compare. Not a transformers model, so
+# it has no model registry entry and no --model-path axis; MODEL_KEY (-k) picks a checkpoint
+# (yolov5nu, yolov8n-seg), which is how the CI matrix runs one leg per model.
+yolo-compare-tests: ## Run Ultralytics YOLO compare tests (suite key: yolo_compare)
+	$(PYTEST) $(PYTEST_ARGS) --suite yolo_compare tests/spyre/test_e2e_yolo_compare_spyre.py $(K_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 # EDGE_CASE_FILE narrows edge-cases-tests to one file under tests/spyre/edge_cases/
 # (matrix-style per-file CI jobs pass this); empty = run every file in the directory.
@@ -313,8 +319,8 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	  fi; \
 	fi; \
 	case " $$resolved " in \
-	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare model_components embed_compare clip multimodal_embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare structured_decision_compare model_module" ;; \
-	  *" unit "*) suites="adapter_coverage load token_compare embed_compare clip multimodal_embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare structured_decision_compare model_module" ;; \
+	  *" regression "*|*" trunk "*) suites="adapter_coverage smoke load token_compare model_components embed_compare sentence_transformers_multimodal vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare structured_decision_compare decision_compare yolo_compare model_module" ;; \
+	  *" unit "*) suites="adapter_coverage load token_compare embed_compare sentence_transformers_multimodal vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare structured_decision_compare decision_compare yolo_compare model_module" ;; \
 	  " integration ") suites="token_compare" ;; \
 	  " perf ") suites="perf" ;; \
 	  " token_compare ") echo "TEST_TYPE=token_compare is not a valid tier -- use TEST_TYPE=integration to run integration coverage, or include 'token_compare' in a multi-suite combo (e.g. TEST_TYPE=\"token_compare load\")."; exit 1 ;; \
@@ -331,8 +337,7 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	    token_compare)    mkdir -p "$(RESULTS_DIR)/junit-token-compare" && $(MAKE) token-compare-tests     JUNIT_XML="$(RESULTS_DIR)/junit-token-compare/junit-token-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    model_components) mkdir -p "$(RESULTS_DIR)/junit-model-components" && $(MAKE) model-components-tests JUNIT_XML="$(RESULTS_DIR)/junit-model-components/junit-model-components.xml" || rc=1 ;; \
 	    embed_compare)    mkdir -p "$(RESULTS_DIR)/junit-embed-compare" && $(MAKE) embed-compare-tests     JUNIT_XML="$(RESULTS_DIR)/junit-embed-compare/junit-embed-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
-	    clip)             mkdir -p "$(RESULTS_DIR)/junit-clip" && $(MAKE) clip-tests JUNIT_XML="$(RESULTS_DIR)/junit-clip/junit-clip.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
-	    multimodal_embed_compare)    mkdir -p "$(RESULTS_DIR)/junit-multimodal-embed-compare" && $(MAKE) multimodal-embed-compare-tests     JUNIT_XML="$(RESULTS_DIR)/junit-multimodal-embed-compare/junit-multimodal-embed-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
+	    sentence_transformers_multimodal)             mkdir -p "$(RESULTS_DIR)/junit-sentence-transformers-multimodal" && $(MAKE) sentence_transformers_multimodal_tests JUNIT_XML="$(RESULTS_DIR)/junit-sentence-transformers-multimodal/junit-sentence-transformers-multimodal.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    vlm)              mkdir -p "$(RESULTS_DIR)/junit-vlm" && $(MAKE) vlm-tests               JUNIT_XML="$(RESULTS_DIR)/junit-vlm/junit-vlm.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    reranker_compare) mkdir -p "$(RESULTS_DIR)/junit-reranker-compare" && $(MAKE) reranker-tests          JUNIT_XML="$(RESULTS_DIR)/junit-reranker-compare/junit-reranker-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    masked_lm_compare) mkdir -p "$(RESULTS_DIR)/junit-masked-lm-compare" && $(MAKE) masked-lm-compare-tests JUNIT_XML="$(RESULTS_DIR)/junit-masked-lm-compare/junit-masked-lm-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
@@ -340,6 +345,8 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	    seq_classification_compare) mkdir -p "$(RESULTS_DIR)/junit-seq-classification-compare" && $(MAKE) seq-classification-compare-tests JUNIT_XML="$(RESULTS_DIR)/junit-seq-classification-compare/junit-seq-classification-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    token_classification_compare) mkdir -p "$(RESULTS_DIR)/junit-token-classification-compare" && $(MAKE) token-classification-compare-tests JUNIT_XML="$(RESULTS_DIR)/junit-token-classification-compare/junit-token-classification-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
 	    structured_decision_compare) mkdir -p "$(RESULTS_DIR)/junit-structured-decision-compare" && $(MAKE) structured-decision-compare-tests JUNIT_XML="$(RESULTS_DIR)/junit-structured-decision-compare/junit-structured-decision-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
+	    decision_compare) mkdir -p "$(RESULTS_DIR)/junit-decision-compare" && $(MAKE) decision-compare-tests JUNIT_XML="$(RESULTS_DIR)/junit-decision-compare/junit-decision-compare.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" || rc=1 ;; \
+	    yolo_compare)     mkdir -p "$(RESULTS_DIR)/junit-yolo-compare" && $(MAKE) yolo-compare-tests      JUNIT_XML="$(RESULTS_DIR)/junit-yolo-compare/junit-yolo-compare.xml" MODEL_KEY="$(MODEL_KEY)" || rc=1 ;; \
 	    model_module)     $(MAKE) model-module-tests      JUNIT_XML=1 RESULTS_DIR="$(RESULTS_DIR)" MODULE_CONFIG="$(MODULE_CONFIG)" || rc=1; \
 	                      for f in "$(RESULTS_DIR)"/model-module-*.xml; do \
 	                        [ -e "$$f" ] || continue; \
@@ -350,7 +357,7 @@ tests: ## Run the suites selected by TEST_TYPE into RESULTS_DIR (JUnit per suite
 	    model_support)    $(MAKE) model-support-tests RESULTS_DIR="$(RESULTS_DIR)" || rc=1 ;; \
 	    edge_cases)       mkdir -p "$(RESULTS_DIR)/junit-edge-cases" && $(MAKE) edge-cases-tests        JUNIT_XML="$(RESULTS_DIR)/junit-edge-cases/junit-edge-cases.xml" MODEL_KEY="$(MODEL_KEY)" MODEL_PATH="$$model_path" EDGE_CASE_FILE="$(EDGE_CASE_FILE)" || rc=1 ;; \
 	    perf)             $(MAKE) perf-tests RESULTS_DIR="$(RESULTS_DIR)" MODEL_PATH="$$model_path" PERF_REPORT=combined || rc=1 ;; \
-	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare model_components embed_compare clip multimodal_embed_compare vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare structured_decision_compare model_module model_support edge_cases perf"; rc=1 ;; \
+	    *) echo "Unknown suite key '$$suite'. Valid: adapter_coverage smoke load token_compare model_components embed_compare sentence_transformers_multimodal vlm reranker_compare masked_lm_compare question_answering_compare seq_classification_compare token_classification_compare structured_decision_compare decision_compare yolo_compare model_module model_support edge_cases perf"; rc=1 ;; \
 	  esac; \
 	done; \
 	exit $$rc

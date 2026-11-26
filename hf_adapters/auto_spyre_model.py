@@ -44,19 +44,21 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from types import MethodType, ModuleType
-from typing import Any, Optional, Union, cast
+from typing import Any, Optional, Union
 
 import torch
 from transformers import (
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
+    AutoModelForDecision,
     AutoModelForImageTextToText,
     AutoModelForMaskedLM,
     AutoModelForQuestionAnswering,
     AutoModelForSequenceClassification,
     AutoModelForTokenClassification,
     BertConfig,
+    CamembertConfig,
     CLIPConfig,
     DistilBertConfig,
     Gemma2Config,
@@ -99,6 +101,7 @@ from transformers import (
 from transformers.configuration_utils import PretrainedConfig
 from transformers.generation import GenerateDecoderOnlyOutput
 from transformers.modeling_outputs import (
+    BaseModelOutput,
     MaskedLMOutput,
     QuestionAnsweringModelOutput,
     SequenceClassifierOutput,
@@ -151,19 +154,23 @@ from hf_adapters import (
     hf_qwen2,
     hf_qwen3,
     hf_qwen3_5,
+    hf_qwen3_5_decision,
     hf_qwen3_5_moe,
     hf_siglip,
     hf_smollm3,
     hf_xlm_roberta,
     hf_xpress_qwen3,
 )
+from hf_adapters._model_loading import model_subfolder
 from hf_adapters.hf_common import (
     SpyreNoAdapterError,
     SpyreUnsupportedFeatureError,
     SpyreUnsupportedModelError,
     assert_spyre_dimensions,
+    get_backbone,
     load_model_common,
     move_model_to_spyre,
+    prefill_embed,
 )
 
 CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
@@ -205,6 +212,9 @@ CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
     Qwen3_5MoeConfig: hf_qwen3_5_moe,
     Qwen3_5MoeTextConfig: hf_qwen3_5_moe,
     RobertaConfig: hf_xlm_roberta,
+    # CamembertModel subclasses RobertaModel unchanged (same layers, weight
+    # names and fairseq-style position ids), so the RoBERTa adapter applies as-is.
+    CamembertConfig: hf_xlm_roberta,
     SiglipConfig: hf_siglip,
     SmolLM3Config: hf_smollm3,
     XLMRobertaConfig: hf_xlm_roberta,
@@ -260,6 +270,13 @@ TOKEN_CLASSIFICATION_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[
     RobertaConfig: hf_xlm_roberta,
 }
 
+# Decision mapping — used by ``AutoSpyreModelForDecision``. Decision checkpoints
+# that ship their head next to the backbone weights carry the backbone's config;
+# the decision adapter prepares that backbone for hidden-state readouts.
+DECISION_CONFIG_TO_ADAPTER_MODULE_MAPPING: dict[type[PretrainedConfig], ModuleType] = {
+    Qwen3_5Config: hf_qwen3_5_decision,
+}
+
 
 @dataclass(frozen=True)
 class ModelDTypePolicy:
@@ -275,42 +292,20 @@ MODEL_DTYPE_POLICIES: dict[str, ModelDTypePolicy] = {
 }
 
 
-# Known sub-module subfolders used by sentence-transformers composite repos,
-# e.g. sentence-transformers/clip-ViT-B-32 stores its model under '0_CLIPModel'.
-_ST_SUBFOLDERS = ("0_CLIPModel", "0_Transformer")
-
-
-def _autoconfig_with_subfolder_fallback(
-    model_name_or_path: Union[str, os.PathLike[str]],
+def _load_model_config(
+    model_name_or_path: str | os.PathLike[str],
     trust_remote_code: bool | None = None,
 ) -> PretrainedConfig | None:
-    """Load ``AutoConfig`` for *model_name_or_path*, probing known ST subfolders on failure.
-
-    Returns the first config that loads successfully, or ``None`` if every
-    attempt fails.
-    """
+    """Load the configuration from the same repository location as the weights."""
     try:
-        return cast(
-            PretrainedConfig,
-            AutoConfig.from_pretrained(
-                model_name_or_path, trust_remote_code=trust_remote_code
-            ),
+        config: PretrainedConfig = AutoConfig.from_pretrained(
+            model_name_or_path,
+            subfolder=model_subfolder(model_name_or_path),
+            trust_remote_code=trust_remote_code,
         )
     except Exception:
-        pass
-    for sub in _ST_SUBFOLDERS:
-        try:
-            return cast(
-                PretrainedConfig,
-                AutoConfig.from_pretrained(
-                    model_name_or_path,
-                    subfolder=sub,
-                    trust_remote_code=trust_remote_code,
-                ),
-            )
-        except Exception:
-            pass
-    return None
+        return None
+    return config
 
 
 def dtype_for_model_path(
@@ -335,7 +330,7 @@ def dtype_for_model_path(
     elif policy.dtype is not None:
         dtype = policy.dtype
     else:
-        config = _autoconfig_with_subfolder_fallback(
+        config = _load_model_config(
             model_name_or_path, trust_remote_code=trust_remote_code
         )
         text_config = getattr(config, "text_config", None)
@@ -358,7 +353,7 @@ def resolve_adapter_module(
     ] = CONFIG_TO_ADAPTER_MODULE_MAPPING,
     trust_remote_code: bool | None = None,
 ) -> ModuleType:
-    model_config = _autoconfig_with_subfolder_fallback(
+    model_config = _load_model_config(
         model_name_or_path, trust_remote_code=trust_remote_code
     )
     if model_config is None:
@@ -881,6 +876,91 @@ class AutoSpyreModelForTokenClassification(AutoSpyreModel):
             return (logits,)
 
         model.forward = MethodType(model_forward, model)  # type: ignore[assignment]
+        return model
+
+
+class AutoSpyreModelForDecision(AutoSpyreModel):
+    """Load a decision model with its text decoder and decision head on Spyre.
+
+    Loads via ``AutoModelForDecision``; score with the model's own ``decide``,
+    as with stock Hugging Face. The backbone ``forward`` runs one right-padded
+    readout prefill on Spyre and returns ``last_hidden_state`` on CPU, where
+    ``decide`` reads the rows at the question marks. Text requests only.
+
+    Example::
+
+        model = AutoSpyreModelForDecision.from_pretrained("vllm-sr/d3-nano")
+        tokenizer = AutoTokenizer.from_pretrained("vllm-sr/d3-nano")
+        for inputs, questions in model.decision_config.prepare_inputs(
+            request, tokenizer
+        ):
+            scores = model.decide(**inputs, decision_questions=questions)
+    """
+
+    _auto_model_cls = AutoModelForDecision  # type: ignore[assignment]
+    _module_mapping: dict[type[PretrainedConfig], ModuleType] = (
+        DECISION_CONFIG_TO_ADAPTER_MODULE_MAPPING
+    )
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_name_or_path: Union[str, os.PathLike[str]],
+        dtype: torch.dtype | None = None,
+        tp_plan: Optional[Union[dict, str]] = None,
+        trust_remote_code: bool | None = None,
+    ) -> PreTrainedModel:
+        if tp_plan is not None:
+            raise SpyreUnsupportedFeatureError(
+                "Tensor parallelism is not currently supported for decision models"
+            )
+        module: ModuleType = resolve_adapter_module(
+            model_name_or_path,
+            mapping=cls._module_mapping,
+            trust_remote_code=trust_remote_code,
+        )
+        model: PreTrainedModel = super().from_pretrained(
+            model_name_or_path,
+            dtype=dtype,
+            trust_remote_code=trust_remote_code,
+        )
+        text_decoder: PreTrainedModel = get_backbone(model)
+
+        def backbone_forward(
+            self: PreTrainedModel,
+            input_ids: torch.Tensor | None = None,
+            attention_mask: torch.Tensor | None = None,
+            inputs_embeds: torch.Tensor | None = None,
+            use_cache: bool | None = None,
+            **kwargs: Any,
+        ) -> BaseModelOutput:
+            if kwargs:
+                raise SpyreUnsupportedFeatureError(
+                    f"Unsupported decision inputs on Spyre: {sorted(kwargs)}"
+                )
+            if inputs_embeds is not None:
+                raise SpyreUnsupportedFeatureError(
+                    "inputs_embeds is not currently supported on Spyre"
+                )
+            if input_ids is None:
+                raise ValueError("input_ids must be provided")
+            if use_cache:
+                raise SpyreUnsupportedFeatureError(
+                    "Decision readouts do not keep a KV cache"
+                )
+            input_ids = input_ids.to("cpu")
+            if attention_mask is None:
+                attention_mask = torch.ones_like(input_ids)
+            hidden_states = prefill_embed(
+                module._run_backbone_forward,
+                text_decoder,
+                input_ids,
+                attention_mask.to("cpu"),
+            )
+            return BaseModelOutput(last_hidden_state=hidden_states.to("cpu"))
+
+        backbone = model.base_model
+        backbone.forward = MethodType(backbone_forward, backbone)  # type: ignore[method-assign]
         return model
 
 

@@ -30,8 +30,8 @@ def _create_fetch(ranking: Ranking) -> Callable[[HfApi, int], list[ModelInfo]]:
         """Top text-generation models by *ranking* (over-fetched to absorb the
         GGUF/MLX entries dropped by the filter).
 
-        Retries transient 5xx gateway errors with exponential backoff via
-        ``with_transient_retry``; permanent failures propagate.
+        Retries HTTP 429 and transient gateway errors via ``with_transient_retry``;
+        permanent failures propagate.
         """
         print(f"{ts()} Fetching top {limit} text-generation models by {ranking}...")
         return with_transient_retry(
