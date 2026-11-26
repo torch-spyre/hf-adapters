@@ -1,0 +1,8 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/torch-spyre/torch-spyre/main/extensions/spyre-bench/spyre_bench/core/schemas/resources.schema.json
+# What is under test for the hf-models suite: the Spyre op library reached through the adapters, at
+# the repository's default precision. The model is not part of the System -- it varies per Benchmark
+# and comes from tests/model_lists/perf.yaml.
+apiVersion: bench/v1alpha1
+kind: System
+metadata: {name: hf-models-spyre-fp16, description: "torch-spyre op library through the hf-adapters harness, fp16"}
+spec: {type: kernel/op-library, backend: spyre, library: torch-spyre, precision: fp16, harness: harness-a}

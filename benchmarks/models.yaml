@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/torch-spyre/torch-spyre/main/extensions/spyre-bench/spyre_bench/core/schemas/resources.schema.json
+# Only the eval model is declared here. The engine's shared catalog holds the models several
+# products benchmark; Qwen3-0.6B is scored by this repository alone, so it stays local rather than
+# putting a one-consumer noun in a shared file.
+#
+# The hf-models perf Benchmarks name their model as a plain hub path instead, because
+# tests/model_lists/perf.yaml -- their single source of truth -- records no revision, and inventing
+# one here would create a second place to edit.
+apiVersion: bench/v1alpha1
+kind: Model
+metadata: {name: qwen3-0.6b, description: the decoder the evals/ question sets are scored on}
+spec:
+  assets: [{role: weights, asset: qwen3-0.6b-weights}]
+  family: qwen
+  architecture: decoder-only

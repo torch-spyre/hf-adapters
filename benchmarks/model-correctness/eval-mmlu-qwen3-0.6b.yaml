@@ -1,0 +1,52 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/torch-spyre/torch-spyre/main/extensions/spyre-bench/spyre_bench/core/schemas/resources.schema.json
+# evals/mmlu scored on the Spyre adapter, recorded as a score. Greedy decoding, so no seed in
+# identity. Judges nothing and gates nothing. Zero-shot: the prompt carries the choices, not examples.
+#
+# `run.command` calls a make target rather than a script path: mk/bench.mk is the one place the
+# eval runner's location is written down, so moving it is a one-line change.
+apiVersion: bench/v1alpha1
+kind: Benchmark
+metadata: {name: eval-mmlu-qwen3-0.6b, description: "MMLU accuracy of Qwen3-0.6B through the hf_qwen3 adapter"}
+spec:
+  type: quality
+  level: service
+  tier: extended
+  system: {type: llm/hf-transformers, backend: spyre}
+  est_hours: 0.5
+  workload:
+    type: llm/lm-eval
+    inputs: [{name: tasks, dataset: mmlu, subset: first-50, expect: {records: 50}}]
+    eval: {task: mmlu, num_fewshot: 0, limit: 50}
+  metrics:
+    required: [llm.eval.exact_match]
+    headline: [llm.eval.exact_match]
+  run:
+    cache: warm
+    repeats: 1
+    timeout: 90m
+    command:
+      - make
+      - bench-eval-case
+      - "BENCH_EVAL_TASK=mmlu"
+      - "CASE={case}"
+      - "BENCH_EVAL_MODEL=Qwen/Qwen3-0.6B"
+      # The declared `limit` is handed to the runner, so the question count the row records is the
+      # one this file promises rather than however many samples happen to sit in the file.
+      - "BENCH_EVAL_LIMIT=50"
+      - "BENCH_REPEAT_DIR={repeat_dir}"
+      - "BENCH_RAW_DIR={raw_dir}"
+  identity:
+    mode: ingest
+    profile: generic
+    name: eval_mmlu_qwen3-0.6b_l50
+    discriminators:
+      - {key: dataset, value: mmlu}
+      - {key: harness, value: hf-adapters-evals}
+      - {key: model, value: Qwen/Qwen3-0.6B}
+      - {key: num_fewshot, value: 0}
+      - {key: num_questions, value: 50}
+      - {key: record_type, value: quality}
+      - {key: task, value: mmlu}
+  variants:
+    - name: eval_mmlu_qwen3-0.6b_l50
+      system: {type: llm/hf-transformers, backend: spyre, token: qwen3-0.6b, model: qwen3-0.6b, precision: fp16}
