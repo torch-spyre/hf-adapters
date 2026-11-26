@@ -9,7 +9,7 @@ from typing import Callable
 
 from huggingface_hub import HfApi
 from huggingface_hub.hf_api import ModelInfo
-from transformers import AutoConfig, PretrainedConfig
+from transformers import PretrainedConfig
 
 from utils.fetch_curated_models_metadata import _create_fetch_metadata, keep_all
 from utils.hf_model_catalog import (
@@ -51,6 +51,28 @@ def _create_fetch(ranking: Ranking) -> Callable[[HfApi, int], list[ModelInfo]]:
     return _fetch
 
 
+def _subfolder_hint(model: ModelInfo) -> str | None:
+    """Return the root layout when Hub siblings rule out a modules.json file.
+
+    ``None`` lets ``load_model_config`` run the loader's layout discovery, which
+    is needed only when the listing has a modules.json or lacks sibling metadata.
+    """
+    if model.siblings is None or any(
+        sibling.rfilename == "modules.json" for sibling in model.siblings
+    ):
+        return None
+    return ""
+
+
+def _config_rejection(error: ValueError | OSError) -> str:
+    """Describe why a config could not be loaded with remote code disabled."""
+    if isinstance(error, ValueError) and "custom code" in str(error):
+        return "requires trust_remote_code"
+    if isinstance(error, OSError):
+        return "config could not be loaded"
+    return "unrecognized or invalid config"
+
+
 def _keep_generation_config(
     model: ModelInfo,
     token: str | bool,
@@ -58,30 +80,28 @@ def _keep_generation_config(
 ) -> tuple[bool, str]:
     """Reject remote-code and encoder-only configs without loading model weights.
 
-    Use the same adapter selection and encoder-only flag as the causal-LM loader.
-    Do not resolve the adapter through ``resolve_adapter_module`` here: dimension
-    validation and unsupported-adapter verdicts still belong to the worker.
+    Load the config with the causal-LM loader's own logic, then use its adapter
+    selection and encoder-only flag. Do not resolve the adapter through
+    ``resolve_adapter_module`` here: dimension validation and unsupported-adapter
+    verdicts still belong to the worker.
     """
-    from hf_adapters._model_loading import model_subfolder
+    from hf_adapters._model_loading import load_model_config
     from hf_adapters.auto_spyre_model import select_adapter_module
 
-    # The listing includes sibling filenames, so ordinary repositories need no
-    # modules.json probe. Missing metadata still falls back to loader discovery.
-    needs_layout_discovery: bool = model.siblings is None or any(
-        sibling.rfilename == "modules.json" for sibling in model.siblings
-    )
+    subfolder: str | None = _subfolder_hint(model)
     try:
+        # Layout discovery and config loading share one retry boundary.
         config: PretrainedConfig = _retry_hub_call(
-            lambda: AutoConfig.from_pretrained(
+            lambda: load_model_config(
                 model.id,
-                subfolder=model_subfolder(model.id) if needs_layout_discovery else "",
                 token=token,
                 trust_remote_code=False,
+                subfolder=subfolder,
             ),
             description=f"config[{model.id}]",
         )
-    except (ValueError, OSError):
-        return False, "requires trust_remote_code"
+    except (ValueError, OSError) as error:
+        return False, _config_rejection(error)
 
     if config_types is not None:
         config_types[model.id] = type(config).__name__
@@ -129,8 +149,7 @@ def keep(
         if result:
             return False, rejection
 
-    # Config loading also checks remote code. Sibling metadata avoids probing
-    # modules.json for ordinary repositories.
+    # Config loading also checks remote code.
     try:
         return _keep_generation_config(model, token, config_types)
     except HubRetryExhaustedError:

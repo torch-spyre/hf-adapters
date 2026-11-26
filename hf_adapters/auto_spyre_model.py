@@ -48,7 +48,6 @@ from typing import Any, Optional, Union
 
 import torch
 from transformers import (
-    AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
     AutoModelForDecision,
@@ -161,7 +160,7 @@ from hf_adapters import (
     hf_xlm_roberta,
     hf_xpress_qwen3,
 )
-from hf_adapters._model_loading import model_subfolder
+from hf_adapters._model_loading import load_model_config
 from hf_adapters.hf_common import (
     SpyreNoAdapterError,
     SpyreUnsupportedFeatureError,
@@ -298,14 +297,11 @@ def _load_model_config(
 ) -> PretrainedConfig | None:
     """Load the configuration from the same repository location as the weights."""
     try:
-        config: PretrainedConfig = AutoConfig.from_pretrained(
-            model_name_or_path,
-            subfolder=model_subfolder(model_name_or_path),
-            trust_remote_code=trust_remote_code,
+        return load_model_config(
+            model_name_or_path, trust_remote_code=trust_remote_code
         )
     except Exception:
         return None
-    return config
 
 
 def dtype_for_model_path(

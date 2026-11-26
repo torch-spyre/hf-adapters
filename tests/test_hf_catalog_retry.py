@@ -285,6 +285,78 @@ def test_generation_layout_retry_exhaustion_fails_visibly(
     assert waits == ([135.0] * 4 if status == 429 else [2.0, 4.0, 8.0, 16.0])
 
 
+@pytest.mark.parametrize(
+    ("has_modules", "subfolder", "layout_calls"),
+    [(False, "", 0), (True, "0_Transformer", 1)],
+)
+def test_generation_config_uses_loader_layout_only_when_needed(
+    monkeypatch: pytest.MonkeyPatch,
+    has_modules: bool,
+    subfolder: str,
+    layout_calls: int,
+) -> None:
+    from hf_adapters import _model_loading
+
+    layout_request = Mock(return_value=subfolder)
+    monkeypatch.setattr(_model_loading, "model_subfolder", layout_request)
+    config_request = Mock(return_value=GPT2Config())
+    monkeypatch.setattr(catalog.AutoConfig, "from_pretrained", config_request)
+
+    assert keep_generative(_model("gpt2", has_modules=has_modules), "tok") == (
+        True,
+        "",
+    )
+    assert layout_request.call_count == layout_calls
+    if layout_calls:
+        layout_request.assert_called_once_with("org/model", token="tok")
+    config_request.assert_called_once_with(
+        "org/model", subfolder=subfolder, token="tok", trust_remote_code=False
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (
+            ValueError("The repository org/model contains custom code"),
+            "requires trust_remote_code",
+        ),
+        (
+            OSError("does not appear to have a file named config.json"),
+            "config could not be loaded",
+        ),
+        (
+            ValueError("Transformers does not recognize this architecture"),
+            "unrecognized or invalid config",
+        ),
+    ],
+)
+def test_generation_config_failures_report_distinct_reasons(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, reason: str
+) -> None:
+    monkeypatch.setattr(catalog.AutoConfig, "from_pretrained", Mock(side_effect=error))
+    config_types: dict[str, str] = {}
+
+    assert keep_generative(_model("gpt2"), False, config_types=config_types) == (
+        False,
+        reason,
+    )
+    assert config_types == {}
+
+
+def test_generation_config_rejects_encoder_only_architecture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        catalog.AutoConfig, "from_pretrained", Mock(return_value=BertConfig())
+    )
+
+    assert keep_generative(_model("bert"), False) == (
+        False,
+        "encoder-only architecture does not support generation",
+    )
+
+
 def test_curated_metadata_recovers_after_throttling(
     monkeypatch: pytest.MonkeyPatch, waits: list[float]
 ) -> None:
