@@ -267,7 +267,7 @@ def _make_conv_block(layer):
 def _pad_decode_validity(mask):
     # A one-token decode only occupies column zero of the convolution stick.
     # Avoid F.pad's unaligned slice write, which Spyre cannot lower for B=1.
-    columns = torch.arange(BLOCK_SIZE, dtype=mask.dtype).to(mask.device)
+    columns = torch.arange(BLOCK_SIZE, dtype=mask.dtype, device=mask.device)
     return mask * (columns == 0).to(mask.dtype)
 
 
