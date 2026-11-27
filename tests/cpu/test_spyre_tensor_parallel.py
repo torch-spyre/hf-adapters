@@ -1097,4 +1097,3 @@ def test_cpu_staging_survives_converter_final_device_lookup() -> None:
             == "cuda:7"
         )
     assert core_model_loading.get_device(device_map, f"{staged}.weight") == "cuda:7"
-

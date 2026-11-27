@@ -1146,4 +1146,3 @@ def spyre_compiled_all_gather_last_dim(
     return _reassemble_all_gather_last_dim(
         gathered, input_shape, group_size, shard_sizes=shard_sizes
     )
-
