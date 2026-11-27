@@ -1,0 +1,14 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/torch-spyre/torch-spyre/main/extensions/spyre-bench/spyre_bench/core/schemas/resources.schema.json
+# The question sets evals/ scores. Both are public test splits under a permissive licence, so they
+# are named outright: the engine's opaque `slot-NN` slug is for a dataset whose name must not be
+# printed, and it carries obligations a repository-vendored file cannot meet (the store allocates
+# the slug, and `<slug>/dataset.json` must exist beside the data or dataset_meta errors out).
+apiVersion: bench/v1alpha1
+kind: Dataset
+metadata: {name: gsm8k, description: "GSM8K grade-school maths questions; scored in file order"}
+spec: {asset: gsm8k-files, role: eval, subsets: {first-50: {limit: 50, order: sequential}}}
+---
+apiVersion: bench/v1alpha1
+kind: Dataset
+metadata: {name: mmlu, description: "MMLU multiple-choice questions; scored in file order"}
+spec: {asset: mmlu-files, role: eval, subsets: {first-50: {limit: 50, order: sequential}}}

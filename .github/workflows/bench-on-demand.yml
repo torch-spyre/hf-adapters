@@ -1,0 +1,512 @@
+name: bench-on-demand
+run-name: ${{ inputs.selection != '' && format('bench-on-demand {0}', inputs.selection) || 'bench-on-demand' }}
+
+# On-demand run of the benchmarks/ catalog through spyre-bench, next to the legacy perf path: the
+# legacy `perf-tests` run produces the reports and the engine reads them (side-by-side), or the
+# engine runs the suite itself (replace). Nightly and weekly runs are dispatched by the Jenkins
+# orchestrator's `bench` cell; this is also the manual route.
+#
+# Never a required check: the bench job is continue-on-error and every stage after validation is
+# advisory. Rows go to the dev instance unless the run explicitly selects prod (clickhouse_env).
+# Results are never uploaded as workflow artifacts.
+on:
+  workflow_dispatch:
+    inputs:
+      # ── The contract the Jenkins orchestrator dispatches with ────────────────────────────────
+      # These are the declared names in spyre-frameworks pipelines/components/hf-adapters/config.yaml
+      # (the bench cell's arch_overrides.amd64.config.gha.inputs). GitHub 422s the whole dispatch on
+      # one this file omits, so none of them may be dropped or renamed on their own.
+      ref:
+        description: Branch, tag, or SHA of hf-adapters to check out and benchmark
+        required: false
+        type: string
+        default: ''
+      repository:
+        description: Repository the ref belongs to (owner/name); empty = this one
+        required: false
+        type: string
+        default: ''
+      runner_label:
+        description: Runner-set label of the image to run in
+        required: false
+        type: string
+        default: image_torch_spyre
+      prebaked_image:
+        description: Image under test, recorded on the rows when the identity job derives nothing
+        required: false
+        type: string
+        default: ''
+      run_id:
+        description: Stored run id for the rows (the orchestrator's per-leg uuid); empty = the collector derives one
+        required: false
+        type: string
+        default: ''
+      test_type:
+        description: Trigger type recorded on the rows
+        required: false
+        type: string
+        default: perf
+      purpose:
+        description: BENCH_PURPOSE recorded on the rows (nightly, weekly, on-demand)
+        required: false
+        type: string
+        default: on-demand
+      selection:
+        description: >-
+          Selection of benchmarks/ to run: hf-models-nightly, hf-models-weekly, smoke or
+          model-correctness. This is the named set, in place of flags nobody can read back.
+        required: false
+        type: string
+        default: hf-models-nightly
+      clickhouse_env:
+        description: >-
+          Which ClickHouse instance receives the rows: "dev" (default) or "prod". Prod only when
+          this is set to prod explicitly.
+        required: false
+        type: string
+        default: dev
+      triggering_repo:
+        description: Repository whose change triggered this run (recorded; set by the orchestrator)
+        required: false
+        type: string
+        default: ''
+      triggering_sha:
+        description: Commit that triggered this run (recorded; set by the orchestrator)
+        required: false
+        type: string
+        default: ''
+      # ── This repository's own knobs ──────────────────────────────────────────────────────────
+      models:
+        description: Space-separated model paths of perf.yaml to narrow a perf selection to; empty = all of it
+        required: false
+        type: string
+        default: ''
+      mode:
+        description: side-by-side reads the reports of the legacy perf-tests run; replace has the engine run the suite itself
+        type: choice
+        options: [side-by-side, replace]
+        default: side-by-side
+      route:
+        description: >-
+          xml hands the case reports to the unchanged XML ingest (same measurement keys as the legacy rows);
+          native ingests the engine's Results as a bench bundle
+        type: choice
+        options: [xml, native]
+        default: xml
+      engine_ref:
+        description: torch-spyre ref that provides spyre-bench and the ingest package
+        required: false
+        type: string
+        default: main
+      ingest:
+        description: Write the results to ClickHouse (off = run and verdict only)
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: bench-on-demand-${{ github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  BENCH_PURPOSE: ${{ inputs.purpose || 'on-demand' }}
+  BENCH_SELECTION: ${{ inputs.selection || 'hf-models-nightly' }}
+  BENCH_ENVIRONMENT: spyre-1card
+  BENCH_INVOKER: gha
+  BENCH_ARCH: x86_64
+  BENCH_QUIET: '1'
+  CI: '1'
+
+jobs:
+  check:
+    name: Check the inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      perf_schedule: ${{ steps.resolve.outputs.perf_schedule }}
+      quality: ${{ steps.resolve.outputs.quality }}
+      smoke: ${{ steps.resolve.outputs.smoke }}
+    steps:
+      - name: Validate
+        env:
+          REF_IN: ${{ inputs.ref }}
+          ENGINE_IN: ${{ inputs.engine_ref }}
+          LABEL_IN: ${{ inputs.runner_label }}
+          MODELS_IN: ${{ inputs.models }}
+          REPO_IN: ${{ inputs.repository }}
+          CH_IN: ${{ inputs.clickhouse_env }}
+        run: |
+          set -eu
+          bad_ref() {
+            [[ ! "$1" =~ ^([A-Za-z0-9][A-Za-z0-9._/-]*)?$ || "$1" == *..* || "$1" == */ || "$1" == refs/* || "$1" == *.lock ]]
+          }
+          bad_ref "${REF_IN}" && { echo "::error::ref is a branch, tag or commit name."; exit 1; }
+          bad_ref "${ENGINE_IN}" && { echo "::error::engine_ref is a branch, tag or commit name."; exit 1; }
+          [[ "${LABEL_IN}" =~ ^image_[a-z0-9_]{1,60}$ ]] || { echo "::error::runner_label is a runner-set label such as image_torch_spyre."; exit 1; }
+          [[ "${MODELS_IN}" =~ ^[A-Za-z0-9._/\ -]*$ ]] || { echo "::error::models are Hugging Face paths separated by spaces."; exit 1; }
+          [[ -z "${REPO_IN}" || "${REPO_IN}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo "::error::repository is owner/name."; exit 1; }
+          case "${CH_IN,,}" in dev|prod|"") ;; *) echo "::error::clickhouse_env must be dev or prod."; exit 1 ;; esac
+
+      # One Selection name decides which route runs, so the job is driven by the same word the
+      # catalog and the orchestrator use rather than by three separate flags.
+      - name: Resolve the selection
+        id: resolve
+        env:
+          SELECTION: ${{ env.BENCH_SELECTION }}
+        run: |
+          set -eu
+          schedule=""; quality=false; smoke=false
+          case "${SELECTION}" in
+            hf-models-nightly)  schedule=nightly ;;
+            hf-models-weekly)   schedule=weekly ;;
+            model-correctness)  quality=true ;;
+            smoke)              smoke=true ;;
+            *) echo "::error::selection must be one of: hf-models-nightly, hf-models-weekly, model-correctness, smoke"; exit 1 ;;
+          esac
+          {
+            echo "perf_schedule=${schedule}"
+            echo "quality=${quality}"
+            echo "smoke=${smoke}"
+          } >> "$GITHUB_OUTPUT"
+
+  # The image under test, so the results name their subject. No card; never fails the run.
+  artifact-identity:
+    name: Derive artifact identity
+    needs: [check]
+    runs-on:
+      - x86_64
+      - spyre_pf_x0
+      - linux
+      - ${{ inputs.runner_label }}
+    timeout-minutes: 10
+    continue-on-error: true
+    outputs:
+      record: >-
+        ${{ steps.derive.outputs.artifact_id != '' && format('{0}|{1}|{2}',
+        steps.derive.outputs.artifact_id, steps.derive.outputs.base_artifact_id, steps.delta.outputs.installed) || '' }}
+    steps:
+      - name: Checkout the identity library
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: torch-spyre/torch-spyre
+          ref: ${{ inputs.engine_ref || 'main' }}
+          path: .torch-spyre-identity
+          sparse-checkout: |
+            .github/scripts/derive_artifact_id.py
+            extensions/clickhouse-ingest
+          sparse-checkout-cone-mode: false
+
+      - name: Describe what this run installs on top of the image
+        id: delta
+        env:
+          HEAD_SHA: ${{ inputs.ref || github.sha }}
+        run: |
+          case "${HEAD_SHA}" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) label="${HEAD_SHA:0:12}" ;;
+            *) label="${HEAD_SHA}" ;;
+          esac
+          echo "installed=hf-adapters@${label}" >> "$GITHUB_OUTPUT"
+
+      - name: Derive and upload the artifact identity
+        id: derive
+        uses: torch-spyre/torch-spyre/.github/actions/derive-gha-artifact-id@main
+        with:
+          component: hf-adapters
+          arch: x86_64
+          installed: ${{ steps.delta.outputs.installed }}
+          library-dir: ${{ github.workspace }}/.torch-spyre-identity
+
+  bench:
+    name: On-demand model benchmarks (advisory)
+    needs: [check, artifact-identity]
+    if: ${{ !cancelled() && needs.check.result == 'success' }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - ${{ inputs.runner_label }}
+    timeout-minutes: 360
+    continue-on-error: true
+    env:
+      BENCH_MODE: ${{ inputs.mode }}
+      # The orchestrator's per-leg uuid, so its rows and this run's rows share a stored id.
+      BENCH_RUN_ID: ${{ inputs.run_id }}
+      # Variables a case command needs when the engine runs the suite itself (replace) or the recorder (quality):
+      # the engine hands a command only what is named here.
+      BENCH_PASS_ENV: HOME,HF_TOKEN,UV_PROJECT_ENVIRONMENT,VIRTUAL_ENV,CLONED_HF_ADAPTERS_DIR,SENPERFORMANCE
+      BENCH_PASS_ENV_PREFIXES: SPYRE_,SEN,TORCH,UV_,HF_
+      # Selects the instance; prod only on an explicit "prod". Secrets cannot gate a step `if:`, so
+      # the host is mapped to env; the password reaches the ingest action as an input only.
+      BENCH_CLICKHOUSE_ENV: ${{ inputs.clickhouse_env || 'dev' }}
+      CLICKHOUSE_HOST: ${{ fromJSON(inputs.clickhouse_env == 'prod' && toJSON(secrets.CLICKHOUSE_V2_HOST || secrets.CLICKHOUSE_HOST) || toJSON(secrets.CLICKHOUSE_V2_HOST_DEV
+        || secrets.CLICKHOUSE_HOST_DEV)) }}
+      # Prod needs a host and the scoped login; guards against a silent fall back to dev.
+      PROD_SET: ${{ (secrets.CLICKHOUSE_V2_HOST || secrets.CLICKHOUSE_HOST) != '' && secrets.CLICKHOUSE_V2_USER != '' && secrets.CLICKHOUSE_V2_PASSWORD
+        != '' }}
+      DO_INGEST: ${{ inputs.ingest && needs.check.outputs.smoke != 'true' }}
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref || github.sha }}
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/build-hf-adapters
+        id: build
+        with:
+          uv_groups: "dev spyre test"
+          ref: ${{ inputs.ref }}
+          prebaked_image: 'true'
+
+      # The engine lives in its own venv so it never perturbs the image's shared environment.
+      - name: Install the engine
+        env:
+          ENGINE_REF: ${{ inputs.engine_ref }}
+        run: |
+          uv venv .bench-venv
+          base="git+https://github.com/torch-spyre/torch-spyre@${ENGINE_REF}"
+          uv pip install --python .bench-venv/bin/python lxml pytest pyyaml regex clickhouse-connect \
+            "spyre-bench @ ${base}#subdirectory=extensions/spyre-bench" \
+            "spyre-clickhouse-ingest @ ${base}#subdirectory=extensions/clickhouse-ingest"
+
+      - name: Validate definitions and identity conformance
+        run: |
+          export PATH="${GITHUB_WORKSPACE}/.bench-venv/bin:${PATH}"
+          make bench-check-catalog
+          make bench-validate BENCH_REQUIRED=1
+          make bench-check-ids
+          python -m pytest -q -p no:cacheprovider benchmarks/tests
+
+      # A prod request that cannot reach prod must fail here, not quietly land in dev.
+      - name: Check the ingest target
+        id: target
+        if: ${{ env.DO_INGEST == 'true' }}
+        env:
+          # CI trust only for default-branch code dispatched from the default branch; any other ref or engine is a lab run.
+          OWN_CODE: ${{ inputs.ref == '' && inputs.engine_ref == 'main' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        run: |
+          set -eu
+          bench_env="${BENCH_CLICKHOUSE_ENV,,}"
+          if [ "${bench_env}" = prod ] && [ "${PROD_SET}" != true ]; then
+            echo "::error::prod selected but the prod ClickHouse host or v2 login is not set; refusing to fall back to dev"
+            exit 1
+          fi
+          if [ -n "${CLICKHOUSE_HOST}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::no ${bench_env} ClickHouse host; the ingest steps are skipped"
+          fi
+          if [ "${OWN_CODE}" = true ]; then echo "trust=ci" >> "$GITHUB_OUTPUT"; else echo "trust=lab" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Run the perf benchmarks
+        id: perf
+        if: ${{ needs.check.outputs.perf_schedule != '' }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          MODELS_IN: ${{ inputs.models }}
+          SCHEDULE_IN: ${{ needs.check.outputs.perf_schedule }}
+          ARTIFACT_RECORD: ${{ needs.artifact-identity.outputs.record }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          if [[ ! -x "$UV_PROJECT_ENVIRONMENT/bin/spyre-perf-suite" ]]; then
+            uv pip install --python "$UV_PROJECT_ENVIRONMENT/bin/python" --no-deps /home/senuser/spyre-perf-suite
+          fi
+          export BENCH_SUBJECT_ID="${ARTIFACT_RECORD%%|*}"
+          [ -n "$BENCH_SUBJECT_ID" ] || export BENCH_SUBJECT_ID="${{ inputs.prebaked_image }}"
+          # shellcheck source=.github/scripts/run-with-pod-stdout.sh
+          source "${POD_STDOUT_HELPER:-.github/scripts/run-with-pod-stdout.sh}"
+          run_teed make tests TEST_TYPE=perf PERF_SCHEDULE="${SCHEDULE_IN}" MODEL_PATH="${MODELS_IN}" \
+            RESULTS_DIR="${GITHUB_WORKSPACE}/perf-results" BENCH="${GITHUB_WORKSPACE}/.bench-venv/bin/spyre-bench" BENCH_REQUIRED=1
+
+      - name: Score the question samples
+        id: quality
+        if: ${{ needs.check.outputs.quality == 'true' }}
+        continue-on-error: true
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          ARTIFACT_RECORD: ${{ needs.artifact-identity.outputs.record }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          export BENCH_SUBJECT_ID="${ARTIFACT_RECORD%%|*}"
+          [ -n "$BENCH_SUBJECT_ID" ] || export BENCH_SUBJECT_ID="${{ inputs.prebaked_image }}"
+          make bench-quality BENCH="${GITHUB_WORKSPACE}/.bench-venv/bin/spyre-bench" BENCH_REQUIRED=1 \
+            BENCH_RESULTS_DIR="${GITHUB_WORKSPACE}/quality-bench"
+
+      # The card-free harness check: runs the `smoke` Selection and ingests nothing.
+      - name: Smoke the harness
+        id: smoke
+        if: ${{ needs.check.outputs.smoke == 'true' }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          cd "$CLONED_HF_ADAPTERS_DIR"
+          make bench-smoke BENCH="${GITHUB_WORKSPACE}/.bench-venv/bin/spyre-bench" BENCH_REQUIRED=1 \
+            BENCH_RESULTS_DIR="${GITHUB_WORKSPACE}/smoke-bench"
+
+      # The shared ingest action runs `uv venv` in the workspace and fails if a .venv is already there.
+      - name: Clear workspace venv before ingest
+        if: ${{ env.DO_INGEST == 'true' && !cancelled() }}
+        run: rm -rf "$GITHUB_WORKSPACE/.venv"
+
+      - name: Collect the case reports
+        id: collect
+        if: ${{ env.DO_INGEST == 'true' && inputs.route == 'xml' && !cancelled() && steps.perf.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          .bench-venv/bin/python benchmarks/tools/collect_ingest_xml.py \
+            "${GITHUB_WORKSPACE}/perf-results-bench" "${GITHUB_WORKSPACE}/ingest-xml" --github-output
+
+      # Series: the legacy GHA perf rows are filed under `integration-tests`; the same name keeps the series
+      # continuous (the engine honours it for CI trust only; a run of another ref or engine is `lab` and has none).
+      - name: Ingest the case reports
+        id: ingest_xml
+        if: ${{ env.DO_INGEST == 'true' && inputs.route == 'xml' && steps.collect.outputs.count != '' && steps.collect.outputs.count != '0' && steps.target.outputs.ready == 'true' }}
+        continue-on-error: true
+        uses: torch-spyre/torch-spyre/.github/actions/ingest-xml-to-clickhouse@main
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
+        with:
+          xml-dir: ${{ github.workspace }}/ingest-xml
+          workflow: integration-tests
+          branch: ${{ inputs.ref || github.ref_name }}
+          sha: ${{ steps.build.outputs.target_sha }}
+          run-id: ${{ inputs.run_id || steps.collect.outputs.run_id }}
+          gha-run-id: ${{ github.run_id }}
+          artifact-id: ${{ needs.artifact-identity.outputs.record }}
+          artifact: ${{ inputs.prebaked_image }}
+          repository: ${{ inputs.repository || github.repository }}
+          trigger-type: ${{ inputs.test_type || 'perf' }}
+          purpose: ${{ inputs.purpose || 'on-demand' }}
+          component: hf-adapters
+          platform: x86_64
+          schema: v2
+          clickhouse-v2-host: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON(secrets.CLICKHOUSE_V2_HOST || secrets.CLICKHOUSE_HOST) || toJSON(secrets.CLICKHOUSE_V2_HOST_DEV
+            || secrets.CLICKHOUSE_HOST_DEV)) }}
+          clickhouse-v2-port: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON((secrets.CLICKHOUSE_V2_HOST && secrets.CLICKHOUSE_V2_PORT) || (!secrets.CLICKHOUSE_V2_HOST
+            && secrets.CLICKHOUSE_PORT) || '') || toJSON((secrets.CLICKHOUSE_V2_HOST_DEV && secrets.CLICKHOUSE_V2_PORT_DEV) || (!secrets.CLICKHOUSE_V2_HOST_DEV
+            && secrets.CLICKHOUSE_PORT_DEV) || '')) }}
+          clickhouse-v2-user: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON(secrets.CLICKHOUSE_V2_USER) || toJSON(secrets.CLICKHOUSE_V2_USER_DEV)) }}
+          clickhouse-v2-pass: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON(secrets.CLICKHOUSE_V2_PASSWORD) || toJSON(secrets.CLICKHOUSE_V2_PASSWORD_DEV)) }}
+          clickhouse-db-v2: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON(secrets.CLICKHOUSE_DB_V2) || toJSON(secrets.CLICKHOUSE_DB_V2_DEV)) }}
+
+      - name: Ingest the perf results as a bench bundle
+        id: ingest_native
+        if: ${{ env.DO_INGEST == 'true' && inputs.route == 'native' && !cancelled() && steps.perf.outcome == 'success' && steps.target.outputs.ready == 'true' }}
+        continue-on-error: true
+        uses: torch-spyre/torch-spyre/.github/actions/ingest-xml-to-clickhouse@main
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
+        with:
+          bench-dir: ${{ github.workspace }}/perf-results-bench
+          channel-trust: ${{ steps.target.outputs.trust }}
+          workflow: integration-tests
+          branch: ${{ inputs.ref || github.ref_name }}
+          sha: ${{ steps.build.outputs.target_sha }}
+          run-id: ${{ inputs.run_id }}
+          gha-run-id: ${{ github.run_id }}
+          artifact-id: ${{ needs.artifact-identity.outputs.record }}
+          artifact: ${{ inputs.prebaked_image }}
+          repository: ${{ inputs.repository || github.repository }}
+          trigger-type: ${{ inputs.test_type || 'perf' }}
+          purpose: ${{ inputs.purpose || 'on-demand' }}
+          component: hf-adapters
+          platform: x86_64
+          schema: v2
+          clickhouse-v2-host: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON(secrets.CLICKHOUSE_V2_HOST || secrets.CLICKHOUSE_HOST) || toJSON(secrets.CLICKHOUSE_V2_HOST_DEV
+            || secrets.CLICKHOUSE_HOST_DEV)) }}
+          clickhouse-v2-port: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON((secrets.CLICKHOUSE_V2_HOST && secrets.CLICKHOUSE_V2_PORT) || (!secrets.CLICKHOUSE_V2_HOST
+            && secrets.CLICKHOUSE_PORT) || '') || toJSON((secrets.CLICKHOUSE_V2_HOST_DEV && secrets.CLICKHOUSE_V2_PORT_DEV) || (!secrets.CLICKHOUSE_V2_HOST_DEV
+            && secrets.CLICKHOUSE_PORT_DEV) || '')) }}
+          clickhouse-v2-user: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON(secrets.CLICKHOUSE_V2_USER) || toJSON(secrets.CLICKHOUSE_V2_USER_DEV)) }}
+          clickhouse-v2-pass: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON(secrets.CLICKHOUSE_V2_PASSWORD) || toJSON(secrets.CLICKHOUSE_V2_PASSWORD_DEV)) }}
+          clickhouse-db-v2: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON(secrets.CLICKHOUSE_DB_V2) || toJSON(secrets.CLICKHOUSE_DB_V2_DEV)) }}
+
+      - name: Clear workspace venv before the quality ingest
+        if: ${{ env.DO_INGEST == 'true' && needs.check.outputs.quality == 'true' && !cancelled() }}
+        run: rm -rf "$GITHUB_WORKSPACE/.venv"
+
+      - name: Ingest the quality results
+        id: ingest_quality
+        if: ${{ env.DO_INGEST == 'true' && needs.check.outputs.quality == 'true' && !cancelled() && steps.quality.outcome == 'success' && steps.target.outputs.ready == 'true' }}
+        continue-on-error: true
+        uses: torch-spyre/torch-spyre/.github/actions/ingest-xml-to-clickhouse@main
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
+        with:
+          bench-dir: ${{ github.workspace }}/quality-bench
+          channel-trust: ${{ steps.target.outputs.trust }}
+          workflow: bench-on-demand
+          branch: ${{ inputs.ref || github.ref_name }}
+          sha: ${{ steps.build.outputs.target_sha }}
+          run-id: ${{ inputs.run_id }}
+          gha-run-id: ${{ github.run_id }}
+          artifact-id: ${{ needs.artifact-identity.outputs.record }}
+          artifact: ${{ inputs.prebaked_image }}
+          repository: ${{ inputs.repository || github.repository }}
+          trigger-type: quality
+          purpose: ${{ inputs.purpose || 'on-demand' }}
+          component: hf-adapters
+          platform: x86_64
+          schema: v2
+          clickhouse-v2-host: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON(secrets.CLICKHOUSE_V2_HOST || secrets.CLICKHOUSE_HOST) || toJSON(secrets.CLICKHOUSE_V2_HOST_DEV
+            || secrets.CLICKHOUSE_HOST_DEV)) }}
+          clickhouse-v2-port: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON((secrets.CLICKHOUSE_V2_HOST && secrets.CLICKHOUSE_V2_PORT) || (!secrets.CLICKHOUSE_V2_HOST
+            && secrets.CLICKHOUSE_PORT) || '') || toJSON((secrets.CLICKHOUSE_V2_HOST_DEV && secrets.CLICKHOUSE_V2_PORT_DEV) || (!secrets.CLICKHOUSE_V2_HOST_DEV
+            && secrets.CLICKHOUSE_PORT_DEV) || '')) }}
+          clickhouse-v2-user: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON(secrets.CLICKHOUSE_V2_USER) || toJSON(secrets.CLICKHOUSE_V2_USER_DEV)) }}
+          clickhouse-v2-pass: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON(secrets.CLICKHOUSE_V2_PASSWORD) || toJSON(secrets.CLICKHOUSE_V2_PASSWORD_DEV)) }}
+          clickhouse-db-v2: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON(secrets.CLICKHOUSE_DB_V2) || toJSON(secrets.CLICKHOUSE_DB_V2_DEV)) }}
+
+      # The verdict only SELECTs, but reads the same connection the ingest used; set on this step alone.
+      - name: Verdict
+        id: verdict
+        if: ${{ !cancelled() && (steps.ingest_xml.outcome == 'success' || steps.ingest_native.outcome == 'success' || steps.ingest_quality.outcome == 'success') }}
+        continue-on-error: true
+        env:
+          CLICKHOUSE_V2_HOST: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON(secrets.CLICKHOUSE_V2_HOST || secrets.CLICKHOUSE_HOST) || toJSON(secrets.CLICKHOUSE_V2_HOST_DEV
+            || secrets.CLICKHOUSE_HOST_DEV)) }}
+          CLICKHOUSE_V2_PORT: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON((secrets.CLICKHOUSE_V2_HOST && secrets.CLICKHOUSE_V2_PORT) || (!secrets.CLICKHOUSE_V2_HOST
+            && secrets.CLICKHOUSE_PORT) || '') || toJSON((secrets.CLICKHOUSE_V2_HOST_DEV && secrets.CLICKHOUSE_V2_PORT_DEV) || (!secrets.CLICKHOUSE_V2_HOST_DEV
+            && secrets.CLICKHOUSE_PORT_DEV) || '')) }}
+          CLICKHOUSE_V2_USER: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON(secrets.CLICKHOUSE_V2_USER) || toJSON(secrets.CLICKHOUSE_V2_USER_DEV)) }}
+          CLICKHOUSE_V2_PASSWORD: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON(secrets.CLICKHOUSE_V2_PASSWORD) || toJSON(secrets.CLICKHOUSE_V2_PASSWORD_DEV)) }}
+          CLICKHOUSE_DB_V2: ${{ fromJSON(env.BENCH_CLICKHOUSE_ENV == 'prod' && toJSON(secrets.CLICKHOUSE_DB_V2) || toJSON(secrets.CLICKHOUSE_DB_V2_DEV)) }}
+          # The ingest threads --run-id verbatim, so the engine run id is the stored one; the target
+          # fails loudly when no row exists under it.
+          RESULTS_DIR_IN: ${{ needs.check.outputs.quality == 'true' && 'quality-bench' || 'perf-results-bench' }}
+        run: |
+          make bench-verdict BENCH="${GITHUB_WORKSPACE}/.bench-venv/bin/spyre-bench" BENCH_REQUIRED=1 \
+            BENCH_RESULTS_DIR="${GITHUB_WORKSPACE}/${RESULTS_DIR_IN}"
+
+      # Counts and stage outcomes only: no measured value or score reaches the log or the summary.
+      - name: Summary
+        if: ${{ always() }}
+        env:
+          PERF_OUTCOME: ${{ steps.perf.outcome }}
+          QUALITY_OUTCOME: ${{ steps.quality.outcome }}
+          SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
+          VERDICT_OUTCOME: ${{ steps.verdict.outcome }}
+        run: |
+          {
+            echo "### bench-on-demand (advisory)"
+            echo "- selection: ${BENCH_SELECTION}; mode: ${BENCH_MODE}; route: ${{ inputs.route }}"
+            echo "- perf: ${PERF_OUTCOME:-n/a}; quality: ${QUALITY_OUTCOME:-n/a}; smoke: ${SMOKE_OUTCOME:-n/a}; verdict: ${VERDICT_OUTCOME:-n/a}"
+            echo "- ingest requested: ${{ inputs.ingest }} -> ${BENCH_CLICKHOUSE_ENV}"
+          } >> "$GITHUB_STEP_SUMMARY"
