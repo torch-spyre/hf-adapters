@@ -624,10 +624,11 @@ def spyre_tp_loading() -> Iterator[None]:
     covers HF's own checkpoint worker threads, but is not safe for concurrent
     independent from_pretrained calls.
     """
-    from transformers import core_model_loading
+    from transformers import core_model_loading, modeling_utils
     from transformers.distributed import mixin
 
     original_shard = core_model_loading.DtensorShardOperation
+    original_tied_equal = modeling_utils._tied_params_are_equal
     original_wrap = core_model_loading._dtensor_from_local_like
     original_resolve = mixin.DistributedMixin._resolve_parallel_plans
     original_validate = mixin.DistributedMixin._validate_parallel_plan
@@ -677,6 +678,14 @@ def spyre_tp_loading() -> Iterator[None]:
             device_map, param_name, valid_torch_device=valid_torch_device
         )
         return result
+
+    def tied_params_are_equal(source: torch.Tensor, target: torch.Tensor) -> bool:
+        # HF's tie_weights compares checkpoint-loaded tied tensors with torch.equal,
+        # which has no aten::equal kernel for the spyre backend. Compare plain
+        # local tensors on CPU; DTensors keep HF's collective comparison.
+        if isinstance(source, DTensor) or isinstance(target, DTensor):
+            return original_tied_equal(source, target)
+        return original_tied_equal(source.detach().cpu(), target.detach().cpu())
 
     def shard_operation(param: DTensor) -> DtensorShardOperation:
         return (
@@ -847,6 +856,7 @@ def spyre_tp_loading() -> Iterator[None]:
         (core_model_loading, "DtensorShardOperation", shard_operation),
         (core_model_loading, "_dtensor_from_local_like", local_parameter),
         (core_model_loading, "get_device", parameter_device),
+        (modeling_utils, "_tied_params_are_equal", tied_params_are_equal),
         (mixin, "_get_parameter_plan", _get_spyre_parameter_plan),
         (mixin.DistributedMixin, "_resolve_parallel_plans", resolve_plans),
         (mixin.DistributedMixin, "_validate_parallel_plan", validate_plan),
@@ -1136,3 +1146,4 @@ def spyre_compiled_all_gather_last_dim(
     return _reassemble_all_gather_last_dim(
         gathered, input_shape, group_size, shard_sizes=shard_sizes
     )
+
