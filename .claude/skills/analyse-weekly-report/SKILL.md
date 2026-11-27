@@ -431,7 +431,9 @@ sees the report block + section 7.
   (`hf_bert`, `hf_xlm_roberta`, `hf_mpnet`, `hf_modernbert`); its many single-model
   adapters usually fall below `--min-n` and land in the small-sample note — that is
   expected, not a bug.
-- Credentials come from `.env` via `clickhouse_db.get_client()`, like the rest of
+- The report reads the legacy v1 `*_model_spyre_support` tables, which the weekly scan
+  no longer writes: results are frozen at the last pre-v2-only snapshot, so say so in
+  the answer. Credentials come from `.env` via `clickhouse_db.get_client()`, like the rest of
   the weekly pipeline. If `get_client()` raises a missing-env / connection error,
   stop and report it plainly — do not fabricate numbers.
 - Never invent a cause. Every explanation sentence must trace to a

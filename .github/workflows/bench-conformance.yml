@@ -1,0 +1,125 @@
+name: bench-conformance
+
+# Hardware-free checks on benchmarks/. The point is that a benchmark's declaration cannot drift from
+# what runs or from the series it reports into: a renamed case silently starts a new trend line, and
+# nothing downstream would notice. Hosted runner, no cards, no secrets.
+#
+# Not a required check, but the job is NOT continue-on-error: a stale or misdeclared catalog has to
+# show red. `continue-on-error` would make the staleness gate -- the thing that keeps
+# tests/model_lists/perf.yaml the single source of truth -- report success while failing.
+on:
+  pull_request:
+    branches: [main, release-*]
+    paths:
+      - benchmarks/**
+      - mk/bench.mk
+      - scripts/generate_bench_definitions.py
+      - scripts/bench_model_cases.py
+      - evals/gsm8k/**
+      - evals/mmlu/**
+      - tests/model_lists/perf.yaml
+      - tests/model_lists/perf_bench.yaml
+      - .github/workflows/bench-conformance.yml
+  push:
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+    inputs:
+      engine_ref:
+        description: >
+          torch-spyre ref to install the bench engine from. Use a branch to try this catalog against
+          an engine change that has not merged yet.
+        required: false
+        type: string
+        default: main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  TORCH_SPYRE_REPO: https://github.com/torch-spyre/torch-spyre
+  ENGINE_REF: ${{ inputs.engine_ref || 'main' }}
+
+jobs:
+  conformance:
+    name: Benchmark definitions and identity conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: latest-known
+
+      # The engine and the ingest live in torch-spyre; the ingest is the single source of the id rule.
+      # Neither imports transformers or torch, which is what keeps these checks off a Spyre card.
+      - name: Install the engine and the ingest
+        run: |
+          set -eux
+          uv venv
+          base="git+${TORCH_SPYRE_REPO}@${ENGINE_REF}"
+          uv pip install lxml pytest pyyaml regex clickhouse-connect \
+            "spyre-bench @ ${base}#subdirectory=extensions/spyre-bench" \
+            "spyre-clickhouse-ingest @ ${base}#subdirectory=extensions/clickhouse-ingest"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      # benchmarks/ is generated from tests/model_lists/perf.yaml, so a model-list edit without a
+      # regenerate is the one way the two can disagree. This is what makes the single source of
+      # truth enforceable, and it needs no engine -- so it runs first and on its own.
+      - name: Check the catalog is not stale against the model list
+        run: make bench-check-catalog
+
+      # Fail here, with the engine ref named, rather than inside each check: an engine that ships no
+      # shared catalog is the one cause behind every dangling Environment a validate would report.
+      - name: Check the engine ships the shared catalog
+        run: |
+          set -eu
+          if ! spyre-bench catalogs --path llm; then
+            echo "::error::the bench engine at ${TORCH_SPYRE_REPO}@${ENGINE_REF} ships no shared" \
+                 "catalog (spyre_bench/catalogs/llm). This catalog cannot resolve the card-count" \
+                 "Environments without it. Merge the engine change first, or dispatch this" \
+                 "workflow with engine_ref set to the branch that has it."
+            exit 1
+          fi
+
+      - name: Validate the catalog
+        run: make bench-validate BENCH_REQUIRED=1
+
+      - name: List the cases
+        run: make bench-list
+
+      # The gate that protects the stored trend lines: every case's identity block must reproduce
+      # the id the ingest derives.
+      - name: Check the identity blocks against the ingest
+        run: make bench-check-ids
+
+      # A Selection that selects nothing would make a nightly report success while measuring
+      # nothing, so each one is planned here. The quality Selection is planned with no BENCH_TYPE,
+      # which is how `make bench-quality` calls it.
+      - name: Plan every Selection
+        run: |
+          set -eu
+          for sel in smoke hf-models-nightly hf-models-weekly model-correctness; do
+            echo "::group::$sel"
+            make bench-plan BENCH_SELECTION="$sel" BENCH_PURPOSE=nightly \
+              BENCH_RESULTS_DIR="/tmp/plan-$sel" | tee "/tmp/plan-$sel.txt"
+            grep -qE 'plan: run [1-9]' "/tmp/plan-$sel.txt" \
+              || { echo "::error::Selection $sel planned no cases"; exit 1; }
+            echo "::endgroup::"
+          done
+
+      - name: Run the definition tests
+        run: python -m pytest -q -p no:cacheprovider benchmarks/tests

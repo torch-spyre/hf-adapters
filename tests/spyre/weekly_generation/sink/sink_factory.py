@@ -31,17 +31,16 @@ def create_sink(
 ) -> ResultSink:
     """Return the sink for a *model_type* run, keyed on whether a CSV was asked for.
 
-    One sink instance binds one destination — a single ClickHouse table, or a
-    single file — so a run covering both model types needs one per type rather
-    than one overall.
+    One sink instance binds one model type and one destination — ClickHouse or a single
+    file — so a run covering both model types needs one per type rather than one overall.
 
     With *write_to_csv* the verdicts go to a new CSV instead of ClickHouse, which
     needs no credentials. Its path gets a ``-<model_type>`` suffix, since a single
     invocation can cover both types and each needs its own file.
 
-    Otherwise a ``ClickHouseResultSink`` is built, which connects during
-    construction and creates its table if missing. *model_list_file* names this
-    process's shard for that sink's schema-v2 dedup scope; the CSV sink ignores it.
+    Otherwise a ``ClickHouseResultSink`` is built, which connects during construction and
+    requires the v2 capability tables to exist. *model_list_file* names this process's shard
+    for that sink's dedup scope; the CSV sink ignores it.
     """
     if write_to_csv is not None:
         path = csv_path_for(write_to_csv, model_type)
