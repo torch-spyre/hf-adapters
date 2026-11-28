@@ -27,7 +27,7 @@ from hf_adapters.hf_common import (
 )
 
 
-def _make_compiled_block(layer):
+def _make_compiled_block(layer, runtime=None):
     attn = layer.self_attn
     return make_decoder_block(
         q_proj=attn.q_proj,
@@ -44,6 +44,8 @@ def _make_compiled_block(layer):
         scale=1.0,
         pre_ln=layer.do_layer_norm_before,
         query_scale=attn.scaling,
+        attention=None if runtime is None else runtime.attention(attn, scale=1.0),
+        runtime=runtime,
     )
 
 
@@ -100,8 +102,12 @@ def _run_forward(
     return run_lm_head(model, h)
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model, *, runtime=None):
     cfg = model.config
+    if runtime is not None and cfg.word_embed_proj_dim != cfg.hidden_size:
+        raise ValueError(
+            "OPT external execution requires word_embed_proj_dim == hidden_size"
+        )
     model_name = getattr(cfg, "name_or_path", "") or "opt"
     if cfg.ffn_dim % BLOCK_SIZE != 0:
         raise SpyreUnsupportedModelError(
@@ -128,11 +134,14 @@ def prepare_for_spyre(model):
         )
 
     vocab_size = model.config.vocab_size
-    prepare_lm_head_for_spyre(
-        model, logits_processor=lambda logits: logits[..., :vocab_size]
-    )
+    if runtime is None:
+        prepare_lm_head_for_spyre(
+            model, logits_processor=lambda logits: logits[..., :vocab_size]
+        )
     model._spyre_kv_shapes = [
         (num_heads, padded_head_dim, padded_head_dim)
         for _ in range(cfg.num_hidden_layers)
     ]
-    model._spyre_compiled_blocks = [_make_compiled_block(layer) for layer in layers]
+    model._spyre_compiled_blocks = [
+        _make_compiled_block(layer, runtime) for layer in layers
+    ]

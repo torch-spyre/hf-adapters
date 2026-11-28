@@ -36,13 +36,20 @@ from hf_adapters.hf_common import (
     fairseq_position_ids,
     get_backbone,
     pad_attention_heads_simple,
+    validate_external_encoder,
 )
 
 
 def _run_backbone_forward(model, input_ids, attn_mask, position_ids, token_type_ids):
     """Encoder backbone forward with RoBERTa/XLM-R position ids."""
     emb = get_backbone(model).embeddings
-    pos_ids = fairseq_position_ids(input_ids, emb.padding_idx)
+    # External execution supplies request-relative, already offset positions.
+    # Recomputing them across packed requests would join their position ranges.
+    pos_ids = (
+        position_ids
+        if attn_mask is None
+        else fairseq_position_ids(input_ids, emb.padding_idx)
+    )
 
     return encoder_backbone_forward(
         model, input_ids, attn_mask, pos_ids, token_type_ids
@@ -53,12 +60,13 @@ _is_encoder_only = True
 _is_reranker = True
 
 
-def prepare_for_spyre(model):
+def prepare_for_spyre(model, *, runtime=None):
     """Apply Spyre adaptations to an XLM-RoBERTa encoder model in-place.
 
     Same flow as BERT: stick-align ``head_dim`` if needed (most XLM-R models
     already have head_dim=64, e.g. bge-m3) and compile each encoder layer.
     """
+    validate_external_encoder(model, runtime)
     backbone = get_backbone(model)
     cfg = model.config
     orig_head_dim = (
@@ -82,5 +90,6 @@ def prepare_for_spyre(model):
         model._spyre_cpu_submodules = ["lm_head"]
 
     model._spyre_compiled_blocks = [
-        _make_compiled_encoder_block(layer) for layer in backbone.encoder.layer
+        _make_compiled_encoder_block(layer, runtime, index)
+        for index, layer in enumerate(backbone.encoder.layer)
     ]

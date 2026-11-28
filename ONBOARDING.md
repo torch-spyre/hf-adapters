@@ -3,6 +3,10 @@
 Step-by-step guide for adding a HuggingFace Transformers model to the
 Spyre adapter framework.
 
+For vLLM/SGLang support, follow the
+[serving integration adapter checklist](docs/hf_adapters_serving_integration.md#adding-an-adapter),
+which covers runtime hooks, attention binding, and deferred compilation.
+
 ## Quick Start (with Claude Code)
 
 In practice, Claude handles the adapter implementation. Your workflow:
