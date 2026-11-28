@@ -10,7 +10,7 @@ import httpx
 import pytest
 from huggingface_hub import HfApi, ModelInfo
 from huggingface_hub.errors import HfHubHTTPError
-from transformers import BertConfig
+from transformers import BertConfig, GPT2Config, PretrainedConfig
 
 from utils import hf_model_catalog as catalog
 from utils.fetch_curated_models_metadata import _create_fetch_metadata
@@ -23,9 +23,12 @@ _NOW = datetime(2026, 11, 22, tzinfo=timezone.utc)
 @pytest.fixture(autouse=True)
 def waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """Record delays without sleeping and reject any accidental live HTTP call."""
+    from hf_adapters import _model_loading
+
     delays: list[float] = []
     monkeypatch.setattr(catalog.time, "sleep", delays.append)
     monkeypatch.setattr(catalog.time, "time", lambda: _NOW.timestamp())
+    monkeypatch.setattr(_model_loading, "cached_file", Mock(return_value=None))
 
     def no_network(
         self: httpx.Client, request: httpx.Request, **kwargs: object
@@ -47,12 +50,15 @@ def _http_error(
     return HfHubHTTPError("Simulated Hub failure", response=response)
 
 
-def _model() -> ModelInfo:
+def _model(model_type: str = "bert", *, has_modules: bool = False) -> ModelInfo:
+    siblings: list[dict[str, str]] = [{"rfilename": "model.safetensors"}]
+    if has_modules:
+        siblings.append({"rfilename": "modules.json"})
     return ModelInfo(
         id="org/model",
-        config={"model_type": "bert"},
+        config={"model_type": model_type},
         library_name="sentence-transformers",
-        siblings=[{"rfilename": "model.safetensors"}],
+        siblings=siblings,
     )
 
 
@@ -61,7 +67,7 @@ def _build_catalog(kind: str) -> list[dict[str, object]]:
         keep_generative if kind == "generative" else keep_embedding
     )
     return catalog.build_catalog(
-        fetch_fn=lambda limit: [_model()],
+        fetch_fn=lambda limit: [_model("gpt2" if kind == "generative" else "bert")],
         filter_fn=lambda model: keeper(model, False),
         limit=1,
         output_csv=None,
@@ -178,11 +184,12 @@ def test_config_lookups_recover_from_wrapped_throttling(
 def test_catalog_keeps_model_after_throttled_config_recovers(
     monkeypatch: pytest.MonkeyPatch, kind: str, waits: list[float]
 ) -> None:
+    config: PretrainedConfig = GPT2Config() if kind == "generative" else BertConfig()
     request = Mock(
         side_effect=[
             _http_error(headers={"Retry-After": "134"}),
-            BertConfig(),
-            BertConfig(),
+            config,
+            config,
         ]
     )
     monkeypatch.setattr(catalog.AutoConfig, "from_pretrained", request)
@@ -190,7 +197,7 @@ def test_catalog_keeps_model_after_throttled_config_recovers(
     rows: list[dict[str, object]] = _build_catalog(kind)
 
     assert [row["model_id"] for row in rows] == ["org/model"]
-    assert rows[0]["config_class"] == "BertConfig"
+    assert rows[0]["config_class"] == type(config).__name__
     assert waits == [135.0]
 
 
@@ -222,6 +229,132 @@ def test_exhaustion_fails_visibly_instead_of_dropping_models(
     assert caught.value.__cause__ is error
     assert request.call_count == 5
     assert waits == ([135.0] * 4 if status == 429 else [2.0, 4.0, 8.0, 16.0])
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_generation_layout_discovery_recovers_and_preserves_config_metadata(
+    monkeypatch: pytest.MonkeyPatch, status: int, waits: list[float]
+) -> None:
+    from hf_adapters import _model_loading
+
+    layout_request = Mock(
+        side_effect=[_http_error(status, {"Retry-After": "134"}), None]
+    )
+    monkeypatch.setattr(_model_loading, "cached_file", layout_request)
+    config_request = Mock(return_value=GPT2Config())
+    monkeypatch.setattr(catalog.AutoConfig, "from_pretrained", config_request)
+    config_types: dict[str, str] = {}
+
+    assert keep_generative(
+        _model("gpt2", has_modules=True), False, config_types=config_types
+    ) == (
+        True,
+        "",
+    )
+    assert config_types == {"org/model": "GPT2Config"}
+    assert layout_request.call_count == 2
+    config_request.assert_called_once_with(
+        "org/model", subfolder="", token=False, trust_remote_code=False
+    )
+    assert waits == ([135.0] if status == 429 else [2.0])
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_generation_layout_retry_exhaustion_fails_visibly(
+    monkeypatch: pytest.MonkeyPatch, status: int, waits: list[float]
+) -> None:
+    from hf_adapters import _model_loading
+
+    error = _http_error(status, {"Retry-After": "134"})
+    layout_request = Mock(side_effect=error)
+    monkeypatch.setattr(_model_loading, "cached_file", layout_request)
+    config_request = Mock(return_value=GPT2Config())
+    monkeypatch.setattr(catalog.AutoConfig, "from_pretrained", config_request)
+    config_types: dict[str, str] = {}
+
+    with pytest.raises(
+        catalog.HubRetryExhaustedError, match=f"{status} after 5 attempts"
+    ):
+        keep_generative(
+            _model("gpt2", has_modules=True), False, config_types=config_types
+        )
+
+    assert layout_request.call_count == 5
+    config_request.assert_not_called()
+    assert config_types == {}
+    assert waits == ([135.0] * 4 if status == 429 else [2.0, 4.0, 8.0, 16.0])
+
+
+@pytest.mark.parametrize(
+    ("has_modules", "subfolder", "layout_calls"),
+    [(False, "", 0), (True, "0_Transformer", 1)],
+)
+def test_generation_config_uses_loader_layout_only_when_needed(
+    monkeypatch: pytest.MonkeyPatch,
+    has_modules: bool,
+    subfolder: str,
+    layout_calls: int,
+) -> None:
+    from hf_adapters import _model_loading
+
+    layout_request = Mock(return_value=subfolder)
+    monkeypatch.setattr(_model_loading, "model_subfolder", layout_request)
+    config_request = Mock(return_value=GPT2Config())
+    monkeypatch.setattr(catalog.AutoConfig, "from_pretrained", config_request)
+
+    assert keep_generative(_model("gpt2", has_modules=has_modules), "tok") == (
+        True,
+        "",
+    )
+    assert layout_request.call_count == layout_calls
+    if layout_calls:
+        layout_request.assert_called_once_with("org/model", token="tok")
+    config_request.assert_called_once_with(
+        "org/model", subfolder=subfolder, token="tok", trust_remote_code=False
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (
+            ValueError("The repository org/model contains custom code"),
+            "requires trust_remote_code",
+        ),
+        (
+            OSError("does not appear to have a file named config.json"),
+            "config could not be loaded",
+        ),
+        (
+            ValueError("Transformers does not recognize this architecture"),
+            "unrecognized or invalid config",
+        ),
+    ],
+)
+def test_generation_config_failures_report_distinct_reasons(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, reason: str
+) -> None:
+    monkeypatch.setattr(catalog.AutoConfig, "from_pretrained", Mock(side_effect=error))
+    config_types: dict[str, str] = {}
+
+    assert keep_generative(_model("gpt2"), False, config_types=config_types) == (
+        False,
+        reason,
+    )
+    assert config_types == {}
+
+
+def test_generation_config_rejects_encoder_only_architecture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        catalog.AutoConfig, "from_pretrained", Mock(return_value=BertConfig())
+    )
+
+    assert keep_generative(_model("bert"), False) == (
+        False,
+        "encoder-only architecture does not support generation",
+    )
 
 
 def test_curated_metadata_recovers_after_throttling(

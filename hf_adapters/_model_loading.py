@@ -17,10 +17,13 @@
 import json
 import os
 
+from transformers import AutoConfig, PretrainedConfig
 from transformers.utils.hub import cached_file
 
 
-def model_subfolder(model_path: str | os.PathLike[str]) -> str:
+def model_subfolder(
+    model_path: str | os.PathLike[str], *, token: str | bool | None = None
+) -> str:
     """Find the HF module declared by SentenceTransformers, locally or on the Hub.
 
     A recognized HF module's path takes precedence over any configuration at
@@ -31,6 +34,7 @@ def model_subfolder(model_path: str | os.PathLike[str]) -> str:
     modules_file = cached_file(
         os.fspath(model_path),
         "modules.json",
+        token=token,
         _raise_exceptions_for_missing_entries=False,
     )
     if modules_file is None:
@@ -52,3 +56,29 @@ def model_subfolder(model_path: str | os.PathLike[str]) -> str:
                 raise ValueError(f"{model_path}: HF module path must be a string")
             return subfolder
     return ""
+
+
+def load_model_config(
+    model_path: str | os.PathLike[str],
+    *,
+    token: str | bool | None = None,
+    trust_remote_code: bool | None = None,
+    subfolder: str | None = None,
+) -> PretrainedConfig:
+    """Load the configuration from the same repository location as the weights.
+
+    ``subfolder=None`` discovers the location through ``model_subfolder``.
+    Callers that already know the layout, such as catalog filtering with Hub
+    sibling metadata, pass it explicitly to skip the ``modules.json`` lookup.
+    Errors propagate so callers can apply their own retry and error policies.
+    """
+    resolved_subfolder: str = (
+        model_subfolder(model_path, token=token) if subfolder is None else subfolder
+    )
+    config: PretrainedConfig = AutoConfig.from_pretrained(
+        model_path,
+        subfolder=resolved_subfolder,
+        token=token,
+        trust_remote_code=trust_remote_code,
+    )
+    return config

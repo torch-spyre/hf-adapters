@@ -2,20 +2,24 @@
 
 import os
 import sys
+from functools import partial
 from pathlib import Path
+from types import ModuleType
 from typing import Callable
 
 from huggingface_hub import HfApi
 from huggingface_hub.hf_api import ModelInfo
+from transformers import PretrainedConfig
 
 from utils.fetch_curated_models_metadata import _create_fetch_metadata, keep_all
 from utils.hf_model_catalog import (
     EXPAND_FIELDS,
     RESOURCES_DIR,
+    HubRetryExhaustedError,
     Ranking,
     _guarded,
+    _retry_hub_call,
     build_catalog,
-    contains_remote_code,
     has_loadable_weights,
     is_baseline_keep,
     with_transient_retry,
@@ -47,12 +51,81 @@ def _create_fetch(ranking: Ranking) -> Callable[[HfApi, int], list[ModelInfo]]:
     return _fetch
 
 
-def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
+def _subfolder_hint(model: ModelInfo) -> str | None:
+    """Return the root layout when Hub siblings rule out a modules.json file.
+
+    ``None`` lets ``load_model_config`` run the loader's layout discovery, which
+    is needed only when the listing has a modules.json or lacks sibling metadata.
+    """
+    if model.siblings is None or any(
+        sibling.rfilename == "modules.json" for sibling in model.siblings
+    ):
+        return None
+    return ""
+
+
+def _config_rejection(error: ValueError | OSError) -> str:
+    """Describe why a config could not be loaded with remote code disabled."""
+    if isinstance(error, ValueError) and "custom code" in str(error):
+        return "requires trust_remote_code"
+    if isinstance(error, OSError):
+        return "config could not be loaded"
+    return "unrecognized or invalid config"
+
+
+def _keep_generation_config(
+    model: ModelInfo,
+    token: str | bool,
+    config_types: dict[str, str] | None = None,
+) -> tuple[bool, str]:
+    """Reject remote-code and encoder-only configs without loading model weights.
+
+    Load the config with the causal-LM loader's own logic, then use its adapter
+    selection and encoder-only flag. Do not resolve the adapter through
+    ``resolve_adapter_module`` here: dimension validation and unsupported-adapter
+    verdicts still belong to the worker.
+    """
+    from hf_adapters._model_loading import load_model_config
+    from hf_adapters.auto_spyre_model import select_adapter_module
+
+    subfolder: str | None = _subfolder_hint(model)
+    try:
+        # Layout discovery and config loading share one retry boundary.
+        config: PretrainedConfig = _retry_hub_call(
+            lambda: load_model_config(
+                model.id,
+                token=token,
+                trust_remote_code=False,
+                subfolder=subfolder,
+            ),
+            description=f"config[{model.id}]",
+        )
+    except (ValueError, OSError) as error:
+        return False, _config_rejection(error)
+
+    if config_types is not None:
+        config_types[model.id] = type(config).__name__
+
+    module: ModuleType | None = select_adapter_module(config)
+
+    if module is not None and getattr(module, "_is_encoder_only", False):
+        return False, "encoder-only architecture does not support generation"
+    return True, ""
+
+
+def keep(
+    model: ModelInfo,
+    token: str | bool,
+    *,
+    config_types: dict[str, str] | None = None,
+) -> tuple[bool, str]:
     """Keep predicate for the generative fetcher.
 
     Ordering matters: the cheap metadata-only checks run first.
     Returns a (keep, reason) tuple where reason describes why the model was
     rejected (empty string when kept).
+    When provided, ``config_types`` collects loaded config class names for
+    catalog enrichment after filtering has finished.
     """
     try:
         keep_flag, reason = is_baseline_keep(model)
@@ -62,16 +135,11 @@ def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
         return False, "exception during is_baseline_keep"
 
     checks: list[tuple[Callable[[], bool], str, str]] = [
-        (lambda: model.gated, "model.gated", "model is gated"),
+        (lambda: bool(model.gated), "model.gated", "model is gated"),
         (
             lambda: not has_loadable_weights(model),
             "has_loadable_weights",
             "no loadable weights",
-        ),
-        (
-            lambda: contains_remote_code(model),
-            "contains_remote_code",
-            "requires trust_remote_code",
         ),
     ]
     for predicate, name, rejection in checks:
@@ -81,7 +149,13 @@ def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
         if result:
             return False, rejection
 
-    return True, ""
+    # Config loading also checks remote code.
+    try:
+        return _keep_generation_config(model, token, config_types)
+    except HubRetryExhaustedError:
+        raise
+    except Exception:
+        return False, "exception during generation config"
 
 
 def _fetch_generative_models(
@@ -92,6 +166,11 @@ def _fetch_generative_models(
 ) -> list[dict]:
     token: str | bool = os.environ.get("HF_TOKEN") or False
     api: HfApi = HfApi(token=token)
+    # Per-fetch metadata only: do not retain live configs or cache Hub results
+    # across scans. Curated requests use keep_all and fall back to enrichment.
+    config_types: dict[str, str] = {}
+    if keeper is keep:
+        keeper = partial(keep, config_types=config_types)
     return build_catalog(
         fetch_fn=lambda lim: fetcher(api, lim),
         filter_fn=lambda m: keeper(m, token),
@@ -99,6 +178,7 @@ def _fetch_generative_models(
         output_csv=output_csv,
         label="generative",
         token=token,
+        known_config_types=config_types,
     )
 
 
