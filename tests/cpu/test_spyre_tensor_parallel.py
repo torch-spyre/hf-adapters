@@ -746,6 +746,35 @@ def test_spyre_tp_module_lookup_does_not_inherit_parent_rule(parent: str) -> Non
         assert mixin._get_parameter_plan(module, plan, is_weight=True) == SPYRE_COLWISE
 
 
+def test_tied_equality_compares_on_cpu_inside_tp_loading() -> None:
+    from transformers import modeling_utils
+
+    class _Probe:
+        def __init__(self, cpu_copy: str | None = None) -> None:
+            self.cpu_copy = cpu_copy
+
+        def detach(self) -> "_Probe":
+            return self
+
+        def cpu(self) -> "_Probe":
+            return _Probe(cpu_copy="cpu")
+
+    calls: list[tuple[str | None, str | None]] = []
+
+    def record(source: _Probe, target: _Probe) -> bool:
+        calls.append((source.cpu_copy, target.cpu_copy))
+        return True
+
+    original = modeling_utils._tied_params_are_equal
+    modeling_utils._tied_params_are_equal = record
+    try:
+        with spyre_tp_loading():
+            assert modeling_utils._tied_params_are_equal(_Probe(), _Probe())
+    finally:
+        modeling_utils._tied_params_are_equal = original
+    assert calls == [("cpu", "cpu")]
+
+
 def test_single_stick_vocabulary_shard_needs_no_prime_factor() -> None:
     assert padded_vocab_size(33, 256, 4) == 64
 
@@ -754,13 +783,14 @@ def test_single_stick_vocabulary_shard_needs_no_prime_factor() -> None:
 def test_tp_loader_hooks_restore(fail: bool) -> None:
     from contextlib import nullcontext
 
-    from transformers import PreTrainedModel, core_model_loading
+    from transformers import PreTrainedModel, core_model_loading, modeling_utils
     from transformers.distributed import mixin
 
     originals = (
         core_model_loading.DtensorShardOperation,
         core_model_loading._dtensor_from_local_like,
         core_model_loading.get_device,
+        modeling_utils._tied_params_are_equal,
         mixin._get_parameter_plan,
         mixin.DistributedMixin._resolve_parallel_plans,
         mixin.DistributedMixin._validate_parallel_plan,
@@ -778,6 +808,7 @@ def test_tp_loader_hooks_restore(fail: bool) -> None:
         core_model_loading.DtensorShardOperation,
         core_model_loading._dtensor_from_local_like,
         core_model_loading.get_device,
+        modeling_utils._tied_params_are_equal,
         mixin._get_parameter_plan,
         mixin.DistributedMixin._resolve_parallel_plans,
         mixin.DistributedMixin._validate_parallel_plan,
