@@ -304,6 +304,14 @@ CAUSAL_LM_MODELS = {
         "size": "1b",
         "weekly_perf": True,
     },
+    # hf_olmo3.py
+    "olmo3_7b_instruct": {
+        "name": "OLMo3 7B Instruct",
+        "path": "allenai/Olmo-3-7B-Instruct",
+        "adapter": "hf_olmo3.py",
+        "size": "7b",
+        "weekly_perf": True,
+    },
     # hf_olmoe.py
     "olmoe_1b_7b": {
         "name": "OLMoE 1B-7B",

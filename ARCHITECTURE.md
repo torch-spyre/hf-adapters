@@ -28,6 +28,7 @@ which models are supported on Spyre.
 | Phi-3.5 mini | phi3 | 96→128 | 64 | Yes (padded) | Yes | Yes | Yes |
 | OLMo 1B | olmo | 128 | 64 | Yes | Yes | Yes | Yes |
 | OLMo2 1B | olmo2 | 128 | 64 | Yes | Yes | Yes | Yes |
+| OLMo3 7B Instruct | olmo3 | 128 | 64 | Yes | Yes | Yes | Yes |
 | OLMoE 1B-7B | olmoe | 128 | 64 | Yes | Yes | Yes | Yes |
 | Falcon 3 1B | llama | 256 | 128 | Yes | Yes | Yes | Yes |
 | DeepSeek-Coder 1.3B | llama | 128 | 64 | Yes | Yes | Yes | Yes |
@@ -313,8 +314,8 @@ all pass that check.
 > adapter or verify a checkpoint, update *only* this file (and the badge
 > counts in README.md, noted below).
 
-**Coverage:** 46 adapters · 71 verified checkpoints · 10K+ compatible models.
-The 71 verified rows are 40 generative + 13 embedding + 2 multimodal-embedding + 2 seq-classification +
+**Coverage:** 47 adapters · 72 verified checkpoints · 10K+ compatible models.
+The 72 verified rows are 41 generative + 13 embedding + 2 multimodal-embedding + 2 seq-classification +
 2 token-classification + 3 structured-decision + 1 decision + 7 vision-language + 1 speculative-decoding drafter (see
 the Verified Checkpoints tables above). `hf_siglip_vision` and `hf_pixtral_vision` are bare vision-tower components
 used by VLM adapters and are not included in the adapter count. The three DSpark
@@ -362,6 +363,7 @@ pattern, norms, and weight layout.
 | hf\_gemma2.py | gemma2 | 1 | Gemma 2 2B and Gemma 2 fine-tunes. |
 | hf\_olmo.py | olmo | 1 | OLMo 7B |
 | hf\_olmo2.py | olmo2 | 1 | OLMo 2 7B |
+| hf\_olmo3.py | olmo3 | 1 | OLMo 3 7B base/Think/Instruct and their SFT/DPO fine-tunes (3:1 sliding/full attention, per-layer-type RoPE); OLMo 3/3.1 32B (same architecture, exceeds the 10B scan limit) |
 | hf\_olmoe.py | olmoe | 1 | OLMoE-1B-7B-0125 and OLMoE fine-tunes with the same SiLU/no-QKV-clipping configuration |
 | hf\_gpt2.py | gpt2 | 1 | GPT-2 medium/large/xl, DistilGPT-2, Cerebras-GPT (111M–6.7B) |
 | hf\_gpt\_neo.py | gpt_neo | 1 | GPT-Neo 1.3B/2.7B, GPT-Neo-style fine-tunes |
