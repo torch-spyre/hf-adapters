@@ -137,7 +137,9 @@ def test_compiled_chunked_decode_matches_independent_expert_reference(
     [(2, 4), (4, 4), (2, 1)],
     ids=["batch2", "batch4", "one_chunk"],
 )
-def test_compiled_routed_decode_for_multiple_tokens(tokens, decode_chunks):
+def test_compiled_routed_decode_for_multiple_tokens(
+    tokens: int, decode_chunks: int
+) -> None:
     experts, hidden, intermediate, top_k, stick = 128, 256, 192, 8, 64
     generator = torch.Generator().manual_seed(341)
     gate_up = (
@@ -158,7 +160,9 @@ def test_compiled_routed_decode_for_multiple_tokens(tokens, decode_chunks):
     normalized = x_router.float() * torch.rsqrt(
         x_router.float().square().mean(-1, keepdim=True) + 1e-6
     )
-    probabilities = torch.softmax(F.linear(normalized.half(), router), dim=-1)
+    probabilities = torch.softmax(
+        F.linear(normalized.half(), router), dim=-1, dtype=torch.float32
+    )
     values, indices = torch.topk(probabilities, top_k, dim=-1)
     routing = values / values.sum(-1, keepdim=True)
     expected = torch.zeros(tokens, hidden, dtype=torch.float32)

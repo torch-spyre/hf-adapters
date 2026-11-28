@@ -10,6 +10,7 @@ than in this document.
 ```bash
 uv sync --frozen --no-default-groups --group test
 HF_HUB_OFFLINE=1 OMP_NUM_THREADS=1 uv run --no-sync python -m pytest \
+  tests/cpu/test_gemma4_moe_routing.py \
   tests/cpu/test_tensor_parallel_loading.py \
   tests/cpu/test_spyre_tensor_parallel.py \
   tests/cpu/test_transformers_tp_contract.py \
@@ -35,6 +36,10 @@ the Spyre loader reads each rank's whole-head slice without creating extra
 process groups. Tests check shared rank pairs, uneven slices, and unchanged
 process-group counts during placement and loading.
 
+Gemma 4 MoE routing tests compare prefill and decode expert selection with HF
+for scores whose fp16/bf16 softmax probabilities round to ties. Selection uses
+the scores before softmax, with normalization applied after selection.
+
 ## Two-card Spyre regressions
 
 Use an environment with torch-spyre and the pinned project dependencies.
@@ -47,6 +52,8 @@ and can run in any file order; the command below runs the collectives first.
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 export SPYRE_DEVICES=0,1 COLL_ALLREDUCE_ALGO=PairwisePow2
 export HF_DEACTIVATE_ASYNC_LOAD=1 HF_HUB_OFFLINE=1
+python -m pytest tests/spyre/test_gemma4_moe_routing_spyre.py \
+  tests/spyre/test_gemma4_moe_layout_spyre.py -sv --tb=short
 python -m torch.distributed.run --standalone --nproc-per-node=2 \
   --max-restarts=0 --log-dir=tp-logs/initialization --tee=3 -m pytest \
   tests/spyre/test_tp_initialization_spyre.py -sv --tb=short
