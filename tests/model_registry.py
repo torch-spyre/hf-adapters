@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import platform
 import types
+from collections.abc import Callable
 from typing import Any
 
 # NOTE: no top-level ``import pytest``. The weekly scan's generate-matrix job imports
@@ -848,7 +849,8 @@ def _select_representative_paths(
     *,
     include_gated: bool,
     include_trust_remote_code: bool | None = None,
-    predicate=None,
+    predicate: Callable[[dict], bool] | None = None,
+    excluded: frozenset[str] | None = None,
 ) -> list[str]:
     """Select representative model paths for each adapter module.
 
@@ -859,11 +861,20 @@ def _select_representative_paths(
     skipped unless ``include_trust_remote_code``. An optional
     ``predicate(info) -> bool`` filters which entries are eligible (e.g.
     ``kind == "vlm"`` for vision).
+
+    Paths listed in ``excluded`` (default: ``tests/model_lists/exclude.yaml``
+    for the current architecture) are dropped *before* choosing the
+    representative, so an excluded smallest model hands the slot to the
+    next-smallest eligible one instead of silently dropping the adapter.
     """
     if include_trust_remote_code is None:
         include_trust_remote_code = _include_trust_remote_code()
+    if excluded is None:
+        excluded = _EXCLUDED_PATHS
     adapter_to_keys: dict[str, list[str]] = {}
     for key, info in models.items():
+        if info["path"] in excluded:
+            continue
         if info.get("is_gated", False) and not include_gated:
             continue
         if info.get("trust_remote_code", False) and not include_trust_remote_code:
