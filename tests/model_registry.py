@@ -1174,7 +1174,6 @@ def _non_blocking(models: dict[str, dict], keys: tuple[str, ...]) -> dict[str, s
 NON_BLOCKING_CAUSAL_MODELS: dict[str, str] = _non_blocking(
     CAUSAL_LM_MODELS,
     (
-        "smollm3",
         "gemma2_2b_unsloth",  # small gap that happens to flip token for test prompt
         "olmoe_1b_7b",
     ),
