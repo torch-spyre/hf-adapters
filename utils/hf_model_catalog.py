@@ -19,6 +19,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Literal, TypeVar
 
+import httpx
 from huggingface_hub.errors import HfHubHTTPError
 from huggingface_hub.hf_api import ExpandModelProperty_T, ModelInfo
 from huggingface_hub.utils import RateLimitInfo, parse_ratelimit_headers
@@ -112,7 +113,8 @@ def catalog_max_workers() -> int:
     return value
 
 
-# Throttling and gateway failures can recover; other HTTP errors are not retried.
+# Transport, throttling and gateway failures can recover; other HTTP errors are
+# not retried.
 _TRANSIENT_HTTP_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 _MAX_FETCH_ATTEMPTS: int = 5
 _MAX_BACKOFF_SECONDS: float = 60.0
@@ -127,16 +129,37 @@ class HubRetryExhaustedError(RuntimeError):
     """Discovery cannot continue without silently losing models or metadata."""
 
 
-def _hub_http_error(error: BaseException) -> HfHubHTTPError | None:
-    """Find HTTP failures that Transformers may wrap in an OSError."""
+def _exception_chain(error: BaseException) -> Iterator[BaseException]:
+    """Walk failures wrapped by Transformers or fsspec without following cycles."""
     current: BaseException | None = error
     seen: set[int] = set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _hub_http_error(error: BaseException) -> HfHubHTTPError | None:
+    """Find HTTP failures that Transformers may wrap in an OSError."""
+    for current in _exception_chain(error):
         if isinstance(current, HfHubHTTPError):
             return current
-        current = current.__cause__ or current.__context__
     return None
+
+
+def _hub_transport_error(
+    error: BaseException, retry_os_errors: bool
+) -> BaseException | None:
+    """Find transport failures, optionally including ambiguous remote-file I/O."""
+    os_error: OSError | None = None
+    for current in _exception_chain(error):
+        if isinstance(current, (httpx.TransportError, ConnectionError, TimeoutError)):
+            return current
+        if isinstance(current, (FileNotFoundError, PermissionError)):
+            return None
+        if retry_os_errors and isinstance(current, OSError):
+            os_error = current
+    return os_error
 
 
 def _rate_limit_delay(error: HfHubHTTPError) -> float:
@@ -165,11 +188,15 @@ def _rate_limit_delay(error: HfHubHTTPError) -> float:
     )
 
 
-def _retry_hub_call(call: Callable[[], _T], description: str) -> _T:
-    """Retry throttling and gateway errors, including wrapped config failures.
+def _retry_hub_call(
+    call: Callable[[], _T], description: str, *, retry_os_errors: bool = False
+) -> _T:
+    """Retry transport, throttling and gateway errors, including wrapped failures.
 
     Exhaustion has a distinct exception so model-level guards cannot turn a
     temporary Hub outage into rejected models or missing config metadata.
+    Remote checkpoint inspection enables retry_os_errors for fsspec I/O;
+    missing files and permission errors remain permanent failures.
     """
     for attempt in range(1, _MAX_FETCH_ATTEMPTS + 1):
         try:
@@ -181,19 +208,29 @@ def _retry_hub_call(call: Callable[[], _T], description: str) -> _T:
                 if http_error is not None and http_error.response is not None
                 else None
             )
-            if http_error is None or status not in _TRANSIENT_HTTP_STATUSES:
+            transport_error: BaseException | None = (
+                _hub_transport_error(error, retry_os_errors)
+                if http_error is None
+                else None
+            )
+            failure: str
+            if http_error is not None and status in _TRANSIENT_HTTP_STATUSES:
+                failure = f"HF API returned {status}"
+            elif transport_error is not None:
+                failure = f"HF transport failed with {type(transport_error).__name__}"
+            else:
                 raise
             if attempt == _MAX_FETCH_ATTEMPTS:
                 raise HubRetryExhaustedError(
-                    f"{description}: HF API returned {status} after {attempt} attempts"
+                    f"{description}: {failure} after {attempt} attempts"
                 ) from error
             backoff: float = (
                 _rate_limit_delay(http_error)
-                if status == 429
+                if http_error is not None and status == 429
                 else min(_MAX_BACKOFF_SECONDS, 2.0**attempt)
             )
             print(
-                f"    {description}: HF API returned {status} "
+                f"    {description}: {failure} "
                 f"(attempt {attempt}/{_MAX_FETCH_ATTEMPTS}); "
                 f"retrying in {backoff:.1f}s...",
                 flush=True,
@@ -206,7 +243,7 @@ def with_transient_retry(
     call: Callable[[], Iterator[_T] | Iterable[_T]],
     description: str,
 ) -> list[_T]:
-    """Materialize an HF listing, retrying HTTP 429 and transient 5xx failures.
+    """Materialize an HF listing, retrying transport, HTTP 429 and 5xx failures.
 
     Consume the iterable inside the retry boundary so a failure on a later page
     restarts the traversal without returning partial or duplicate results.

@@ -17,6 +17,10 @@ transformers-library embedders such as ``jinaai/jina-embeddings-v3``.
 
 Rerankers (cross-encoders) are excluded. Multimodal embedders (jina-clip,
 jina-embeddings-v5-omni, ...) are kept but flagged via ``is_multimodal``.
+
+Ranked candidates must also have readable checkpoint metadata and complete
+shard indexes. Sparse encoders are excluded from the dense embedding suite.
+Inspection uses range reads rather than downloading tensor payloads.
 """
 
 import os
@@ -27,6 +31,7 @@ from typing import Callable
 from huggingface_hub import HfApi
 from huggingface_hub.hf_api import ModelInfo
 
+from utils.embedding_checkpoint_validation import validate_embedding_checkpoint
 from utils.fetch_curated_models_metadata import _create_fetch_metadata, keep_all
 from utils.hf_model_catalog import (
     EXPAND_FIELDS,
@@ -78,6 +83,14 @@ MULTIMODAL_SUBSTRINGS: list[str] = [
 # Markers that identify rerankers / cross-encoders (excluded entirely — they
 # are not bi-encoder embedders).
 RERANKER_SUBSTRINGS: list[str] = ["rerank", "cross-encoder", "cross_encoder"]
+
+
+def _is_sparse_encoder(model: ModelInfo) -> bool:
+    """Sparse retrieval models are incompatible with the dense embedding suite."""
+    # Generic "sparse" also describes pruned dense weights. Namespaced Hub
+    # tags can mention sparse datasets/base models without defining the task.
+    markers: set[str] = {"sparse-encoder", "splade"}
+    return bool(tags(model) & markers)
 
 
 def _has_embedding_signal(model: ModelInfo) -> bool:
@@ -144,13 +157,19 @@ def _create_fetch(ranking: Ranking) -> Callable[[HfApi, int], list[ModelInfo]]:
         by_id: dict[str, ModelInfo] = {}
         for tag in EMBEDDING_PIPELINE_TAGS:
             print(f"Fetching up to {per_tag_limit} '{tag}' models by {ranking}...")
+
+            def _list_models() -> list[ModelInfo]:
+                return list(
+                    api.list_models(
+                        pipeline_tag=tag,
+                        sort=ranking,
+                        limit=per_tag_limit,
+                        expand=EXPAND_FIELDS,
+                    )
+                )
+
             models: list[ModelInfo] = with_transient_retry(
-                lambda t=tag: api.list_models(
-                    pipeline_tag=t,
-                    sort=ranking,
-                    limit=per_tag_limit,
-                    expand=EXPAND_FIELDS,
-                ),
+                _list_models,
                 description=f"list_models[{tag}, sort={ranking}]",
             )
             for m in models:
@@ -187,7 +206,12 @@ def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
             "_is_reranker",
             "model is a reranker / cross-encoder",
         ),
-        (lambda: model.gated, "model.gated", "model is gated"),
+        (
+            lambda: _is_sparse_encoder(model),
+            "_is_sparse_encoder",
+            "model is a sparse encoder",
+        ),
+        (lambda: bool(model.gated), "model.gated", "model is gated"),
         (
             lambda: not has_loadable_weights(model),
             "has_loadable_weights",
@@ -206,7 +230,7 @@ def keep(model: ModelInfo, token: str | bool) -> tuple[bool, str]:
         if result:
             return False, rejection
 
-    return True, ""
+    return validate_embedding_checkpoint(model, token)
 
 
 def _fetch_embedding_models(
