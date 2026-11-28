@@ -1,6 +1,6 @@
 """Fetch a model type's weekly-scan catalog from the HuggingFace Hub.
 
-One indirection over the two ``utils.fetch_top_*_models`` functions, so callers
+One indirection over the ``utils.fetch_top_*_models`` functions, so callers
 select a catalog with a ``ModelType`` instead of branching on a string. Both
 producers (``generate_weekly_shards`` and ``weekly_test --fetch``) reach the Hub
 through here, which is also the single place the rows get normalized for the
@@ -21,6 +21,8 @@ from collections.abc import Callable
 from tests.model_registry import (
     WEEKLY_SCAN_EMBEDDING_PATHS,
     WEEKLY_SCAN_GENERATIVE_PATHS,
+    WEEKLY_SCAN_VISION_PATHS,
+    WEEKLY_SCAN_VISION_TOWER_PATHS,
 )
 from tests.spyre.weekly_generation.model_type import ModelType
 from utils.fetch_top_embedding_models import (
@@ -31,31 +33,43 @@ from utils.fetch_top_generative_models import (
     fetch_curated_generative_models_metadata,
     fetch_top_generative_models,
 )
+from utils.fetch_top_vision_models import (
+    fetch_curated_vision_models_metadata,
+    fetch_top_vision_models,
+)
 from utils.hf_model_catalog import (
     Ranking,
     load_curated_embedding_models,
     load_curated_generative_models,
+    load_curated_vision_models,
 )
 from utils.utilities import ts
 
 all_fetchers: dict[ModelType, Callable[..., list[dict]]] = {
     ModelType.GENERATIVE: fetch_top_generative_models,
     ModelType.EMBEDDING: fetch_top_embedding_models,
+    ModelType.VISION: fetch_top_vision_models,
 }
 
 all_metadata_fetchers: dict[ModelType, Callable[..., list[dict]]] = {
     ModelType.GENERATIVE: fetch_curated_generative_models_metadata,
     ModelType.EMBEDDING: fetch_curated_embedding_models_metadata,
+    ModelType.VISION: fetch_curated_vision_models_metadata,
+    ModelType.VISION_TOWER: fetch_curated_vision_models_metadata,
 }
 
 all_curated_loaders: dict[ModelType, Callable[..., list[str]]] = {
     ModelType.GENERATIVE: load_curated_generative_models,
     ModelType.EMBEDDING: load_curated_embedding_models,
+    ModelType.VISION: load_curated_vision_models,
+    ModelType.VISION_TOWER: lambda: [],
 }
 
 all_registry_paths: dict[ModelType, list[str]] = {
     ModelType.GENERATIVE: WEEKLY_SCAN_GENERATIVE_PATHS,
     ModelType.EMBEDDING: WEEKLY_SCAN_EMBEDDING_PATHS,
+    ModelType.VISION: WEEKLY_SCAN_VISION_PATHS,
+    ModelType.VISION_TOWER: WEEKLY_SCAN_VISION_TOWER_PATHS,
 }
 """Catalog sources per model type. Module-level and mutable so tests can
 monkeypatch them and exercise the pipeline without hitting the network."""
@@ -74,6 +88,9 @@ def fetch(
     ``architectures``. It is JSON-serializable, so it survives being written to
     a shard file and read back by another process.
     """
+    if model_type == ModelType.VISION_TOWER:
+        # Registry-only: Hub task tags describe the enclosing VLM, not its tower.
+        return []
     if top_k <= 0:
         print(f"{ts()} Skipping {model_type} ranking by {ranking} (top_k={top_k}).")
         return []

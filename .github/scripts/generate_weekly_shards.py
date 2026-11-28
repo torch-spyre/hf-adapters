@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fetch the weekly generative and embedding model lists once, then split each into
+Fetch the weekly generative, embedding, and vision lists once, then split each into
 fixed-size shards for parallel GitHub Actions jobs.
 
 Each model type's list is the deduplicated union of (see ``fetch_and_filter``):
@@ -12,6 +12,7 @@ Each model type's list is the deduplicated union of (see ``fetch_and_filter``):
 
 The two ranked counts are taken after the fetcher's keep() predicate; curated and
 registry models bypass it and are flagged curated=True.
+Vision selection also includes registry-only tower checks in a separate mode.
 
 Mirrors the pattern in generate_test_matrix.py: this script does the one-time
 fetch/compute step and emits a JSON matrix via GITHUB_OUTPUT for a downstream
@@ -39,7 +40,7 @@ the runtime failure breakdown; MoE models with an adapter are evaluated.
 
 Per-tier shard sizes do NOT need to be small: weekly_test.py already
 re-chunks whatever list it's given into fresh-OS-process batches of
-GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS/EMBEDDING_NUMBER_OF_MODEL_PER_PROCESS
+{GENERATIVE,EMBEDDING,VISION,VISION_TOWER}_NUMBER_OF_MODEL_PER_PROCESS
 regardless of shard size, which is what actually bounds how many models'
 memory can accumulate in one process before a clean restart. A tiny shard
 size buys no extra safety over a large one — it only multiplies GitHub
@@ -53,6 +54,7 @@ Usage (called by the GHA workflow):
         --top-k-trending 1000 \
         --shard-size-generative 250 \
         --shard-size-embedding 500 \
+        --shard-size-vision 25 \
         --x1-max-params 7000000000 \
         --x2-max-params 12000000000 \
         --x2-shard-size 100 \
@@ -82,7 +84,10 @@ from tests.spyre.weekly_generation.failure_categories import (  # noqa: E402
 from tests.spyre.weekly_generation.model_prefilter import (  # noqa: E402
     fetch_and_filter,
 )
-from tests.spyre.weekly_generation.model_type import ModelType  # noqa: E402
+from tests.spyre.weekly_generation.model_type import (  # noqa: E402
+    ModelType,
+    scan_model_types,
+)
 from tests.spyre.weekly_generation.sink.result_sink import ResultSink  # noqa: E402
 from tests.spyre.weekly_generation.sink.sink_factory import create_sink  # noqa: E402
 
@@ -94,12 +99,21 @@ def _chunk(rows: list[dict], shard_size: int) -> list[list[dict]]:
     return [rows[i : i + shard_size] for i in range(0, len(rows), shard_size)]
 
 
-def _tier_for(row: dict, x1_max_params: int, x2_max_params: int) -> str:
+def _tier_for(
+    row: dict,
+    x1_max_params: int,
+    x2_max_params: int,
+    *,
+    model_type: ModelType | None = None,
+) -> str:
     """Return "x1"/"x2"/"x4" for *row* by parameter count.
 
     Unknown/non-numeric parameter counts default to "x1" (the smallest,
     least risky tier) rather than being treated as large.
+    Registered towers use x1; their metadata counts the full VLM checkpoint.
     """
+    if model_type == ModelType.VISION_TOWER:
+        return "x1"
     params = row.get("parameters")
     if not isinstance(params, (int, float)):
         return "x1"
@@ -116,6 +130,7 @@ def generate_shards(
     max_params: int,
     shard_size_generative: int,
     shard_size_embedding: int,
+    shard_size_vision: int,
     x1_max_params: int,
     x2_max_params: int,
     x2_shard_size: int,
@@ -158,6 +173,8 @@ def generate_shards(
     x1_shard_sizes = {
         ModelType.GENERATIVE: shard_size_generative,
         ModelType.EMBEDDING: shard_size_embedding,
+        ModelType.VISION: shard_size_vision,
+        ModelType.VISION_TOWER: shard_size_vision,
     }
 
     matrix: list[dict] = []
@@ -186,7 +203,8 @@ def generate_shards(
 
         by_tier: dict[str, list[dict]] = {"x1": [], "x2": [], "x4": []}
         for row in rows:
-            by_tier[_tier_for(row, x1_max_params, x2_max_params)].append(row)
+            tier = _tier_for(row, x1_max_params, x2_max_params, model_type=model_type)
+            by_tier[tier].append(row)
 
         tier_shard_sizes = {
             "x1": x1_shard_sizes[model_type],
@@ -276,6 +294,15 @@ def main() -> None:
         help="Models per embedding shard.",
     )
     parser.add_argument(
+        "--shard-size-vision",
+        type=int,
+        default=25,
+        help=(
+            "Models per vision and vision_tower shard. Small because each vision "
+            "checkpoint runs alone in a fresh worker and is slow to verify."
+        ),
+    )
+    parser.add_argument(
         "--x1-max-params",
         type=int,
         default=7_000_000_000,
@@ -339,14 +366,12 @@ def main() -> None:
         metavar="YYYY-MM-DD",
         help=(
             "Date to record as the snapshot date for all rows written in this run. "
-            "Use $(date -u +%Y-%m-%d) for today when invoking manually."
+            "Use $(date -u +%%Y-%%m-%%d) for today when invoking manually."
         ),
     )
     args = parser.parse_args()
 
-    model_types = (
-        list(ModelType) if args.model_type == "all" else [ModelType(args.model_type)]
-    )
+    model_types: list[ModelType] = scan_model_types(args.model_type)
 
     print("Generating shards started")
     print("Snapshot date:", args.snapshot_date)
@@ -357,6 +382,7 @@ def main() -> None:
         max_params=args.max_params,
         shard_size_generative=args.shard_size_generative,
         shard_size_embedding=args.shard_size_embedding,
+        shard_size_vision=args.shard_size_vision,
         x1_max_params=args.x1_max_params,
         x2_max_params=args.x2_max_params,
         x2_shard_size=args.x2_shard_size,

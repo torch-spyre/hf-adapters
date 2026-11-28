@@ -1138,10 +1138,9 @@ ALL_VISION_PATHS: list[str] = _exclude(
 # representative per adapter -- because the point is a weekly check that each
 # registered checkpoint still works. Gated and trust_remote_code entries are always
 # left out, regardless of SPYRE_INCLUDE_GATED / SPYRE_INCLUDE_TRUST_REMOTE_CODE: the
-# scan runs unattended and must not depend on per-environment opt-ins. Only the two
-# registries the scan has an evaluator for are included: token-compare (generative,
-# minus drafters and diffusion, which are not autoregressive LMs) and the text
-# SentenceTransformers embed-compare (embedding).
+# scan runs unattended and must not depend on per-environment opt-ins. Supported
+# evaluators are causal token-compare (minus drafters and diffusion), text
+# SentenceTransformers embed-compare, full VLM comparison/smoke, and vision towers.
 WEEKLY_SCAN_GENERATIVE_PATHS: list[str] = _exclude(
     _all_paths(
         CAUSAL_LM_MODELS,
@@ -1152,6 +1151,26 @@ WEEKLY_SCAN_GENERATIVE_PATHS: list[str] = _exclude(
 )
 WEEKLY_SCAN_EMBEDDING_PATHS: list[str] = _exclude(
     _all_paths(EMBEDDING_MODELS, include_gated=False, include_trust_remote_code=False)
+)
+
+
+# All eligible vision checkpoints, without per-adapter representative reduction.
+# Towers have a separate scan mode because a checkpoint can also name a full VLM.
+WEEKLY_SCAN_VISION_PATHS: list[str] = _exclude(
+    _all_paths(
+        VISION_MODELS,
+        include_gated=False,
+        include_trust_remote_code=False,
+        predicate=lambda info: info.get("kind") == "vlm",
+    )
+)
+WEEKLY_SCAN_VISION_TOWER_PATHS: list[str] = _exclude(
+    _all_paths(
+        VISION_MODELS,
+        include_gated=False,
+        include_trust_remote_code=False,
+        predicate=lambda info: info.get("kind") == "tower",
+    )
 )
 
 

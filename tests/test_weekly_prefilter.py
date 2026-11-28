@@ -127,11 +127,11 @@ class TestPrefilterIsPure:
     no sink at all — and these tests run with no database driver installed.
     """
 
-    def test_takes_no_sink(self) -> None:
+    def test_takes_no_sink(self: TestPrefilterIsPure) -> None:
         """A sink parameter would reintroduce the dependency this split removed."""
         params = inspect.signature(prefilter_models).parameters
         assert "sink" not in params
-        assert set(params) == {"models", "max_params"}
+        assert set(params) == {"models", "max_params", "model_type"}
 
     def test_every_model_lands_in_exactly_one_list(self) -> None:
         rows = [
@@ -235,8 +235,13 @@ class TestModelType:
         assert ModelType("generative") is ModelType.GENERATIVE
         assert ModelType("embedding") is ModelType.EMBEDDING
 
-    def test_values_match_the_cli_choices(self) -> None:
-        assert {m.value for m in ModelType} == {"generative", "embedding"}
+    def test_values_match_the_cli_choices(self: TestModelType) -> None:
+        assert {m.value for m in ModelType} == {
+            "generative",
+            "embedding",
+            "vision",
+            "vision_tower",
+        }
 
 
 @requires_sink
@@ -985,7 +990,9 @@ class TestSinkFactory:
         assert expected.exists()
         assert expected.name == "results-generative.csv"
 
-    def test_each_model_type_gets_its_own_file(self, tmp_path) -> None:
+    def test_each_model_type_gets_its_own_file(
+        self: TestSinkFactory, tmp_path: Path
+    ) -> None:
         from tests.spyre.weekly_generation.sink.sink_factory import create_sink
 
         base = tmp_path / "v.csv"
@@ -998,6 +1005,8 @@ class TestSinkFactory:
         assert {p.name for p in tmp_path.iterdir()} == {
             "v-generative.csv",
             "v-embedding.csv",
+            "v-vision.csv",
+            "v-vision_tower.csv",
         }
 
     def test_no_csv_path_builds_the_clickhouse_sink(

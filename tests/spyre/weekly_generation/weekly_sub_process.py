@@ -24,6 +24,8 @@ import sys
 import traceback as _traceback
 from datetime import date
 from multiprocessing.queues import SimpleQueue
+from types import ModuleType
+from typing import Any
 
 from huggingface_hub.errors import HfHubHTTPError
 
@@ -41,6 +43,7 @@ from tests.spyre.weekly_generation.failure_categories import (
     FAILURE_CATEGORY_VERIFICATION_FAILED,
 )
 from tests.spyre.weekly_generation.model_type import ModelType
+from tests.spyre.weekly_generation.reference_stage import ReferenceStage
 from utils.utilities import ts
 
 
@@ -55,7 +58,8 @@ def _process_batch(
 
     Amortizes the per-child fixed cost (spawn + module imports + kernel
     teardown on exit) across the batch; ``weekly_test``'s
-    ``{GENERATIVE,EMBEDDING}_NUMBER_OF_MODEL_PER_PROCESS`` set how many. Puts a
+    ``{GENERATIVE,EMBEDDING,VISION,VISION_TOWER}_NUMBER_OF_MODEL_PER_PROCESS`` set
+    how many. Puts a
     ``list[dict]`` on the queue — one full result dict per row, in the same order
     as *batch*. If a single model errors, its ``error`` field is populated and
     the loop continues to the next model; the child does NOT abort.
@@ -95,8 +99,6 @@ def _process_batch(
         flush=True,
     )
 
-    from tests.conftest import resolve_adapter_module_for_test
-
     results: list[dict] = []
     for row in batch:
         model_path: str = str(row["model_id"])
@@ -120,7 +122,7 @@ def _process_batch(
         print(f"{ts()} - {model_path} " + ("\t(curated)" if row["curated"] else ""))
         try:
             try:
-                adapter_module = resolve_adapter_module_for_test(model_path)
+                adapter_module = resolve_weekly_adapter(model_path, model_type)
             except Exception as _adapter_exc:
                 from hf_adapters.hf_common import SpyreUnsupportedModelError
 
@@ -232,7 +234,9 @@ def _classify_failure(err: str, default: str) -> str:
     return default
 
 
-def eval_model(model_id: str, adapter, model_type: ModelType) -> dict:
+def eval_model(
+    model_id: str, adapter: ModuleType | None, model_type: ModelType
+) -> dict[str, Any]:
     """Load *model_id* on CPU then run the mode's verification pipeline.
 
     Generative mode: CPU-load → CPU-generate (single-prompt HF forward pass)
@@ -249,6 +253,9 @@ def eval_model(model_id: str, adapter, model_type: ModelType) -> dict:
     — in embedding mode there is no smoke step, so ``smoke_passed`` is
     treated as True and the outcome reduces to ``not mismatches``.
     """
+    if model_type in (ModelType.VISION, ModelType.VISION_TOWER):
+        return _eval_vision_model(model_id, model_type)
+
     load_on_cpu = False
     mismatches = True
     result: dict = {"error": "", "failure_category": None}
@@ -385,3 +392,84 @@ def _cpu_generate(model_path: str) -> tuple[bool, str | None]:
         return False, err
     finally:
         _hf_common.DEVICE = _orig_device
+
+
+def resolve_weekly_adapter(model_path: str, model_type: ModelType) -> ModuleType:
+    """Select the evaluator's adapter mapping, including the multimodal role."""
+    if model_type == ModelType.VISION_TOWER:
+        from tests.spyre.weekly_generation.vision_tower import resolve_tower_adapter
+
+        return resolve_tower_adapter(model_path)
+    from tests.conftest import resolve_adapter_module_for_test
+
+    if model_type == ModelType.VISION:
+        from hf_adapters.auto_spyre_model import (
+            IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+        )
+
+        return resolve_adapter_module_for_test(
+            model_path,
+            mapping=IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+            trust_remote_code=False,
+        )
+    return resolve_adapter_module_for_test(model_path)
+
+
+def _eval_vision_model(model_id: str, model_type: ModelType) -> dict[str, Any]:
+    """Stock-reference success and Spyre verification are separate backend verdicts.
+
+    Each vision checkpoint runs alone in a fresh worker: stock reference first,
+    then Spyre preparation, so global RMSNorm patches cannot contaminate stock HF.
+    """
+    result: dict[str, Any] = {
+        "load": False,
+        "correct": False,
+        "error": "",
+        "failure_category": None,
+    }
+    reference_stage: ReferenceStage = "load"
+
+    def reference_stage_changed(stage: ReferenceStage) -> None:
+        nonlocal reference_stage
+        reference_stage = stage
+
+    def reference_ready() -> None:
+        result["load"] = True
+
+    try:
+        if model_type == ModelType.VISION:
+            from tests.spyre.test_vlm_e2e_spyre import run_vlm_compare
+
+            run_vlm_compare(
+                model_id,
+                trust_remote_code=False,
+                on_reference=reference_ready,
+                on_reference_stage=reference_stage_changed,
+                include_smoke=True,
+            )
+        else:
+            from tests.spyre.weekly_generation.vision_tower import run_tower_compare
+
+            run_tower_compare(
+                model_id,
+                on_reference=reference_ready,
+                on_reference_stage=reference_stage_changed,
+            )
+        result["correct"] = True
+    except Exception as error:
+        result["error"] = (
+            f"{type(error).__name__}: {error}\n"
+            f"{''.join(_traceback.format_exc().splitlines(keepends=True)[-6:])}"
+        )
+        if not result["load"]:
+            category = (
+                FAILURE_CATEGORY_CPU_LOAD_FAILED
+                if reference_stage == "load"
+                else FAILURE_CATEGORY_CPU_GENERATE_FAILED
+            )
+        elif isinstance(error, AssertionError):
+            category = FAILURE_CATEGORY_VERIFICATION_FAILED
+        else:
+            category = FAILURE_CATEGORY_TEST_EXECUTION_EXCEPTION
+        result["failure_category"] = _classify_failure(result["error"], category)
+    return result

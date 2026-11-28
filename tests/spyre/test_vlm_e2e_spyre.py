@@ -56,16 +56,18 @@ Usage (on Spyre pod)::
 
 import gc
 import os
+import traceback
 import types
+from collections.abc import Callable
 
 import pytest
 import torch
 import torch.nn.functional as F
 from transformers import PreTrainedModel
 
-from hf_adapters import AutoSpyreModelForImageTextToText
 from hf_adapters.auto_spyre_model import (
     IMAGE_TEXT_TO_TEXT_CONFIG_TO_ADAPTER_MODULE_MAPPING,
+    AutoSpyreModelForImageTextToText,
     dtype_for_model_path,
     resolve_adapter_module,
 )
@@ -83,6 +85,7 @@ from hf_adapters.hf_common import (
 )
 from tests._vision_helpers import (
     VLM_REFERENCE_CACHE_ENV,
+    VLMReference,
     build_vlm_batch,
     get_or_create_vlm_reference,
     resolve_model_revision,
@@ -95,6 +98,7 @@ from tests.model_registry import (
     VISION_PATHS,
     xfail_non_blocking,
 )
+from tests.spyre.weekly_generation.reference_stage import ReferenceStage
 
 pytestmark = pytest.mark.model_harness("vision")
 
@@ -161,9 +165,9 @@ def _adapter_teacher_forced_steps(
     # and ``result`` just grows by one column per step.
     result = padded_ids.clone()
     current_cache_len = padded_len
-    per_step_logits = []
+    per_step_logits: list[torch.Tensor] = []
 
-    def _write_token(tok_id):
+    def _write_token(tok_id: int) -> None:
         nonlocal result
         col = torch.full((batch_size, 1), tok_id, dtype=result.dtype)
         result = torch.cat([result, col], dim=1)
@@ -221,10 +225,37 @@ def _adapter_teacher_forced_steps(
     return per_step_logits
 
 
-@pytest.mark.parametrize(
-    "model_path", xfail_non_blocking(VISION_PATHS, table=NON_BLOCKING_VISION_MODELS)
-)
-def test_vlm_generate_spyre(model_path: str, trust_remote_code: bool | None) -> None:
+def _clear_exception_frames(error: BaseException) -> None:
+    """Release callee locals while preserving traceback locations and error chains.
+
+    Active frames cannot be cleared; their resource owners still use finally to
+    delete model references. Unwound callees can hold models and device caches,
+    including in chained compiler errors (``__cause__`` / ``__context__``).
+    """
+    pending: list[BaseException] = [error]
+    # Guards against a manually assigned __cause__/__context__ cycle.
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        traceback.clear_frames(current.__traceback__)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+
+
+def run_vlm_compare(
+    model_path: str,
+    trust_remote_code: bool | None = None,
+    *,
+    on_reference: Callable[[], None] | None = None,
+    on_reference_stage: Callable[[ReferenceStage], None] | None = None,
+    include_smoke: bool = False,
+) -> None:
+    """Compare stock and Spyre logits; optionally smoke-test the same loaded VLM."""
     if trust_remote_code is None:
         trust_remote_code = model_path in REMOTE_CODE_PATHS
     adapter = resolve_adapter_module(
@@ -236,6 +267,8 @@ def test_vlm_generate_spyre(model_path: str, trust_remote_code: bool | None) -> 
         model_path, target_device="spyre", trust_remote_code=trust_remote_code
     )
 
+    if on_reference_stage is not None:
+        on_reference_stage("forward")
     processor, batch = build_vlm_batch(
         model_path, PROMPT, trust_remote_code=trust_remote_code
     )
@@ -261,14 +294,19 @@ def test_vlm_generate_spyre(model_path: str, trust_remote_code: bool | None) -> 
     model_revision = resolve_model_revision(model_path, trust_remote_code)
     cache_dir = os.environ.get(VLM_REFERENCE_CACHE_ENV) or None
 
-    def _compute_reference():
-        ref_model = load_ref_model(
-            model_path=model_path,
-            adapter_mod=adapter,
-            auto_model_cls=AutoModelForImageTextToText,
-            trust_remote_code=trust_remote_code,
-        )
+    def _compute_reference() -> VLMReference:
+        ref_model: PreTrainedModel | None = None
         try:
+            if on_reference_stage is not None:
+                on_reference_stage("load")
+            ref_model = load_ref_model(
+                model_path=model_path,
+                adapter_mod=adapter,
+                auto_model_cls=AutoModelForImageTextToText,
+                trust_remote_code=trust_remote_code,
+            )
+            if on_reference_stage is not None:
+                on_reference_stage("forward")
             return stock_vlm_reference(
                 model=ref_model,
                 processor=processor,
@@ -276,6 +314,9 @@ def test_vlm_generate_spyre(model_path: str, trust_remote_code: bool | None) -> 
                 max_new_tokens=MAX_NEW_TOKENS,
                 num_compare_steps=NUM_COMPARE_STEPS,
             )
+        except BaseException as error:
+            _clear_exception_frames(error)
+            raise
         finally:
             del ref_model
             gc.collect()
@@ -306,65 +347,94 @@ def test_vlm_generate_spyre(model_path: str, trust_remote_code: bool | None) -> 
     else:
         print(f"  Stock CPU reference generated (cache write failed: {cache_dir})")
 
+    if on_reference is not None:
+        on_reference()
+
     # --- Adapter on Spyre ---
     print("  Loading model for Spyre ...")
-    model = AutoSpyreModelForImageTextToText.from_pretrained(
-        model_name_or_path=model_path, dtype=dtype, trust_remote_code=trust_remote_code
-    )
-
-    # Per-step adapter logits on Spyre, teacher-forced on stock's tokens (so the
-    # comparison is free of greedy-fork drift while still exercising decode).
-    print(f"  Running adapter prefill + {len(ref_tokens) - 1} forced decode steps ...")
-    with torch.no_grad():
-        sp_logits = _adapter_teacher_forced_steps(adapter, model, batch, ref_tokens)
-
-    # Free-run caption — human-eyeball diagnostic + non-degeneracy check only.
-    print("  Running adapter free-run generate (diagnostic) ...")
-    prompt_len = batch["input_ids"].shape[1]
-    with torch.no_grad():
-        adapter_sequences = model.generate(
-            max_new_tokens=MAX_NEW_TOKENS,
-            do_sample=False,
-            **batch,
+    model: PreTrainedModel | None = None
+    try:
+        model = AutoSpyreModelForImageTextToText.from_pretrained(
+            model_name_or_path=model_path,
+            dtype=dtype,
+            trust_remote_code=trust_remote_code,
         )
-    adapter_text = tokenizer.decode(
-        adapter_sequences[0, prompt_len:], skip_special_tokens=True
-    )
-    del model
-    gc.collect()
-
-    # --- Per-step logit cosine (the assertion) + top-1 agreement (reported) ---
-    # Teacher-forced, so every step is a clean same-prefix comparison. The cosine
-    # floor is the hard check: a real decode bug (KV-cache, mask, RoPE) tanks the
-    # whole logit vector. Top-1 agreement is printed for visibility but NOT
-    # asserted — a single near-tie (two candidates within fp16 rounding) can flip
-    # the argmax while cosine stays ~0.9999, which is benign substrate rounding,
-    # not a regression.
-    print("  step      | stock top1          | spyre top1          | match | cosine")
-    low_cosine = []
-    n_top1_match = 0
-    for step, (rl, sl) in enumerate(zip(ref_logits, sp_logits)):
-        n = min(rl.shape[-1], sl.shape[-1])
-        rl, sl = rl[:n], sl[:n]
-        r_top1 = int(rl.argmax())
-        s_top1 = int(sl.argmax())
-        cosine = F.cosine_similarity(rl, sl, dim=-1).item()
-        ok = r_top1 == s_top1
-        n_top1_match += ok
-        label = "prefill" if step == 0 else f"decode-{step}"
+        # Per-step adapter logits on Spyre, teacher-forced on stock's tokens (so the
+        # comparison is free of greedy-fork drift while still exercising decode).
         print(
-            f"  {label:>9} | {r_top1:>6} {tokenizer.decode([r_top1])!r:>11} "
-            f"| {s_top1:>6} {tokenizer.decode([s_top1])!r:>11} "
-            f"| {'OK' if ok else 'tie?':>5} | {cosine:.6f}"
+            f"  Running adapter prefill + {len(ref_tokens) - 1} forced decode steps ..."
         )
-        if cosine < MIN_COSINE:
-            low_cosine.append((label, cosine))
-    print(f"  top-1 agreement: {n_top1_match}/{len(ref_logits)} steps (reported)")
-    print(f"  stock:   {ref_text!r}")
-    print(f"  adapter free-run: {adapter_text!r}")
+        with torch.no_grad():
+            sp_logits = _adapter_teacher_forced_steps(adapter, model, batch, ref_tokens)
 
-    assert len(adapter_text) > 0, "adapter generated an empty string"
-    assert not low_cosine, (
-        f"adapter logits drifted below cosine {MIN_COSINE} (teacher-forced) at: "
-        + ", ".join(f"{lab}: {c:.6f}" for lab, c in low_cosine)
-    )
+        # Free-run caption — human-eyeball diagnostic + non-degeneracy check only.
+        print("  Running adapter free-run generate (diagnostic) ...")
+        prompt_len = batch["input_ids"].shape[1]
+        with torch.no_grad():
+            adapter_sequences = model.generate(
+                max_new_tokens=MAX_NEW_TOKENS,
+                do_sample=False,
+                **batch,
+            )
+        adapter_text = tokenizer.decode(
+            adapter_sequences[0, prompt_len:], skip_special_tokens=True
+        )
+
+        # --- Per-step logit cosine (the assertion) + top-1 agreement (reported) ---
+        # Teacher-forced, so every step is a clean same-prefix comparison. The cosine
+        # floor is the hard check: a real decode bug (KV-cache, mask, RoPE) tanks the
+        # whole logit vector. Top-1 agreement is printed for visibility but NOT
+        # asserted — a single near-tie (two candidates within fp16 rounding) can flip
+        # the argmax while cosine stays ~0.9999, which is benign substrate rounding,
+        # not a regression.
+        print(
+            "  step      | stock top1          | spyre top1          | match | cosine"
+        )
+        low_cosine: list[tuple[str, float]] = []
+        n_top1_match = 0
+        for step, (rl, sl) in enumerate(zip(ref_logits, sp_logits)):
+            n = min(rl.shape[-1], sl.shape[-1])
+            rl, sl = rl[:n], sl[:n]
+            r_top1 = int(rl.argmax())
+            s_top1 = int(sl.argmax())
+            cosine = F.cosine_similarity(rl, sl, dim=-1).item()
+            ok = r_top1 == s_top1
+            n_top1_match += ok
+            label = "prefill" if step == 0 else f"decode-{step}"
+            print(
+                f"  {label:>9} | {r_top1:>6} {tokenizer.decode([r_top1])!r:>11} "
+                f"| {s_top1:>6} {tokenizer.decode([s_top1])!r:>11} "
+                f"| {'OK' if ok else 'tie?':>5} | {cosine:.6f}"
+            )
+            if cosine < MIN_COSINE:
+                low_cosine.append((label, cosine))
+        print(f"  top-1 agreement: {n_top1_match}/{len(ref_logits)} steps (reported)")
+        print(f"  stock:   {ref_text!r}")
+        print(f"  adapter free-run: {adapter_text!r}")
+
+        assert len(adapter_text) > 0, "adapter generated an empty string"
+        assert not low_cosine, (
+            f"adapter logits drifted below cosine {MIN_COSINE} (teacher-forced) at: "
+            + ", ".join(f"{lab}: {c:.6f}" for lab, c in low_cosine)
+        )
+
+        if include_smoke:
+            from tests.spyre.test_e2e_smoke_vision_spyre import run_vision_smoke_test
+
+            smoke = run_vision_smoke_test(
+                model_path, trust_remote_code=trust_remote_code, model=model
+            )
+            assert smoke["status"] == "PASS", smoke
+    except BaseException as error:
+        _clear_exception_frames(error)
+        raise
+    finally:
+        del model
+        gc.collect()
+
+
+@pytest.mark.parametrize(
+    "model_path", xfail_non_blocking(VISION_PATHS, table=NON_BLOCKING_VISION_MODELS)
+)
+def test_vlm_generate_spyre(model_path: str, trust_remote_code: bool | None) -> None:
+    run_vlm_compare(model_path, trust_remote_code=trust_remote_code)

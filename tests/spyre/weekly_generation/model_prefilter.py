@@ -96,6 +96,8 @@ def _parameter_count(row: dict) -> int | None:
 def prefilter_models(
     models: list[dict],
     max_params: int,
+    *,
+    model_type: ModelType | None = None,
 ) -> PrefilterResult:
     """Partition *models* into work to do and verdicts to record.
 
@@ -112,6 +114,8 @@ def prefilter_models(
             JSON-serializable.
         max_params: parameter ceiling above which a model cannot be brought up
             on Spyre.
+        model_type: standalone towers bypass the checkpoint-size gate because
+            their catalog count includes the language decoder that is not loaded.
 
     Returns:
         A ``PrefilterResult``. ``keep`` preserves the input order, which the
@@ -132,7 +136,11 @@ def prefilter_models(
             continue
 
         params = _parameter_count(row)
-        if params is not None and params > max_params:
+        if (
+            model_type != ModelType.VISION_TOWER
+            and params is not None
+            and params > max_params
+        ):
             result.skipped.append(
                 SkippedModel(
                     row=row,
@@ -206,7 +214,9 @@ def fetch_and_filter(
     )
 
     # Filter checkpoints known to exceed Spyre's parameter limit.
-    result: PrefilterResult = prefilter_models(models, max_params=max_params)
+    result: PrefilterResult = prefilter_models(
+        models, max_params=max_params, model_type=model_type
+    )
 
     # write the skipped models to the sink; these won't be tested
     written: int = write_skipped_rows(

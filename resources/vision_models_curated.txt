@@ -1,0 +1,2 @@
+# Full VLM checkpoints to include alongside Hub rankings and VISION_MODELS.
+# Registry checkpoints are included automatically; add extra checkpoints here.

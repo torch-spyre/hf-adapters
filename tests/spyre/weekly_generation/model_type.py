@@ -1,4 +1,4 @@
-"""The two kinds of model the weekly scan evaluates.
+"""The model kinds the weekly scan evaluates.
 
 ``generative`` and ``embedding`` each name a whole bundle of per-kind choices
 that used to travel as a bare string: which catalog is fetched, which ClickHouse
@@ -21,3 +21,14 @@ from enum import StrEnum
 class ModelType(StrEnum):
     GENERATIVE = "generative"
     EMBEDDING = "embedding"
+    VISION = "vision"
+    VISION_TOWER = "vision_tower"
+
+
+def scan_model_types(selection: str) -> list[ModelType]:
+    """A vision scan includes registered towers as a separate verdict kind."""
+    if selection == "all":
+        return list(ModelType)
+    if selection == "vision":
+        return [ModelType.VISION, ModelType.VISION_TOWER]
+    return [ModelType(selection)]

@@ -83,3 +83,60 @@ No workflow changes needed!
 - torch
 
 These are installed in the `generate-matrix` job before running the script.
+
+## Weekly vision model support
+
+`push-to-clickhouse.yaml` includes `vision` (full image-to-text models) and
+`vision_tower` (registered standalone towers). Selecting `model_type=vision`
+also includes the tower checks. Like generative and embedding models, VLMs use
+`top_k_downloads` and `top_k_trending` (1000 each by default). The catalog
+merges both rankings, `resources/vision_models_curated.txt`, and every eligible
+registered VLM checkpoint. Ranked discovery uses the Hub's `image-text-to-text`
+tag and expands the candidate pool until the requested post-filter count is
+reached or the ranking is exhausted. Tower discovery is registry-only.
+Tower metadata reports the full checkpoint's parameter count, so tower checks
+bypass the checkpoint-size gate and always use the x1 runner tier. Architecture
+exclusions still apply. x1 vision and tower shards hold `--shard-size-vision`
+checkpoints (default 25), smaller than text shards because each vision
+checkpoint runs alone in a fresh worker.
+
+Full VLMs compare stock-HF and Spyre logits through prefill and four
+teacher-forced decode steps (cosine floor 0.99), then generate over the five
+existing sample images with the same Spyre model. Towers use the shared checkpoint
+dtype policy for both paths and compare stock-HF
+features with the compiled adapter, checking shapes, finite values, per-patch
+cosine, and relative L2 error. Each vision evaluation uses a fresh process and
+runs the stock reference before Spyre preparation. Results are written to the
+existing v2 capability tables, keyed by checkpoint and adapter, so tower and VLM
+results for a shared checkpoint stay distinct once their adapters resolve.
+Existing access, architecture
+exclusion, remote-code, and model-size policies still apply.
+
+Tower configuration resolves an immutable Hub commit, and both the checkpoint
+index and weight shards are downloaded at that revision. Reference checkpoint
+loading failures are reported as `cpu_load_failed`; forward and input preparation
+failures are reported as `cpu_generate_failed`. The VLM verifier clears unwound
+exception frames, including chained errors, before releasing models, so retained
+pytest tracebacks do not retain callee-owned models or KV caches. Error messages
+and traceback locations remain available.
+
+To launch a small scan from an implementation branch:
+
+```bash
+gh workflow run push-to-clickhouse.yaml --ref <branch> \
+  -f model_type=vision -f top_k_downloads=10 -f top_k_trending=10 \
+  -f clickhouse_db=dev
+```
+
+For a local catalog/sharding check without database access:
+
+```bash
+python .github/scripts/generate_weekly_shards.py --model-type vision \
+  --top-k-downloads 10 --top-k-trending 10 --snapshot-date 2026-11-25 \
+  --write-to-csv /tmp/vision-verdicts.csv --output-dir /tmp/vision-shards
+```
+
+`--write-to-csv` requires new output files. The workflow shares the VLM CI stock
+reference cache (`HF_ADAPTERS_VLM_REF_CACHE`); its revision/input/config keys
+prevent reuse across incompatible references. Latency is diagnostic, and these
+checks establish adapter parity and runtime support rather than caption quality.
