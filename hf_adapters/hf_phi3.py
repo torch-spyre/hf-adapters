@@ -34,6 +34,7 @@ Usage::
     outputs = model.generate(**encoded, max_new_tokens=32)
 """
 
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -54,7 +55,12 @@ from hf_adapters.hf_common import (
     prepare_lm_head_for_spyre,
     rope_dim_permutation,
     run_lm_head,
-    split_fused_linear,
+)
+from hf_adapters.spyre_tensor_parallel import (
+    SPYRE_CPU_ROWWISE,
+    SPYRE_ROWWISE,
+    SPYRE_ROWWISE_SPLIT_INPUT,
+    spyre_compiled_all_reduce,
 )
 
 # ---------------------------------------------------------------------------
@@ -65,47 +71,188 @@ from hf_adapters.hf_common import (
 # ---------------------------------------------------------------------------
 
 
-def spyre_tp_cpu_replicated_modules(model: nn.Module, tp_size: int) -> set[str]:
-    """Stage full fused weights for the adapter's QKV and gate/up splitting.
+# ---------------------------------------------------------------------------
+# Tensor parallelism
+#
+# Transformers' Phi-3 plan cuts the fused qkv_proj / gate_up_proj weights into
+# equal row blocks and all-gathers their outputs, so a block can straddle the
+# Q/K/V or gate/up boundary. This adapter splits those weights itself and never
+# calls the fused modules, so it would see a shard with no gather. Instead the
+# fused weights load whole on CPU and each rank keeps only its own heads and
+# neurons, which leaves o_proj and down_proj with rank-local inputs.
+# ---------------------------------------------------------------------------
 
-    HF gathers the outputs of these projections before splitting them. This
-    adapter instead splits their weights during preparation, bypassing the
-    gather hooks. Keep those weights replicated on CPU until preparation;
-    o_proj and down_proj retain HF's rowwise split-input placement.
+_FUSED_MODULE_SUFFIXES = (".self_attn.qkv_proj", ".mlp.gate_up_proj")
 
-    Preparation creates full Q/K/V and gate/up projections on every rank, so
-    their device weight memory and computation do not shrink with TP size.
-    Attention and KV caches are also replicated. Within each decoder layer,
-    only o_proj and down_proj benefit from sharding. Efficient Phi-3 TP needs
-    a follow-up that splits fused checkpoint weights into per-rank colwise
-    Q/K/V and gate/up projections and adjusts local head counts and caches.
+# Styles that split o_proj/down_proj by input column. Replicated styles also
+# leave a mesh on the module, so the mesh alone does not mean "sharded".
+_ROW_SHARDED_STYLES = frozenset(
+    {SPYRE_ROWWISE, SPYRE_ROWWISE_SPLIT_INPUT, SPYRE_CPU_ROWWISE}
+)
+
+
+@dataclass(frozen=True)
+class _TpPlacement:
+    """This process's position in the tensor-parallel group."""
+
+    rank: int = 0
+    size: int = 1
+    group_name: str | None = None
+
+
+def _is_row_sharded(proj: nn.Module) -> bool:
+    """True when the TP loader split ``proj`` by input column across ranks."""
+    mesh = getattr(proj, "_hf_device_mesh", None)
+    return (
+        mesh is not None
+        and mesh.size() > 1
+        and getattr(proj, "_hf_tp_plan", None) in _ROW_SHARDED_STYLES
+    )
+
+
+def _output_projections(model) -> dict[str, nn.Module]:
+    """Every layer's o_proj and down_proj, keyed by module path."""
+    prefix = "model.layers" if hasattr(model, "model") else "layers"
+    projections = {}
+    for i, layer in enumerate(get_backbone(model).layers):
+        projections[f"{prefix}.{i}.self_attn.o_proj"] = layer.self_attn.o_proj
+        projections[f"{prefix}.{i}.mlp.down_proj"] = layer.mlp.down_proj
+    return projections
+
+
+def _tp_placement(model) -> _TpPlacement:
+    """Read the TP position from how the loader placed o_proj and down_proj.
+
+    Per-rank slicing is only correct when every o_proj and down_proj is
+    row-sharded, so each one reduces this rank's partial sum. When they are
+    all replicated (for example ``tp_plan={}``) every rank runs the full model.
+    A mix would leave some projections with the wrong input width, so it is
+    rejected.
     """
-    del tp_size
+    projections = _output_projections(model)
+    sharded = {name: _is_row_sharded(proj) for name, proj in projections.items()}
+    if not any(sharded.values()):
+        return _TpPlacement()
+    if not all(sharded.values()):
+        replicated = sorted(
+            name for name, is_sharded in sharded.items() if not is_sharded
+        )
+        raise ValueError(
+            "Phi-3 TP: o_proj and down_proj must all be row-sharded or all "
+            f"replicated, but these are replicated while others are sharded: "
+            f"{', '.join(replicated)}"
+        )
+    mesh = get_backbone(model).layers[0].self_attn.o_proj._hf_device_mesh
+    return _TpPlacement(
+        rank=mesh.get_local_rank(),
+        size=mesh.size(),
+        group_name=mesh.get_group().group_name,
+    )
+
+
+def _validate_tp_heads(num_q, num_kv, tp_size):
+    """Reject head layouts that cannot give every rank whole heads."""
+    if num_q % tp_size != 0:
+        raise ValueError(
+            f"Phi-3 TP cannot split {num_q} query heads across {tp_size} ranks"
+        )
+    if num_kv % tp_size != 0:
+        raise ValueError(
+            f"Phi-3 TP cannot split {num_kv} KV heads across {tp_size} ranks"
+        )
+
+
+def _validate_tp_intermediate(intermediate_size, tp_size):
+    """Reject MLP widths that cannot give every rank equal gate/up rows."""
+    if intermediate_size % tp_size != 0:
+        raise ValueError(
+            f"gate_up_proj's {intermediate_size} intermediate rows do not "
+            f"divide across {tp_size} TP ranks"
+        )
+
+
+def spyre_tp_cpu_replicated_modules(model: Any, tp_size: int) -> set[str]:
+    """Load the fused projections whole on CPU for per-rank slicing."""
+    cfg = model.config
+    _validate_tp_heads(cfg.num_attention_heads, cfg.num_key_value_heads, tp_size)
+    _validate_tp_intermediate(cfg.intermediate_size, tp_size)
     return {
         name
-        for name, module in model.named_modules()
-        if isinstance(module, nn.Linear)
-        and name.endswith((".self_attn.qkv_proj", ".mlp.gate_up_proj"))
+        for name, _ in model.named_modules()
+        if name.endswith(_FUSED_MODULE_SUFFIXES)
     }
 
 
-def _split_fused_qkv(attn, num_q, num_kv, head_dim):
-    """Split fused qkv_proj into separate q/k/v projections."""
-    w = attn.qkv_proj.weight
+def _check_rank(rank, tp_size):
+    if not 0 <= rank < tp_size:
+        raise ValueError(f"TP rank must be in [0, {tp_size}), got {rank}")
+
+
+def _rank_rows(weight, rank, tp_size):
+    """Return an independent copy of this rank's equal share of ``weight``."""
+    rows = weight.shape[0] // tp_size
+    return weight[rank * rows : (rank + 1) * rows].clone()
+
+
+def _local_qkv_weights(w, num_q, num_kv, head_dim, rank, tp_size):
+    """Split a full fused QKV weight and keep this rank's whole heads."""
+    _check_rank(rank, tp_size)
     q_dim = num_q * head_dim
     k_dim = num_kv * head_dim
-    hidden = w.shape[1]
-
-    def _mk(w_data, out_dim):
-        p = nn.Linear(hidden, out_dim, bias=False)
-        p.weight = nn.Parameter(w_data.clone(), requires_grad=False)
-        return p
-
+    expected_rows = q_dim + 2 * k_dim
+    if w.shape[0] != expected_rows:
+        raise ValueError(
+            f"qkv_proj must hold all {expected_rows} fused rows, got "
+            f"{w.shape[0]}; it may have been sharded before the Q/K/V split"
+        )
+    _validate_tp_heads(num_q, num_kv, tp_size)
     return (
-        _mk(w[:q_dim], q_dim),
-        _mk(w[q_dim : q_dim + k_dim], k_dim),
-        _mk(w[q_dim + k_dim :], k_dim),
+        _rank_rows(w[:q_dim], rank, tp_size),
+        _rank_rows(w[q_dim : q_dim + k_dim], rank, tp_size),
+        _rank_rows(w[q_dim + k_dim :], rank, tp_size),
     )
+
+
+def _local_gate_up_weights(w, rank, tp_size):
+    """Split a full fused gate/up weight and keep this rank's matching rows."""
+    _check_rank(rank, tp_size)
+    intermediate_size = w.shape[0] // 2
+    _validate_tp_intermediate(intermediate_size, tp_size)
+    return (
+        _rank_rows(w[:intermediate_size], rank, tp_size),
+        _rank_rows(w[intermediate_size:], rank, tp_size),
+    )
+
+
+def _frozen_linear(weight):
+    proj = nn.Linear(weight.shape[1], weight.shape[0], bias=False)
+    proj.weight = nn.Parameter(weight, requires_grad=False)
+    return proj
+
+
+def _split_fused_qkv(attn, num_q, num_kv, head_dim, rank=0, tp_size=1):
+    """Split fused qkv_proj into this rank's q/k/v projections."""
+    weights = _local_qkv_weights(
+        attn.qkv_proj.weight, num_q, num_kv, head_dim, rank, tp_size
+    )
+    return tuple(_frozen_linear(weight) for weight in weights)
+
+
+def _split_fused_gate_up(mlp, rank=0, tp_size=1):
+    """Split fused gate_up_proj into this rank's gate/up projections."""
+    weights = _local_gate_up_weights(mlp.gate_up_proj.weight, rank, tp_size)
+    return tuple(_frozen_linear(weight) for weight in weights)
+
+
+def _row_parallel_linear(x, proj, tp_group_name):
+    """Apply an ``o_proj``/``down_proj`` whose input is already rank-local.
+
+    Under TP, ``F.linear`` skips the ``rowwise_split_input`` hooks, which would
+    split the input a second time, and the partial sums reduce inside the graph.
+    """
+    if tp_group_name is None:
+        return proj(x)
+    return spyre_compiled_all_reduce(F.linear(x, proj.weight), tp_group_name)
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +260,9 @@ def _split_fused_qkv(attn, num_q, num_kv, head_dim):
 # ---------------------------------------------------------------------------
 
 
-def _make_compiled_block(layer, q_proj, k_proj, v_proj, gate_proj, up_proj, head_dim):
+def _make_compiled_block(
+    layer, q_proj, k_proj, v_proj, gate_proj, up_proj, head_dim, tp_group_name=None
+):
     """Compiled block for Phi-3. Full head_dim RoPE via identity-padded freqs."""
     input_ln = layer.input_layernorm
     post_attn_ln = layer.post_attention_layernorm
@@ -162,14 +311,16 @@ def _make_compiled_block(layer, q_proj, k_proj, v_proj, gate_proj, up_proj, head
             enable_gqa=True,
         )
         attn_out = attn_out.transpose(1, 2).reshape(bsz, seq_len, -1)
-        attn_out = o_proj(attn_out)
+        attn_out = _row_parallel_linear(attn_out, o_proj, tp_group_name)
 
         h = residual + attn_out
 
         # MLP with pre-split gate/up
         residual = h
         h = post_attn_ln(h)
-        h = down_proj(act_fn(gate_proj(h)) * up_proj(h))
+        h = _row_parallel_linear(
+            act_fn(gate_proj(h)) * up_proj(h), down_proj, tp_group_name
+        )
         h = residual + h
 
         return h, key_cache, value_cache
@@ -258,8 +409,11 @@ def prepare_for_spyre(model: Any) -> None:
 
     prepare_lm_head_for_spyre(model)
 
+    tp = _tp_placement(model)
     num_q = cfg.num_attention_heads
     num_kv = cfg.num_key_value_heads
+    local_q = num_q // tp.size
+    local_kv = num_kv // tp.size
 
     # Partial RoPE dimension permutation: HF pairs (j, j+rope_dim//2) but
     # apply_rope_matmul pairs (j, j+head_dim//2). Permute Q/K weights so
@@ -277,44 +431,40 @@ def prepare_for_spyre(model: Any) -> None:
     model._spyre_up_projs = nn.ModuleList()
 
     for layer in get_backbone(model).layers:
-        q, k, v = _split_fused_qkv(layer.self_attn, num_q, num_kv, hd)
+        q, k, v = _split_fused_qkv(layer.self_attn, num_q, num_kv, hd, tp.rank, tp.size)
         if rope_perm is not None:
-            permute_proj_for_rope(q, num_q, hd, rope_perm)
-            permute_proj_for_rope(k, num_kv, hd, rope_perm)
+            permute_proj_for_rope(q, local_q, hd, rope_perm)
+            permute_proj_for_rope(k, local_kv, hd, rope_perm)
         if padded_head_dim is not None:
             # Interleave-pad Q/K (RoPE layout), end-pad V, input-pad O.
-            q = pad_qk_proj_for_rope(q, num_q, hd, padded_head_dim)
-            k = pad_qk_proj_for_rope(k, num_kv, hd, padded_head_dim)
-            v = _pad_proj_output_simple(v, num_kv, hd, padded_head_dim)
-            # Q/K/V are replicated, but O may be a rowwise local shard. Pad
-            # only the heads owned here and retain the module's split-input
-            # and all-reduce forward. Device weights must be staged before
-            # the helper's CPU slicing/assignment.
-            o_proj: nn.Linear = layer.self_attn.o_proj
-            local_width = o_proj.weight.shape[1]
-            if local_width % hd:
-                raise ValueError(
-                    "Phi-3 TP head padding requires whole heads per o_proj shard; "
-                    f"got {local_width} columns with head_dim={hd}"
-                )
-            o_proj.to("cpu")
-            padded_o: nn.Linear = _pad_proj_input_simple(
-                o_proj, local_width // hd, hd, padded_head_dim
+            q = pad_qk_proj_for_rope(q, local_q, hd, padded_head_dim)
+            k = pad_qk_proj_for_rope(k, local_kv, hd, padded_head_dim)
+            v = _pad_proj_output_simple(v, local_kv, hd, padded_head_dim)
+            # The TP loader may already have placed this shard on Spyre.
+            layer.self_attn.o_proj = _pad_proj_input_simple(
+                layer.self_attn.o_proj.to("cpu"), local_q, hd, padded_head_dim
             )
-            o_proj.weight = padded_o.weight
-            o_proj.bias = padded_o.bias
-            o_proj.in_features = padded_o.in_features
-            o_proj.out_features = padded_o.out_features
         model._spyre_q_projs.append(q)
         model._spyre_k_projs.append(k)
         model._spyre_v_projs.append(v)
 
-        gate, up = split_fused_linear(layer.mlp.gate_up_proj.weight)
+        gate, up = _split_fused_gate_up(layer.mlp, tp.rank, tp.size)
         model._spyre_gate_projs.append(gate)
         model._spyre_up_projs.append(up)
 
+        if tp.size > 1:
+            # Whole on every rank and unused from here on: keep them off Spyre.
+            layer.self_attn.qkv_proj = None
+            layer.mlp.gate_up_proj = None
+
+    if tp.size > 1:
+        # kv_cache_shapes falls back to the global config count without a k_proj.
+        model._spyre_kv_shapes = [
+            (local_kv, work_hd, work_hd) for _ in get_backbone(model).layers
+        ]
+
     model._spyre_compiled_blocks = [
-        _make_compiled_block(layer, qp, kp, vp, gp, up, work_hd)
+        _make_compiled_block(layer, qp, kp, vp, gp, up, work_hd, tp.group_name)
         for layer, qp, kp, vp, gp, up in zip(
             get_backbone(model).layers,
             model._spyre_q_projs,
