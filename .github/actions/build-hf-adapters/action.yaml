@@ -63,6 +63,22 @@ outputs:
 runs:
   using: composite
   steps:
+    # Every step below needs $CLONED_HF_ADAPTERS_DIR, and so do the calling job's own steps, but no
+    # input carries it: each caller is expected to set it as a workflow env. Two do; bench-on-demand.yml
+    # did not, and because the runner's shell init turns on `set -u`, the Checkout step died on its very
+    # first command ("CLONED_HF_ADAPTERS_DIR: unbound variable") rather than defaulting. It is
+    # $GITHUB_WORKSPACE on these runners anyway, so settle it here, once, and publish it so the rest of
+    # the action and the rest of the job read the same path.
+    - name: Resolve the clone directory
+      shell: bash
+      run: |
+        if [[ -n "${CLONED_HF_ADAPTERS_DIR:-}" ]]; then
+          echo "CLONED_HF_ADAPTERS_DIR=${CLONED_HF_ADAPTERS_DIR} (set by the caller)"
+        else
+          echo "CLONED_HF_ADAPTERS_DIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          echo "CLONED_HF_ADAPTERS_DIR defaulted to $GITHUB_WORKSPACE"
+        fi
+
     # The next step deletes and re-clones $CLONED_HF_ADAPTERS_DIR, which is the
     # same path as $GITHUB_WORKSPACE on these runners, so the workflow-ref copy
     # of run-with-pod-stdout.sh staged there is destroyed before any test step
