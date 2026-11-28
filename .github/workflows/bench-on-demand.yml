@@ -165,6 +165,7 @@ jobs:
         id: resolve
         env:
           SELECTION: ${{ env.BENCH_SELECTION }}
+          INGEST: ${{ inputs.ingest }}
         run: |
           set -eu
           schedule=""; quality=false; smoke=false
@@ -175,6 +176,11 @@ jobs:
             smoke)              smoke=true ;;
             *) echo "::error::selection must be one of: hf-models-nightly, hf-models-weekly, model-correctness, smoke"; exit 1 ;;
           esac
+          # Asked for and not given: a caller that passes ingest:true with this selection otherwise reads a green
+          # run with no rows as a successful ingest.
+          if [ "${smoke}" = true ] && [ "${INGEST}" = true ]; then
+            echo "::notice::ingest was requested but the \`smoke\` selection never stores rows; dispatch hf-models-nightly or hf-models-weekly to ingest"
+          fi
           {
             echo "perf_schedule=${schedule}"
             echo "quality=${quality}"
@@ -356,7 +362,7 @@ jobs:
           make bench-quality BENCH="${GITHUB_WORKSPACE}/.bench-venv/bin/spyre-bench" BENCH_REQUIRED=1 \
             BENCH_RESULTS_DIR="${GITHUB_WORKSPACE}/quality-bench"
 
-      # The card-free harness check: runs the `smoke` Selection and ingests nothing.
+      # The harness check: one case of the `smoke` Selection, on the card this runner holds, ingesting nothing.
       - name: Smoke the harness
         id: smoke
         if: ${{ needs.check.outputs.smoke == 'true' }}
@@ -536,10 +542,18 @@ jobs:
           QUALITY_OUTCOME: ${{ steps.quality.outcome }}
           SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
           VERDICT_OUTCOME: ${{ steps.verdict.outcome }}
+          SMOKE: ${{ needs.check.outputs.smoke }}
         run: |
           {
             echo "### bench-on-demand (advisory)"
             echo "- selection: ${BENCH_SELECTION}; mode: ${BENCH_MODE}; route: ${{ inputs.route }}"
             echo "- perf: ${PERF_OUTCOME:-n/a}; quality: ${QUALITY_OUTCOME:-n/a}; smoke: ${SMOKE_OUTCOME:-n/a}; verdict: ${VERDICT_OUTCOME:-n/a}"
-            echo "- ingest requested: ${{ inputs.ingest }} -> ${BENCH_CLICKHOUSE_ENV}"
+            # What the ingest did, not only what was asked: requested-but-suppressed read as a successful ingest.
+            if [ "${DO_INGEST}" = true ]; then
+              echo "- ingest: requested -> ${BENCH_CLICKHOUSE_ENV}"
+            elif [ "${SMOKE}" = true ]; then
+              echo "- ingest: none, the \`smoke\` selection never stores rows (requested: ${{ inputs.ingest }})"
+            else
+              echo "- ingest: none, not requested"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
