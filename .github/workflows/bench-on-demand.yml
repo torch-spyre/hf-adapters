@@ -123,6 +123,11 @@ env:
   BENCH_ARCH: x86_64
   BENCH_QUIET: '1'
   CI: '1'
+  # Where build-hf-adapters re-clones the repo and where the bench steps below cd to. The runner's own
+  # shell init turns on `set -u`, so leaving this unset is not a default -- it is the action dying on
+  # "CLONED_HF_ADAPTERS_DIR: unbound variable" at its first command. Same value as the action's other
+  # two callers, _test_matrix.yaml and push-to-clickhouse.yaml.
+  CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
 
 jobs:
   check:
@@ -321,8 +326,12 @@ jobs:
           source "$HOME/.bashrc"
           source /etc/profile.d/ibm-aiu-setup.sh
           cd "$CLONED_HF_ADAPTERS_DIR"
-          if [[ ! -x "$UV_PROJECT_ENVIRONMENT/bin/spyre-perf-suite" ]]; then
-            uv pip install --python "$UV_PROJECT_ENVIRONMENT/bin/python" --no-deps /home/senuser/spyre-perf-suite
+          # The suite must land in the venv `make tests` uses: this job is prebaked_image, so the
+          # Makefile's `uv run --active --no-sync` resolves to $VIRTUAL_ENV. Named with defaults
+          # throughout, because the setup script sourced above runs this step under `set -u`.
+          venv="${VIRTUAL_ENV:-${UV_PROJECT_ENVIRONMENT:-.venv}}"
+          if [[ ! -x "$venv/bin/spyre-perf-suite" ]]; then
+            uv pip install --python "$venv/bin/python" --no-deps /home/senuser/spyre-perf-suite
           fi
           export BENCH_SUBJECT_ID="${ARTIFACT_RECORD%%|*}"
           [ -n "$BENCH_SUBJECT_ID" ] || export BENCH_SUBJECT_ID="${{ inputs.prebaked_image }}"
