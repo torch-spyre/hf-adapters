@@ -1,0 +1,39 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/torch-spyre/torch-spyre/main/extensions/spyre-bench/spyre_bench/core/schemas/resources.schema.json
+# The benchmark catalog of hf-adapters. See README.md for what belongs here and what stays in
+# tests/model_lists/perf.yaml and evals/.
+#
+# The Models, Datasets and Environments that several products share travel with the engine
+# (`spyre-bench catalogs --path llm`), so this catalog refers to them by name rather than
+# redeclaring them; mk/bench.mk passes that directory as --central.
+apiVersion: bench/v1alpha1
+kind: Project
+metadata: {name: hf-adapters, owner: hf-adapters}
+spec:
+  component: hf-adapters
+  packs: [{name: llm-serving, version: "0.2"}, {name: kernel, version: "0.2"}, {name: spyre, version: "0.2"}]
+  default_suites: [hf-models]
+  default_environment: spyre-1card
+  visibility: public
+  groupings:
+    - {name: tier, ordered: true, cardinality: one, values: [sanity, core, extended]}
+    - {name: suite, ordered: false, cardinality: many}
+  # A one-card and a multi-card run of the same benchmark are different series, not noise in one.
+  series_labels: [env.label.device.count]
+---
+apiVersion: bench/v1alpha1
+kind: Suite
+metadata: {name: hf-models, description: "per-model layer and full-model timings of the Spyre adapters"}
+spec: {type: perf, pr_selectable: true}
+---
+apiVersion: bench/v1alpha1
+kind: Suite
+metadata: {name: model-correctness, description: "evals/ question samples scored through the adapters"}
+spec: {type: quality, pr_selectable: true}
+---
+# A selector, not a case list: a Selection has to say which type it selects, or it resolves to
+# nothing unless the caller also passes BENCH_TYPE=quality.
+apiVersion: bench/v1alpha1
+kind: Selection
+metadata: {name: model-correctness, description: "evals/ question samples scored on the Spyre adapter"}
+spec:
+  selector: {types: [quality], suites: [model-correctness]}
