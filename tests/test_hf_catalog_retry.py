@@ -9,7 +9,7 @@ from unittest.mock import Mock
 import httpx
 import pytest
 from huggingface_hub import HfApi, ModelInfo
-from huggingface_hub.errors import HfHubHTTPError
+from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
 from transformers import BertConfig
 
 from utils import hf_model_catalog as catalog
@@ -251,19 +251,131 @@ def test_missing_curated_model_still_skips_without_retry(
     assert waits == []
 
 
-@pytest.mark.parametrize(
-    "error", [ValueError("Requires remote code"), OSError("Missing config")]
+def _wrapped_network_error(
+    error: httpx.TransportError | None = None,
+) -> OSError:
+    """Mirror the chain Transformers raises when the Hub cannot be reached."""
+    network_error: httpx.TransportError = error or httpx.ConnectError(
+        "Connection reset"
+    )
+    hub_error = LocalEntryNotFoundError("Cannot find the requested files")
+    hub_error.__cause__ = network_error
+    wrapped = OSError("We couldn't connect to 'https://huggingface.co'")
+    wrapped.__cause__ = hub_error
+    return wrapped
+
+
+def _wrapped_http_error(status: int) -> OSError:
+    wrapped = OSError("There was a specific connection error")
+    wrapped.__cause__ = _http_error(status)
+    return wrapped
+
+
+_REMOTE_CODE_ERROR = ValueError(
+    "The repository org/model contains custom code which must be executed"
 )
-def test_permanent_config_failures_keep_existing_behavior(
-    monkeypatch: pytest.MonkeyPatch, error: Exception, waits: list[float]
+
+
+def test_remote_code_value_error_is_still_rejected(
+    monkeypatch: pytest.MonkeyPatch, waits: list[float]
 ) -> None:
-    request = Mock(side_effect=error)
+    request = Mock(side_effect=_REMOTE_CODE_ERROR)
     monkeypatch.setattr(catalog.AutoConfig, "from_pretrained", request)
 
     assert catalog.contains_remote_code(_model()) is True
+    assert keep_generative(_model(), False) == (False, "requires trust_remote_code")
+    assert keep_embedding(_model(), False) == (False, "requires trust_remote_code")
     assert catalog.get_config_type("org/model", False) is None
-    assert request.call_count == 2
+    assert request.call_count == 4
     assert waits == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        PermissionError("Read-only HF_HOME"),
+        OSError("Missing config"),
+        _wrapped_http_error(401),
+        _wrapped_http_error(403),
+        _wrapped_http_error(404),
+    ],
+    ids=["permission", "missing-config", "http-401", "http-403", "http-404"],
+)
+def test_non_remote_code_failures_are_not_reclassified(
+    monkeypatch: pytest.MonkeyPatch, error: OSError, waits: list[float]
+) -> None:
+    request = Mock(side_effect=error)
+    monkeypatch.setattr(catalog.AutoConfig, "from_pretrained", request)
+    reason: str = f"exception during contains_remote_code ({type(error).__name__})"
+
+    with pytest.raises(type(error)) as caught:
+        catalog.contains_remote_code(_model())
+    assert caught.value is error
+    assert keep_generative(_model(), False) == (False, reason)
+    assert keep_embedding(_model(), False) == (False, reason)
+    # A degraded config_class is still the right outcome for the enrichment step.
+    assert catalog.get_config_type("org/model", False) is None
+    assert request.call_count == 4
+    assert waits == []
+
+
+@pytest.mark.parametrize("lookup", ["remote_code", "config_type", "listing"])
+@pytest.mark.parametrize(
+    "network_error",
+    [
+        httpx.ConnectError("Connection reset"),
+        httpx.ReadError("Connection reset while reading"),
+        httpx.WriteError("Connection reset while writing"),
+        httpx.ReadTimeout("Read timed out"),
+        httpx.RemoteProtocolError("Server disconnected"),
+    ],
+    ids=["connect", "read", "write", "timeout", "protocol"],
+)
+def test_network_errors_are_retried(
+    monkeypatch: pytest.MonkeyPatch,
+    lookup: str,
+    network_error: httpx.TransportError,
+    waits: list[float],
+) -> None:
+    error: Exception = _wrapped_network_error(network_error)
+    if lookup == "listing":
+        request = Mock(side_effect=[error, ["org/model"]])
+        assert catalog.with_transient_retry(request, "listing") == ["org/model"]
+    else:
+        request = Mock(side_effect=[error, BertConfig()])
+        monkeypatch.setattr(catalog.AutoConfig, "from_pretrained", request)
+        if lookup == "remote_code":
+            assert catalog.contains_remote_code(_model()) is False
+        else:
+            assert catalog.get_config_type("org/model", False) == "BertConfig"
+
+    assert request.call_count == 2
+    assert waits == [2.0]
+
+
+@pytest.mark.parametrize("kind", ["generative", "embedding"])
+@pytest.mark.parametrize(
+    "network_error_type", [httpx.ConnectError, httpx.ReadError, httpx.WriteError]
+)
+def test_persistent_network_errors_fail_visibly(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    network_error_type: type[httpx.NetworkError],
+    waits: list[float],
+) -> None:
+    error: OSError = _wrapped_network_error(network_error_type("Connection reset"))
+    request = Mock(side_effect=error)
+    monkeypatch.setattr(catalog.AutoConfig, "from_pretrained", request)
+
+    with pytest.raises(
+        catalog.HubRetryExhaustedError,
+        match=f"{network_error_type.__name__} after 5 attempts",
+    ) as caught:
+        _build_catalog(kind)
+
+    assert caught.value.__cause__ is error
+    assert request.call_count == 5
+    assert waits == [2.0, 4.0, 8.0, 16.0]
 
 
 @pytest.mark.parametrize("phase", ["filter", "enrichment"])
