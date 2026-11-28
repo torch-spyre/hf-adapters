@@ -19,7 +19,7 @@ Columns:
   - model_name         (String)   – unique model identifier
   - config_class       (String)   – model config_class (e.g. BertConfig, Qwen3Config)
   - adapter_name       (String)   – adapter name (e.g. hf_bert, hf_gemma4)
-  - added_date         (Date?)    – date the adapter was added to the git repo (optional - None if not existing)
+  - added_date         (Date?)    – recorded adapter introduction date from adapter_added_dates.json (None if unknown)
   - snapshot_date      (Date)     – date this weekly snapshot was taken
   - verified_on_cpu    (Bool)     – passes on CPU
   - verified_on_gpu    (Bool)     – passes on GPU

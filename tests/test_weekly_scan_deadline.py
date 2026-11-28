@@ -23,6 +23,20 @@ _WORKFLOW = (
 )
 
 
+def test_scan_reads_committed_adapter_dates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scan entry point uses the stable map, even without a git checkout."""
+    (tmp_path / "hf_adapters").mkdir()
+    (tmp_path / "resources").mkdir()
+    (tmp_path / "hf_adapters/hf_bert.py").write_text("# Adapter\n")
+    (tmp_path / "resources/adapter_added_dates.json").write_text(
+        json.dumps({"hf_bert": "2026-05-21"})
+    )
+    monkeypatch.setattr(weekly_test, "_REPO_ROOT", tmp_path)
+    assert weekly_test._get_adapter_dates() == {"hf_bert": "2026-05-21"}
+
+
 def _step_script(job: str, name: str) -> str:
     workflow: dict[str, Any] = yaml.safe_load(_WORKFLOW.read_text())
     for step in workflow["jobs"][job]["steps"]:
@@ -247,11 +261,6 @@ def scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Mock, M
     context = Mock()
     monkeypatch.setattr(weekly_test, "create_sink", Mock(return_value=sink))
     monkeypatch.setattr(weekly_test, "_get_adapter_dates", Mock(return_value={}))
-    monkeypatch.setattr(
-        weekly_test, "_cache_warmed_repos", Mock(return_value=frozenset())
-    )
-    monkeypatch.setattr(weekly_test, "_repos_with_weights", Mock(return_value=set()))
-    monkeypatch.setattr(weekly_test, "_cleanup_batch_weights", Mock(return_value=0))
     monkeypatch.setattr(weekly_test, "GENERATIVE_NUMBER_OF_MODEL_PER_PROCESS", 1)
     monkeypatch.setattr(
         weekly_test.multiprocessing, "get_context", Mock(return_value=context)
@@ -265,7 +274,8 @@ def _run_scan(models: Path, deadline: dt.datetime | None) -> None:
         model_list_file=models,
         write_to_csv=None,
         fetch=False,
-        top_k=0,
+        top_k_downloads=0,
+        top_k_trending=0,
         max_params=0,
         snapshot_date=dt.date(2026, 11, 7),
         deadline=deadline,

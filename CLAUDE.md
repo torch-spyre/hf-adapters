@@ -58,6 +58,16 @@ Import shared utilities from `hf_common.py`: `PrecomputedRotaryEmbedding`, `appl
 - [ ] Registry entry in `tests/model_registry.py`
 - [ ] Compiles + runs end-to-end on Spyre (`tests/spyre/test_e2e_*_spyre.py`, no crash/NaN)
 - [ ] Added to the Verified Checkpoints + Model Family Coverage tables in `ARCHITECTURE.md` (the single source of truth; bump the README badge counts)
+- [ ] Added the adapter's introduction date to `resources/adapter_added_dates.json` in the same commit — `tests/test_adapter_added_dates.py` requires a complete map with valid ISO dates
+
+The JSON is the source of truth for stable introduction dates. After adding an
+adapter, run `python tests/spyre/weekly_generation/regenerate_adapter_added_dates.py`
+and stage the JSON with the adapter. New entries default to today's UTC date;
+use `--added-date YYYY-MM-DD` to specify the introduction date explicitly.
+The updater preserves existing dates and removes deleted adapter names. For a
+rename, move the existing JSON entry to the new module name before running it.
+Neither checks nor updates compare dates with git history: squash merges can
+change the introducing commit's date. All modes work in shallow checkouts.
 
 ## Critical Rules
 

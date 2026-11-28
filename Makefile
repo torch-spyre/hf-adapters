@@ -95,8 +95,12 @@ help: ## Show this help message
 
 # Suite keys, one target each -- same vocabulary and test_types membership as
 # _test_matrix.yaml. Each is independently runnable with its own JUNIT_XML.
-adapter-coverage-tests: ## Run adapter registry coverage and build-action checks (suite key: adapter_coverage)
-	$(PYTEST) -v --noconftest tests/test_adapter_coverage.py tests/test_perf_coverage.py tests/test_build_hf_adapters.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+adapter-coverage-tests: ## Run adapter registry coverage, added-date, and build-action checks (suite key: adapter_coverage)
+	# test_adapter_added_dates.py rides along: both are pure-Python checks over the
+	# adapter files that need only pytest + a git checkout (no torch, no DB, hence
+	# --noconftest). Added-date checks validate authoritative metadata without
+	# comparing git dates, so shallow and squash-merged checkouts behave alike.
+	$(PYTEST) -v --noconftest tests/test_adapter_coverage.py tests/test_adapter_added_dates.py tests/test_perf_coverage.py tests/test_build_hf_adapters.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 smoke-tests: ## Run e2e smoke tests (suite key: smoke)
 	$(PYTEST) $(PYTEST_ARGS) --suite smoke tests/spyre/test_e2e_smoke_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
