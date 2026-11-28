@@ -1,0 +1,141 @@
+name: push-hw-diagnostics-to-clickhouse
+
+# Parses hardware/RAS failure signatures out of the raw job logs of a completed test run and
+# ingests them into schema-v2 hw_failure_diagnostics, which backs the "Spyre Hardware Health"
+# dashboard. Without it a card-level fault surfaces only as a pytest failure.
+#
+# Same trigger set as push-test-results-to-clickhouse.yaml. The parse+ingest pipeline is
+# torch-spyre's shared ingest-hw-diagnostics-to-clickhouse action, not a local copy of its
+# scripts.
+#
+# Secrets: CLICKHOUSE_V2_USER / CLICKHOUSE_V2_PASSWORD, CLICKHOUSE_DB_V2, and optionally
+# CLICKHOUSE_V2_HOST / CLICKHOUSE_V2_PORT (fall back to CLICKHOUSE_HOST / CLICKHOUSE_PORT).
+on:
+  workflow_run:
+    workflows:
+      - integration-tests
+      - test_pull_request
+      - test_daily
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      gha_run_id:
+        description: GHA run ID to parse and ingest
+        required: true
+        default: ''
+      workflow_name:
+        description: Workflow name (integration-tests | test_pull_request | test_daily)
+        required: false
+        default: integration-tests
+
+concurrency:
+  group: hw-diag-${{ github.event.workflow_run.id || inputs.gha_run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read   # read job logs from the triggering run
+
+jobs:
+  ingest:
+    name: Parse logs -> ClickHouse
+    runs-on:
+      - x86_64
+      - linux
+      - image_ingest
+    timeout-minutes: 30
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion != 'cancelled' &&
+       github.event.workflow_run.conclusion != 'skipped')
+
+    env:
+      TRIGGERING_RUN_ID: ${{ github.event.workflow_run.id || inputs.gha_run_id }}
+      TRIGGERING_WORKFLOW: ${{ github.event.workflow_run.name || inputs.workflow_name }}
+      TRIGGERING_DISPLAY_TITLE: ${{ github.event.workflow_run.display_title || '' }}
+      # Arch of the ANALYSED legs, never $(uname -m) of this job: arch is a run_id hash input,
+      # so a wrong value derives an id that joins nothing, silently.
+      LEG_ARCH: x86_64
+      # v2 only: the writer login has no DDL.
+      INGEST_SCHEMA: v2
+      CH_HOST: ${{ secrets.CLICKHOUSE_V2_HOST || secrets.CLICKHOUSE_HOST }}
+      CH_PORT: ${{ fromJSON(secrets.CLICKHOUSE_V2_HOST != '' && toJSON(secrets.CLICKHOUSE_V2_PORT) || toJSON(secrets.CLICKHOUSE_PORT)) }}
+      CH_DB_V2: ${{ secrets.CLICKHOUSE_DB_V2 }}
+      CH_USER: ${{ secrets.CLICKHOUSE_V2_USER }}
+      CH_PASS: ${{ secrets.CLICKHOUSE_V2_PASSWORD }}
+
+    steps:
+      # A configured host without the v2 login must fail loudly (fork PRs have no host and skip).
+      - name: Require the v2 login
+        run: |
+          if [ -n "${CH_HOST}" ] && { [ -z "${CH_USER}" ] || [ -z "${CH_PASS}" ]; }; then
+            echo "::error::ClickHouse host is set but CLICKHOUSE_V2_USER/CLICKHOUSE_V2_PASSWORD is empty; results would be lost."
+            exit 1
+          fi
+
+      # The action's nested local `uses: ./...` steps resolve against this checkout.
+      - name: Checkout torch-spyre composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: torch-spyre/torch-spyre
+          sparse-checkout: |
+            .github/actions
+          sparse-checkout-cone-mode: false
+
+      # Resolved as push-test-results-to-clickhouse.yaml does, so these rows share the leg's
+      # run_id and join its cases.
+      - name: Recover threaded run_id
+        id: threaded-run-id
+        uses: torch-spyre/torch-spyre/.github/actions/recover-threaded-run-id@main
+        with:
+          triggering-run-id: ${{ env.TRIGGERING_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Recover this run's artifact_id
+        id: leg-artifact-id
+        uses: torch-spyre/torch-spyre/.github/actions/recover-threaded-run-id@main
+        with:
+          triggering-run-id: ${{ env.TRIGGERING_RUN_ID }}
+          artifact-name: artifact-id
+          label: Leg artifact_id
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract suite tier from display title
+        id: extract-tier
+        run: |
+          if [[ "${TRIGGERING_DISPLAY_TITLE}" == *"("*")"* ]]; then
+            TIER=$(echo "${TRIGGERING_DISPLAY_TITLE}" | sed -n 's/.*(\(.*\))\s*$/\1/p')
+          else
+            TIER="${TRIGGERING_DISPLAY_TITLE}"
+          fi
+          echo "Resolved tier: ${TIER:-<none>}"
+          echo "tier=${TIER}" >> "${GITHUB_OUTPUT}"
+
+      - name: Ingest hardware-failure diagnostics into ClickHouse
+        id: ingest
+        uses: torch-spyre/torch-spyre/.github/actions/ingest-hw-diagnostics-to-clickhouse@main
+        with:
+          gha-run-id: ${{ env.TRIGGERING_RUN_ID }}
+          workflow-name: ${{ env.TRIGGERING_WORKFLOW }}
+          trigger-type: ${{ steps.extract-tier.outputs.tier }}
+          threaded-run-id: ${{ steps.threaded-run-id.outputs.run_id }}
+          artifact-id: ${{ steps.leg-artifact-id.outputs.value }}
+          component: hf-adapters
+          arch: ${{ env.LEG_ARCH }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          clickhouse-host: ${{ env.CH_HOST }}
+          clickhouse-port: ${{ env.CH_PORT }}
+          clickhouse-user: ${{ env.CH_USER }}
+          clickhouse-pass: ${{ env.CH_PASS }}
+          clickhouse-db: ${{ env.CH_DB_V2 }}
+          clickhouse-db-v2: ${{ env.CH_DB_V2 }}
+          schema: ${{ env.INGEST_SCHEMA }}
+          strict: 'true'
+
+      - name: Upload JSON artifact
+        if: always() && steps.ingest.outputs.json-file != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.ingest.outputs.json-file }}
+          path: ${{ steps.ingest.outputs.json-file }}
+          retention-days: 10
