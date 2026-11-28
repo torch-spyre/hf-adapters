@@ -41,12 +41,17 @@ utils = types.SimpleNamespace(rename_privateuse1_backend=_rename_privateuse1_bac
 """
 
 
-def _build_script() -> str:
+def _step_script(name: str) -> str:
     action: dict[str, Any] = yaml.safe_load(_ACTION.read_text())
     step: dict[str, Any] = next(
-        step for step in action["runs"]["steps"] if step["name"] == "Build hf-adapters"
+        step for step in action["runs"]["steps"] if step["name"] == name
     )
     script: str = step["run"]
+    return script
+
+
+def _build_script() -> str:
+    script = _step_script("Build hf-adapters")
     # Skip runner shell initialization and diagnostics, which require the image.
     return script[script.index("# Build group flags") :]
 
@@ -200,6 +205,44 @@ def test_prebaked_mode_preserves_and_checks_image_environment(tmp_path: Path) ->
         f"uv pip show --python {tmp_path}/image-env/bin/python torch torch-spyre"
         in commands
     )
+
+
+def _run_resolve_clone_dir(
+    tmp_path: Path, *, clone_dir: str | None
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    """The clone-directory step under the runner's `set -u`, and what it published to GITHUB_ENV."""
+    github_env = tmp_path / "github_env"
+    github_env.touch()
+    env: dict[str, str] = {
+        **os.environ,
+        "GITHUB_ENV": str(github_env),
+        "GITHUB_WORKSPACE": str(tmp_path / "workspace"),
+    }
+    env.pop("CLONED_HF_ADAPTERS_DIR", None)
+    if clone_dir is not None:
+        env["CLONED_HF_ADAPTERS_DIR"] = clone_dir
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", _step_script("Resolve the clone directory")],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, github_env.read_text()
+
+
+def test_an_unset_clone_directory_defaults_to_the_workspace(tmp_path: Path) -> None:
+    result, published = _run_resolve_clone_dir(tmp_path, clone_dir=None)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert published.strip() == f"CLONED_HF_ADAPTERS_DIR={tmp_path / 'workspace'}"
+
+
+def test_a_callers_clone_directory_is_left_alone(tmp_path: Path) -> None:
+    result, published = _run_resolve_clone_dir(tmp_path, clone_dir="/home/senuser/own")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert published == ""
+    assert "/home/senuser/own" in result.stdout
 
 
 def test_missing_project_backend_fails_setup(tmp_path: Path) -> None:

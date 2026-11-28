@@ -85,6 +85,17 @@ def test_every_allowed_selection_exists_in_the_catalog():
     ), f"missing Selections: {sorted(SELECTIONS - declared)}"
 
 
+def test_the_build_action_is_given_the_clone_directory():
+    """build-hf-adapters wipes and re-clones $CLONED_HF_ADAPTERS_DIR, and the bench steps cd to it.
+
+    No input carries it, and the runner's shell init runs those steps under `set -u`, so a workflow
+    that calls the action without setting it fails on the action's first command.
+    """
+    document, _ = workflow()
+    env = document.get("env") or {}
+    assert env.get("CLONED_HF_ADAPTERS_DIR") == "${{ github.workspace }}"
+
+
 def test_rows_are_routed_by_clickhouse_env_rather_than_pinned_to_dev():
     """A leg that ignores clickhouse_env files every row in dev, whatever the folder asked for."""
     text = WORKFLOW.read_text()
