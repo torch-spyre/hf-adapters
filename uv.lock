@@ -1177,6 +1177,11 @@ models-ops = [
 oot = [
     { name = "oot-framework" },
 ]
+perf = [
+    { name = "protobuf" },
+    { name = "pyyaml" },
+    { name = "requests" },
+]
 spyre = [
     { name = "torch-spyre" },
 ]
@@ -1226,6 +1231,11 @@ models-ops = [
     { name = "regex" },
 ]
 oot = [{ name = "oot-framework", git = "https://github.com/torch-spyre/torch-spyre?subdirectory=tests%2Foot_framework&rev=main" }]
+perf = [
+    { name = "protobuf" },
+    { name = "pyyaml" },
+    { name = "requests" },
+]
 spyre = [{ name = "torch-spyre", git = "https://github.com/torch-spyre/torch-spyre?rev=main" }]
 test = [
     { name = "laya", specifier = ">=0.3.28,<0.4" },

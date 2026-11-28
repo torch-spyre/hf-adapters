@@ -1,0 +1,137 @@
+name: Daily model prefill benchmarks
+
+on:
+  # Temporary trigger to test this workflow before merging it into main.
+  push:
+    branches:
+      - codex/daily-granite-prefill
+  schedule:
+    # Daily at 03:17 UTC, using hf-adapters' default branch.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-granite-prefill
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+    working-directory: /home/senuser
+
+env:
+  UV_NO_SYNC: "1"
+  UV_PROJECT_ENVIRONMENT: /home/senuser/.venv
+  CLONED_HF_ADAPTERS_DIR: ${{ github.workspace }}
+  # Match the existing Spyre test jobs: avoid PyTorch's CI-only behavior.
+  CI: ""
+  PYTHONUNBUFFERED: "1"
+  HF_HOME: /storage-1/hf-adapters/.cache/huggingface
+  HF_HUB_OFFLINE: "0"
+
+jobs:
+  generate-matrix:
+    name: Read nightly models from perf.yaml
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: .
+    env:
+      # Hosted runners have no image-provided Spyre venv. Install only the
+      # lightweight perf group here, without hf-adapters or its runtime.
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
+      UV_NO_SYNC: "0"
+    outputs:
+      models: ${{ steps.generate.outputs.models }}
+    steps:
+      - name: Checkout model list and matrix generator
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.12"
+
+      - name: Generate nightly model matrix
+        id: generate
+        run: |
+          models="$(uv run --frozen --only-group perf python .github/scripts/generate_prefill_matrix.py)"
+          echo "Nightly models: $models"
+          echo "models=$models" >> "$GITHUB_OUTPUT"
+
+  prefill:
+    name: Prefill (${{ matrix.model }})
+    needs: generate-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        model: ${{ fromJSON(needs.generate-matrix.outputs.models) }}
+    runs-on:
+      - x86_64
+      - spyre_pf_x1
+      - linux
+      - image_torch_spyre
+    timeout-minutes: 120
+    steps:
+      - name: Checkout composite actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/actions
+            .github/scripts/run-with-pod-stdout.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Install hf-adapters and benchmark dependencies
+        uses: ./.github/actions/build-hf-adapters
+        with:
+          uv_groups: perf
+          # Sync the locked HF dependencies while preserving the image's
+          # Kineto-enabled torch, torch-spyre, and benchmark suite.
+          prebaked_image: "true"
+
+      - name: Run model prefill and print results
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_MODEL: ${{ matrix.model }}
+        run: |
+          source "$HOME/.bashrc"
+          source /etc/profile.d/ibm-aiu-setup.sh
+          set -euo pipefail
+          export PATH="$UV_PROJECT_ENVIRONMENT/bin:$PATH"
+
+          # The existing perf jobs also use this source baked into the image.
+          suite_dir=/home/senuser/spyre-perf-suite
+          if [[ ! -f "$suite_dir/run_benchmark.py" ]]; then
+            echo "::error::The runner image must include spyre-perf-suite sources."
+            exit 1
+          fi
+          git -C "$suite_dir" log -1 --oneline
+
+          # Keep output separate from both repositories and from previous runs.
+          benchmark_dir="$(mktemp -d "$RUNNER_TEMP/model-prefill.XXXXXX")"
+          ln -s "$suite_dir/run_benchmark.py" "$benchmark_dir/run_benchmark.py"
+          # As in make perf-tests, expose only hf_adapters; the checkout's
+          # top-level utils package would shadow the benchmark suite's utils.
+          mkdir "$benchmark_dir/.hf-adapters-path"
+          ln -s "$CLONED_HF_ADAPTERS_DIR/hf_adapters" "$benchmark_dir/.hf-adapters-path/hf_adapters"
+          export PYTHONPATH="$benchmark_dir/.hf-adapters-path${PYTHONPATH:+:$PYTHONPATH}"
+          cd "$benchmark_dir"
+
+          # The suite starts a Bash launcher. Inherit errexit so worker failures
+          # fail this job even on images whose launcher does not set -e itself.
+          export SHELLOPTS
+          python run_benchmark.py --hf-only --hf-model "$HF_MODEL" --hf-mode prefill 2>&1 | tee benchmark.log
+          test -s docs/report_hf.txt
+          cat docs/report_hf.txt
+          python "$CLONED_HF_ADAPTERS_DIR/.github/scripts/summarize_prefill.py" \
+            --model "$HF_MODEL" \
+            --report docs/report_hf.txt \
+            --log benchmark.log \
+            --summary-file "$GITHUB_STEP_SUMMARY"
