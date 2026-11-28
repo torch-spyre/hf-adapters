@@ -78,7 +78,7 @@ else
 MODEL_PATH_ARGS :=
 endif
 
-.PHONY: help test tests model-support-tests adapter-coverage-tests smoke-tests load-tests \
+.PHONY: help test tests model-support-tests adapter-coverage-tests smoke-tests load-tests direct-load-tests \
         token-compare-tests embed-compare-tests sentence_transformers_multimodal_tests vlm-tests reranker-tests model-module-tests \
         masked-lm-compare-tests question-answering-compare-tests seq-classification-compare-tests \
         token-classification-compare-tests structured-decision-compare-tests decision-compare-tests yolo-compare-tests model-components-tests edge-cases-tests perf-tests
@@ -97,6 +97,9 @@ help: ## Show this help message
 # _test_matrix.yaml. Each is independently runnable with its own JUNIT_XML.
 adapter-coverage-tests: ## Run adapter registry coverage and build-action checks (suite key: adapter_coverage)
 	$(PYTEST) -v --noconftest tests/test_adapter_coverage.py tests/test_perf_coverage.py tests/test_build_hf_adapters.py $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
+
+direct-load-tests: ## Run direct-to-device load tests: staged-vs-direct compare and host memory (needs MODEL_PATH)
+	$(PYTEST) $(PYTEST_ARGS) tests/spyre/test_direct_load_compare_spyre.py tests/spyre/test_direct_load_memory_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
 
 smoke-tests: ## Run e2e smoke tests (suite key: smoke)
 	$(PYTEST) $(PYTEST_ARGS) --suite smoke tests/spyre/test_e2e_smoke_spyre.py $(K_ARGS) $(MODEL_PATH_ARGS) $(if $(JUNIT_XML),--junitxml=$(JUNIT_XML))
