@@ -34,6 +34,10 @@ Grouped KV uses a replicated placeholder on the existing one-dimensional mesh;
 the Spyre loader reads each rank's whole-head slice without creating extra
 process groups. Tests check shared rank pairs, uneven slices, and unchanged
 process-group counts during placement and loading.
+Qwen3.5 MoE routing checks deliberately give ranks different near-tied router
+scores and require identical selected experts and weights in prefill and decode.
+They cover fp32, fp16, and bf16, plus TP subgroups whose source is not global
+rank zero and models without a TP mesh.
 
 ## Two-card Spyre regressions
 
@@ -67,12 +71,17 @@ Tied Qwen3 checkpoints cover both embedding-only and LM-head-only weights.
 CPU checks also cover both directions with uneven vocabulary shards and reject
 tied groups with no usable checkpoint weight.
 
-Two numerical cases remain strict expected failures:
+Qwen3.5 MoE broadcasts the first TP rank's expert selection and routing weights
+over the existing CPU/Gloo backend before executing local expert shards. Both
+full-attention and hybrid fixtures assert exact routing agreement across ranks
+at every prefill/decode step, in addition to the token and logit checks above.
+The hybrid fixture no longer marks [#772](https://github.com/torch-spyre/hf-adapters/issues/772)
+as an expected failure; two-card logit parity remains required to validate the fix.
 
-- Hybrid Qwen3.5 MoE rank-dependent expert routing: [#772](https://github.com/torch-spyre/hf-adapters/issues/772).
-- Gemma 4 MoE decode divergence: [#773](https://github.com/torch-spyre/hf-adapters/issues/773).
+Gemma 4 MoE decode divergence remains a strict expected failure:
+[#773](https://github.com/torch-spyre/hf-adapters/issues/773).
 
-Only token/logit mismatches qualify for these xfails. Loading, compilation,
+Only token/logit mismatches qualify for this xfail. Loading, compilation,
 non-finite outputs, and unexpected passes fail the suite. Full-attention
 Qwen3.5 MoE coverage does not establish hybrid MoE correctness; production
 text smoke tests do not establish reference-logit parity.
